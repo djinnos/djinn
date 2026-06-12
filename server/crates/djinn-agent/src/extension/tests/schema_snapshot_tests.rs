@@ -111,10 +111,6 @@ fn prompt_references_for_agent(agent_type: AgentType) -> Vec<ToolReference> {
                 include_str!("../../prompts/planner/intervention.md"),
             ),
             (
-                "prompts/planner/patrol.md",
-                include_str!("../../prompts/planner/patrol.md"),
-            ),
-            (
                 "prompts/planner/proposal.md",
                 include_str!("../../prompts/planner/proposal.md"),
             ),
@@ -366,12 +362,11 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(planner.iter().any(|n| n == "task_create"));
     assert!(planner.iter().any(|n| n == "task_transition"));
     assert!(planner.iter().any(|n| n == "submit_grooming"));
-    // Patrol may curate the KB during the Memory Health Review.
+    // The Planner may curate the KB while reshaping the board.
     assert!(planner.iter().any(|n| n == "memory_write"));
     assert!(planner.iter().any(|n| n == "memory_edit"));
-    // Per ADR-051 §1 the Planner now runs patrol mode, which needs to leave
-    // diagnostic comments on stuck tasks and mutate learned_prompts for
-    // specialist agents during the effectiveness review.
+    // The Planner leaves diagnostic comments on stuck tasks and mutates
+    // learned_prompts for specialist agents during the effectiveness review.
     assert!(planner.iter().any(|n| n == "task_comment_add"));
     assert!(planner.iter().any(|n| n == "memory_health"));
     assert!(planner.iter().any(|n| n == "memory_broken_links"));
@@ -397,7 +392,7 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(!architect.iter().any(|n| n == "edit"));
     assert!(!architect.iter().any(|n| n == "apply_patch"));
     // Per ADR-051 §1 `agent_amend_prompt` moved from Architect to Planner
-    // (agent-effectiveness review is a patrol action, not a consultant action).
+    // (agent-effectiveness review is a Planner action, not a consultant action).
     assert!(!architect.iter().any(|n| n == "agent_amend_prompt"));
 }
 

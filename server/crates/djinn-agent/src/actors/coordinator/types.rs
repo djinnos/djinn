@@ -258,8 +258,7 @@ pub(super) const PROVIDER_RETRY_AFTER_MAX: Duration = Duration::from_secs(6 * 60
 /// task is failed **terminally** instead of looping forever. Combined with the
 /// escalating cooldown this spans hours, so transient provider/credential blips
 /// never reach it; only structurally-undispatchable tasks do. Terminal close
-/// also self-cleans the patrol guard (a non-closed patrol blocks all future
-/// patrols).
+/// also keeps review-type tasks from wedging open forever.
 pub(super) const MAX_DISPATCH_FAILURES: u32 = 10;
 
 /// Consecutive same-role failed dispatch attempts after which the task is

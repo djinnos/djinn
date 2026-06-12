@@ -340,7 +340,6 @@ pub struct MemoryHealthResponse {
     pub total_notes: Option<i64>,
     pub broken_link_count: Option<i64>,
     pub orphan_note_count: Option<i64>,
-    pub duplicate_cluster_count: Option<i64>,
     pub low_confidence_note_count: Option<i64>,
     pub stale_note_count: Option<i64>,
     pub stale_notes_by_folder: Option<Vec<djinn_memory::StaleFolder>>,

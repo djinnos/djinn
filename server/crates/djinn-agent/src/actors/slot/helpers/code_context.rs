@@ -91,14 +91,6 @@ pub(crate) fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars:
     lines.join("\n")
 }
 
-pub(super) fn note_scope_covers_path(note_scope_paths: &[String], path: &str) -> bool {
-    note_scope_paths.iter().any(|scope| {
-        path == scope
-            || path.starts_with(&format!("{scope}/"))
-            || scope.starts_with(&format!("{path}/"))
-    })
-}
-
 // ─── PR E2: auto-injected `code_graph context` for worker / reviewer ──────
 
 /// Returns true when the given role name is opted-in to auto-injected

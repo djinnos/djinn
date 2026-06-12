@@ -313,6 +313,15 @@ export type BoardReconcileOutput = BoardReconcileOutputSchema.BoardReconcileOutp
 export namespace CodeGraphInputSchema {
   export interface CodeGraphInput {
   /**
+   * df6s: per-depth counts for `impact`. When `Some(true)`, the
+   * response ships a `by_depth_counts: { "1": 12, "2": 7 }` map
+   * alongside the (sliced) impact list so triage can read the
+   * depth distribution without walking every entry. Honoured by
+   * `impact` only; other ops ignore it. `summary_only=true`
+   * already implies this — passing both is fine.
+   */
+  by_depth_counts?: boolean
+  /**
    * Repository-relative file paths for `detect_changes` when no
    * SHA range is supplied (or as a coarser fallback). Every symbol
    * in each listed file is treated as potentially touched.
@@ -374,8 +383,7 @@ export namespace CodeGraphInputSchema {
    */
   file_glob?: string
   /**
-   * Optional framework filter for `route_map` (for example `axum`,
-   * `express`, or `rails`).
+   * Optional route framework filter for `route_map` discovery.
    */
   framework?: string
   /**
@@ -474,6 +482,11 @@ export namespace CodeGraphInputSchema {
    */
   max_seeds?: number
   /**
+   * HTTP method for route-aware ops (`route_map`, `shape_check`,
+   * `api_impact`) when `route_id` is not supplied.
+   */
+  method?: string
+  /**
    * Minimum edge confidence in `[0, 1]` for the `impact` BFS frontier
    * (PR A2). Edges below this threshold are skipped — useful for
    * excluding `local`-prefixed references and other low-confidence SCIP
@@ -501,10 +514,16 @@ export namespace CodeGraphInputSchema {
    */
   module_glob?: string
   /**
-   * HTTP method selector for route-aware ops. Optional for `route_map`;
-   * required with `path` when `shape_check`/`api_impact` omit `route_id`.
+   * df6s: page offset for paginated traversal ops (`neighbors`,
+   * `impact`, `coupling_hotspots`). Sliced **only** when
+   * constructing the agent-facing response DTO — the underlying
+   * `RepoDependencyGraph` traversal always runs to completion so
+   * `total` reflects the unsliced result count and pagination can
+   * never be misread as "the graph has no more nodes". Empty
+   * string is normalized to `None` via `normalize()`. Negative
+   * values are clamped to zero at the handler boundary.
    */
-  method?: string
+  offset?: number
   /**
    * The operation to perform.
    * One of: `neighbors`, `ranked`, `impact`, `implementations`,
@@ -516,21 +535,33 @@ export namespace CodeGraphInputSchema {
    */
   operation: string
   /**
+   * df6s: distinct result cap for paginated traversal ops. For
+   * `neighbors` / `coupling_hotspots` this is the existing `limit`
+   * (re-aliased for clarity), so the field is **only** consumed by
+   * ops where `limit` means something else — currently `impact`,
+   * where `limit` is the BFS depth. `impact` therefore reads
+   * `page_limit` for its result cap and keeps `limit` as the
+   * traversal depth. Defaults to 100 when omitted; clamps to
+   * `[1, 1000]`. Sliced only at the response-DTO layer; the
+   * internal traversal still runs to completion.
+   */
+  page_limit?: number
+  /**
+   * Exact route path for `shape_check` / `api_impact` when `route_id` is
+   * not supplied.
+   */
+  path?: string
+  /**
+   * Route path glob for `route_map` discovery.
+   */
+  path_glob?: string
+  /**
    * Project identifier — either the UUID (`project_id`) or the
    * canonical `"owner/repo"` slug. The handler resolves it to the
    * server-managed clone path via `djinn_core::paths::project_dir`
    * before dispatching to the graph backend.
    */
   project: string
-  /**
-   * Exact route path selector for `shape_check`/`api_impact` when
-   * `route_id` is omitted.
-   */
-  path?: string
-  /**
-   * Route path glob filter for `route_map`.
-   */
-  path_glob?: string
   /**
    * Query text, op-specific:
    * - `search`: substring/name lookup text.
@@ -541,9 +572,9 @@ export namespace CodeGraphInputSchema {
    */
   query?: string
   /**
-   * Route identifier for `route_map` filters and as one selector form for
-   * `shape_check`/`api_impact`. For `shape_check`/`api_impact`, callers
-   * must provide either `route_id` or both `method` and exact `path`.
+   * Stable route id for route-aware ops. For `shape_check` and
+   * `api_impact`, callers must provide either `route_id` or both
+   * `method` and `path`.
    */
   route_id?: string
   /**
@@ -574,6 +605,17 @@ export namespace CodeGraphInputSchema {
    * 1-indexed inclusive start line for `symbols_at`.
    */
   start_line?: number
+  /**
+   * df6s: counts-only mode for paginated traversal ops
+   * (`neighbors`, `impact`, `coupling_hotspots`). When `Some(true)`,
+   * the response omits the large node/pair lists and instead ships
+   * `total` + the relevant counters (`by_depth_counts` for impact).
+   * Designed for triage: a model can ask "how big is the blast
+   * radius?" without paying the token cost of every impacted
+   * symbol. The internal traversal still runs to completion so
+   * group_by-file rollups report the full per-module count.
+   */
+  summary_only?: boolean
   /**
    * Queried symbol keys for `touches_hot_path` — which sit on any
    * entry→sink shortest path?
@@ -627,9 +669,17 @@ export namespace CodeGraphInputSchema {
    */
   window_days?: number
   /**
-   * Optional workspace slug. For `query_subgraph`, scopes seed search and
-   * traversal to a warmed workspace when provided; omit to query the
-   * project-level graph/default workspace selection.
+   * Optional workspace slug. Empty string is normalized to omitted. Use
+   * `operation = "workspaces"` to enumerate valid slugs and metadata
+   * (`slug`, `name`, `node_count`, `commit_sha`, `warmed_at`, `status`).
+   * Known workspaces hard-scope listing/bounded ops such as `ranked`,
+   * `orphans`, `snapshot`, and `api_surface`. Traversal ops such as
+   * `impact`, `path`, `touches_hot_path`, and `query_subgraph` use the
+   * workspace only while resolving seeds/endpoints, then keep the traversal
+   * cross-workspace so blast radius stays visible. Unknown non-empty slugs
+   * return unscoped results with `workspace_hint` candidate slugs where the
+   * response type supports hints; single-workspace graphs treat the parameter
+   * as a no-op.
    */
   workspace?: string
   [k: string]: any
@@ -770,30 +820,91 @@ export namespace CredentialSetOutputSchema {
 
 }
 export type CredentialSetOutput = CredentialSetOutputSchema.CredentialSetOutput;
+export namespace DispatchPauseInputSchema {
+  export interface DispatchPauseInput {
+  /**
+   * Non-empty administrative reason recorded with the pause.
+   */
+  reason: string
+  /**
+   * Pause scope: `global`, `project`, or `user`.
+   */
+  scope: ("global" | "project" | "user")
+  /**
+   * Required for `project` and `user`; must be omitted for `global`.
+   */
+  target_id?: string
+  }
+
+}
+export type DispatchPauseInput = DispatchPauseInputSchema.DispatchPauseInput;
+export namespace DispatchPauseOutputSchema {
+  /**
+   * Dispatch pause scope supported by the persistence layer.
+   */
+  export type DispatchPauseScope = ("global" | "project" | "user")
+
+  export interface DispatchPauseOutput {
+  changed: boolean
+  current?: (DispatchPause | null)
+  error?: string
+  ok: boolean
+  previous?: (DispatchPause | null)
+  scope: DispatchPauseScope
+  target_id?: string
+  [k: string]: any
+  }
+  /**
+   * Metadata recorded when dispatch is paused for a scope.
+   */
+  export interface DispatchPause {
+  expires_at?: string
+  paused_at: string
+  paused_by: string
+  reason: string
+  }
+
+}
+export type DispatchPauseOutput = DispatchPauseOutputSchema.DispatchPauseOutput;
 export namespace DispatchPauseStatusInputSchema {
-  export type DispatchPauseScope = "global" | "project" | "user"
+  /**
+   * Dispatch pause scope supported by the persistence layer.
+   */
+  export type DispatchPauseScope = ("global" | "project" | "user")
 
   export interface DispatchPauseStatusInput {
   /**
    * Optional scope filter. Omit to return all pause scopes.
    */
-  scope?: DispatchPauseScope | null
+  scope?: (DispatchPauseScope | null)
   /**
    * Required when filtering `project` or `user`; invalid for `global`.
    */
-  target_id?: string | null
+  target_id?: string
   }
 
 }
 export type DispatchPauseStatusInput = DispatchPauseStatusInputSchema.DispatchPauseStatusInput;
 export namespace DispatchPauseStatusOutputSchema {
-  export type DispatchPauseScope = "global" | "project" | "user"
+  /**
+   * Dispatch pause scope supported by the persistence layer.
+   */
+  export type DispatchPauseScope = ("global" | "project" | "user")
 
+  export interface DispatchPauseStatusOutput {
+  current?: (DispatchPause | null)
+  error?: string
+  ok: boolean
+  scope?: (DispatchPauseScope | null)
+  state?: (DispatchPauseState | null)
+  target_id?: string
+  [k: string]: any
+  }
   /**
    * Metadata recorded when dispatch is paused for a scope.
    */
   export interface DispatchPause {
-  expires_at?: string | null
+  expires_at?: string
   paused_at: string
   paused_by: string
   reason: string
@@ -802,7 +913,7 @@ export namespace DispatchPauseStatusOutputSchema {
    * Snapshot of dispatch pause state across all scopes.
    */
   export interface DispatchPauseState {
-  global?: DispatchPause | null
+  global?: (DispatchPause | null)
   projects?: {
   [k: string]: DispatchPause
   }
@@ -810,18 +921,51 @@ export namespace DispatchPauseStatusOutputSchema {
   [k: string]: DispatchPause
   }
   }
-  export interface DispatchPauseStatusOutput {
-  current?: DispatchPause | null
-  error?: string | null
-  ok: boolean
-  scope?: DispatchPauseScope | null
-  state?: DispatchPauseState | null
-  target_id?: string | null
-  [k: string]: any
-  }
 
 }
 export type DispatchPauseStatusOutput = DispatchPauseStatusOutputSchema.DispatchPauseStatusOutput;
+export namespace DispatchResumeInputSchema {
+  export interface DispatchResumeInput {
+  /**
+   * Resume scope: `global`, `project`, or `user`.
+   */
+  scope: ("global" | "project" | "user")
+  /**
+   * Required for `project` and `user`; must be omitted for `global`.
+   */
+  target_id?: string
+  }
+
+}
+export type DispatchResumeInput = DispatchResumeInputSchema.DispatchResumeInput;
+export namespace DispatchResumeOutputSchema {
+  /**
+   * Dispatch pause scope supported by the persistence layer.
+   */
+  export type DispatchPauseScope = ("global" | "project" | "user")
+
+  export interface DispatchResumeOutput {
+  changed: boolean
+  current?: (DispatchPause | null)
+  error?: string
+  ok: boolean
+  previous?: (DispatchPause | null)
+  scope: DispatchPauseScope
+  target_id?: string
+  [k: string]: any
+  }
+  /**
+   * Metadata recorded when dispatch is paused for a scope.
+   */
+  export interface DispatchPause {
+  expires_at?: string
+  paused_at: string
+  paused_by: string
+  reason: string
+  }
+
+}
+export type DispatchResumeOutput = DispatchResumeOutputSchema.DispatchResumeOutput;
 export namespace EpicAddReadSourceInputSchema {
   export interface EpicAddReadSourceInput {
   /**
@@ -1929,8 +2073,24 @@ export namespace GithubSearchOutputSchema {
 }
 export type GithubSearchOutput = GithubSearchOutputSchema.GithubSearchOutput;
 export namespace ImageCreateInputSchema {
+  /**
+   * A lifecycle / verification / setup command.
+   * 
+   * Shape matches the `LifecycleCommand` enum in
+   * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
+   * local enum is replaced with this canonical definition so the on-disk
+   * config JSON round-trips through both sides without a translation layer.
+   * 
+   * The three forms follow the devcontainer spec that originally inspired them:
+   * a shell string passed to `/bin/sh -c`, an argv array exec'd directly, or
+   * a named map run in parallel.
+   */
+  export type HookCommand = (string | string[] | {
+  [k: string]: HookCommand
+  })
+
   export interface ImageCreateInput {
-  config: ObjectJson
+  config: EnvironmentConfig
   description?: string
   /**
    * Unique display name (e.g. "Go", "Rust", "Node").
@@ -1942,7 +2102,130 @@ export namespace ImageCreateInputSchema {
    * The image's EnvironmentConfig (languages+versions, system_packages,
    * build env, post_build hooks). Validated server-side.
    */
-  export interface ObjectJson {
+  export interface EnvironmentConfig {
+  /**
+   * Per-agent-role MCP server defaults. Moved here from the pre-cut-over
+   * `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+   * name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
+   * any role with no explicit entry. The value is the list of MCP server
+   * names (from root `mcp.json`) that sessions for that role should
+   * connect to by default. Specialist role assignments override these.
+   */
+  agent_mcp_defaults?: {
+  [k: string]: string[]
+  }
+  env?: {
+  [k: string]: string
+  }
+  /**
+   * Skills injected into every agent prompt regardless of role. Moved here
+   * from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
+   * Each entry is a skill file stem (resolved against `.djinn/skills/`).
+   */
+  global_skills?: string[]
+  languages?: Languages
+  lifecycle?: LifecycleHooks
+  /**
+   * `0` (the default) is the "needs reseed" sentinel — the P5 boot hook
+   * treats any config with `schema_version < 1` as an un-seeded row and
+   * rewrites it from `projects.stack`. `validate()` rejects 0 so that
+   * user-submitted configs must declare a real version.
+   */
+  schema_version?: number
+  /**
+   * How the config landed in the column.
+   * 
+   * * `AutoDetected` — written by the P5 boot reseed hook from stack detection.
+   *   Re-writing from detection is OK (config may still be overwritten on the
+   *   next detector pass until the user edits it).
+   * * `UserEdited` — saved via the MCP tool or UI. Never reseeded from stack.
+   */
+  source?: ("auto-detected" | "user-edited")
+  /**
+   * apt packages installed in the image. Alpine was dropped in the
+   * 2026-04-22 cleanup — every image is `debian:bookworm-slim` now.
+   */
+  system_packages?: string[]
+  workspaces?: Workspace[]
+  }
+  export interface Languages {
+  clang?: (ClangLanguage | null)
+  dotnet?: (DotnetLanguage | null)
+  go?: (GoLanguage | null)
+  java?: (JavaLanguage | null)
+  node?: (NodeLanguage | null)
+  python?: (PythonLanguage | null)
+  ruby?: (RubyLanguage | null)
+  rust?: (RustLanguage | null)
+  }
+  export interface ClangLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface DotnetLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface GoLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface JavaLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface NodeLanguage {
+  default_package_manager?: string
+  default_version: string
+  [k: string]: any
+  }
+  export interface PythonLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface RubyLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface RustLanguage {
+  default_toolchain: string
+  [k: string]: any
+  }
+  export interface LifecycleHooks {
+  /**
+   * `RUN` lines appended to the generated Dockerfile. Bundle anything
+   * you want baked into the image here (apt packages are the easy path;
+   * curl-installs like `protoc` go here).
+   */
+  post_build?: HookCommand[]
+  /**
+   * Runs in every Pod djinn starts (warm AND task-run), before any
+   * djinn work. The pre-2026-04-22 `pre_warm` field routes here via
+   * the serde alias.
+   */
+  pre_anything?: HookCommand[]
+  /**
+   * Runs in the task-run Pod before the supervisor starts.
+   */
+  pre_task?: HookCommand[]
+  /**
+   * Runs once in the task-run Pod, before any verification rule fires.
+   * Typically `pnpm install` / `cargo build` / similar — commands that
+   * prepare the workspace so the `verification.rules` commands succeed.
+   * Previously lived as `verification.setup`.
+   */
+  pre_verification?: HookCommand[]
+  [k: string]: any
+  }
+  export interface Workspace {
+  language: string
+  name?: string
+  package_manager?: string
+  root: string
+  slug?: string
+  tags?: string[]
+  toolchain?: string
+  version?: string
   [k: string]: any
   }
 
@@ -1984,6 +2267,22 @@ export namespace ImageListInputSchema {
 }
 export type ImageListInput = ImageListInputSchema.ImageListInput;
 export namespace ImageListOutputSchema {
+  /**
+   * A lifecycle / verification / setup command.
+   * 
+   * Shape matches the `LifecycleCommand` enum in
+   * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
+   * local enum is replaced with this canonical definition so the on-disk
+   * config JSON round-trips through both sides without a translation layer.
+   * 
+   * The three forms follow the devcontainer spec that originally inspired them:
+   * a shell string passed to `/bin/sh -c`, an argv array exec'd directly, or
+   * a named map run in parallel.
+   */
+  export type HookCommand = (string | string[] | {
+  [k: string]: HookCommand
+  })
+
   export interface ImageListOutput {
   error?: string
   images: ImageDto[]
@@ -1995,7 +2294,7 @@ export namespace ImageListOutputSchema {
    * Service-preset ids tasks using this image may request (Phase C capability).
    */
   allowed_presets?: string[]
-  config: ObjectJson
+  config: EnvironmentConfig
   description?: string
   id: string
   name: string
@@ -2008,7 +2307,130 @@ export namespace ImageListOutputSchema {
   /**
    * The image's EnvironmentConfig (build fields).
    */
-  export interface ObjectJson {
+  export interface EnvironmentConfig {
+  /**
+   * Per-agent-role MCP server defaults. Moved here from the pre-cut-over
+   * `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+   * name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
+   * any role with no explicit entry. The value is the list of MCP server
+   * names (from root `mcp.json`) that sessions for that role should
+   * connect to by default. Specialist role assignments override these.
+   */
+  agent_mcp_defaults?: {
+  [k: string]: string[]
+  }
+  env?: {
+  [k: string]: string
+  }
+  /**
+   * Skills injected into every agent prompt regardless of role. Moved here
+   * from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
+   * Each entry is a skill file stem (resolved against `.djinn/skills/`).
+   */
+  global_skills?: string[]
+  languages?: Languages
+  lifecycle?: LifecycleHooks
+  /**
+   * `0` (the default) is the "needs reseed" sentinel — the P5 boot hook
+   * treats any config with `schema_version < 1` as an un-seeded row and
+   * rewrites it from `projects.stack`. `validate()` rejects 0 so that
+   * user-submitted configs must declare a real version.
+   */
+  schema_version?: number
+  /**
+   * How the config landed in the column.
+   * 
+   * * `AutoDetected` — written by the P5 boot reseed hook from stack detection.
+   *   Re-writing from detection is OK (config may still be overwritten on the
+   *   next detector pass until the user edits it).
+   * * `UserEdited` — saved via the MCP tool or UI. Never reseeded from stack.
+   */
+  source?: ("auto-detected" | "user-edited")
+  /**
+   * apt packages installed in the image. Alpine was dropped in the
+   * 2026-04-22 cleanup — every image is `debian:bookworm-slim` now.
+   */
+  system_packages?: string[]
+  workspaces?: Workspace[]
+  }
+  export interface Languages {
+  clang?: (ClangLanguage | null)
+  dotnet?: (DotnetLanguage | null)
+  go?: (GoLanguage | null)
+  java?: (JavaLanguage | null)
+  node?: (NodeLanguage | null)
+  python?: (PythonLanguage | null)
+  ruby?: (RubyLanguage | null)
+  rust?: (RustLanguage | null)
+  }
+  export interface ClangLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface DotnetLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface GoLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface JavaLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface NodeLanguage {
+  default_package_manager?: string
+  default_version: string
+  [k: string]: any
+  }
+  export interface PythonLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface RubyLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface RustLanguage {
+  default_toolchain: string
+  [k: string]: any
+  }
+  export interface LifecycleHooks {
+  /**
+   * `RUN` lines appended to the generated Dockerfile. Bundle anything
+   * you want baked into the image here (apt packages are the easy path;
+   * curl-installs like `protoc` go here).
+   */
+  post_build?: HookCommand[]
+  /**
+   * Runs in every Pod djinn starts (warm AND task-run), before any
+   * djinn work. The pre-2026-04-22 `pre_warm` field routes here via
+   * the serde alias.
+   */
+  pre_anything?: HookCommand[]
+  /**
+   * Runs in the task-run Pod before the supervisor starts.
+   */
+  pre_task?: HookCommand[]
+  /**
+   * Runs once in the task-run Pod, before any verification rule fires.
+   * Typically `pnpm install` / `cargo build` / similar — commands that
+   * prepare the workspace so the `verification.rules` commands succeed.
+   * Previously lived as `verification.setup`.
+   */
+  pre_verification?: HookCommand[]
+  [k: string]: any
+  }
+  export interface Workspace {
+  language: string
+  name?: string
+  package_manager?: string
+  root: string
+  slug?: string
+  tags?: string[]
+  toolchain?: string
+  version?: string
   [k: string]: any
   }
 
@@ -2040,14 +2462,156 @@ export namespace ImageSetAllowedPresetsOutputSchema {
 }
 export type ImageSetAllowedPresetsOutput = ImageSetAllowedPresetsOutputSchema.ImageSetAllowedPresetsOutput;
 export namespace ImageUpdateInputSchema {
+  /**
+   * A lifecycle / verification / setup command.
+   * 
+   * Shape matches the `LifecycleCommand` enum in
+   * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
+   * local enum is replaced with this canonical definition so the on-disk
+   * config JSON round-trips through both sides without a translation layer.
+   * 
+   * The three forms follow the devcontainer spec that originally inspired them:
+   * a shell string passed to `/bin/sh -c`, an argv array exec'd directly, or
+   * a named map run in parallel.
+   */
+  export type HookCommand = (string | string[] | {
+  [k: string]: HookCommand
+  })
+
   export interface ImageUpdateInput {
-  config: ObjectJson
+  config: EnvironmentConfig
   description?: string
   id: string
   name: string
   [k: string]: any
   }
-  export interface ObjectJson {
+  /**
+   * The image's EnvironmentConfig (build fields). Validated server-side.
+   */
+  export interface EnvironmentConfig {
+  /**
+   * Per-agent-role MCP server defaults. Moved here from the pre-cut-over
+   * `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+   * name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
+   * any role with no explicit entry. The value is the list of MCP server
+   * names (from root `mcp.json`) that sessions for that role should
+   * connect to by default. Specialist role assignments override these.
+   */
+  agent_mcp_defaults?: {
+  [k: string]: string[]
+  }
+  env?: {
+  [k: string]: string
+  }
+  /**
+   * Skills injected into every agent prompt regardless of role. Moved here
+   * from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
+   * Each entry is a skill file stem (resolved against `.djinn/skills/`).
+   */
+  global_skills?: string[]
+  languages?: Languages
+  lifecycle?: LifecycleHooks
+  /**
+   * `0` (the default) is the "needs reseed" sentinel — the P5 boot hook
+   * treats any config with `schema_version < 1` as an un-seeded row and
+   * rewrites it from `projects.stack`. `validate()` rejects 0 so that
+   * user-submitted configs must declare a real version.
+   */
+  schema_version?: number
+  /**
+   * How the config landed in the column.
+   * 
+   * * `AutoDetected` — written by the P5 boot reseed hook from stack detection.
+   *   Re-writing from detection is OK (config may still be overwritten on the
+   *   next detector pass until the user edits it).
+   * * `UserEdited` — saved via the MCP tool or UI. Never reseeded from stack.
+   */
+  source?: ("auto-detected" | "user-edited")
+  /**
+   * apt packages installed in the image. Alpine was dropped in the
+   * 2026-04-22 cleanup — every image is `debian:bookworm-slim` now.
+   */
+  system_packages?: string[]
+  workspaces?: Workspace[]
+  }
+  export interface Languages {
+  clang?: (ClangLanguage | null)
+  dotnet?: (DotnetLanguage | null)
+  go?: (GoLanguage | null)
+  java?: (JavaLanguage | null)
+  node?: (NodeLanguage | null)
+  python?: (PythonLanguage | null)
+  ruby?: (RubyLanguage | null)
+  rust?: (RustLanguage | null)
+  }
+  export interface ClangLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface DotnetLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface GoLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface JavaLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface NodeLanguage {
+  default_package_manager?: string
+  default_version: string
+  [k: string]: any
+  }
+  export interface PythonLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface RubyLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface RustLanguage {
+  default_toolchain: string
+  [k: string]: any
+  }
+  export interface LifecycleHooks {
+  /**
+   * `RUN` lines appended to the generated Dockerfile. Bundle anything
+   * you want baked into the image here (apt packages are the easy path;
+   * curl-installs like `protoc` go here).
+   */
+  post_build?: HookCommand[]
+  /**
+   * Runs in every Pod djinn starts (warm AND task-run), before any
+   * djinn work. The pre-2026-04-22 `pre_warm` field routes here via
+   * the serde alias.
+   */
+  pre_anything?: HookCommand[]
+  /**
+   * Runs in the task-run Pod before the supervisor starts.
+   */
+  pre_task?: HookCommand[]
+  /**
+   * Runs once in the task-run Pod, before any verification rule fires.
+   * Typically `pnpm install` / `cargo build` / similar — commands that
+   * prepare the workspace so the `verification.rules` commands succeed.
+   * Previously lived as `verification.setup`.
+   */
+  pre_verification?: HookCommand[]
+  [k: string]: any
+  }
+  export interface Workspace {
+  language: string
+  name?: string
+  package_manager?: string
+  root: string
+  slug?: string
+  tags?: string[]
+  toolchain?: string
+  version?: string
   [k: string]: any
   }
 
@@ -2458,7 +3022,6 @@ export type MemoryHealthInput = MemoryHealthInputSchema.MemoryHealthInput;
 export namespace MemoryHealthOutputSchema {
   export interface MemoryHealthOutput {
   broken_link_count?: number
-  duplicate_cluster_count?: number
   error?: string
   low_confidence_note_count?: number
   orphan_note_count?: number
@@ -3153,12 +3716,28 @@ export namespace ProjectEnvironmentConfigGetInputSchema {
 }
 export type ProjectEnvironmentConfigGetInput = ProjectEnvironmentConfigGetInputSchema.ProjectEnvironmentConfigGetInput;
 export namespace ProjectEnvironmentConfigGetOutputSchema {
+  /**
+   * A lifecycle / verification / setup command.
+   * 
+   * Shape matches the `LifecycleCommand` enum in
+   * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
+   * local enum is replaced with this canonical definition so the on-disk
+   * config JSON round-trips through both sides without a translation layer.
+   * 
+   * The three forms follow the devcontainer spec that originally inspired them:
+   * a shell string passed to `/bin/sh -c`, an argv array exec'd directly, or
+   * a named map run in parallel.
+   */
+  export type HookCommand = (string | string[] | {
+  [k: string]: HookCommand
+  })
+
   export interface ProjectEnvironmentConfigGetOutput {
   /**
    * The raw JSON config currently in `projects.environment_config`.
    * Empty object `{}` when the row hasn't been reseeded yet.
    */
-  config?: (ObjectJson | null)
+  config?: (EnvironmentConfig | null)
   error?: string
   /**
    * The catalog image this project is assigned to, if any (for the picker).
@@ -3168,7 +3747,130 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   status: string
   [k: string]: any
   }
-  export interface ObjectJson {
+  export interface EnvironmentConfig {
+  /**
+   * Per-agent-role MCP server defaults. Moved here from the pre-cut-over
+   * `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+   * name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
+   * any role with no explicit entry. The value is the list of MCP server
+   * names (from root `mcp.json`) that sessions for that role should
+   * connect to by default. Specialist role assignments override these.
+   */
+  agent_mcp_defaults?: {
+  [k: string]: string[]
+  }
+  env?: {
+  [k: string]: string
+  }
+  /**
+   * Skills injected into every agent prompt regardless of role. Moved here
+   * from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
+   * Each entry is a skill file stem (resolved against `.djinn/skills/`).
+   */
+  global_skills?: string[]
+  languages?: Languages
+  lifecycle?: LifecycleHooks
+  /**
+   * `0` (the default) is the "needs reseed" sentinel — the P5 boot hook
+   * treats any config with `schema_version < 1` as an un-seeded row and
+   * rewrites it from `projects.stack`. `validate()` rejects 0 so that
+   * user-submitted configs must declare a real version.
+   */
+  schema_version?: number
+  /**
+   * How the config landed in the column.
+   * 
+   * * `AutoDetected` — written by the P5 boot reseed hook from stack detection.
+   *   Re-writing from detection is OK (config may still be overwritten on the
+   *   next detector pass until the user edits it).
+   * * `UserEdited` — saved via the MCP tool or UI. Never reseeded from stack.
+   */
+  source?: ("auto-detected" | "user-edited")
+  /**
+   * apt packages installed in the image. Alpine was dropped in the
+   * 2026-04-22 cleanup — every image is `debian:bookworm-slim` now.
+   */
+  system_packages?: string[]
+  workspaces?: Workspace[]
+  }
+  export interface Languages {
+  clang?: (ClangLanguage | null)
+  dotnet?: (DotnetLanguage | null)
+  go?: (GoLanguage | null)
+  java?: (JavaLanguage | null)
+  node?: (NodeLanguage | null)
+  python?: (PythonLanguage | null)
+  ruby?: (RubyLanguage | null)
+  rust?: (RustLanguage | null)
+  }
+  export interface ClangLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface DotnetLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface GoLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface JavaLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface NodeLanguage {
+  default_package_manager?: string
+  default_version: string
+  [k: string]: any
+  }
+  export interface PythonLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface RubyLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface RustLanguage {
+  default_toolchain: string
+  [k: string]: any
+  }
+  export interface LifecycleHooks {
+  /**
+   * `RUN` lines appended to the generated Dockerfile. Bundle anything
+   * you want baked into the image here (apt packages are the easy path;
+   * curl-installs like `protoc` go here).
+   */
+  post_build?: HookCommand[]
+  /**
+   * Runs in every Pod djinn starts (warm AND task-run), before any
+   * djinn work. The pre-2026-04-22 `pre_warm` field routes here via
+   * the serde alias.
+   */
+  pre_anything?: HookCommand[]
+  /**
+   * Runs in the task-run Pod before the supervisor starts.
+   */
+  pre_task?: HookCommand[]
+  /**
+   * Runs once in the task-run Pod, before any verification rule fires.
+   * Typically `pnpm install` / `cargo build` / similar — commands that
+   * prepare the workspace so the `verification.rules` commands succeed.
+   * Previously lived as `verification.setup`.
+   */
+  pre_verification?: HookCommand[]
+  [k: string]: any
+  }
+  export interface Workspace {
+  language: string
+  name?: string
+  package_manager?: string
+  root: string
+  slug?: string
+  tags?: string[]
+  toolchain?: string
+  version?: string
   [k: string]: any
   }
 
@@ -3186,24 +3888,179 @@ export namespace ProjectEnvironmentConfigResetInputSchema {
 }
 export type ProjectEnvironmentConfigResetInput = ProjectEnvironmentConfigResetInputSchema.ProjectEnvironmentConfigResetInput;
 export namespace ProjectEnvironmentConfigResetOutputSchema {
+  /**
+   * A lifecycle / verification / setup command.
+   * 
+   * Shape matches the `LifecycleCommand` enum in
+   * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
+   * local enum is replaced with this canonical definition so the on-disk
+   * config JSON round-trips through both sides without a translation layer.
+   * 
+   * The three forms follow the devcontainer spec that originally inspired them:
+   * a shell string passed to `/bin/sh -c`, an argv array exec'd directly, or
+   * a named map run in parallel.
+   */
+  export type HookCommand = (string | string[] | {
+  [k: string]: HookCommand
+  })
+
   export interface ProjectEnvironmentConfigResetOutput {
   /**
    * The freshly-generated auto-detected config, on success.
    */
-  config?: (ObjectJson | null)
+  config?: (EnvironmentConfig | null)
   error?: string
   status: string
   [k: string]: any
   }
-  export interface ObjectJson {
+  export interface EnvironmentConfig {
+  /**
+   * Per-agent-role MCP server defaults. Moved here from the pre-cut-over
+   * `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+   * name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
+   * any role with no explicit entry. The value is the list of MCP server
+   * names (from root `mcp.json`) that sessions for that role should
+   * connect to by default. Specialist role assignments override these.
+   */
+  agent_mcp_defaults?: {
+  [k: string]: string[]
+  }
+  env?: {
+  [k: string]: string
+  }
+  /**
+   * Skills injected into every agent prompt regardless of role. Moved here
+   * from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
+   * Each entry is a skill file stem (resolved against `.djinn/skills/`).
+   */
+  global_skills?: string[]
+  languages?: Languages
+  lifecycle?: LifecycleHooks
+  /**
+   * `0` (the default) is the "needs reseed" sentinel — the P5 boot hook
+   * treats any config with `schema_version < 1` as an un-seeded row and
+   * rewrites it from `projects.stack`. `validate()` rejects 0 so that
+   * user-submitted configs must declare a real version.
+   */
+  schema_version?: number
+  /**
+   * How the config landed in the column.
+   * 
+   * * `AutoDetected` — written by the P5 boot reseed hook from stack detection.
+   *   Re-writing from detection is OK (config may still be overwritten on the
+   *   next detector pass until the user edits it).
+   * * `UserEdited` — saved via the MCP tool or UI. Never reseeded from stack.
+   */
+  source?: ("auto-detected" | "user-edited")
+  /**
+   * apt packages installed in the image. Alpine was dropped in the
+   * 2026-04-22 cleanup — every image is `debian:bookworm-slim` now.
+   */
+  system_packages?: string[]
+  workspaces?: Workspace[]
+  }
+  export interface Languages {
+  clang?: (ClangLanguage | null)
+  dotnet?: (DotnetLanguage | null)
+  go?: (GoLanguage | null)
+  java?: (JavaLanguage | null)
+  node?: (NodeLanguage | null)
+  python?: (PythonLanguage | null)
+  ruby?: (RubyLanguage | null)
+  rust?: (RustLanguage | null)
+  }
+  export interface ClangLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface DotnetLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface GoLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface JavaLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface NodeLanguage {
+  default_package_manager?: string
+  default_version: string
+  [k: string]: any
+  }
+  export interface PythonLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface RubyLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface RustLanguage {
+  default_toolchain: string
+  [k: string]: any
+  }
+  export interface LifecycleHooks {
+  /**
+   * `RUN` lines appended to the generated Dockerfile. Bundle anything
+   * you want baked into the image here (apt packages are the easy path;
+   * curl-installs like `protoc` go here).
+   */
+  post_build?: HookCommand[]
+  /**
+   * Runs in every Pod djinn starts (warm AND task-run), before any
+   * djinn work. The pre-2026-04-22 `pre_warm` field routes here via
+   * the serde alias.
+   */
+  pre_anything?: HookCommand[]
+  /**
+   * Runs in the task-run Pod before the supervisor starts.
+   */
+  pre_task?: HookCommand[]
+  /**
+   * Runs once in the task-run Pod, before any verification rule fires.
+   * Typically `pnpm install` / `cargo build` / similar — commands that
+   * prepare the workspace so the `verification.rules` commands succeed.
+   * Previously lived as `verification.setup`.
+   */
+  pre_verification?: HookCommand[]
+  [k: string]: any
+  }
+  export interface Workspace {
+  language: string
+  name?: string
+  package_manager?: string
+  root: string
+  slug?: string
+  tags?: string[]
+  toolchain?: string
+  version?: string
   [k: string]: any
   }
 
 }
 export type ProjectEnvironmentConfigResetOutput = ProjectEnvironmentConfigResetOutputSchema.ProjectEnvironmentConfigResetOutput;
 export namespace ProjectEnvironmentConfigSetInputSchema {
+  /**
+   * A lifecycle / verification / setup command.
+   * 
+   * Shape matches the `LifecycleCommand` enum in
+   * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
+   * local enum is replaced with this canonical definition so the on-disk
+   * config JSON round-trips through both sides without a translation layer.
+   * 
+   * The three forms follow the devcontainer spec that originally inspired them:
+   * a shell string passed to `/bin/sh -c`, an argv array exec'd directly, or
+   * a named map run in parallel.
+   */
+  export type HookCommand = (string | string[] | {
+  [k: string]: HookCommand
+  })
+
   export interface ProjectEnvironmentConfigSetInput {
-  config: ObjectJson
+  config: EnvironmentConfig
   /**
    * Project UUID.
    */
@@ -3215,7 +4072,130 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
    * `djinn_stack::environment::EnvironmentConfig::validate` before
    * anything is written.
    */
-  export interface ObjectJson {
+  export interface EnvironmentConfig {
+  /**
+   * Per-agent-role MCP server defaults. Moved here from the pre-cut-over
+   * `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+   * name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
+   * any role with no explicit entry. The value is the list of MCP server
+   * names (from root `mcp.json`) that sessions for that role should
+   * connect to by default. Specialist role assignments override these.
+   */
+  agent_mcp_defaults?: {
+  [k: string]: string[]
+  }
+  env?: {
+  [k: string]: string
+  }
+  /**
+   * Skills injected into every agent prompt regardless of role. Moved here
+   * from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
+   * Each entry is a skill file stem (resolved against `.djinn/skills/`).
+   */
+  global_skills?: string[]
+  languages?: Languages
+  lifecycle?: LifecycleHooks
+  /**
+   * `0` (the default) is the "needs reseed" sentinel — the P5 boot hook
+   * treats any config with `schema_version < 1` as an un-seeded row and
+   * rewrites it from `projects.stack`. `validate()` rejects 0 so that
+   * user-submitted configs must declare a real version.
+   */
+  schema_version?: number
+  /**
+   * How the config landed in the column.
+   * 
+   * * `AutoDetected` — written by the P5 boot reseed hook from stack detection.
+   *   Re-writing from detection is OK (config may still be overwritten on the
+   *   next detector pass until the user edits it).
+   * * `UserEdited` — saved via the MCP tool or UI. Never reseeded from stack.
+   */
+  source?: ("auto-detected" | "user-edited")
+  /**
+   * apt packages installed in the image. Alpine was dropped in the
+   * 2026-04-22 cleanup — every image is `debian:bookworm-slim` now.
+   */
+  system_packages?: string[]
+  workspaces?: Workspace[]
+  }
+  export interface Languages {
+  clang?: (ClangLanguage | null)
+  dotnet?: (DotnetLanguage | null)
+  go?: (GoLanguage | null)
+  java?: (JavaLanguage | null)
+  node?: (NodeLanguage | null)
+  python?: (PythonLanguage | null)
+  ruby?: (RubyLanguage | null)
+  rust?: (RustLanguage | null)
+  }
+  export interface ClangLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface DotnetLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface GoLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface JavaLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface NodeLanguage {
+  default_package_manager?: string
+  default_version: string
+  [k: string]: any
+  }
+  export interface PythonLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface RubyLanguage {
+  default_version: string
+  [k: string]: any
+  }
+  export interface RustLanguage {
+  default_toolchain: string
+  [k: string]: any
+  }
+  export interface LifecycleHooks {
+  /**
+   * `RUN` lines appended to the generated Dockerfile. Bundle anything
+   * you want baked into the image here (apt packages are the easy path;
+   * curl-installs like `protoc` go here).
+   */
+  post_build?: HookCommand[]
+  /**
+   * Runs in every Pod djinn starts (warm AND task-run), before any
+   * djinn work. The pre-2026-04-22 `pre_warm` field routes here via
+   * the serde alias.
+   */
+  pre_anything?: HookCommand[]
+  /**
+   * Runs in the task-run Pod before the supervisor starts.
+   */
+  pre_task?: HookCommand[]
+  /**
+   * Runs once in the task-run Pod, before any verification rule fires.
+   * Typically `pnpm install` / `cargo build` / similar — commands that
+   * prepare the workspace so the `verification.rules` commands succeed.
+   * Previously lived as `verification.setup`.
+   */
+  pre_verification?: HookCommand[]
+  [k: string]: any
+  }
+  export interface Workspace {
+  language: string
+  name?: string
+  package_manager?: string
+  root: string
+  slug?: string
+  tags?: string[]
+  toolchain?: string
+  version?: string
   [k: string]: any
   }
 
@@ -5154,6 +6134,10 @@ export namespace SettingsGetOutputSchema {
    */
   dispatch_limit?: number
   /**
+   * Global emergency stop for task dispatch. Missing in older settings rows means unpaused.
+   */
+  dispatch_pause?: (DispatchPause | null)
+  /**
    * LEGACY/ignored. Per-model concurrency caps are now **per-user**
    * (`user_settings.max_sessions`) and the slot pool is elastic, so this
    * global field is no longer written or read. Retained only so existing
@@ -5174,6 +6158,15 @@ export namespace SettingsGetOutputSchema {
    * Ordered list of models available to agents, e.g. `["openai/gpt-4o"]`.
    */
   models?: string[]
+  }
+  /**
+   * Metadata recorded when dispatch is paused for a scope.
+   */
+  export interface DispatchPause {
+  expires_at?: string
+  paused_at: string
+  paused_by: string
+  reason: string
   }
 
 }
@@ -5994,7 +6987,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause_status" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_allowed_presets" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "project_verification_get" | "project_verification_set" | "project_verification_test" | "project_verification_test_status" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_list" | "service_preset_list" | "service_release" | "service_request" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_allowed_presets" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "project_verification_get" | "project_verification_set" | "project_verification_test" | "project_verification_test_status" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_list" | "service_preset_list" | "service_release" | "service_request" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -6008,7 +7001,9 @@ export interface McpToolMap {
   "credential_delete": { input: CredentialDeleteInput; output: CredentialDeleteOutput };
   "credential_list": { input: CredentialListInput; output: CredentialListOutput };
   "credential_set": { input: CredentialSetInput; output: CredentialSetOutput };
+  "dispatch_pause": { input: DispatchPauseInput; output: DispatchPauseOutput };
   "dispatch_pause_status": { input: DispatchPauseStatusInput; output: DispatchPauseStatusOutput };
+  "dispatch_resume": { input: DispatchResumeInput; output: DispatchResumeOutput };
   "epic_add_read_source": { input: EpicAddReadSourceInput; output: EpicAddReadSourceOutput };
   "epic_blocked_list": { input: EpicBlockedListInput; output: EpicBlockedListOutput };
   "epic_blockers_list": { input: EpicBlockersListInput; output: EpicBlockersListOutput };

@@ -1,6 +1,6 @@
 ## Workflow C: Intervention (Lead escalation OR stuck-task auto-routing)
 
-You are in intervention mode whenever you are dispatched on a review-type task whose title does **not** contain "patrol". You reach this mode two ways:
+You are in intervention mode whenever you are dispatched on a review-type task. You reach this mode two ways:
 
 1. **Lead escalation** — Lead couldn't resolve a task at the board level (duplicates, wrong sequencing, contradicts in-flight sibling work, failed multiple Lead interventions) and escalated it to the Planner.
 2. **Stuck-task auto-routing** — the coordinator detected a non-converging loop and routed the task to you automatically. Two loop shapes trigger this:
@@ -35,5 +35,4 @@ Pick exactly one. Act with tool calls immediately — do not narrate.
 
 Call `submit_grooming(summary="<which fix you chose and why>")`.
 
-Do NOT set `next_patrol_minutes` in intervention mode.
 

@@ -45,7 +45,7 @@ impl CoordinatorActor {
         /// mid-edit and destroyed their ephemeral workspaces before they could
         /// commit (no PR ever opens).
         const STALL_TIMEOUT_SECS: u64 = 30 * 60;
-        /// Architect sessions kept on the same 30-minute budget — patrol
+        /// Architect sessions kept on the same 30-minute budget —
         /// reviews are similarly read-heavy and don't need a shorter clock.
         const ARCHITECT_STALL_TIMEOUT_SECS: u64 = 30 * 60;
 
@@ -647,8 +647,7 @@ impl CoordinatorActor {
     /// Fail a task terminally (`ForceClose`) with an actionable reason. Used
     /// when a task is structurally undispatchable (its owner has no model with a
     /// connected provider) or has failed too many consecutive times. Looping
-    /// forever is worse than a clear terminal state — and for board patrols a
-    /// non-closed orphan blocks all future patrols, so closing it self-cleans
+    /// forever is worse than a clear terminal state, so closing it self-cleans
     /// that guard.
     pub(in crate::actors::coordinator::dispatch) async fn terminally_fail_task(
         &self,

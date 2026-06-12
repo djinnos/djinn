@@ -3,7 +3,7 @@
 //! This is a pure code-motion extraction from `run_task_lifecycle` (task #17).
 //! It gathers the data the base prompt template needs — conflict metadata,
 //! activity-log digest, extracted worker submission context, epic context,
-//! knowledge notes, planner patrol context — builds the full
+//! knowledge notes — builds the full
 //! [`TaskContext`], renders the role's system prompt, and layers the DB-level
 //! prompt extensions + skills on top.
 //!
@@ -26,7 +26,7 @@ use djinn_core::models::Task;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
-    build_planner_patrol_context, build_reviewer_diff_context, build_role_code_graph_context,
+    build_reviewer_diff_context, build_role_code_graph_context,
     derive_task_scope_paths, extract_worker_context, format_knowledge_notes, recent_feedback,
 };
 use crate::context::AgentContext;
@@ -62,8 +62,6 @@ pub(crate) struct PromptContext {
     pub epic_context: Option<String>,
     /// Knowledge-notes block scoped to the task's paths.
     pub knowledge_context: Option<String>,
-    /// Planner-patrol-only code-graph diff summary.
-    pub planner_patrol_context: Option<String>,
     /// PR E2: auto-injected `code_graph context` summary for the dispatch
     /// role. `None` when the role is not in the
     /// `DJINN_AUTO_CODE_CONTEXT_ROLES` allowlist or no scope-path symbols
@@ -166,7 +164,7 @@ pub(crate) struct PromptContextInputs<'a> {
 /// extensions + skills prompts) for one role session.
 ///
 /// Reads activity log, epic row (when the role needs it), knowledge notes
-/// scoped to the task's paths, and planner patrol signals. Non-fatal: every
+/// scoped to the task's paths. Non-fatal: every
 /// DB query falls back to `None` on error, mirroring the original inline
 /// block.
 pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> PromptContext {
@@ -328,8 +326,6 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
         }
     };
 
-    let planner_patrol_context = build_planner_patrol_context(task, app_state, project_path).await;
-
     // PR E2: auto-include `code_graph context` for worker / reviewer roles
     // when `DJINN_AUTO_CODE_CONTEXT_ROLES` enables this role. Reuses the
     // task-scope-path inference already used by the knowledge context block.
@@ -395,7 +391,6 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
             verification_failure: verification_failure.clone(),
             epic_context: epic_context.clone(),
             knowledge_context: knowledge_context.clone(),
-            planner_patrol_context: planner_patrol_context.clone(),
             code_graph_context: code_graph_context.clone(),
             reviewer_diff_context: reviewer_diff_context.clone(),
         },
@@ -420,7 +415,6 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
         verification_failure,
         epic_context,
         knowledge_context,
-        planner_patrol_context,
         code_graph_context,
         reviewer_diff_context,
         base_system_prompt,

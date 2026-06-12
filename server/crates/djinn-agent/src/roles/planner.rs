@@ -18,7 +18,6 @@ impl AgentRole for PlannerRole {
 
 // Mode workflow sections — exactly one is injected at `{{role_mode_section}}`
 // based on the dispatched task. The LLM no longer "detects" its mode.
-const PLANNER_PATROL: &str = include_str!("../prompts/planner/patrol.md");
 const PLANNER_DECOMPOSITION: &str = include_str!("../prompts/planner/decomposition.md");
 const PLANNER_INTERVENTION: &str = include_str!("../prompts/planner/intervention.md");
 const PLANNER_PROPOSAL: &str = include_str!("../prompts/planner/proposal.md");
@@ -40,9 +39,8 @@ fn planner_mode_section(task: &Task, _ctx: &TaskContext) -> &'static str {
         }
         "epic_breakdown" => PLANNER_PROPOSAL,
         "planning" | "decomposition" => PLANNER_DECOMPOSITION,
-        // Review tasks split by whether they are the periodic board patrol or a
-        // targeted escalation/stuck-task intervention.
-        "review" if task.title.to_lowercase().contains("patrol") => PLANNER_PATROL,
+        // Review tasks are targeted escalation/stuck-task interventions (the
+        // periodic board patrol was removed with proposal 1omc).
         "review" => PLANNER_INTERVENTION,
         // Planner only ever runs these issue types; default to decomposition as
         // the safe catch-all rather than leaving the section empty.

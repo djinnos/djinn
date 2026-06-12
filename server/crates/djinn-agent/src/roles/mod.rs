@@ -112,8 +112,8 @@ pub(crate) fn role_impl_for(agent_type: AgentType) -> Arc<dyn AgentRole> {
 ///   chooses the fallback *base* role for that path.
 /// - `planning` / `decomposition` → Planner (wave decomposition).
 /// - `review` → Planner.  Under ADR-051 the Planner owns the board
-///   patrol *and* is the escalation ceiling above Lead, so every review
-///   task (patrol + `request_planner` escalation) dispatches as a
+///   board *and* is the escalation ceiling above Lead, so every review
+///   task (`request_planner` escalation) dispatches as a
 ///   Planner session.  The previous rule routed reviews to Architect
 ///   (ADR-034), which no longer matches the role hierarchy.
 /// - `spike` → Architect.  Architect is the on-demand consultant per
@@ -156,7 +156,7 @@ pub(crate) fn role_for_task_dispatch(
         "planning" | "decomposition" | "epic_breakdown" => {
             return role_impl_for(AgentType::Planner);
         }
-        // ADR-051 §1 + §8: review tasks are Planner-owned (patrol +
+        // ADR-051 §1 + §8: review tasks are Planner-owned (escalation +
         // lead escalation ceiling).  Previously this routed to Architect
         // per ADR-034 before the split.
         "review" => return role_impl_for(AgentType::Planner),
@@ -277,7 +277,7 @@ impl RoleRegistry {
         ]);
 
         let dispatch_rules = vec![
-            // ADR-051 §1 + §8: review tasks (patrol + escalation) are
+            // ADR-051 §1 + §8: review tasks (escalation + intervention) are
             // Planner-owned.  This rule must come before the architect
             // rule so spike tasks still fall through to Architect.
             planner_review_dispatch_rule(),
@@ -349,7 +349,7 @@ fn architect_dispatch_rule() -> DispatchRule {
 }
 
 /// Returns `true` if the task is an open/in-progress review task.
-/// Under ADR-051 §1 + §8 the Planner owns both the board patrol and
+/// Under ADR-051 §1 + §8 the Planner owns both board maintenance and
 /// the escalation ceiling above Lead, so every review task dispatches
 /// as a Planner session.
 fn planner_review_claims(task: &Task, _ctx: &DispatchContext) -> bool {
@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn spike_tasks_dispatch_to_architect_review_tasks_dispatch_to_planner() {
-        // ADR-051 §1 + §8: review tasks (patrol + lead escalation)
+        // ADR-051 §1 + §8: review tasks (lead escalation + intervention)
         // are Planner-owned; spike tasks remain Architect-owned
         // (on-demand consultant loop per ADR-051 §2).
         let registry = RoleRegistry::new();

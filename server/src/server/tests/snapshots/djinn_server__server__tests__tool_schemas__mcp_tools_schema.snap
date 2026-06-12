@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 456
 expression: signatures
 ---
 [
@@ -6231,11 +6230,6 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "broken_link_count": {
-          "format": "int64",
-          "nullable": true,
-          "type": "integer"
-        },
-        "duplicate_cluster_count": {
           "format": "int64",
           "nullable": true,
           "type": "integer"

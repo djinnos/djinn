@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use crate::actors::coordinator::pr_poller::PR_REVIEW_FEEDBACK_EVENT;
 use crate::context::AgentContext;
 use djinn_core::models::Task;
-use djinn_core::models::parse_json_array;
 use djinn_db::ActivityQuery;
 use djinn_db::ProjectRepository;
 use djinn_db::TaskRepository;
@@ -19,13 +18,6 @@ const MAX_VERIFICATION_CHARS: usize = 3000;
 
 /// Max characters for a single inline PR review comment included in the prompt.
 const MAX_PR_COMMENT_CHARS: usize = 500;
-
-/// Maximum number of new hygiene/exploration follow-up tasks the Planner should
-/// create during a single patrol when no explicit override is configured.
-const DEFAULT_PATROL_KNOWLEDGE_TASK_BUDGET: usize = 2;
-
-/// Environment variable for overriding the patrol knowledge-task budget.
-const PATROL_KNOWLEDGE_TASK_BUDGET_ENV: &str = "DJINN_PLANNER_PATROL_KNOWLEDGE_TASK_BUDGET";
 
 /// PR E2 feature flag: comma-separated list of role names (matching
 /// `RoleConfig::name`) that opt-in to auto-injected `code_graph context`
@@ -68,8 +60,6 @@ const REVIEWER_DIFF_IMPACT_DEPTH: usize = 3;
 
 mod code_context;
 mod feedback;
-mod knowledge_helpers;
-mod patrol_context;
 mod provider_resolution;
 mod reviewer_diff;
 
@@ -96,7 +86,6 @@ pub(crate) use feedback::{
     pr_review_feedback_context, raw_ci_feedback_in_cycle, recent_feedback, runtime_env_diagnostics,
     runtime_fs_diagnostics,
 };
-pub(crate) use patrol_context::build_planner_patrol_context;
 pub use provider_resolution::{
     OAuthAuthMethodWire, OAuthCapabilitiesWire, OAuthConfigWire, OAuthFormatFamilyWire,
     ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,

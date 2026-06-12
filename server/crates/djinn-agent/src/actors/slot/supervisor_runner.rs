@@ -314,7 +314,7 @@ pub(crate) async fn run_supervisor_dispatch(
     // deployment-author check (which rejects commits whose author email
     // matches no GitHub account) authorizes the build. The PR is still OPENED
     // by the App (`djinn-bot[bot]`), so the creator can review/approve their
-    // own commits. A NULL creator (system/patrol tasks) — or a user row we
+    // own commits. A NULL creator (legacy system tasks) — or a user row we
     // can't read — leaves these None; the supervisor then falls back to the
     // bot identity (those PRs don't clear Vercel's author check anyway).
     let (commit_author_name, commit_author_email) = match created_by_user_id.as_deref() {
