@@ -554,7 +554,7 @@ pub(crate) async fn call_proposal_ac_amend(
                     .filter(|text| !text.is_empty())
                     .ok_or_else(|| {
                         format!(
-                            "proposal_ac_amend amendments[{position}] operation=rewrite requires a non-empty `criterion`"
+                            "proposal_ac_amend amendments[{position}] operation=rewrite requires non-empty `criterion`"
                         )
                     })?;
                 amendments.push(ProposalAcceptanceCriteriaAmendment::Rewrite {
