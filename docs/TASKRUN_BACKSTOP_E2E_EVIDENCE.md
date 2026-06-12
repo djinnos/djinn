@@ -2251,3 +2251,169 @@ yes
 ### Code fixes made
 
 None. The observed failure is an environmental preflight blocker (`docker` missing, with Docker Compose and `sqlx` also unavailable), not a concrete code or test defect. The full entrypoint still needs to be rerun from a host that has Docker Compose or equivalent reachable Postgres test service, `sqlx-cli`, Cargo, cargo-nextest, OpenSSL, and permission to create `/var/tmp/djinn-test-vault/vault.key`.
+
+## Wave 4 force-close/operator-close Kubernetes cleanup attempt — blocked by operator access
+
+- **Evidence task:** `lyot` / `019ebbcf-17a2-7391-939e-08ad605ea4dd`
+- **Attempt window (UTC):** 2026-06-12T12:41:53Z through 2026-06-12T12:42:44Z
+- **Runner invocation:** `NS=djinn TASK_ID=019ebbcf-17a2-7391-939e-08ad605ea4dd TASK_RUN_ID=019ebbda-0827-7b60-b598-00328da67a2f MODE=force-close ACTION_RESULT='not invoked; blocked before safe operator force-close by failed operator/admin preflight (missing kubectl/KUBECONFIG and no authenticated operator MCP credentials)' ./scripts/taskrun-backstop-e2e-evidence.sh`
+- **Namespace/context:** intended namespace `djinn`; the mounted in-cluster namespace file also reports `djinn`. No Kubernetes client context could be read because `kubectl` is absent and `KUBECONFIG` is unset.
+- **Task run id under this worker:** `019ebbda-0827-7b60-b598-00328da67a2f` (hostname `djinn-taskrun-019ebbda-0827-7b60-b598-00328da67a2f-86x62`).
+- **Operator preflight result:** **failed**. This session is a normal task-run worker, not an operator/admin shell: `kubectl` is not installed, `KUBECONFIG` is unset, no `DJINN_MCP_URL` or `DJINN_OPERATOR_BEARER_TOKEN` is configured, the worker service account is RBAC-forbidden from listing Pods/Jobs or getting the canonical task-run Job, and the projected Djinn token could not establish an MCP session against the in-cluster endpoint.
+- **Force-close/operator-close mechanism and result:** **none invoked**. The exact safe mechanism that would be used from a passing operator shell is the runner's `force-close/operator-close` mode (for example a `task_admin_close` MCP call or proposal-abort flow) targeting `task_id=019ebbcf-17a2-7391-939e-08ad605ea4dd`; this worker did not have authenticated operator credentials, so invoking a force-close would not be safe or auditable.
+- **Cleanup proof status:** **not satisfied**. No cleanup success is claimed. The failure is an access/safety blocker, not evidence that teardown/backstop code failed.
+
+### Wave 4 force-close runner output summary
+
+The existing operator evidence runner from `7283` was executed without `DRY_RUN`, so it recorded the preflight, the intended before-action capture, the force-close/operator-close placeholder, and the skipped post-action sections. The runner exited non-zero and ended with `EVIDENCE RUNNER FAIL`, as expected for a failed operator preflight.
+
+```console
+$ NS=djinn TASK_ID=019ebbcf-17a2-7391-939e-08ad605ea4dd TASK_RUN_ID=019ebbda-0827-7b60-b598-00328da67a2f MODE=force-close ACTION_RESULT='not invoked; blocked before safe operator force-close by failed operator/admin preflight (missing kubectl/KUBECONFIG and no authenticated operator MCP credentials)' ./scripts/taskrun-backstop-e2e-evidence.sh > runner.md 2>&1
+# exit=1
+
+# Task-run backstop operator evidence — force-close/operator-close
+
+- **Captured at (UTC):** `2026-06-12T12:42:02Z`
+- **Mode:** `force-close`
+- **Action mode display:** `force-close/operator-close`
+- **Namespace:** `djinn`
+- **Task id:** `019ebbcf-17a2-7391-939e-08ad605ea4dd`
+- **Task run id:** `019ebbda-0827-7b60-b598-00328da67a2f`
+- **Server log target:** `deploy/djinn-server`
+- **Djinn MCP endpoint:** `<unset DJINN_MCP_URL>`
+- **DRY_RUN:** `0`
+- **Operator action result:** `not invoked; blocked before safe operator force-close by failed operator/admin preflight (missing kubectl/KUBECONFIG and no authenticated operator MCP credentials)`
+
+#### kubectl client availability
+
+$ kubectl version --client=true
+/workspace/.tmpQjxmNY/scripts/taskrun-backstop-preflight.sh: 53: kubectl: not found
+
+# exit=127
+
+#### current Kubernetes context
+
+$ kubectl config current-context
+/workspace/.tmpQjxmNY/scripts/taskrun-backstop-preflight.sh: 53: kubectl: not found
+
+# exit=127
+
+#### target namespace exists
+
+$ kubectl get namespace djinn -o name
+/workspace/.tmpQjxmNY/scripts/taskrun-backstop-preflight.sh: 53: kubectl: not found
+
+# exit=127
+
+#### Djinn MCP/control-plane authentication smoke test
+
+$ curl -fsS -H "Authorization: Bearer <redacted operator token>" -H "Content-Type: application/json" -d <initialize-json> "$DJINN_MCP_URL"
+DJINN_MCP_URL is not set. Set it to the operator-accessible /mcp endpoint.
+
+# exit=2
+
+PRECHECK FAIL: operator environment is missing at least one required prerequisite.
+
+## Before-action Kubernetes evidence
+
+- **Action captured at (UTC):** `2026-06-12T12:42:02Z`
+- **Namespace:** `djinn`
+- **Task id:** `019ebbcf-17a2-7391-939e-08ad605ea4dd`
+- **Task run id:** `019ebbda-0827-7b60-b598-00328da67a2f`
+
+#### kubectl client availability
+
+$ command -v kubectl || true
+
+kubectl not found; before-action evidence cannot be captured.
+
+## Operator action invocation
+
+- **Action mechanism:** force-close/operator-close (proposal abort, task-admin force-close, or equivalent operator MCP tool)
+- **Action target:** `task_id="019ebbcf-17a2-7391-939e-08ad605ea4dd"`
+
+## Post-action 60-second cleanup polling
+
+> Preflight did not pass: post-action polling was skipped. Fix the operator environment, rerun the preflight until it passes, and then re-run this script with ACTION_RESULT/ACTION_INVOKED_AT set.
+
+## Server/coordinator log capture
+
+> Preflight did not pass: server log capture was skipped. Fix the operator environment and re-run this script with ACTION_RESULT/ACTION_INVOKED_AT set.
+
+EVIDENCE RUNNER FAIL: at least one prerequisite is missing or the post-action poll did not converge. The bundle above records the exact failure; do not claim cleanup success for this attempt.
+```
+
+### Direct Kubernetes and MCP access probes
+
+Because `kubectl` was absent, direct in-cluster API probes were used only to characterize the blocker. They do **not** replace the required before/after `kubectl get jobs,pods` evidence for a passing proof.
+
+```console
+$ date -u +%Y-%m-%dT%H:%M:%SZ
+2026-06-12T12:42:29Z
+
+$ task/run context
+TASK_ID=019ebbcf-17a2-7391-939e-08ad605ea4dd
+TASK_RUN_ID=019ebbda-0827-7b60-b598-00328da67a2f
+NS=djinn
+HOSTNAME=djinn-taskrun-019ebbda-0827-7b60-b598-00328da67a2f-86x62
+KUBECONFIG=<unset>
+DJINN_MCP_URL=<unset>
+DJINN_OPERATOR_BEARER_TOKEN=<unset>
+
+$ command -v kubectl || true
+
+$ cat /var/run/secrets/kubernetes.io/serviceaccount/namespace
+djinn
+
+$ curl Kubernetes API discovery with mounted service-account token
+http_code=200
+{
+  "kind": "APIVersions",
+  "versions": ["v1"]
+}
+
+$ curl list pods in namespace djinn with mounted service-account token
+http_code=403
+{
+  "kind": "Status",
+  "status": "Failure",
+  "message": "pods is forbidden: User \"system:serviceaccount:djinn:djinn-djinn-taskrun\" cannot list resource \"pods\" in API group \"\" in the namespace \"djinn\"",
+  "reason": "Forbidden",
+  "details": {"kind": "pods"},
+  "code": 403
+}
+
+$ curl list jobs.batch in namespace djinn with mounted service-account token
+http_code=403
+{
+  "kind": "Status",
+  "status": "Failure",
+  "message": "jobs.batch is forbidden: User \"system:serviceaccount:djinn:djinn-djinn-taskrun\" cannot list resource \"jobs\" in API group \"batch\" in the namespace \"djinn\"",
+  "reason": "Forbidden",
+  "details": {"group": "batch", "kind": "jobs"},
+  "code": 403
+}
+
+$ curl get canonical job for this task_run_id with mounted service-account token
+http_code=403
+{
+  "kind": "Status",
+  "status": "Failure",
+  "message": "jobs.batch \"djinn-taskrun-019ebbda-0827-7b60-b598-00328da67a2f\" is forbidden: User \"system:serviceaccount:djinn:djinn-djinn-taskrun\" cannot get resource \"jobs\" in API group \"batch\" in the namespace \"djinn\"",
+  "reason": "Forbidden",
+  "details": {"name": "djinn-taskrun-019ebbda-0827-7b60-b598-00328da67a2f", "group": "batch", "kind": "jobs"},
+  "code": 403
+}
+
+$ curl MCP initialize with projected Djinn token against in-cluster API (token redacted)
+curl: (35) Send failure: Broken pipe
+# curl_exit=35
+```
+
+### Before-force-close, post-force-close, and log evidence outcome
+
+- **Before-force-close Kubernetes evidence:** not captured. The intended `kubectl get jobs,pods -n djinn -l djinn.app/task-run-id=019ebbda-0827-7b60-b598-00328da67a2f -o wide` evidence could not be produced because `kubectl` is not installed, and the direct API fallback is RBAC-forbidden from listing Pods/Jobs. Therefore the target `djinn-taskrun-*` Job/Pod was **not proven present** in this attempt.
+- **Force-close/operator-close action:** not invoked. There was no authenticated operator/admin force-close credential or endpoint in this worker, so no safe force-close command/API result exists to record.
+- **Post-force-close polling:** not run. The runner correctly skipped the 60-second cleanup poll because preflight failed and no force-close was performed.
+- **Server/coordinator logs:** not captured. `kubectl logs -n djinn deploy/djinn-server --since=10m --tail=200` could not run without `kubectl`/RBAC, so no inline teardown or backstop cleanup log markers were available.
+- **Criterion statement:** the Wave 4 force-close/operator-close Kubernetes cleanup proof criterion is **not satisfied** by this run. A passing proof still requires rerunning `MODE=force-close ./scripts/taskrun-backstop-e2e-evidence.sh` from a real operator/admin environment with configured `kubectl`, Pods/Jobs/log RBAC in namespace `djinn`, authenticated Djinn operator credentials, and a deliberately long-running task with a live `djinn-taskrun-*` Job/Pod.
