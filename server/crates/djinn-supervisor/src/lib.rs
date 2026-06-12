@@ -1979,6 +1979,90 @@ mod tests {
         );
     }
 
+    /// Final no-redispatch regression: a Planner `request_lead` /
+    /// `StageOutcome::Escalate` on a planning-type task must be parked
+    /// as a terminal close, not reported as `TaskRunOutcome::Escalated`.
+    ///
+    /// This encodes the exact old failure mode: pre-fix code returned
+    /// `Escalated` and made no board transition, leaving the still-open
+    /// planning task eligible for recovery redispatch. The fixed path
+    /// returns `Closed` and requests exactly one `close` transition whose
+    /// durable reason mentions the escalation.
+    #[tokio::test]
+    async fn planner_escalate_planning_task_closes_instead_of_redispatching() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+        let calls_for_closure = std::sync::Arc::clone(&calls);
+
+        let outcome = apply_planner_escalate_route(
+            RoleKind::Planner,
+            "planning",
+            "planning-task-no-redispatch",
+            "run-no-redispatch",
+            "planner escalated because the decomposition is ambiguous".to_string(),
+            false,
+            move |task_id, action, reason| {
+                let calls = std::sync::Arc::clone(&calls_for_closure);
+                async move {
+                    calls
+                        .lock()
+                        .expect("calls mutex poisoned")
+                        .push(TransitionCall {
+                            task_id,
+                            action,
+                            reason,
+                        });
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert!(
+            !matches!(outcome, TaskRunOutcome::Escalated { .. }),
+            "planner escalate on a planning task must not return Escalated; \
+             Escalated leaves the task eligible for recovery redispatch"
+        );
+
+        let TaskRunOutcome::Closed { reason } = &outcome else {
+            panic!(
+                "planner escalate on a planning task must return terminal Closed, got {outcome:?}"
+            );
+        };
+        assert!(
+            reason.contains("escalated") && reason.contains("decomposition is ambiguous"),
+            "Closed outcome reason must durably mention the escalation, got {reason:?}"
+        );
+
+        let calls = calls.lock().expect("calls mutex poisoned");
+        assert_eq!(
+            calls.len(),
+            1,
+            "planner escalate on a planning task must request exactly one close transition, got {calls:?}"
+        );
+        let close_call = &calls[0];
+        assert_eq!(
+            close_call.task_id, "planning-task-no-redispatch",
+            "close transition must target the planning task"
+        );
+        assert_eq!(
+            close_call.action, "close",
+            "planner escalate no-redispatch backstop must request a close transition"
+        );
+        let close_reason = close_call
+            .reason
+            .as_ref()
+            .expect("planner escalate close transition must carry a durable reason");
+        assert!(
+            close_reason.contains("planner escalated")
+                && close_reason.contains("decomposition is ambiguous"),
+            "close transition reason must mention the planner escalation, got {close_reason:?}"
+        );
+        assert_eq!(
+            close_reason, reason,
+            "terminal Closed reason must match the persisted close-transition reason"
+        );
+    }
+
     /// Table test: every planning-type issue string
     /// (`planning` / `decomposition` / `review` / `epic_breakdown`)
     /// routes through the close path on a non-cancelled planner run.
@@ -2384,6 +2468,65 @@ mod tests {
             assert!(
                 calls.is_empty(),
                 "{role:?} escalation must NOT fire any transition_task call, got {calls:?}"
+            );
+        }
+    }
+
+    /// Negative no-hijack coverage: Worker/Reviewer `request_lead`
+    /// escalation on a normal implementation task is still the legacy
+    /// `Escalated` outcome and must not fire the Planner-only close
+    /// transition. This guards the common non-planning path separately
+    /// from `planner_escalate_non_planner_escalation_is_unchanged`, which
+    /// exercises non-planner roles on a planning-type issue.
+    #[tokio::test]
+    async fn worker_and_reviewer_escalation_on_normal_task_do_not_close() {
+        for role in [RoleKind::Worker, RoleKind::Reviewer] {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+            let calls_for_closure = std::sync::Arc::clone(&calls);
+
+            let original_reason = format!("{role:?} request_lead needs lead guidance");
+            let outcome = apply_planner_escalate_route(
+                role,
+                "task",
+                "normal-task-request-lead",
+                "run-normal-request-lead",
+                original_reason.clone(),
+                false,
+                move |task_id, action, reason| {
+                    let calls = std::sync::Arc::clone(&calls_for_closure);
+                    async move {
+                        calls
+                            .lock()
+                            .expect("calls mutex poisoned")
+                            .push(TransitionCall {
+                                task_id,
+                                action,
+                                reason,
+                            });
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+
+            match outcome {
+                TaskRunOutcome::Escalated { reason } => assert_eq!(
+                    reason, original_reason,
+                    "{role:?} request_lead on a normal task must preserve the escalation reason"
+                ),
+                other => panic!(
+                    "{role:?} request_lead on a normal task must remain TaskRunOutcome::Escalated, got {other:?}"
+                ),
+            }
+
+            let calls = calls.lock().expect("calls mutex poisoned");
+            assert!(
+                calls.iter().all(|call| call.action != "close"),
+                "{role:?} request_lead on a normal task must not fire close, got {calls:?}"
+            );
+            assert!(
+                calls.is_empty(),
+                "{role:?} request_lead on a normal task should fire no transition_task calls, got {calls:?}"
             );
         }
     }
