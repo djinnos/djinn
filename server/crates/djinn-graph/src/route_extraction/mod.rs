@@ -7,6 +7,7 @@
 //! canonical graph continues to build from the SCIP-derived graph.
 
 pub mod axum;
+pub mod typescript_fetch;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,12 +16,12 @@ use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 
 pub use axum::{AxumRouteHit, detect_axum_routes};
+pub use typescript_fetch::FetchHit;
 
 use crate::repo_graph::{
     RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
-    RouteExclusionConfig, promote_fetches_confidence_with_import_evidence,
+    RouteExclusionConfig,
 };
-use crate::scip_parser::ScipSymbolKind;
 
 /// Environment flag that disables route extraction when set to `0` / `false`.
 /// Default = on.
@@ -137,7 +138,7 @@ pub fn detect_routes_with_options(
         collect_existing_route_nodes(graph, &mut routes_by_path);
     }
 
-    detect_typescript_fetches(
+    typescript_fetch::detect_typescript_fetches(
         graph,
         project_root,
         &routes_by_path,
@@ -148,7 +149,7 @@ pub fn detect_routes_with_options(
 }
 
 #[derive(Debug, Clone)]
-struct RouteCandidate {
+pub(super) struct RouteCandidate {
     path: String,
     node: NodeIndex,
     framework: Option<String>,
@@ -170,100 +171,12 @@ fn preflight_readable_candidate_files(
     report: &mut RouteExtractionReport,
 ) {
     for (rel_path, _file_node) in file_nodes(graph, |lang, path| {
-        is_rust_file(lang, path) || is_typescript_fetch_candidate(lang, path)
+        is_rust_file(lang, path) || typescript_fetch::is_typescript_fetch_candidate(lang, path)
     }) {
         if let Err(error) = std::fs::read_to_string(project_root.join(&rel_path)) {
             record_file_failure(report, rel_path, error.to_string());
         }
     }
-}
-
-fn detect_typescript_fetches(
-    graph: &mut RepoDependencyGraph,
-    project_root: &Path,
-    routes_by_path: &BTreeMap<String, RouteCandidate>,
-    exclusion_config: &RouteExclusionConfig,
-    report: &mut RouteExtractionReport,
-) {
-    if routes_by_path.is_empty() {
-        return;
-    }
-
-    for (rel_path, file_node) in file_nodes(graph, is_typescript_fetch_candidate) {
-        let source = match std::fs::read_to_string(project_root.join(&rel_path)) {
-            Ok(source) => source,
-            Err(error) => {
-                record_file_failure(report, rel_path, error.to_string());
-                continue;
-            }
-        };
-        if !source.contains("fetch(") {
-            continue;
-        }
-        for fetch in scan_fetches(&source) {
-            let Some(route) = resolve_fetch_route(&fetch.path, routes_by_path) else {
-                report.unmatched_fetch_count += 1;
-                continue;
-            };
-            let has_import_evidence = consumer_has_route_import_evidence(graph, file_node, route);
-            let (confidence, reason) = if has_import_evidence {
-                promote_fetches_confidence_with_import_evidence(
-                    fetch.confidence,
-                    Some(fetch.reason),
-                )
-            } else {
-                (fetch.confidence, fetch.reason.to_string())
-            };
-            let exclusion_reasons = consumer_edge_exclusion_reasons(
-                confidence,
-                has_import_evidence,
-                graph.node(file_node).language.as_deref(),
-                graph.node(route.node).language.as_deref(),
-                route,
-                exclusion_config,
-            );
-            if !exclusion_reasons.is_empty() {
-                report
-                    .consumer_edge_suggestions
-                    .push(RouteConsumerEdgeSuggestion {
-                        consumer_file: rel_path.clone(),
-                        fetch_path: fetch.path.clone(),
-                        route_path: route.path.clone(),
-                        framework: route.framework.clone(),
-                        confidence,
-                        reasons: exclusion_reasons,
-                    });
-                continue;
-            }
-            let line = byte_to_line(&source, fetch.byte_offset);
-            if let Some(consumer) = enclosing_symbol(graph, &rel_path, line) {
-                graph.add_route_edge(
-                    consumer,
-                    route.node,
-                    RepoGraphEdgeKind::Fetches,
-                    confidence,
-                    &reason,
-                );
-                report.fetches_edges_added += 1;
-            } else {
-                report.unresolved_consumer_count += 1;
-            }
-        }
-    }
-}
-
-fn resolve_fetch_route<'a>(
-    fetch_path: &str,
-    routes_by_path: &'a BTreeMap<String, RouteCandidate>,
-) -> Option<&'a RouteCandidate> {
-    routes_by_path
-        .iter()
-        .find(|(route_path, _)| {
-            fetch_path == route_path.as_str()
-                || fetch_path.starts_with(route_path.as_str())
-                || route_path.starts_with(fetch_path)
-        })
-        .map(|(_, route)| route)
 }
 
 fn collect_existing_route_nodes(
@@ -283,7 +196,7 @@ fn collect_existing_route_nodes(
     }
 }
 
-fn consumer_edge_exclusion_reasons(
+pub(super) fn consumer_edge_exclusion_reasons(
     confidence: f64,
     has_import_evidence: bool,
     consumer_language: Option<&str>,
@@ -319,7 +232,7 @@ fn consumer_edge_exclusion_reasons(
     reasons
 }
 
-fn consumer_has_route_import_evidence(
+pub(super) fn consumer_has_route_import_evidence(
     graph: &RepoDependencyGraph,
     consumer_file: NodeIndex,
     route: &RouteCandidate,
@@ -399,7 +312,11 @@ fn count_edges(graph: &RepoDependencyGraph, kind: RepoGraphEdgeKind) -> usize {
         .count()
 }
 
-fn record_file_failure(report: &mut RouteExtractionReport, rel_path: PathBuf, message: String) {
+pub(super) fn record_file_failure(
+    report: &mut RouteExtractionReport,
+    rel_path: PathBuf,
+    message: String,
+) {
     if !report.skipped_files.contains(&rel_path) {
         report.skipped_files.push(rel_path.clone());
     }
@@ -416,7 +333,10 @@ fn record_file_failure(report: &mut RouteExtractionReport, rel_path: PathBuf, me
     }
 }
 
-fn file_nodes<F>(graph: &RepoDependencyGraph, mut include: F) -> Vec<(PathBuf, NodeIndex)>
+pub(super) fn file_nodes<F>(
+    graph: &RepoDependencyGraph,
+    mut include: F,
+) -> Vec<(PathBuf, NodeIndex)>
 where
     F: FnMut(Option<&str>, &Path) -> bool,
 {
@@ -443,157 +363,6 @@ where
 
 fn is_rust_file(lang: Option<&str>, path: &Path) -> bool {
     lang == Some("rust") || path.extension().is_some_and(|ext| ext == "rs")
-}
-
-fn is_typescript_fetch_candidate(lang: Option<&str>, path: &Path) -> bool {
-    let language_matches = matches!(lang, Some("typescript" | "javascript"));
-    let extension_matches = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| matches!(ext, "ts" | "js" | "tsx" | "jsx"));
-    if !language_matches && !extension_matches {
-        return false;
-    }
-    let path = path.to_string_lossy();
-    path.starts_with("ui/src/api/") || path.starts_with("ui/src/components/")
-}
-
-#[derive(Debug, Clone)]
-struct FetchHit {
-    path: String,
-    byte_offset: usize,
-    confidence: f64,
-    reason: &'static str,
-}
-
-fn scan_fetches(source: &str) -> Vec<FetchHit> {
-    let mut out = Vec::new();
-    let mut cursor = 0;
-    while let Some(pos) = source[cursor..].find("fetch(") {
-        let start = cursor + pos + "fetch(".len();
-        let arg_start = skip_ws(source, start);
-        if source.as_bytes().get(arg_start) == Some(&b'`') {
-            if let Some((template, _end)) = parse_until(source, arg_start + 1, '`')
-                && let Some(path) = first_path_literal(&template)
-            {
-                out.push(FetchHit {
-                    path,
-                    byte_offset: arg_start,
-                    confidence: 0.70,
-                    reason: "ts-fetch-template",
-                });
-            }
-        } else if let Some((literal, _end)) = parse_quoted(source, arg_start)
-            && literal.starts_with('/')
-        {
-            out.push(FetchHit {
-                path: literal,
-                byte_offset: arg_start,
-                confidence: 0.70,
-                reason: "ts-fetch-literal",
-            });
-        } else if let Some(window) = source.get(arg_start..source.len().min(arg_start + 256))
-            && let Some(path) = first_path_literal(window)
-        {
-            out.push(FetchHit {
-                path,
-                byte_offset: arg_start,
-                confidence: 0.70,
-                reason: "ts-fetch-template",
-            });
-        }
-        cursor = start;
-    }
-    out
-}
-
-fn enclosing_symbol(graph: &RepoDependencyGraph, rel_path: &Path, line: u32) -> Option<NodeIndex> {
-    graph
-        .symbols_enclosing(rel_path, line, line)
-        .into_iter()
-        .filter(|node| is_enclosing_fetch_consumer_symbol(graph.node(*node)))
-        .min_by_key(|node| {
-            graph
-                .range_for_node(*node, rel_path)
-                .map(|(start, end)| end.saturating_sub(start))
-                .unwrap_or(u32::MAX)
-        })
-}
-
-fn is_enclosing_fetch_consumer_symbol(node: &RepoGraphNode) -> bool {
-    node.kind == RepoGraphNodeKind::Symbol
-        && matches!(
-            node.symbol_kind,
-            Some(ScipSymbolKind::Function | ScipSymbolKind::Method | ScipSymbolKind::Constructor)
-        )
-}
-
-fn parse_quoted(source: &str, start: usize) -> Option<(String, usize)> {
-    let start = skip_ws(source, start);
-    let quote = *source.as_bytes().get(start)?;
-    if quote != b'\'' && quote != b'"' {
-        return None;
-    }
-    parse_until(source, start + 1, quote as char)
-}
-
-fn parse_until(source: &str, start: usize, term: char) -> Option<(String, usize)> {
-    let mut escaped = false;
-    for (off, ch) in source[start..].char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == term {
-            return Some((
-                source[start..start + off].to_string(),
-                start + off + ch.len_utf8(),
-            ));
-        }
-    }
-    None
-}
-
-fn first_path_literal(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'/' && bytes[i + 1].is_ascii_alphanumeric() {
-            let end = (i + 1..bytes.len())
-                .find(|&j| {
-                    matches!(
-                        bytes[j],
-                        b'`' | b'\'' | b'"' | b' ' | b'\n' | b'\r' | b'\t' | b'?' | b'#' | b'$'
-                    )
-                })
-                .unwrap_or(bytes.len());
-            return Some(s[i..end].to_string());
-        }
-        i += 1;
-    }
-    None
-}
-
-fn skip_ws(source: &str, mut i: usize) -> usize {
-    while source
-        .as_bytes()
-        .get(i)
-        .is_some_and(u8::is_ascii_whitespace)
-    {
-        i += 1;
-    }
-    i
-}
-
-fn byte_to_line(source: &str, byte_offset: usize) -> u32 {
-    1 + source[..source.len().min(byte_offset)]
-        .bytes()
-        .filter(|b| *b == b'\n')
-        .count() as u32
 }
 
 #[cfg(test)]
@@ -758,16 +527,6 @@ mod tests {
         for value in ["0", "false", "no", "off", " OFF "] {
             assert!(!route_parity_enabled_from_var(Some(value)));
         }
-    }
-
-    #[test]
-    fn scans_typescript_fetch_shapes() {
-        let fetches =
-            scan_fetches("fetch(`${getServerBaseUrl()}/api/agents`, {})\nfetch('/api/missing')");
-        assert_eq!(
-            fetches.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
-            vec!["/api/agents", "/api/missing"]
-        );
     }
 
     #[test]
@@ -977,16 +736,18 @@ mod tests {
     fn fetches_consumer_resolution_rejects_non_function_symbols() {
         let mut graph = fixture_graph();
         let consumer = graph.node(NodeIndex::new(4)).clone();
-        assert!(is_enclosing_fetch_consumer_symbol(&consumer));
+        assert!(typescript_fetch::is_enclosing_fetch_consumer_symbol(
+            &consumer
+        ));
 
         graph.graph_mut_unchecked()[NodeIndex::new(4)].kind = RepoGraphNodeKind::Table;
-        assert!(!is_enclosing_fetch_consumer_symbol(
+        assert!(!typescript_fetch::is_enclosing_fetch_consumer_symbol(
             graph.node(NodeIndex::new(4))
         ));
 
         graph.graph_mut_unchecked()[NodeIndex::new(4)].kind = RepoGraphNodeKind::Symbol;
         graph.graph_mut_unchecked()[NodeIndex::new(4)].symbol_kind = Some(ScipSymbolKind::Property);
-        assert!(!is_enclosing_fetch_consumer_symbol(
+        assert!(!typescript_fetch::is_enclosing_fetch_consumer_symbol(
             graph.node(NodeIndex::new(4))
         ));
     }
