@@ -55,6 +55,13 @@ struct DurableDispatchStateUpdate {
 }
 
 fn format_dispatch_wall_clock(ts: ::time::OffsetDateTime) -> Option<String> {
+    // Dispatch-state timestamps are round-tripped through Postgres and selected
+    // with millisecond precision. Emit the same precision up front so no-op
+    // write-throughs (for example, pause skips preserving cooldown_until) do not
+    // appear to mutate durable state by dropping sub-millisecond digits.
+    let ts = ts
+        .replace_nanosecond((ts.nanosecond() / 1_000_000) * 1_000_000)
+        .ok()?;
     ts.format(&::time::format_description::well_known::Rfc3339)
         .ok()
 }
@@ -1278,6 +1285,21 @@ mod inflight_ledger_tests {
 
     fn key(creator: &str, model: &str) -> (String, String) {
         (creator.to_string(), model.to_string())
+    }
+
+    #[test]
+    fn dispatch_wall_clock_timestamps_are_millisecond_precision() {
+        let ts = ::time::OffsetDateTime::parse(
+            "2026-06-12T14:48:37.048295203Z",
+            &::time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+
+        assert_eq!(
+            format_dispatch_wall_clock(ts).as_deref(),
+            Some("2026-06-12T14:48:37.048Z"),
+            "persisted dispatch-state timestamps must match Postgres millisecond precision"
+        );
     }
 
     /// The overshoot fix: a dispatch whose `running` session row hasn't landed
