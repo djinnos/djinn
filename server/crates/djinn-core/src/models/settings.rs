@@ -2,6 +2,61 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Metadata recorded when dispatch is paused for a scope.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchPause {
+    pub paused_by: String,
+    pub paused_at: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// Dispatch pause scope supported by the persistence layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DispatchPauseScope {
+    Global,
+    Project,
+    User,
+}
+
+impl DispatchPauseScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Project => "project",
+            Self::User => "user",
+        }
+    }
+}
+
+impl std::str::FromStr for DispatchPauseScope {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "global" => Ok(Self::Global),
+            "project" => Ok(Self::Project),
+            "user" => Ok(Self::User),
+            other => Err(format!("unknown dispatch pause scope `{other}`")),
+        }
+    }
+}
+
+/// Snapshot of dispatch pause state across all scopes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchPauseState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global: Option<DispatchPause>,
+    #[serde(default)]
+    pub projects: HashMap<String, DispatchPause>,
+    #[serde(default)]
+    pub users: HashMap<String, DispatchPause>,
+}
+
 /// A key-value setting persisted in the `settings` table.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
@@ -30,6 +85,9 @@ pub struct DjinnSettings {
     pub memory_mount_enabled: Option<bool>,
     /// Absolute filesystem path where the Linux FUSE mount should be attached. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; Djinn does not expose additional branch directories in this slice.
     pub memory_mount_path: Option<String>,
+    /// Global emergency stop for task dispatch. Missing in older settings rows means unpaused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_pause: Option<DispatchPause>,
 }
 
 impl DjinnSettings {
@@ -105,6 +163,7 @@ impl DjinnSettings {
             max_sessions,
             memory_mount_enabled: None,
             memory_mount_path: None,
+            dispatch_pause: None,
         }
     }
 
@@ -241,6 +300,30 @@ mod tests {
         assert_eq!(s.dispatch_limit_or_default(), 50);
         assert!(s.models_or_default().is_empty());
         assert!(s.max_sessions_or_default().is_empty());
+        assert!(s.dispatch_pause.is_none());
+    }
+
+    #[test]
+    fn dispatch_pause_serializes_metadata_and_defaults_absent() {
+        let raw = r#"{"dispatch_pause":{"paused_by":"admin","paused_at":"2026-06-12T00:00:00.000Z","reason":"maintenance"}}"#;
+        let s = DjinnSettings::from_db_value(raw);
+        let pause = s.dispatch_pause.expect("pause should parse");
+        assert_eq!(pause.paused_by, "admin");
+        assert_eq!(pause.paused_at, "2026-06-12T00:00:00.000Z");
+        assert_eq!(pause.reason, "maintenance");
+        assert!(pause.expires_at.is_none());
+
+        let serialized = serde_json::to_value(&pause).unwrap();
+        assert_eq!(serialized.get("paused_by").unwrap(), "admin");
+        assert_eq!(
+            serialized.get("paused_at").unwrap(),
+            "2026-06-12T00:00:00.000Z"
+        );
+        assert_eq!(serialized.get("reason").unwrap(), "maintenance");
+        assert!(serialized.get("expires_at").is_none());
+
+        let older = DjinnSettings::from_db_value(r#"{"dispatch_limit":10}"#);
+        assert!(older.dispatch_pause.is_none());
     }
 
     #[test]
