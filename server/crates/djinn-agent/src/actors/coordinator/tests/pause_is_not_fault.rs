@@ -187,6 +187,17 @@ async fn paused_task_dispatch_does_not_mutate_durable_dispatch_state_row() {
         .await
         .unwrap();
 
+    // PostgreSQL normalizes RFC3339 values to the column precision on write
+    // (for example, nanoseconds may round/truncate to milliseconds depending
+    // on the schema). Capture the row as persisted immediately after seeding;
+    // the regression we care about is that the pause-skip pass leaves this
+    // durable row byte-for-byte equivalent to the stored baseline.
+    let before = state_repo
+        .get(&task.id)
+        .await
+        .unwrap()
+        .expect("seeded dispatch_state row must exist before the pause-skip");
+
     // Set a global pause so the task's dispatch will be deferred.
     local_pause_dispatch(
         &db,
@@ -214,7 +225,7 @@ async fn paused_task_dispatch_does_not_mutate_durable_dispatch_state_row() {
     );
     assert_eq!(
         after.cooldown_until.as_deref(),
-        Some(persisted_deadline_str.as_str()),
+        before.cooldown_until.as_deref(),
         "pause-skip must not clear cooldown_until"
     );
     assert_eq!(
@@ -228,7 +239,7 @@ async fn paused_task_dispatch_does_not_mutate_durable_dispatch_state_row() {
     );
     assert_eq!(
         after.last_dispatched_at.as_deref(),
-        Some(last_dispatched_str.as_str()),
+        before.last_dispatched_at.as_deref(),
         "pause-skip must not clear or rewrite last_dispatched_at"
     );
     assert_eq!(
