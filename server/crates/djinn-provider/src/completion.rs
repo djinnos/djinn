@@ -497,6 +497,7 @@ mod tests {
     use crate::catalog::builtin::{AuthShape, FormatRule};
     use crate::provider::error::ProviderError;
     use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ToolChoice};
+    use djinn_db::UserRepository;
 
     #[test]
     fn transient_error_prefers_typed_then_substring() {
@@ -839,12 +840,16 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let settings = SettingsRepository::new(db.clone(), EventBus::noop());
         let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(1001, "user-a", None, None)
+            .await
+            .unwrap();
         settings
             .set("settings.raw", r#"{"models":["openai/gpt-4.1-mini"]}"#)
             .await
             .unwrap();
         credentials
-            .set_with_owner("openai", "OPENAI_API_KEY", "caller-key", Some("user-a"))
+            .set_with_owner("openai", "OPENAI_API_KEY", "caller-key", Some(&user.id))
             .await
             .unwrap();
         credentials
@@ -852,7 +857,7 @@ mod tests {
             .await
             .unwrap();
 
-        let caller_provider = resolve_memory_provider_for_user(&db, Some("user-a"))
+        let caller_provider = resolve_memory_provider_for_user(&db, Some(&user.id))
             .await
             .expect("caller should resolve their private configured provider");
         assert_eq!(caller_provider.name(), "openai");
@@ -864,7 +869,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let fallback_provider = resolve_memory_provider_for_user(&db, Some("user-a"))
+        let fallback_provider = resolve_memory_provider_for_user(&db, Some(&user.id))
             .await
             .expect("caller should resolve org-shared fallback provider");
         assert_eq!(fallback_provider.name(), "anthropic");
@@ -875,12 +880,21 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let settings = SettingsRepository::new(db.clone(), EventBus::noop());
         let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
+        let other_user = UserRepository::new(db.clone())
+            .upsert_from_github(1002, "user-b", None, None)
+            .await
+            .unwrap();
         settings
             .set("settings.raw", r#"{"models":["openai/gpt-4.1-mini"]}"#)
             .await
             .unwrap();
         credentials
-            .set_with_owner("openai", "OPENAI_API_KEY", "user-b-key", Some("user-b"))
+            .set_with_owner(
+                "openai",
+                "OPENAI_API_KEY",
+                "user-b-key",
+                Some(&other_user.id),
+            )
             .await
             .unwrap();
         credentials
