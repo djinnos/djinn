@@ -11,6 +11,7 @@
 target/
 target-*/
 .cargo-target/
+.taskrun-backstop-validation/
 tmp/
 .tmp/
 .tmp-test/

@@ -1,5 +1,46 @@
 # Task-run backstop E2E evidence
 
+## Wave 3 Postgres-backed full validation entrypoint
+
+A reproducible manual/CI entrypoint now exists for the remaining proposal 4369 / epic 8451 Rust validation blocker:
+
+```bash
+make validate-taskrun-backstop
+# equivalent direct form:
+./scripts/validate-taskrun-backstop.sh
+```
+
+The entrypoint provisions the repository's `docker-compose.yml` `postgres-test` service on `127.0.0.1:5433`, applies `djinn-db` Postgres migrations, rebuilds `djinn_test_template`, creates the test vault key at `/var/tmp/djinn-test-vault/vault.key`, configures a test git identity, then runs the full validation command sequence:
+
+```bash
+docker compose -f docker-compose.yml up -d postgres-test
+# reset postgres-test, apply djinn-db migrations, and rebuild djinn_test_template
+# create /var/tmp/djinn-test-vault/vault.key
+cd server && cargo build
+cd server && cargo clippy --workspace --all-targets --all-features -- -D warnings
+cd server && cargo nextest run --workspace --all-targets --all-features
+```
+
+- **Evidence timestamp (UTC):** 2026-06-12T11:26:21Z
+- **Attempted command:** `sh -n scripts/validate-taskrun-backstop.sh && ./scripts/validate-taskrun-backstop.sh`
+- **Local result:** **blocked by environment before Postgres provisioning**. The script syntax check passed, but this task-run worker does not have Docker installed, so the validation entrypoint stopped before starting `postgres-test`, building `djinn_test_template`, or running Cargo validation. A separate dry-run attempt of the Makefile target also showed `make: command not found` in this worker. These are environmental blockers, not task-run teardown code/test defects.
+- **Proposal validation criterion:** **not yet satisfied by a passing run**. It is now reproducible: rerun `make validate-taskrun-backstop` or `./scripts/validate-taskrun-backstop.sh` on a host with Docker Compose, `sqlx-cli`, `cargo-nextest`, Cargo, and OpenSSL available. The Makefile form additionally requires Make. A passing run of either command satisfies the full Rust validation portion of epic 8451.
+
+Captured local output:
+
+```console
+$ sh -n scripts/validate-taskrun-backstop.sh && ./scripts/validate-taskrun-backstop.sh
+
+[2026-06-12T11:26:21Z] Task-run backstop validation started
+
+[2026-06-12T11:26:21Z] Repository: /workspace/.tmp5yxXK4
+
+[2026-06-12T11:26:21Z] Log file: /workspace/.tmp5yxXK4/.taskrun-backstop-validation/validation-20260612T112621Z.log
+ERROR: required command not found: docker
+
+[2026-06-12T11:26:21Z] Task-run backstop validation failed with exit=127; see /workspace/.tmp5yxXK4/.taskrun-backstop-validation/validation-20260612T112621Z.log
+```
+
 ## Wave 2 final consolidation status
 
 Wave 2 did **not** clear all residual proposal 4369 / epic 8451 criteria. The operator preflight helper from `7jbf` is present and documents the exact evidence bundle required from a real operator/admin shell, but the subsequent Wave 2 runs still executed in worker environments that lacked the required infrastructure and access. The residual status is:
