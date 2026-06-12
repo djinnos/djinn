@@ -200,17 +200,21 @@ impl ToolCallSignature {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LoopGuardError {
     pub condition: LoopGuardCondition,
+    pub turn_span: (u32, u32),
+    pub session_id: String,
 }
 
 impl fmt::Display for LoopGuardError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "loop guard tripped: {:?}; offending signature: {}; observed {}/{}",
+            "loop guard tripped: {:?}; offending signature: {}; observed {}/{}; turn_span={:?}; session_id={}",
             self.condition.kind(),
             self.condition.offending_signature_label(),
             self.condition.observed,
-            self.condition.threshold
+            self.condition.threshold,
+            self.turn_span,
+            self.session_id
         )
     }
 }

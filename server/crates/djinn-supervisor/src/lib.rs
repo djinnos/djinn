@@ -59,7 +59,8 @@ pub use services::wire::{
 // Re-export runtime spec types at the crate root so the thin
 // `djinn_agent::supervisor` shim preserves every existing import path.
 pub use djinn_runtime::spec::{
-    RoleKind, SupervisorFlow, TaskRunOutcome, TaskRunReport, TaskRunSpec, role_sequence,
+    LoopGuardKind, RoleKind, SupervisorFlow, TaskRunOutcome, TaskRunReport, TaskRunSpec,
+    role_sequence,
 };
 
 /// Root under the shared cache PVC for per-task-run Cargo target directories.
@@ -211,6 +212,14 @@ pub enum StageOutcome {
         #[serde(default)]
         provider_failure: Option<djinn_runtime::ProviderFailureClass>,
     },
+    LoopGuardTripped {
+        kind: LoopGuardKind,
+        offending_signature: String,
+        threshold: u32,
+        observed: u32,
+        turn_span: (u32, u32),
+        session_id: String,
+    },
 }
 
 impl StageOutcome {
@@ -221,6 +230,7 @@ impl StageOutcome {
             StageOutcome::PlannerClose { .. }
                 | StageOutcome::Escalate { .. }
                 | StageOutcome::Failed { .. }
+                | StageOutcome::LoopGuardTripped { .. }
                 | StageOutcome::ReviewerRejected { .. }
                 | StageOutcome::VerifierFailed { .. }
                 // Lead decisions that fire their own terminal board transition
@@ -1462,6 +1472,24 @@ impl TaskRunSupervisor {
                         });
                         break;
                     }
+                    StageOutcome::LoopGuardTripped {
+                        kind,
+                        offending_signature,
+                        threshold,
+                        observed,
+                        turn_span,
+                        session_id,
+                    } => {
+                        result = Some(TaskRunOutcome::LoopGuardTripped {
+                            kind,
+                            offending_signature,
+                            threshold,
+                            observed,
+                            turn_span,
+                            session_id,
+                        });
+                        break;
+                    }
                 }
             }
 
@@ -1596,6 +1624,7 @@ impl TaskRunSupervisor {
             TaskRunOutcome::WorkerSubmitted => TaskRunStatus::Completed,
             TaskRunOutcome::Escalated { .. } => TaskRunStatus::Completed,
             TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
+            TaskRunOutcome::LoopGuardTripped { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
         };
         // On the cancellation path the host-bound RPC channel may already
@@ -1806,6 +1835,17 @@ mod tests {
         );
         assert!(StageOutcome::PlannerClose { reason: "x".into() }.is_terminal());
         assert!(StageOutcome::Escalate { reason: "x".into() }.is_terminal());
+        assert!(
+            StageOutcome::LoopGuardTripped {
+                kind: LoopGuardKind::ConsecutiveFailures,
+                offending_signature: "x".into(),
+                threshold: 3,
+                observed: 3,
+                turn_span: (1, 3),
+                session_id: "session-x".into(),
+            }
+            .is_terminal()
+        );
         assert!(
             StageOutcome::ReviewerRejected {
                 feedback: "x".into()
@@ -2741,5 +2781,109 @@ mod tests {
             captured.contains("INFO"),
             "expected log output to be emitted at INFO level, got:\n{captured}"
         );
+    }
+
+    fn loop_guard_stage_outcome(kind: LoopGuardKind) -> StageOutcome {
+        StageOutcome::LoopGuardTripped {
+            kind,
+            offending_signature: "tool_failure:shell:{\"command\":\"cargo test\"}:error: denied"
+                .to_string(),
+            threshold: 3,
+            observed: 3,
+            turn_span: (4, 6),
+            session_id: "session-1".to_string(),
+        }
+    }
+
+    #[test]
+    fn loop_guard_stage_outcome_bincode_roundtrip_for_each_kind() {
+        for kind in [
+            LoopGuardKind::IdenticalToolFailure,
+            LoopGuardKind::PermissionDenial,
+            LoopGuardKind::IdenticalOutput,
+            LoopGuardKind::ConsecutiveFailures,
+        ] {
+            let bytes = bincode::serialize(&loop_guard_stage_outcome(kind)).expect("serialize");
+            let back: StageOutcome = bincode::deserialize(&bytes).expect("deserialize");
+
+            match back {
+                StageOutcome::LoopGuardTripped {
+                    kind: back_kind,
+                    offending_signature,
+                    threshold,
+                    observed,
+                    turn_span,
+                    session_id,
+                } => {
+                    assert_eq!(back_kind, kind);
+                    assert!(offending_signature.contains("tool_failure:shell"));
+                    assert_eq!(threshold, 3);
+                    assert_eq!(observed, 3);
+                    assert_eq!(turn_span, (4, 6));
+                    assert_eq!(session_id, "session-1");
+                }
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn stage_outcome_bincode_discriminants_keep_existing_variants_stable() {
+        let old_variants = [
+            StageOutcome::WorkerDone,
+            StageOutcome::PlannerExecute,
+            StageOutcome::PlannerClose {
+                reason: "done".to_string(),
+            },
+            StageOutcome::ReviewerApproved,
+            StageOutcome::ReviewerRejected {
+                feedback: "needs work".to_string(),
+            },
+            StageOutcome::VerifierPassed,
+            StageOutcome::VerifierFailed {
+                reason: "tests failed".to_string(),
+            },
+            StageOutcome::ArchitectDone,
+            StageOutcome::Escalate {
+                reason: "blocked".to_string(),
+            },
+            StageOutcome::LeadApproved,
+            StageOutcome::LeadApproveConflict {
+                reason: "conflict".to_string(),
+            },
+            StageOutcome::LeadReopen {
+                reason: "retry".to_string(),
+            },
+            StageOutcome::LeadClose {
+                reason: "close".to_string(),
+            },
+            StageOutcome::LeadEscalate {
+                reason: "escalate".to_string(),
+            },
+            StageOutcome::Failed {
+                reason: "boom".to_string(),
+                provider_failure: None,
+            },
+        ];
+
+        for (expected_discriminant, outcome) in old_variants.into_iter().enumerate() {
+            let bytes = bincode::serialize(&outcome).expect("serialize old variant");
+            assert_eq!(
+                &bytes[..4],
+                &(expected_discriminant as u32).to_le_bytes(),
+                "existing variant discriminant shifted for {outcome:?}"
+            );
+            let decoded: StageOutcome = bincode::deserialize(&bytes).expect("decode old frame");
+            assert_eq!(
+                std::mem::discriminant(&decoded),
+                std::mem::discriminant(&outcome)
+            );
+        }
+
+        let new_bytes = bincode::serialize(&loop_guard_stage_outcome(
+            LoopGuardKind::IdenticalToolFailure,
+        ))
+        .expect("serialize new variant");
+        assert_eq!(&new_bytes[..4], &15u32.to_le_bytes());
     }
 }
