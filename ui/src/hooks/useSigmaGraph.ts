@@ -229,8 +229,17 @@ export function useSigmaGraph(
     setReady(true);
 
     const sigmaInstance = sigma;
+    // Consumers hold this handle across React commits, so it can outlive
+    // the Sigma instance by one render: on graph identity change (e.g.
+    // workspace switch) the cleanup below kills Sigma, but `setHandle(null)`
+    // only lands on the NEXT render — effects in the same commit still see
+    // the stale handle. Sigma 3's `kill()` empties `nodePrograms`, so a
+    // late `refresh()` throws `could not find a suitable program for node
+    // type "circle"`. Flip `killed` before kill() and no-op afterwards.
+    let killed = false;
     setHandle({
       on: (event, fn) => {
+        if (killed) return () => {};
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const onFn = (sigmaInstance as any).on?.bind(sigmaInstance);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -241,8 +250,13 @@ export function useSigmaGraph(
         return () => offFn?.(event, fn);
       },
       refresh: () => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (sigmaInstance as any).refresh?.();
+        if (killed) return;
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (sigmaInstance as any).refresh?.();
+        } catch {
+          // unmount race — no-op
+        }
       },
       getNodeAttributes: (id) => {
         try {
@@ -290,6 +304,7 @@ export function useSigmaGraph(
     stopTimerRef.current = timer;
 
     return () => {
+      killed = true;
       if (stopTimerRef.current) {
         clearTimeout(stopTimerRef.current);
         stopTimerRef.current = null;

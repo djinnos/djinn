@@ -231,12 +231,12 @@ pub(crate) async fn fetch_one(
     // Job that can never satisfy the gate. Mirror the coordinator's code-less
     // skip (see `refresh_canonical_graphs_if_stale`) and stamp the project
     // warmed so the UI badge resolves to "ready".
-    let env_cfg = djinn_agent::verification::environment::environment_config_for_project_id(
-        state.db(),
-        project_id,
-    )
-    .await;
-    if env_cfg.languages.has_any() {
+    // `project_has_indexable_code` resolves through the assigned catalog
+    // image — catalog projects keep an empty per-project languages block by
+    // design (`project_set_image` never copies the image config).
+    if djinn_agent::verification::environment::project_has_indexable_code(state.db(), project_id)
+        .await
+    {
         state.graph_warmer().await.trigger(project_id).await;
     } else {
         tracing::debug!(

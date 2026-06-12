@@ -77,6 +77,22 @@ impl ProjectWorkspaceGraphRepository {
         Ok(())
     }
 
+    /// Remove a single workspace freshness row. Used to retire the
+    /// [`CODELESS_WORKSPACE_SLUG`] sentinel once a real warm succeeds — a
+    /// project can't simultaneously be "code-less" and have indexed
+    /// workspaces.
+    pub async fn delete(&self, project_id: &str, workspace_slug: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "DELETE FROM project_workspace_graph WHERE project_id = $1 AND workspace_slug = $2",
+        )
+        .bind(project_id)
+        .bind(workspace_slug)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
     pub async fn list_for_project(&self, project_id: &str) -> Result<Vec<ProjectWorkspaceGraph>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, ProjectWorkspaceGraph>(
