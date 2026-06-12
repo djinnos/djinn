@@ -9856,10 +9856,20 @@ expression: signatures
         "id": {
           "type": "string"
         },
+        "last_reconciled_revision_seq": {
+          "description": "Last proposal revision that the in-flight build has reconciled against.",
+          "format": "int32",
+          "nullable": true,
+          "type": "integer"
+        },
         "latest_revision_seq": {
           "description": "Head revision number (sign-offs anchored earlier are stale).",
           "format": "int32",
           "type": "integer"
+        },
+        "pending_reconcile": {
+          "description": "True when the in-flight build is behind the latest proposal revision.",
+          "type": "boolean"
         },
         "short_id": {
           "type": "string"
@@ -10263,10 +10273,20 @@ expression: signatures
         "id": {
           "type": "string"
         },
+        "last_reconciled_revision_seq": {
+          "description": "Last proposal revision that the in-flight build has reconciled against.",
+          "format": "int32",
+          "nullable": true,
+          "type": "integer"
+        },
         "latest_revision_seq": {
           "description": "Head revision number (sign-offs anchored earlier are stale).",
           "format": "int32",
           "type": "integer"
+        },
+        "pending_reconcile": {
+          "description": "True when the in-flight build is behind the latest proposal revision.",
+          "type": "boolean"
         },
         "short_id": {
           "type": "string"
@@ -10402,10 +10422,20 @@ expression: signatures
             "id": {
               "type": "string"
             },
+            "last_reconciled_revision_seq": {
+              "description": "Last proposal revision that the in-flight build has reconciled against.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
             "latest_revision_seq": {
               "description": "Head revision number (sign-offs anchored earlier are stale).",
               "format": "int32",
               "type": "integer"
+            },
+            "pending_reconcile": {
+              "description": "True when the in-flight build is behind the latest proposal revision.",
+              "type": "boolean"
             },
             "short_id": {
               "type": "string"
@@ -10440,7 +10470,8 @@ expression: signatures
             "status",
             "created_at",
             "updated_at",
-            "latest_revision_seq"
+            "latest_revision_seq",
+            "pending_reconcile"
           ],
           "type": "object"
         }
@@ -10740,10 +10771,20 @@ expression: signatures
             "id": {
               "type": "string"
             },
+            "last_reconciled_revision_seq": {
+              "description": "Last proposal revision that the in-flight build has reconciled against.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
             "latest_revision_seq": {
               "description": "Head revision number (sign-offs anchored earlier are stale).",
               "format": "int32",
               "type": "integer"
+            },
+            "pending_reconcile": {
+              "description": "True when the in-flight build is behind the latest proposal revision.",
+              "type": "boolean"
             },
             "short_id": {
               "type": "string"
@@ -10778,7 +10819,8 @@ expression: signatures
             "status",
             "created_at",
             "updated_at",
-            "latest_revision_seq"
+            "latest_revision_seq",
+            "pending_reconcile"
           ],
           "type": "object"
         },
@@ -11029,10 +11071,20 @@ expression: signatures
         "id": {
           "type": "string"
         },
+        "last_reconciled_revision_seq": {
+          "description": "Last proposal revision that the in-flight build has reconciled against.",
+          "format": "int32",
+          "nullable": true,
+          "type": "integer"
+        },
         "latest_revision_seq": {
           "description": "Head revision number (sign-offs anchored earlier are stale).",
           "format": "int32",
           "type": "integer"
+        },
+        "pending_reconcile": {
+          "description": "True when the in-flight build is behind the latest proposal revision.",
+          "type": "boolean"
         },
         "short_id": {
           "type": "string"
@@ -11151,10 +11203,20 @@ expression: signatures
         "id": {
           "type": "string"
         },
+        "last_reconciled_revision_seq": {
+          "description": "Last proposal revision that the in-flight build has reconciled against.",
+          "format": "int32",
+          "nullable": true,
+          "type": "integer"
+        },
         "latest_revision_seq": {
           "description": "Head revision number (sign-offs anchored earlier are stale).",
           "format": "int32",
           "type": "integer"
+        },
+        "pending_reconcile": {
+          "description": "True when the in-flight build is behind the latest proposal revision.",
+          "type": "boolean"
         },
         "short_id": {
           "type": "string"
@@ -11411,10 +11473,20 @@ expression: signatures
         "id": {
           "type": "string"
         },
+        "last_reconciled_revision_seq": {
+          "description": "Last proposal revision that the in-flight build has reconciled against.",
+          "format": "int32",
+          "nullable": true,
+          "type": "integer"
+        },
         "latest_revision_seq": {
           "description": "Head revision number (sign-offs anchored earlier are stale).",
           "format": "int32",
           "type": "integer"
+        },
+        "pending_reconcile": {
+          "description": "True when the in-flight build is behind the latest proposal revision.",
+          "type": "boolean"
         },
         "short_id": {
           "type": "string"
