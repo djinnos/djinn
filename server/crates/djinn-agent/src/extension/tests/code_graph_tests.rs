@@ -1,4 +1,16 @@
 use super::*;
+use async_trait::async_trait;
+use djinn_control_plane::bridge::{
+    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, ChurnEntry, ComplexityResult,
+    CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup, DeadSymbolEntry, DeprecatedHit,
+    DetectedChangesResult, DiffTouchesResult, EdgeEntry, GraphStatus, HotPathHit, HotspotEntry,
+    ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, ProjectCtx,
+    QuerySubgraphBudget, QuerySubgraphRequest, QuerySubgraphResult, QuerySubgraphTraversalDebug,
+    RankedNode, RefactorCandidate, RepoGraphOps, ResolveOutcome, SearchHit, SnapshotLevel,
+    SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription, WorkspacesResult,
+};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 // -----------------------------------------------------------------------
 // code_graph dispatch tests
@@ -24,6 +36,402 @@ async fn code_graph_tool(
         None,
     )
     .await
+}
+
+#[derive(Debug, Default)]
+struct RecordingCodeGraphOps {
+    resolve_calls: Mutex<Vec<(String, Option<String>)>>,
+    symbols_at_calls: Mutex<Vec<(String, u32, Option<u32>)>>,
+    query_subgraph_calls: Mutex<Vec<QuerySubgraphRequest>>,
+}
+
+#[async_trait]
+impl RepoGraphOps for RecordingCodeGraphOps {
+    async fn neighbors(
+        &self,
+        _: &ProjectCtx,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<NeighborsResult, String> {
+        Ok(NeighborsResult::Detailed(Vec::new()))
+    }
+
+    async fn ranked(
+        &self,
+        _: &ProjectCtx,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<RankedNode>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn implementations(&self, _: &ProjectCtx, _: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn impact(
+        &self,
+        _: &ProjectCtx,
+        _: Option<&str>,
+        _: &str,
+        _: usize,
+        _: Option<&str>,
+        _: Option<f64>,
+    ) -> Result<ImpactResult, String> {
+        Ok(ImpactResult::Detailed(vec![
+            djinn_control_plane::bridge::ImpactEntry {
+                key: "symbol:a".to_string(),
+                uid: "symbol:a".to_string(),
+                depth: 1,
+                file_path: Some("src/a.rs".to_string()),
+                confidence_tier: None,
+                exclusion_reason: None,
+            },
+            djinn_control_plane::bridge::ImpactEntry {
+                key: "symbol:b".to_string(),
+                uid: "symbol:b".to_string(),
+                depth: 2,
+                file_path: Some("src/b.rs".to_string()),
+                confidence_tier: None,
+                exclusion_reason: None,
+            },
+            djinn_control_plane::bridge::ImpactEntry {
+                key: "symbol:c".to_string(),
+                uid: "symbol:c".to_string(),
+                depth: 2,
+                file_path: Some("src/c.rs".to_string()),
+                confidence_tier: None,
+                exclusion_reason: None,
+            },
+        ]))
+    }
+
+    async fn search(
+        &self,
+        _: &ProjectCtx,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<SearchHit>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn query_subgraph(
+        &self,
+        _: &ProjectCtx,
+        req: QuerySubgraphRequest,
+    ) -> Result<QuerySubgraphResult, String> {
+        self.query_subgraph_calls
+            .lock()
+            .expect("query_subgraph calls lock")
+            .push(req.clone());
+        Ok(QuerySubgraphResult {
+            query: req.query,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            seeds: Vec::new(),
+            inferred_edge_kinds: Vec::new(),
+            budget: QuerySubgraphBudget {
+                requested_tokens: 0,
+                estimated_tokens: 0,
+                truncated: false,
+                omitted_nodes: 0,
+                omitted_edges: 0,
+            },
+            traversal: QuerySubgraphTraversalDebug {
+                max_depth: 0,
+                hub_degree_threshold: 0,
+                hubs_blocked: Vec::new(),
+                skipped_edge_kinds: Vec::new(),
+            },
+            narrowing_hints: Vec::new(),
+        })
+    }
+
+    async fn cycles(
+        &self,
+        _: &ProjectCtx,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<CycleGroup>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn orphans(
+        &self,
+        _: &ProjectCtx,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<OrphanEntry>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn path(
+        &self,
+        _: &ProjectCtx,
+        _: Option<&str>,
+        _: &str,
+        _: &str,
+        _: Option<usize>,
+    ) -> Result<Option<PathResult>, String> {
+        Ok(None)
+    }
+
+    async fn edges(
+        &self,
+        _: &ProjectCtx,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<EdgeEntry>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn describe(&self, _: &ProjectCtx, _: &str) -> Result<Option<SymbolDescription>, String> {
+        Ok(None)
+    }
+
+    async fn context(
+        &self,
+        _: &ProjectCtx,
+        _: &str,
+        _: bool,
+    ) -> Result<Option<SymbolContext>, String> {
+        Ok(None)
+    }
+
+    async fn status(&self, _: &ProjectCtx) -> Result<GraphStatus, String> {
+        Ok(GraphStatus {
+            project_id: "test-project".to_string(),
+            warmed: false,
+            last_warm_at: None,
+            pinned_commit: None,
+            commits_since_pin: None,
+            route_parity_enabled: false,
+            route_exclusion_config: serde_json::json!({}),
+        })
+    }
+
+    async fn snapshot(
+        &self,
+        _: &ProjectCtx,
+        _: Option<&str>,
+        _: SnapshotLevel,
+        _: usize,
+        _: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
+    ) -> Result<SnapshotPayload, String> {
+        Ok(SnapshotPayload {
+            project_id: "test-project".to_string(),
+            git_head: "HEAD".to_string(),
+            generated_at: "1970-01-01T00:00:00Z".to_string(),
+            truncated: false,
+            total_nodes: 0,
+            total_edges: 0,
+            node_cap: 0,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        })
+    }
+
+    async fn workspaces(&self, ctx: &ProjectCtx) -> Result<WorkspacesResult, String> {
+        Ok(WorkspacesResult {
+            project_id: ctx.id.clone(),
+            workspaces: Vec::new(),
+        })
+    }
+
+    async fn symbols_at(
+        &self,
+        _: &ProjectCtx,
+        file: &str,
+        start_line: u32,
+        end_line: Option<u32>,
+    ) -> Result<Vec<SymbolAtHit>, String> {
+        self.symbols_at_calls
+            .lock()
+            .expect("symbols_at calls lock")
+            .push((file.to_string(), start_line, end_line));
+        Ok(Vec::new())
+    }
+
+    async fn diff_touches(
+        &self,
+        _: &ProjectCtx,
+        _: &[ChangedRange],
+    ) -> Result<DiffTouchesResult, String> {
+        Ok(DiffTouchesResult {
+            touched_symbols: Vec::new(),
+            affected_files: Vec::new(),
+            unknown_files: Vec::new(),
+        })
+    }
+
+    async fn detect_changes(
+        &self,
+        _: &ProjectCtx,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[String],
+    ) -> Result<DetectedChangesResult, String> {
+        Ok(DetectedChangesResult {
+            from_sha: String::new(),
+            to_sha: String::new(),
+            touched_symbols: Vec::new(),
+            by_file: BTreeMap::new(),
+        })
+    }
+
+    async fn api_surface(
+        &self,
+        _: &ProjectCtx,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<ApiSurfaceEntry>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn boundary_check(
+        &self,
+        _: &ProjectCtx,
+        _: &[BoundaryRule],
+    ) -> Result<Vec<BoundaryViolation>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn hotspots(
+        &self,
+        _: &ProjectCtx,
+        _: u32,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<HotspotEntry>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn complexity(
+        &self,
+        _: &ProjectCtx,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<ComplexityResult, String> {
+        Ok(ComplexityResult::Functions(Vec::new()))
+    }
+
+    async fn refactor_candidates(
+        &self,
+        _: &ProjectCtx,
+        _: Option<u32>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<RefactorCandidate>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn metrics_at(&self, _: &ProjectCtx) -> Result<MetricsAtResult, String> {
+        Ok(MetricsAtResult {
+            commit: String::new(),
+            node_count: 0,
+            edge_count: 0,
+            cycle_count: 0,
+            cycle_count_symbol_only: 0,
+            cycle_count_file_only: 0,
+            cycles_by_size_histogram: BTreeMap::new(),
+            god_object_count: 0,
+            orphan_count: 0,
+            public_api_count: 0,
+            doc_coverage_pct: 0.0,
+        })
+    }
+
+    async fn dead_symbols(
+        &self,
+        _: &ProjectCtx,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<DeadSymbolEntry>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn deprecated_callers(
+        &self,
+        _: &ProjectCtx,
+        _: usize,
+    ) -> Result<Vec<DeprecatedHit>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn touches_hot_path(
+        &self,
+        _: &ProjectCtx,
+        _: Option<&str>,
+        _: &[String],
+        _: &[String],
+        _: &[String],
+    ) -> Result<Vec<HotPathHit>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn coupling(
+        &self,
+        _: &ProjectCtx,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<CouplingEntry>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn churn(
+        &self,
+        _: &ProjectCtx,
+        _: usize,
+        _: Option<u32>,
+    ) -> Result<Vec<ChurnEntry>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn coupling_hotspots(
+        &self,
+        _: &ProjectCtx,
+        _: usize,
+        _: Option<u32>,
+        _: usize,
+    ) -> Result<Vec<CoupledPairEntry>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn coupling_hubs(
+        &self,
+        _: &ProjectCtx,
+        _: usize,
+        _: Option<u32>,
+        _: usize,
+    ) -> Result<Vec<CouplingHubEntry>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn resolve(
+        &self,
+        _: &ProjectCtx,
+        key: &str,
+        kind_hint: Option<&str>,
+    ) -> Result<ResolveOutcome, String> {
+        self.resolve_calls
+            .lock()
+            .expect("resolve calls lock")
+            .push((key.to_string(), kind_hint.map(str::to_string)));
+        Ok(ResolveOutcome::Found(key.to_string()))
+    }
 }
 
 #[test]
@@ -157,6 +565,168 @@ fn code_graph_chat_pagination_helpers_preserve_unsliced_traversal_counts() {
         has_more,
         "the sliced page must report that another page remains"
     );
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_forwards_uid_name_kind_and_pagination_controls() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-forward-resolver-");
+    let mut state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let graph_ops = Arc::new(RecordingCodeGraphOps::default());
+    state.repo_graph_ops = Some(graph_ops.clone());
+
+    let result = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "impact",
+            "project_path": worktree.path().to_string_lossy(),
+            "uid": "node:src/auth.rs#AuthService",
+            "name": "AuthService",
+            "kind": "struct",
+            "limit": 3,
+            "offset": 1,
+            "pageLimit": 1,
+            "summaryOnly": false,
+            "byDepthCounts": true
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("impact should dispatch through recording graph ops");
+
+    assert_eq!(
+        graph_ops
+            .resolve_calls
+            .lock()
+            .expect("resolve calls lock")
+            .as_slice(),
+        &[(
+            "node:src/auth.rs#AuthService".to_string(),
+            Some("struct".to_string())
+        )],
+        "uid must be forwarded as the exact resolver key and kind must feed kind_hint"
+    );
+    assert_eq!(result["key"], "node:src/auth.rs#AuthService");
+    assert_eq!(result["total"], 3);
+    assert_eq!(result["offset"], 1);
+    assert_eq!(result["limit"], 1);
+    assert_eq!(result["has_more"], true);
+    assert_eq!(result["by_depth_counts"]["1"], 1);
+    assert_eq!(result["by_depth_counts"]["2"], 2);
+    assert_eq!(
+        result["impact"]
+            .as_array()
+            .expect("impact remains a detailed page")
+            .len(),
+        1,
+        "pageLimit/offset must slice only the extension-visible page"
+    );
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_forwards_name_triplet_and_file_path_fields() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-forward-triplet-");
+    let mut state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let graph_ops = Arc::new(RecordingCodeGraphOps::default());
+    state.repo_graph_ops = Some(graph_ops.clone());
+
+    let impact = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "impact",
+            "project_path": worktree.path().to_string_lossy(),
+            "name": "login",
+            "file_path": "src/auth.rs",
+            "kind": "function",
+            "summaryOnly": true,
+            "byDepthCounts": true,
+            "pageLimit": 2
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("impact should dispatch with name resolver input");
+
+    assert_eq!(
+        graph_ops
+            .resolve_calls
+            .lock()
+            .expect("resolve calls lock")
+            .as_slice(),
+        &[("login".to_string(), Some("function".to_string()))],
+        "name must normalize into the bridge key and kind into kind_hint when uid is unavailable"
+    );
+    assert_eq!(impact["summary_only"], true);
+    assert!(
+        impact.get("impact").is_none(),
+        "summaryOnly responses omit the detailed impact list so agents treat them as triage counts"
+    );
+    assert_eq!(impact["total"], 3);
+    assert_eq!(impact["by_depth_counts"]["2"], 2);
+
+    code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "symbols_at",
+            "project_path": worktree.path().to_string_lossy(),
+            "file_path": "src/auth.rs",
+            "start_line": 10,
+            "end_line": 12
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("symbols_at should forward file_path to the graph bridge");
+    assert_eq!(
+        graph_ops
+            .symbols_at_calls
+            .lock()
+            .expect("symbols_at calls lock")
+            .as_slice(),
+        &[("src/auth.rs".to_string(), 10, Some(12))],
+        "file_path must be serialized/forwarded as the bridge file argument"
+    );
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_forwards_query_subgraph_file_path_fallback() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-forward-subgraph-");
+    let mut state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let graph_ops = Arc::new(RecordingCodeGraphOps::default());
+    state.repo_graph_ops = Some(graph_ops.clone());
+
+    code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "query_subgraph",
+            "project_path": worktree.path().to_string_lossy(),
+            "query": "where is auth wired?",
+            "file_path": "src/auth.rs",
+            "kind_filter": "symbol",
+            "edge_filters": ["Calls"],
+            "token_budget": 2048,
+            "max_depth": 2,
+            "max_seeds": 3
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("query_subgraph should forward normalized request fields");
+
+    let calls = graph_ops
+        .query_subgraph_calls
+        .lock()
+        .expect("query_subgraph calls lock");
+    let request = calls.first().expect("one query_subgraph call recorded");
+    assert_eq!(request.query, "where is auth wired?");
+    assert_eq!(request.file_filter.as_deref(), Some("src/auth.rs"));
+    assert_eq!(request.kind_filter.as_deref(), Some("symbol"));
+    assert_eq!(request.edge_filter, vec!["calls"]);
+    assert_eq!(request.token_budget, Some(2048));
+    assert_eq!(request.max_depth, Some(2));
+    assert_eq!(request.max_seeds, Some(3));
 }
 
 #[tokio::test]
