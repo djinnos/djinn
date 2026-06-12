@@ -855,7 +855,6 @@ mod tests {
         .unwrap();
 
         let health = repo.health(&project_id).await.unwrap();
-        assert_eq!(health.duplicate_cluster_count, 0);
         assert_eq!(health.low_confidence_note_count, 0);
         assert_eq!(health.stale_note_count, 0);
 

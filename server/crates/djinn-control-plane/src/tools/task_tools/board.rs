@@ -1,25 +1,18 @@
 use super::*;
-use djinn_db::NoteRepository;
 
 pub(super) async fn board_health_impl(
     server: &DjinnMcpServer,
     p: BoardHealthParams,
 ) -> Json<ErrorOr<BoardHealthResponse>> {
-    let project_id = match server.require_project_id(&p.project).await {
-        Ok(id) => id,
-        Err(e) => return Json(ErrorOr::Error(e)),
-    };
+    // Validate the project param even though the report itself is board-wide.
+    if let Err(e) = server.require_project_id(&p.project).await {
+        return Json(ErrorOr::Error(e));
+    }
     let stale_hours = p.stale_threshold_hours.unwrap_or(24).max(1);
     let repo = TaskRepository::new(server.state.db().clone(), server.state.event_bus());
     match repo.board_health(stale_hours).await {
         Ok(report) => match serde_json::from_value::<BoardHealthResponse>(report) {
             Ok(mut parsed) => {
-                let note_repo =
-                    NoteRepository::new(server.state.db().clone(), server.state.event_bus());
-                if let Ok(memory_health) = note_repo.health(&project_id).await {
-                    parsed.memory_health = Some(memory_health);
-                }
-
                 // Surface aggregate coordinator metrics (throughput + PR errors).
                 if let Some(coordinator) = server.state.coordinator().await
                     && let Ok(status) = coordinator.get_status()

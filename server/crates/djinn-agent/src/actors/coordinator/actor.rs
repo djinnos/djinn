@@ -1215,7 +1215,7 @@ impl CoordinatorActor {
             // GLOBAL per-user model selection: the SAME `resolve_user_model_priority`
             // the worker dispatch path uses. This is still "only what the user
             // configured" (their global model choice), not random credentials.
-            // Without it, escalation/patrol roles (planner, lead) silently get
+            // Without it, escalation roles (planner, lead) silently get
             // NO model and the autonomous stuck-task Planner intervention no-ops
             // ("no model configured for planner role"), so stuck tasks loop on
             // the same rejected acceptance criterion forever instead of

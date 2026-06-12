@@ -10,7 +10,7 @@
 //! the chat-user-global refactor: chat is single-turn, read-only, and runs
 //! against an ephemeral clone that should not host a stateful
 //! rust-analyzer process.  The architect keeps `lsp` because it runs in a
-//! long-lived patrol context with a warm canonical index tree.
+//! long-lived Architect context with a warm canonical index tree.
 //!
 //! ## Chat vs. agent schemas
 //!

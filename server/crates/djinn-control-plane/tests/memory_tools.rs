@@ -519,7 +519,6 @@ async fn mcp_memory_health_orphans_and_broken_links_shapes() {
         .expect("memory_health should dispatch");
     assert!(health.get("orphan_note_count").is_some());
     assert!(health.get("broken_link_count").is_some());
-    assert!(health.get("duplicate_cluster_count").is_some());
     assert!(health.get("low_confidence_note_count").is_some());
     assert!(health.get("stale_note_count").is_some());
 

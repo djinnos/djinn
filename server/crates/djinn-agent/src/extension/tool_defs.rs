@@ -791,7 +791,7 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     tool_values.push(serialize_tool(tool_skill_read(), read_only()));
     tool_values.push(serialize_tool(tool_lsp(), read_only()));
     // NOTE: `tool_code_graph()` is intentionally NOT in the base schema set.
-    // Per ADR-050, the code-graph tool is exclusive to the Architect (autonomous patrol form)
+    // Per ADR-050, the code-graph tool is exclusive to the Architect (autonomous form)
     // and the Chat surface (interactive form). Worker, reviewer, planner, and lead do not
     // see it. The architect's role-specific schema function appends it directly.
     tool_values.push(serialize_tool(tool_ci_job_log(), read_only()));
@@ -872,14 +872,14 @@ fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
 }
 
 /// Tool schemas for Planner: base + task/epic management tools + memory/role
-/// management tools (needed by patrol mode per ADR-051 §1) + submit_grooming
+/// management tools (per ADR-051 §1) + submit_grooming
 /// finalize tool.
 ///
 /// The Planner now runs in two modes: (a) per-epic decomposition (the legacy
-/// mode) and (b) board-health patrol (migrated from Architect). The tool
+/// mode) and (b) board-health maintenance (migrated from Architect). The tool
 /// surface is the union of both needs. `code_graph` remains Architect-only
 /// (per ADR-050) because deep structural analysis is an Architect spike, not
-/// a patrol responsibility.
+/// a Planner responsibility.
 pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     tool_values.push(serialize_tool(tool_write(), destructive()));
@@ -923,15 +923,15 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
         mutation(),
     ));
     // task_comment_add was previously excluded for planners (submit_grooming
-    // captured output), but patrol mode needs to leave diagnostic comments on
+    // captured output), but the Planner needs to leave diagnostic comments on
     // stuck tasks.
     tool_values.push(serialize_tool(
         shared_schemas::tool_task_comment_add(),
         mutation(),
     ));
-    // Memory-health and knowledge-graph tools used by the patrol workflow
+    // Memory-health and knowledge-graph tools used by board maintenance
     // (sections "Memory Health Review" and "Contradiction and Low-Confidence
-    // Review" in the patrol prompt).
+    // Review", formerly the patrol prompt).
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_build_context(),
         read_only(),
@@ -952,7 +952,7 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
         shared_schemas::tool_memory_orphans(),
         read_only(),
     ));
-    // Patrol may curate the knowledge base directly (annotate/fix notes during
+    // The Planner may curate the knowledge base directly (annotate/fix notes during
     // the Memory Health Review), so expose write + edit alongside the read tools.
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_write(),
@@ -963,7 +963,7 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
         mutation(),
     ));
     // Agent effectiveness review tools (migrated from Architect §10 per ADR-051
-    // patrol ownership migration).
+    // ADR-051 ownership migration).
     tool_values.push(serialize_tool(
         shared_schemas::tool_role_metrics(),
         read_only(),
@@ -1071,7 +1071,7 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
         serialize_tool(tool_task_reset_counters(), idempotent_destructive()),
         serialize_tool(tool_task_kill_session(), destructive()),
         // Per ADR-051 §1, `role_amend_prompt` has moved to the Planner —
-        // agent-effectiveness amendment is a patrol action, not a consultant
+        // agent-effectiveness amendment is a Planner action, not a consultant
         // action. Architect keeps `role_metrics` (read) and `role_create`
         // (structural proposal) but cannot mutate existing learned_prompts.
         serialize_tool(crate::roles::finalize::tool_submit_work(), mutation()),

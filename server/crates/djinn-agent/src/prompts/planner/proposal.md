@@ -42,5 +42,5 @@ A blocked epic will not start its breakdown until every blocker closes; it then 
 
 Call `submit_grooming(summary="Created N epics across M repos: <short list with dependency notes>")`.
 
-Do NOT create worker tasks, and do NOT set `next_patrol_minutes` in this mode. The per-epic wave Planners take over from here.
+Do NOT create worker tasks in this mode. The per-epic wave Planners take over from here.
 

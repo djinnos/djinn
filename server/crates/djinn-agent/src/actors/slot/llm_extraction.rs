@@ -563,7 +563,7 @@ async fn run_llm_extraction_inner(
     } else {
         // Resolve the memory model the way DISPATCH does — act as the task's
         // creator (the automations / owning user) so extraction uses THEIR
-        // configured model + credential, exactly like the planner patrol. The
+        // configured model + credential, like other system-initiated LLM work. The
         // session already ran on `session.model_id` for this user, so resolving
         // it under the creator's `SESSION_USER_ID` scope reuses the proven
         // provider path: e.g. an `openai/*` id served via the connected

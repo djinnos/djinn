@@ -6258,11 +6258,6 @@ expression: signatures
           "nullable": true,
           "type": "integer"
         },
-        "duplicate_cluster_count": {
-          "format": "int64",
-          "nullable": true,
-          "type": "integer"
-        },
         "error": {
           "nullable": true,
           "type": "string"

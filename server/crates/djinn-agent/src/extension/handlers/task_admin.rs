@@ -166,7 +166,7 @@ pub(super) async fn call_task_transition(
     )
     .await;
 
-    // Branch hygiene: when a lead / admin / planner-patrol caller force-closes
+    // Branch hygiene: when a lead / admin / planner caller force-closes
     // a task, delete the task branch on both the local mirror and the GitHub
     // remote so it doesn't sit on the mirror as a dead ref and an open PR.
     // Best-effort: errors are logged inside `cleanup_task_branches_post_close`
