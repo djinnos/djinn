@@ -30,6 +30,11 @@ pub struct ProposalModel {
     pub closed_at: Option<String>,
     /// Head revision number (sign-offs anchored earlier are stale).
     pub latest_revision_seq: i32,
+    /// Last proposal revision that the in-flight build has reconciled against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_reconciled_revision_seq: Option<i32>,
+    /// True when the in-flight build is behind the latest proposal revision.
+    pub pending_reconcile: bool,
     /// Build owner once graduated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_owner_user_id: Option<String>,
@@ -75,6 +80,8 @@ impl ProposalModel {
             updated_at: p.updated_at.clone(),
             closed_at: p.closed_at.clone(),
             latest_revision_seq: p.latest_revision_seq,
+            last_reconciled_revision_seq: p.last_reconciled_revision_seq,
+            pending_reconcile: p.pending_reconcile,
             build_owner_user_id: p.build_owner_user_id.clone(),
             unresolved_feedback_count,
         }
