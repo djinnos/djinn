@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::fmt;
 
 use djinn_provider::message::ContentBlock;
 use serde::{Deserialize, Serialize};
@@ -167,7 +168,54 @@ impl LoopGuardCondition {
     pub(crate) fn kind(&self) -> LoopGuardKind {
         self.reason.kind()
     }
+
+    pub(crate) fn offending_signature_label(&self) -> String {
+        match &self.reason {
+            LoopGuardReason::RepeatedToolFailure { signature }
+            | LoopGuardReason::RepeatedPermissionOrSecurityDenial { signature } => {
+                signature.display_label()
+            }
+            LoopGuardReason::RepeatedAssistantOutput { signature } => {
+                format!("assistant_output(digest={})", signature.digest)
+            }
+            LoopGuardReason::ConsecutiveToolFailures { last_signature } => {
+                last_signature.display_label()
+            }
+        }
+    }
 }
+
+impl ToolCallSignature {
+    pub(crate) fn display_label(&self) -> String {
+        format!(
+            "{}({}) [digest={}]",
+            self.tool_name, self.normalized_args, self.digest
+        )
+    }
+}
+
+/// Typed reply-loop error used when a deterministic loop guard terminates the
+/// session. Keeping the condition as an error source lets downstream stage
+/// plumbing downcast and route the guard distinctly from generic failures.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LoopGuardError {
+    pub condition: LoopGuardCondition,
+}
+
+impl fmt::Display for LoopGuardError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "loop guard tripped: {:?}; offending signature: {}; observed {}/{}",
+            self.condition.kind(),
+            self.condition.offending_signature_label(),
+            self.condition.observed,
+            self.condition.threshold
+        )
+    }
+}
+
+impl std::error::Error for LoopGuardError {}
 
 /// Pure in-memory guard state for one reply loop.
 #[derive(Clone, Debug)]

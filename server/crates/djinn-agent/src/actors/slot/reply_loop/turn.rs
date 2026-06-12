@@ -16,6 +16,10 @@ use super::error_handling::{
     should_retry_empty_assistant_turn, should_retry_empty_stream, tool_choice_for_turn,
     wind_down_message,
 };
+use super::loop_guard::{
+    LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState, ToolCallSignature,
+    ToolFailureClass,
+};
 use super::persistence::{persist_session_message, serialize_llm_input, serialize_message};
 use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
@@ -46,6 +50,62 @@ fn push_fragment(fragments: &mut Vec<String>, value: String) {
         fragments.remove(0);
     }
     fragments.push(snippet);
+}
+
+fn corrective_message_for_loop_guard(condition: &LoopGuardCondition) -> Message {
+    let signature = condition.offending_signature_label();
+    Message::user(format!(
+        "SYSTEM CORRECTION: You have repeated the same failing tool call signature \
+         {observed} times: `{signature}`. Do not call this exact tool with these \
+         exact normalized arguments again in this session. Choose a different \
+         approach, change the arguments materially, or use an appropriate \
+         finalize/escalation tool if you are blocked. Repeating this exact \
+         failing signature again will terminate the session through the loop guard.",
+        observed = condition.observed,
+    ))
+}
+
+fn tool_result_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(ContentBlock::as_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn classify_tool_failure(_content: &[ContentBlock]) -> ToolFailureClass {
+    // Permission/security denial handling has a stricter threshold in the pure
+    // guard engine and is wired in a follow-up task. This slice intentionally
+    // feeds ordinary dispatched tool errors through the general identical
+    // failure path.
+    ToolFailureClass::General
+}
+
+fn tool_call_signature_for_result(
+    result_index: usize,
+    tool_use_id: &str,
+    turn_tool_calls: &[ContentBlock],
+) -> Option<ToolCallSignature> {
+    let by_id = turn_tool_calls
+        .iter()
+        .find(|block| matches!(block, ContentBlock::ToolUse { id, .. } if id == tool_use_id));
+    let by_index = turn_tool_calls.get(result_index);
+    by_id.or(by_index).and_then(|block| match block {
+        ContentBlock::ToolUse { name, input, .. } => Some(ToolCallSignature::new(name, input)),
+        _ => None,
+    })
+}
+
+async fn inject_loop_guard_correction(
+    msg_repo: &SessionMessageRepository,
+    session_id: &str,
+    task_id: &str,
+    conversation: &mut Conversation,
+    condition: &LoopGuardCondition,
+) {
+    let msg = corrective_message_for_loop_guard(condition);
+    persist_session_message(msg_repo, session_id, task_id, &msg).await;
+    conversation.push(msg);
 }
 
 pub(crate) struct ReplyLoopContext<'a> {
@@ -242,6 +302,12 @@ pub(crate) async fn run_reply_loop(
         let mut empty_turn_retries: u32 = 0;
         // Consecutive text-only turns without a finalize or tool call (for nudge loop).
         let mut consecutive_nudge_count: u32 = 0;
+
+        // Deterministic in-session guard over repeated failing tool-call
+        // signatures. A signature gets exactly one corrective turn at the
+        // threshold; repeating it after that terminates through LoopGuardError.
+        let mut loop_guard_state = LoopGuardState::default();
+        let mut corrected_tool_failure_signatures: Vec<ToolCallSignature> = Vec::new();
 
         // Track the last assistant text for output parsing.
         let mut last_assistant_text = String::new();
@@ -740,6 +806,65 @@ pub(crate) async fn run_reply_loop(
             )
             .await;
 
+            let signatures_corrected_before_dispatch = corrected_tool_failure_signatures.clone();
+            let mut loop_guard_condition_to_inject: Option<LoopGuardCondition> = None;
+            for (result_index, result_block) in tool_result_blocks.iter().enumerate() {
+                let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } = result_block
+                else {
+                    continue;
+                };
+
+                let Some(signature) =
+                    tool_call_signature_for_result(result_index, tool_use_id, &turn_tool_calls)
+                else {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        tool_use_id = %tool_use_id,
+                        "ReplyLoop: tool result could not be correlated to a tool-use signature"
+                    );
+                    continue;
+                };
+
+                if *is_error {
+                    let failure_text = tool_result_text(content);
+                    let condition = loop_guard_state
+                        .record_tool_failure(signature.clone(), classify_tool_failure(content));
+                    if let Some(condition) = condition
+                        && matches!(&condition.reason, LoopGuardReason::RepeatedToolFailure { .. })
+                    {
+                        if signatures_corrected_before_dispatch.contains(&signature) {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                signature = %signature.display_label(),
+                                observed = condition.observed,
+                                threshold = condition.threshold,
+                                failure = %failure_text,
+                                "ReplyLoop: repeated failing tool-call signature persisted after corrective message; terminating"
+                            );
+                            return Err(anyhow::Error::new(LoopGuardError { condition }));
+                        }
+
+                        tracing::warn!(
+                            task_id = %task_id,
+                            signature = %signature.display_label(),
+                            observed = condition.observed,
+                            threshold = condition.threshold,
+                            failure = %failure_text,
+                            "ReplyLoop: repeated failing tool-call signature reached threshold; injecting corrective message"
+                        );
+                        corrected_tool_failure_signatures.push(signature);
+                        loop_guard_condition_to_inject.get_or_insert(condition);
+                    }
+                } else {
+                    loop_guard_state.record_tool_success();
+                    corrected_tool_failure_signatures.clear();
+                }
+            }
+
             // Touch activity after tool execution — tool calls are legitimate
             // work and can take a while (e.g. cargo build).
             {
@@ -774,6 +899,17 @@ pub(crate) async fn run_reply_loop(
             };
             persist_session_message(&msg_repo, session_id, task_id, &tool_result_msg).await;
             conversation.push(tool_result_msg);
+
+            if let Some(condition) = loop_guard_condition_to_inject {
+                inject_loop_guard_correction(
+                    &msg_repo,
+                    session_id,
+                    task_id,
+                    conversation,
+                    &condition,
+                )
+                .await;
+            }
 
             // ── Post-dispatch finalize check for alternate finalize tools ─────
             // Alternate finalize tools (e.g. request_lead) were dispatched above
