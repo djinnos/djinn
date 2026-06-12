@@ -12637,6 +12637,31 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "DispatchPause": {
+          "additionalProperties": false,
+          "description": "Metadata recorded when dispatch is paused for a scope.",
+          "properties": {
+            "expires_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "paused_at": {
+              "type": "string"
+            },
+            "paused_by": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "paused_by",
+            "paused_at",
+            "reason"
+          ],
+          "type": "object"
+        },
         "DjinnSettings": {
           "additionalProperties": false,
           "description": "Typed settings schema. Unknown fields are rejected at parse time.",
@@ -12646,6 +12671,18 @@ expression: signatures
               "format": "int64",
               "nullable": true,
               "type": "integer"
+            },
+            "dispatch_pause": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DispatchPause"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "Global emergency stop for task dispatch. Missing in older settings rows means unpaused."
             },
             "max_sessions": {
               "additionalProperties": {

@@ -23,7 +23,7 @@ pub use proposal::{Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
 pub use session::{SessionRecord, SessionStatus};
 pub use session_message::SessionMessage;
-pub use settings::{DjinnSettings, Setting};
+pub use settings::{DispatchPause, DispatchPauseScope, DispatchPauseState, DjinnSettings, Setting};
 pub use task::{
     ActivityEntry, IssueType, PRIORITY_CRITICAL, Task, TaskStatus, TransitionAction,
     TransitionApply, compute_transition, compute_transition_for_issue_type,
