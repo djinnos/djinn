@@ -92,6 +92,24 @@ pub struct ProposalFeedbackCreateInput<'a> {
     pub target_section: Option<&'a str>,
 }
 
+/// A Planner-authored acceptance-criteria spec amendment. Unlike
+/// [`ProposalRepository::set_acceptance_criteria`], these operations are real
+/// spec edits: they bump the proposal revision and write an audit trail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProposalAcceptanceCriteriaAmendment<'a> {
+    Rewrite { index: usize, criterion: &'a str },
+    Drop { index: usize },
+    Waive { index: usize },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+struct ProposalAcceptanceCriteriaAuditEntry {
+    operation: &'static str,
+    index: usize,
+    old_criterion: serde_json::Value,
+    new_criterion: serde_json::Value,
+}
+
 pub struct ProposalRepository {
     db: Database,
     events: EventBus,
