@@ -157,11 +157,12 @@ fn apply_policy(
 
     // Shared cross-task cache PVC (`/cache`). The K8s task-run Pod env
     // (djinn-k8s/src/job.rs) routes the toolchain caches here at runtime —
-    // CARGO_HOME=/cache/cargo, CARGO_TARGET_DIR=/cache/cargo-target/<project>,
+    // CARGO_HOME=/cache/cargo, CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>,
     // SCCACHE_DIR=/cache/sccache/<project> — and the image bakes the Go cache
     // (GOMODCACHE/GOCACHE) onto /cache too — so build/test commands need write
     // access to populate them (`go mod download` → /cache/go/mod, cargo
-    // registry → /cache/cargo, sccache → /cache/sccache, etc.). Only present
+    // registry → /cache/cargo, cargo target artifacts → /cache/cargo-target-runs,
+    // sccache → /cache/sccache, etc.). Only present
     // in the K8s task-run
     // Pod (the PVC mount); a no-op elsewhere since the open fails. Guarded:
     // if the dir is absent we silently skip, same as the scratch dir above.
