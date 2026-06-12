@@ -383,7 +383,9 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
          ambiguous names return ranked candidates. Agent-boundary traversal triage controls: \
          `limit`, `offset`, `pageLimit`, `summaryOnly`, `byDepthCounts`. Partial pages and capped \
          summaries are triage views; absence from a page or summary is NOT evidence a node/edge/pair \
-         is absent from the full graph. WHEN TO USE: capabilities = cheap discovery of supported \
+         is absent from the full graph. `workspaces` lists available-workspace slugs plus \
+         name/node_count/commit_sha/warmed_at/status; unknown workspace degradation includes \
+         `workspace_hint`. WHEN TO USE: capabilities = cheap discovery of supported \
          ops/params/defaults before spending graph budget; query_subgraph = ask a natural-language \
          question in `query` and get a token-budgeted focused subgraph with narrowing hints; search = \
          find candidate files/symbols by substring when you do not know a key; describe = inspect one \
