@@ -1,7 +1,12 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use super::*;
-use crate::repo_graph::{RepoGraphEdge, RepoGraphEdgeKind, RepoGraphNodeKind};
+use crate::repo_graph::{RepoDependencyGraph, RepoGraphEdge, RepoGraphEdgeKind, RepoGraphNodeKind};
+use crate::scip_parser::{
+    ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipSymbol, ScipSymbolKind,
+    ScipSymbolRole, ScipVisibility,
+};
 
 const AXUM_ONLY_ROUTE: &str = include_str!("fixtures/axum_only/server/src/routes.rs");
 const TS_ONLY_UNKNOWN: &str = include_str!("fixtures/ts_only_no_match/ui/src/api/unknown.ts");
@@ -34,31 +39,163 @@ fn write_fixture(root: &Path, axum_source: Option<&str>, ts_file: Option<(&str, 
     }
 }
 
+fn definition_occurrence(symbol: &str, start_line: u32, end_line: u32) -> ScipOccurrence {
+    ScipOccurrence {
+        symbol: symbol.to_string(),
+        range: ScipRange {
+            start_line: start_line.saturating_sub(1) as i32,
+            start_character: 0,
+            end_line: start_line.saturating_sub(1) as i32,
+            end_character: 1,
+        },
+        enclosing_range: Some(ScipRange {
+            start_line: start_line.saturating_sub(1) as i32,
+            start_character: 0,
+            end_line: end_line.saturating_sub(1) as i32,
+            end_character: 1,
+        }),
+        roles: BTreeSet::from([ScipSymbolRole::Definition]),
+        syntax_kind: None,
+        override_documentation: Vec::new(),
+    }
+}
+
+fn reference_occurrence(symbol: &str) -> ScipOccurrence {
+    ScipOccurrence {
+        symbol: symbol.to_string(),
+        range: ScipRange {
+            start_line: 0,
+            start_character: 0,
+            end_line: 0,
+            end_character: 1,
+        },
+        enclosing_range: None,
+        roles: BTreeSet::from([ScipSymbolRole::Import]),
+        syntax_kind: None,
+        override_documentation: Vec::new(),
+    }
+}
+
+fn scip_function_symbol(symbol: String, display_name: String) -> ScipSymbol {
+    ScipSymbol {
+        symbol,
+        kind: Some(ScipSymbolKind::Function),
+        display_name: Some(display_name),
+        signature: None,
+        documentation: Vec::new(),
+        relationships: Vec::new(),
+        visibility: Some(ScipVisibility::Public),
+        signature_parts: None,
+    }
+}
+
+fn function_names(source: &str) -> Vec<(String, u32)> {
+    source
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let function_pos = line
+                .find("fn ")
+                .map(|pos| pos + "fn ".len())
+                .or_else(|| line.find("function ").map(|pos| pos + "function ".len()))?;
+            let name: String = line[function_pos..]
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                .collect();
+            (!name.is_empty()).then_some((name, (idx + 1) as u32))
+        })
+        .collect()
+}
+
+fn rust_fixture_file(root: &Path, rel_path: &Path) -> Option<ScipFile> {
+    let source = std::fs::read_to_string(root.join(rel_path)).ok()?;
+    let end_line = source.lines().count().max(1) as u32;
+    let mut symbols = Vec::new();
+    let mut definitions = Vec::new();
+    for (name, line) in function_names(&source) {
+        let symbol = format!("test {}/{name}().", rel_path.display());
+        symbols.push(scip_function_symbol(symbol.clone(), name));
+        definitions.push(definition_occurrence(&symbol, line, end_line));
+    }
+
+    Some(ScipFile {
+        language: "rust".to_string(),
+        relative_path: rel_path.to_path_buf(),
+        definitions,
+        references: vec![reference_occurrence("axum::Router")],
+        occurrences: Vec::new(),
+        symbols,
+    })
+}
+
+fn typescript_fixture_file(root: &Path, rel_path: &Path) -> Option<ScipFile> {
+    let source = std::fs::read_to_string(root.join(rel_path)).ok()?;
+    let end_line = source.lines().count().max(1) as u32;
+    let mut symbols = Vec::new();
+    let mut definitions = Vec::new();
+    for (name, line) in function_names(&source) {
+        let symbol = format!("ts {}/{name}().", rel_path.display());
+        symbols.push(scip_function_symbol(symbol.clone(), name));
+        definitions.push(definition_occurrence(&symbol, line, end_line));
+    }
+
+    Some(ScipFile {
+        language: "typescript".to_string(),
+        relative_path: rel_path.to_path_buf(),
+        definitions,
+        references: Vec::new(),
+        occurrences: Vec::new(),
+        symbols,
+    })
+}
+
+fn source_backed_fixture_graph(root: &Path, ts_path: &Path) -> RepoDependencyGraph {
+    let mut files = Vec::new();
+    if let Some(file) = rust_fixture_file(root, Path::new("server/src/routes.rs")) {
+        files.push(file);
+    }
+    if let Some(file) = typescript_fixture_file(root, ts_path) {
+        files.push(file);
+    }
+
+    RepoDependencyGraph::build(&[ParsedScipIndex {
+        workspace_slug: "route-e2e-fixture".to_string(),
+        metadata: ScipMetadata::default(),
+        files,
+        external_symbols: vec![ScipSymbol {
+            symbol: "axum::Router".to_string(),
+            kind: Some(ScipSymbolKind::Type),
+            display_name: Some("Router".to_string()),
+            signature: None,
+            documentation: Vec::new(),
+            relationships: Vec::new(),
+            visibility: Some(ScipVisibility::Public),
+            signature_parts: None,
+        }],
+    }])
+}
+
 /// End-to-end route-extraction harness that exercises the same source-backed
 /// canonical graph post-processing pass that `ensure_canonical_graph` invokes:
-/// build a file/symbol graph for the fixture, run route extraction against the
-/// fixture project root, then inspect the materialized canonical graph shape.
+/// write a fixture project, build a file/symbol graph from those files, run
+/// route extraction against the fixture project root, then inspect the
+/// materialized canonical graph shape.
 fn ensure_canonical_graph_route_extraction_fixture(
     axum_source: Option<&str>,
     ts_file: Option<(&str, &str)>,
-    include_axum_graph: bool,
-    include_ts_graph: bool,
-) -> (
-    RouteExtractionReport,
-    crate::repo_graph::RepoDependencyGraph,
-) {
+) -> (RouteExtractionReport, RepoDependencyGraph) {
     let temp = tempfile::tempdir().expect("create route extraction e2e fixture dir");
     write_fixture(temp.path(), axum_source, ts_file);
 
     let ts_path = ts_file
         .map(|(relative_path, _source)| Path::new(relative_path))
         .unwrap_or_else(|| Path::new("ui/src/api/agents.ts"));
-    let mut graph = route_fixture_graph_with_ts_path(include_axum_graph, include_ts_graph, ts_path);
+    let mut graph = source_backed_fixture_graph(temp.path(), ts_path);
     let report = detect_routes(&mut graph, temp.path());
     (report, graph)
 }
 
-fn counts(graph: &crate::repo_graph::RepoDependencyGraph) -> RouteCounts {
+fn counts(graph: &RepoDependencyGraph) -> RouteCounts {
     RouteCounts {
         route_display_names: graph
             .graph()
@@ -84,7 +221,7 @@ fn counts(graph: &crate::repo_graph::RepoDependencyGraph) -> RouteCounts {
 #[test]
 fn axum_only_round_trips_to_route_and_handler_edge_without_fetches() {
     let (report, graph) =
-        ensure_canonical_graph_route_extraction_fixture(Some(AXUM_ONLY_ROUTE), None, true, false);
+        ensure_canonical_graph_route_extraction_fixture(Some(AXUM_ONLY_ROUTE), None);
     let counts = counts(&graph);
 
     assert!(report.skipped_files.is_empty());
@@ -109,8 +246,6 @@ fn ts_only_no_match_records_unmatched_fetch_without_graph_pollution() {
     let (report, graph) = ensure_canonical_graph_route_extraction_fixture(
         None,
         Some(("ui/src/api/unknown.ts", TS_ONLY_UNKNOWN)),
-        false,
-        true,
     );
     let counts = counts(&graph);
 
@@ -130,8 +265,6 @@ fn full_e2e_round_trips_to_route_handler_and_fetch_edges() {
     let (report, graph) = ensure_canonical_graph_route_extraction_fixture(
         Some(FULL_E2E_ROUTE),
         Some(("ui/src/api/fixture.ts", FULL_E2E_FETCH)),
-        true,
-        true,
     );
     let counts = counts(&graph);
 
