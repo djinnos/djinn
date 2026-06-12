@@ -455,3 +455,273 @@ async fn mcp_tools_schema_snapshot() {
 
     assert_json_snapshot!("mcp_tools_schema", signatures);
 }
+
+// ── Dispatch-pause public MCP contract ─────────────────────────────────────────
+//
+// The dispatch-pause epic introduces three new MCP tools — `dispatch_pause`,
+// `dispatch_resume`, and `dispatch_pause_status` — that must advertise a stable
+// input/output shape so external clients can build against them. The
+// generic `mcp_tools_schema` snapshot above already pins the full surface
+// (line-for-line), but broad snapshot diffs are noisy. The tests below are
+// focused contract assertions: they target only the dispatch-pause tools and
+// the specific contract details that must NOT drift silently — input field
+// names, required fields, output response shape, and the safety annotations
+// that drive host agent UI (read-only, destructive, idempotent, open-world,
+// concurrent-safe). If a future change adds a new field, removes a required
+// input, or flips a safety hint, these tests fail with a clear, local
+// message instead of forcing a reviewer to scan 14k lines of snapshot text.
+
+/// Locate a tool schema by `name`. Mirrors the helper pattern used elsewhere
+/// in this module but kept private to the dispatch-pause block so a renamed
+/// tool only touches this section.
+fn dispatch_pause_tool<'a>(tools: &'a [Value], name: &str) -> &'a Value {
+    tools
+        .iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+        .unwrap_or_else(|| panic!("missing dispatch-pause tool schema: {name}"))
+}
+
+#[tokio::test]
+async fn all_tool_schemas_advertises_dispatch_pause_pause_resume_and_status() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let tools = mcp.all_tool_schemas();
+
+    for name in ["dispatch_pause", "dispatch_resume", "dispatch_pause_status"] {
+        let tool = dispatch_pause_tool(&tools, name);
+        // Every dispatch-pause tool must surface a typed input AND output
+        // schema so clients can both invoke and parse the result without
+        // guessing at field names. A null inputSchema/outputSchema would
+        // mean the router dropped the typed contract for that surface.
+        assert!(
+            tool.get("inputSchema")
+                .map(|s| s.get("properties").is_some())
+                .unwrap_or(false),
+            "{name} inputSchema is missing `properties`"
+        );
+        assert_eq!(
+            tool["inputSchema"]["additionalProperties"],
+            json!(false),
+            "{name} inputSchema must reject unknown fields"
+        );
+        assert!(
+            tool.get("outputSchema")
+                .map(|s| s.get("properties").is_some())
+                .unwrap_or(false),
+            "{name} outputSchema is missing `properties`"
+        );
+    }
+
+    // dispatch_pause — required inputs (scope + reason) and output (mutation envelope).
+    let pause = dispatch_pause_tool(&tools, "dispatch_pause");
+    let pause_input_required = pause["inputSchema"]["required"]
+        .as_array()
+        .expect("dispatch_pause inputSchema.required array");
+    for field in ["scope", "reason"] {
+        assert!(
+            pause_input_required
+                .iter()
+                .any(|v| v.as_str() == Some(field)),
+            "dispatch_pause inputSchema.required missing `{field}`"
+        );
+    }
+    assert!(
+        pause["inputSchema"]["properties"]["target_id"].is_object(),
+        "dispatch_pause inputSchema.properties.target_id must be present (optional but typed)"
+    );
+    let pause_output_required = pause["outputSchema"]["required"]
+        .as_array()
+        .expect("dispatch_pause outputSchema.required array");
+    for field in ["ok", "changed", "scope"] {
+        assert!(
+            pause_output_required
+                .iter()
+                .any(|v| v.as_str() == Some(field)),
+            "dispatch_pause outputSchema.required missing `{field}`"
+        );
+    }
+
+    // dispatch_resume — only `scope` is required; same mutation envelope output.
+    let resume = dispatch_pause_tool(&tools, "dispatch_resume");
+    let resume_input_required = resume["inputSchema"]["required"]
+        .as_array()
+        .expect("dispatch_resume inputSchema.required array");
+    assert_eq!(
+        resume_input_required
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>(),
+        vec!["scope"],
+        "dispatch_resume inputSchema.required must be exactly [\"scope\"]"
+    );
+    assert!(
+        resume["inputSchema"]["properties"]["target_id"].is_object(),
+        "dispatch_resume inputSchema.properties.target_id must be present (optional but typed)"
+    );
+    let resume_output_required = resume["outputSchema"]["required"]
+        .as_array()
+        .expect("dispatch_resume outputSchema.required array");
+    for field in ["ok", "changed", "scope"] {
+        assert!(
+            resume_output_required
+                .iter()
+                .any(|v| v.as_str() == Some(field)),
+            "dispatch_resume outputSchema.required missing `{field}`"
+        );
+    }
+
+    // dispatch_pause_status — neither scope nor target_id is required at the
+    // type level (the handler infers "all scopes" when both are absent and
+    // the runtime catches the global+target_id mismatch). The response
+    // contract requires only `ok` — both `state` and `current` are
+    // `anyOf`/`nullable` envelopes that are absent in different branches.
+    let status = dispatch_pause_tool(&tools, "dispatch_pause_status");
+    let status_input_required = status["inputSchema"]
+        .get("required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        status_input_required.is_empty(),
+        "dispatch_pause_status inputSchema.required must be empty (no required fields), got {status_input_required:?}"
+    );
+    for field in ["scope", "target_id"] {
+        assert!(
+            status["inputSchema"]["properties"][field].is_object(),
+            "dispatch_pause_status inputSchema.properties.{field} must be present (optional but typed)"
+        );
+    }
+    let status_output_required = status["outputSchema"]["required"]
+        .as_array()
+        .expect("dispatch_pause_status outputSchema.required array");
+    assert_eq!(
+        status_output_required
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ok"],
+        "dispatch_pause_status outputSchema.required must be exactly [\"ok\"]"
+    );
+    for field in ["state", "current", "scope", "target_id", "error"] {
+        assert!(
+            status["outputSchema"]["properties"][field].is_object(),
+            "dispatch_pause_status outputSchema.properties.{field} must be present (optional but typed)"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dispatch_pause_safety_annotations_match_intent() {
+    // Host agents (e.g. OpenAI Codex strict schema validators, Anthropic's
+    // tool-use approval UI, in-app agent UIs) consult the MCP tool's safety
+    // annotations to decide whether to prompt the user for confirmation.
+    // The dispatch-pause epic relies on those hints to be correct:
+    //
+    // * dispatch_pause / dispatch_resume — write/admin operations. They
+    //   mutate persisted state, fail closed (require admin), and should be
+    //   presented to users as "destructive: true". `concurrent_safe: false`
+    //   because two overlapping pause calls can race on the mutation record
+    //   and the second call's "changed: false" branch is the only thing that
+    //   papers over the race.
+    //
+    // * dispatch_pause_status — strictly read-only / non-destructive. It
+    //   must never mutate pause state and must never emit a pause-state
+    //   change event. The test here pins the schema hint; the runtime
+    //   guarantee (no event emission, no state change) is covered by
+    //   `dispatch_pause_status_does_not_mutate_state_or_emit_events` in
+    //   `server_tests.rs`.
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let tools = mcp.all_tool_schemas();
+
+    for name in ["dispatch_pause", "dispatch_resume"] {
+        let tool = dispatch_pause_tool(&tools, name);
+        assert_eq!(
+            tool["readOnly"], false,
+            "{name} must advertise readOnly=false"
+        );
+        assert_eq!(
+            tool["destructive"], true,
+            "{name} must advertise destructive=true (pause/resume mutate state)"
+        );
+        // `idempotent: false` is the conservative default — the repository
+        // layer will short-circuit no-op pauses/resumes, but the tool
+        // itself is not contractually idempotent (each call still records
+        // an actor/time). Hosts MUST treat repeated calls as distinct
+        // mutations and prompt accordingly.
+        assert_eq!(
+            tool["idempotent"], false,
+            "{name} must advertise idempotent=false (each call is a recorded mutation)"
+        );
+        assert_eq!(
+            tool["openWorld"], false,
+            "{name} must advertise openWorld=false (no external system call)"
+        );
+        assert_eq!(
+            tool["concurrent_safe"], false,
+            "{name} must advertise concurrent_safe=false (pause/resume race on mutation record)"
+        );
+    }
+
+    let status = dispatch_pause_tool(&tools, "dispatch_pause_status");
+    assert_eq!(
+        status["readOnly"], true,
+        "dispatch_pause_status must advertise readOnly=true (it is a pure read)"
+    );
+    assert_eq!(
+        status["destructive"], false,
+        "dispatch_pause_status must advertise destructive=false (no state mutation)"
+    );
+    assert_eq!(
+        status["idempotent"], true,
+        "dispatch_pause_status must advertise idempotent=true (pure read, safe to retry)"
+    );
+    assert_eq!(
+        status["openWorld"], false,
+        "dispatch_pause_status must advertise openWorld=false (in-process DB read only)"
+    );
+    assert_eq!(
+        status["concurrent_safe"], false,
+        "dispatch_pause_status must advertise concurrent_safe=false (the underlying \
+         connection is not pooled for concurrent reads in this revision; the host UI \
+         can still treat the call as read-only)"
+    );
+}
+
+#[test]
+fn checked_in_mcp_snapshot_includes_dispatch_pause_tools_with_strict_schemas() {
+    // The checked-in insta snapshot of every tool schema is the contract
+    // clients rely on at runtime. This test guards two specific properties
+    // of the dispatch-pause entry points inside that snapshot:
+    //
+    // 1. All three tool names appear in the snapshot.
+    // 2. Each tool's input schema carries `additionalProperties: false` —
+    //    the JSON-Schema manifestation of `#[serde(deny_unknown_fields)]`.
+    //    A future migration that drops `deny_unknown_fields` on any of the
+    //    three param structs would silently weaken the contract; this test
+    //    fails loudly before that change ships.
+    let snapshot =
+        include_str!("snapshots/djinn_server__server__tests__tool_schemas__mcp_tools_schema.snap");
+    let json_body = snapshot
+        .splitn(3, "---\n")
+        .nth(2)
+        .expect("insta snapshot body after metadata header");
+    let tools: Vec<Value> = serde_json::from_str(json_body).expect("MCP schema snapshot is JSON");
+
+    for name in ["dispatch_pause", "dispatch_resume", "dispatch_pause_status"] {
+        let tool = tools
+            .iter()
+            .find(|t| t.get("name").and_then(Value::as_str) == Some(name))
+            .unwrap_or_else(|| panic!("checked-in MCP snapshot is missing `{name}`"));
+
+        let input_schema = tool
+            .get("input_schema")
+            .unwrap_or_else(|| panic!("{name} snapshot entry missing input_schema"));
+        assert_eq!(
+            input_schema["additionalProperties"],
+            json!(false),
+            "{name} input_schema must declare additionalProperties=false \
+             (i.e. #[serde(deny_unknown_fields)] on the params struct)"
+        );
+    }
+}

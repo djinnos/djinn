@@ -17,6 +17,7 @@ import { ImageEditorPage } from "@/pages/ImageEditorPage";
 import { ProjectEnvironmentPage } from "@/pages/ProjectEnvironmentPage";
 import { UsersPage } from "@/pages/UsersPage";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
+import { DispatchPauseBanner } from "@/components/DispatchPauseBanner";
 import { AuthGate, useAuthUser } from "@/components/AuthGate";
 import { useEffect, useRef } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
@@ -27,6 +28,7 @@ import { useModelGateStore } from "@/stores/modelGateStore";
 import { ModelOnboarding } from "@/components/ModelOnboarding";
 import { useProjectGateStore } from "@/stores/projectGateStore";
 import { RepositoryOnboarding } from "@/components/RepositoryOnboarding";
+import { useDispatchPauseHydration } from "@/hooks/useDispatchPauseHydration";
 
 function MainLayout() {
   const isAdmin = useAuthUser()?.isAdmin ?? false;
@@ -36,6 +38,7 @@ function MainLayout() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="flex min-h-0 flex-1 flex-col">
           <ConnectionBanner />
+          <DispatchPauseBanner />
           <Routes>
             {/* Views — project selection lives in the projectStore, not the URL.
                 Tasks + Dependencies share the BoardLayout (filter header + view
@@ -100,6 +103,7 @@ function AuthenticatedApp() {
   const hasConnectedOnce = useRef(false);
 
   useProjectsBootstrap(status);
+  useDispatchPauseHydration(status);
   useEventSource();
 
   useEffect(() => {

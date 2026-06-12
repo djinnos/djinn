@@ -19,6 +19,7 @@ import { fetchProjects } from "@/api/server";
 import { verificationStore, type StepEntry } from "./verificationStore";
 import { showToast } from "@/lib/toast";
 import type { Task, Epic, Proposal } from "@/api/types";
+import { applyDispatchPauseSsePayload, type DispatchPauseSsePayload } from "./dispatchPauseStore";
 
 /**
  * Unwrap SSE event payload.
@@ -88,6 +89,7 @@ let proposalCreatedUnsub: (() => void) | null = null;
 let proposalUpdatedUnsub: (() => void) | null = null;
 let proposalDeletedUnsub: (() => void) | null = null;
 let proposalFeedbackUnsub: (() => void) | null = null;
+let dispatchPauseChangedUnsub: (() => void) | null = null;
 
 /**
  * Initialize SSE event handlers
@@ -112,6 +114,11 @@ export function initSSEEventHandlers(): () => void {
     queryClient.setQueryData(["tasks"], (current: Task[] | undefined) =>
       current ? [...current, task] : [task]
     );
+  });
+
+  dispatchPauseChangedUnsub = subscribe("dispatch_pause_changed", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as DispatchPauseSsePayload;
+    applyDispatchPauseSsePayload(payload);
   });
 
   taskUpdatedUnsub = subscribe("task_updated", (event: SSEEvent) => {
@@ -444,6 +451,7 @@ export function initSSEEventHandlers(): () => void {
     proposalUpdatedUnsub?.();
     proposalDeletedUnsub?.();
     proposalFeedbackUnsub?.();
+    dispatchPauseChangedUnsub?.();
     projectChangedUnsub?.();
     sessionDispatchedUnsub?.();
     sessionStartedUnsub?.();
@@ -469,6 +477,7 @@ export function cleanupSSEEventHandlers(): void {
   proposalUpdatedUnsub?.();
   proposalDeletedUnsub?.();
   proposalFeedbackUnsub?.();
+  dispatchPauseChangedUnsub?.();
 
   taskCreatedUnsub = null;
   taskUpdatedUnsub = null;
@@ -480,5 +489,6 @@ export function cleanupSSEEventHandlers(): void {
   proposalUpdatedUnsub = null;
   proposalDeletedUnsub = null;
   proposalFeedbackUnsub = null;
+  dispatchPauseChangedUnsub = null;
   flushDebouncedInvalidations();
 }
