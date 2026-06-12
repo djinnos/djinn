@@ -306,6 +306,16 @@ pub(in crate::actors::coordinator) fn is_merge_queue_405(err: &anyhow::Error) ->
     msg.contains("405") && msg.contains("merge queue")
 }
 
+/// Detect the `enqueuePullRequest` UNPROCESSABLE rejection whose message is
+/// "Pull request is already in the queue" — the entry we wanted already
+/// exists (GitHub merge-when-ready armed it, or a pre-restart delegation this
+/// process no longer remembers). Callers adopt the entry instead of erroring.
+pub(in crate::actors::coordinator) fn is_already_queued(err: &anyhow::Error) -> bool {
+    format!("{err}")
+        .to_ascii_lowercase()
+        .contains("already in the queue")
+}
+
 /// Heuristic: is this check-run name an *advisory* (non-merge-gating) check?
 ///
 /// Used only as a fallback when we couldn't read the branch's required-status-

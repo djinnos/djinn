@@ -69,8 +69,8 @@ mod state;
 mod tests;
 
 use ci_helpers::{
-    advisory_checks_section, blocking_failed_checks, build_ci_failure_sections, is_merge_queue_405,
-    parse_actions_run_id,
+    advisory_checks_section, blocking_failed_checks, build_ci_failure_sections, is_already_queued,
+    is_merge_queue_405, parse_actions_run_id,
 };
 use conversation_resolution::{
     is_conversation_resolution_block, should_auto_resolve_conversations,
