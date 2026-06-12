@@ -163,6 +163,72 @@ async fn code_graph_schema_advertises_route_shape_impact_flow_ops() {
     }
 }
 
+#[tokio::test]
+async fn code_graph_schema_advertises_uid_resolver_pagination_and_partial_semantics() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let tools = mcp.all_tool_schemas();
+    let code_graph = tools
+        .iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some("code_graph"))
+        .expect("code_graph schema");
+    let description = code_graph
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("code_graph description");
+
+    for phrase in [
+        "Prefer stable uid",
+        "name + file_path + kind",
+        "offset",
+        "limit/page_limit",
+        "summaryOnly",
+        "byDepthCounts",
+        "absence from a page or summary is not evidence",
+    ] {
+        assert!(
+            description.contains(phrase),
+            "code_graph description does not advertise public contract phrase {phrase:?}: {description}"
+        );
+    }
+
+    let input_props = &code_graph["inputSchema"]["properties"];
+    for field in [
+        "uid",
+        "name",
+        "file_path",
+        "kind",
+        "offset",
+        "summary_only",
+        "by_depth_counts",
+        "page_limit",
+    ] {
+        assert!(
+            !input_props[field].is_null(),
+            "code_graph input schema missing {field}: {input_props}"
+        );
+    }
+
+    for (field, phrase) in [
+        ("uid", "Stable graph node UID"),
+        ("name", "Human-readable node name"),
+        ("file_path", "path hint"),
+        ("kind", "kind hint"),
+        ("offset", "page offset"),
+        ("summary_only", "counts-only"),
+        ("by_depth_counts", "per-depth counts"),
+        ("page_limit", "result cap"),
+    ] {
+        let field_description = input_props[field]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            field_description.contains(phrase),
+            "code_graph input field {field} description does not advertise {phrase:?}: {field_description}"
+        );
+    }
+}
+
 /// The curated chat surface (`filter_chat_allowed_mcp_schemas`) is what the
 /// chat completions handler hands to the provider. Every `object`-typed
 /// (sub)schema in it must carry a `properties` field — OpenAI/Codex's strict
@@ -454,7 +520,10 @@ async fn code_graph_schema_exposes_uid_resolver_and_partial_result_controls() {
         "by_depth_counts",
         "page_limit",
     ] {
-        assert!(props.contains_key(field), "code_graph input schema missing {field}");
+        assert!(
+            props.contains_key(field),
+            "code_graph input schema missing {field}"
+        );
     }
 
     let rendered = serde_json::to_string(tool).expect("code_graph schema serializes");

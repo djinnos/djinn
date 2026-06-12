@@ -26,6 +26,76 @@ async fn code_graph_tool(
     .await
 }
 
+#[test]
+fn code_graph_params_normalize_uid_triplet_and_traversal_pagination_fields() {
+    let mut params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "impact",
+        "project": "owner/repo",
+        "uid": "node:src/lib.rs#AuthService",
+        "name": "AuthService",
+        "file_path": "src/lib.rs",
+        "kind": "struct",
+        "limit": 3,
+        "offset": 40,
+        "summaryOnly": true,
+        "byDepthCounts": true,
+        "pageLimit": 25
+    }))
+    .expect("extension code_graph params should accept MCP/chat resolver and pagination fields");
+
+    params.normalize();
+    params.normalize_resolver_inputs();
+
+    assert_eq!(
+        params.key.as_deref(),
+        Some("node:src/lib.rs#AuthService"),
+        "uid must normalize into key so chat/extension and MCP share exact follow-up resolution"
+    );
+    assert_eq!(params.uid.as_deref(), Some("node:src/lib.rs#AuthService"));
+    assert_eq!(params.name.as_deref(), Some("AuthService"));
+    assert_eq!(params.file_path.as_deref(), Some("src/lib.rs"));
+    assert_eq!(params.kind.as_deref(), Some("struct"));
+    assert_eq!(
+        params.kind_hint.as_deref(),
+        Some("struct"),
+        "kind must feed the existing bridge kind_hint score path"
+    );
+    assert_eq!(params.limit, Some(3));
+    assert_eq!(params.offset, Some(40));
+    assert_eq!(params.summary_only, Some(true));
+    assert_eq!(params.by_depth_counts, Some(true));
+    assert_eq!(params.page_limit, Some(25));
+}
+
+#[test]
+fn code_graph_params_normalize_name_file_kind_when_uid_is_unavailable() {
+    let mut params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "project": "owner/repo",
+        "key": "",
+        "uid": "",
+        "name": "  ",
+        "file_path": "src/auth.rs",
+        "kind": "function"
+    }))
+    .expect("extension code_graph params should deserialize name/file_path/kind resolver triplet");
+
+    // Empty strings are normalized only when exactly empty; trim-like handling
+    // belongs to the graph resolver. Verify the truly-empty uid/key fields do
+    // not mask a non-empty triplet supplied by chat/MCP clients.
+    params.normalize();
+    params.name = Some("login".to_string());
+    params.normalize_resolver_inputs();
+
+    assert_eq!(
+        params.key.as_deref(),
+        Some("login"),
+        "name must become the bridge key when no uid/key exact identity was supplied"
+    );
+    assert_eq!(params.file_path.as_deref(), Some("src/auth.rs"));
+    assert_eq!(params.kind_hint.as_deref(), Some("function"));
+}
+
 #[tokio::test]
 async fn code_graph_dispatch_neighbors_reaches_graph_ops() {
     let worktree = crate::test_helpers::test_tempdir("djinn-cg-neighbors-");
