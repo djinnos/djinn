@@ -426,6 +426,13 @@ impl CoordinatorActor {
             // state, then terminally close (ForceClose) with the recoverable reason.
             self.dispatch_failure_streak.remove(&task.id);
             self.dispatch_cooldowns.remove(&task.id);
+            self.last_dispatched.remove(&task.id);
+            self.clear_durable_dispatch_backoff_state(
+                &task.id,
+                Some(&task.short_id),
+                "planner_second_strike_terminal_close_clear",
+            )
+            .await;
             self.terminally_fail_task(task, role, &reason).await;
             return true;
         }
@@ -478,6 +485,13 @@ impl CoordinatorActor {
         // stale failure streak attributed to the original task.
         self.dispatch_failure_streak.remove(&task.id);
         self.dispatch_cooldowns.remove(&task.id);
+        self.last_dispatched.remove(&task.id);
+        self.clear_durable_dispatch_backoff_state(
+            &task.id,
+            Some(&task.short_id),
+            "planner_intervention_handoff_clear",
+        )
+        .await;
 
         self.dispatch_planner_escalation(&task.id, reason, &task.project_id)
             .await;
