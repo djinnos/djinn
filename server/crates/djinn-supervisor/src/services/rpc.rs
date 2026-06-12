@@ -634,6 +634,31 @@ impl SupervisorServices for RpcServices {
         }
     }
 
+    async fn flush_session_tokens(
+        &self,
+        session_id: String,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+    ) -> Result<(), String> {
+        match self
+            .roundtrip(ServiceRpcRequest::FlushSessionTokens {
+                session_id,
+                tokens_in,
+                tokens_out,
+                cache_read,
+                cache_write,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::FlushSessionTokens(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn emit_djinn_event(
         &self,
         event: crate::services::SerializableDjinnEvent,

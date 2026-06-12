@@ -456,6 +456,42 @@ impl SessionRepository {
         self.fetch_and_emit_update(id).await
     }
 
+    /// Mid-flight token-counter flush for a still-running session.
+    ///
+    /// Long sessions otherwise show `tokens_in = 0` until they end, because
+    /// `update()` is only called at reply-loop teardown. This writes the token
+    /// columns ONLY — no `status`, no `ended_at` — and is guarded by
+    /// `status = 'running'` so a flush racing the zombie reaper / stall killer
+    /// can never resurrect or overwrite a terminal row. Best-effort: a missed
+    /// flush is corrected by the next one or by the final `update()`.
+    pub async fn flush_tokens(
+        &self,
+        id: &str,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+
+        sqlx::query!(
+            r#"UPDATE sessions
+             SET tokens_in = $1,
+                 tokens_out = $2,
+                 cache_read_tokens = $3,
+                 cache_write_tokens = $4
+             WHERE id = $5 AND status = 'running'"#,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+            id
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
     /// Set a paused session back to Running (for resume cycles).
     pub async fn set_running(&self, id: &str) -> Result<SessionRecord> {
         self.db.ensure_initialized().await?;
