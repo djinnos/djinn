@@ -953,7 +953,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn spawn_verification_defers_without_registering_when_global_pause_is_active() {
         let (_task_repo, task_id, app_state) = setup_verifying_task_with_count_blocking(0);
         DispatchPauseRepository::new(app_state.db.clone(), app_state.event_bus.clone())

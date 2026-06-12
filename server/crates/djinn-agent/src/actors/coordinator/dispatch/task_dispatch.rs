@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy dispatch module over size-guard threshold; split when touched substantively.
 use super::super::*;
 use super::DispatchOutcome;
 use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pause};
