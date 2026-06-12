@@ -185,6 +185,7 @@ impl RepoGraphBridge {
                 neighbors.push((
                     other_node,
                     GraphNeighbor {
+                        uid: other_key.clone(),
                         key: other_key,
                         kind: format!("{:?}", other_node.kind).to_lowercase(),
                         display_name: other_node.display_name.clone(),
@@ -436,6 +437,7 @@ impl RepoGraphBridge {
                 let process_id = shared::pick_lowest_ordinal_process_id(&graph, node.node_index);
                 let community_id = graph.community_id(node.node_index).map(|s| s.to_string());
                 Some(RankedNode {
+                    uid: key.clone(),
                     key,
                     kind: format!("{:?}", node.kind).to_lowercase(),
                     display_name: graph_node.display_name.clone(),
@@ -490,7 +492,6 @@ impl RepoGraphBridge {
         ctx: &ProjectCtx,
         symbol: &str,
     ) -> Result<Vec<String>, String> {
-        use djinn_graph::repo_graph::RepoGraphEdgeKind;
         let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
             &self.state,
             &ctx.id,
@@ -502,36 +503,17 @@ impl RepoGraphBridge {
         // copy of an interface implementation) don't show up alongside
         // the in-repo implementors.
         let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
-        let node_index = graph
-            .symbol_node(symbol)
-            .ok_or_else(|| format!("symbol '{symbol}' not found in graph"))?;
-        let mut impls = Vec::new();
-        for edge in graph
-            .graph()
-            .edges_directed(node_index, petgraph::Direction::Incoming)
-        {
-            if edge.weight().kind == RepoGraphEdgeKind::Implements {
-                let source_node = graph.node(edge.source());
-                // v8: skip external (vendored / third-party) implementors.
-                // "Who implements this trait" should be in-repo by default.
-                if source_node.is_external {
-                    continue;
-                }
-                if let Some(sym) = &source_node.symbol {
-                    let src_key = format_node_key(&source_node.id);
-                    let src_file = source_node
-                        .file_path
-                        .as_ref()
-                        .map(|p| p.display().to_string());
-                    if exclusions.excludes(&src_key, src_file.as_deref(), &source_node.display_name)
-                    {
-                        continue;
-                    }
-                    impls.push(sym.clone());
-                }
-            }
-        }
-        Ok(impls)
+        // Route through the shared resolver so the call accepts the
+        // canonical `symbol:<scip>`-prefixed form that MCP/chat
+        // pre-resolution produces (see
+        // `graph_ops::insights::resolve` returning
+        // `ResolveOutcome::Found(format_node_key(...))`). Before this
+        // carve-out, `graph.symbol_node` was called directly with the
+        // bare SCIP symbol and the op would fail with
+        // `symbol 'symbol:…' not found in graph` once a caller passed
+        // the canonical key.
+        let node_index = resolve_node_or_err(&graph, symbol)?;
+        Ok(collect_implementations(&graph, node_index, &exclusions))
     }
 
     pub(super) async fn impact(
@@ -646,6 +628,7 @@ impl RepoGraphBridge {
                 continue;
             }
             out.push(SearchHit {
+                uid: key.clone(),
                 key,
                 kind: format!("{:?}", node.kind).to_lowercase(),
                 display_name: node.display_name.clone(),
@@ -710,6 +693,7 @@ impl RepoGraphBridge {
                         let node = graph.node(*idx);
                         CycleMember {
                             key: format_node_key(&node.id),
+                            uid: format_node_key(&node.id),
                             display_name: node.display_name.clone(),
                             kind: format!("{:?}", node.kind).to_lowercase(),
                         }
@@ -808,6 +792,7 @@ impl RepoGraphBridge {
             }
             out.push(OrphanEntry {
                 key: format_node_key(&node.id),
+                uid: format_node_key(&node.id),
                 kind: format!("{:?}", node.kind).to_lowercase(),
                 display_name: node.display_name.clone(),
                 file: shared::repo_graph_node_file_path(node),
@@ -855,6 +840,7 @@ impl RepoGraphBridge {
             let dst_node = graph.node(dst);
             hops.push(PathHop {
                 key: format_node_key(&dst_node.id),
+                uid: format_node_key(&dst_node.id),
                 edge_kind,
             });
         }
@@ -1166,6 +1152,7 @@ impl RepoGraphBridge {
             .into_iter()
             .map(|p| ProcessRef {
                 id: p.id.clone(),
+                uid: p.id.clone(),
                 label: p.label.clone(),
                 role: "step".to_string(),
             })
@@ -1234,5 +1221,81 @@ impl RepoGraphBridge {
                         .unwrap_or_else(|_| serde_json::Value::Null)
                     }),
         })
+    }
+}
+
+/// Collect the implementor symbols for the trait/interface node at
+/// `target`. Extracted from [`RepoGraphBridge::implementations`] so the
+/// same predicate (and exclusion filter) can be exercised in unit
+/// tests without spinning up an [`AppState`].
+///
+/// Walks every incoming `Implements` edge to `target`, drops external
+/// implementors and anything filtered by `exclusions`, and returns the
+/// remaining implementor SCIP symbol strings in graph order. The order
+/// is deterministic (petgraph's storage order over `edges_directed`)
+/// so callers can `==`-compare two result lists.
+fn collect_implementations(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+    target: petgraph::graph::NodeIndex,
+    exclusions: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
+) -> Vec<String> {
+    use djinn_graph::repo_graph::RepoGraphEdgeKind;
+    let mut impls = Vec::new();
+    for edge in graph
+        .graph()
+        .edges_directed(target, petgraph::Direction::Incoming)
+    {
+        if edge.weight().kind != RepoGraphEdgeKind::Implements {
+            continue;
+        }
+        let source_node = graph.node(edge.source());
+        // v8: skip external (vendored / third-party) implementors.
+        // "Who implements this trait" should be in-repo by default.
+        if source_node.is_external {
+            continue;
+        }
+        let Some(sym) = &source_node.symbol else {
+            continue;
+        };
+        let src_key = format_node_key(&source_node.id);
+        let src_file = source_node
+            .file_path
+            .as_ref()
+            .map(|p| p.display().to_string());
+        if exclusions.excludes(&src_key, src_file.as_deref(), &source_node.display_name) {
+            continue;
+        }
+        impls.push(sym.clone());
+    }
+    impls
+}
+
+#[cfg(test)]
+pub(super) mod test_helpers {
+    //! Re-export the inner `implementations` algorithm and the shared
+    //! resolver shim so the `graph_ops::tests` module can drive both
+    //! the bare-SCIP and `symbol:<scip>`-prefixed call shapes against
+    //! a fixture graph without standing up an `AppState`. Mirrors the
+    //! `flow::test_helpers` / `routes::test_helpers` pattern used by
+    //! the rest of the bridge op module.
+    use super::*;
+    use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+    use djinn_graph::repo_graph::RepoDependencyGraph;
+
+    /// Resolve `key` against `graph` via the shared resolver and
+    /// return the same implementor list the bridge op would return.
+    /// `key` is forwarded verbatim — passing a bare SCIP symbol and
+    /// the canonical `symbol:<scip>` form must produce identical
+    /// results.
+    pub(crate) fn implementations_for_graph(
+        graph: &RepoDependencyGraph,
+        key: &str,
+    ) -> Result<Vec<String>, String> {
+        let node_index = resolve_node_or_err(graph, key)?;
+        Ok(collect_implementations(
+            graph,
+            node_index,
+            &GraphExclusions::empty(),
+        ))
     }
 }
