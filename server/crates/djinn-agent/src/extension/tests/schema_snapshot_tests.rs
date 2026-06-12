@@ -260,6 +260,35 @@ fn code_graph_schema_embeds_workflow_guidance() {
 }
 
 #[test]
+fn proposal_ac_amend_schema_documents_operations_and_reasons() {
+    let schema = serde_json::to_value(shared_schemas::tool_proposal_ac_amend())
+        .expect("serialize proposal_ac_amend schema");
+    assert_eq!(schema["name"], "proposal_ac_amend");
+    assert_eq!(
+        schema["inputSchema"]["required"],
+        serde_json::json!(["id", "reason", "amendments"])
+    );
+    assert_eq!(
+        schema["inputSchema"]["properties"]["reason"]["minLength"],
+        serde_json::json!(1)
+    );
+    assert_eq!(
+        schema["inputSchema"]["properties"]["amendments"]["minItems"],
+        serde_json::json!(1)
+    );
+    let item = &schema["inputSchema"]["properties"]["amendments"]["items"];
+    assert_eq!(item["required"], serde_json::json!(["operation", "index"]));
+    assert_eq!(
+        item["properties"]["operation"]["enum"],
+        serde_json::json!(["rewrite", "drop", "waive"])
+    );
+    assert_eq!(
+        item["properties"]["criterion"]["description"],
+        "New criterion text; required and non-empty when operation is rewrite."
+    );
+}
+
+#[test]
 fn loaded_skills_and_progressive_disclosure_reference_only_registered_worker_tools() {
     let project_root = crate::test_helpers::test_tempdir("djinn-skill-lockstep-");
     let skill_dir = project_root.path().join(".djinn").join("skills");
@@ -362,6 +391,7 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(planner.iter().any(|n| n == "task_create"));
     assert!(planner.iter().any(|n| n == "task_transition"));
     assert!(planner.iter().any(|n| n == "submit_grooming"));
+    assert!(planner.iter().any(|n| n == "proposal_ac_amend"));
     // The Planner may curate the KB while reshaping the board.
     assert!(planner.iter().any(|n| n == "memory_write"));
     assert!(planner.iter().any(|n| n == "memory_edit"));
@@ -561,8 +591,9 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
             Some(idempotent_mutation)
         }
         "task_create" | "epic_create" | "task_transition" | "task_comment_add" | "memory_write"
-        | "memory_edit" | "memory_move" | "request_lead" | "request_planner" | "submit_work"
-        | "submit_review" | "submit_decision" | "submit_grooming" => Some(mutation),
+        | "memory_edit" | "memory_move" | "request_lead" | "request_planner"
+        | "proposal_ac_amend" | "submit_work" | "submit_review" | "submit_decision"
+        | "submit_grooming" => Some(mutation),
         "shell"
         | "write"
         | "edit"

@@ -311,24 +311,31 @@ pub(crate) fn tool_proposal_ac_set() -> RmcpTool {
 pub(crate) fn tool_proposal_ac_amend() -> RmcpTool {
     RmcpTool::new(
         "proposal_ac_amend".to_string(),
-        "Amend a proposal's acceptance-criteria spec with audited revision semantics. Each amendment targets a zero-based criterion index and uses operation `rewrite`, `drop`, or `waive`: rewrite replaces criterion text and requires `criterion`; drop removes the criterion; waive marks it waived. Requires a non-empty reason. This is a real spec edit: it bumps the proposal revision, retains sign-offs, and records feedback/audit.".to_string(),
+        "Amend a proposal's acceptance-criteria spec with audited revision semantics. Each amendment targets a zero-based criterion index and uses operation `rewrite`, `drop`, or `waive`: rewrite replaces criterion text and requires `criterion`; drop removes the criterion; waive marks it waived. Requires a non-empty top-level reason. This is a real spec edit: it bumps the proposal revision, retains sign-offs, and records feedback/audit. Use proposal_ac_set instead when only reconciling met flags.".to_string(),
         object!({
             "type": "object",
             "required": ["id", "reason", "amendments"],
             "properties": {
                 "id": {"type": "string", "description": "Proposal UUID or short ID"},
-                "reason": {"type": "string", "description": "Required explanation for the acceptance-criteria amendment audit trail"},
+                "reason": {"type": "string", "minLength": 1, "description": "Required non-empty explanation for the acceptance-criteria amendment audit trail"},
                 "amendments": {
                     "type": "array",
-                    "description": "One or more spec amendments applied in order. Operations target zero-based acceptance-criteria indexes from proposal_show.",
+                    "minItems": 1,
+                    "description": "One or more spec amendments applied in order. Operations target zero-based acceptance-criteria indexes from proposal_show; drops affect later indexes, so order multi-drop operations carefully.",
                     "items": {
                         "type": "object",
                         "required": ["operation", "index"],
                         "properties": {
-                            "operation": {"type": "string", "description": "Amendment operation: rewrite, drop, or waive"},
-                            "index": {"type": "integer", "minimum": 0, "description": "Zero-based acceptance-criteria index"},
-                            "criterion": {"type": "string", "description": "New criterion text; required and non-empty when operation is rewrite"}
-                        }
+                            "operation": {"type": "string", "enum": ["rewrite", "drop", "waive"], "description": "Amendment operation: rewrite replaces criterion text; drop removes the criterion; waive keeps it but marks it waived."},
+                            "index": {"type": "integer", "minimum": 0, "description": "Zero-based acceptance-criteria index to amend."},
+                            "criterion": {"type": "string", "minLength": 1, "description": "New criterion text; required and non-empty when operation is rewrite."}
+                        },
+                        "allOf": [
+                            {
+                                "if": {"properties": {"operation": {"const": "rewrite"}}},
+                                "then": {"required": ["criterion"]}
+                            }
+                        ]
                     }
                 }
             }

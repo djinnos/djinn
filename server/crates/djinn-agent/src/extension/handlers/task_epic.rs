@@ -543,8 +543,9 @@ pub(crate) async fn call_proposal_ac_amend(
     }
 
     let mut amendments = Vec::with_capacity(p.amendments.len());
-    for amendment in &p.amendments {
-        match amendment.operation.as_str() {
+    for (position, amendment) in p.amendments.iter().enumerate() {
+        let operation = amendment.operation.trim();
+        match operation {
             "rewrite" => {
                 let criterion = amendment
                     .criterion
@@ -552,29 +553,24 @@ pub(crate) async fn call_proposal_ac_amend(
                     .map(str::trim)
                     .filter(|text| !text.is_empty())
                     .ok_or_else(|| {
-                        "proposal_ac_amend rewrite amendments require a non-empty `criterion`"
-                            .to_string()
+                        format!(
+                            "proposal_ac_amend amendments[{position}] operation=rewrite requires a non-empty `criterion`"
+                        )
                     })?;
-                amendments.push(
-                    djinn_db::repositories::proposal::ProposalAcceptanceCriteriaAmendment::Rewrite {
-                        index: amendment.index,
-                        criterion,
-                    },
-                );
+                amendments.push(ProposalAcceptanceCriteriaAmendment::Rewrite {
+                    index: amendment.index,
+                    criterion,
+                });
             }
-            "drop" => amendments.push(
-                djinn_db::repositories::proposal::ProposalAcceptanceCriteriaAmendment::Drop {
-                    index: amendment.index,
-                },
-            ),
-            "waive" => amendments.push(
-                djinn_db::repositories::proposal::ProposalAcceptanceCriteriaAmendment::Waive {
-                    index: amendment.index,
-                },
-            ),
+            "drop" => amendments.push(ProposalAcceptanceCriteriaAmendment::Drop {
+                index: amendment.index,
+            }),
+            "waive" => amendments.push(ProposalAcceptanceCriteriaAmendment::Waive {
+                index: amendment.index,
+            }),
             other => {
                 return Err(format!(
-                    "unknown proposal_ac_amend operation `{other}` (expected rewrite, drop, or waive)"
+                    "proposal_ac_amend amendments[{position}] has invalid operation `{other}`; expected rewrite, drop, or waive"
                 ));
             }
         }
@@ -590,6 +586,7 @@ pub(crate) async fn call_proposal_ac_amend(
         .map_err(|e| e.to_string())?;
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&updated.acceptance_criteria).unwrap_or_default();
+
     Ok(serde_json::json!({
         "ok": true,
         "id": updated.id,
