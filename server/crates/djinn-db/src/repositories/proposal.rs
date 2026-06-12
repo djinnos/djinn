@@ -92,6 +92,24 @@ pub struct ProposalFeedbackCreateInput<'a> {
     pub target_section: Option<&'a str>,
 }
 
+/// A Planner-authored acceptance-criteria spec amendment. Unlike
+/// [`ProposalRepository::set_acceptance_criteria`], these operations are real
+/// spec edits: they bump the proposal revision and write an audit trail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProposalAcceptanceCriteriaAmendment<'a> {
+    Rewrite { index: usize, criterion: &'a str },
+    Drop { index: usize },
+    Waive { index: usize },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+struct ProposalAcceptanceCriteriaAuditEntry {
+    operation: &'static str,
+    index: usize,
+    old_criterion: serde_json::Value,
+    new_criterion: serde_json::Value,
+}
+
 pub struct ProposalRepository {
     db: Database,
     events: EventBus,
@@ -879,6 +897,168 @@ impl ProposalRepository {
         Ok(proposal)
     }
 
+    /// Apply Planner-authored acceptance-criteria amendments as real spec edits.
+    ///
+    /// Unlike [`Self::set_acceptance_criteria`], this bumps the proposal head
+    /// revision and inserts a feedback audit entry. Unlike [`Self::update`], it
+    /// intentionally retains existing sign-offs and does not demote approved
+    /// proposals; the audit event is the mechanism for humans to object.
+    pub async fn amend_acceptance_criteria(
+        &self,
+        proposal_id: &str,
+        amendments: &[ProposalAcceptanceCriteriaAmendment<'_>],
+        reason: &str,
+    ) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(Error::InvalidData(
+                "acceptance-criteria amendment reason is required".to_owned(),
+            ));
+        }
+        if amendments.is_empty() {
+            return Err(Error::InvalidData(
+                "at least one acceptance-criteria amendment is required".to_owned(),
+            ));
+        }
+
+        let current = self
+            .get(proposal_id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("proposal not found: {proposal_id}")))?;
+        let old_revision_seq = current.latest_revision_seq;
+        let next_revision_seq = old_revision_seq + 1;
+        let mut criteria = serde_json::from_str::<serde_json::Value>(&current.acceptance_criteria)
+            .map_err(|e| {
+                Error::InvalidData(format!(
+                    "invalid json in proposals.acceptance_criteria: {e}"
+                ))
+            })?
+            .as_array()
+            .cloned()
+            .ok_or_else(|| {
+                Error::InvalidData("proposals.acceptance_criteria must be a JSON array".to_owned())
+            })?;
+
+        let mut audit_entries = Vec::with_capacity(amendments.len());
+        for amendment in amendments {
+            match amendment {
+                ProposalAcceptanceCriteriaAmendment::Rewrite { index, criterion } => {
+                    let criterion = criterion.trim();
+                    if criterion.is_empty() {
+                        return Err(Error::InvalidData(
+                            "rewrite acceptance-criteria text is required".to_owned(),
+                        ));
+                    }
+                    let old = criteria.get(*index).cloned().ok_or_else(|| {
+                        Error::InvalidData(format!(
+                            "acceptance-criteria index {index} out of range"
+                        ))
+                    })?;
+                    let mut new = old.clone();
+                    match &mut new {
+                        serde_json::Value::Object(obj) => {
+                            obj.insert(
+                                "criterion".to_owned(),
+                                serde_json::Value::String(criterion.to_owned()),
+                            );
+                        }
+                        _ => new = serde_json::Value::String(criterion.to_owned()),
+                    }
+                    criteria[*index] = new.clone();
+                    audit_entries.push(ProposalAcceptanceCriteriaAuditEntry {
+                        operation: "rewrite",
+                        index: *index,
+                        old_criterion: old,
+                        new_criterion: new,
+                    });
+                }
+                ProposalAcceptanceCriteriaAmendment::Drop { index } => {
+                    if *index >= criteria.len() {
+                        return Err(Error::InvalidData(format!(
+                            "acceptance-criteria index {index} out of range"
+                        )));
+                    }
+                    let old = criteria.remove(*index);
+                    audit_entries.push(ProposalAcceptanceCriteriaAuditEntry {
+                        operation: "drop",
+                        index: *index,
+                        old_criterion: old,
+                        new_criterion: serde_json::json!({"dropped": true}),
+                    });
+                }
+                ProposalAcceptanceCriteriaAmendment::Waive { index } => {
+                    let old = criteria.get(*index).cloned().ok_or_else(|| {
+                        Error::InvalidData(format!(
+                            "acceptance-criteria index {index} out of range"
+                        ))
+                    })?;
+                    let mut new = old.clone();
+                    match &mut new {
+                        serde_json::Value::Object(obj) => {
+                            obj.insert("waived".to_owned(), serde_json::Value::Bool(true));
+                        }
+                        _ => {
+                            new = serde_json::json!({
+                                "criterion": old,
+                                "waived": true
+                            });
+                        }
+                    }
+                    criteria[*index] = new.clone();
+                    audit_entries.push(ProposalAcceptanceCriteriaAuditEntry {
+                        operation: "waive",
+                        index: *index,
+                        old_criterion: old,
+                        new_criterion: new,
+                    });
+                }
+            }
+        }
+
+        let acceptance_criteria = serde_json::Value::Array(criteria);
+        sqlx::query(
+            r#"UPDATE proposals SET acceptance_criteria = $1, latest_revision_seq = $2,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $3"#,
+        )
+        .bind(&acceptance_criteria)
+        .bind(next_revision_seq)
+        .bind(proposal_id)
+        .execute(self.db.pool())
+        .await?;
+        let editor = djinn_core::auth_context::current_user_id();
+        self.insert_revision(
+            proposal_id,
+            next_revision_seq,
+            &current.title,
+            &current.body,
+            &acceptance_criteria,
+            editor.as_deref(),
+        )
+        .await?;
+
+        let audit_json = serde_json::to_string(&audit_entries)
+            .map_err(|e| Error::InvalidData(format!("failed to encode amendment audit: {e}")))?;
+        let body = format!(
+            "Acceptance criteria amended\nreason: {reason}\nrevision: {old_revision_seq} -> {next_revision_seq}\namendments: {audit_json}"
+        );
+        self.add_feedback(ProposalFeedbackCreateInput {
+            proposal_id,
+            parent_id: None,
+            author_kind: "ai",
+            author_model: None,
+            body: &body,
+            target_section: Some("acceptance_criteria"),
+        })
+        .await?;
+
+        let proposal = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&proposal));
+        Ok(proposal)
+    }
+
     /// `building` proposals whose build has fully drained — at least one
     /// graduated epic, and every graduated epic closed — for the coordinator's
     /// backfill sweep. Catches proposals whose epics closed before the review
@@ -1504,6 +1684,162 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&updated.acceptance_criteria).unwrap();
         assert_eq!(parsed[0]["met"], serde_json::json!(true));
         assert_eq!(parsed[1]["met"], serde_json::json!(false));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn amend_acceptance_criteria_rewrites_drops_waives_and_audits() {
+        let (bus, captured) = capturing_bus();
+        let repo = ProposalRepository::new(test_db(), bus);
+        let p = repo
+            .create(ProposalCreateInput {
+                title: "AC amend",
+                body: "body",
+                acceptance_criteria: Some(
+                    r#"[{"criterion":"rewrite me","met":false},{"criterion":"drop me","met":false},{"criterion":"waive me","met":false}]"#,
+                ),
+                status: Some("in_review"),
+            })
+            .await
+            .unwrap();
+        repo.add_signoff(&p.id, "scoped", "u1").await.unwrap();
+        let signoffs_before = repo.signoffs(&p.id).await.unwrap();
+        captured.lock().unwrap().clear();
+
+        let updated = repo
+            .amend_acceptance_criteria(
+                &p.id,
+                &[
+                    ProposalAcceptanceCriteriaAmendment::Rewrite {
+                        index: 0,
+                        criterion: "rewritten criterion",
+                    },
+                    ProposalAcceptanceCriteriaAmendment::Drop { index: 1 },
+                    ProposalAcceptanceCriteriaAmendment::Waive { index: 1 },
+                ],
+                "criterion 2 cannot be verified by agents",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.latest_revision_seq, p.latest_revision_seq + 1);
+        assert_eq!(repo.revisions(&p.id).await.unwrap().len(), 2);
+        let signoffs_after = repo.signoffs(&p.id).await.unwrap();
+        assert_eq!(signoffs_after.len(), signoffs_before.len());
+        assert_eq!(
+            signoffs_after[0].proposal_id,
+            signoffs_before[0].proposal_id
+        );
+        assert_eq!(signoffs_after[0].kind, signoffs_before[0].kind);
+        assert_eq!(signoffs_after[0].user_id, signoffs_before[0].user_id);
+        assert_eq!(
+            signoffs_after[0].revision_seq,
+            signoffs_before[0].revision_seq
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&updated.acceptance_criteria).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 2);
+        assert_eq!(
+            parsed[0]["criterion"],
+            serde_json::json!("rewritten criterion")
+        );
+        assert_eq!(parsed[0]["met"], serde_json::json!(false));
+        assert_eq!(parsed[1]["criterion"], serde_json::json!("waive me"));
+        assert_eq!(parsed[1]["waived"], serde_json::json!(true));
+
+        let feedback = repo.feedback(&p.id).await.unwrap();
+        assert_eq!(feedback.len(), 1);
+        let audit = &feedback[0];
+        assert_eq!(audit.author_kind, "ai");
+        assert_eq!(audit.target_section.as_deref(), Some("acceptance_criteria"));
+        assert!(
+            audit
+                .body
+                .contains("reason: criterion 2 cannot be verified by agents")
+        );
+        assert!(audit.body.contains("revision: 1 -> 2"));
+        let amendments_json = audit
+            .body
+            .strip_prefix(&format!(
+                "Acceptance criteria amended\nreason: {}\nrevision: 1 -> 2\namendments: ",
+                "criterion 2 cannot be verified by agents"
+            ))
+            .unwrap();
+        let audit_entries: serde_json::Value = serde_json::from_str(amendments_json).unwrap();
+        let audit_entries = audit_entries.as_array().unwrap();
+        assert_eq!(audit_entries.len(), 3);
+        assert_eq!(audit_entries[0]["operation"], serde_json::json!("rewrite"));
+        assert_eq!(audit_entries[1]["operation"], serde_json::json!("drop"));
+        assert_eq!(audit_entries[2]["operation"], serde_json::json!("waive"));
+        assert_eq!(
+            audit_entries[1]["old_criterion"],
+            serde_json::json!({"criterion": "drop me", "met": false})
+        );
+        assert_eq!(
+            audit_entries[1]["new_criterion"],
+            serde_json::json!({"dropped": true})
+        );
+
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].entity_type, "proposal_feedback");
+        assert_eq!(events[0].action, "created");
+        assert_eq!(events[1].entity_type, "proposal");
+        assert_eq!(events[1].action, "updated");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn amend_acceptance_criteria_validates_without_mutating() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo
+            .create(ProposalCreateInput {
+                title: "AC invalid",
+                body: "body",
+                acceptance_criteria: Some(r#"[{"criterion":"keep","met":false}]"#),
+                status: None,
+            })
+            .await
+            .unwrap();
+        let before = repo.get(&p.id).await.unwrap().unwrap();
+
+        let empty_reason = repo
+            .amend_acceptance_criteria(
+                &p.id,
+                &[ProposalAcceptanceCriteriaAmendment::Rewrite {
+                    index: 0,
+                    criterion: "changed",
+                }],
+                "   ",
+            )
+            .await;
+        assert!(empty_reason.is_err());
+        let after_empty_reason = repo.get(&p.id).await.unwrap().unwrap();
+        assert_eq!(
+            after_empty_reason.acceptance_criteria,
+            before.acceptance_criteria
+        );
+        assert_eq!(
+            after_empty_reason.latest_revision_seq,
+            before.latest_revision_seq
+        );
+
+        let bad_index = repo
+            .amend_acceptance_criteria(
+                &p.id,
+                &[ProposalAcceptanceCriteriaAmendment::Drop { index: 7 }],
+                "bad index",
+            )
+            .await;
+        assert!(bad_index.is_err());
+        let after_bad_index = repo.get(&p.id).await.unwrap().unwrap();
+        assert_eq!(
+            after_bad_index.acceptance_criteria,
+            before.acceptance_criteria
+        );
+        assert_eq!(
+            after_bad_index.latest_revision_seq,
+            before.latest_revision_seq
+        );
+        assert!(repo.feedback(&p.id).await.unwrap().is_empty());
+        assert_eq!(repo.revisions(&p.id).await.unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

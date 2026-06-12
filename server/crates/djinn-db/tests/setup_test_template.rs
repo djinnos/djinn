@@ -10,9 +10,9 @@
 #[tokio::test]
 #[ignore]
 async fn setup_test_template() {
-    use std::path::Path;
     use sqlx::Connection;
     use sqlx::postgres::PgConnection;
+    use std::path::Path;
 
     let base = std::env::var("DJINN_TEST_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://djinn:VipjO1uAdxAGvNSA6EcJdZMdHAquYeJj@djinn-postgres.djinn.svc.cluster.local:5432/djinn".to_owned());
@@ -24,7 +24,9 @@ async fn setup_test_template() {
         .to_owned();
     let admin_url = format!("{server_prefix}/postgres");
 
-    let mut conn = PgConnection::connect(&admin_url).await.expect("connect admin");
+    let mut conn = PgConnection::connect(&admin_url)
+        .await
+        .expect("connect admin");
     let _ = sqlx::query(
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
          WHERE datname = 'djinn_test_template' AND pid <> pg_backend_pid()",
@@ -96,9 +98,11 @@ async fn setup_test_template() {
     let mut conn = PgConnection::connect(&admin_url)
         .await
         .expect("reconnect admin");
-    sqlx::query("UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'")
-        .execute(&mut conn)
-        .await
-        .expect("mark template");
+    sqlx::query(
+        "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'",
+    )
+    .execute(&mut conn)
+    .await
+    .expect("mark template");
     println!("djinn_test_template ready at {template_url}");
 }
