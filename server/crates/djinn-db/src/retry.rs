@@ -40,9 +40,10 @@ pub fn is_serialization_failure(err: &DbError) -> bool {
     matches!(db_err.code().as_deref(), Some("40001") | Some("40P01"))
 }
 
-/// Run `op` and retry up to `max_attempts` times when it returns a Dolt
-/// serialization failure. Backoff is exponential starting at 20 ms so the
-/// contending writer has a chance to finish before the next attempt.
+/// Run `op` and retry up to `max_attempts` times when it returns a Postgres
+/// serialization failure (`40001`) or deadlock (`40P01`). Backoff is exponential
+/// starting at 20 ms so the contending writer has a chance to finish before the
+/// next attempt.
 ///
 /// Non-serialization errors short-circuit immediately; any error from the
 /// final attempt is returned verbatim.
