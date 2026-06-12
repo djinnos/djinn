@@ -30,6 +30,41 @@ static AMBIGUITY_ENV_LOCK: Mutex<()> = Mutex::new(());
 /// the lock so they can't see a transient `false`.
 pub(super) static ROUTE_PARITY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// RAII guard that restores `DJINN_ROUTE_PARITY` to its previous
+/// value on drop (including panic unwinds). Pair with
+/// `ROUTE_PARITY_TEST_LOCK` so the mutation window can't race
+/// peer tests.
+pub(super) struct RouteParityGuard {
+    prev: Option<String>,
+}
+
+impl RouteParityGuard {
+    /// Set `DJINN_ROUTE_PARITY` to `value` and return a guard that
+    /// will restore the prior env state on drop.
+    pub(super) fn set(value: &str) -> Self {
+        let prev = std::env::var(djinn_graph::route_extraction::ROUTE_PARITY_FLAG).ok();
+        // SAFETY: callers pair this with `ROUTE_PARITY_TEST_LOCK`
+        // so the env mutation can't race peer threads.
+        unsafe {
+            std::env::set_var(djinn_graph::route_extraction::ROUTE_PARITY_FLAG, value);
+        }
+        Self { prev }
+    }
+}
+
+impl Drop for RouteParityGuard {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(value) => unsafe {
+                std::env::set_var(djinn_graph::route_extraction::ROUTE_PARITY_FLAG, value);
+            },
+            None => unsafe {
+                std::env::remove_var(djinn_graph::route_extraction::ROUTE_PARITY_FLAG);
+            },
+        }
+    }
+}
+
 fn fixture_index() -> ParsedScipIndex {
     let helper_symbol_name = "scip-rust pkg src/helper.rs `helper`().".to_string();
     let helper_symbol = ScipSymbol {

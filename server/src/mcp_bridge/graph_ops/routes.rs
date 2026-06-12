@@ -7,6 +7,7 @@ use djinn_control_plane::bridge::{
 };
 use djinn_graph::repo_graph::{
     RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
+    RouteExclusionConfig,
 };
 use petgraph::Direction;
 use petgraph::graph::NodeIndex;
@@ -453,14 +454,22 @@ fn api_impact_on_graph(
         }
     }
 
+    // PR s6ch / 92z7: gate the policy argument on `route_parity_enabled()`
+    // so the transitive API-impact BFS agrees with the consumer-side
+    // helpers (`route_excluded_reason` / `route_consumer_excluded_reason`).
+    // With the flag off, passing `None` makes `impact_bfs_with_policy`
+    // behave like the legacy `impact_bfs` — no `exclusion_reason` is
+    // stamped, the pre-filter consumer set is returned as hard blast-
+    // radius links, and `excluded_impacts` stays empty. With the flag
+    // on, below-floor / health-path / param-only-path `Fetches` edges
+    // are downgraded to suggestions and surfaced via `excluded_impacts`.
+    let policy: Option<&RouteExclusionConfig> =
+        djinn_graph::route_extraction::route_parity_enabled()
+            .then(|| graph.route_exclusion_config());
     for start in seed.handler.into_iter().chain(std::iter::once(seed.route)) {
-        for (idx, impact) in shared::impact_bfs_with_policy(
-            graph,
-            start,
-            3,
-            Some(min_confidence),
-            Some(graph.route_exclusion_config()),
-        ) {
+        for (idx, impact) in
+            shared::impact_bfs_with_policy(graph, start, 3, Some(min_confidence), policy)
+        {
             let node = graph.node(idx);
             if node.is_external || node.kind != RepoGraphNodeKind::Symbol {
                 continue;
@@ -916,5 +925,12 @@ pub(super) mod test_helpers {
 
     pub(crate) fn api_impact_for_graph(graph: &RepoDependencyGraph) -> ApiImpactResult {
         api_impact_on_graph(graph, Some("GET /api/agents (axum)"), None, None, 0.5, 20)
+    }
+
+    pub(crate) fn api_impact_for_graph_with_route_id(
+        graph: &RepoDependencyGraph,
+        route_id: &str,
+    ) -> ApiImpactResult {
+        api_impact_on_graph(graph, Some(route_id), None, None, 0.5, 20)
     }
 }
