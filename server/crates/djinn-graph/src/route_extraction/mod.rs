@@ -372,6 +372,8 @@ fn is_rust_file(lang: Option<&str>, path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod e2e;
+
     use std::collections::BTreeMap;
 
     use super::*;
