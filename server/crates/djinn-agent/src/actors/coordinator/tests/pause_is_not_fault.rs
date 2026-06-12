@@ -72,10 +72,11 @@ async fn paused_task_dispatch_does_not_mutate_dispatch_fault_accounting_or_healt
     // does not TOUCH them either way (no spurious increment, no spurious
     // clear, no spurious insert).
     let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let seeded_last_dispatched = StdInstant::now();
     actor.last_dispatched.insert(
         task.id.clone(),
         DispatchMarker {
-            instant: StdInstant::now(),
+            instant: seeded_last_dispatched,
             role: "reviewer".to_owned(),
         },
     );
@@ -124,9 +125,10 @@ async fn paused_task_dispatch_does_not_mutate_dispatch_fault_accounting_or_healt
         marker.role, "reviewer",
         "pause-skip must not change the pre-seeded role of last_dispatched"
     );
-    // The seeded marker was inserted at "now" — pause-skip must not roll it
-    // forward. Verify by checking it is NOT a new entry (the original marker
-    // survives without modification).
+    assert_eq!(
+        marker.instant, seeded_last_dispatched,
+        "pause-skip must not advance last_dispatched as a dispatch/failure signal"
+    );
     assert_eq!(
         actor.dispatch_failure_streak.get(&task.id).copied(),
         Some(2),
@@ -223,6 +225,11 @@ async fn paused_task_dispatch_does_not_mutate_durable_dispatch_state_row() {
         after.last_dispatched_role.as_deref(),
         Some("worker"),
         "pause-skip must not clear last_dispatched_role"
+    );
+    assert_eq!(
+        after.last_dispatched_at.as_deref(),
+        Some(last_dispatched_str.as_str()),
+        "pause-skip must not clear or rewrite last_dispatched_at"
     );
     assert_eq!(
         after.inflight_creator_user_id.as_deref(),
@@ -324,6 +331,16 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
         .execute(db.pool())
         .await
         .unwrap();
+    let run_id = "pause-active-run";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind(run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
     let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let session = session_repo
         .create(CreateSessionParams {
@@ -332,7 +349,7 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
             model: "test/mock",
             agent_type: "worker",
             metadata_json: None,
-            task_run_id: None,
+            task_run_id: Some(run_id),
         })
         .await
         .unwrap();
@@ -385,12 +402,7 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
                 },
             );
             SlotHandle::spawn_with_test_runner(
-                slot_id,
-                model_id,
-                event_tx,
-                app_state,
-                cancel,
-                runner,
+                slot_id, model_id, event_tx, app_state, cancel, runner,
             )
         }),
     );
@@ -428,7 +440,7 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
     // to its original task, untouched.
     assert!(
         runtime.calls().is_empty(),
-        "pause must not trigger task-run Job teardown for an active session"
+        "pause must not trigger task-run Job teardown for an active session with a task_run_id"
     );
 
     // The DB session row is still `running` and listed by `list_active()`.
