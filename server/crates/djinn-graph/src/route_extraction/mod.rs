@@ -23,8 +23,8 @@ use crate::repo_graph::{
     RouteExclusionConfig,
 };
 
-/// Environment flag that disables route extraction when set to `0` / `false`.
-/// Default = on.
+/// Environment flag that disables route extraction when set to `0` / `false`
+/// / `no` / `off` (case-insensitive). Default = on.
 pub const ROUTE_DETECTION_FLAG: &str = "DJINN_ROUTE_DETECTION";
 
 /// Environment flag for the route-parity rollout gate. Default = on.
@@ -82,7 +82,12 @@ impl<'a> RouteExtractionOptions<'a> {
 
 /// Returns `true` when route extraction should run.
 pub fn route_detection_enabled() -> bool {
-    env_flag_enabled(std::env::var(ROUTE_DETECTION_FLAG).ok().as_deref())
+    route_detection_enabled_from_var(std::env::var(ROUTE_DETECTION_FLAG).ok().as_deref())
+}
+
+/// Pure helper for tests/callers that already resolved the env var.
+pub fn route_detection_enabled_from_var(value: Option<&str>) -> bool {
+    env_flag_enabled(value)
 }
 
 /// Returns `true` when route parity behavior should be active.
@@ -620,11 +625,27 @@ mod tests {
         let _guard = ROUTE_DETECTION_ENV_LOCK.lock().unwrap();
         unsafe { std::env::remove_var(ROUTE_DETECTION_FLAG) };
         assert!(route_detection_enabled());
-        unsafe { std::env::set_var(ROUTE_DETECTION_FLAG, "0") };
-        assert!(!route_detection_enabled());
+        for value in ["0", "false", "no", "off", " OFF "] {
+            unsafe { std::env::set_var(ROUTE_DETECTION_FLAG, value) };
+            assert!(
+                !route_detection_enabled(),
+                "{ROUTE_DETECTION_FLAG}={value:?} must disable route extraction"
+            );
+        }
         unsafe { std::env::set_var(ROUTE_DETECTION_FLAG, "true") };
         assert!(route_detection_enabled());
         unsafe { std::env::remove_var(ROUTE_DETECTION_FLAG) };
+    }
+
+    #[test]
+    fn route_detection_pure_env_helper_matches_process_gate_shape() {
+        assert!(route_detection_enabled_from_var(None));
+        for value in ["1", "true", "yes", "on", "anything"] {
+            assert!(route_detection_enabled_from_var(Some(value)));
+        }
+        for value in ["0", "false", "no", "off", " OFF "] {
+            assert!(!route_detection_enabled_from_var(Some(value)));
+        }
     }
 
     #[test]
