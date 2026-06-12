@@ -31,6 +31,8 @@ pub struct Proposal {
     /// Last proposal revision that the in-flight build has reconciled against.
     /// `None` means no build reconciliation has been stamped for this proposal.
     pub last_reconciled_revision_seq: Option<i32>,
+    /// When the in-flight build was last reconciled against a proposal revision.
+    pub reconciled_at: Option<String>,
     /// True when the latest proposal revision is newer than the revision the
     /// in-flight build has reconciled against.
     pub pending_reconcile: bool,

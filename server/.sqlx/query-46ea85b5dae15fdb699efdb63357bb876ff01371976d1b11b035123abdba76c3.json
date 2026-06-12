@@ -1,0 +1,124 @@
+{
+   "hash" : "46ea85b5dae15fdb699efdb63357bb876ff01371976d1b11b035123abdba76c3",
+   "describe" : {
+      "nullable" : [
+         false,
+         false,
+         false,
+         false,
+         null,
+         false,
+         true,
+         true,
+         false,
+         false,
+         true,
+         false,
+         true,
+         true,
+         false,
+         true,
+         false,
+         true
+      ],
+      "parameters" : {
+         "Left" : [
+            "Text"
+         ]
+      },
+      "columns" : [
+         {
+            "ordinal" : 0,
+            "type_info" : "Varchar",
+            "name" : "id"
+         },
+         {
+            "name" : "short_id",
+            "type_info" : "Varchar",
+            "ordinal" : 1
+         },
+         {
+            "type_info" : "Varchar",
+            "ordinal" : 2,
+            "name" : "title"
+         },
+         {
+            "type_info" : "Text",
+            "ordinal" : 3,
+            "name" : "body"
+         },
+         {
+            "name" : "acceptance_criteria!",
+            "ordinal" : 4,
+            "type_info" : "Text"
+         },
+         {
+            "ordinal" : 5,
+            "type_info" : "Varchar",
+            "name" : "status"
+         },
+         {
+            "ordinal" : 6,
+            "type_info" : "Varchar",
+            "name" : "author_user_id"
+         },
+         {
+            "ordinal" : 7,
+            "type_info" : "Varchar",
+            "name" : "superseded_by"
+         },
+         {
+            "ordinal" : 8,
+            "type_info" : "Varchar",
+            "name" : "created_at"
+         },
+         {
+            "name" : "updated_at",
+            "type_info" : "Varchar",
+            "ordinal" : 9
+         },
+         {
+            "name" : "closed_at",
+            "ordinal" : 10,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "latest_revision_seq",
+            "ordinal" : 11,
+            "type_info" : "Int4"
+         },
+         {
+            "type_info" : "Int4",
+            "ordinal" : 12,
+            "name" : "last_reconciled_revision_seq"
+         },
+         {
+            "type_info" : "Text",
+            "ordinal" : 13,
+            "name" : "reconciled_at"
+         },
+         {
+            "ordinal" : 14,
+            "type_info" : "Bool",
+            "name" : "pending_reconcile"
+         },
+         {
+            "name" : "build_owner_user_id",
+            "type_info" : "Varchar",
+            "ordinal" : 15
+         },
+         {
+            "ordinal" : 16,
+            "type_info" : "Bool",
+            "name" : "build_frozen"
+         },
+         {
+            "name" : "build_breakdown_task_id",
+            "ordinal" : 17,
+            "type_info" : "Varchar"
+         }
+      ]
+   },
+   "query" : "SELECT id, short_id, title, body,\n                    acceptance_criteria::text AS \"acceptance_criteria!\",\n                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, reconciled_at::text AS reconciled_at, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id\n             FROM proposals WHERE id = $1",
+   "db_name" : "PostgreSQL"
+}
