@@ -710,6 +710,11 @@ mod tests {
         tokio::task::yield_now().await;
     }
 
+    async fn tick_spawned_verification_yield_only() {
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+    }
+
     fn dispatch_pause() -> djinn_core::models::DispatchPause {
         djinn_core::models::DispatchPause {
             paused_by: "admin".to_owned(),
@@ -953,43 +958,49 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn spawn_verification_defers_without_registering_when_global_pause_is_active() {
-        let (_task_repo, task_id, app_state) = setup_verifying_task_with_count(0).await;
-        let pause_repo =
-            DispatchPauseRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-        let mut last_err = None;
-        for _ in 0..10 {
-            match pause_repo
-                .pause(DispatchPauseTarget::global(), dispatch_pause())
-                .await
-            {
-                Ok(_) => {
-                    last_err = None;
-                    break;
-                }
-                Err(e) => {
-                    last_err = Some(e);
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+    #[test]
+    fn spawn_verification_defers_without_registering_when_global_pause_is_active() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let (_task_repo, task_id, app_state) = setup_verifying_task_with_count_blocking(0);
+            let pause_repo =
+                DispatchPauseRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            let mut last_err = None;
+            for _ in 0..10 {
+                match pause_repo
+                    .pause(DispatchPauseTarget::global(), dispatch_pause())
+                    .await
+                {
+                    Ok(_) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
                 }
             }
-        }
-        if let Some(e) = last_err {
-            panic!("pause dispatch globally: {e}");
-        }
+            if let Some(e) = last_err {
+                panic!("pause dispatch globally: {e}");
+            }
 
-        spawn_verification(
-            task_id.clone(),
-            "/unused/project/path".to_owned(),
-            app_state.clone(),
-        );
-        tick_spawned_verification().await;
-        tick_spawned_verification().await;
+            spawn_verification(
+                task_id.clone(),
+                "/unused/project/path".to_owned(),
+                app_state.clone(),
+            );
+            tick_spawned_verification_yield_only().await;
+            tick_spawned_verification_yield_only().await;
 
-        assert!(
-            !app_state.has_verification(&task_id),
-            "global dispatch pause must prevent registering/spawning host verification work"
-        );
+            assert!(
+                !app_state.has_verification(&task_id),
+                "global dispatch pause must prevent registering/spawning host verification work"
+            );
+        });
     }
 
     #[tokio::test(start_paused = true)]
