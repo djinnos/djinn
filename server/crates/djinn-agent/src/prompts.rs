@@ -926,6 +926,12 @@ mod tests {
                 .contains("objectively checkable by the executing role's actual tool surface"),
             "task AC authoring should require criteria checkable by the executing role"
         );
+        assert!(
+            decomposition_prompt.contains("Do not create retry worker tasks")
+                && decomposition_prompt
+                    .contains("Docker/Postgres/Kubernetes/operator/Djinn-authenticated proof"),
+            "decomposition planner should not create retry worker tasks for external proof"
+        );
 
         let mut intervention_task = make_task();
         intervention_task.issue_type = "review".into();
@@ -1100,6 +1106,79 @@ mod tests {
         assert!(
             !planner_prompt.contains("create retry worker tasks for external proof"),
             "externally-blocked proof should be repaired/pruned, not redispatched as worker implementation"
+        );
+    }
+
+    #[test]
+    fn externally_blocked_replay_prunes_and_closes_without_loop_outcomes() {
+        let externally_blocked_criteria = [
+            "Prove the migration in Docker Compose against Postgres",
+            "Validate rollout in Kubernetes with operator-only cluster access",
+            "Confirm Djinn-authenticated production API access from the task pod",
+        ];
+        let invalid_spec_summary = externally_blocked_criteria.join("; ");
+        assert!(invalid_spec_summary.contains("Docker"));
+        assert!(invalid_spec_summary.contains("Postgres"));
+        assert!(invalid_spec_summary.contains("Kubernetes"));
+        assert!(invalid_spec_summary.contains("operator-only"));
+        assert!(invalid_spec_summary.contains("Djinn-authenticated"));
+
+        let converged_replay = [
+            "task_update(id=\"4lzx-worker\", acceptance_criteria=[\"external proof pruned; no implementable work remains\"])",
+            "task_comment_add(id=\"4lzx-worker\", body=\"Docker/Postgres/Kubernetes/operator/Djinn-authenticated access is unavailable to task pods; invalid spec pruned, not escalated\")",
+            "memory_edit(identifier=\"01r3-roadmap\", operation=\"append\", content=\"External proof moved to runbook/checklist rationale\")",
+            "epic_update(id=\"01r3\", description=\"External proof requirements repaired out of worker AC\")",
+            "task_transition(id=\"4lzx-worker\", status=\"close\", reason=\"no implementable work remains after pruning invalid external proof AC\")",
+            "epic_close(id=\"01r3\")",
+            "submit_grooming(summary=\"Pruned externally-blocked criteria and closed epic\", decision=\"close\")",
+        ];
+
+        assert!(
+            converged_replay
+                .iter()
+                .any(|action| action.starts_with("epic_close")),
+            "converged replay must close the epic after pruning invalid external-proof criteria"
+        );
+        assert!(
+            converged_replay
+                .iter()
+                .any(|action| action.contains("submit_grooming")
+                    && action.contains("decision=\"close\"")),
+            "converged replay must close this planning task with submit_grooming(decision=\"close\")"
+        );
+
+        assert!(
+            !converged_replay
+                .iter()
+                .any(|action| action.contains("submit_grooming")
+                    && action.contains("decision=\"escalate\"")),
+            "missing Docker/Postgres/Kubernetes/operator/Djinn access is invalid spec, not escalation"
+        );
+        assert!(
+            !converged_replay.iter().any(|action| {
+                action.starts_with("task_create")
+                    && (action.contains("external proof")
+                        || action.contains("Docker")
+                        || action.contains("Postgres")
+                        || action.contains("Kubernetes")
+                        || action.contains("operator")
+                        || action.contains("Djinn-authenticated"))
+            }),
+            "external proof requirements must be pruned/rewritten or documented, not converted into retry worker tasks"
+        );
+
+        let final_action = converged_replay
+            .last()
+            .expect("synthetic replay should include final planner action");
+        assert!(
+            final_action.contains("submit_grooming") && final_action.contains("decision=\"close\""),
+            "final planner action must not omit decision=\"close\" or the planning task remains redispatchable"
+        );
+        assert!(
+            !final_action.contains("decision=\"approve\"")
+                && !final_action.contains("decision=\"reopen\"")
+                && !final_action.contains("decision=\"escalate\""),
+            "final planner action must not leave an open-ended redispatch path"
         );
     }
 
