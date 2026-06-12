@@ -71,6 +71,7 @@ mod worker_services;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use cargo_target_seed::{run_target_dir, seed_cargo_target_dir, teardown_run_dir, warm_base_dir};
 use clap::{Parser, Subcommand};
 use djinn_agent::context::AgentContext;
@@ -79,6 +80,7 @@ use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_core::events::EventBus;
 use djinn_db::{Database, DatabaseConnectConfig, PostgresDatabaseConfig};
+use djinn_graph::graph_parity::{GraphArtifactBlobParityError, assert_graph_artifact_blob_parity};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_runtime::{ResolvedCredentials, RoleKind, TaskRunSpec, WorkerEvent};
 use djinn_supervisor::{RpcServices, SupervisorServices, TaskRunSupervisor};
@@ -156,6 +158,25 @@ enum Cmd {
     WarmGraph {
         /// Project id (matches `projects.id`). Positional.
         project_id: String,
+    },
+
+    /// Compare two cached repo graph artifacts for a project and exit.
+    ///
+    /// Loads blobs exclusively through `RepoGraphCacheRepository` and delegates
+    /// artifact deserialization/comparison to `djinn_graph::graph_parity` so
+    /// cache compatibility shims stay centralized in the graph crate.
+    CompareGraphArtifacts {
+        /// Project id (matches `projects.id`).
+        #[arg(long)]
+        project_id: String,
+
+        /// Old commit SHA to compare, or `latest` for the newest cached row.
+        #[arg(long)]
+        old_commit: String,
+
+        /// New commit SHA to compare, or `latest` for the newest cached row.
+        #[arg(long)]
+        new_commit: String,
     },
 
     /// Run a one-shot verification "test" for a candidate rule set and exit.
@@ -282,6 +303,11 @@ async fn run() -> Result<()> {
     match cli.cmd {
         Cmd::TaskRun(args) => run_task_run(args).await,
         Cmd::WarmGraph { project_id } => run_warm_graph(&project_id).await,
+        Cmd::CompareGraphArtifacts {
+            project_id,
+            old_commit,
+            new_commit,
+        } => run_compare_graph_artifacts(&project_id, &old_commit, &new_commit).await,
         Cmd::VerifyTest { test_id } => run_verify_test(&test_id).await,
     }
 }
@@ -1347,6 +1373,141 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
     .with_context(|| format!("run_warm_graph_command({project_id})"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CachedGraphArtifactParitySuccess {
+    project_id: String,
+    old_commit: String,
+    new_commit: String,
+}
+
+#[derive(Debug)]
+enum CachedGraphArtifactParityError {
+    MissingCache {
+        project_id: String,
+        requested_commit: String,
+    },
+    Repository(anyhow::Error),
+    BlobParity(GraphArtifactBlobParityError),
+}
+
+impl std::fmt::Display for CachedGraphArtifactParityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingCache {
+                project_id,
+                requested_commit,
+            } => write!(
+                f,
+                "missing cached graph artifact for project {project_id} at commit {requested_commit}"
+            ),
+            Self::Repository(err) => write!(f, "load cached graph artifact: {err:#}"),
+            Self::BlobParity(GraphArtifactBlobParityError::Diff(diff)) => {
+                let diff_json = serde_json::to_string_pretty(diff).map_err(|_| std::fmt::Error)?;
+                write!(f, "cached graph artifacts are not at parity:\n{diff_json}")
+            }
+            Self::BlobParity(err) => write!(f, "cached graph artifact comparison failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for CachedGraphArtifactParityError {}
+
+#[async_trait]
+trait CachedGraphArtifactCache: Sync {
+    async fn get_cached_graph_artifact(
+        &self,
+        project_id: &str,
+        commit_sha: &str,
+    ) -> djinn_db::Result<Option<djinn_db::repositories::repo_graph_cache::CachedRepoGraph>>;
+
+    async fn latest_cached_graph_artifact(
+        &self,
+        project_id: &str,
+    ) -> djinn_db::Result<Option<djinn_db::repositories::repo_graph_cache::CachedRepoGraph>>;
+}
+
+#[async_trait]
+impl CachedGraphArtifactCache
+    for djinn_db::repositories::repo_graph_cache::RepoGraphCacheRepository
+{
+    async fn get_cached_graph_artifact(
+        &self,
+        project_id: &str,
+        commit_sha: &str,
+    ) -> djinn_db::Result<Option<djinn_db::repositories::repo_graph_cache::CachedRepoGraph>> {
+        self.get(project_id, commit_sha).await
+    }
+
+    async fn latest_cached_graph_artifact(
+        &self,
+        project_id: &str,
+    ) -> djinn_db::Result<Option<djinn_db::repositories::repo_graph_cache::CachedRepoGraph>> {
+        self.latest_for_project(project_id).await
+    }
+}
+
+async fn run_compare_graph_artifacts(
+    project_id: &str,
+    old_commit: &str,
+    new_commit: &str,
+) -> Result<()> {
+    let db = bootstrap_warm_database().await?;
+    let repo = djinn_db::repositories::repo_graph_cache::RepoGraphCacheRepository::new(db);
+    let success = compare_cached_graph_artifacts(&repo, project_id, old_commit, new_commit)
+        .await
+        .map_err(anyhow::Error::from)?;
+
+    println!(
+        "cached graph artifacts match for project {} (old_commit={}, new_commit={})",
+        success.project_id, success.old_commit, success.new_commit
+    );
+    Ok(())
+}
+
+async fn compare_cached_graph_artifacts(
+    repo: &impl CachedGraphArtifactCache,
+    project_id: &str,
+    old_commit: &str,
+    new_commit: &str,
+) -> std::result::Result<CachedGraphArtifactParitySuccess, CachedGraphArtifactParityError> {
+    let old = load_cached_graph_artifact(repo, project_id, old_commit).await?;
+    let new = load_cached_graph_artifact(repo, project_id, new_commit).await?;
+
+    assert_graph_artifact_blob_parity(&old.graph_blob, &new.graph_blob)
+        .map_err(CachedGraphArtifactParityError::BlobParity)?;
+
+    Ok(CachedGraphArtifactParitySuccess {
+        project_id: project_id.to_string(),
+        old_commit: old.commit_sha,
+        new_commit: new.commit_sha,
+    })
+}
+
+async fn load_cached_graph_artifact(
+    repo: &impl CachedGraphArtifactCache,
+    project_id: &str,
+    requested_commit: &str,
+) -> std::result::Result<
+    djinn_db::repositories::repo_graph_cache::CachedRepoGraph,
+    CachedGraphArtifactParityError,
+> {
+    let cached = if requested_commit == "latest" {
+        repo.latest_cached_graph_artifact(project_id).await
+    } else {
+        repo.get_cached_graph_artifact(project_id, requested_commit)
+            .await
+    }
+    .with_context(|| {
+        format!("load cached graph artifact for project {project_id} at commit {requested_commit}")
+    })
+    .map_err(CachedGraphArtifactParityError::Repository)?;
+
+    cached.ok_or_else(|| CachedGraphArtifactParityError::MissingCache {
+        project_id: project_id.to_string(),
+        requested_commit: requested_commit.to_string(),
+    })
+}
+
 /// Run a one-shot verification test: execute the candidate rule set's commands
 /// in this project image against the cloned default branch (at
 /// `DJINN_PROJECT_ROOT`), then write the outcome back to the
@@ -1474,7 +1635,211 @@ fn _assert_contract_workspace_path() -> &'static Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_db::repositories::repo_graph_cache::CachedRepoGraph;
+    use djinn_graph::communities::Community;
+    use djinn_graph::repo_graph::{
+        REPO_GRAPH_ARTIFACT_VERSION, RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphEdgeKind,
+        RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
+    };
+    use std::collections::BTreeMap;
     use std::process::Command;
+
+    #[derive(Default)]
+    struct FakeGraphArtifactCache {
+        rows: BTreeMap<(String, String), CachedRepoGraph>,
+    }
+
+    impl FakeGraphArtifactCache {
+        fn with_row(mut self, project_id: &str, commit_sha: &str, graph_blob: Vec<u8>) -> Self {
+            self.rows.insert(
+                (project_id.to_string(), commit_sha.to_string()),
+                CachedRepoGraph {
+                    project_id: project_id.to_string(),
+                    commit_sha: commit_sha.to_string(),
+                    graph_blob,
+                    built_at: commit_sha.to_string(),
+                },
+            );
+            self
+        }
+    }
+
+    #[async_trait]
+    impl CachedGraphArtifactCache for FakeGraphArtifactCache {
+        async fn get_cached_graph_artifact(
+            &self,
+            project_id: &str,
+            commit_sha: &str,
+        ) -> djinn_db::Result<Option<CachedRepoGraph>> {
+            Ok(self
+                .rows
+                .get(&(project_id.to_string(), commit_sha.to_string()))
+                .cloned())
+        }
+
+        async fn latest_cached_graph_artifact(
+            &self,
+            project_id: &str,
+        ) -> djinn_db::Result<Option<CachedRepoGraph>> {
+            Ok(self
+                .rows
+                .values()
+                .filter(|row| row.project_id == project_id)
+                .max_by(|a, b| a.built_at.cmp(&b.built_at))
+                .cloned())
+        }
+    }
+
+    fn graph_artifact_blob(extra_file: Option<&str>) -> Vec<u8> {
+        let mut nodes = vec![
+            RepoGraphNode {
+                id: RepoNodeKey::File("src/lib.rs".into()),
+                kind: RepoGraphNodeKind::File,
+                display_name: "src/lib.rs".to_string(),
+                language: Some("rust".to_string()),
+                file_path: Some("src/lib.rs".into()),
+                symbol: None,
+                symbol_kind: None,
+                is_external: false,
+                visibility: None,
+                signature: None,
+                documentation: Vec::new(),
+                signature_parts: None,
+                is_test: false,
+                complexity: None,
+                workspace: Some("root".to_string()),
+                route_framework: None,
+                route_handler_symbol: None,
+            },
+            RepoGraphNode {
+                id: RepoNodeKey::Symbol("pkg src/lib.rs `alpha`().".to_string()),
+                kind: RepoGraphNodeKind::Symbol,
+                display_name: "alpha".to_string(),
+                language: Some("rust".to_string()),
+                file_path: Some("src/lib.rs".into()),
+                symbol: Some("pkg src/lib.rs `alpha`().".to_string()),
+                symbol_kind: None,
+                is_external: false,
+                visibility: None,
+                signature: None,
+                documentation: Vec::new(),
+                signature_parts: None,
+                is_test: false,
+                complexity: None,
+                workspace: Some("root".to_string()),
+                route_framework: None,
+                route_handler_symbol: None,
+            },
+        ];
+        if let Some(path) = extra_file {
+            nodes.push(RepoGraphNode {
+                id: RepoNodeKey::File(path.into()),
+                kind: RepoGraphNodeKind::File,
+                display_name: path.to_string(),
+                language: Some("rust".to_string()),
+                file_path: Some(path.into()),
+                symbol: None,
+                symbol_kind: None,
+                is_external: false,
+                visibility: None,
+                signature: None,
+                documentation: Vec::new(),
+                signature_parts: None,
+                is_test: false,
+                complexity: None,
+                workspace: Some("root".to_string()),
+                route_framework: None,
+                route_handler_symbol: None,
+            });
+        }
+
+        let artifact = RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes,
+            edges: vec![RepoGraphArtifactEdge {
+                source: 0,
+                target: 1,
+                kind: RepoGraphEdgeKind::ContainsDefinition,
+                weight: 1.0,
+                evidence_count: 1,
+                confidence: 0.95,
+                reason: None,
+                step: None,
+            }],
+            symbol_ranges: BTreeMap::new(),
+            communities: vec![Community {
+                id: "community-alpha".to_string(),
+                label: "community-alpha".to_string(),
+                symbol_count: 2,
+                member_ids: vec![0, 1],
+                cohesion: 1.0,
+                keywords: Vec::new(),
+            }],
+            processes: Vec::new(),
+            route_exclusion_config: Default::default(),
+        };
+        bincode::serialize(&artifact).expect("serialize graph artifact")
+    }
+
+    #[tokio::test]
+    async fn compare_cached_graph_artifacts_reports_success_without_dumping_graphs() {
+        let blob = graph_artifact_blob(None);
+        let repo = FakeGraphArtifactCache::default()
+            .with_row("project-1", "old-sha", blob.clone())
+            .with_row("project-1", "new-sha", blob);
+
+        let success = compare_cached_graph_artifacts(&repo, "project-1", "old-sha", "new-sha")
+            .await
+            .expect("matching cached artifacts should compare cleanly");
+
+        assert_eq!(success.project_id, "project-1");
+        assert_eq!(success.old_commit, "old-sha");
+        assert_eq!(success.new_commit, "new-sha");
+    }
+
+    #[tokio::test]
+    async fn compare_cached_graph_artifacts_resolves_latest_via_repository() {
+        let blob = graph_artifact_blob(None);
+        let repo = FakeGraphArtifactCache::default().with_row("project-1", "latest-sha", blob);
+
+        let success = compare_cached_graph_artifacts(&repo, "project-1", "latest", "latest")
+            .await
+            .expect("latest cached artifact should compare to itself");
+
+        assert_eq!(success.old_commit, "latest-sha");
+        assert_eq!(success.new_commit, "latest-sha");
+    }
+
+    #[tokio::test]
+    async fn compare_cached_graph_artifacts_names_missing_project_and_commit() {
+        let repo = FakeGraphArtifactCache::default();
+
+        let err = compare_cached_graph_artifacts(&repo, "project-missing", "abc123", "latest")
+            .await
+            .expect_err("missing cache row should error");
+
+        let message = err.to_string();
+        assert!(message.contains("project-missing"));
+        assert!(message.contains("abc123"));
+    }
+
+    #[tokio::test]
+    async fn compare_cached_graph_artifacts_surfaces_structured_diff_as_json() {
+        let old_blob = graph_artifact_blob(None);
+        let new_blob = graph_artifact_blob(Some("src/extra.rs"));
+        let repo = FakeGraphArtifactCache::default()
+            .with_row("project-1", "old-sha", old_blob)
+            .with_row("project-1", "new-sha", new_blob);
+
+        let err = compare_cached_graph_artifacts(&repo, "project-1", "old-sha", "new-sha")
+            .await
+            .expect_err("different cached artifacts should report diff");
+
+        let message = err.to_string();
+        assert!(message.contains("cached graph artifacts are not at parity"));
+        assert!(message.contains("\"added_count\": 1"));
+        assert!(message.contains("src/extra.rs"));
+    }
 
     #[test]
     fn soft_deadline_subtracts_margin_for_large_deadlines() {
