@@ -30,11 +30,13 @@ Decide how the work splits into epics. You are NOT forced into one-epic-per-targ
 ### D4. Create the epics
 
 For each epic, call `epic_create`:
-- `title`, `description` — derive from the proposal; fold in the relevant acceptance criteria so the downstream wave Planner inherits them.
+- `title`, `description` — derive from the proposal; fold in the relevant acceptance criteria so the downstream wave Planner inherits them. Only translate proposal AC into epic descriptions/AC when they are checkable by the executing role's actual tool surface and environment.
 - `project` — the target repo slug this epic WRITES to (omit only for the home project).
 - `proposal_id` — the proposal id, so the proposal tracks what it became. **Always set this.**
 - `read_sources` — sibling repos this epic needs to read (the proposal's other targets, as appropriate).
 - `blocked_by` — the epics (created earlier in this run) that must close first. Create independent/foundational epics FIRST so you can reference their ids as blockers on the dependents.
+
+Do not convert external-infra/operator-only proof requirements into acceptance criteria. Put those expectations in runbook/checklist artifacts or descriptive non-AC context, while keeping downstream criteria verifiable by the role that will execute the epic.
 
 A blocked epic will not start its breakdown until every blocker closes; it then fires automatically. Do NOT set `auto_breakdown=false` to "hold" an epic — use `blocked_by` for ordering.
 
