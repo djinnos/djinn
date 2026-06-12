@@ -899,14 +899,21 @@ pub(crate) async fn run_reply_loop(
             )
             .await;
 
-            if let Some(trip) = observe_loop_guard(
-                &mut loop_guard_state,
-                &turn_tool_calls,
-                &tool_result_blocks,
-                &turn_text,
-                turns,
-                session_id,
-            ) {
+            // Step-cap wind-down has precedence over loop-guard termination. In
+            // particular, a small configured cap can coincide with the third
+            // identical tool failure (the default loop-guard threshold). Let the
+            // next iteration inject/complete the one-shot wind-down rather than
+            // preempting it with a loop-guard error.
+            if turns < max_turns
+                && let Some(trip) = observe_loop_guard(
+                    &mut loop_guard_state,
+                    &turn_tool_calls,
+                    &tool_result_blocks,
+                    &turn_text,
+                    turns,
+                    session_id,
+                )
+            {
                 tracing::warn!(
                     task_id = %task_id,
                     session_id = %session_id,
