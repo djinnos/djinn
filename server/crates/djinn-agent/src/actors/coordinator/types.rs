@@ -220,10 +220,10 @@ pub(super) const REOPEN_INTERVENTION_THRESHOLD: i64 = 3;
 /// scoped task against the existing branch) can finish it.
 pub(super) const MAX_PLANNER_INTERVENTIONS: i64 = 1;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct DispatchMarker {
     pub(super) instant: StdInstant,
-    pub(super) role: &'static str,
+    pub(super) role: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,7 +408,7 @@ mod cooldown_tests {
     fn reappearing_same_role_is_failure_and_escalates_from_existing_streak() {
         let marker = DispatchMarker {
             instant: StdInstant::now(),
-            role: "worker",
+            role: "worker".to_owned(),
         };
 
         assert_eq!(
@@ -424,7 +424,7 @@ mod cooldown_tests {
     fn reappearing_different_role_is_successful_stage_transition() {
         let marker = DispatchMarker {
             instant: StdInstant::now(),
-            role: "worker",
+            role: "worker".to_owned(),
         };
 
         assert_eq!(

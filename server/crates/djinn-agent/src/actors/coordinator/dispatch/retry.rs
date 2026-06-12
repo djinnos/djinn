@@ -673,7 +673,7 @@ impl CoordinatorActor {
                     review_task.id.clone(),
                     DispatchMarker {
                         instant: StdInstant::now(),
-                        role: "planner",
+                        role: "planner".to_owned(),
                     },
                 );
                 self.dispatched += 1;
