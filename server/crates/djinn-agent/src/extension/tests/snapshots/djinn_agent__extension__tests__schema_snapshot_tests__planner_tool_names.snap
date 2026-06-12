@@ -30,6 +30,7 @@ expression: names
   "epic_create",
   "proposal_show",
   "proposal_ac_set",
+  "proposal_ac_amend",
   "proposal_complete",
   "epic_blockers_list",
   "epic_blocked_list",
