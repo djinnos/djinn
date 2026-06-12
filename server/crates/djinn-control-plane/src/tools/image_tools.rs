@@ -26,6 +26,7 @@ pub struct ImageDto {
     /// Build status of the image's own config: none | building | ready | failed.
     pub status: String,
     /// The image's EnvironmentConfig (build fields).
+    #[schemars(with = "djinn_stack::environment::EnvironmentConfig")]
     pub config: ObjectJson,
     /// Service-preset ids tasks using this image may request (Phase C capability).
     #[serde(default)]
@@ -48,6 +49,7 @@ pub struct ImageCreateParams {
     pub description: Option<String>,
     /// The image's EnvironmentConfig (languages+versions, system_packages,
     /// build env, post_build hooks). Validated server-side.
+    #[schemars(with = "djinn_stack::environment::EnvironmentConfig")]
     pub config: ObjectJson,
 }
 
@@ -66,6 +68,8 @@ pub struct ImageUpdateParams {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// The image's EnvironmentConfig (build fields). Validated server-side.
+    #[schemars(with = "djinn_stack::environment::EnvironmentConfig")]
     pub config: ObjectJson,
 }
 

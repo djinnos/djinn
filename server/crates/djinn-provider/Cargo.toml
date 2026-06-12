@@ -25,6 +25,7 @@ jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"]
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", features = ["reqwest-rustls"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+parking_lot = "0.12"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form"] }
 ring = "0.17"
 serde = { version = "1", features = ["derive"] }

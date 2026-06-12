@@ -585,6 +585,23 @@ mod tests {
         assert!(!prompt.contains("{{"));
     }
 
+    #[test]
+    fn worker_prompt_describes_private_cargo_target_lifecycle() {
+        let task = make_task();
+        let ctx = make_ctx();
+        let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+        assert!(prompt.contains("CARGO_HOME=/cache/cargo"));
+        assert!(prompt.contains("/cache/cargo-target-runs/<task_run_id>"));
+        assert!(prompt.contains("/cache/cargo-target/<project_id>"));
+        assert!(prompt.contains("seeded from `/cache/cargo-target/<project_id>`"));
+        assert!(prompt.contains("removed after the run"));
+        assert!(prompt.contains("Do **not** redirect Cargo to `/cache/cargo-target/<project_id>`"));
+        let old_shared_target_claim =
+            ["CARGO_TARGET_DIR=", "/cache/", "cargo-target/", "<project>"].concat();
+        assert!(!prompt.contains(&old_shared_target_claim));
+    }
+
     /// The dispatcher injects the research workflow ONLY for research tasks —
     /// the model never has to detect its mode.
     #[test]
@@ -632,6 +649,25 @@ mod tests {
         // Reviewer uses the role-specific finalize tool for verdict.
         assert!(prompt.contains("submit_review"));
         assert!(!prompt.contains("{{"));
+    }
+
+    #[test]
+    fn reviewer_prompt_describes_private_cargo_target_lifecycle() {
+        let task = make_task();
+        let ctx = make_ctx();
+        let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
+
+        assert!(prompt.contains("CARGO_HOME=/cache/cargo"));
+        assert!(prompt.contains("/cache/cargo-target-runs/<task_run_id>"));
+        assert!(prompt.contains("/cache/cargo-target/<project_id>"));
+        assert!(prompt.contains("seeded from the warm base"));
+        assert!(prompt.contains("removed after the run"));
+        assert!(
+            prompt.contains("workers must not override it or point Cargo at the shared warm base")
+        );
+        let old_shared_target_claim =
+            ["CARGO_TARGET_DIR=", "/cache/", "cargo-target/", "<project>"].concat();
+        assert!(!prompt.contains(&old_shared_target_claim));
     }
 
     #[test]
