@@ -26,8 +26,8 @@ use djinn_core::models::Task;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
-    build_reviewer_diff_context, build_role_code_graph_context,
-    derive_task_scope_paths, extract_worker_context, format_knowledge_notes, recent_feedback,
+    build_reviewer_diff_context, build_role_code_graph_context, derive_task_scope_paths,
+    extract_worker_context, format_knowledge_notes, recent_feedback,
 };
 use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
