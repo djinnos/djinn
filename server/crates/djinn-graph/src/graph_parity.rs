@@ -26,10 +26,23 @@ pub fn assert_graph_parity(
     old: &RepoDependencyGraph,
     new: &RepoDependencyGraph,
 ) -> Result<(), GraphParityDiff> {
+    let diff = diff_graph_parity(old, new, DEFAULT_SAMPLE_LIMIT);
+    if diff.is_empty() { Ok(()) } else { Err(diff) }
+}
+
+/// Build a structured graph parity diff with a caller-provided sample bound.
+///
+/// This is the reusable API used by rollout-specific adapters that need to
+/// classify a subset of additions without changing the core graph parity
+/// semantics.
+pub fn diff_graph_parity(
+    old: &RepoDependencyGraph,
+    new: &RepoDependencyGraph,
+    sample_limit: usize,
+) -> GraphParityDiff {
     let old_snapshot = NormalizedGraph::from_graph(old);
     let new_snapshot = NormalizedGraph::from_graph(new);
-    let diff = GraphParityDiff::between(&old_snapshot, &new_snapshot, DEFAULT_SAMPLE_LIMIT);
-    if diff.is_empty() { Ok(()) } else { Err(diff) }
+    GraphParityDiff::between(&old_snapshot, &new_snapshot, sample_limit)
 }
 
 /// Compare two serialized repo-graph artifact blobs for normalized parity.
@@ -149,10 +162,14 @@ where
     pub new_total: usize,
     pub old_counts_by_kind: BTreeMap<K, usize>,
     pub new_counts_by_kind: BTreeMap<K, usize>,
+    pub added_counts_by_kind: BTreeMap<K, usize>,
+    pub removed_counts_by_kind: BTreeMap<K, usize>,
     pub added_count: usize,
     pub removed_count: usize,
     pub added_samples: Vec<String>,
     pub removed_samples: Vec<String>,
+    pub added_samples_by_kind: BTreeMap<K, Vec<String>>,
+    pub removed_samples_by_kind: BTreeMap<K, Vec<String>>,
 }
 
 impl<K> KindedSetParityDiff<K>
@@ -168,15 +185,23 @@ where
     ) -> Self {
         let added: Vec<String> = new.difference(old).cloned().collect();
         let removed: Vec<String> = old.difference(new).cloned().collect();
+        let added_counts_by_kind = delta_counts_by_kind(&added, new_kind_by_id);
+        let removed_counts_by_kind = delta_counts_by_kind(&removed, old_kind_by_id);
+        let added_samples_by_kind = samples_by_kind(&added, new_kind_by_id, sample_limit);
+        let removed_samples_by_kind = samples_by_kind(&removed, old_kind_by_id, sample_limit);
         Self {
             old_total: old.len(),
             new_total: new.len(),
             old_counts_by_kind: counts_by_kind(old_kind_by_id),
             new_counts_by_kind: counts_by_kind(new_kind_by_id),
+            added_counts_by_kind,
+            removed_counts_by_kind,
             added_count: added.len(),
             removed_count: removed.len(),
             added_samples: sample(added, sample_limit),
             removed_samples: sample(removed, sample_limit),
+            added_samples_by_kind,
+            removed_samples_by_kind,
         }
     }
 
@@ -346,6 +371,39 @@ where
         *counts.entry(kind.clone()).or_default() += 1;
     }
     counts
+}
+
+fn delta_counts_by_kind<K>(ids: &[String], kind_by_id: &BTreeMap<String, K>) -> BTreeMap<K, usize>
+where
+    K: Clone + Ord,
+{
+    let mut counts = BTreeMap::new();
+    for id in ids {
+        if let Some(kind) = kind_by_id.get(id) {
+            *counts.entry(kind.clone()).or_default() += 1;
+        }
+    }
+    counts
+}
+
+fn samples_by_kind<K>(
+    ids: &[String],
+    kind_by_id: &BTreeMap<String, K>,
+    sample_limit: usize,
+) -> BTreeMap<K, Vec<String>>
+where
+    K: Clone + Ord,
+{
+    let mut samples: BTreeMap<K, Vec<String>> = BTreeMap::new();
+    for id in ids {
+        if let Some(kind) = kind_by_id.get(id) {
+            let values = samples.entry(kind.clone()).or_default();
+            if values.len() < sample_limit {
+                values.push(id.clone());
+            }
+        }
+    }
+    samples
 }
 
 fn sample(mut values: Vec<String>, sample_limit: usize) -> Vec<String> {
