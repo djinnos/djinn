@@ -543,6 +543,7 @@ This evidence pack reconciles the remaining proposal 4369 / epic 8451 criteria a
 | Full Rust validation for the landed task-run teardown/backstop implementation. | `de12` (`019eb930-2164-7a23-ae8f-96d630fe1146`), `t2cs` (`019eb9c5-82a9-7e93-8ae5-cb2860fd792c`) | **Partially satisfied with an environmental blocker:** `cargo build` and strict `cargo clippy --all-features -- -D warnings` passed in `de12`. `t2cs` reran `cargo nextest run` after explicitly checking for the required Postgres path; Docker, `psql`, and `pg_isready` were absent, TCP `127.0.0.1:5433` refused connections, and nextest reached test execution then failed only in DB-backed tests with `Connection refused`. No teardown code defect was identified. |
 | Real Kubernetes proof that `execution_kill_task` removes `djinn-taskrun-*` Pods/Jobs within roughly 60 seconds. | `9l2v` (`019eb930-5068-7213-b348-2c2c2d2d75f7`), `9eps` (`019eb9c5-d90f-78e0-95aa-edca757567c0`), sections [Wave 2 operator preflight attempt from `9eps`](#wave-2-operator-preflight-attempt-from-9eps--failed-before-cleanup-action) and [`execution_kill_task` cleanup verification attempt](#execution_kill_task-cleanup-verification-attempt--blocked-by-worker-cluster-access). | **Not satisfied:** the Wave 2 run did not reach a passing operator/admin preflight. In `9eps`, `kubectl` was absent, `KUBECONFIG` was unset, no operator MCP endpoint/token was configured, and the worker-projected token returned HTTP 401 from `/mcp`; therefore no kill action, before/after Kubernetes cleanup polling, or server/coordinator log capture could be performed. No cleanup success is claimed. |
 | Real Kubernetes proof that force-close/operator-close removes `djinn-taskrun-*` Pods/Jobs within roughly 60 seconds. | `6eg3` (`019eb930-803a-7033-9b7a-42678aac97a3`), `mqt8` (`019eb9c6-04bd-74c0-90e1-7e4b4ea6e23c`), sections [Wave 2 operator preflight attempt from `mqt8`](#wave-2-operator-preflight-attempt-from-mqt8--failed-before-force-close-action), [Force-close/operator-close cleanup verification attempt](#force-closeoperator-close-cleanup-verification-attempt--blocked-by-worker-cluster-access). | **Not satisfied:** the Wave 2 force-close run still did not reach a passing operator/admin preflight. In `mqt8`, `kubectl` was absent, `KUBECONFIG` was unset, no operator MCP endpoint/token was configured, the worker service account was forbidden from reading Pods/Jobs/canonical Jobs, and both projected tokens returned HTTP 401 from `/mcp`; therefore no force-close/operator-close action, before/after Kubernetes cleanup polling, or server/coordinator log capture could be performed. No cleanup success is claimed. |
+| Wave 3 follow-up: same `execution_kill_task` Kubernetes proof, run through the new operator evidence runner from task `7283`. | `8cd0` (`019ebb90-db0c-7fd3-9fe4-0cd707bb5d94`), sections [Wave 3 paste point: `execution_kill_task` operator evidence](#wave-3-paste-point-execution_kill_task-operator-evidence) and [Wave 3 reconciliation against the acceptance criteria](#wave-3-reconciliation-against-the-acceptance-criteria). | **Not satisfied:** Wave 3 ran the `scripts/taskrun-backstop-e2e-evidence.sh` operator runner with `MODE=kill`, `TASK_ID=019ebb90-db0c-7fd3-9fe4-0cd707bb5d94`, `TASK_RUN_ID=019ebbaa-e748-7462-9c05-0dd0e356d50f`, `NS=djinn`, and `DRY_RUN=0`, but the same operator-access blocker documented in `9eps` is still in effect: `kubectl` is not installed in the worker image, `KUBECONFIG` is unset, the in-cluster service-account token is rejected with HTTP 401 by the Kubernetes API (and the only Djinn token returned HTTP 401 from `/mcp`), so the embedded preflight ended with `PRECHECK FAIL` and the runner footer is `EVIDENCE RUNNER FAIL`. The 60-second post-action polling, the `execution_kill_task` invocation, and the `deploy/djinn-server` log capture were intentionally skipped by the runner; no cleanup success is claimed. Wave 3 closes only the runner-and-bundle-format half of the follow-up: the operator-runner + dry-run + inline-bundle machinery from `7jbf`/`7283` is exercised end-to-end and the bundle is recorded verbatim in this doc. The remaining `execution_kill_task` Kubernetes cleanup proof is still blocked by the missing operator/admin environment, not by a teardown code defect. |
 
 ### Full validation outcome from `de12`
 
@@ -688,6 +689,20 @@ Epic 8451 should **remain open** for a follow-up wave. The exact residual blocke
 
 Once those three residual items pass, the next Planner can close epic 8451. Until then, proposal 4369 residual Kubernetes cleanup proof criteria are not met, and the nextest criterion has only blocker evidence rather than a successful full pass.
 
+### Wave 3 reconciliation outcome from `8cd0`
+
+- **Evidence task:** `8cd0` / `019ebb90-db0c-7fd3-9fe4-0cd707bb5d94`
+- **Active task_run_id:** `019ebbaa-e748-7462-9c05-0dd0e356d50f`
+- **Attempt window (UTC):** 2026-06-12T11:51:42Z through 2026-06-12T11:53:03Z
+- **Runner invocation:** `MODE=kill DRY_RUN=0 NS=djinn TASK_ID=019ebb90-db0c-7fd3-9fe4-0cd707bb5d94 TASK_RUN_ID=019ebbaa-e748-7462-9c05-0dd0e356d50f ./scripts/taskrun-backstop-e2e-evidence.sh`
+- **Result:** the runner emitted a complete bundle (header → preflight → before-action → action placeholder → post-action → server log → bundle interpretation) but the embedded preflight ended with `PRECHECK FAIL`, the runner footer is `EVIDENCE RUNNER FAIL`, and the 60-second post-action polling + `deploy/djinn-server` log capture were intentionally skipped. No `execution_kill_task` invocation, no before/after Kubernetes cleanup polling, and no inline teardown/backstop markers were captured.
+- **Operator environment available:** **no** — this is a normal task-run worker shell, not an operator/admin environment. `kubectl` is not installed, `KUBECONFIG` is unset, the in-cluster service-account token is rejected with HTTP 401 by the Kubernetes API server (even for the unauthenticated `/api` discovery endpoint), and the only Djinn token returned HTTP 401 from `/mcp`. The Wave 3 attempt therefore records the same operator-access blocker that the Wave 2 attempts (`9eps`, `mqt8`) and the Wave 1 attempts (`9l2v`, `6eg3`) recorded, just rendered through the new `7283` evidence runner.
+- **Reconciliation:** the Wave 3 `execution_kill_task` Kubernetes proof is **still not satisfied**, but the operator evidence runner + inline bundle format from `7283` has now been exercised end-to-end against this operator-blocker scenario and the bundle is recorded verbatim in this doc (see the [Wave 3 paste point: `execution_kill_task` operator evidence](#wave-3-paste-point-execution_kill_task-operator-evidence) section). The remaining gap is the missing operator/admin environment, not a teardown code defect and not a runner-shape defect.
+- **Wave 3 follow-up actions:**
+  1. The corresponding force-close/operator-close runner invocation is recorded as the still-open sibling task `wu8h` (Wave 3 force-close), and the Wave 3 final consolidation is recorded as `dzcv`.
+  2. The companion Postgres-backed full validation entrypoint is now reproducible via `make validate-taskrun-backstop` (or `./scripts/validate-taskrun-backstop.sh`) and is summarized in the [Wave 3 Postgres-backed full validation entrypoint](#wave-3-postgres-backed-full-validation-entrypoint) section above.
+  3. The implementation evidence (inline `RuntimeOps::teardown_taskrun_job`, pool `teardown_taskrun_jobs_for_task`, zombie-reaper `teardown_taskrun_job`, periodic + startup `reap_orphaned_taskrun_jobs` backstop from `ld18` / `o17b`) and the runbook + operator evidence runner (from `7jbf` / `7283`) are unchanged; this attempt does not modify teardown code and explicitly leaves the architecture intact, per the task's "Do not modify teardown implementation unless this run exposes a concrete code defect; fix narrowly if so" guidance.
+
 
 ## Wave 3 operator evidence runner usage and paste points
 
@@ -721,9 +736,382 @@ Operator workflow for the Wave 3 kill and force-close proofs (`8cd0`, `wu8h`):
 
 ### Wave 3 paste point: `execution_kill_task` operator evidence
 
-> Paste the `MODE=kill` runner output here. The bundle should include the embedded preflight (kubectl/context/RBAC/log/MCP), before-action `kubectl get jobs,pods` evidence filtered by the task-run label and the canonical `djinn-taskrun-$TASK_RUN_ID` prefix, the `execution_kill_task` action invocation and result, the 60-second post-action polling log with the final iteration showing `running_pods= jobs= canonical=` and `exit=0`, and the filtered `deploy/djinn-server` log capture around the backstop window.
->
-> If the operator environment is unavailable, paste the runner output verbatim and explicitly state that the bundle is not claiming cleanup success.
+- **Evidence task:** `8cd0` / `019ebb90-db0c-7fd3-9fe4-0cd707bb5d94`
+- **Active task_run_id for the verification attempt:** `019ebbaa-e748-7462-9c05-0dd0e356d50f`
+- **Operator environment available:** **no** — this attempt executed in a normal task-run worker shell, not an operator/admin environment.
+- **Attempt window (UTC):** 2026-06-12T11:51:42Z through 2026-06-12T11:53:03Z
+- **Namespace:** `djinn`
+- **DRY_RUN:** `0` (the runner was invoked without `DRY_RUN` so the bundle includes the full preflight, before-action, and skipped polling/log sections).
+- **Bundle artifact:** `wave3-8cd0-kill-bundle.md` (also embedded inline below).
+- **Direct-API fallback artifact:** `wave3-8cd0-direct-api.md` (also embedded inline below).
+- **Runner footer:** `EVIDENCE RUNNER FAIL: at least one prerequisite is missing or the post-action poll did not converge. The bundle above records the exact failure; do not claim cleanup success for this attempt.`
+- **Cleanup success claimed:** **no** — per the runner guidance and the task description, the failed preflight blocks the kill action and the 60-second post-action poll; this section is blocker evidence only.
+
+#### Wave 3 evidence runner bundle (`MODE=kill`)
+
+The full operator evidence runner output is embedded below verbatim. The runner header records the captured UTC timestamp, namespace, task id, task run id, and action invocation; the embedded preflight ends with `PRECHECK FAIL`; the before-action subsection is recorded but `kubectl` was absent, so the target `djinn-taskrun-*` Job/Pod could not be proven present before kill; and the post-action 60-second polling + server log capture were intentionally skipped because the preflight did not pass.
+
+````md
+# Task-run backstop operator evidence — execution_kill_task
+
+- **Captured at (UTC):** `2026-06-12T11:51:42Z`
+- **Mode:** `kill`
+- **Action mode display:** `execution_kill_task`
+- **Namespace:** `djinn`
+- **Task id:** `019ebb90-db0c-7fd3-9fe4-0cd707bb5d94`
+- **Task run id:** `019ebbaa-e748-7462-9c05-0dd0e356d50f`
+- **Server log target:** `deploy/djinn-server`
+- **Djinn MCP endpoint:** `<unset DJINN_MCP_URL>`
+- **DRY_RUN:** `0`
+- **Redaction:** do not paste bearer tokens, kubeconfig client keys/certificates, cookies, database URLs, or full health payloads containing credentials. This script redacts the MCP bearer token by design.
+- **Scope:** this bundle captures the operator-side evidence for one Wave 3 cleanup attempt. It does **not** claim cleanup success unless the post-action polling converges and the operator records the action result.
+- **Operator action invoked at (UTC):** `2026-06-12T11:51:42Z`
+- **Operator action result:** `<unset ACTION_RESULT; runner marked this as the Wave 3 capture for 8cd0 - see preflight fail; kill was NOT invoked>`
+
+## Operator preflight (reused from taskrun-backstop-preflight.sh)
+
+
+#### Preflight output
+
+The preflight helper was invoked with NS=`djinn`,
+DJINN_SERVER_DEPLOY=`deploy/djinn-server`,
+DJINN_MCP_URL=``, and the operator token redacted. The
+helper's complete Markdown bundle is embedded below verbatim (no outer
+code fence) so the inner `console` blocks stay readable.
+
+<!-- taskrun-backstop-e2e-evidence.sh: preflight bundle begin -->
+
+# Task-run backstop operator preflight evidence
+
+- **Captured at (UTC):** `2026-06-12T11:51:42Z`
+- **Namespace checked:** `djinn`
+- **Server log target:** `deploy/djinn-server`
+- **Djinn MCP endpoint:** `<unset DJINN_MCP_URL>`
+- **Scope:** preflight only. This bundle proves the operator shell has the ingredients required for the real kill/force-close cleanup checks; it does **not** claim task-run cleanup success.
+- **Redaction:** do not paste bearer tokens, kubeconfig client keys/certificates, cookies, database URLs, or full health payloads containing credentials. This script redacts the MCP bearer token by design.
+
+#### kubectl client availability
+
+```console
+$ kubectl version --client=true
+/workspace/.tmplPiR2E/scripts/taskrun-backstop-preflight.sh: 53: kubectl: not found
+
+# exit=127
+```
+
+#### current Kubernetes context
+
+```console
+$ kubectl config current-context
+/workspace/.tmplPiR2E/scripts/taskrun-backstop-preflight.sh: 53: kubectl: not found
+
+# exit=127
+```
+
+#### configured namespace for current context
+
+```console
+$ kubectl config view --minify --output jsonpath={..namespace}
+/workspace/.tmplPiR2E/scripts/taskrun-backstop-preflight.sh: 53: kubectl: not found
+
+# exit=127
+```
+
+#### target namespace exists
+
+```console
+$ kubectl get namespace djinn -o name
+/workspace/.tmplPiR2E/scripts/taskrun-backstop-preflight.sh: 53: kubectl: not found
+
+# exit=127
+```
+
+#### RBAC: list Pods in target namespace
+
+```console
+$ answer=$(kubectl auth can-i list pods -n 'djinn'); printf '%s\n' "$answer"; test "$answer" = yes
+sh: 1: kubectl: not found
+
+
+# exit=1
+```
+
+#### RBAC: get Pods in target namespace
+
+```console
+$ answer=$(kubectl auth can-i get pods -n 'djinn'); printf '%s\n' "$answer"; test "$answer" = yes
+sh: 1: kubectl: not found
+
+
+# exit=1
+```
+
+#### RBAC: list Jobs in target namespace
+
+```console
+$ answer=$(kubectl auth can-i list jobs.batch -n 'djinn'); printf '%s\n' "$answer"; test "$answer" = yes
+sh: 1: kubectl: not found
+
+
+# exit=1
+```
+
+#### RBAC: get Jobs in target namespace
+
+```console
+$ answer=$(kubectl auth can-i get jobs.batch -n 'djinn'); printf '%s\n' "$answer"; test "$answer" = yes
+sh: 1: kubectl: not found
+
+
+# exit=1
+```
+
+#### Pods read smoke test
+
+```console
+$ kubectl get pods -n djinn -o name --request-timeout=10s
+/workspace/.tmplPiR2E/scripts/taskrun-backstop-preflight.sh: 53: kubectl: not found
+
+# exit=127
+```
+
+#### Jobs read smoke test
+
+```console
+$ kubectl get jobs -n djinn -o name --request-timeout=10s
+/workspace/.tmplPiR2E/scripts/taskrun-backstop-preflight.sh: 53: kubectl: not found
+
+# exit=127
+```
+
+#### djinn-server log access smoke test
+
+```console
+$ kubectl logs -n djinn deploy/djinn-server --since=10m --tail=20
+/workspace/.tmplPiR2E/scripts/taskrun-backstop-preflight.sh: 53: kubectl: not found
+
+# exit=127
+```
+
+#### Djinn MCP/control-plane authentication smoke test
+
+```console
+$ curl -fsS -H "Authorization: Bearer <redacted operator token>" -H "Content-Type: application/json" -d <initialize-json> "$DJINN_MCP_URL"
+DJINN_MCP_URL is not set. Set it to the operator-accessible /mcp endpoint.
+
+# exit=2
+```
+
+## Preflight interpretation
+
+PASS requires every command above to exit 0, including:
+
+- `kubectl` is installed and points at the intended cluster/context.
+- The checked namespace is the Djinn runtime namespace that owns `djinn-taskrun-*` Jobs/Pods.
+- RBAC allows list/get for Pods and Jobs in that namespace.
+- `kubectl logs` can read `deploy/djinn-server` logs.
+- The Djinn MCP/control-plane endpoint accepts the operator/admin credential that will be used for `execution_kill_task` and force-close/operator-close actions.
+
+If any item fails, stop and fix the operator environment before running the real cleanup verification. Do not treat this preflight as cleanup proof.
+
+PRECHECK FAIL: operator environment is missing at least one required prerequisite.
+
+<!-- taskrun-backstop-e2e-evidence.sh: preflight bundle end (exit=1) -->
+
+> Preflight did not pass; the operator environment is missing at least one required prerequisite. The bundle below the preflight is therefore marked **NOT PASS** and the runner did not perform the post-action 60-second polling or claim cleanup success.
+
+## Before-action Kubernetes evidence
+
+- **Action captured at (UTC):** `2026-06-12T11:51:43Z`
+- **Namespace:** `djinn`
+- **Task id:** `019ebb90-db0c-7fd3-9fe4-0cd707bb5d94`
+- **Task run id:** `019ebbaa-e748-7462-9c05-0dd0e356d50f`
+- **Label selector key:** `djinn.app/task-run-id`
+- **Canonical job/pod prefix:** `djinn-taskrun-`
+
+#### kubectl client availability
+
+```console
+$ command -v kubectl || true
+
+kubectl not found; before-action evidence cannot be captured.
+```
+
+#### Operator action invocation
+
+- **Action tool:** `execution_kill_task`
+- **Action arguments:** `task_id="019ebb90-db0c-7fd3-9fe4-0cd707bb5d94"`, `reason="task-run backstop e2e verification"`
+
+The operator must invoke the `execution_kill_task` MCP tool from the
+same shell (or record the equivalent transcript) and set
+`ACTION_RESULT` / `ACTION_INVOKED_AT` before re-running this script.
+The placeholder text below shows the exact shell-template an operator
+can copy/paste, with `$TASK_ID` and `$DJINN_MCP_URL` as the only
+substitutions required.
+
+```json
+{
+  "tool": "execution_kill_task",
+  "arguments": {
+    "task_id": "$TASK_ID",
+    "reason": "task-run backstop e2e verification"
+  }
+}
+```
+
+Equivalent `curl` invocation (operator token redacted in the bundle):
+
+```console
+$ curl -sS -H "Authorization: Bearer <redacted operator token>" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"execution_kill_task","arguments":{"task_id":"$TASK_ID","reason":"task-run backstop e2e verification"}}}' \
+    "$DJINN_MCP_URL"
+```
+
+
+## Post-action 60-second cleanup polling
+
+> Preflight did not pass: post-action polling was skipped. Fix the operator environment, rerun the preflight until it passes, and then re-run this script with ACTION_RESULT/ACTION_INVOKED_AT set.
+
+## Server/coordinator log capture
+
+> Preflight did not pass: server log capture was skipped. Fix the operator environment and re-run this script with ACTION_RESULT/ACTION_INVOKED_AT set.
+
+## Bundle interpretation
+
+This bundle is a single Wave 3 evidence attempt. The exact fields
+required for review are:
+
+- `TASK_ID` and `TASK_RUN_ID` recorded in the header.
+- `NS` and the Kubernetes context (captured inside the preflight
+  subsection).
+- UTC timestamps for preflight, before-action capture, action
+  invocation, and each polling iteration.
+- Exact commands, raw output, and exit statuses for every probe.
+- A redaction note reminding reviewers that bearer tokens, kubeconfig
+  client keys/certificates, cookies, database URLs, and full health
+  payloads containing credentials must be removed before committing the
+  bundle.
+
+The bundle does **not** claim cleanup success unless all of the
+following are true:
+
+- The preflight subsection shows `PRECHECK PASS`.
+- The `Operator action invocation` subsection is followed by an
+  operator-issued action (or a recorded transcript) and the
+  `ACTION_RESULT` header field is populated.
+- The `Post-action 60-second cleanup polling` subsection ends with
+  `exit=0` and shows `running_pods= jobs= canonical=` for the final
+  iteration.
+
+If any of these conditions is false, the bundle records the exact
+blocker (operator access, missing MCP credential, missing RBAC, or
+remaining Pods/Jobs) and explicitly states that no cleanup success is
+claimed.
+
+EVIDENCE RUNNER FAIL: at least one prerequisite is missing or the post-action poll did not converge. The bundle above records the exact failure; do not claim cleanup success for this attempt.
+
+````
+
+#### Wave 3 direct in-cluster API + `/mcp` fallback
+
+The worker also tried the same direct Kubernetes API and `/mcp` fallback that the Wave 2 attempts (`9eps`, `mqt8`) used, to confirm the operator-access blocker is still in effect in this session. The bearer token is intentionally not pasted.
+
+````md
+## Wave 3 (`8cd0`) direct in-cluster API fallback — worker shell
+
+- **Evidence task:** `8cd0` / `019ebb90-db0c-7fd3-9fe4-0cd707bb5d94`
+- **Active task_run_id:** `019ebbaa-e748-7462-9c05-0dd0e356d50f`
+- **In-cluster namespace (from `/var/run/secrets/kubernetes.io/serviceaccount/namespace`):** `djinn`
+- **Kubernetes API endpoint:** `https://kubernetes.default.svc:443` (`KUBERNETES_SERVICE_HOST=10.43.0.1`, `KUBERNETES_SERVICE_PORT=443`)
+- **Captured at (UTC):** `2026-06-12T11:53:02Z`
+
+The operator evidence runner is unable to claim cleanup success from this shell.
+To complement the runner output captured in `wave3-8cd0-kill-bundle.md`,
+the worker also tried the same direct Kubernetes API and `/mcp`
+fallback used in the Wave 2 attempts (`9eps`, `mqt8`) so reviewers can
+see that the same operator-access blocker is in effect. The bearer
+token is intentionally not pasted.
+
+```console
+$ date -u +%Y-%m-%dT%H:%M:%SZ
+2026-06-12T11:53:02Z
+
+$ wc -c /var/run/secrets/tokens/djinn
+1162 /var/run/secrets/tokens/djinn
+
+$ curl --cacert "$CA_FILE" https://kubernetes.default.svc:443/api
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "Unauthorized",
+  "reason": "Unauthorized",
+  "code": 401
+}
+$ curl --cacert "$CA_FILE" -H "Authorization: Bearer <redacted service-account token>" \
+  "https://kubernetes.default.svc:443/api/v1/namespaces/djinn/pods?labelSelector=djinn.app%2Ftask-run-id%3D019ebbaa-e748-7462-9c05-0dd0e356d50f"
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "Unauthorized",
+  "reason": "Unauthorized",
+  "code": 401
+}
+$ curl --cacert "$CA_FILE" -H "Authorization: Bearer <redacted service-account token>" \
+  "https://kubernetes.default.svc:443/apis/batch/v1/namespaces/djinn/jobs?labelSelector=djinn.app%2Ftask-run-id%3D019ebbaa-e748-7462-9c05-0dd0e356d50f"
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "Unauthorized",
+  "reason": "Unauthorized",
+  "code": 401
+}
+$ curl --cacert "$CA_FILE" -H "Authorization: Bearer <redacted service-account token>" \
+  "https://kubernetes.default.svc:443/apis/batch/v1/namespaces/djinn/jobs/djinn-taskrun-019ebbaa-e748-7462-9c05-0dd0e356d50f"
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "Unauthorized",
+  "reason": "Unauthorized",
+  "code": 401
+}
+$ curl -i -H "Authorization: Bearer <redacted /var/run/secrets/tokens/djinn token>" \
+  -H "Content-Type: application/json" -d <initialize-json> \
+  http://djinn-server.djinn.svc.cluster.local:3000/mcp
+HTTP/1.1 401 Unauthorized
+content-type: text/plain; charset=utf-8
+www-authenticate: Bearer resource_metadata="https://code.djinnai.io/.well-known/oauth-protected-resource/mcp"
+vary: origin, access-control-request-method, access-control-request-headers
+access-control-allow-credentials: true
+content-length: 23
+date: Fri, 12 Jun 2026 11:53:03 GMT
+
+authentication required
+$ date -u +%Y-%m-%dT%H:%M:%SZ
+2026-06-12T11:53:03Z
+
+```
+
+> The Kubernetes API server returned HTTP 401 `Unauthorized` for the worker-projected service-account token in this session, even on the unauthenticated `/api` discovery endpoint. The same token is rejected by `/mcp` with HTTP 401 `authentication required`. This is the same operator-access blocker documented in `9eps`/`mqt8`: the worker shell is not an operator/admin environment, and there is no operator MCP endpoint or token configured. The runner is therefore recorded as `EVIDENCE RUNNER FAIL`, and no cleanup success is claimed.
+
+````
+
+#### Wave 3 reconciliation against the acceptance criteria
+
+- **Acceptance criterion 1 (run attempt with evidence runner after preflight, recording task id, task run id, namespace/context, UTC timestamps):** **satisfied as an attempt only.** The runner was invoked with `TASK_ID=019ebb90-db0c-7fd3-9fe4-0cd707bb5d94`, `TASK_RUN_ID=019ebbaa-e748-7462-9c05-0dd0e356d50f`, `NS=djinn`, and `MODE=kill` at `2026-06-12T11:51:42Z`. The header, preflight, before-action, action placeholder, post-action, server log, and bundle interpretation sections were all emitted, and the UTC timestamps are recorded at every step. The preflight failed (`PRECHECK FAIL`), so this attempt is a runner invocation + failed preflight, not a passing operator verification.
+- **Acceptance criterion 2 (before-kill Kubernetes evidence shows the target `djinn-taskrun-*` Job/Pod exists, or the exact operator-access blocker is documented without claiming success):** **operator-access blocker documented.** The preflight subsection shows that `kubectl` is not installed in this worker image (`kubectl: not found`, exit 127 on every `kubectl` probe); the runner therefore emitted `kubectl not found; before-action evidence cannot be captured` in the before-action subsection. The direct Kubernetes API fallback confirmed the worker-projected service-account token is rejected with HTTP 401 `Unauthorized`, so the runner cannot read Pods/Jobs even via the API. No `djinn-taskrun-*` Job/Pod is proven present; the operator-access blocker is recorded explicitly and no success is claimed.
+- **Acceptance criterion 3 (after-kill polling shows no running Pods/Jobs/canonical `djinn-taskrun-$TASK_RUN_ID` resources within ~60 s, or the exact failure/blocker is documented):** **failure/blocker documented.** The runner intentionally skipped the 60-second post-action polling because the preflight did not pass; the bundle subsection states `Preflight did not pass: post-action polling was skipped. Fix the operator environment, rerun the preflight until it passes, and then re-run this script with ACTION_RESULT/ACTION_INVOKED_AT set.` No after-kill polling iteration, no convergence, and no `execution_kill_task` invocation is recorded; the runner footer is `EVIDENCE RUNNER FAIL`. The direct Kubernetes API fallback confirms the worker cannot read Pods/Jobs at all, so polling would not have produced meaningful evidence even if it had run.
+- **Acceptance criterion 4 (relevant server/coordinator logs around the kill time are captured, including inline teardown/backstop markers where available):** **blocker documented; no logs captured.** The runner subsection states `Preflight did not pass: server log capture was skipped. Fix the operator environment and re-run this script with ACTION_RESULT/ACTION_INVOKED_AT set.` No `deploy/djinn-server` log capture and no inline teardown/backstop markers were produced, because the worker has no `kubectl` and the API token is rejected. The expected markers (`task-run Job backstop`, `backstop reaped orphaned task-run Job`, `task_run_id=…`, `job_name`, `reason`, `db_classification`) are still documented in the runner header but no log lines were captured for this attempt.
+- **Acceptance criterion 5 (this doc is updated with a reconciliation statement for whether the `execution_kill_task` Kubernetes proof is now satisfied):** **satisfied by this subsection.** The `execution_kill_task` Kubernetes proof is **still not satisfied**: the same operator-access blocker documented in `9eps` (and previously in `9l2v`) is in effect, the Wave 3 runner was only able to emit a `PRECHECK FAIL` bundle, and no kill action, no before/after Kubernetes polling, and no server/coordinator logs were captured. The implementation evidence (inline `RuntimeOps::teardown_taskrun_job`, pool `teardown_taskrun_jobs_for_task`, zombie-reaper `teardown_taskrun_job`, and the `reap_orphaned_taskrun_jobs` / `sweep_stale_resources` periodic + startup backstop) is in place from `ld18` / `o17b`, and the runbook and runner are in place from `7jbf` / `7283`; the remaining gap is purely the missing operator/admin environment, not a teardown code defect.
 
 ### Wave 3 paste point: force-close/operator-close evidence
 
