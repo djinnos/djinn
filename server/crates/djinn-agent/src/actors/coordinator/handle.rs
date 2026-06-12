@@ -168,6 +168,23 @@ impl CoordinatorHandle {
         .await
     }
 
+    /// Route a loop-guard-terminated task through the shared Planner
+    /// intervention / second-strike park path. This is intentionally distinct
+    /// from the ordinary dispatch-failure redispatch ladder.
+    pub async fn route_loop_guard_planner_intervention(
+        &self,
+        source_task_id: &str,
+        role: &'static str,
+        reason: &str,
+    ) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::RouteLoopGuardPlannerIntervention {
+            source_task_id: source_task_id.to_owned(),
+            role,
+            reason: reason.to_owned(),
+        })
+        .await
+    }
+
     /// Increment the Lead escalation count for a task and return the new count.
     ///
     /// When the count reaches ≥ 2, the caller should route to Planner instead of Lead

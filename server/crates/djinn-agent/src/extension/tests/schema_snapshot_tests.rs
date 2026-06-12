@@ -260,6 +260,39 @@ fn code_graph_schema_embeds_workflow_guidance() {
 }
 
 #[test]
+fn proposal_ac_set_schema_remains_status_only() {
+    let schema = serde_json::to_value(shared_schemas::tool_proposal_ac_set())
+        .expect("serialize proposal_ac_set schema");
+    assert_eq!(schema["name"], "proposal_ac_set");
+
+    let description = schema["description"]
+        .as_str()
+        .expect("proposal_ac_set has a description");
+    for required in [
+        "`met` flags",
+        "criterion text is preserved automatically",
+        "status annotation only",
+        "does not edit the spec",
+        "bump a revision",
+        "clear sign-offs",
+    ] {
+        assert!(
+            description.contains(required),
+            "proposal_ac_set description should mention {required}: {description}"
+        );
+    }
+
+    assert_eq!(
+        schema["inputSchema"]["required"],
+        serde_json::json!(["id", "acceptance_criteria"])
+    );
+    assert_eq!(
+        schema["inputSchema"]["properties"]["acceptance_criteria"]["items"]["properties"]["met"]["type"],
+        serde_json::json!("boolean")
+    );
+}
+
+#[test]
 fn proposal_ac_amend_schema_documents_operations_and_reasons() {
     let schema = serde_json::to_value(shared_schemas::tool_proposal_ac_amend())
         .expect("serialize proposal_ac_amend schema");

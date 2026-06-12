@@ -36,8 +36,8 @@ use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{TaskRepository, task_branch_name};
 use djinn_runtime::{
-    BiStream, ResolvedCredentials, SessionRuntime, StreamEvent, TaskRunOutcome, TaskRunReport,
-    TestRuntime,
+    BiStream, LoopGuardKind, ProviderFailureClass, ResolvedCredentials, SessionRuntime,
+    StreamEvent, TaskRunOutcome, TaskRunReport, TestRuntime,
 };
 
 use crate::actors::slot::lifecycle::model_resolution::resolve_role_model_preference;
@@ -206,6 +206,11 @@ pub(crate) async fn run_supervisor_dispatch(
             None => false,
         };
     let flow = resume_flow(base_flow, worker_output_durable);
+    let loop_guard_intervention_role = flow
+        .role_sequence()
+        .first()
+        .map(|role| role.as_str())
+        .unwrap_or("worker");
     if matches!(flow, SupervisorFlow::ReviewResume) {
         tracing::info!(
             task_id = %task.short_id,
@@ -719,17 +724,13 @@ pub(crate) async fn run_supervisor_dispatch(
             // classified to `None` in `stage.rs` and are deliberately NOT fed
             // (reactive compaction / empty-turn backoff / one-off blip handle
             // those; non-provider errors must not over-trip the breaker).
-            if let TaskRunOutcome::Failed {
-                provider_failure: Some(class),
-                ..
-            } = &report.outcome
-            {
+            if let Some(class) = provider_failure_class_for_report(&report) {
                 let (is_throttle, retry_after_ms) = match class {
                     djinn_runtime::ProviderFailureClass::Throttle { retry_after_ms } => {
                         app_state
                             .health_tracker
                             .record_stall(creator_scope.as_deref(), &model_id);
-                        (true, *retry_after_ms)
+                        (true, retry_after_ms)
                     }
                     djinn_runtime::ProviderFailureClass::Failure => {
                         app_state
@@ -779,6 +780,60 @@ pub(crate) async fn run_supervisor_dispatch(
                         retry_after_ms,
                     },
                 );
+            }
+
+            if let TaskRunOutcome::LoopGuardTripped {
+                kind,
+                offending_signature,
+                threshold,
+                observed,
+                turn_span,
+                session_id,
+            } = &report.outcome
+            {
+                let reason = loop_guard_planner_intervention_reason(
+                    *kind,
+                    offending_signature,
+                    *threshold,
+                    *observed,
+                    *turn_span,
+                    session_id,
+                );
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    guard_kind = ?kind,
+                    offending_signature = %offending_signature,
+                    threshold,
+                    observed,
+                    turn_start = turn_span.0,
+                    turn_end = turn_span.1,
+                    session_id = %session_id,
+                    "supervisor dispatch: loop guard tripped; routing to Planner intervention"
+                );
+                match app_state.coordinator().await {
+                    Some(coordinator) => {
+                        if let Err(e) = coordinator
+                            .route_loop_guard_planner_intervention(
+                                &task.id,
+                                loop_guard_intervention_role,
+                                &reason,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                error = %e,
+                                "supervisor dispatch: failed to enqueue loop-guard Planner intervention"
+                            );
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            "supervisor dispatch: no coordinator handle; loop-guard Planner intervention not enqueued"
+                        );
+                    }
+                }
             }
             // Phase 2.2: post-session knowledge extraction. Fire-and-forget on
             // the long-lived server (it owns the embedding model + Qdrant, so
@@ -844,6 +899,50 @@ fn resume_flow(base_flow: SupervisorFlow, worker_output_durable: bool) -> Superv
     } else {
         base_flow
     }
+}
+
+fn provider_failure_class_for_report(report: &TaskRunReport) -> Option<ProviderFailureClass> {
+    match &report.outcome {
+        TaskRunOutcome::Failed {
+            provider_failure: Some(class),
+            ..
+        } => Some(*class),
+        _ => None,
+    }
+}
+
+fn loop_guard_kind_label(kind: LoopGuardKind) -> &'static str {
+    match kind {
+        LoopGuardKind::IdenticalToolFailure => "identical_tool_failure",
+        LoopGuardKind::PermissionDenial => "permission_denial",
+        LoopGuardKind::IdenticalOutput => "identical_output",
+        LoopGuardKind::ConsecutiveFailures => "consecutive_failures",
+    }
+}
+
+fn loop_guard_planner_intervention_reason(
+    kind: LoopGuardKind,
+    offending_signature: &str,
+    threshold: u32,
+    observed: u32,
+    turn_span: (u32, u32),
+    session_id: &str,
+) -> String {
+    format!(
+        "Reply-loop guard `{}` tripped in session `{}`: offending_signature=`{}`, \
+         threshold={}, observed={}, turn_span={}..={}. The run completed in a \
+         degenerate loop rather than failing to dispatch; do not re-dispatch the \
+         identical worker attempt. Decide how to unstick this: DECOMPOSE into \
+         focused subtasks, RESCOPE/clarify the acceptance criteria and re-dispatch, \
+         or CLOSE if the work is moot/duplicate/already-done.",
+        loop_guard_kind_label(kind),
+        session_id,
+        offending_signature,
+        threshold,
+        observed,
+        turn_span.0,
+        turn_span.1,
+    )
 }
 
 fn report_to_terminal_status(report: &TaskRunReport) -> TaskRunStatus {
@@ -964,6 +1063,69 @@ mod tests {
             task_run_id: id.to_string(),
             outcome,
             stages_completed: stages,
+        }
+    }
+
+    #[test]
+    fn loop_guard_outcome_has_no_provider_breaker_signal() {
+        let guard_report = report(
+            "guard-run",
+            vec![RoleKind::Worker],
+            TaskRunOutcome::LoopGuardTripped {
+                kind: LoopGuardKind::IdenticalToolFailure,
+                offending_signature: "shell:cargo-test".into(),
+                threshold: 3,
+                observed: 4,
+                turn_span: (7, 12),
+                session_id: "session-123".into(),
+            },
+        );
+        assert_eq!(
+            provider_failure_class_for_report(&guard_report),
+            None,
+            "loop-guard trips must not feed the provider breaker"
+        );
+
+        let failed_report = report(
+            "failed-run",
+            vec![RoleKind::Worker],
+            TaskRunOutcome::Failed {
+                stage: "worker".into(),
+                reason: "provider rejected request".into(),
+                provider_failure: Some(ProviderFailureClass::Failure),
+            },
+        );
+        assert_eq!(
+            provider_failure_class_for_report(&failed_report),
+            Some(ProviderFailureClass::Failure),
+            "typed provider failures still feed the breaker"
+        );
+    }
+
+    #[test]
+    fn loop_guard_reason_names_full_trip_payload() {
+        let reason = loop_guard_planner_intervention_reason(
+            LoopGuardKind::IdenticalToolFailure,
+            "shell:cargo-test",
+            3,
+            4,
+            (7, 12),
+            "session-123",
+        );
+
+        for expected in [
+            "identical_tool_failure",
+            "shell:cargo-test",
+            "threshold=3",
+            "observed=4",
+            "turn_span=7..=12",
+            "session-123",
+            "do not re-dispatch the identical worker attempt",
+        ] {
+            assert!(
+                reason.contains(expected),
+                "reason must include `{expected}`; got {reason}"
+            );
         }
     }
 

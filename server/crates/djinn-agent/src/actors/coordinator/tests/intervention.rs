@@ -20,6 +20,101 @@ async fn below_threshold_does_not_intervene() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loop_guard_routes_to_planner_without_dispatch_failure_streak() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    actor.dispatch_failure_streak.insert(task.id.clone(), 2);
+    actor.last_dispatched.insert(
+        task.id.clone(),
+        DispatchMarker {
+            instant: StdInstant::now(),
+            role: "worker".into(),
+        },
+    );
+
+    let handled = actor
+        .route_loop_guard_planner_intervention(
+            &task.id,
+            "worker",
+            "Reply-loop guard `identical_tool_failure` tripped: offending_signature=`shell:cargo-test`, threshold=3, observed=4, turn_span=7..=12",
+        )
+        .await;
+    assert!(
+        handled,
+        "loop guard trip must be routed through Planner intervention"
+    );
+
+    assert!(
+        !actor.dispatch_failure_streak.contains_key(&task.id),
+        "route_planner_intervention clears stale streak state instead of incrementing it"
+    );
+    assert!(
+        !actor.last_dispatched.contains_key(&task.id),
+        "loop guard path must gate identical worker re-dispatch"
+    );
+
+    let markers = planner_intervention_markers(&repo, &task.id).await;
+    assert_eq!(
+        markers.len(),
+        1,
+        "loop guard writes planner_intervention marker"
+    );
+    assert_eq!(markers[0]["reopen_count"], 0);
+
+    let reviews = repo.list_by_status("open").await.unwrap();
+    assert!(
+        reviews
+            .iter()
+            .any(|t| t.issue_type == "review" && t.project_id == task.project_id),
+        "loop guard trip must create a Planner intervention review task, not redispatch the worker"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loop_guard_second_strike_parks_task() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+
+    let handled = actor
+        .route_loop_guard_planner_intervention(
+            &task.id,
+            "worker",
+            "Reply-loop guard `identical_tool_failure` tripped: offending_signature=`shell:cargo-test`, threshold=3, observed=4, turn_span=7..=12",
+        )
+        .await;
+    assert!(handled, "second-strike guard trip must be handled");
+
+    let parked = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        parked.status, "closed",
+        "second-strike guard trip force-closes the task"
+    );
+    assert!(
+        parked
+            .close_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("planner intervention")),
+        "second-strike close reason should preserve the recoverable planner-intervention park message"
+    );
+    assert!(
+        planner_intervention_markers(&repo, &task.id)
+            .await
+            .is_empty(),
+        "second strike parks without writing a fresh marker"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn at_threshold_routes_to_planner_intervention() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
