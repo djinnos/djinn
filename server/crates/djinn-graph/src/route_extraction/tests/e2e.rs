@@ -45,7 +45,10 @@ fn ensure_canonical_graph_route_extraction_fixture(
     let temp = tempfile::tempdir().expect("create route extraction e2e fixture dir");
     write_fixture(temp.path(), axum_source, ts_file);
 
-    let mut graph = route_fixture_graph(include_axum_graph, include_ts_graph);
+    let ts_path = ts_file
+        .map(|(relative_path, _source)| Path::new(relative_path))
+        .unwrap_or_else(|| Path::new("ui/src/api/agents.ts"));
+    let mut graph = route_fixture_graph_with_ts_path(include_axum_graph, include_ts_graph, ts_path);
     let report = detect_routes(&mut graph, temp.path());
     (report, graph)
 }
@@ -78,6 +81,8 @@ fn axum_only_round_trips_to_route_and_handler_edge_without_fetches() {
         ensure_canonical_graph_route_extraction_fixture(Some(AXUM_ONLY_ROUTE), None, true, false);
     let counts = counts(&graph);
 
+    assert!(report.skipped_files.is_empty());
+    assert!(report.file_failures.is_empty());
     assert_eq!(report.route_nodes_added, 1);
     assert_eq!(report.handles_route_edges_added, 1);
     assert_eq!(report.fetches_edges_added, 0);
@@ -91,12 +96,14 @@ fn axum_only_round_trips_to_route_and_handler_edge_without_fetches() {
 fn ts_only_no_match_records_unmatched_fetch_without_graph_pollution() {
     let (report, graph) = ensure_canonical_graph_route_extraction_fixture(
         None,
-        Some(("ui/src/api/agents.ts", TS_ONLY_UNKNOWN)),
+        Some(("ui/src/api/unknown.ts", TS_ONLY_UNKNOWN)),
         false,
         true,
     );
     let counts = counts(&graph);
 
+    assert!(report.skipped_files.is_empty());
+    assert!(report.file_failures.is_empty());
     assert_eq!(report.route_nodes_added, 0);
     assert_eq!(report.handles_route_edges_added, 0);
     assert_eq!(report.fetches_edges_added, 0);
@@ -110,12 +117,14 @@ fn ts_only_no_match_records_unmatched_fetch_without_graph_pollution() {
 fn full_e2e_round_trips_to_route_handler_and_fetch_edges() {
     let (report, graph) = ensure_canonical_graph_route_extraction_fixture(
         Some(FULL_E2E_ROUTE),
-        Some(("ui/src/api/agents.ts", FULL_E2E_FETCH)),
+        Some(("ui/src/api/fixture.ts", FULL_E2E_FETCH)),
         true,
         true,
     );
     let counts = counts(&graph);
 
+    assert!(report.skipped_files.is_empty());
+    assert!(report.file_failures.is_empty());
     assert_eq!(report.route_nodes_added, 1);
     assert_eq!(report.handles_route_edges_added, 1);
     assert_eq!(report.fetches_edges_added, 1);
