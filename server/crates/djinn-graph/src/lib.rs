@@ -26,6 +26,7 @@ pub mod coupling_index;
 pub mod db_access;
 pub mod entry_points;
 pub mod git_diff;
+pub mod graph_parity;
 pub mod index_tree;
 pub mod process;
 pub mod processes;

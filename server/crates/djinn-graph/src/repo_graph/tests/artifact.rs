@@ -586,11 +586,12 @@ fn from_artifact_round_trips_route_exclusion_config() {
     // bincode / JSON round-trip so callers (impact / api_impact /
     // route_map / shape_check / edges) see the same policy
     // configuration the warmer persisted.
-    let mut config = RouteExclusionConfig::default();
-    config.health_path_globs = vec!["/_internal/health".to_string()];
-    config.param_only_paths = false;
-    config.min_confidence_for_consumer_edge = 0.75;
-    config.excluded_frameworks = vec!["actix".to_string()];
+    let config = RouteExclusionConfig {
+        health_path_globs: vec!["/_internal/health".to_string()],
+        param_only_paths: false,
+        min_confidence_for_consumer_edge: 0.75,
+        excluded_frameworks: vec!["actix".to_string()],
+    };
 
     let artifact = RepoGraphArtifact {
         version: REPO_GRAPH_ARTIFACT_VERSION,
@@ -606,8 +607,10 @@ fn from_artifact_round_trips_route_exclusion_config() {
 
     // `set_route_exclusion_config` lets tests (and the warmer)
     // override the policy without rebuilding the graph.
-    let mut override_cfg = RouteExclusionConfig::default();
-    override_cfg.min_confidence_for_consumer_edge = 0.10;
+    let override_cfg = RouteExclusionConfig {
+        min_confidence_for_consumer_edge: 0.10,
+        ..Default::default()
+    };
     let mut graph = graph;
     graph.set_route_exclusion_config(override_cfg.clone());
     assert_eq!(graph.route_exclusion_config(), &override_cfg);

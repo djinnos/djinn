@@ -855,7 +855,9 @@ fn report_to_terminal_status(report: &TaskRunReport) -> TaskRunStatus {
         // separate slot-free job on the host).
         | TaskRunOutcome::WorkerSubmitted
         | TaskRunOutcome::Escalated { .. } => TaskRunStatus::Completed,
-        TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
+        TaskRunOutcome::Failed { .. } | TaskRunOutcome::LoopGuardTripped { .. } => {
+            TaskRunStatus::Failed
+        }
         TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
     }
 }
