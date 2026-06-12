@@ -4,8 +4,8 @@
  * Features:
  * - Stores EventSource in useRef to prevent re-renders
  * - Connects to http://127.0.0.1:{port}/events on startup
- * - Exponential backoff on connection errors
- * - Parses SSE event types: task_*, epic_*, project_* and emits to sseStore
+ * - Exponential backoff with jitter on connection errors
+ * - Treats any registered SSE event or ping as stream liveness
  * - Tracks Last-Event-ID for replay on reconnect
  * - Manages connection status: connected | reconnecting | error
  *
@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useRef } from "react";
-import { sseStore, type SSEEvent, type SSEEventType } from "../stores/sseStore";
+import { sseStore, type SSEEvent } from "../stores/sseStore";
 import { getServerBaseUrl } from "@/api/serverUrl";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
 import { fetchKanbanSnapshot } from "@/api/server";
@@ -27,10 +27,31 @@ import { epicStore } from "@/stores/epicStore";
 import { resetMcpClient } from "@/api/mcpClient";
 import { useProviderGateStore } from "@/stores/providerGateStore";
 import { refreshDispatchPauseStatus } from "@/stores/dispatchPauseStore";
+import {
+  SERVER_SSE_EVENT_DECISIONS,
+  SERVER_SSE_EVENT_NAMES,
+  type ServerSSEEventName,
+} from "@/stores/sseEventContract";
 
-const INITIAL_RECONNECT_DELAY = 1000;
-const MAX_RECONNECT_DELAY = 30000;
-const RECONNECT_MULTIPLIER = 2;
+export const INITIAL_RECONNECT_DELAY = 1000;
+export const MAX_RECONNECT_DELAY = 30000;
+export const RECONNECT_MULTIPLIER = 2;
+export const RECONNECT_JITTER_RATIO = 0.2;
+export const SILENCE_TIMEOUT_MS = 60_000;
+export const LIVENESS_CHECK_INTERVAL_MS = 1_000;
+
+export function calculateReconnectDelay(
+  reconnectAttempt: number,
+  random = Math.random,
+): number {
+  const baseDelay = Math.min(
+    INITIAL_RECONNECT_DELAY * Math.pow(RECONNECT_MULTIPLIER, reconnectAttempt),
+    MAX_RECONNECT_DELAY,
+  );
+  const minDelay = Math.max(0, baseDelay * (1 - RECONNECT_JITTER_RATIO));
+  const maxDelay = Math.min(MAX_RECONNECT_DELAY, baseDelay * (1 + RECONNECT_JITTER_RATIO));
+  return Math.round(minDelay + random() * (maxDelay - minDelay));
+}
 
 export function useEventSource() {
   const projects = useProjects();
@@ -43,49 +64,24 @@ export function useEventSource() {
     .join(",");
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const livenessTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const cleanupHandlersRef = useRef<(() => void) | null>(null);
-  const normalizeEventType = (rawType: string): SSEEventType | null => {
-    const normalized = rawType.replace(".", "_");
-    if (normalized === "task_created") return "task_created";
-    if (normalized === "task_updated") return "task_updated";
-    if (normalized === "task_deleted") return "task_deleted";
-    if (normalized === "epic_created") return "epic_created";
-    if (normalized === "epic_updated") return "epic_updated";
-    if (normalized === "epic_deleted") return "epic_deleted";
-    if (normalized === "proposal_created") return "proposal_created";
-    if (normalized === "proposal_updated") return "proposal_updated";
-    if (normalized === "proposal_deleted") return "proposal_deleted";
-    if (normalized === "proposal_feedback_created") return "proposal_feedback_created";
-    if (normalized === "session_message") return "session_message";
-    if (normalized === "session_dispatched") return "session_dispatched";
-    if (normalized === "session_started") return "session_started";
-    if (
-      normalized === "session_completed" ||
-      normalized === "session_interrupted" ||
-      normalized === "session_failed" ||
-      normalized === "session_updated"
-    ) {
-      return "session_ended";
-    }
-    if (
-      normalized === "project_changed" ||
-      normalized === "project_created" ||
-      normalized === "project_updated" ||
-      normalized === "project_deleted" ||
-      normalized === "project_health_ok" ||
-      normalized === "project_health_error"
-    ) {
-      return "project_changed";
-    }
-    if (normalized === "sync_completed") return "sync_completed";
-    if (normalized === "verification_step") return "verification_step";
-    if (normalized === "lifecycle_step") return "lifecycle_step";
-    if (normalized === "dispatch_pause_changed") return "dispatch_pause_changed";
-    return null;
-  };
+  const lastReceivedAtRef = useRef<number>(Date.now());
 
   useEffect(() => {
     let isActive = true;
+    let connectGeneration = 0;
+
+    const markReceived = () => {
+      lastReceivedAtRef.current = Date.now();
+    };
+
+    const clearReconnectTimer = () => {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+    };
 
     const hydrateSnapshot = async () => {
       const slugs = projectStore
@@ -114,10 +110,63 @@ export function useEventSource() {
       }
     };
 
+    const scheduleReconnect = (source: EventSource | null) => {
+      if (!isActive) return;
+
+      clearReconnectTimer();
+      connectGeneration += 1;
+
+      sseStore.getState().setConnected(false);
+      sseStore.getState().setConnectionStatus("reconnecting");
+
+      const currentSource = source ?? eventSourceRef.current;
+      if (currentSource) {
+        currentSource.close();
+      }
+      if (!source || eventSourceRef.current === source) {
+        eventSourceRef.current = null;
+      }
+
+      const { reconnectAttempt } = sseStore.getState();
+      const delay = calculateReconnectDelay(reconnectAttempt);
+      sseStore.getState().incrementReconnectAttempt();
+
+      reconnectTimerRef.current = setTimeout(async () => {
+        if (!isActive) return;
+        // Reset MCP client so the next tool call reconnects cleanly.
+        try {
+          await resetMcpClient();
+        } catch {
+          // ignore — connect() below will surface any failure
+        }
+        void connect();
+      }, delay);
+    };
+
+    const handleOAuthOpenBrowser = (event: MessageEvent) => {
+      markReceived();
+      if (!isActive) return;
+      try {
+        const envelope = JSON.parse(event.data);
+        const url = envelope?.payload?.url;
+        if (typeof url !== "string" || !url) return;
+        const win = window.open(url, "_blank", "noopener,noreferrer");
+        if (!win) {
+          sseStore.getState().setError(
+            new Error("Browser blocked the OAuth popup. Open this URL manually: " + url),
+          );
+          console.warn("oauth.open_browser: popup blocked; url:", url);
+        }
+      } catch (err) {
+        console.error("Failed to handle oauth.open_browser:", err);
+      }
+    };
+
     // Initialize SSE event handlers (wire stores to SSE events)
     cleanupHandlersRef.current = initSSEEventHandlers();
 
     const connect = async () => {
+      const generation = connectGeneration;
       try {
         await hydrateSnapshot();
 
@@ -129,13 +178,14 @@ export function useEventSource() {
           url += `?lastEventId=${encodeURIComponent(lastEventId)}`;
         }
 
-        if (!isActive) return;
+        if (!isActive || generation !== connectGeneration) return;
 
         const es = new EventSource(url);
         eventSourceRef.current = es;
 
         es.onopen = () => {
-          if (!isActive) return;
+          markReceived();
+          if (!isActive || eventSourceRef.current !== es) return;
           if (sseStore.getState().reconnectAttempt > 0) {
             void hydrateSnapshot();
             void hydratePauseStatus();
@@ -146,118 +196,57 @@ export function useEventSource() {
           sseStore.getState().setError(null);
         };
 
-        const eventTypes = [
-          "lagged",
-          "task_created",
-          "task_updated",
-          "task_deleted",
-          "epic_created",
-          "epic_updated",
-          "epic_deleted",
-          "proposal_created",
-          "proposal_updated",
-          "proposal_deleted",
-          "proposal_feedback_created",
-          "proposal.created",
-          "proposal.updated",
-          "proposal.deleted",
-          "proposal_feedback.created",
-          "project_changed",
-          "task.created",
-          "task.updated",
-          "task.deleted",
-          "epic.created",
-          "epic.updated",
-          "epic.deleted",
-          "project.created",
-          "project.updated",
-          "project.deleted",
-          "project.health_ok",
-          "project.health_error",
-          "session.message",
-          "session.dispatched",
-          "session.started",
-          "session.completed",
-          "session.interrupted",
-          "session.failed",
-          "session.updated",
-          "sync.completed",
-          "verification.step",
-          "verification_step",
-          "lifecycle.step",
-          "lifecycle_step",
-          "dispatch_pause.changed",
-          "dispatch_pause_changed",
-        ] as const;
-
         // Copilot's in-process OAuth still needs the browser-popup
         // fallback (its MCP handler opens the authorize URL on the
         // server side). Codex moved to the device-code flow — the
         // server emits `oauth.device_code` instead; the ChatGPT sign-in
         // card consumes it directly from the `provider_oauth_start`
         // response, so we no longer need a global popup handler.
-        // Credential writes (vault upsert + OAuth token persistence) fire
-        // `credential.updated`; re-check the provider gate so the onboarding
-        // screen unmounts as soon as a new provider becomes usable — e.g.
-        // right after the Codex device-code flow lands tokens in the DB.
-        const refreshGate = () => {
-          if (!isActive) return;
-          void useProviderGateStore.getState().refresh();
-        };
-        es.addEventListener("credential.updated", refreshGate);
-        es.addEventListener("credential.created", refreshGate);
-        es.addEventListener("credential.deleted", refreshGate);
+        es.addEventListener("oauth.open_browser", handleOAuthOpenBrowser);
 
-        es.addEventListener("oauth.open_browser", (event) => {
-          if (!isActive) return;
-          try {
-            const envelope = JSON.parse(event.data);
-            const url = envelope?.payload?.url;
-            if (typeof url !== "string" || !url) return;
-            const win = window.open(url, "_blank", "noopener,noreferrer");
-            if (!win) {
-              sseStore.getState().setError(
-                new Error(
-                  "Browser blocked the OAuth popup. Open this URL manually: " + url,
-                ),
-              );
-              console.warn("oauth.open_browser: popup blocked; url:", url);
-            }
-          } catch (err) {
-            console.error("Failed to handle oauth.open_browser:", err);
-          }
-        });
+        SERVER_SSE_EVENT_NAMES.forEach((eventType: ServerSSEEventName) => {
+          if (eventType === "oauth.open_browser") return;
 
-        eventTypes.forEach((eventType) => {
           es.addEventListener(eventType, (event) => {
-            if (!isActive) return;
+            markReceived();
+            if (!isActive || eventSourceRef.current !== es) return;
+
+            const decision = SERVER_SSE_EVENT_DECISIONS[eventType];
+
             try {
-              if (eventType === "lagged") {
+              if (decision.kind === "liveness") {
+                return;
+              }
+
+              if (decision.kind === "hydrate") {
                 void hydrateSnapshot();
                 void hydratePauseStatus();
                 return;
               }
 
+              if (decision.kind === "hook") {
+                return;
+              }
+
               const data = JSON.parse(event.data);
-              
+
               // Track the event ID from the SSE message if present
               const eventId = (event as MessageEvent).lastEventId || undefined;
               if (eventId) {
                 sseStore.getState().setLastEventId(eventId);
               }
-              
-              const mappedType = normalizeEventType(eventType);
-              if (!mappedType) {
-                return;
-              }
 
               const sseEvent: SSEEvent = {
-                type: mappedType,
+                type: decision.eventType,
                 data,
                 timestamp: Date.now(),
                 id: eventId,
               };
               sseStore.getState().emit(sseEvent);
+
+              if (eventType.startsWith("credential.")) {
+                void useProviderGateStore.getState().refresh();
+              }
             } catch (err) {
               console.error(`Failed to parse ${eventType} event:`, err);
             }
@@ -265,31 +254,8 @@ export function useEventSource() {
         });
 
         es.onerror = () => {
-          if (!isActive) return;
-
-          sseStore.getState().setConnected(false);
-          sseStore.getState().setConnectionStatus("reconnecting");
-
-          es.close();
-          eventSourceRef.current = null;
-
-          const { reconnectAttempt } = sseStore.getState();
-          const delay = Math.min(
-            INITIAL_RECONNECT_DELAY * Math.pow(RECONNECT_MULTIPLIER, reconnectAttempt),
-            MAX_RECONNECT_DELAY
-          );
-          sseStore.getState().incrementReconnectAttempt();
-
-          reconnectTimerRef.current = setTimeout(async () => {
-            if (!isActive) return;
-            // Reset MCP client so the next tool call reconnects cleanly.
-            try {
-              await resetMcpClient();
-            } catch {
-              // ignore — connect() below will surface any failure
-            }
-            connect();
-          }, delay);
+          if (!isActive || eventSourceRef.current !== es) return;
+          scheduleReconnect(es);
         };
       } catch (err) {
         if (!isActive) return;
@@ -299,12 +265,22 @@ export function useEventSource() {
       }
     };
 
-    connect();
+    livenessTimerRef.current = setInterval(() => {
+      if (!isActive || !eventSourceRef.current) return;
+      if (Date.now() - lastReceivedAtRef.current >= SILENCE_TIMEOUT_MS) {
+        scheduleReconnect(eventSourceRef.current);
+      }
+    }, LIVENESS_CHECK_INTERVAL_MS);
+
+    void connect();
 
     return () => {
       isActive = false;
-      if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current);
+      connectGeneration += 1;
+      clearReconnectTimer();
+      if (livenessTimerRef.current) {
+        clearInterval(livenessTimerRef.current);
+        livenessTimerRef.current = null;
       }
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
