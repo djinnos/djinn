@@ -85,6 +85,28 @@ async fn chat_uses_router_derived_tool_schemas() {
     assert!(names.contains("execution_kill_task"));
 }
 
+#[tokio::test]
+async fn code_graph_schema_advertises_route_shape_impact_flow_ops() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let tools = mcp.all_tool_schemas();
+    let code_graph = tools
+        .iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some("code_graph"))
+        .expect("code_graph schema");
+    let description = code_graph
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("code_graph description");
+
+    for op in ["route_map", "shape_check", "api_impact", "flow"] {
+        assert!(
+            description.contains(op),
+            "code_graph schema description does not advertise {op}"
+        );
+    }
+}
+
 /// The curated chat surface (`filter_chat_allowed_mcp_schemas`) is what the
 /// chat completions handler hands to the provider. Every `object`-typed
 /// (sub)schema in it must carry a `properties` field — OpenAI/Codex's strict

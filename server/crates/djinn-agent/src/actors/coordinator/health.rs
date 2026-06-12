@@ -108,6 +108,23 @@ pub(super) async fn sweep_stale_resources(
     }
 }
 
+fn session_status_classification(sessions: &[djinn_core::models::SessionRecord]) -> &'static str {
+    if sessions
+        .iter()
+        .any(|session| session.status == "interrupted")
+    {
+        "session_interrupted"
+    } else if sessions.iter().any(|session| session.status == "completed") {
+        "session_completed"
+    } else if sessions.iter().any(|session| session.status == "failed") {
+        "session_failed"
+    } else if sessions.is_empty() {
+        "task_run_running_without_session"
+    } else {
+        "task_run_running_without_live_session"
+    }
+}
+
 // ─── K8s task-run Job backstop ───────────────────────────────────────────────
 
 /// Reconcile runtime task-run Jobs against DB truth and foreground-delete Jobs
@@ -142,8 +159,10 @@ pub(super) async fn reap_orphaned_taskrun_jobs(
         if task_run_id.is_empty() {
             tracing::warn!(
                 job_name = %job.job_name,
+                task_run_id = %job.task_run_id,
+                db_classification = "malformed_inventory",
                 reason,
-                "CoordinatorActor: task-run Job inventory returned an empty task_run_id; skipping"
+                "CoordinatorActor: task-run Job backstop inventory entry is malformed; skipping"
             );
             continue;
         }
@@ -176,7 +195,15 @@ pub(super) async fn reap_orphaned_taskrun_jobs(
             }
         };
 
-        if should_keep_taskrun_job(task_run.as_ref(), &sessions) {
+        let classification = classify_taskrun_job_owner(task_run.as_ref(), &sessions);
+        if classification.keep_job {
+            tracing::debug!(
+                job_name = %job.job_name,
+                task_run_id = %task_run_id,
+                db_classification = classification.db_classification,
+                reason,
+                "CoordinatorActor: task-run Job backstop preserved live task-run Job"
+            );
             continue;
         }
 
@@ -184,6 +211,7 @@ pub(super) async fn reap_orphaned_taskrun_jobs(
             tracing::warn!(
                 job_name = %job.job_name,
                 task_run_id = %task_run_id,
+                db_classification = classification.db_classification,
                 error = %e,
                 reason,
                 "CoordinatorActor: task-run Job backstop teardown failed; continuing sweep"
@@ -194,6 +222,7 @@ pub(super) async fn reap_orphaned_taskrun_jobs(
         tracing::info!(
             job_name = %job.job_name,
             task_run_id = %task_run_id,
+            db_classification = classification.db_classification,
             reason,
             "CoordinatorActor: backstop reaped orphaned task-run Job"
         );
@@ -230,19 +259,58 @@ pub(super) async fn reap_orphaned_taskrun_jobs_for_startup(
     reap_orphaned_taskrun_jobs(db, app_state, "startup").await;
 }
 
-fn should_keep_taskrun_job(
+struct TaskrunJobClassification {
+    keep_job: bool,
+    db_classification: &'static str,
+}
+
+fn classify_taskrun_job_owner(
     task_run: Option<&djinn_core::models::TaskRunRecord>,
     sessions: &[djinn_core::models::SessionRecord],
-) -> bool {
+) -> TaskrunJobClassification {
     let has_live_session = sessions
         .iter()
         .any(|session| session.status == "running" && session.ended_at.is_none());
 
     if let Some(task_run) = task_run {
-        return task_run.status == "running" && task_run.ended_at.is_none() && has_live_session;
+        if task_run.status == "running" && task_run.ended_at.is_none() && has_live_session {
+            return TaskrunJobClassification {
+                keep_job: true,
+                db_classification: "live_running",
+            };
+        }
+
+        if task_run.status == "running" {
+            return TaskrunJobClassification {
+                keep_job: false,
+                db_classification: session_status_classification(sessions),
+            };
+        }
+
+        return TaskrunJobClassification {
+            keep_job: false,
+            db_classification: taskrun_status_classification(&task_run.status),
+        };
     }
 
-    has_live_session
+    TaskrunJobClassification {
+        keep_job: has_live_session,
+        db_classification: if has_live_session {
+            "live_session_without_task_run"
+        } else {
+            "absent"
+        },
+    }
+}
+
+fn taskrun_status_classification(status: &str) -> &'static str {
+    match status {
+        "completed" => "task_run_completed",
+        "failed" => "task_run_failed",
+        "interrupted" => "task_run_interrupted",
+        "running" => "task_run_running_without_live_session",
+        _ => "task_run_unknown_status",
+    }
 }
 
 // ─── Note association pruning ────────────────────────────────────────────────
