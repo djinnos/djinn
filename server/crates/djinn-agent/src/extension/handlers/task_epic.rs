@@ -526,6 +526,79 @@ pub(crate) async fn call_proposal_ac_set(
     }))
 }
 
+/// Apply real acceptance-criteria spec amendments (rewrite/drop/waive) with a
+/// required audit reason. Unlike `proposal_ac_set`, this delegates to the DB
+/// repository's revision-bumping amendment path rather than met-flag merge.
+pub(crate) async fn call_proposal_ac_amend(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalAcAmendParams = parse_args(arguments)?;
+    let reason = p.reason.trim();
+    if reason.is_empty() {
+        return Err("proposal_ac_amend requires a non-empty `reason`".to_string());
+    }
+    if p.amendments.is_empty() {
+        return Err("proposal_ac_amend requires at least one amendment".to_string());
+    }
+
+    let mut amendments = Vec::with_capacity(p.amendments.len());
+    for amendment in &p.amendments {
+        match amendment.operation.as_str() {
+            "rewrite" => {
+                let criterion = amendment
+                    .criterion
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .ok_or_else(|| {
+                        "proposal_ac_amend rewrite amendments require a non-empty `criterion`"
+                            .to_string()
+                    })?;
+                amendments.push(
+                    djinn_db::repositories::proposal::ProposalAcceptanceCriteriaAmendment::Rewrite {
+                        index: amendment.index,
+                        criterion,
+                    },
+                );
+            }
+            "drop" => amendments.push(
+                djinn_db::repositories::proposal::ProposalAcceptanceCriteriaAmendment::Drop {
+                    index: amendment.index,
+                },
+            ),
+            "waive" => amendments.push(
+                djinn_db::repositories::proposal::ProposalAcceptanceCriteriaAmendment::Waive {
+                    index: amendment.index,
+                },
+            ),
+            other => {
+                return Err(format!(
+                    "unknown proposal_ac_amend operation `{other}` (expected rewrite, drop, or waive)"
+                ));
+            }
+        }
+    }
+
+    let proposal_repo = ProposalRepository::new(state.db.clone(), state.event_bus.clone());
+    let Some(proposal) = proposal_repo.resolve(&p.id).await.ok().flatten() else {
+        return Err(format!("proposal not found: {}", p.id));
+    };
+    let updated = proposal_repo
+        .amend_acceptance_criteria(&proposal.id, &amendments, reason)
+        .await
+        .map_err(|e| e.to_string())?;
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_str(&updated.acceptance_criteria).unwrap_or_default();
+    Ok(serde_json::json!({
+        "ok": true,
+        "id": updated.id,
+        "short_id": updated.short_id,
+        "latest_revision_seq": updated.latest_revision_seq,
+        "acceptance_criteria_count": parsed.len(),
+    }))
+}
+
 pub(crate) async fn call_epic_tasks(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
