@@ -6,7 +6,7 @@ use super::*;
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph and file-coupling index. Operations include workspaces, neighbors, ranked, impact, implementations, search, query_subgraph, route_map, shape_check, api_impact, flow, cycles, orphans, path, edges, symbols_at, diff_touches, detect_changes, describe, context, status, snapshot, api_surface, boundary_check, hotspots, complexity, refactor_candidates, metrics_at, dead_symbols, deprecated_callers, touches_hot_path, coupling, churn, coupling_hotspots, and coupling_hubs."
+        description = "Query the repository dependency graph and file-coupling index. Prefer `uid` as the stable exact node input; fall back to `name` + `file_path` + `kind` when a UID is unavailable; ambiguous names return ranked candidates. Agent-boundary traversal triage controls include `limit`, `offset`, `pageLimit`, `summaryOnly`, and `byDepthCounts`. Partial pages and capped summaries are triage views; absence from a page or summary is NOT evidence a node/edge/pair is absent from the full graph. Operations include workspaces, neighbors, ranked, impact, implementations, search, query_subgraph, route_map, shape_check, api_impact, flow, cycles, orphans, path, edges, symbols_at, diff_touches, detect_changes, describe, context, status, snapshot, api_surface, boundary_check, hotspots, complexity, refactor_candidates, metrics_at, dead_symbols, deprecated_callers, touches_hot_path, coupling, churn, coupling_hotspots, and coupling_hubs."
     )]
     pub async fn code_graph(
         &self,
