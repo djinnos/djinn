@@ -107,6 +107,9 @@ pub(crate) fn build_snapshot_payload(
     let mut pagerank_lookup: HashMap<petgraph::graph::NodeIndex, f64> = HashMap::new();
     for ranked_node in &ranking.nodes {
         let node = graph.node(ranked_node.node_index);
+        if node.is_route_or_tool() {
+            continue;
+        }
         let key = format_node_key(&node.id);
         let display_name = node.display_name.as_str();
         let file_hint = node.file_path.as_ref().map(|p| p.display().to_string());
@@ -140,6 +143,9 @@ pub(crate) fn build_snapshot_payload(
             continue;
         }
         let node = graph.node(idx);
+        if node.is_route_or_tool() {
+            continue;
+        }
         let key = format_node_key(&node.id);
         let file_hint = node.file_path.as_ref().map(|p| p.display().to_string());
         if exclusions.excludes(&key, file_hint.as_deref(), &node.display_name) {

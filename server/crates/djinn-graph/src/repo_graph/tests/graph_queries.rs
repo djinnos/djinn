@@ -169,23 +169,19 @@ fn search_by_name_respects_kind_filter() {
 fn route_nodes_are_additive_for_search_and_impact() {
     let graph_without_routes = RepoDependencyGraph::build(&[fixture_index()]);
     assert!(
-        graph_without_routes
-            .graph()
-            .node_weights()
-            .all(|node| node.kind != RepoGraphNodeKind::Route),
-        "fixture should model the pre-Route world"
+        graph_without_routes.graph().node_weights().all(|node| {
+            node.kind != RepoGraphNodeKind::Route && node.kind != RepoGraphNodeKind::Tool
+        }),
+        "fixture should model the pre-Route/Tool world"
     );
 
-    let pre_route_search = search_signatures(&graph_without_routes, "helper");
+    let pre_route_search = search_keys(&graph_without_routes, "helper");
     assert_eq!(
         pre_route_search,
         vec![
-            (RepoGraphNodeKind::Symbol, "helper".to_string()),
-            (RepoGraphNodeKind::File, "src/helper.rs".to_string()),
-            (
-                RepoGraphNodeKind::Symbol,
-                "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
-            ),
+            RepoNodeKey::Symbol("scip-rust pkg src/helper.rs `helper`().".to_string()),
+            RepoNodeKey::File(PathBuf::from("src/helper.rs")),
+            RepoNodeKey::Symbol("scip-rust pkg src/types.rs `HelperTrait`#".to_string()),
         ],
         "zero-Route fixture search results are the pre-Route baseline"
     );
@@ -206,7 +202,7 @@ fn route_nodes_are_additive_for_search_and_impact() {
         .expect("helper symbol");
     assert_eq!(
         pre_route_search,
-        search_signatures(&graph_without_routes_again, "helper"),
+        search_keys(&graph_without_routes_again, "helper"),
         "adding Route support must not perturb search when no Route nodes exist"
     );
     assert_eq!(
@@ -216,16 +212,18 @@ fn route_nodes_are_additive_for_search_and_impact() {
     );
 
     let mut graph_with_route = RepoDependencyGraph::build(&[fixture_index()]);
+    let handler_symbol = "scip-rust pkg src/helper.rs `helper`().";
     let helper_with_route = graph_with_route
-        .symbol_node("scip-rust pkg src/helper.rs `helper`().")
+        .symbol_node(handler_symbol)
         .expect("helper symbol");
     let route = graph_with_route.ensure_route_node(
         "GET /helper (axum)",
         "GET /helper (axum)",
         Some("rust"),
         Some("root"),
+        Some(Path::new("src/helper.rs")),
         Some("axum"),
-        Some("scip-rust pkg src/helper.rs `helper`()."),
+        Some(handler_symbol),
     );
     graph_with_route.add_handles_route_edge(
         route,
@@ -242,9 +240,9 @@ fn route_nodes_are_additive_for_search_and_impact() {
         "unfiltered search should still include the existing Symbol hit: {with_route_search:?}"
     );
     assert!(
-        with_route_search
-            .iter()
-            .any(|(kind, name)| *kind == RepoGraphNodeKind::Route && name == "GET /helper (axum)"),
+        with_route_search.iter().any(|(kind, name)| {
+            *kind == RepoGraphNodeKind::Route && name == "GET /helper (axum)"
+        }),
         "unfiltered search should include additive Route hits: {with_route_search:?}"
     );
 
@@ -263,6 +261,14 @@ fn route_nodes_are_additive_for_search_and_impact() {
         }),
         "impact should include additive Route dependents: {with_route_impact:?}"
     );
+}
+
+fn search_keys(graph: &RepoDependencyGraph, query: &str) -> Vec<RepoNodeKey> {
+    graph
+        .search_by_name(query, None, 10)
+        .into_iter()
+        .map(|hit| graph.node(hit.node_index).key())
+        .collect()
 }
 
 fn search_signatures(graph: &RepoDependencyGraph, query: &str) -> Vec<(RepoGraphNodeKind, String)> {
@@ -327,7 +333,6 @@ fn impact_edge_propagates(kind: RepoGraphEdgeKind) -> bool {
             | RepoGraphEdgeKind::Fetches
     )
 }
-
 // F6: query-planner search path. The OFF path must be identical to the
 // baseline `search_by_name`; the ON path unions across sub-queries.
 #[test]

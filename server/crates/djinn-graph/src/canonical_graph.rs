@@ -77,8 +77,10 @@ fn run_route_extraction_post_processor(
         route_nodes = report.route_nodes_added,
         handles_route_edges = report.handles_route_edges_added,
         fetches_edges = report.fetches_edges_added,
+        route_parity_enabled = crate::route_extraction::route_parity_enabled(),
         unmatched_fetch_count = report.unmatched_fetch_count,
         unresolved_consumer_count = report.unresolved_consumer_count,
+        suggested_consumer_edges = report.consumer_edge_suggestions.len(),
         skipped_files = report.skipped_files.len(),
         "ensure_canonical_graph: route_extraction pass complete"
     );

@@ -2,6 +2,30 @@ use super::super::*;
 use djinn_core::models::{TaskStatus, TransitionAction};
 
 impl CoordinatorActor {
+    async fn teardown_zombie_taskrun_job(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        task_run_id: Option<&str>,
+    ) {
+        let Some(task_run_id) = task_run_id.map(str::trim).filter(|id| !id.is_empty()) else {
+            return;
+        };
+        let Some(runtime_ops) = self.runtime_ops.as_ref() else {
+            return;
+        };
+
+        if let Err(e) = runtime_ops.teardown_taskrun_job(task_run_id).await {
+            tracing::warn!(
+                task_id = %task_id,
+                session_id = %session_id,
+                task_run_id = %task_run_id,
+                error = %e,
+                "CoordinatorActor: task-run Job teardown failed during zombie reap (continuing DB recovery)"
+            );
+        }
+    }
+
     pub(in crate::actors::coordinator) async fn enforce_session_stall_timeout(&mut self) {
         let repo = djinn_db::SessionRepository::new(
             self.db.clone(),
@@ -317,6 +341,8 @@ impl CoordinatorActor {
 
             // Forcibly reclaim the (likely leaked) slot so the reopened task is
             // not rejected with `SessionAlreadyActive` on redispatch.
+            self.teardown_zombie_taskrun_job(task_id, &session.id, session.task_run_id.as_deref())
+                .await;
             if let Err(e) = self.pool.evict_session(task_id).await {
                 tracing::warn!(task_id = %task_id, error = %e, "CoordinatorActor: failed to evict slot for zombie session");
             }

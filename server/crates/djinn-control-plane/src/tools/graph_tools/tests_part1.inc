@@ -415,6 +415,7 @@
                 to_uid: "sym:login".to_string(),
                 kind: "contains_definition".to_string(),
                 confidence: 0.98,
+                confidence_tier: "extracted".to_string(),
                 reason: Some("seed expansion".to_string()),
             }],
             seeds: vec![QuerySubgraphSeedDebug {
@@ -653,6 +654,16 @@
         }
         assert_eq!(payload["nodes"].as_array().expect("nodes array").len(), 2);
         assert_eq!(payload["edges"].as_array().expect("edges array").len(), 1);
+        let edge = payload["edges"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_object())
+            .expect("edge object");
+        assert_eq!(
+            edge.get("confidence_tier").and_then(|v| v.as_str()),
+            Some("extracted"),
+            "query_subgraph edge should expose confidence_tier: {edge:?}"
+        );
 
         let seed = payload["seeds"]
             .as_array()
@@ -783,6 +794,7 @@
                 to_uid: "symbol:scip-rust pkg auth `login`().".to_string(),
                 kind: "contains_definition".to_string(),
                 confidence: 0.98,
+                confidence_tier: "extracted".to_string(),
                 reason: Some("seed expansion".to_string()),
             }],
             seeds: vec![
@@ -1841,6 +1853,8 @@
                 last_warm_at: None,
                 pinned_commit: None,
                 commits_since_pin: None,
+            route_parity_enabled: true,
+            route_exclusion_config: serde_json::json!({}),
             })
         }
         async fn snapshot(

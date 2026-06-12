@@ -6,9 +6,11 @@ use super::*;
 pub struct CodeGraphParams {
     /// The operation to perform.
     /// One of: `neighbors`, `ranked`, `impact`, `implementations`,
-    /// `search`, `query_subgraph`, `cycles`, `orphans`, `path`, `edges`,
+    /// `search`, `query_subgraph`, `route_map`, `shape_check`,
+    /// `api_impact`, `flow`, `cycles`, `orphans`, `path`, `edges`,
     /// `symbols_at`, `diff_touches`, `detect_changes`, `describe`,
-    /// `context`, `status`, `snapshot`, `workspaces`, and the other graph analysis ops.
+    /// `context`, `status`, `snapshot`, `workspaces`, and the other
+    /// graph analysis ops.
     pub operation: String,
     /// Project identifier — either the UUID (`project_id`) or the
     /// canonical `"owner/repo"` slug. The handler resolves it to the
@@ -109,12 +111,35 @@ pub struct CodeGraphParams {
     /// Destination node for `path`.
     #[serde(default)]
     pub to: Option<String>,
+    /// HTTP method for route-aware ops (`route_map`, `shape_check`,
+    /// `api_impact`) when `route_id` is not supplied.
+    #[serde(default)]
+    pub method: Option<String>,
+    /// Exact route path for `shape_check` / `api_impact` when `route_id` is
+    /// not supplied.
+    #[serde(default)]
+    pub path: Option<String>,
     /// Source path glob for `edges`.
     #[serde(default)]
     pub from_glob: Option<String>,
     /// Destination path glob for `edges`.
     #[serde(default)]
     pub to_glob: Option<String>,
+    /// Stable route id for route-aware ops. For `shape_check` and
+    /// `api_impact`, callers must provide either `route_id` or both
+    /// `method` and `path`.
+    #[serde(default)]
+    pub route_id: Option<String>,
+    /// Route path glob for `route_map` discovery.
+    #[serde(default)]
+    pub path_glob: Option<String>,
+    /// Optional route framework filter for `route_map` discovery.
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// Include optional response fields when computing `shape_check` drift.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub include_optional: Option<bool>,
     /// Minimum SCC size for `cycles` (default 2).
     #[serde(default)]
     pub min_size: Option<i64>,
@@ -168,30 +193,6 @@ pub struct CodeGraphParams {
     /// `file_filter` is omitted.
     #[serde(default)]
     pub file_glob: Option<String>,
-    /// Route identifier for `route_map` filters and as one selector form for
-    /// `shape_check`/`api_impact`. For `shape_check`/`api_impact`, callers
-    /// must provide either `route_id` or both `method` and exact `path`.
-    #[serde(default)]
-    pub route_id: Option<String>,
-    /// HTTP method selector for route-aware ops. Optional for `route_map`;
-    /// required with `path` when `shape_check`/`api_impact` omit `route_id`.
-    #[serde(default)]
-    pub method: Option<String>,
-    /// Exact route path selector for `shape_check`/`api_impact` when
-    /// `route_id` is omitted.
-    #[serde(default)]
-    pub path: Option<String>,
-    /// Route path glob filter for `route_map`.
-    #[serde(default)]
-    pub path_glob: Option<String>,
-    /// Optional framework filter for `route_map` (for example `axum`,
-    /// `express`, or `rails`).
-    #[serde(default)]
-    pub framework: Option<String>,
-    /// Include optional response fields when computing `shape_check` drift.
-    /// Defaults to `false`.
-    #[serde(default)]
-    pub include_optional: Option<bool>,
     /// Boundary rules for `boundary_check`.
     #[serde(default)]
     pub rules: Option<Vec<BoundaryRule>>,
@@ -311,8 +312,13 @@ impl CodeGraphParams {
         clear(&mut self.file_filter);
         clear(&mut self.from);
         clear(&mut self.to);
+        clear(&mut self.method);
+        clear(&mut self.path);
         clear(&mut self.from_glob);
         clear(&mut self.to_glob);
+        clear(&mut self.route_id);
+        clear(&mut self.path_glob);
+        clear(&mut self.framework);
         clear(&mut self.visibility);
         clear(&mut self.sort_by);
         clear(&mut self.group_by);
@@ -333,6 +339,11 @@ impl CodeGraphParams {
         clear(&mut self.level);
         clear(&mut self.target);
         clear(&mut self.tests);
+        clear(&mut self.route_id);
+        clear(&mut self.method);
+        clear(&mut self.path);
+        clear(&mut self.path_glob);
+        clear(&mut self.framework);
     }
 }
 

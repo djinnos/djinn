@@ -319,6 +319,7 @@ impl DjinnMcpServer {
                 ctx,
                 params.route_id.as_deref(),
                 params.method.as_deref(),
+                params.path.as_deref(),
                 params.path_glob.as_deref(),
                 params.framework.as_deref(),
                 limit,

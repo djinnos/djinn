@@ -276,6 +276,7 @@ pub(super) fn impact_bfs(
         | RepoGraphEdgeKind::Writes
         | RepoGraphEdgeKind::SymbolReference
         | RepoGraphEdgeKind::FileReference
+        | RepoGraphEdgeKind::Route
         | RepoGraphEdgeKind::Implements
         | RepoGraphEdgeKind::Extends
         | RepoGraphEdgeKind::TypeDefines

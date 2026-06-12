@@ -751,8 +751,14 @@
             max_seeds: None,
             from: None,
             to: None,
+            method: None,
+            path: None,
             from_glob: None,
             to_glob: None,
+            route_id: None,
+            path_glob: None,
+            framework: None,
+            include_optional: None,
             min_size: None,
             visibility: None,
             sort_by: None,
@@ -767,12 +773,6 @@
             confidence: None,
             window_days: None,
             file_glob: None,
-            route_id: None,
-            method: None,
-            path: None,
-            path_glob: None,
-            framework: None,
-            include_optional: None,
             rules: None,
             seed_entries: None,
             seed_sinks: None,
@@ -1056,6 +1056,116 @@
         assert_eq!(params.from_glob.as_deref(), Some("server/src/**"));
         assert_eq!(params.to_glob.as_deref(), Some("server/crates/**"));
         assert_eq!(params.edge_kind.as_deref(), Some("FileReference"));
+    }
+
+    #[test]
+    fn edge_entry_serializes_confidence_tier_contract() {
+        let json = serde_json::to_value(EdgeEntry {
+            from: "file:ui/src/api.ts".to_string(),
+            to: "route:GET /api/users".to_string(),
+            edge_kind: "Fetches".to_string(),
+            edge_weight: 2.0,
+            confidence: 0.91,
+            confidence_tier: "extracted".to_string(),
+            reason: Some("url-literal; import-evidence".to_string()),
+        })
+        .expect("serialize EdgeEntry");
+        assert_eq!(
+            json.get("confidence_tier").and_then(|v| v.as_str()),
+            Some("extracted")
+        );
+        assert_eq!(json.get("confidence").and_then(|v| v.as_f64()), Some(0.91));
+        assert_eq!(
+            json.get("reason").and_then(|v| v.as_str()),
+            Some("url-literal; import-evidence")
+        );
+    }
+
+    #[test]
+    fn route_contracts_serialize_exclusion_and_tier_audit_fields() {
+        let consumer = RelatedSymbol {
+            uid: "symbol:ui-loadAgents".to_string(),
+            name: "loadAgents".to_string(),
+            kind: "function".to_string(),
+            file_path: Some("ui/src/api.ts".to_string()),
+            confidence: 0.2,
+            confidence_tier: "ambiguous".to_string(),
+            confidence_reason: Some("below-floor string-shape".to_string()),
+            excluded_reason: Some("below-confidence-floor".to_string()),
+            route_language_chain: Some(RouteLanguageChain {
+                source_language: Some("typescript".to_string()),
+                target_language: Some("rust".to_string()),
+                is_cross_language: true,
+            }),
+        };
+        let route = RouteRef {
+            uid: "route:GET /api/agents (axum)".to_string(),
+            id: "GET /api/agents (axum)".to_string(),
+            method: Some("GET".to_string()),
+            path: Some("/api/agents".to_string()),
+            framework: Some("axum".to_string()),
+        };
+
+        let route_json = serde_json::to_value(RouteMapResult {
+            routes: vec![RouteMapEntry {
+                route: route.clone(),
+                excluded_reason: Some("health-path".to_string()),
+                handler: None,
+                middleware: Vec::new(),
+                consumers: vec![consumer.clone()],
+            }],
+            summary: RouteSummary::default(),
+        })
+        .expect("serialize route map");
+        assert_eq!(
+            route_json["routes"][0]["excluded_reason"].as_str(),
+            Some("health-path")
+        );
+        assert_eq!(
+            route_json["routes"][0]["consumers"][0]["confidence_tier"].as_str(),
+            Some("ambiguous")
+        );
+        assert_eq!(
+            route_json["routes"][0]["consumers"][0]["excluded_reason"].as_str(),
+            Some("below-confidence-floor")
+        );
+
+        let shape_json = serde_json::to_value(ShapeCheckResult {
+            matched: false,
+            summary: "route matched selector but is excluded: health-path".to_string(),
+            excluded_reason: Some("health-path".to_string()),
+            route_shape: RouteShape {
+                route: route.clone(),
+                response_fields: Vec::new(),
+            },
+            drifts: Vec::new(),
+        })
+        .expect("serialize shape check");
+        assert_eq!(shape_json["matched"].as_bool(), Some(false));
+        assert_eq!(
+            shape_json["excluded_reason"].as_str(),
+            Some("health-path")
+        );
+
+        let impact_json = serde_json::to_value(ApiImpactResult {
+            impacts: Vec::new(),
+            excluded_impacts: vec![ApiImpactEntry {
+                consumer,
+                risk_tier: "excluded".to_string(),
+                reason: "below-floor Fetches suggestion".to_string(),
+                excluded_reason: Some("below-confidence-floor".to_string()),
+            }],
+            summary: "0 default impact(s); 1 excluded audit entry".to_string(),
+        })
+        .expect("serialize api impact");
+        assert_eq!(
+            impact_json["excluded_impacts"][0]["consumer"]["confidence_tier"].as_str(),
+            Some("ambiguous")
+        );
+        assert_eq!(
+            impact_json["excluded_impacts"][0]["excluded_reason"].as_str(),
+            Some("below-confidence-floor")
+        );
     }
 
     #[test]

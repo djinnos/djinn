@@ -242,8 +242,9 @@ impl RepoGraphBridge {
                     Ok(RepoGraphEdgeKind::SymbolReference)
                 }
                 "handles_route" | "handlesroute" => Ok(RepoGraphEdgeKind::HandlesRoute),
-                "fetches" => Ok(RepoGraphEdgeKind::Fetches),
                 "reads" | "read" => Ok(RepoGraphEdgeKind::Reads),
+                "route" | "routes" => Ok(RepoGraphEdgeKind::Route),
+                "fetches" | "fetch" => Ok(RepoGraphEdgeKind::Fetches),
                 "writes" | "write" => Ok(RepoGraphEdgeKind::Writes),
                 "extends" | "extend" => Ok(RepoGraphEdgeKind::Extends),
                 "implements" | "implement" => Ok(RepoGraphEdgeKind::Implements),
@@ -314,6 +315,7 @@ impl RepoGraphBridge {
                     to_uid: edge.to_uid,
                     kind: edge_label(edge.kind),
                     confidence: edge.confidence,
+                    confidence_tier: format!("{:?}", edge.confidence_tier).to_ascii_lowercase(),
                     reason: edge.reason,
                 })
                 .collect(),
@@ -393,6 +395,9 @@ impl RepoGraphBridge {
                 // imported `tokio::spawn` getting top-3 is noise. Mirrors
                 // the long-standing filter in `orphans` and `dead`.
                 if graph_node.is_external {
+                    return None;
+                }
+                if graph_node.is_route_or_tool() {
                     return None;
                 }
                 if let Some(prefix) = workspace_prefix.as_deref()
@@ -906,6 +911,10 @@ impl RepoGraphBridge {
                 to: dst_key,
                 edge_kind: kind_label,
                 edge_weight: edge_ref.weight().weight,
+                confidence: edge_ref.weight().confidence,
+                confidence_tier: format!("{:?}", edge_ref.weight().confidence_tier())
+                    .to_ascii_lowercase(),
+                reason: edge_ref.weight().reason.clone(),
             });
             if out.len() >= limit {
                 break;
@@ -950,6 +959,7 @@ impl RepoGraphBridge {
                     | RepoGraphEdgeKind::Extends
                     | RepoGraphEdgeKind::TypeDefines
                     | RepoGraphEdgeKind::Defines
+                    | RepoGraphEdgeKind::Route
                     | RepoGraphEdgeKind::HandlesRoute
                     | RepoGraphEdgeKind::Fetches
             )
@@ -1158,6 +1168,11 @@ impl RepoGraphBridge {
                 last_warm_at: None,
                 pinned_commit: None,
                 commits_since_pin: None,
+                route_parity_enabled: djinn_graph::route_extraction::route_parity_enabled(),
+                route_exclusion_config: serde_json::to_value(
+                    djinn_graph::repo_graph::RouteExclusionConfig::default(),
+                )
+                .unwrap_or_else(|_| serde_json::Value::Null),
             });
         };
 
@@ -1171,8 +1186,20 @@ impl RepoGraphBridge {
             project_id: ctx.id.clone(),
             warmed: true,
             last_warm_at: Some(row.built_at),
-            pinned_commit: Some(row.commit_sha),
+            pinned_commit: Some(row.commit_sha.clone()),
             commits_since_pin,
+            route_parity_enabled: djinn_graph::route_extraction::route_parity_enabled(),
+            route_exclusion_config:
+                djinn_graph::repo_graph::deserialize_repo_graph_artifact_bincode(&row.graph_blob)
+                    .map(|artifact| serde_json::to_value(artifact.route_exclusion_config).ok())
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| {
+                        serde_json::to_value(
+                            djinn_graph::repo_graph::RouteExclusionConfig::default(),
+                        )
+                        .unwrap_or_else(|_| serde_json::Value::Null)
+                    }),
         })
     }
 }

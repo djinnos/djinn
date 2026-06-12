@@ -37,13 +37,21 @@ mod tests;
 // `communities.rs`, etc. for the consumer side.
 pub use self::artifact::{
     RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphArtifactProcess,
-    RepoGraphArtifactSymbolRange, RouteRef, deserialize_repo_graph_artifact_bincode,
+    RepoGraphArtifactSymbolRange, RouteExclusionConfig, RouteRef,
+    deserialize_repo_graph_artifact_bincode,
 };
 pub use self::constants::{REPO_GRAPH_ARTIFACT_VERSION, is_test_path};
-pub use self::edge::{RepoGraphEdge, RepoGraphEdgeKind, edge_confidence_floor};
-pub use self::graph::{RepoDependencyGraph, SymbolRange};
-pub use self::node::{RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey};
-pub use self::ranking::{RankedRepoGraphNode, RepoGraphRanking};
+pub use self::edge::{
+    EdgeConfidenceTier, RepoGraphEdge, RepoGraphEdgeKind, edge_confidence_floor,
+    edge_confidence_tier, promote_fetches_confidence_with_import_evidence,
+};
+pub use self::graph::{RepoDependencyGraph, RouteEdgeLanguageChain, SymbolRange};
+pub use self::node::{
+    RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey, is_route_or_tool_node,
+};
+pub use self::ranking::{
+    RankedRepoGraphNode, RepoGraphRanking, is_singleton_route_without_consumers,
+};
 
 /// `RepoDependencyGraphBuilder` lives in [`self::builder`] (see
 /// `repo_graph/builder.rs`). The `impl` block in `mod.rs` (`build_with_source`
@@ -68,6 +76,7 @@ pub(crate) use self::constants::{
     PAGE_RANK_DAMPING_FACTOR, PAGE_RANK_ITERATIONS,
 };
 pub(crate) use self::edge::{edge_weight, edge_weight_for};
+pub(crate) use self::graph::is_default_hidden_synthetic_kind;
 #[allow(unused_imports)]
 pub(crate) use self::ranking::{
     apply_rrf_fused_rank, compute_entry_point_distance, compute_pagerank_sparse,
@@ -184,6 +193,7 @@ impl RepoDependencyGraph {
             symbol_ranges,
             communities: self.communities.clone(),
             processes: processes_out,
+            route_exclusion_config: self.route_exclusion_config.clone(),
         }
     }
 
@@ -284,6 +294,7 @@ impl RepoDependencyGraph {
             community_lookup: BTreeMap::new(),
             processes,
             process_lookup,
+            route_exclusion_config: artifact.route_exclusion_config.clone(),
         };
         // PR F3: rehydrate the community sidecar verbatim — node
         // positions in the artifact match `NodeIndex` 0..n thanks to the
@@ -403,6 +414,7 @@ impl RepoDependencyGraph {
             communities: Vec::new(),
             // Processes are likewise recomputed by the post-build pass.
             processes: Vec::new(),
+            route_exclusion_config: artifact.route_exclusion_config,
         };
 
         // Step 2: Rebuild the base graph from the filtered artifact.
