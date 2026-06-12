@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useRef } from "react";
-import { sseStore, type SSEEvent, type SSEEventType } from "../stores/sseStore";
+import { sseStore, type SSEEvent } from "../stores/sseStore";
 import { getServerBaseUrl } from "@/api/serverUrl";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
 import { fetchKanbanSnapshot } from "@/api/server";
@@ -27,6 +27,10 @@ import { epicStore } from "@/stores/epicStore";
 import { resetMcpClient } from "@/api/mcpClient";
 import { useProviderGateStore } from "@/stores/providerGateStore";
 import { refreshDispatchPauseStatus } from "@/stores/dispatchPauseStore";
+import {
+  SERVER_SSE_EVENT_NAMES,
+  resolveServerSSEEventName,
+} from "@/stores/sseEventContract";
 
 const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
@@ -44,46 +48,6 @@ export function useEventSource() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cleanupHandlersRef = useRef<(() => void) | null>(null);
-  const normalizeEventType = (rawType: string): SSEEventType | null => {
-    const normalized = rawType.replace(".", "_");
-    if (normalized === "task_created") return "task_created";
-    if (normalized === "task_updated") return "task_updated";
-    if (normalized === "task_deleted") return "task_deleted";
-    if (normalized === "epic_created") return "epic_created";
-    if (normalized === "epic_updated") return "epic_updated";
-    if (normalized === "epic_deleted") return "epic_deleted";
-    if (normalized === "proposal_created") return "proposal_created";
-    if (normalized === "proposal_updated") return "proposal_updated";
-    if (normalized === "proposal_deleted") return "proposal_deleted";
-    if (normalized === "proposal_feedback_created") return "proposal_feedback_created";
-    if (normalized === "session_message") return "session_message";
-    if (normalized === "session_dispatched") return "session_dispatched";
-    if (normalized === "session_started") return "session_started";
-    if (
-      normalized === "session_completed" ||
-      normalized === "session_interrupted" ||
-      normalized === "session_failed" ||
-      normalized === "session_updated"
-    ) {
-      return "session_ended";
-    }
-    if (
-      normalized === "project_changed" ||
-      normalized === "project_created" ||
-      normalized === "project_updated" ||
-      normalized === "project_deleted" ||
-      normalized === "project_health_ok" ||
-      normalized === "project_health_error"
-    ) {
-      return "project_changed";
-    }
-    if (normalized === "sync_completed") return "sync_completed";
-    if (normalized === "verification_step") return "verification_step";
-    if (normalized === "lifecycle_step") return "lifecycle_step";
-    if (normalized === "dispatch_pause_changed") return "dispatch_pause_changed";
-    return null;
-  };
-
   useEffect(() => {
     let isActive = true;
 
@@ -146,50 +110,6 @@ export function useEventSource() {
           sseStore.getState().setError(null);
         };
 
-        const eventTypes = [
-          "lagged",
-          "task_created",
-          "task_updated",
-          "task_deleted",
-          "epic_created",
-          "epic_updated",
-          "epic_deleted",
-          "proposal_created",
-          "proposal_updated",
-          "proposal_deleted",
-          "proposal_feedback_created",
-          "proposal.created",
-          "proposal.updated",
-          "proposal.deleted",
-          "proposal_feedback.created",
-          "project_changed",
-          "task.created",
-          "task.updated",
-          "task.deleted",
-          "epic.created",
-          "epic.updated",
-          "epic.deleted",
-          "project.created",
-          "project.updated",
-          "project.deleted",
-          "project.health_ok",
-          "project.health_error",
-          "session.message",
-          "session.dispatched",
-          "session.started",
-          "session.completed",
-          "session.interrupted",
-          "session.failed",
-          "session.updated",
-          "sync.completed",
-          "verification.step",
-          "verification_step",
-          "lifecycle.step",
-          "lifecycle_step",
-          "dispatch_pause.changed",
-          "dispatch_pause_changed",
-        ] as const;
-
         // Copilot's in-process OAuth still needs the browser-popup
         // fallback (its MCP handler opens the authorize URL on the
         // server side). Codex moved to the device-code flow — the
@@ -228,31 +148,32 @@ export function useEventSource() {
           }
         });
 
-        eventTypes.forEach((eventType) => {
+        SERVER_SSE_EVENT_NAMES.forEach((eventType) => {
           es.addEventListener(eventType, (event) => {
             if (!isActive) return;
             try {
-              if (eventType === "lagged") {
+              const decision = resolveServerSSEEventName(eventType);
+
+              if (decision.kind === "hydrate") {
                 void hydrateSnapshot();
                 void hydratePauseStatus();
                 return;
               }
 
+              if (decision.kind !== "dispatch") {
+                return;
+              }
+
               const data = JSON.parse(event.data);
-              
+
               // Track the event ID from the SSE message if present
               const eventId = (event as MessageEvent).lastEventId || undefined;
               if (eventId) {
                 sseStore.getState().setLastEventId(eventId);
               }
-              
-              const mappedType = normalizeEventType(eventType);
-              if (!mappedType) {
-                return;
-              }
 
               const sseEvent: SSEEvent = {
-                type: mappedType,
+                type: decision.eventType,
                 data,
                 timestamp: Date.now(),
                 id: eventId,
