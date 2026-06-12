@@ -303,14 +303,13 @@ fn route_planner_escalate(
 /// - `Planner` + planning-type issue (`planning` / `decomposition` /
 ///   `review` / `epic_breakdown`) + not cancelled: exactly one
 ///   `transition(task_id, "close", Some(surfaced_reason))` call;
-///   return [`TaskRunOutcome::Closed`] with the original `reason`
-///   verbatim (the surfaced reason passed to the close transition is
-///   prefixed with `"planner escalated:"` for log / `tasks.close_reason`
-///   parity with other close paths, but the `TaskRunOutcome::Closed`
-///   `reason` field stays stable so host/UI reporting and the
-///   `planner_escalate_routes_planning_close` regression test don't
-///   need to track a prefix). The success path also emits a structured
-///   `tracing::info!` so the worker pod log carries `task_run_id`,
+///   return [`TaskRunOutcome::Closed`] with the same surfaced reason.
+///   The surfaced reason is prefixed with `"planner escalated:"` so
+///   `tasks.close_reason`, activity events, the terminal run outcome,
+///   and host/UI reporting all show the same durable close reason while
+///   still containing the original planner-provided message. The
+///   success path also emits a structured `tracing::info!` so the
+///   worker pod log carries `task_run_id`,
 ///   `task_id`, `issue_type`, and the surfaced reason — this is the
 ///   `rt3l` hardening on top of `ep1i`'s routing.
 /// - `Planner` + planning-type issue + cancelled: NO transition call;
@@ -347,10 +346,10 @@ where
             // values in the schema (`"completed"`, `"force_closed"`,
             // `"peer_reconciled"`) and gives operators a single
             // grep-able token for "the planner asked for help here"
-            // without losing the original message. The
-            // `TaskRunOutcome::Closed { reason }` returned below keeps
-            // the original reason verbatim so host/UI reporting stays
-            // stable.
+            // without losing the original message. Returning the same
+            // surfaced reason in `TaskRunOutcome::Closed { reason }`
+            // keeps host/UI reporting consistent with the durable
+            // close transition path.
             let surfaced_reason = format!("planner escalated: {reason}");
             info!(
                 task_run_id = %task_run_id,
@@ -362,7 +361,7 @@ where
             if let Err(e) = transition(
                 task_id.to_string(),
                 "close".to_string(),
-                Some(surfaced_reason),
+                Some(surfaced_reason.clone()),
             )
             .await
             {
@@ -374,7 +373,9 @@ where
                     "supervisor: planner escalate close transition skipped",
                 );
             }
-            TaskRunOutcome::Closed { reason }
+            TaskRunOutcome::Closed {
+                reason: surfaced_reason,
+            }
         }
         PlannerEscalateRoute::Cancelled => {
             tracing::debug!(
@@ -1243,9 +1244,9 @@ impl TaskRunSupervisor {
                         //     `"peer_reconciled"` / `"force_closed"`
                         //     / `"completed"` markers). The
                         //     `TaskRunOutcome::Closed { reason }`
-                        //     returned by the helper keeps the
-                        //     original reason verbatim so the
-                        //     host/UI contract stays stable.
+                        //     returned by the helper uses the same
+                        //     surfaced reason so host/UI reporting
+                        //     matches the persisted close reason.
                         let outcome = apply_planner_escalate_route(
                             role_kind,
                             &task.issue_type,
@@ -1742,6 +1743,16 @@ mod tests {
     #[allow(dead_code)]
     fn _obj_safe(_: &dyn SupervisorServices) {}
 
+    #[derive(Debug, Clone)]
+    struct TransitionCall {
+        task_id: String,
+        action: String,
+        reason: Option<String>,
+    }
+
+    const PLANNING_ISSUE_TYPES: [&str; 4] =
+        ["planning", "decomposition", "review", "epic_breakdown"];
+
     #[test]
     fn cargo_target_run_dir_helper_matches_expected_cache_path() {
         let task_run_id = "019eb956-ac3a-7492-b51c-bcd904f65a21";
@@ -1826,21 +1837,6 @@ mod tests {
     // `CancellationToken`, and full `SupervisorServices` for a full
     // task-run. The existing `stage_outcome_terminal_classifier` test
     // above is intentionally preserved.
-
-    /// Recorded `transition_task` call captured by the planner-escalate
-    /// regression tests below. The recording closure runs in a
-    /// multi-threaded tokio runtime, so the `Vec` lives behind a
-    /// `Mutex`; this struct is what gets pushed per call.
-    #[derive(Debug, Clone)]
-    struct TransitionCall {
-        task_id: String,
-        action: String,
-        reason: Option<String>,
-    }
-
-    const PLANNING_ISSUE_TYPES: [&str; 4] =
-        ["planning", "decomposition", "review", "epic_breakdown"];
-
     /// Pure routing decision: planner + planning + not cancelled →
     /// `CloseWithReason`. This is the regression assertion for the old
     /// behavior where planner escalate produced only
@@ -1950,8 +1946,8 @@ mod tests {
         match &outcome {
             TaskRunOutcome::Closed { reason } => {
                 assert_eq!(
-                    reason, "planner needs human guidance on the spec",
-                    "Closed outcome must carry the original escalation reason verbatim"
+                    reason, "planner escalated: planner needs human guidance on the spec",
+                    "Closed outcome must carry the same surfaced reason passed to the close transition"
                 );
             }
             other => panic!(
@@ -2181,11 +2177,11 @@ mod tests {
     // that's the actual acceptance criterion: the close-transition reason
     // must contain the planner's original escalation reason (so the
     // persisted `tasks.close_reason` row and activity log entry are
-    // durably visible) AND the `TaskRunOutcome::Closed` reason must
-    // stay verbatim (so host/UI reporting stays stable), AND the
-    // surfaced reason must be the prefixed `"planner escalated:"`
-    // variant the design calls out as the grep-able token for
-    // planner-escalate closures.
+    // durably visible), the `TaskRunOutcome::Closed` reason must match
+    // that surfaced close-transition reason (so host/UI reporting stays
+    // consistent), and the surfaced reason must be the prefixed
+    // `"planner escalated:"` variant the design calls out as the
+    // grep-able token for planner-escalate closures.
 
     /// Acceptance criterion: the close-transition reason MUST start
     /// with the `"planner escalated:"` prefix so `tasks.close_reason`
@@ -2246,15 +2242,13 @@ mod tests {
     }
 
     /// Acceptance criterion: the `TaskRunOutcome::Closed { reason }`
-    /// reason must be the ORIGINAL planner-provided reason verbatim —
-    /// it must NOT carry the `"planner escalated:"` prefix that the
-    /// close transition gets. The two surfaces serve different
-    /// consumers (the transition reason feeds `tasks.close_reason`;
-    /// the outcome reason feeds the host/UI report) and the design
-    /// calls for keeping them distinct so the host/UI contract
-    /// doesn't drift every time the persisted reason format changes.
+    /// reason must match the exact surfaced reason passed to the
+    /// close transition. That keeps host/UI terminal reporting
+    /// consistent with the durable `tasks.close_reason` / activity path
+    /// while the original planner-provided reason remains included
+    /// verbatim after the `"planner escalated:"` prefix.
     #[tokio::test]
-    async fn planner_escalate_outcome_reason_stays_verbatim() {
+    async fn planner_escalate_outcome_reason_matches_persisted_close_reason() {
         let outcome = apply_planner_escalate_route(
             RoleKind::Planner,
             "planning",
@@ -2269,13 +2263,12 @@ mod tests {
         match outcome {
             TaskRunOutcome::Closed { reason } => {
                 assert_eq!(
-                    reason, "planner needs human guidance on the spec",
-                    "TaskRunOutcome::Closed reason must be the original planner reason verbatim"
+                    reason, "planner escalated: planner needs human guidance on the spec",
+                    "TaskRunOutcome::Closed reason must match the persisted close-transition reason"
                 );
                 assert!(
-                    !reason.starts_with("planner escalated: "),
-                    "TaskRunOutcome::Closed reason must NOT carry the persisted close_reason prefix; \
-                     that prefix is for the transition reason only, got {reason:?}"
+                    reason.contains("planner needs human guidance on the spec"),
+                    "TaskRunOutcome::Closed reason must contain the original planner reason, got {reason:?}"
                 );
             }
             other => panic!(
@@ -2560,9 +2553,12 @@ mod tests {
             futures::executor::block_on(future)
         });
 
-        // The outcome is the `Closed` variant with the verbatim reason.
+        // The outcome is the `Closed` variant with the same surfaced reason
+        // that was passed to the durable close transition.
         match outcome {
-            TaskRunOutcome::Closed { reason } => assert_eq!(reason, original_reason),
+            TaskRunOutcome::Closed { reason } => {
+                assert_eq!(reason, format!("planner escalated: {original_reason}"))
+            }
             other => panic!("expected Closed, got {other:?}"),
         }
 
