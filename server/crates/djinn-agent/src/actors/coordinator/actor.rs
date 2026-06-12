@@ -1079,12 +1079,12 @@ impl CoordinatorActor {
             // language) has nothing to index — warming it just churns empty
             // Jobs. Dispatch no longer depends on the warm (see
             // `is_ready_for_dispatch`), so skipping is purely a saving.
-            let cfg = crate::verification::environment::environment_config_for_project_id(
-                &self.db,
-                &project.id,
-            )
-            .await;
-            if !cfg.languages.has_any() {
+            // `project_has_indexable_code` resolves through the assigned
+            // catalog image — catalog projects keep an empty per-project
+            // languages block by design.
+            if !crate::verification::environment::project_has_indexable_code(&self.db, &project.id)
+                .await
+            {
                 skipped_no_code += 1;
                 tracing::debug!(
                     project_id = %project.id,

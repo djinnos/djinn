@@ -304,6 +304,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
 
     let output_dir_for_blocking = output_dir.clone();
     let artifacts = run.artifacts;
+    let workspace_statuses = run.workspace_statuses;
     let project_root_for_blocking = handle.path().to_path_buf();
     let blocking =
         tokio::task::spawn_blocking(move || -> Result<CanonicalGraphBuildOutput, String> {
@@ -410,8 +411,14 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         .await
     {
         Ok(()) => {
-            persist_workspace_graph_freshness_best_effort(ctx, project_id, &commit_sha, &graph)
-                .await;
+            persist_workspace_graph_freshness_best_effort(
+                ctx,
+                project_id,
+                &commit_sha,
+                &graph,
+                &workspace_statuses,
+            )
+            .await;
         }
         Err(e) => {
             tracing::warn!(error = %e, "ensure_canonical_graph: failed to persist graph cache row");
@@ -530,15 +537,18 @@ async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
     project_id: &str,
     commit_sha: &str,
     graph: &crate::repo_graph::RepoDependencyGraph,
+    workspace_statuses: &[crate::scip_indexer::WorkspaceWarmStatus],
 ) {
-    use djinn_db::{ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert};
+    use djinn_db::{
+        CODELESS_WORKSPACE_SLUG, ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert,
+    };
 
     let workspaces = distinct_workspace_slugs(graph);
     if workspaces.is_empty() {
         return;
     }
 
-    let rows: Vec<_> = workspaces
+    let mut rows: Vec<_> = workspaces
         .iter()
         .map(|workspace_slug| ProjectWorkspaceGraphUpsert {
             project_id,
@@ -547,6 +557,35 @@ async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
             status: "ready",
         })
         .collect();
+
+    // A workspace whose indexer failed (or timed out) contributes no nodes,
+    // so it never makes `distinct_workspace_slugs` — without an explicit row
+    // its previous "ready" stamp (possibly from an older commit) survives and
+    // lies about freshness, and a never-yet-indexed workspace stays invisible.
+    // Stamp those at THIS commit with their failure status so the workspaces
+    // op / UI can tell "indexed empty" from "indexer wiped out". Partial
+    // success still caches the merged graph (see `tally_indexer_results` for
+    // the policy); this is purely visibility.
+    let ready: std::collections::BTreeSet<&str> = workspaces.iter().map(String::as_str).collect();
+    let mut failed_seen = std::collections::BTreeSet::new();
+    for status in workspace_statuses {
+        if !matches!(status.status.as_str(), "failed" | "timed_out") {
+            continue;
+        }
+        if ready.contains(status.workspace_slug.as_str()) {
+            // Another indexer covered this workspace (polyglot roots run
+            // several) — the graph has nodes for it, so "ready" wins.
+            continue;
+        }
+        if failed_seen.insert(status.workspace_slug.as_str()) {
+            rows.push(ProjectWorkspaceGraphUpsert {
+                project_id,
+                workspace_slug: &status.workspace_slug,
+                commit_sha,
+                status: &status.status,
+            });
+        }
+    }
 
     let workspace_count = rows.len();
     let repo = ProjectWorkspaceGraphRepository::new(ctx.db().clone());
@@ -557,6 +596,17 @@ async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
             workspace_count,
             error = %e,
             "ensure_canonical_graph: failed to persist project_workspace_graph freshness rows"
+        );
+    }
+
+    // A successful warm with real workspaces contradicts any lingering
+    // code-less sentinel (e.g. stamped while the warm gate misfired on a
+    // catalog-image project). Retire it so freshness derives from real rows.
+    if let Err(e) = repo.delete(project_id, CODELESS_WORKSPACE_SLUG).await {
+        tracing::warn!(
+            project_id = %project_id,
+            error = %e,
+            "ensure_canonical_graph: failed to delete code-less sentinel row"
         );
     }
 }
@@ -1018,6 +1068,82 @@ mod tests {
         let graph = crate::repo_graph::RepoDependencyGraph::build(&[]);
 
         assert!(distinct_workspace_slugs(&graph).is_empty());
+    }
+
+    #[tokio::test]
+    async fn persist_freshness_stamps_failures_and_retires_codeless_sentinel() {
+        use djinn_db::{
+            CODELESS_WORKSPACE_SLUG, ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert,
+        };
+
+        let db = create_test_db();
+        db.ensure_initialized().await.unwrap();
+        ProjectRepository::new(db.clone(), EventBus::noop())
+            .create_with_id("p1", "p1", "test", "p1")
+            .await
+            .unwrap();
+        let repo = ProjectWorkspaceGraphRepository::new(db.clone());
+        // Pre-existing state from a misfiring gate + an older partial warm:
+        // a code-less sentinel and a stale "ready" row for `server`.
+        repo.upsert_many(&[
+            ProjectWorkspaceGraphUpsert {
+                project_id: "p1",
+                workspace_slug: CODELESS_WORKSPACE_SLUG,
+                commit_sha: "no-code",
+                status: "ready",
+            },
+            ProjectWorkspaceGraphUpsert {
+                project_id: "p1",
+                workspace_slug: "server",
+                commit_sha: "old-commit",
+                status: "ready",
+            },
+        ])
+        .await
+        .unwrap();
+
+        // New warm at `new-commit`: graph carries `ui` only; the `server`
+        // indexer timed out.
+        let mut graph = build_test_graph_fixture();
+        for node in graph.graph_mut_unchecked().node_weights_mut() {
+            node.workspace = Some("ui".to_string());
+        }
+        let statuses = vec![
+            crate::scip_indexer::WorkspaceWarmStatus {
+                workspace_slug: "ui".to_string(),
+                indexer: crate::scip_indexer::SupportedIndexer::TypeScript,
+                status: "ready".to_string(),
+                detail: None,
+            },
+            crate::scip_indexer::WorkspaceWarmStatus {
+                workspace_slug: "server".to_string(),
+                indexer: crate::scip_indexer::SupportedIndexer::RustAnalyzer,
+                status: "timed_out".to_string(),
+                detail: Some("indexer timed out".to_string()),
+            },
+        ];
+
+        let ctx = TestWarmContext::new(db);
+        persist_workspace_graph_freshness_best_effort(&ctx, "p1", "new-commit", &graph, &statuses)
+            .await;
+
+        let ui = repo.get("p1", "ui").await.unwrap().expect("ui row");
+        assert_eq!(ui.status, "ready");
+        assert_eq!(ui.commit_sha, "new-commit");
+
+        // The stale `server` "ready" row must be overwritten with the real
+        // outcome at THIS commit — not left lying about freshness.
+        let server = repo.get("p1", "server").await.unwrap().expect("server row");
+        assert_eq!(server.status, "timed_out");
+        assert_eq!(server.commit_sha, "new-commit");
+
+        // A successful real warm contradicts the code-less sentinel.
+        assert!(
+            repo.get("p1", CODELESS_WORKSPACE_SLUG)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
