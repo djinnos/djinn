@@ -289,6 +289,16 @@ impl RepoDependencyGraph {
             community_lookup: BTreeMap::new(),
             processes,
             process_lookup,
+            // PR s6ch / 92z7: rehydrate the route exclusion config
+            // from the artifact so callers see the same
+            // health-path / param-only / below-confidence-floor
+            // exclusions the warmer persisted. Defaults to the
+            // baseline config (health globs, param_only_paths=true,
+            // min_confidence_for_consumer_edge=0.5) for legacy
+            // artifacts that pre-date the sidecar — see
+            // `RepoGraphArtifactV10WithoutRouteExclusionConfig` in
+            // `artifact.rs` for the deserialization compat path.
+            route_exclusion_config: artifact.route_exclusion_config.clone(),
         };
         // PR F3: rehydrate the community sidecar verbatim — node
         // positions in the artifact match `NodeIndex` 0..n thanks to the

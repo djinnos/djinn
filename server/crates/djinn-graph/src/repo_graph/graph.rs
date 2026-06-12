@@ -20,6 +20,7 @@ use petgraph::visit::EdgeRef;
 use crate::complexity::ComplexityWalker;
 use crate::scip_parser::{ParsedScipIndex, ScipSymbolKind, ScipVisibility};
 
+use super::artifact::RouteExclusionConfig;
 use super::constants::EDGE_CONFIDENCE_LOCAL_PENALTY;
 use super::edge::{RepoGraphEdge, RepoGraphEdgeKind, edge_confidence_floor, edge_weight};
 use super::node::{RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey};
@@ -64,6 +65,13 @@ pub struct RepoDependencyGraph {
     /// `processes` is set (build-time or after `from_artifact`). Empty
     /// for nodes that don't participate in any traced process.
     pub(super) process_lookup: BTreeMap<usize, Vec<usize>>,
+    /// PR s6ch / 92z7: in-memory copy of the [`RouteExclusionConfig`]
+    /// sidecar that travels with the artifact. Carrying the config on
+    /// the live graph means `impact` / `api_impact` / `route_map` /
+    /// `shape_check` can apply the same exclusion policy without
+    /// re-fetching the artifact, and unit tests can construct a graph
+    /// with a custom config in-memory.
+    pub(super) route_exclusion_config: RouteExclusionConfig,
 }
 
 /// A single SCIP definition range pinned to a graph node.
@@ -472,6 +480,27 @@ impl RepoDependencyGraph {
     pub(crate) fn set_processes(&mut self, processes: Vec<crate::processes::Process>) {
         self.process_lookup = build_process_lookup(&processes);
         self.processes = processes;
+    }
+
+    /// PR s6ch / 92z7: read-only access to the in-memory route
+    /// exclusion config. Used by `impact` / `api_impact` /
+    /// `route_map` / `shape_check` / `edges` to apply the same
+    /// per-project policy without re-parsing the persisted artifact.
+    pub fn route_exclusion_config(&self) -> &RouteExclusionConfig {
+        &self.route_exclusion_config
+    }
+
+    /// PR s6ch / 92z7: install a [`RouteExclusionConfig`] on the
+    /// live graph. Crate-internal so the warmer / artifact hydration
+    /// paths can stamp the sidecar without exposing a generic
+    /// mutator surface to outside callers. Tests use this to
+    /// exercise the exclusion helpers without round-tripping
+    /// through a real artifact. Tests in
+    /// `crates/djinn-graph/src/repo_graph/tests/artifact.rs`
+    /// exercise this setter to verify the round-trip; the warmer
+    /// pipeline uses it the same way.
+    pub(crate) fn set_route_exclusion_config(&mut self, config: RouteExclusionConfig) {
+        self.route_exclusion_config = config;
     }
 
     /// PR F2: stamp a `StepInProcess` edge from a `Process` synthetic

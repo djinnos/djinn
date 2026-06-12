@@ -1,4 +1,5 @@
 use djinn_control_plane::bridge::{ImpactEntry, PagerankTier};
+use djinn_graph::repo_graph::{RepoGraphEdge, RepoGraphEdgeKind, RouteExclusionConfig};
 use petgraph::visit::EdgeRef;
 
 use super::graph_neighbors::{
@@ -240,6 +241,135 @@ pub(super) fn is_deprecated_text(signature: Option<&str>, documentation: &[Strin
     false
 }
 
+/// PR s6ch / 92z7: machine-readable exclusion reasons stamped on
+/// `ImpactEntry.exclusion_reason` / `EdgeEntry.exclusion_reason` /
+/// `ApiImpactEntry.exclusion_reason`. Stable strings — the UI is
+/// expected to switch on these values to render the entry as a
+/// suggestion instead of a hard dependency.
+pub(super) mod exclusion_reason {
+    /// Inferred `Fetches` edge landed below the project policy's
+    /// `min_confidence_for_consumer_edge` floor. The blast-radius
+    /// BFS treats the link as a suggestion.
+    pub(crate) const BELOW_CONFIDENCE_FLOOR: &str = "below-confidence-floor";
+    /// The route path is on the project's health-path glob list
+    /// (`/health`, `/healthz`, `/ping`, `/readyz`, `/livez`,
+    /// `/metrics` by default). Consumer calls into these endpoints
+    /// are not interesting blast-radius signal — they're framework
+    /// plumbing, not business logic.
+    pub(crate) const HEALTH_PATH: &str = "health-path";
+    /// The route path has no static segments (e.g. `/{tenant}` or
+    /// `/{id}/{slug}`) and is therefore unlikely to be a
+    /// real-architecture consumer. Only emitted when the policy
+    /// `param_only_paths` flag is on.
+    pub(crate) const PARAM_ONLY_PATH: &str = "param-only-path";
+}
+/// PR s6ch / 92z7: match a path against the health-path glob list.
+/// A `path` is a "health" path when, after lowercasing and trimming
+/// the leading slash, it equals one of the configured globs (e.g.
+/// `/health`, `/healthz`, `/ping`, …). The match is exact-segment:
+/// `/healthcheck` does not match `/health`.
+pub(super) fn path_matches_health_glob(path: &str, globs: &[String]) -> bool {
+    if globs.is_empty() {
+        return false;
+    }
+    let lowered = path.trim().to_ascii_lowercase();
+    let trimmed = lowered.trim_start_matches('/').trim_end_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+    globs.iter().any(|glob| {
+        let glob_lc = glob.trim().to_ascii_lowercase();
+        let glob = glob_lc.trim_start_matches('/').trim_end_matches('/');
+        !glob.is_empty() && trimmed == glob
+    })
+}
+
+/// PR s6ch / 92z7: detect a route path that is made up entirely of
+/// parameter segments — e.g. `/{tenant}`, `/{id}/{slug}`, or `:tenant`
+/// in the axum `/{tenant}` shape. Such paths rarely reflect real
+/// consumer edges because the parameter can stand in for any
+/// concrete route, so the policy treats them as suggestions when
+/// `param_only_paths` is enabled.
+pub(super) fn path_is_param_only(path: &str) -> bool {
+    let trimmed = path.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed.split('/').all(|segment| {
+        segment.starts_with(':')
+            || (segment.starts_with('{') && segment.ends_with('}'))
+            || (segment.starts_with('<') && segment.ends_with('>'))
+    })
+}
+
+/// PR s6ch / 92z7: enumerate the active exclusion reasons for a
+/// `Fetches` edge that points at a `Route` node. Returns an empty
+/// `Vec` when the edge is a hard dependency under the active policy
+/// (caller proceeds with normal blast-radius propagation).
+///
+/// `route_path` is the route node's path component — e.g.
+/// `"/api/agents"`. We recover it from the route node's
+/// `display_name` / `id` so callers don't have to re-parse the
+/// `(method, path)` tuple.
+pub(super) fn fetches_exclusion_reasons(
+    edge: &RepoGraphEdge,
+    route_path: Option<&str>,
+    config: &RouteExclusionConfig,
+) -> Vec<&'static str> {
+    if edge.kind != RepoGraphEdgeKind::Fetches {
+        return Vec::new();
+    }
+    let mut reasons = Vec::new();
+    if edge.confidence + f64::EPSILON < config.min_confidence_for_consumer_edge {
+        reasons.push(exclusion_reason::BELOW_CONFIDENCE_FLOOR);
+    }
+    if let Some(path) = route_path
+        && !config.health_path_globs.is_empty()
+        && path_matches_health_glob(path, &config.health_path_globs)
+    {
+        reasons.push(exclusion_reason::HEALTH_PATH);
+    }
+    if config.param_only_paths
+        && let Some(path) = route_path
+        && path_is_param_only(path)
+    {
+        reasons.push(exclusion_reason::PARAM_ONLY_PATH);
+    }
+    reasons
+}
+
+/// PR s6ch / 92z7: pick the first exclusion reason (in declaration
+/// order) for use in single-value wire fields like
+/// `ImpactEntry.exclusion_reason`. Returns `None` when the edge
+/// is a hard dependency. Order matches the reasons emitted by
+/// [`fetches_exclusion_reasons`] so the wire field is stable.
+pub(super) fn first_exclusion_reason(
+    edge: &RepoGraphEdge,
+    route_path: Option<&str>,
+    config: &RouteExclusionConfig,
+) -> Option<&'static str> {
+    fetches_exclusion_reasons(edge, route_path, config)
+        .into_iter()
+        .next()
+}
+
+/// PR s6ch / 92z7: extract the path component from a `Route` node's
+/// identifier. Route IDs follow the shape `"<METHOD> <path> (<framework>)"`
+/// (e.g. `"GET /api/agents (axum)"`); we split off the leading
+/// method token and drop the trailing framework annotation.
+pub(super) fn route_node_path(node: &djinn_graph::repo_graph::RepoGraphNode) -> Option<String> {
+    use djinn_graph::repo_graph::RepoNodeKey;
+    let raw = match &node.id {
+        RepoNodeKey::Route(value) => value.clone(),
+        _ => node.display_name.clone(),
+    };
+    let without_framework = raw.split_once(" (").map_or(raw.as_str(), |(left, _)| left);
+    let mut parts = without_framework.split_whitespace();
+    let _method = parts.next()?;
+    let path = parts.next()?;
+    (!path.is_empty()).then(|| path.to_string())
+}
+
 /// PR F4: pick the [`djinn_graph::processes::Process`] id whose member
 /// list places `node` at the lowest step ordinal (most upstream). When
 /// the node sits in two flows — say it's `step=0` in process A and
@@ -264,6 +394,9 @@ pub(super) fn is_deprecated_text(signature: Option<&str>, documentation: &[Strin
 ///   contains everything, not "this changes when that changes".
 /// * **Confidence floor.** Defaults to 0.85 when the caller passes
 ///   `None`; pass `Some(0.0)` to opt back into the full set.
+#[allow(dead_code)] // Kept for the parity-disabled shadow path and the
+// pre-92z7 test suite. Production code routes
+// through [`impact_bfs_with_policy`] instead.
 pub(super) fn impact_bfs(
     graph: &djinn_graph::repo_graph::RepoDependencyGraph,
     start: petgraph::graph::NodeIndex,
@@ -300,12 +433,21 @@ pub(super) fn impact_bfs(
     while let Some((current, depth)) = queue.pop_front() {
         if depth > 0 {
             let node = graph.node(current);
+            let tier = format!("{:?}", node.kind).to_ascii_lowercase();
             result.push((
                 current,
                 ImpactEntry {
                     key: format_node_key(&node.id),
                     depth,
                     file_path: node.file_path.as_ref().map(|p| p.display().to_string()),
+                    // `impact_bfs` (legacy, parity-disabled callers)
+                    // surfaces a generic per-node tier label rather
+                    // than a per-edge one. The parity-aware
+                    // `impact_bfs_with_policy` variant below stamps
+                    // the per-edge tier / exclusion reason that
+                    // shapes "is this a suggestion" UI.
+                    confidence_tier: Some(tier),
+                    exclusion_reason: None,
                 },
             ));
         }
@@ -323,6 +465,132 @@ pub(super) fn impact_bfs(
                 let source = edge.source();
                 if visited.insert(source) {
                     queue.push_back((source, depth + 1));
+                }
+            }
+        }
+    }
+    result
+}
+
+/// PR s6ch / 92z7: parity-aware variant of [`impact_bfs`]. Walks the
+/// same behavioral-edge whitelist but, when a `Fetches` edge lands
+/// on a `Route` whose path or confidence falls inside the
+/// [`RouteExclusionConfig`] policy, the upstream node is still
+/// visited (so the UI can render it as a soft dependency) but the
+/// `ImpactEntry` carries an `exclusion_reason` instead of being a
+/// hard blast-radius link.
+///
+/// `min_confidence`: the legacy caller-supplied threshold. When
+/// `None`, the floor is `0.85` (matching `impact_bfs`).
+/// `policy`: the project's [`RouteExclusionConfig`]. When `None`,
+/// behaves identically to `impact_bfs` — i.e. every `Fetches` edge
+/// above the confidence floor counts as a hard dependency. This
+/// keeps the parity-disabled shadow path byte-compatible with the
+/// pre-92z7 behaviour.
+pub(super) fn impact_bfs_with_policy(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+    start: petgraph::graph::NodeIndex,
+    max_depth: usize,
+    min_confidence: Option<f64>,
+    policy: Option<&RouteExclusionConfig>,
+) -> Vec<(petgraph::graph::NodeIndex, ImpactEntry)> {
+    use djinn_graph::repo_graph::{RepoGraphEdgeKind, RepoGraphNodeKind};
+    let propagates = |kind: RepoGraphEdgeKind| match kind {
+        RepoGraphEdgeKind::Reads
+        | RepoGraphEdgeKind::Writes
+        | RepoGraphEdgeKind::SymbolReference
+        | RepoGraphEdgeKind::FileReference
+        | RepoGraphEdgeKind::Route
+        | RepoGraphEdgeKind::Implements
+        | RepoGraphEdgeKind::Extends
+        | RepoGraphEdgeKind::TypeDefines
+        | RepoGraphEdgeKind::Defines
+        | RepoGraphEdgeKind::HandlesRoute
+        | RepoGraphEdgeKind::Fetches => true,
+        RepoGraphEdgeKind::ContainsDefinition
+        | RepoGraphEdgeKind::DeclaredInFile
+        | RepoGraphEdgeKind::MemberOf
+        | RepoGraphEdgeKind::StepInProcess
+        | RepoGraphEdgeKind::EntryPointOf => false,
+    };
+    let confidence_threshold = min_confidence.unwrap_or(0.85);
+
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(start);
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back((start, 0usize));
+    // Per-node side table: maps the BFS-reached upstream caller
+    // node to the exclusion reason the policy stamped on the
+    // `Fetches` edge that *first* reached it. A node that's
+    // reached through a hard path later keeps its hard
+    // classification (we never overwrite a `None` once we've
+    // placed a `Some`).
+    let mut suggestion_reasons: std::collections::HashMap<
+        petgraph::graph::NodeIndex,
+        &'static str,
+    > = std::collections::HashMap::new();
+    let mut result: Vec<(petgraph::graph::NodeIndex, ImpactEntry)> = Vec::new();
+
+    while let Some((current, depth)) = queue.pop_front() {
+        if depth > 0 {
+            let node = graph.node(current);
+            let tier = format!("{:?}", node.kind).to_ascii_lowercase();
+            let exclusion_reason: Option<String> =
+                suggestion_reasons.get(&current).map(|s| (*s).to_string());
+            result.push((
+                current,
+                ImpactEntry {
+                    key: format_node_key(&node.id),
+                    depth,
+                    file_path: node.file_path.as_ref().map(|p| p.display().to_string()),
+                    confidence_tier: Some(tier),
+                    exclusion_reason,
+                },
+            ));
+        }
+        if depth < max_depth {
+            for edge in graph
+                .graph()
+                .edges_directed(current, petgraph::Direction::Incoming)
+            {
+                if !propagates(edge.weight().kind) {
+                    continue;
+                }
+                if edge.weight().confidence < confidence_threshold {
+                    continue;
+                }
+                let source = edge.source();
+                let newly_inserted = visited.insert(source);
+                if newly_inserted {
+                    queue.push_back((source, depth + 1));
+                }
+                // PR s6ch / 92z7: a `Fetches` edge pointing at a
+                // `Route` node is downgraded to a suggestion when
+                // the project policy classifies it as a noisy
+                // inferred consumer. The upstream node still joins
+                // the BFS (so transitive impact is visible) but the
+                // entry's `exclusion_reason` field is stamped when
+                // it was first reached, so the UI can render it
+                // as a soft dependency. We only record the reason
+                // when this edge was the *first* one to reach the
+                // upstream node, so a node reachable via a hard
+                // edge and a soft edge keeps the hard-edge
+                // classification.
+                if let (Some(cfg), true, true) = (
+                    policy,
+                    edge.weight().kind == RepoGraphEdgeKind::Fetches,
+                    newly_inserted,
+                ) {
+                    let target = edge.target();
+                    let target_node = graph.node(target);
+                    if target_node.kind == RepoGraphNodeKind::Route {
+                        let route_path = route_node_path(target_node);
+                        if let Some(reason) =
+                            first_exclusion_reason(edge.weight(), route_path.as_deref(), cfg)
+                        {
+                            suggestion_reasons.entry(source).or_insert(reason);
+                        }
+                    }
                 }
             }
         }

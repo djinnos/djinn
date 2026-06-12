@@ -238,6 +238,10 @@ fn handler_for_route(graph: &RepoDependencyGraph, route: NodeIndex) -> Option<No
         })
 }
 
+/// PR s6ch / 92z7: list the `Symbol` nodes that fetch into the given
+/// route. The route-exclusion helpers in [`consumer_exclusion_reason`]
+/// and [`shared::first_exclusion_reason`] do the heavy lifting on
+/// the per-consumer side; this just enumerates the candidates.
 fn consumers_for_route(graph: &RepoDependencyGraph, route: NodeIndex) -> Vec<NodeIndex> {
     graph
         .graph()
@@ -246,6 +250,50 @@ fn consumers_for_route(graph: &RepoDependencyGraph, route: NodeIndex) -> Vec<Nod
         .map(|edge| edge.source())
         .filter(|idx| graph.node(*idx).kind == RepoGraphNodeKind::Symbol)
         .collect()
+}
+
+/// PR s6ch / 92z7: compute the active route-exclusion reason for a
+/// consumer node reached through a `Fetches` edge into the route
+/// node we just resolved. Returns `None` when the edge is a hard
+/// dependency under the policy, or the caller has disabled
+/// `DJINN_ROUTE_PARITY` (the shadow path keeps every consumer as a
+/// hard entry for diagnostic comparison).
+///
+/// For each `Fetches` edge that lands on the route from the queried
+/// consumer, we compute the first reason the policy emits. When the
+/// consumer has multiple `Fetches` edges (e.g. `ui/src/api.ts` calls
+/// `/api/agents` from several symbols), we pick the highest-
+/// confidence edge so the strongest signal wins.
+fn consumer_exclusion_reason(graph: &RepoDependencyGraph, consumer: NodeIndex) -> Option<String> {
+    if !djinn_graph::route_extraction::route_parity_enabled() {
+        return None;
+    }
+    let cfg = graph.route_exclusion_config();
+    let mut best: Option<f64> = None;
+    let mut best_reason: Option<String> = None;
+    for edge in graph.graph().edges_directed(consumer, Direction::Outgoing) {
+        if edge.weight().kind != RepoGraphEdgeKind::Fetches {
+            continue;
+        }
+        let target = edge.target();
+        let target_node = graph.node(target);
+        if target_node.kind != RepoGraphNodeKind::Route {
+            continue;
+        }
+        let route_path = shared::route_node_path(target_node);
+        let reason = shared::first_exclusion_reason(edge.weight(), route_path.as_deref(), cfg)
+            .map(|s| s.to_string());
+        if let Some(reason) = reason {
+            match best {
+                Some(prev) if edge.weight().confidence <= prev => {}
+                _ => {
+                    best = Some(edge.weight().confidence);
+                    best_reason = Some(reason);
+                }
+            }
+        }
+    }
+    best_reason
 }
 
 fn middleware_for_route(graph: &RepoDependencyGraph, route: NodeIndex) -> Vec<NodeIndex> {
@@ -359,28 +407,44 @@ fn api_impact_on_graph(
         let uid = format_node_key(&node.id);
         let drift = drift_by_uid.get(&uid);
         let (risk_tier, reason) = risk_for(drift, 1);
+        // PR s6ch / 92z7: stamp the route-exclusion policy on each
+        // direct consumer so the UI can downgrade noisy inferred
+        // routes (e.g. /health, /ping) to suggestions.
+        let exclusion_reason = consumer_exclusion_reason(graph, *consumer);
         by_uid.insert(
             uid,
             ApiImpactEntry {
                 consumer: symbol_ref(node, 1.0),
                 risk_tier,
                 reason,
+                exclusion_reason,
             },
         );
     }
 
     for start in seed.handler.into_iter().chain(std::iter::once(seed.route)) {
-        for (idx, impact) in shared::impact_bfs(graph, start, 3, Some(min_confidence)) {
+        for (idx, impact) in shared::impact_bfs_with_policy(
+            graph,
+            start,
+            3,
+            Some(min_confidence),
+            Some(graph.route_exclusion_config()),
+        ) {
             let node = graph.node(idx);
             if node.is_external || node.kind != RepoGraphNodeKind::Symbol {
                 continue;
             }
             let drift = drift_by_uid.get(&impact.key);
             let (risk_tier, reason) = risk_for(drift, impact.depth);
+            // PR s6ch / 92z7: surface the policy reason on transitive
+            // entries too, so a node only reachable via a `Fetches`
+            // hop the policy excludes still gets flagged.
+            let exclusion_reason = impact.exclusion_reason.clone();
             by_uid.entry(impact.key.clone()).or_insert(ApiImpactEntry {
                 consumer: symbol_ref(node, 1.0),
                 risk_tier,
                 reason,
+                exclusion_reason,
             });
         }
     }

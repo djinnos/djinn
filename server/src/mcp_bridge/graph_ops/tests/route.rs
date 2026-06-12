@@ -1,7 +1,7 @@
 use super::*;
 use djinn_graph::repo_graph::{
     REPO_GRAPH_ARTIFACT_VERSION, RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphEdgeKind,
-    RepoGraphNode, RepoGraphNodeKind,
+    RepoGraphNode, RepoGraphNodeKind, RouteExclusionConfig,
 };
 use djinn_graph::scip_parser::{ScipSymbolKind, ScipVisibility};
 
@@ -25,6 +25,179 @@ fn symbol_node(symbol: &str, name: &str, file: &str, language: &str) -> RepoGrap
         route_framework: None,
         route_handler_symbol: None,
     }
+}
+
+/// PR s6ch / 92z7 fixture: a graph with a `Fetches` consumer into
+/// each of the three exclusion categories (health-path, param-only
+/// path, below-confidence floor) plus a high-confidence "good"
+/// consumer. The same fixture is reused by the policy-aware
+/// `impact_bfs_with_policy` / `consumer_exclusion_reason` tests so
+/// we don't drift the projections out of sync.
+fn route_exclusion_fixture_graph() -> RepoDependencyGraph {
+    let mut health_route = RepoGraphNode {
+        id: RepoNodeKey::Route("GET /health (axum)".to_string()),
+        kind: RepoGraphNodeKind::Route,
+        display_name: "GET /health (axum)".to_string(),
+        language: Some("rust".to_string()),
+        file_path: None,
+        symbol: None,
+        symbol_kind: None,
+        is_external: false,
+        visibility: None,
+        signature: None,
+        documentation: vec![],
+        signature_parts: None,
+        is_test: false,
+        complexity: None,
+        workspace: Some("root".to_string()),
+        route_framework: Some("axum".to_string()),
+        route_handler_symbol: None,
+    };
+    health_route.signature = Some("route GET /health".to_string());
+
+    let mut param_only_route = RepoGraphNode {
+        id: RepoNodeKey::Route("GET /{tenant}/{id} (axum)".to_string()),
+        kind: RepoGraphNodeKind::Route,
+        display_name: "GET /{tenant}/{id} (axum)".to_string(),
+        language: Some("rust".to_string()),
+        file_path: None,
+        symbol: None,
+        symbol_kind: None,
+        is_external: false,
+        visibility: None,
+        signature: None,
+        documentation: vec![],
+        signature_parts: None,
+        is_test: false,
+        complexity: None,
+        workspace: Some("root".to_string()),
+        route_framework: Some("axum".to_string()),
+        route_handler_symbol: None,
+    };
+    param_only_route.signature = Some("route GET /{tenant}/{id}".to_string());
+
+    let mut low_confidence_route = RepoGraphNode {
+        id: RepoNodeKey::Route("POST /api/agents (axum)".to_string()),
+        kind: RepoGraphNodeKind::Route,
+        display_name: "POST /api/agents (axum)".to_string(),
+        language: Some("rust".to_string()),
+        file_path: None,
+        symbol: None,
+        symbol_kind: None,
+        is_external: false,
+        visibility: None,
+        signature: None,
+        documentation: vec![],
+        signature_parts: None,
+        is_test: false,
+        complexity: None,
+        workspace: Some("root".to_string()),
+        route_framework: Some("axum".to_string()),
+        route_handler_symbol: None,
+    };
+    low_confidence_route.signature = Some("route POST /api/agents".to_string());
+
+    let mut good_route = RepoGraphNode {
+        id: RepoNodeKey::Route("GET /api/agents (axum)".to_string()),
+        kind: RepoGraphNodeKind::Route,
+        display_name: "GET /api/agents (axum)".to_string(),
+        language: Some("rust".to_string()),
+        file_path: None,
+        symbol: None,
+        symbol_kind: None,
+        is_external: false,
+        visibility: None,
+        signature: None,
+        documentation: vec![],
+        signature_parts: None,
+        is_test: false,
+        complexity: None,
+        workspace: Some("root".to_string()),
+        route_framework: Some("axum".to_string()),
+        route_handler_symbol: None,
+    };
+    good_route.signature = Some("route GET /api/agents".to_string());
+
+    let handler = symbol_node(
+        "scip-rust pkg server/src/routes.rs `list_agents`().",
+        "list_agents",
+        "server/src/routes.rs",
+        "rust",
+    );
+
+    let health_consumer = symbol_node(
+        "scip-typescript pkg ui/src/api.ts `pollHealth`().",
+        "pollHealth",
+        "ui/src/api.ts",
+        "typescript",
+    );
+
+    let param_only_consumer = symbol_node(
+        "scip-typescript pkg ui/src/api.ts `pollTenant`().",
+        "pollTenant",
+        "ui/src/api.ts",
+        "typescript",
+    );
+
+    let low_confidence_consumer = symbol_node(
+        "scip-typescript pkg ui/src/api.ts `createAgent`().",
+        "createAgent",
+        "ui/src/api.ts",
+        "typescript",
+    );
+
+    let good_consumer = symbol_node(
+        "scip-typescript pkg ui/src/api.ts `loadAgents`().",
+        "loadAgents",
+        "ui/src/api.ts",
+        "typescript",
+    );
+
+    let fetches_edge = |source, target, confidence, reason: &str| RepoGraphArtifactEdge {
+        source,
+        target,
+        kind: RepoGraphEdgeKind::Fetches,
+        weight: 1.0,
+        evidence_count: 1,
+        confidence,
+        reason: Some(reason.to_string()),
+        step: None,
+    };
+    let artifact = RepoGraphArtifact {
+        version: REPO_GRAPH_ARTIFACT_VERSION,
+        nodes: vec![
+            handler,
+            good_route,
+            low_confidence_route,
+            health_route,
+            param_only_route,
+            good_consumer,
+            low_confidence_consumer,
+            health_consumer,
+            param_only_consumer,
+        ],
+        edges: vec![
+            // High-confidence `Fetches` consumer into the real route.
+            fetches_edge(5, 1, 0.92, "ts-fetch-template"),
+            // Inferred consumer in the (0, 0.5) "below the policy
+            // floor" band — `first_exclusion_reason` flags the edge
+            // as `below-confidence-floor`, but the BFS impact
+            // threshold (0.85 by default) would cut it before the
+            // policy ever sees it. The `impact_bfs_with_policy`
+            // tests below dial `min_confidence` down to 0.0 so the
+            // edge survives the BFS long enough to be downgraded.
+            fetches_edge(6, 2, 0.4, "ts-fetch-template"),
+            // Health-path consumer (above the floor).
+            fetches_edge(7, 3, 0.92, "ts-fetch-template"),
+            // Param-only-path consumer (above the floor).
+            fetches_edge(8, 4, 0.92, "ts-fetch-template"),
+        ],
+        symbol_ranges: std::collections::BTreeMap::new(),
+        communities: vec![],
+        processes: vec![],
+        route_exclusion_config: RouteExclusionConfig::default(),
+    };
+    RepoDependencyGraph::from_artifact(&artifact)
 }
 
 fn route_fixture_graph() -> RepoDependencyGraph {
@@ -155,4 +328,402 @@ fn api_impact_prioritizes_shape_drift_and_empty_graphs_succeed() {
             .impacts
             .is_empty()
     );
+}
+
+// ── PR s6ch / 92z7: route-exclusion / suggestion semantics ──────────
+//
+// The fixture exposes one consumer per exclusion category (health
+// path, param-only path, below-confidence floor) plus a single
+// "good" high-confidence consumer. The tests below assert that
+// `consumer_exclusion_reason` / `impact_bfs_with_policy` correctly
+// stamp the right reason on each projection and that disabling
+// `DJINN_ROUTE_PARITY` keeps the shadow path unfiltered.
+
+#[test]
+fn consumer_exclusion_reason_flags_health_path_consumer() {
+    let graph = route_exclusion_fixture_graph();
+    let cfg = graph.route_exclusion_config();
+    // Find the `pollHealth` consumer's NodeIndex and the
+    // `GET /health` route's NodeIndex by display name.
+    let mut consumer_idx = None;
+    let mut route_idx = None;
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        if node.display_name == "pollHealth" {
+            consumer_idx = Some(idx);
+        } else if node.display_name == "GET /health (axum)" {
+            route_idx = Some(idx);
+        }
+    }
+    let (consumer_idx, route_idx) = (consumer_idx.unwrap(), route_idx.unwrap());
+    let edge = graph
+        .graph()
+        .edges_connecting(consumer_idx, route_idx)
+        .next()
+        .expect("health fetches edge present");
+    assert_eq!(
+        shared::first_exclusion_reason(edge.weight(), Some("/health"), cfg),
+        Some(shared::exclusion_reason::HEALTH_PATH)
+    );
+}
+
+#[test]
+fn consumer_exclusion_reason_flags_param_only_path_consumer() {
+    let graph = route_exclusion_fixture_graph();
+    let cfg = graph.route_exclusion_config();
+    let mut consumer_idx = None;
+    let mut route_idx = None;
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        if node.display_name == "pollTenant" {
+            consumer_idx = Some(idx);
+        } else if node.display_name == "GET /{tenant}/{id} (axum)" {
+            route_idx = Some(idx);
+        }
+    }
+    let (consumer_idx, route_idx) = (consumer_idx.unwrap(), route_idx.unwrap());
+    let edge = graph
+        .graph()
+        .edges_connecting(consumer_idx, route_idx)
+        .next()
+        .expect("param-only fetches edge present");
+    assert_eq!(
+        shared::first_exclusion_reason(edge.weight(), Some("/{tenant}/{id}"), cfg),
+        Some(shared::exclusion_reason::PARAM_ONLY_PATH)
+    );
+}
+
+#[test]
+fn consumer_exclusion_reason_flags_below_confidence_floor_consumer() {
+    let graph = route_exclusion_fixture_graph();
+    let cfg = graph.route_exclusion_config();
+    let mut consumer_idx = None;
+    let mut route_idx = None;
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        if node.display_name == "createAgent" {
+            consumer_idx = Some(idx);
+        } else if node.display_name == "POST /api/agents (axum)" {
+            route_idx = Some(idx);
+        }
+    }
+    let (consumer_idx, route_idx) = (consumer_idx.unwrap(), route_idx.unwrap());
+    let edge = graph
+        .graph()
+        .edges_connecting(consumer_idx, route_idx)
+        .next()
+        .expect("low-confidence fetches edge present");
+    assert_eq!(
+        shared::first_exclusion_reason(edge.weight(), Some("/api/agents"), cfg),
+        Some(shared::exclusion_reason::BELOW_CONFIDENCE_FLOOR)
+    );
+}
+
+#[test]
+fn consumer_exclusion_reason_returns_none_for_hard_consumer() {
+    let graph = route_exclusion_fixture_graph();
+    let cfg = graph.route_exclusion_config();
+    let mut consumer_idx = None;
+    let mut route_idx = None;
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        if node.display_name == "loadAgents" {
+            consumer_idx = Some(idx);
+        } else if node.display_name == "GET /api/agents (axum)" {
+            route_idx = Some(idx);
+        }
+    }
+    let (consumer_idx, route_idx) = (consumer_idx.unwrap(), route_idx.unwrap());
+    let edge = graph
+        .graph()
+        .edges_connecting(consumer_idx, route_idx)
+        .next()
+        .expect("hard fetches edge present");
+    assert_eq!(
+        shared::first_exclusion_reason(edge.weight(), Some("/api/agents"), cfg),
+        None
+    );
+}
+
+#[test]
+fn path_is_param_only_matches_braced_and_axum_style_paths() {
+    assert!(shared::path_is_param_only("/{tenant}"));
+    assert!(shared::path_is_param_only("/{id}/{slug}"));
+    assert!(shared::path_is_param_only("/<id>/<slug>"));
+    // axum-style `:segment` is only param-only when *every*
+    // segment uses that style — `/api/:tenant` mixes a static
+    // segment with a parameter segment, so the helper says no.
+    assert!(!shared::path_is_param_only("/:tenant/items"));
+    assert!(!shared::path_is_param_only("/api/agents"));
+    assert!(!shared::path_is_param_only("/"));
+    assert!(!shared::path_is_param_only("/api/{tenant}/items"));
+}
+
+#[test]
+fn path_matches_health_glob_normalises_case_and_slashes() {
+    let globs = vec![
+        "/health".to_string(),
+        "/healthz".to_string(),
+        "/ping".to_string(),
+    ];
+    assert!(shared::path_matches_health_glob("/health", &globs));
+    assert!(shared::path_matches_health_glob("health", &globs));
+    assert!(shared::path_matches_health_glob("/HEALTH", &globs));
+    assert!(shared::path_matches_health_glob("/ping/", &globs));
+    // `healthcheck` shouldn't match `/health`.
+    assert!(!shared::path_matches_health_glob("/healthcheck", &globs));
+    assert!(!shared::path_matches_health_glob("/api/agents", &globs));
+    assert!(!shared::path_matches_health_glob("/", &globs));
+    // Empty glob list disables the filter.
+    assert!(!shared::path_matches_health_glob("/health", &[]));
+}
+
+#[test]
+fn route_node_path_parses_method_path_and_framework_suffix() {
+    use djinn_graph::repo_graph::{RepoGraphNode, RepoGraphNodeKind, RepoNodeKey};
+    let route_node = RepoGraphNode {
+        id: RepoNodeKey::Route("POST /api/v1/items (axum)".to_string()),
+        kind: RepoGraphNodeKind::Route,
+        display_name: "POST /api/v1/items (axum)".to_string(),
+        language: None,
+        file_path: None,
+        symbol: None,
+        symbol_kind: None,
+        is_external: false,
+        visibility: None,
+        signature: None,
+        documentation: vec![],
+        signature_parts: None,
+        is_test: false,
+        complexity: None,
+        workspace: None,
+        route_framework: None,
+        route_handler_symbol: None,
+    };
+    assert_eq!(
+        shared::route_node_path(&route_node).as_deref(),
+        Some("/api/v1/items")
+    );
+    // Plain symbol nodes don't expose a route path.
+    let symbol_node = symbol_node("scip-rust pkg x.rs `foo`().", "foo", "x.rs", "rust");
+    assert_eq!(shared::route_node_path(&symbol_node), None);
+}
+
+#[test]
+fn impact_bfs_with_policy_stamps_health_path_exclusion_reason() {
+    let _guard = ROUTE_PARITY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let graph = route_exclusion_fixture_graph();
+    let cfg = graph.route_exclusion_config();
+    let mut route_idx = None;
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        if node.display_name == "GET /health (axum)" {
+            route_idx = Some(idx);
+        }
+    }
+    // Walk backward from the `GET /health` route, treating it as the
+    // "queried" node. The BFS should reach the `pollHealth` symbol
+    // via the `Fetches` edge and stamp the `health-path` reason.
+    let entries: Vec<_> =
+        shared::impact_bfs_with_policy(&graph, route_idx.unwrap(), 2, None, Some(cfg))
+            .into_iter()
+            .map(|(_, entry)| entry)
+            .collect();
+    let health_entry = entries
+        .iter()
+        .find(|entry| entry.key.contains("pollHealth"))
+        .expect("pollHealth entry present");
+    assert_eq!(
+        health_entry.exclusion_reason.as_deref(),
+        Some(shared::exclusion_reason::HEALTH_PATH)
+    );
+}
+
+#[test]
+fn impact_bfs_with_policy_stamps_param_only_exclusion_reason() {
+    let _guard = ROUTE_PARITY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let graph = route_exclusion_fixture_graph();
+    let cfg = graph.route_exclusion_config();
+    let mut route_idx = None;
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        if node.display_name == "GET /{tenant}/{id} (axum)" {
+            route_idx = Some(idx);
+        }
+    }
+    let entries: Vec<_> =
+        shared::impact_bfs_with_policy(&graph, route_idx.unwrap(), 2, None, Some(cfg))
+            .into_iter()
+            .map(|(_, entry)| entry)
+            .collect();
+    let entry = entries
+        .iter()
+        .find(|entry| entry.key.contains("pollTenant"))
+        .expect("pollTenant entry present");
+    assert_eq!(
+        entry.exclusion_reason.as_deref(),
+        Some(shared::exclusion_reason::PARAM_ONLY_PATH)
+    );
+}
+
+#[test]
+fn impact_bfs_with_policy_stamps_below_confidence_floor_reason() {
+    let _guard = ROUTE_PARITY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let graph = route_exclusion_fixture_graph();
+    let cfg = graph.route_exclusion_config();
+    let mut route_idx = None;
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        if node.display_name == "POST /api/agents (axum)" {
+            route_idx = Some(idx);
+        }
+    }
+    // Walk backward from the `POST /api/agents` route. The
+    // `createAgent` consumer's `Fetches` edge sits below the
+    // `min_confidence_for_consumer_edge=0.5` floor, so the BFS
+    // needs `min_confidence=Some(0.0)` to let it through; once
+    // inside the BFS the policy downgrades it to a
+    // `below-confidence-floor` suggestion.
+    let entries: Vec<_> =
+        shared::impact_bfs_with_policy(&graph, route_idx.unwrap(), 2, Some(0.0), Some(cfg))
+            .into_iter()
+            .map(|(_, entry)| entry)
+            .collect();
+    let entry = entries
+        .iter()
+        .find(|entry| entry.key.contains("createAgent"))
+        .expect("createAgent entry present");
+    assert_eq!(
+        entry.exclusion_reason.as_deref(),
+        Some(shared::exclusion_reason::BELOW_CONFIDENCE_FLOOR)
+    );
+}
+
+#[test]
+fn impact_bfs_with_policy_leaves_hard_consumer_unflagged() {
+    let _guard = ROUTE_PARITY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let graph = route_exclusion_fixture_graph();
+    let cfg = graph.route_exclusion_config();
+    let mut route_idx = None;
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        if node.display_name == "GET /api/agents (axum)" {
+            route_idx = Some(idx);
+        }
+    }
+    let entries: Vec<_> =
+        shared::impact_bfs_with_policy(&graph, route_idx.unwrap(), 2, None, Some(cfg))
+            .into_iter()
+            .map(|(_, entry)| entry)
+            .collect();
+    let entry = entries
+        .iter()
+        .find(|entry| entry.key.contains("loadAgents"))
+        .expect("loadAgents entry present");
+    assert_eq!(entry.exclusion_reason, None);
+    assert_eq!(entry.confidence_tier.as_deref(), Some("symbol"));
+}
+
+#[test]
+fn impact_bfs_with_policy_disabled_shadow_path_keeps_pre_filter_edges() {
+    // PR s6ch / 92z7: with `DJINN_ROUTE_PARITY=0` the shadow path
+    // should not exclude any inferred `Fetches` consumer — that's
+    // the comparison surface the rollout team uses to validate the
+    // new exclusions don't drop real consumers.
+    let _guard = ROUTE_PARITY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let graph = route_exclusion_fixture_graph();
+    let mut route_idx = None;
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        if node.display_name == "GET /health (axum)" {
+            route_idx = Some(idx);
+        }
+    }
+    // `policy: None` mirrors the parity-disabled path: every
+    // `Fetches` edge above the confidence floor passes through.
+    let entries: Vec<_> = shared::impact_bfs_with_policy(&graph, route_idx.unwrap(), 2, None, None)
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect();
+    let health_entry = entries
+        .iter()
+        .find(|entry| entry.key.contains("pollHealth"))
+        .expect("pollHealth entry present in shadow path");
+    assert_eq!(health_entry.exclusion_reason, None);
+}
+
+#[test]
+fn impact_bfs_disabled_shadow_path_via_env_var_keeps_pre_filter_edges() {
+    // PR s6ch / 92z7 acceptance: when `DJINN_ROUTE_PARITY` is
+    // disabled at runtime, the bridge hands callers the pre-filter
+    // edge set so the rollout team can compare. We model that
+    // here by setting the env var, calling
+    // `route_parity_enabled()`, and confirming the BFS helper
+    // agrees the consumer is a hard entry.
+    let _guard = ROUTE_PARITY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var(djinn_graph::route_extraction::ROUTE_PARITY_FLAG).ok();
+    // SAFETY: tests serialize on `ROUTE_PARITY_TEST_LOCK` so the env
+    // mutation can't race with peer threads reading it.
+    unsafe {
+        std::env::set_var(djinn_graph::route_extraction::ROUTE_PARITY_FLAG, "0");
+    }
+    assert!(!djinn_graph::route_extraction::route_parity_enabled());
+    let graph = route_exclusion_fixture_graph();
+    let mut route_idx = None;
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        if node.display_name == "GET /health (axum)" {
+            route_idx = Some(idx);
+        }
+    }
+    let entries: Vec<_> = shared::impact_bfs_with_policy(&graph, route_idx.unwrap(), 2, None, None)
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect();
+    let entry = entries
+        .iter()
+        .find(|entry| entry.key.contains("pollHealth"))
+        .expect("pollHealth entry present in shadow path");
+    assert_eq!(entry.exclusion_reason, None);
+    // Restore the previous env state so peer tests aren't affected.
+    match prev {
+        Some(value) => unsafe {
+            std::env::set_var(djinn_graph::route_extraction::ROUTE_PARITY_FLAG, value);
+        },
+        None => unsafe {
+            std::env::remove_var(djinn_graph::route_extraction::ROUTE_PARITY_FLAG);
+        },
+    }
+}
+
+#[test]
+fn api_impact_stamps_exclusion_reasons_on_consumers() {
+    let _guard = ROUTE_PARITY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let graph = route_exclusion_fixture_graph();
+    let result = routes::test_helpers::api_impact_for_graph(&graph);
+    // The fixture's "real" route is `GET /api/agents` — every
+    // consumer into it lands in the `impacts` list. The high-
+    // confidence `loadAgents` consumer is the only hard entry;
+    // every other fixture edge points at a different route, so it
+    // shows up in `impacts` only via the policy-suggested path.
+    let load = result
+        .impacts
+        .iter()
+        .find(|entry| entry.consumer.name == "loadAgents")
+        .expect("loadAgents impact present");
+    assert_eq!(load.exclusion_reason, None);
 }

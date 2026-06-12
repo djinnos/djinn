@@ -22,6 +22,14 @@ use std::sync::Mutex;
 /// acquire the lock so they can't see a transient `false`.
 static AMBIGUITY_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// PR s6ch / 92z7: serialize tests that mutate `DJINN_ROUTE_PARITY`
+/// against every other test that exercises
+/// `route_parity_enabled`. Cargo runs tests in parallel, so an env
+/// var set in one test would otherwise race with peer threads
+/// reading it. Tests that don't touch the env var still acquire
+/// the lock so they can't see a transient `false`.
+pub(super) static ROUTE_PARITY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 fn fixture_index() -> ParsedScipIndex {
     let helper_symbol_name = "scip-rust pkg src/helper.rs `helper`().".to_string();
     let helper_symbol = ScipSymbol {
@@ -812,6 +820,8 @@ async fn impact_returns_transitive_dependents() {
                 key: format_node_key(&node.id),
                 depth,
                 file_path: node.file_path.as_ref().map(|p| p.display().to_string()),
+                confidence_tier: None,
+                exclusion_reason: None,
             });
         }
         if depth < max_depth {

@@ -1068,6 +1068,7 @@
             confidence: 0.91,
             confidence_tier: "extracted".to_string(),
             reason: Some("url-literal; import-evidence".to_string()),
+            exclusion_reason: None,
         })
         .expect("serialize EdgeEntry");
         assert_eq!(
