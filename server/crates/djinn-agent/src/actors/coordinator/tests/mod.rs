@@ -529,6 +529,210 @@ async fn rehydration_skips_expired_cooldown_but_keeps_other_state() {
     assert_eq!(actor.dispatch_failure_streak["task-expired"], 5);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_rehydrated_active_cooldown_defers_until_persisted_wall_clock_deadline() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _project_path) = create_simple_task(&db, &tx, "task", "cooldown restart task").await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = repo.set_status(&task.id, "open").await.unwrap();
+
+    let wall_now = ::time::OffsetDateTime::now_utc();
+    let persisted_deadline = wall_now + ::time::Duration::seconds(30);
+    let record = dispatch_state_record(&task.id, Some(rfc3339(persisted_deadline)), (1, 0));
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.apply_rehydrated_dispatch_state(vec![record], wall_now, StdInstant::now());
+
+    actor.dispatch_ready_tasks(None).await;
+    assert_eq!(
+        actor.dispatched, 0,
+        "rehydrated active cooldown must suppress dispatch before the original wall-clock deadline"
+    );
+    assert!(!actor.last_dispatched.contains_key(&task.id));
+
+    actor.dispatch_cooldowns.insert(
+        task.id.clone(),
+        StdInstant::now() - std::time::Duration::from_millis(1),
+    );
+    actor.dispatch_ready_tasks(None).await;
+
+    assert_eq!(
+        actor.dispatched, 1,
+        "same task should dispatch once the rehydrated persisted cooldown deadline has elapsed"
+    );
+    assert!(actor.last_dispatched.contains_key(&task.id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_rehydrated_failure_streak_continues_to_trigger_b_intervention() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _project_path) =
+        create_simple_task(&db, &tx, "task", "trigger b restart task").await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = repo
+        .set_status(&task.id, "needs_task_review")
+        .await
+        .unwrap();
+
+    let wall_now = ::time::OffsetDateTime::now_utc();
+    let mut record = dispatch_state_record(
+        &task.id,
+        None,
+        (i64::from(STREAK_INTERVENTION_THRESHOLD - 1), 0),
+    );
+    record.last_dispatched_at = Some(rfc3339(wall_now - ::time::Duration::seconds(5)));
+    record.last_dispatched_role = Some("reviewer".to_owned());
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.apply_rehydrated_dispatch_state(vec![record], wall_now, StdInstant::now());
+    actor.dispatch_ready_tasks(None).await;
+
+    assert_eq!(
+        planner_intervention_markers(&repo, &task.id).await.len(),
+        1,
+        "failure streak N must survive restart so the next same-role failure reaches trigger B"
+    );
+    assert!(
+        !actor.dispatch_failure_streak.contains_key(&task.id),
+        "trigger-B planner handoff clears the rehydrated backoff state"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_rehydrated_failure_streak_continues_to_terminal_close_threshold() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _project_path) = create_simple_task(&db, &tx, "task", "terminal restart task").await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = repo
+        .set_status(&task.id, "needs_task_review")
+        .await
+        .unwrap();
+    repo.log_activity(
+        Some(&task.id),
+        "coordinator",
+        "system",
+        PLANNER_INTERVENTION_MARKER,
+        &serde_json::json!({"reopen_count": task.reopen_count}).to_string(),
+    )
+    .await
+    .unwrap();
+
+    let wall_now = ::time::OffsetDateTime::now_utc();
+    let mut record =
+        dispatch_state_record(&task.id, None, (i64::from(MAX_DISPATCH_FAILURES - 1), 0));
+    record.last_dispatched_at = Some(rfc3339(wall_now - ::time::Duration::seconds(5)));
+    record.last_dispatched_role = Some("reviewer".to_owned());
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.apply_rehydrated_dispatch_state(vec![record], wall_now, StdInstant::now());
+    actor.dispatch_ready_tasks(None).await;
+
+    let closed = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        closed.status, "closed",
+        "failure streak N must survive restart so the next same-role failure reaches MAX_DISPATCH_FAILURES"
+    );
+    assert!(!actor.dispatch_failure_streak.contains_key(&task.id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_rehydrated_escalation_count_increments_from_persisted_n() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _project_path) =
+        create_simple_task(&db, &tx, "task", "escalation restart task").await;
+    let state_repo = djinn_db::DispatchStateRepository::new(db.clone());
+    state_repo
+        .upsert(djinn_db::DispatchStateUpsert {
+            task_id: &task.id,
+            failure_streak: 0,
+            cooldown_until: None,
+            escalation_count: 7,
+            last_dispatched_at: None,
+            last_dispatched_role: None,
+            inflight_creator_user_id: None,
+            inflight_model_id: None,
+        })
+        .await
+        .unwrap();
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.rehydrate_durable_dispatch_state().await;
+    assert_eq!(actor.escalation_counts[&task.id], 7);
+
+    let next = actor
+        .increment_durable_escalation_count(&task.id)
+        .await
+        .unwrap();
+    assert_eq!(next, 8);
+    assert_eq!(
+        state_repo
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .escalation_count,
+        8
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_cleanup_prunes_closed_terminal_dispatch_state_rows() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (closed_task, _project_path) = create_simple_task(&db, &tx, "task", "closed cleanup").await;
+    let (open_task, _project_path) = create_simple_task(&db, &tx, "task", "open kept").await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    repo.set_status(&closed_task.id, "closed").await.unwrap();
+
+    let state_repo = djinn_db::DispatchStateRepository::new(db.clone());
+    for task_id in [&closed_task.id, &open_task.id] {
+        state_repo
+            .upsert(djinn_db::DispatchStateUpsert {
+                task_id,
+                failure_streak: 2,
+                cooldown_until: None,
+                escalation_count: 1,
+                last_dispatched_at: None,
+                last_dispatched_role: None,
+                inflight_creator_user_id: None,
+                inflight_model_id: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.rehydrate_durable_dispatch_state().await;
+
+    assert!(state_repo.get(&closed_task.id).await.unwrap().is_none());
+    assert!(state_repo.get(&open_task.id).await.unwrap().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_rehydrates_persisted_inflight_ledger_for_cap_overlay() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let wall_now = ::time::OffsetDateTime::now_utc();
+    let mut record = dispatch_state_record("task-inflight", None, (0, 0));
+    record.last_dispatched_at = Some(rfc3339(wall_now - ::time::Duration::seconds(3)));
+    record.last_dispatched_role = Some("worker".to_owned());
+    record.inflight_creator_user_id = Some("user-a".to_owned());
+    record.inflight_model_id = Some(DEFAULT_MODEL_ID.to_owned());
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.apply_rehydrated_dispatch_state(vec![record], wall_now, StdInstant::now());
+
+    assert_eq!(
+        actor.inflight_dispatches.get("task-inflight"),
+        Some(&(Some("user-a".to_owned()), DEFAULT_MODEL_ID.to_owned())),
+        "chosen design: inflight ledger is persisted in dispatch_state and rehydrated at boot, so the existing cap overlay counts pre-running dispatches immediately after restart"
+    );
+}
+
 async fn create_simple_task(
     db: &Database,
     tx: &broadcast::Sender<DjinnEventEnvelope>,
