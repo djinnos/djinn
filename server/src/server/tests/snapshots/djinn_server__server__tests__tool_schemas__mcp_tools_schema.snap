@@ -3265,7 +3265,7 @@ expression: signatures
           "type": "string"
         },
         "graph_warm_status": {
-          "description": "Derived status for the UI banner. One of\n`pending | running | ready | failed`. `pending` means no warm has\never run; `running` means the image is ready and a warm should be\nin flight (or imminent); `ready` means derived graph freshness exists;\n`failed` mirrors the image build's failed status (no warm possible).",
+          "description": "Derived status for the UI banner. One of\n`pending | running | ready | warning | failed`. `pending` means no warm has\never run; `running` means the image is ready and a warm should be\nin flight (or imminent); `ready` means derived graph freshness exists;\n`warning` means a non-fatal graph-cache shrink backstop fired\n(see `scip_indexer::append_graph_cache_shrink_warning` and\n`canonical_graph::detect_graph_cache_shrink_warning`) — the cache\nis still fresh and graph usage is unaffected, but operators should\ninspect the matching `workspace_warm_statuses` row carrying the\nold/new node counts and commit SHA; `failed` mirrors the image\nbuild's failed status (no warm possible) or any\n`failed`/`timed_out` workspace warm status (which always overrides\na shrink warning).",
           "type": "string"
         },
         "graph_warmed_at": {

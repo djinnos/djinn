@@ -187,7 +187,28 @@ fn build_conversation(request: &CompletionRequest) -> Conversation {
     conversation
 }
 
+/// Resolve the memory LLM provider for the current task-local caller scope.
+///
+/// With `Some(user)` from `djinn_core::auth_context::current_user_id()`, the
+/// resolver can see that user's own credentials plus org-shared fallback
+/// credentials. With no current user (background/no-session work), it can see
+/// only org-shared credentials. This compatibility wrapper never falls back to
+/// all-owner credential listing.
 pub async fn resolve_memory_provider(db: &Database) -> Result<Box<dyn LlmProvider>> {
+    let user_id = djinn_core::auth_context::current_user_id();
+    resolve_memory_provider_for_user(db, user_id.as_deref()).await
+}
+
+/// Resolve the memory LLM provider under an explicit credential visibility
+/// scope.
+///
+/// `user_id = Some(user)` means the user's own credentials plus org-shared
+/// fallback credentials are visible. `user_id = None` is the background/
+/// no-session scope and can see only org-shared credentials.
+pub async fn resolve_memory_provider_for_user(
+    db: &Database,
+    user_id: Option<&str>,
+) -> Result<Box<dyn LlmProvider>> {
     let event_bus = EventBus::noop();
     let settings_repo = SettingsRepository::new(db.clone(), event_bus.clone());
 
@@ -213,10 +234,15 @@ pub async fn resolve_memory_provider(db: &Database) -> Result<Box<dyn LlmProvide
     catalog.inject_builtin_providers(builtin::BUILTIN_PROVIDERS);
 
     let credential_repo = CredentialRepository::new(db.clone(), event_bus);
-    let credentials = credential_repo.list().await?;
-    let provider_config =
-        resolve_memory_provider_config(&catalog, &credentials, &credential_repo, &settings_raw)
-            .await?;
+    let credentials = credential_repo.list_for_user(user_id).await?;
+    let provider_config = resolve_memory_provider_config_for_user(
+        &catalog,
+        &credentials,
+        &credential_repo,
+        &settings_raw,
+        user_id,
+    )
+    .await?;
 
     Ok(create_provider(provider_config))
 }
@@ -226,6 +252,24 @@ pub async fn resolve_memory_provider_config(
     credentials: &[Credential],
     credential_repo: &CredentialRepository,
     settings_raw: &str,
+) -> Result<ProviderConfig> {
+    let user_id = djinn_core::auth_context::current_user_id();
+    resolve_memory_provider_config_for_user(
+        catalog,
+        credentials,
+        credential_repo,
+        settings_raw,
+        user_id.as_deref(),
+    )
+    .await
+}
+
+pub async fn resolve_memory_provider_config_for_user(
+    catalog: &CatalogService,
+    credentials: &[Credential],
+    credential_repo: &CredentialRepository,
+    settings_raw: &str,
+    user_id: Option<&str>,
 ) -> Result<ProviderConfig> {
     let selected = parse_memory_model_selection(settings_raw);
     let resolved = match select_memory_model(catalog, credentials, selected.as_deref()) {
@@ -246,12 +290,21 @@ pub async fn resolve_memory_provider_config(
             })?
         }
     };
-    provider_config_for_model(&resolved, credential_repo).await
+    provider_config_for_model_for_user(&resolved, credential_repo, user_id).await
 }
 
+#[cfg(test)]
 pub(crate) async fn provider_config_for_model(
     resolved: &ResolvedMemoryModel,
     credential_repo: &CredentialRepository,
+) -> Result<ProviderConfig> {
+    provider_config_for_model_for_user(resolved, credential_repo, None).await
+}
+
+pub(crate) async fn provider_config_for_model_for_user(
+    resolved: &ResolvedMemoryModel,
+    credential_repo: &CredentialRepository,
+    user_id: Option<&str>,
 ) -> Result<ProviderConfig> {
     match resolved.effective_provider_id.as_str() {
         "chatgpt_codex" => {
@@ -284,7 +337,10 @@ pub(crate) async fn provider_config_for_model(
                 &resolved.model,
             ))
         }
-        provider_id => api_key_provider_config(provider_id, &resolved.model, credential_repo).await,
+        provider_id => {
+            api_key_provider_config_for_user(provider_id, &resolved.model, credential_repo, user_id)
+                .await
+        }
     }
 }
 
@@ -350,10 +406,11 @@ fn provider_config_with_model(mut config: ProviderConfig, model: &Model) -> Prov
     config
 }
 
-async fn api_key_provider_config(
+async fn api_key_provider_config_for_user(
     provider_id: &str,
     model: &Model,
     credential_repo: &CredentialRepository,
+    user_id: Option<&str>,
 ) -> Result<ProviderConfig> {
     let builtin_provider = builtin::find_builtin_provider(provider_id).ok_or_else(|| {
         anyhow!(
@@ -369,7 +426,7 @@ async fn api_key_provider_config(
         )
     })?;
     let api_key = credential_repo
-        .get_decrypted(key_name)
+        .get_decrypted_for_user(key_name, user_id)
         .await?
         .ok_or_else(|| {
             anyhow!(
@@ -440,6 +497,7 @@ mod tests {
     use crate::catalog::builtin::{AuthShape, FormatRule};
     use crate::provider::error::ProviderError;
     use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ToolChoice};
+    use djinn_db::UserRepository;
 
     #[test]
     fn transient_error_prefers_typed_then_substring() {
@@ -775,6 +833,80 @@ mod tests {
 
         let provider = resolve_memory_provider(&db).await.unwrap();
         assert_eq!(provider.name(), "openai");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_memory_provider_for_user_sees_private_and_org_shared_credentials() {
+        let db = Database::open_in_memory().unwrap();
+        let settings = SettingsRepository::new(db.clone(), EventBus::noop());
+        let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(1001, "user-a", None, None)
+            .await
+            .unwrap();
+        settings
+            .set("settings.raw", r#"{"models":["openai/gpt-4.1-mini"]}"#)
+            .await
+            .unwrap();
+        credentials
+            .set_with_owner("openai", "OPENAI_API_KEY", "caller-key", Some(&user.id))
+            .await
+            .unwrap();
+        credentials
+            .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "org-key", None)
+            .await
+            .unwrap();
+
+        let caller_provider = resolve_memory_provider_for_user(&db, Some(&user.id))
+            .await
+            .expect("caller should resolve their private configured provider");
+        assert_eq!(caller_provider.name(), "openai");
+
+        settings
+            .set(
+                "settings.raw",
+                r#"{"models":["anthropic/claude-3-5-haiku-latest"]}"#,
+            )
+            .await
+            .unwrap();
+        let fallback_provider = resolve_memory_provider_for_user(&db, Some(&user.id))
+            .await
+            .expect("caller should resolve org-shared fallback provider");
+        assert_eq!(fallback_provider.name(), "anthropic");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_memory_provider_background_ignores_another_users_private_credential() {
+        let db = Database::open_in_memory().unwrap();
+        let settings = SettingsRepository::new(db.clone(), EventBus::noop());
+        let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
+        let other_user = UserRepository::new(db.clone())
+            .upsert_from_github(1002, "user-b", None, None)
+            .await
+            .unwrap();
+        settings
+            .set("settings.raw", r#"{"models":["openai/gpt-4.1-mini"]}"#)
+            .await
+            .unwrap();
+        credentials
+            .set_with_owner(
+                "openai",
+                "OPENAI_API_KEY",
+                "user-b-key",
+                Some(&other_user.id),
+            )
+            .await
+            .unwrap();
+        credentials
+            .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "org-key", None)
+            .await
+            .unwrap();
+
+        let provider = resolve_memory_provider_for_user(&db, None)
+            .await
+            .expect("background scope should fall back to org-shared credentials only");
+
+        assert_eq!(provider.name(), "anthropic");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
