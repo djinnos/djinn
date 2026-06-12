@@ -593,6 +593,22 @@ mod tests {
         }
     }
 
+    fn task_run_job_envs(job: &Job) -> BTreeMap<&str, &str> {
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+        let container = &pod.containers[0];
+        container
+            .env
+            .as_ref()
+            .expect("container.env set")
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().expect("env value")))
+            .collect()
+    }
+
     #[test]
     fn extracts_task_run_id_from_valid_label() {
         let task_run_id = Uuid::now_v7();
@@ -989,6 +1005,65 @@ mod tests {
             Some("true"),
             "build-in-pod has no DB; sqlx macros must use the committed .sqlx cache"
         );
+    }
+
+    #[test]
+    fn same_project_task_runs_get_distinct_private_cargo_target_dirs() {
+        let cfg = KubernetesConfig::for_testing();
+        let first_task_run_id = Uuid::now_v7();
+        let second_task_run_id = Uuid::now_v7();
+        let project_id = "proj-xyz";
+
+        let first_job = build_task_run_job(
+            &cfg,
+            &first_task_run_id,
+            project_id,
+            "djinn-taskrun-first",
+            "registry.example:5000/djinn-project-p:abc123def456",
+        );
+        let second_job = build_task_run_job(
+            &cfg,
+            &second_task_run_id,
+            project_id,
+            "djinn-taskrun-second",
+            "registry.example:5000/djinn-project-p:abc123def456",
+        );
+
+        let first_envs = task_run_job_envs(&first_job);
+        let second_envs = task_run_job_envs(&second_job);
+        let first_target_dir = first_envs
+            .get("CARGO_TARGET_DIR")
+            .copied()
+            .expect("first job CARGO_TARGET_DIR set");
+        let second_target_dir = second_envs
+            .get("CARGO_TARGET_DIR")
+            .copied()
+            .expect("second job CARGO_TARGET_DIR set");
+
+        assert_ne!(
+            first_target_dir, second_target_dir,
+            "same-project task-runs must not contend on one cargo target dir"
+        );
+        assert_eq!(
+            first_target_dir,
+            format!("/cache/cargo-target-runs/{first_task_run_id}")
+        );
+        assert_eq!(
+            second_target_dir,
+            format!("/cache/cargo-target-runs/{second_task_run_id}")
+        );
+        assert!(first_target_dir.starts_with("/cache/cargo-target-runs/"));
+        assert!(second_target_dir.starts_with("/cache/cargo-target-runs/"));
+
+        for envs in [&first_envs, &second_envs] {
+            assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
+            assert_eq!(
+                envs.get("SCCACHE_DIR").copied(),
+                Some("/cache/sccache/proj-xyz")
+            );
+            assert_eq!(envs.get("SCCACHE_CACHE_SIZE").copied(), Some("20G"));
+            assert_eq!(envs.get("SQLX_OFFLINE").copied(), Some("true"));
+        }
     }
 
     /// When the operator has configured nodeSelector + tolerations (typical
