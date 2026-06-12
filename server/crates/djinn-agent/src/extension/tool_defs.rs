@@ -881,6 +881,10 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
         idempotent_mutation(),
     ));
     tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_ac_amend(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_complete(),
         idempotent_destructive(),
     ));

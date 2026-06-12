@@ -308,6 +308,40 @@ pub(crate) fn tool_proposal_ac_set() -> RmcpTool {
     )
 }
 
+pub(crate) fn tool_proposal_ac_amend() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_ac_amend".to_string(),
+        "Amend invalid or unverifiable proposal acceptance criteria during Planner Workflow E closeout. This is a real spec edit: it rewrites/drops/waives criteria, requires an explicit reason per amendment, bumps the proposal revision, and writes an audit trail. Use proposal_ac_set instead when only reconciling met flags.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id", "amendments"],
+            "properties": {
+                "id": {"type": "string", "description": "Proposal UUID or short ID"},
+                "amendments": {
+                    "type": "array",
+                    "description": "One or more ordered AC amendments. Indexes are zero-based against the current proposal_show acceptance_criteria list; drops affect later indexes, so order multi-drop operations carefully.",
+                    "items": {
+                        "type": "object",
+                        "required": ["index", "action", "reason"],
+                        "properties": {
+                            "index": {"type": "integer", "minimum": 0, "description": "Zero-based acceptance-criteria index to amend."},
+                            "action": {"type": "string", "enum": ["rewrite", "drop", "waive"], "description": "rewrite replaces criterion text; drop removes the criterion; waive keeps it but marks it waived."},
+                            "reason": {"type": "string", "minLength": 1, "description": "Required non-empty explanation for why this AC is invalid/unverifiable or no longer applicable."},
+                            "criterion": {"type": "string", "minLength": 1, "description": "Required replacement criterion text when action is rewrite; omitted for drop/waive."}
+                        },
+                        "allOf": [
+                            {
+                                "if": {"properties": {"action": {"const": "rewrite"}}},
+                                "then": {"required": ["criterion"]}
+                            }
+                        ]
+                    }
+                }
+            }
+        }),
+    )
+}
+
 pub(crate) fn tool_task_list() -> RmcpTool {
     RmcpTool::new(
         "task_list".to_string(),

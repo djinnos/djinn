@@ -526,6 +526,115 @@ pub(crate) async fn call_proposal_ac_set(
     }))
 }
 
+/// Amend proposal acceptance criteria as real spec edits (Planner Workflow E).
+/// Use this only to repair invalid/unverifiable criteria; status-only met flag
+/// reconciliation stays on `proposal_ac_set` and remains revision-lightweight.
+pub(crate) async fn call_proposal_ac_amend(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalAcAmendParams = parse_args(arguments)?;
+    if p.amendments.is_empty() {
+        return Err("proposal_ac_amend requires at least one amendment".to_string());
+    }
+
+    let mut amendments = Vec::with_capacity(p.amendments.len());
+    let mut reasons = Vec::with_capacity(p.amendments.len());
+    for (position, amendment) in p.amendments.iter().enumerate() {
+        let action = amendment.action.trim();
+        let reason = amendment.reason.trim();
+        if reason.is_empty() {
+            return Err(format!(
+                "proposal_ac_amend amendments[{position}] requires a non-empty reason"
+            ));
+        }
+        reasons.push(format!("{} index {}: {}", action, amendment.index, reason));
+
+        match action {
+            "rewrite" => {
+                let criterion = amendment
+                    .criterion
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .ok_or_else(|| {
+                        format!(
+                            "proposal_ac_amend amendments[{position}] action=rewrite requires non-empty `criterion` text"
+                        )
+                    })?;
+                amendments.push(ProposalAcceptanceCriteriaAmendment::Rewrite {
+                    index: amendment.index,
+                    criterion,
+                });
+            }
+            "drop" => {
+                if amendment
+                    .criterion
+                    .as_deref()
+                    .is_some_and(|text| !text.trim().is_empty())
+                {
+                    return Err(format!(
+                        "proposal_ac_amend amendments[{position}] action=drop must not include `criterion`"
+                    ));
+                }
+                amendments.push(ProposalAcceptanceCriteriaAmendment::Drop {
+                    index: amendment.index,
+                });
+            }
+            "waive" => {
+                if amendment
+                    .criterion
+                    .as_deref()
+                    .is_some_and(|text| !text.trim().is_empty())
+                {
+                    return Err(format!(
+                        "proposal_ac_amend amendments[{position}] action=waive must not include `criterion`"
+                    ));
+                }
+                amendments.push(ProposalAcceptanceCriteriaAmendment::Waive {
+                    index: amendment.index,
+                });
+            }
+            other => {
+                return Err(format!(
+                    "proposal_ac_amend amendments[{position}] has invalid action `{other}`; expected rewrite, drop, or waive"
+                ));
+            }
+        }
+    }
+
+    let proposal_repo = ProposalRepository::new(state.db.clone(), state.event_bus.clone());
+    let Some(proposal) = proposal_repo.resolve(&p.id).await.ok().flatten() else {
+        return Err(format!("proposal not found: {}", p.id));
+    };
+    let previous_revision = proposal.latest_revision_seq;
+    let reason = reasons.join("\n");
+    let updated = proposal_repo
+        .amend_acceptance_criteria(&proposal.id, &amendments, &reason)
+        .await
+        .map_err(|e| e.to_string())?;
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_str(&updated.acceptance_criteria).unwrap_or_default();
+    let met = parsed
+        .iter()
+        .filter(|c| {
+            c.get("met")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "id": updated.id,
+        "short_id": updated.short_id,
+        "revision": updated.latest_revision_seq,
+        "previous_revision": previous_revision,
+        "total": parsed.len(),
+        "met": met,
+    }))
+}
+
 pub(crate) async fn call_epic_tasks(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,

@@ -90,3 +90,129 @@ async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
     assert!(tasks_value.get("total_count").is_none());
     assert!(tasks_value.get("error").is_none());
 }
+
+#[tokio::test]
+async fn proposal_ac_amend_validates_and_uses_repository_primitive() {
+    let db = create_test_db();
+    let proposal_repo = djinn_db::ProposalRepository::new(db.clone(), EventBus::noop());
+    let proposal = proposal_repo
+        .create(djinn_db::ProposalCreateInput {
+            title: "amendable proposal",
+            body: "body",
+            acceptance_criteria: Some(
+                r#"[{"criterion":"Old text","met":false},{"criterion":"Drop me","met":true},{"criterion":"Waive me","met":false}]"#,
+            ),
+            status: Some("building"),
+        })
+        .await
+        .expect("create proposal");
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+
+    let missing_reason = Some(
+        serde_json::json!({
+            "id": proposal.short_id,
+            "amendments": [{"index": 0, "action": "rewrite", "criterion": "New text", "reason": "   "}],
+        })
+        .as_object()
+        .expect("args object")
+        .clone(),
+    );
+    let err = call_proposal_ac_amend(&state, &missing_reason)
+        .await
+        .expect_err("blank reason rejected");
+    assert!(err.contains("non-empty reason"));
+
+    let missing_criterion = Some(
+        serde_json::json!({
+            "id": proposal.id,
+            "amendments": [{"index": 0, "action": "rewrite", "reason": "make verifiable"}],
+        })
+        .as_object()
+        .expect("args object")
+        .clone(),
+    );
+    let err = call_proposal_ac_amend(&state, &missing_criterion)
+        .await
+        .expect_err("rewrite text required");
+    assert!(err.contains("requires non-empty `criterion`"));
+
+    let amend_args = Some(
+        serde_json::json!({
+            "id": proposal.short_id,
+            "amendments": [
+                {"index": 0, "action": "rewrite", "criterion": "New verifiable text", "reason": "old text was unverifiable"},
+                {"index": 1, "action": "drop", "reason": "duplicate of prior AC"},
+                {"index": 1, "action": "waive", "reason": "external-only proof is not agent-verifiable"}
+            ],
+        })
+        .as_object()
+        .expect("args object")
+        .clone(),
+    );
+    let response = call_proposal_ac_amend(&state, &amend_args)
+        .await
+        .expect("amend succeeds");
+    assert_eq!(response["ok"], serde_json::json!(true));
+    assert_eq!(response["previous_revision"], serde_json::json!(1));
+    assert_eq!(response["revision"], serde_json::json!(2));
+    assert_eq!(response["total"], serde_json::json!(2));
+    assert_eq!(response["met"], serde_json::json!(0));
+
+    let updated = proposal_repo
+        .get(&proposal.id)
+        .await
+        .expect("reload proposal")
+        .expect("proposal exists");
+    assert_eq!(updated.latest_revision_seq, 2);
+    let criteria: Vec<serde_json::Value> = serde_json::from_str(&updated.acceptance_criteria)
+        .expect("updated acceptance criteria json");
+    assert_eq!(criteria.len(), 2);
+    assert_eq!(criteria[0]["criterion"], "New verifiable text");
+    assert_eq!(criteria[1]["criterion"], "Waive me");
+    assert_eq!(criteria[1]["waived"], true);
+}
+
+#[tokio::test]
+async fn proposal_ac_set_stays_status_only_without_revision_bump() {
+    let db = create_test_db();
+    let proposal_repo = djinn_db::ProposalRepository::new(db.clone(), EventBus::noop());
+    let proposal = proposal_repo
+        .create(djinn_db::ProposalCreateInput {
+            title: "status-only proposal",
+            body: "body",
+            acceptance_criteria: Some(
+                r#"[{"criterion":"Keep text","met":false},{"criterion":"Also keep","met":false}]"#,
+            ),
+            status: Some("building"),
+        })
+        .await
+        .expect("create proposal");
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({
+            "id": proposal.short_id,
+            "acceptance_criteria": [{"met": true}, {"met": false}],
+        })
+        .as_object()
+        .expect("args object")
+        .clone(),
+    );
+    let response = call_proposal_ac_set(&state, &args)
+        .await
+        .expect("set succeeds");
+    assert_eq!(response["met"], serde_json::json!(1));
+    assert_eq!(response["total"], serde_json::json!(2));
+
+    let updated = proposal_repo
+        .get(&proposal.id)
+        .await
+        .expect("reload proposal")
+        .expect("proposal exists");
+    assert_eq!(updated.latest_revision_seq, 1);
+    let criteria: Vec<serde_json::Value> = serde_json::from_str(&updated.acceptance_criteria)
+        .expect("updated acceptance criteria json");
+    assert_eq!(criteria[0]["criterion"], "Keep text");
+    assert_eq!(criteria[0]["met"], true);
+    assert_eq!(criteria[1]["criterion"], "Also keep");
+}

@@ -146,6 +146,21 @@ pub(super) struct ProposalAcSetParams {
 }
 
 #[derive(Deserialize)]
+pub(super) struct ProposalAcAmendParams {
+    pub id: String,
+    pub amendments: Vec<ProposalAcAmendmentParam>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ProposalAcAmendmentParam {
+    pub index: usize,
+    pub action: String,
+    pub reason: String,
+    #[serde(default)]
+    pub criterion: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct EpicTasksParams {
     pub id: String,
     pub limit: Option<i64>,
