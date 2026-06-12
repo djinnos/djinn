@@ -5,7 +5,14 @@
     "rust": { "default_toolchain": "1.84.0" }
   },
   "workspaces": [
-    { "root": "", "language": "rust", "toolchain": "1.84.0" }
+    {
+      "slug": "root",
+      "name": null,
+      "tags": [],
+      "root": "",
+      "language": "rust",
+      "toolchain": "1.84.0"
+    }
   ],
   "system_packages": [],
   "env": {},
