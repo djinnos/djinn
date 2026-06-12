@@ -1,25 +1,28 @@
 import { callMcpTool } from "@/api/mcpClient";
 import type { McpToolInput, McpToolOutput } from "@/api/generated/mcp-tools.gen";
 
-export type DispatchPauseStatusArgs = McpToolInput<"dispatch_pause_status">;
-export type DispatchPauseStatusResponse = McpToolOutput<"dispatch_pause_status">;
-export type DispatchPauseScope = NonNullable<DispatchPauseStatusArgs["scope"]>;
-export type DispatchPauseState = NonNullable<DispatchPauseStatusResponse["state"]>;
-export type DispatchPauseStatusEntry = NonNullable<
-  DispatchPauseStatusResponse["current"]
->;
+export type DispatchPauseStatusInput = McpToolInput<"dispatch_pause_status">;
+export type DispatchPauseStatusOutput = McpToolOutput<"dispatch_pause_status">;
+export type DispatchPauseScope = NonNullable<DispatchPauseStatusInput["scope"]>;
+export type DispatchPauseMetadata = NonNullable<DispatchPauseStatusOutput["current"]>;
+export type DispatchPauseState = NonNullable<DispatchPauseStatusOutput["state"]>;
 
-function statusArgs(args?: DispatchPauseStatusArgs): DispatchPauseStatusArgs {
-  const next: DispatchPauseStatusArgs = {};
+// Back-compat aliases for callers added by the API-wrapper task.
+export type DispatchPauseStatusArgs = DispatchPauseStatusInput;
+export type DispatchPauseStatusResponse = DispatchPauseStatusOutput;
+export type DispatchPauseStatusEntry = DispatchPauseMetadata;
+
+function sanitizeStatusArgs(args?: Partial<DispatchPauseStatusInput>): DispatchPauseStatusInput {
+  const sanitized: DispatchPauseStatusInput = {};
 
   if (args?.scope != null) {
-    next.scope = args.scope;
+    sanitized.scope = args.scope;
   }
-  if (args?.target_id != null) {
-    next.target_id = args.target_id;
+  if (typeof args?.target_id === "string" && args.target_id.trim() !== "") {
+    sanitized.target_id = args.target_id;
   }
 
-  return next;
+  return sanitized;
 }
 
 /**
@@ -28,23 +31,19 @@ function statusArgs(args?: DispatchPauseStatusArgs): DispatchPauseStatusArgs {
  * caller-provided objects before sending MCP arguments.
  */
 export async function fetchDispatchPauseStatus(
-  args?: DispatchPauseStatusArgs,
-): Promise<DispatchPauseStatusResponse> {
-  return callMcpTool("dispatch_pause_status", statusArgs(args));
+  args?: Partial<DispatchPauseStatusInput>,
+): Promise<DispatchPauseStatusOutput> {
+  return callMcpTool("dispatch_pause_status", sanitizeStatusArgs(args));
 }
 
-export async function fetchGlobalDispatchPauseStatus(): Promise<DispatchPauseStatusResponse> {
+export function fetchGlobalDispatchPauseStatus(): Promise<DispatchPauseStatusOutput> {
   return fetchDispatchPauseStatus();
 }
 
-export async function fetchProjectDispatchPauseStatus(
-  projectId: string,
-): Promise<DispatchPauseStatusResponse> {
-  return fetchDispatchPauseStatus({ scope: "project", target_id: projectId });
+export function fetchProjectDispatchPauseStatus(targetId: string): Promise<DispatchPauseStatusOutput> {
+  return fetchDispatchPauseStatus({ scope: "project", target_id: targetId });
 }
 
-export async function fetchUserDispatchPauseStatus(
-  userId: string,
-): Promise<DispatchPauseStatusResponse> {
-  return fetchDispatchPauseStatus({ scope: "user", target_id: userId });
+export function fetchUserDispatchPauseStatus(targetId: string): Promise<DispatchPauseStatusOutput> {
+  return fetchDispatchPauseStatus({ scope: "user", target_id: targetId });
 }
