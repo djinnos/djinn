@@ -235,6 +235,160 @@ impl StageOutcome {
     }
 }
 
+/// Routing decision for [`apply_planner_escalate_route`].
+///
+/// Pure helper — no I/O, no async — so unit tests can branch on the rule
+/// without driving the transition closure. The async wrapper
+/// ([`apply_planner_escalate_route`]) maps each variant to a transition
+/// call (or no call) and the returned [`TaskRunOutcome`].
+#[derive(Debug, PartialEq, Eq)]
+enum PlannerEscalateRoute {
+    /// Planner + planning-type issue + not cancelled: fire a single
+    /// `close` transition with the escalation reason and surface
+    /// [`TaskRunOutcome::Closed`].
+    CloseWithReason,
+    /// Planner + planning-type issue + cancelled: do NOT transition
+    /// (leave the task redispatchable) and surface
+    /// [`TaskRunOutcome::Interrupted`].
+    Cancelled,
+    /// Any other (non-planner role OR a non-planning issue): keep the
+    /// legacy [`TaskRunOutcome::Escalated`] outcome. The supervisor
+    /// backstop exists to ESCAPE this branch for planning-type tasks;
+    /// the regression test in `planner_escalate_routes_planning_close`
+    /// proves the new code no longer takes it on planning/decomposition/
+    /// review/epic_breakdown.
+    Escalate,
+}
+
+/// Compute the routing branch for a planner [`StageOutcome::Escalate`].
+///
+/// Mirrors the conditional that used to live inline in the
+/// `StageOutcome::Escalate { reason }` arm of the supervisor loop (see
+/// `ep1i`); split out so the regression tests in this module can cover
+/// every branch without standing up a full `SupervisorServices`. Pure
+/// function — no I/O, no logging, no clock.
+fn route_planner_escalate(
+    role_kind: RoleKind,
+    issue_type: &str,
+    cancel_is_cancelled: bool,
+) -> PlannerEscalateRoute {
+    let is_planner_planning = role_kind == RoleKind::Planner
+        && matches!(
+            issue_type,
+            "planning" | "decomposition" | "review" | "epic_breakdown"
+        );
+    if !is_planner_planning {
+        return PlannerEscalateRoute::Escalate;
+    }
+    if cancel_is_cancelled {
+        PlannerEscalateRoute::Cancelled
+    } else {
+        PlannerEscalateRoute::CloseWithReason
+    }
+}
+
+/// Apply the planner-escalate routing rule introduced by `ep1i` and
+/// hardened by `rt3l`.
+///
+/// Called from the `StageOutcome::Escalate { reason }` arm of the
+/// supervisor loop. Encapsulates the three-way decision (park the task
+/// with a `close` transition / cancel-gated interrupt / legacy
+/// `Escalated` outcome) AND the actual `transition_task` call so unit
+/// tests can assert both the outcome AND the exact set of transition
+/// invocations (count, action, reason) without needing a full
+/// [`SupervisorServices`] implementation.
+///
+/// Routing (mirrors the production code that lived inline before
+/// `ep1i`):
+/// - `Planner` + planning-type issue (`planning` / `decomposition` /
+///   `review` / `epic_breakdown`) + not cancelled: exactly one
+///   `transition(task_id, "close", Some(surfaced_reason))` call;
+///   return [`TaskRunOutcome::Closed`] with the original `reason`
+///   verbatim (the surfaced reason passed to the close transition is
+///   prefixed with `"planner escalated:"` for log / `tasks.close_reason`
+///   parity with other close paths, but the `TaskRunOutcome::Closed`
+///   `reason` field stays stable so host/UI reporting and the
+///   `planner_escalate_routes_planning_close` regression test don't
+///   need to track a prefix). The success path also emits a structured
+///   `tracing::info!` so the worker pod log carries `task_run_id`,
+///   `task_id`, `issue_type`, and the surfaced reason — this is the
+///   `rt3l` hardening on top of `ep1i`'s routing.
+/// - `Planner` + planning-type issue + cancelled: NO transition call;
+///   return [`TaskRunOutcome::Interrupted`] so the task stays in its
+///   current state for redispatch.
+/// - Any other role OR a non-planning issue: NO transition call;
+///   return [`TaskRunOutcome::Escalated`] (the legacy fall-through the
+///   supervisor backstop exists to escape for planning-type tasks).
+///
+/// `transition` is a closure that performs the host-side
+/// `transition_task` call. Its only production caller is
+/// `self.services.transition_task(..)`; tests pass a recording closure
+/// to assert call count + arguments.
+async fn apply_planner_escalate_route<F, Fut>(
+    role_kind: RoleKind,
+    issue_type: &str,
+    task_id: &str,
+    task_run_id: &str,
+    reason: String,
+    cancel_is_cancelled: bool,
+    transition: F,
+) -> TaskRunOutcome
+where
+    F: FnOnce(String, String, Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    match route_planner_escalate(role_kind, issue_type, cancel_is_cancelled) {
+        PlannerEscalateRoute::CloseWithReason => {
+            // The close transition's `reason` carries the prefix so the
+            // persisted `tasks.close_reason` row and the activity_log
+            // entry both read "planner escalated: <original reason>".
+            // This is the durable surface the host/UI / dispatcher sees;
+            // the prefix is consistent with other canned `close_reason`
+            // values in the schema (`"completed"`, `"force_closed"`,
+            // `"peer_reconciled"`) and gives operators a single
+            // grep-able token for "the planner asked for help here"
+            // without losing the original message. The
+            // `TaskRunOutcome::Closed { reason }` returned below keeps
+            // the original reason verbatim so host/UI reporting stays
+            // stable.
+            let surfaced_reason = format!("planner escalated: {reason}");
+            info!(
+                task_run_id = %task_run_id,
+                task_id = %task_id,
+                issue_type = %issue_type,
+                surfaced_reason = %surfaced_reason,
+                "supervisor: planner escalated — closing planning-type task via close transition (rt3l)",
+            );
+            if let Err(e) = transition(
+                task_id.to_string(),
+                "close".to_string(),
+                Some(surfaced_reason),
+            )
+            .await
+            {
+                tracing::warn!(
+                    task_run_id = %task_run_id,
+                    task_id = %task_id,
+                    issue_type = %issue_type,
+                    error = %e,
+                    "supervisor: planner escalate close transition skipped",
+                );
+            }
+            TaskRunOutcome::Closed { reason }
+        }
+        PlannerEscalateRoute::Cancelled => {
+            tracing::debug!(
+                task_run_id = %task_run_id,
+                task_id = %task_id,
+                issue_type = %issue_type,
+                "supervisor: run cancelled — skipping planner escalate close transition",
+            );
+            TaskRunOutcome::Interrupted
+        }
+        PlannerEscalateRoute::Escalate => TaskRunOutcome::Escalated { reason },
+    }
+}
+
 // ── TaskRunSupervisor ────────────────────────────────────────────────────────
 
 pub struct TaskRunSupervisor {
@@ -1056,42 +1210,55 @@ impl TaskRunSupervisor {
                         break;
                     }
                     StageOutcome::Escalate { reason } => {
-                        if role_kind == RoleKind::Planner
-                            && matches!(
-                                task.issue_type.as_str(),
-                                "planning" | "decomposition" | "review" | "epic_breakdown"
-                            )
-                        {
-                            if self.services.cancel().is_cancelled() {
-                                tracing::debug!(
-                                    task_run_id = %run_id,
-                                    task_id = %spec.task_id,
-                                    issue_type = %task.issue_type,
-                                    "supervisor: run cancelled — skipping planner escalate close transition"
-                                );
-                                result = Some(TaskRunOutcome::Interrupted);
-                                break;
-                            }
-
-                            result = Some(TaskRunOutcome::Closed {
-                                reason: reason.clone(),
-                            });
-                            if let Err(e) = self
-                                .services
-                                .transition_task(spec.task_id.clone(), "close".into(), Some(reason))
-                                .await
-                            {
-                                tracing::warn!(
-                                    task_run_id = %run_id,
-                                    task_id = %spec.task_id,
-                                    issue_type = %task.issue_type,
-                                    error = %e,
-                                    "supervisor: planner escalate close transition skipped"
-                                );
-                            }
-                        } else {
-                            result = Some(TaskRunOutcome::Escalated { reason });
-                        }
+                        // Planner escalate on a planning-type task parks the
+                        // task (close + reason) instead of leaving it
+                        // redispatchable; the previous shape only set
+                        // `TaskRunOutcome::Escalated`, which the
+                        // coordinator's ready-task sweep kept re-dispatching
+                        // every ~30s (the bug `ep1i` fixes). The cancel
+                        // gate ensures a stall-kill / preempt arriving
+                        // mid-stage leaves the task in_progress for
+                        // redispatch instead of closing it. Non-planner
+                        // roles and non-planning issues keep the legacy
+                        // `Escalated` outcome — the backstop is
+                        // intentionally narrow to the planner planning leg.
+                        // The routing + transition are factored into
+                        // [`apply_planner_escalate_route`] so the unit
+                        // tests in this module can cover every branch
+                        // without standing up a full `SupervisorServices`.
+                        // The `rt3l` hardening on top of `ep1i`'s
+                        // routing adds:
+                        //   * a structured `tracing::info!` on the
+                        //     success path carrying `task_run_id`,
+                        //     `task_id`, `issue_type`, and the
+                        //     surfaced close reason so worker pod
+                        //     logs make the planner-escalate
+                        //     closure visible;
+                        //   * a stable `"planner escalated:"` prefix
+                        //     on the close-transition `reason` so
+                        //     the persisted `tasks.close_reason`
+                        //     row and the activity log entry are
+                        //     grep-able as planner escalations
+                        //     (mirroring the canned
+                        //     `"peer_reconciled"` / `"force_closed"`
+                        //     / `"completed"` markers). The
+                        //     `TaskRunOutcome::Closed { reason }`
+                        //     returned by the helper keeps the
+                        //     original reason verbatim so the
+                        //     host/UI contract stays stable.
+                        let outcome = apply_planner_escalate_route(
+                            role_kind,
+                            &task.issue_type,
+                            &spec.task_id,
+                            &run_id,
+                            reason,
+                            self.services.cancel().is_cancelled(),
+                            |task_id, action, reason| async move {
+                                self.services.transition_task(task_id, action, reason).await
+                            },
+                        )
+                        .await;
+                        result = Some(outcome);
                         break;
                     }
                     // ── Lead intervention decisions ──────────────────────────
@@ -1640,5 +1807,800 @@ mod tests {
         assert!(!StageOutcome::ReviewerApproved.is_terminal());
         assert!(!StageOutcome::VerifierPassed.is_terminal());
         assert!(!StageOutcome::ArchitectDone.is_terminal());
+    }
+
+    // ── Planner-escalate routing regression coverage (ykr7) ────────────────────
+    //
+    // Bug fixed in `ep1i`: a planner `StageOutcome::Escalate` on a
+    // planning-type task used to surface `TaskRunOutcome::Escalated`
+    // and fire NO `transition_task` call, leaving the task in
+    // `in_progress` for the coordinator's ready-task sweep to
+    // re-dispatch every ~30s (the `k4my` / patrol planning redispatch
+    // loop). The fix routes planner + planning-type escalates through a
+    // cancel-gated `close` transition so the task parks durably.
+    //
+    // The routing + transition logic was factored out of the supervisor
+    // loop into [`apply_planner_escalate_route`] +
+    // [`route_planner_escalate`] precisely so these tests can cover
+    // every branch without spinning up a `MirrorManager`,
+    // `CancellationToken`, and full `SupervisorServices` for a full
+    // task-run. The existing `stage_outcome_terminal_classifier` test
+    // above is intentionally preserved.
+
+    /// Recorded `transition_task` call captured by the planner-escalate
+    /// regression tests below. The recording closure runs in a
+    /// multi-threaded tokio runtime, so the `Vec` lives behind a
+    /// `Mutex`; this struct is what gets pushed per call.
+    #[derive(Debug, Clone)]
+    struct TransitionCall {
+        task_id: String,
+        action: String,
+        reason: Option<String>,
+    }
+
+    const PLANNING_ISSUE_TYPES: [&str; 4] =
+        ["planning", "decomposition", "review", "epic_breakdown"];
+
+    /// Pure routing decision: planner + planning + not cancelled →
+    /// `CloseWithReason`. This is the regression assertion for the old
+    /// behavior where planner escalate produced only
+    /// `TaskRunOutcome::Escalated` — if `route_planner_escalate` ever
+    /// returns `Escalate` for the planner planning leg, the bug has
+    /// regressed.
+    #[test]
+    fn route_planner_escalate_planner_planning_not_cancelled_closes() {
+        for issue_type in PLANNING_ISSUE_TYPES {
+            assert_eq!(
+                route_planner_escalate(RoleKind::Planner, issue_type, false),
+                PlannerEscalateRoute::CloseWithReason,
+                "planner escalate on {issue_type} must route to CloseWithReason, not the legacy Escalate branch"
+            );
+        }
+    }
+
+    /// Pure routing decision: planner + planning + cancelled →
+    /// `Cancelled` (interrupt, no transition). The cancel gate must
+    /// fire BEFORE the close transition so a stall-kill / preempt
+    /// arriving mid-stage doesn't park the task and strand the user.
+    #[test]
+    fn route_planner_escalate_planner_planning_cancelled_interrupts() {
+        for issue_type in PLANNING_ISSUE_TYPES {
+            assert_eq!(
+                route_planner_escalate(RoleKind::Planner, issue_type, true),
+                PlannerEscalateRoute::Cancelled,
+                "cancelled planner escalate on {issue_type} must route to Cancelled, never CloseWithReason"
+            );
+        }
+    }
+
+    /// Pure routing decision: non-planner roles keep the legacy
+    /// `Escalated` outcome — the supervisor backstop is intentionally
+    /// narrow to the Planner planning leg, and Lead/Worker/Reviewer
+    /// escalation paths must NOT start parking tasks.
+    #[test]
+    fn route_planner_escalate_non_planner_role_keeps_legacy_escalated() {
+        for role in [
+            RoleKind::Worker,
+            RoleKind::Reviewer,
+            RoleKind::Verifier,
+            RoleKind::Architect,
+            RoleKind::Lead,
+        ] {
+            assert_eq!(
+                route_planner_escalate(role, "planning", false),
+                PlannerEscalateRoute::Escalate,
+                "non-planner role {role:?} on a planning issue must keep the legacy Escalated outcome"
+            );
+        }
+    }
+
+    /// Pure routing decision: planner + non-planning issue keeps the
+    /// legacy `Escalated` outcome. The backstop is intentionally scoped
+    /// to the four planning-type issue strings; everything else (e.g.
+    /// `task`, `epic`, `spike`) is unaffected.
+    #[test]
+    fn route_planner_escalate_planner_non_planning_keeps_legacy_escalated() {
+        for issue_type in ["task", "epic", "spike", "", "unknown"] {
+            assert_eq!(
+                route_planner_escalate(RoleKind::Planner, issue_type, false),
+                PlannerEscalateRoute::Escalate,
+                "planner escalate on non-planning issue {issue_type:?} must keep the legacy Escalated outcome"
+            );
+        }
+    }
+
+    /// The headline regression test for `ep1i`: planner + `planning`
+    /// + not cancelled fires EXACTLY ONE `transition_task` call with
+    /// action `close` and a non-empty reason containing the
+    /// escalation reason, and returns `TaskRunOutcome::Closed { .. }`.
+    ///
+    /// On the old code (pre-`ep1i`), this assertion would fail in two
+    /// ways: no transition would be recorded, and the outcome would be
+    /// `TaskRunOutcome::Escalated` instead of `Closed`.
+    #[tokio::test]
+    async fn planner_escalate_routes_planning_close() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+        let calls_for_closure = std::sync::Arc::clone(&calls);
+
+        let outcome = apply_planner_escalate_route(
+            RoleKind::Planner,
+            "planning",
+            "task-1",
+            "run-1",
+            "planner needs human guidance on the spec".to_string(),
+            false,
+            move |task_id, action, reason| {
+                let calls = std::sync::Arc::clone(&calls_for_closure);
+                async move {
+                    calls
+                        .lock()
+                        .expect("calls mutex poisoned")
+                        .push(TransitionCall {
+                            task_id,
+                            action,
+                            reason,
+                        });
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        // Outcome is the new `Closed` (was `Escalated` pre-`ep1i`).
+        match &outcome {
+            TaskRunOutcome::Closed { reason } => {
+                assert_eq!(
+                    reason, "planner needs human guidance on the spec",
+                    "Closed outcome must carry the original escalation reason verbatim"
+                );
+            }
+            other => panic!(
+                "planner + planning + not cancelled must produce TaskRunOutcome::Closed, got {other:?}"
+            ),
+        }
+
+        // Exactly one transition call, action=close, reason non-empty and
+        // matches the escalation reason, task_id matches the input.
+        let calls = calls.lock().expect("calls mutex poisoned");
+        assert_eq!(
+            calls.len(),
+            1,
+            "planner escalate on planning must fire EXACTLY ONE transition_task call, got {calls:?}"
+        );
+        let call = &calls[0];
+        assert_eq!(
+            call.task_id, "task-1",
+            "transition must use the spec task id"
+        );
+        assert_eq!(call.action, "close", "transition action must be \"close\"");
+        let reason = call
+            .reason
+            .as_ref()
+            .expect("close transition on planner escalate must carry a reason");
+        assert!(
+            reason.contains("planner needs human guidance on the spec"),
+            "transition reason must contain the original escalation reason, got {reason:?}"
+        );
+    }
+
+    /// Table test: every planning-type issue string
+    /// (`planning` / `decomposition` / `review` / `epic_breakdown`)
+    /// routes through the close path on a non-cancelled planner run.
+    /// This is the cheap repeat coverage the design called out, and
+    /// it guards against a future PR narrowing the matches!() list by
+    /// accident (e.g. dropping `epic_breakdown`).
+    #[tokio::test]
+    async fn planner_escalate_routes_every_planning_issue_type_to_close() {
+        for issue_type in PLANNING_ISSUE_TYPES {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+            let calls_for_closure = std::sync::Arc::clone(&calls);
+
+            let outcome = apply_planner_escalate_route(
+                RoleKind::Planner,
+                issue_type,
+                "task-x",
+                "run-x",
+                format!("escalate reason for {issue_type}"),
+                false,
+                move |task_id, action, reason| {
+                    let calls = std::sync::Arc::clone(&calls_for_closure);
+                    async move {
+                        calls
+                            .lock()
+                            .expect("calls mutex poisoned")
+                            .push(TransitionCall {
+                                task_id,
+                                action,
+                                reason,
+                            });
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+
+            assert!(
+                matches!(outcome, TaskRunOutcome::Closed { .. }),
+                "{issue_type}: expected TaskRunOutcome::Closed, got {outcome:?}"
+            );
+
+            let calls = calls.lock().expect("calls mutex poisoned");
+            assert_eq!(
+                calls.len(),
+                1,
+                "{issue_type}: expected exactly one transition_task call, got {calls:?}"
+            );
+            assert_eq!(
+                calls[0].action, "close",
+                "{issue_type}: transition action must be \"close\""
+            );
+            assert_eq!(
+                calls[0].task_id, "task-x",
+                "{issue_type}: transition must use the spec task id"
+            );
+            let reason = calls[0]
+                .reason
+                .as_ref()
+                .unwrap_or_else(|| panic!("{issue_type}: close transition must carry a reason"));
+            assert!(
+                reason.contains(&format!("escalate reason for {issue_type}")),
+                "{issue_type}: transition reason must contain the escalation reason, got {reason:?}"
+            );
+        }
+    }
+
+    /// Cancel-gate regression: planner + `planning` + cancel already
+    /// set must fire NO transition and return
+    /// `TaskRunOutcome::Interrupted`. The task stays redispatchable
+    /// in `in_progress` for the coordinator to retry cleanly, rather
+    /// than being closed mid-cancel and stranding the user.
+    ///
+    /// On the pre-`ep1i` code the cancel gate didn't exist for this
+    /// arm at all (it only short-circuited via the dispatch-time
+    /// `load_task` / `create_task_run` paths), so this assertion
+    /// would have leaked through to a transition + Closed outcome
+    /// when cancel flipped mid-stage.
+    #[tokio::test]
+    async fn planner_escalate_cancel_gate_skips_transition_and_interrupts() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+        let calls_for_closure = std::sync::Arc::clone(&calls);
+
+        let outcome = apply_planner_escalate_route(
+            RoleKind::Planner,
+            "planning",
+            "task-cancel-1",
+            "run-cancel-1",
+            "planner was about to escalate but cancel flipped".to_string(),
+            true,
+            move |task_id, action, reason| {
+                let calls = std::sync::Arc::clone(&calls_for_closure);
+                async move {
+                    calls
+                        .lock()
+                        .expect("calls mutex poisoned")
+                        .push(TransitionCall {
+                            task_id,
+                            action,
+                            reason,
+                        });
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, TaskRunOutcome::Interrupted),
+            "cancelled planner escalate on a planning issue must produce \
+             TaskRunOutcome::Interrupted, got {outcome:?}"
+        );
+
+        let calls = calls.lock().expect("calls mutex poisoned");
+        assert!(
+            calls.is_empty(),
+            "cancelled planner escalate must fire ZERO transition_task calls, got {calls:?}"
+        );
+    }
+
+    /// Cancel gate also covers the other planning-type issue strings
+    /// — a single passing `planning` test could mask a bug where the
+    /// matches!() list and the cancel check get out of sync.
+    #[tokio::test]
+    async fn planner_escalate_cancel_gate_skips_transition_for_every_planning_issue() {
+        for issue_type in PLANNING_ISSUE_TYPES {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+            let calls_for_closure = std::sync::Arc::clone(&calls);
+
+            let outcome = apply_planner_escalate_route(
+                RoleKind::Planner,
+                issue_type,
+                "task-cancel-x",
+                "run-cancel-x",
+                "cancelled".to_string(),
+                true,
+                move |task_id, action, reason| {
+                    let calls = std::sync::Arc::clone(&calls_for_closure);
+                    async move {
+                        calls
+                            .lock()
+                            .expect("calls mutex poisoned")
+                            .push(TransitionCall {
+                                task_id,
+                                action,
+                                reason,
+                            });
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+
+            assert!(
+                matches!(outcome, TaskRunOutcome::Interrupted),
+                "{issue_type}: cancelled planner escalate must produce Interrupted, got {outcome:?}"
+            );
+            let calls = calls.lock().expect("calls mutex poisoned");
+            assert!(
+                calls.is_empty(),
+                "{issue_type}: cancelled planner escalate must fire ZERO transition calls, got {calls:?}"
+            );
+        }
+    }
+
+    /// Negative path: a failed `transition_task` (e.g. RPC transport
+    /// error, invalid-transition rejection from the host) does NOT
+    /// change the returned outcome — the supervisor still surfaces
+    /// `TaskRunOutcome::Closed` so the run is parked at the outcome
+    /// level. The transition failure is logged on the host side; the
+    /// worker pod treats it as best-effort, matching the policy used
+    /// by every other transition call in this loop
+    /// (`PlannerClose`, `LeadEscalate`, `submit_verification`, etc.).
+    #[tokio::test]
+    async fn planner_escalate_close_transition_failure_still_surfaces_closed() {
+        let outcome = apply_planner_escalate_route(
+            RoleKind::Planner,
+            "planning",
+            "task-fail-1",
+            "run-fail-1",
+            "reason that should still close the run".to_string(),
+            false,
+            |_task_id, _action, _reason| async { Err("simulated transport failure".to_string()) },
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, TaskRunOutcome::Closed { .. }),
+            "transition failure must not downgrade the run outcome, got {outcome:?}"
+        );
+    }
+
+    // ── rt3l: durable reason surfacing + supervisor log coverage ──────────────
+    //
+    // The ykr7 tests above prove the routing + transition count + outcome
+    // shape. The rt3l tests below harden the reason-surfacing contract
+    // that's the actual acceptance criterion: the close-transition reason
+    // must contain the planner's original escalation reason (so the
+    // persisted `tasks.close_reason` row and activity log entry are
+    // durably visible) AND the `TaskRunOutcome::Closed` reason must
+    // stay verbatim (so host/UI reporting stays stable), AND the
+    // surfaced reason must be the prefixed `"planner escalated:"`
+    // variant the design calls out as the grep-able token for
+    // planner-escalate closures.
+
+    /// Acceptance criterion: the close-transition reason MUST start
+    /// with the `"planner escalated:"` prefix so `tasks.close_reason`
+    /// rows are grep-able as planner escalations. The host-side
+    /// `transition` machinery persists the `Some(reason)` argument
+    /// verbatim, so asserting the recorded reason's prefix shape is
+    /// the same as asserting the persisted row.
+    #[tokio::test]
+    async fn planner_escalate_close_transition_reason_is_prefixed() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+        let calls_for_closure = std::sync::Arc::clone(&calls);
+
+        let original_reason = "planner needs human guidance on the spec".to_string();
+        let _ = apply_planner_escalate_route(
+            RoleKind::Planner,
+            "planning",
+            "task-rt3l-prefix",
+            "run-rt3l-prefix",
+            original_reason.clone(),
+            false,
+            move |task_id, action, reason| {
+                let calls = std::sync::Arc::clone(&calls_for_closure);
+                async move {
+                    calls
+                        .lock()
+                        .expect("calls mutex poisoned")
+                        .push(TransitionCall {
+                            task_id,
+                            action,
+                            reason,
+                        });
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        let calls = calls.lock().expect("calls mutex poisoned");
+        assert_eq!(calls.len(), 1, "expected exactly one transition call");
+        let recorded = calls[0]
+            .reason
+            .as_ref()
+            .expect("close transition on planner escalate must carry a reason");
+        assert!(
+            recorded.starts_with("planner escalated: "),
+            "close-transition reason must be prefixed with 'planner escalated: ' \
+             for grep-able `tasks.close_reason` rows, got {recorded:?}"
+        );
+        assert!(
+            recorded.contains(&original_reason),
+            "close-transition reason must contain the original escalation reason verbatim, got {recorded:?}"
+        );
+        assert_eq!(
+            recorded,
+            &format!("planner escalated: {original_reason}"),
+            "close-transition reason must be EXACTLY 'planner escalated: <original>' (no extra wrapping)"
+        );
+    }
+
+    /// Acceptance criterion: the `TaskRunOutcome::Closed { reason }`
+    /// reason must be the ORIGINAL planner-provided reason verbatim —
+    /// it must NOT carry the `"planner escalated:"` prefix that the
+    /// close transition gets. The two surfaces serve different
+    /// consumers (the transition reason feeds `tasks.close_reason`;
+    /// the outcome reason feeds the host/UI report) and the design
+    /// calls for keeping them distinct so the host/UI contract
+    /// doesn't drift every time the persisted reason format changes.
+    #[tokio::test]
+    async fn planner_escalate_outcome_reason_stays_verbatim() {
+        let outcome = apply_planner_escalate_route(
+            RoleKind::Planner,
+            "planning",
+            "task-rt3l-verbatim",
+            "run-rt3l-verbatim",
+            "planner needs human guidance on the spec".to_string(),
+            false,
+            |_task_id, _action, _reason| async { Ok(()) },
+        )
+        .await;
+
+        match outcome {
+            TaskRunOutcome::Closed { reason } => {
+                assert_eq!(
+                    reason, "planner needs human guidance on the spec",
+                    "TaskRunOutcome::Closed reason must be the original planner reason verbatim"
+                );
+                assert!(
+                    !reason.starts_with("planner escalated: "),
+                    "TaskRunOutcome::Closed reason must NOT carry the persisted close_reason prefix; \
+                     that prefix is for the transition reason only, got {reason:?}"
+                );
+            }
+            other => panic!(
+                "planner + planning + not cancelled must produce TaskRunOutcome::Closed, got {other:?}"
+            ),
+        }
+    }
+
+    /// Table test: the prefix is applied uniformly across every
+    /// planning-type issue string the backstop handles, so a future
+    /// PR can't accidentally drop the prefix on a single issue type
+    /// and leave the persisted rows inconsistent.
+    #[tokio::test]
+    async fn planner_escalate_close_reason_is_prefixed_for_every_planning_issue() {
+        for issue_type in PLANNING_ISSUE_TYPES {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+            let calls_for_closure = std::sync::Arc::clone(&calls);
+
+            let original_reason = format!("escalate reason for {issue_type}");
+            let _ = apply_planner_escalate_route(
+                RoleKind::Planner,
+                issue_type,
+                "task-rt3l-prefix-table",
+                "run-rt3l-prefix-table",
+                original_reason.clone(),
+                false,
+                move |task_id, action, reason| {
+                    let calls = std::sync::Arc::clone(&calls_for_closure);
+                    async move {
+                        calls
+                            .lock()
+                            .expect("calls mutex poisoned")
+                            .push(TransitionCall {
+                                task_id,
+                                action,
+                                reason,
+                            });
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+
+            let calls = calls.lock().expect("calls mutex poisoned");
+            assert_eq!(
+                calls.len(),
+                1,
+                "{issue_type}: expected exactly one transition call"
+            );
+            let recorded = calls[0]
+                .reason
+                .as_ref()
+                .unwrap_or_else(|| panic!("{issue_type}: close transition must carry a reason"));
+            assert_eq!(
+                recorded,
+                &format!("planner escalated: {original_reason}"),
+                "{issue_type}: close-transition reason must be exactly 'planner escalated: <original>'"
+            );
+        }
+    }
+
+    /// Non-planner roles (Worker / Reviewer) keep the legacy
+    /// `TaskRunOutcome::Escalated` outcome and fire NO transition
+    /// call — the supervisor backstop is intentionally narrow to the
+    /// Planner planning leg, and the Worker/Reviewer `request_lead`
+    /// escalation paths must NOT start parking tasks. This is the
+    /// AC: "Worker/Reviewer `request_lead` escalation behavior
+    /// remains unchanged by tests or code inspection."
+    #[tokio::test]
+    async fn planner_escalate_non_planner_escalation_is_unchanged() {
+        for role in [RoleKind::Worker, RoleKind::Reviewer] {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+            let calls_for_closure = std::sync::Arc::clone(&calls);
+
+            let original_reason = "worker hit a wall and needs lead guidance".to_string();
+            let outcome = apply_planner_escalate_route(
+                role,
+                "planning",
+                "task-worker",
+                "run-worker",
+                original_reason.clone(),
+                false,
+                move |task_id, action, reason| {
+                    let calls = std::sync::Arc::clone(&calls_for_closure);
+                    async move {
+                        calls
+                            .lock()
+                            .expect("calls mutex poisoned")
+                            .push(TransitionCall {
+                                task_id,
+                                action,
+                                reason,
+                            });
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+
+            match outcome {
+                TaskRunOutcome::Escalated { reason } => {
+                    assert_eq!(
+                        reason, original_reason,
+                        "{role:?} escalation must keep the original reason verbatim (legacy Escalated path)"
+                    );
+                }
+                other => panic!(
+                    "{role:?} escalation must keep the legacy TaskRunOutcome::Escalated outcome, got {other:?}"
+                ),
+            }
+
+            let calls = calls.lock().expect("calls mutex poisoned");
+            assert!(
+                calls.is_empty(),
+                "{role:?} escalation must NOT fire any transition_task call, got {calls:?}"
+            );
+        }
+    }
+
+    /// Non-planning issue types (e.g. `task`, `spike`) on a Planner
+    /// run also keep the legacy `Escalated` outcome and fire NO
+    /// transition. The backstop is scoped to the four planning-type
+    /// issue strings; everything else is unaffected.
+    #[tokio::test]
+    async fn planner_escalate_planner_non_planning_escalation_is_unchanged() {
+        for issue_type in ["task", "epic", "spike"] {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+            let calls_for_closure = std::sync::Arc::clone(&calls);
+
+            let outcome = apply_planner_escalate_route(
+                RoleKind::Planner,
+                issue_type,
+                "task-other",
+                "run-other",
+                "planner hit a non-planning issue wall".to_string(),
+                false,
+                move |task_id, action, reason| {
+                    let calls = std::sync::Arc::clone(&calls_for_closure);
+                    async move {
+                        calls
+                            .lock()
+                            .expect("calls mutex poisoned")
+                            .push(TransitionCall {
+                                task_id,
+                                action,
+                                reason,
+                            });
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+
+            match outcome {
+                TaskRunOutcome::Escalated { reason } => {
+                    assert_eq!(
+                        reason, "planner hit a non-planning issue wall",
+                        "{issue_type}: planner escalate on a non-planning issue must keep the original reason verbatim"
+                    );
+                }
+                other => panic!(
+                    "{issue_type}: planner escalate on a non-planning issue must keep Escalated, got {other:?}"
+                ),
+            }
+
+            let calls = calls.lock().expect("calls mutex poisoned");
+            assert!(
+                calls.is_empty(),
+                "{issue_type}: planner escalate on a non-planning issue must NOT fire any transition_task call, got {calls:?}"
+            );
+        }
+    }
+
+    /// Helper: a `MakeWriter` that wraps a `Vec<u8>` behind a `Mutex`
+    /// so the `tracing_subscriber::fmt` subscriber can be configured
+    /// to write formatted log lines into a buffer the test can read.
+    /// The test reads the buffer after `dispatcher::with_default`
+    /// returns to assert on the captured log content.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn take(&self) -> String {
+            let mut buf = self.0.lock().expect("captured logs mutex poisoned");
+            let out =
+                String::from_utf8(buf.clone()).expect("captured log bytes were not valid utf-8");
+            buf.clear();
+            out
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogsWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogsWriter {
+                inner: std::sync::Arc::clone(&self.0),
+            }
+        }
+    }
+
+    struct CapturedLogsWriter {
+        inner: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for CapturedLogsWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner
+                .lock()
+                .expect("captured logs mutex poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Acceptance criterion: the planner-escalate success path emits
+    /// a structured `tracing::info!` event whose message clearly says
+    /// the task was closed because the planner escalated, and whose
+    /// fields include `task_run_id`, `task_id`, `issue_type`, and the
+    /// surfaced close reason. We capture the formatted log output
+    /// (the same shape the pod log shipper sees) via a thread-local
+    /// subscriber and assert on both the message and the structured
+    /// fields rendered as key=value pairs.
+    ///
+    /// `tracing::dispatcher::with_default` is thread-local, so we
+    /// drive the async helper with `futures::executor::block_on` on
+    /// the same thread (no tokio runtime here) to keep the
+    /// subscriber live across the `.await`. `apply_planner_escalate_route`
+    /// is just an async fn — it doesn't need tokio, only a
+    /// `Future`-aware executor.
+    #[test]
+    fn planner_escalate_success_emits_structured_close_log() {
+        use tracing::dispatcher::Dispatch;
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(false)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = Dispatch::new(subscriber);
+
+        let task_run_id = "run-rt3l-log";
+        let task_id = "task-rt3l-log";
+        let issue_type = "planning";
+        let original_reason = "planner needs human guidance on the spec";
+
+        // Drive the helper under our scoped subscriber, on the same
+        // thread that the subscriber is registered on, so the
+        // captured log writes are routed to our `CapturedLogs`.
+        let outcome = tracing::dispatcher::with_default(&dispatch, || {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+            let calls_for_closure = std::sync::Arc::clone(&calls);
+            let future = apply_planner_escalate_route(
+                RoleKind::Planner,
+                issue_type,
+                task_id,
+                task_run_id,
+                original_reason.to_string(),
+                false,
+                move |task_id, action, reason| {
+                    let calls = std::sync::Arc::clone(&calls_for_closure);
+                    async move {
+                        calls
+                            .lock()
+                            .expect("calls mutex poisoned")
+                            .push(TransitionCall {
+                                task_id,
+                                action,
+                                reason,
+                            });
+                        Ok(())
+                    }
+                },
+            );
+            futures::executor::block_on(future)
+        });
+
+        // The outcome is the `Closed` variant with the verbatim reason.
+        match outcome {
+            TaskRunOutcome::Closed { reason } => assert_eq!(reason, original_reason),
+            other => panic!("expected Closed, got {other:?}"),
+        }
+
+        let captured = logs.take();
+        assert!(
+            !captured.is_empty(),
+            "expected at least one log line to be captured, got nothing"
+        );
+        // The success-path log must be present in the captured output.
+        assert!(
+            captured.contains("planner escalated")
+                && captured.contains("rt3l")
+                && captured.contains("closing planning-type task"),
+            "expected success-path log message to include 'planner escalated', \
+             'rt3l', and 'closing planning-type task' so the pod log makes the \
+             planner-escalate closure visible. Captured:\n{captured}"
+        );
+        // Structured fields must be present (rendered as
+        // `key=value` by the default fmt subscriber).
+        for (field, expected_value) in [
+            ("task_run_id", task_run_id),
+            ("task_id", task_id),
+            ("issue_type", issue_type),
+            (
+                "surfaced_reason",
+                "planner escalated: planner needs human guidance on the spec",
+            ),
+        ] {
+            assert!(
+                captured.contains(&format!("{field}={expected_value}")),
+                "expected log output to contain structured field {field}={expected_value}, got:\n{captured}"
+            );
+        }
+        // INFO level is required (so it shows up at the default log
+        // level) and the level token must be present.
+        assert!(
+            captured.contains("INFO"),
+            "expected log output to be emitted at INFO level, got:\n{captured}"
+        );
     }
 }
