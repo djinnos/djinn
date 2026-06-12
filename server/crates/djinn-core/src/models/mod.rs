@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod credential;
+pub mod dispatch_state;
 pub mod epic;
 pub mod git_settings;
 pub mod project;
@@ -14,6 +15,7 @@ pub mod user_settings;
 
 pub use agent::Agent;
 pub use credential::Credential;
+pub use dispatch_state::DispatchStateRecord;
 pub use epic::Epic;
 pub use git_settings::GitSettings;
 pub use project::Project;

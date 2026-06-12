@@ -1,7 +1,7 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant as StdInstant;
+use std::time::{Duration as StdDuration, Instant as StdInstant};
 
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{self, Interval};
@@ -19,13 +19,21 @@ use djinn_core::models::parse_json_array;
 use djinn_db::Database;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
-use djinn_db::{ActivityQuery, ReadyQuery, TaskRepository};
+use djinn_db::{
+    ActivityQuery, DispatchStateRecord, DispatchStateRepository, ReadyQuery, TaskRepository,
+};
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
 use djinn_provider::rate_limit::suppression_remaining;
 
 // ─── Actor (≤20 fields — AGENT-11) ───────────────────────────────────────────
 
+/// Coordinator runtime state has a deliberate durability boundary: dispatch
+/// decision state that changes how quickly or how often a task is re-dispatched
+/// is rehydrated from `dispatch_state` at startup; observation caches that are
+/// recomputed from GitHub, sessions, metrics windows, or background task state
+/// remain memory-only because losing them can at worst cause one redundant poll
+/// or a conservative retry after restart.
 pub(super) struct CoordinatorActor {
     // Ryhl core
     pub(super) receiver: mpsc::Receiver<CoordinatorMessage>,
@@ -51,14 +59,16 @@ pub(super) struct CoordinatorActor {
     pub(super) model_priorities: HashMap<String, Vec<String>>,
     /// Per-project PR creation errors (project_id → error message).
     pub(super) pr_errors: HashMap<String, String>,
-    /// Per-task dispatch tracking: task UUID → last dispatch marker.
+    /// Durable dispatch-state: per-task dispatch tracking (task UUID → last
+    /// dispatch marker), rehydrated from `dispatch_state.last_dispatched_*`.
     /// When a task becomes ready again (no active session) within
     /// `FAILURE_DETECTION_WINDOW` for the same dispatch role, the prior run
     /// failed → it is placed in an escalating cooldown to prevent hot dispatch
     /// loops (missing credential, crash, or a provider returning empty/throttled
     /// turns). A role change is a successful stage transition, not a failure.
     pub(super) last_dispatched: HashMap<String, DispatchMarker>,
-    /// In-flight dispatch ledger: task UUID → (creator, model actually used).
+    /// Durable dispatch-state when persisted: in-flight dispatch ledger
+    /// (task UUID → (creator, model actually used)).
     /// Recorded the instant a dispatch succeeds and reconciled against the live
     /// slot pool each pass. The per-user concurrency cap is seeded from running
     /// session ROWS, but those don't exist until the worker pod boots and
@@ -68,10 +78,11 @@ pub(super) struct CoordinatorActor {
     /// dispatched-but-not-yet-running task count against the cap immediately;
     /// `max(db_count, ledger_count)` keeps the seed correct across restarts too.
     pub(super) inflight_dispatches: HashMap<String, (Option<String>, String)>,
-    /// Task UUID → cooldown EXPIRY instant. A task is skipped for dispatch while
-    /// an entry exists; entries are pruned once their expiry passes.
+    /// Durable dispatch-state: task UUID → cooldown EXPIRY instant. Persisted as
+    /// a wall-clock timestamp and converted to a process-local `StdInstant` on
+    /// startup; expired persisted cooldowns are intentionally not reloaded.
     pub(super) dispatch_cooldowns: HashMap<String, StdInstant>,
-    /// Task UUID → count of consecutive failed dispatches, driving the
+    /// Durable dispatch-state: task UUID → count of consecutive failed dispatches, driving the
     /// escalating `dispatch_cooldowns` backoff. Cleared once the task makes a
     /// successful stage transition to a different dispatch role.
     pub(super) dispatch_failure_streak: HashMap<String, u32>,
@@ -110,34 +121,43 @@ pub(super) struct CoordinatorActor {
     pub(super) rpc_registry: Option<Arc<djinn_supervisor::ConnectionRegistry>>,
     /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
     pub(super) prune_tick_counter: u32,
-    /// Rolling-window throughput tracking: epic_id → Vec of merge event instants.
+    /// Restart-safe-to-lose: rolling-window throughput tracking is recomputed
+    /// from future merge events; losing it only resets the status metric window.
+    /// epic_id → Vec of merge event instants.
     pub(super) throughput_events: HashMap<String, Vec<StdInstant>>,
-    /// Per-task Lead escalation count (request_lead call count per task UUID).
+    /// Durable dispatch-state: per-task Lead escalation count (request_lead call count per task UUID).
     /// When a task accumulates ≥ 2 escalations, the next request_lead routes to Architect.
     pub(super) escalation_counts: HashMap<String, u32>,
-    /// PR status cache: task_id → last known head SHA.
+    /// Restart-safe-to-lose: PR status cache; losing it causes one redundant
+    /// GitHub CI query, after which the cache is rebuilt.
+    /// task_id → last known head SHA.
     ///
     /// Used by the PR poller to skip redundant CI check-run queries when the
     /// PR's head commit has not changed since the previous poll cycle.
     pub(super) pr_status_cache: HashMap<String, String>,
-    /// Tracks when each task was first seen in `pr_draft` status.
+    /// Restart-safe-to-lose: tracks when each task was first seen in `pr_draft`
+    /// status. Losing it makes the PR poller wait the minimum age again rather
+    /// than falsely advancing a task.
     ///
     /// Used by the PR poller to enforce a minimum age before checking CI,
     /// preventing a race where GitHub hasn't registered workflow check-runs
     /// yet and the poller incorrectly concludes CI has passed.
     pub(super) pr_draft_first_seen: HashMap<String, StdInstant>,
-    /// Consecutive merge failure count per task.  After
+    /// Restart-safe-to-lose: consecutive merge failure count per task. A restart
+    /// resets the recheck threshold, which is safe because the next poll observes
+    /// GitHub's current PR/CI state.
+    /// After
     /// `MERGE_RETRY_RECHECK_THRESHOLD` failures, the poller invalidates
     /// the CI SHA cache so it re-checks whether CI actually passed.
     pub(super) merge_fail_count: HashMap<String, u32>,
-    /// task_id → head SHA an auto-approve attempt was already made for
+    /// Restart-safe-to-lose: task_id → head SHA an auto-approve attempt was already made for
     /// (regardless of success). Suppresses retries on the same SHA — needed
     /// when GitHub returns 422 "Can not approve your own pull request" or
     /// when the approval already landed and the next tick hasn't observed
     /// it yet. Stale entries are harmless: a new push bumps the SHA and we
     /// retry once on the new commit.
     pub(super) auto_approve_attempted: HashMap<String, String>,
-    /// task_id → head SHA at the time we handed the PR off to GitHub
+    /// Restart-safe-to-lose: task_id → head SHA at the time we handed the PR off to GitHub
     /// (either via auto-merge enablement or direct merge-queue enqueue).
     /// While this entry is present the poller stays in observe-mode and
     /// does not re-attempt the REST merge call. Cleared on:
@@ -145,7 +165,7 @@ pub(super) struct CoordinatorActor {
     ///   * SHA change (a new push invalidated GitHub's queue entry)
     ///   * Merge-queue rejection (`PrCiFailed` reopens the task)
     pub(super) delegated_to_github: HashMap<String, String>,
-    /// task_id → head SHA for which we already auto-resolved the PR's review
+    /// Restart-safe-to-lose: task_id → head SHA for which we already auto-resolved the PR's review
     /// conversations. Suppresses re-querying GitHub's review threads on every
     /// 30s observe tick when a DIFFERENT protection rule (e.g. an outstanding
     /// CODEOWNERS review) keeps `mergeStateStatus == BLOCKED` after the
@@ -154,7 +174,7 @@ pub(super) struct CoordinatorActor {
     /// alongside the other per-SHA caches on merge / close / conflict / SHA
     /// change.
     pub(super) conversations_resolved: HashMap<String, String>,
-    /// SESSION IDs for which a stall-kill has already been issued.  Prevents
+    /// Restart-safe-to-lose: SESSION IDs for which a stall-kill has already been issued.  Prevents
     /// repeated kill + activity-log spam while the async lifecycle cleanup
     /// is still in progress (the DB session record stays `running` until
     /// the lifecycle finishes).  Entries are removed when the session
@@ -174,8 +194,95 @@ pub(super) struct CoordinatorActor {
     pub(super) recovered: u64,
 }
 
+#[cfg(test)]
+mod rehydration_tests {
+    use super::*;
+
+    fn fixed_now() -> ::time::OffsetDateTime {
+        ::time::OffsetDateTime::parse(
+            "2026-06-12T00:00:00Z",
+            &::time::format_description::well_known::Rfc3339,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn active_wall_clock_cooldown_converts_to_remaining_instant_deadline() {
+        let wall_now = fixed_now();
+        let deadline = wall_now + ::time::Duration::seconds(90);
+
+        let remaining = positive_wall_clock_delta(deadline, wall_now).unwrap();
+
+        assert_eq!(remaining, StdDuration::from_secs(90));
+    }
+
+    #[test]
+    fn expired_wall_clock_cooldown_is_not_loaded() {
+        let wall_now = fixed_now();
+        let deadline = wall_now - ::time::Duration::seconds(1);
+
+        assert_eq!(positive_wall_clock_delta(deadline, wall_now), None);
+    }
+
+    #[test]
+    fn persisted_last_dispatch_wall_clock_rehydrates_elapsed_instant() {
+        let wall_now = fixed_now();
+        let instant_now = StdInstant::now();
+        let persisted = wall_now - ::time::Duration::seconds(30);
+
+        let marker_instant = instant_for_persisted_wall_clock(persisted, wall_now, instant_now);
+
+        let elapsed = instant_now.duration_since(marker_instant);
+        assert!(elapsed >= StdDuration::from_secs(29));
+        assert!(elapsed <= StdDuration::from_secs(31));
+    }
+}
+
 // Field count: receiver, events, cancel, tick, db, events_tx, pool,
 //              catalog, health, paused, dispatched, recovered = 12 ✓ (≤20)
+
+#[derive(Default)]
+pub(super) struct RehydratedDispatchStateSummary {
+    pub(super) records: usize,
+    pub(super) failure_streaks: usize,
+    pub(super) cooldowns: usize,
+    pub(super) expired_cooldowns: usize,
+    pub(super) last_dispatched: usize,
+    pub(super) inflight: usize,
+    pub(super) escalation_counts: usize,
+}
+
+fn parse_dispatch_wall_clock_ts(raw: &str) -> Option<::time::OffsetDateTime> {
+    use ::time::format_description::well_known::{Iso8601, Rfc3339};
+
+    ::time::OffsetDateTime::parse(raw, &Iso8601::DEFAULT)
+        .or_else(|_| ::time::OffsetDateTime::parse(raw, &Rfc3339))
+        .ok()
+}
+
+fn positive_wall_clock_delta(
+    deadline: ::time::OffsetDateTime,
+    wall_now: ::time::OffsetDateTime,
+) -> Option<StdDuration> {
+    if deadline <= wall_now {
+        return None;
+    }
+    (deadline - wall_now).try_into().ok()
+}
+
+fn instant_for_persisted_wall_clock(
+    persisted_at: ::time::OffsetDateTime,
+    wall_now: ::time::OffsetDateTime,
+    instant_now: StdInstant,
+) -> StdInstant {
+    if persisted_at >= wall_now {
+        return instant_now;
+    }
+    let Ok(elapsed): Result<StdDuration, _> = (wall_now - persisted_at).try_into() else {
+        return instant_now;
+    };
+    instant_now.checked_sub(elapsed).unwrap_or(instant_now)
+}
 
 impl CoordinatorActor {
     pub(super) fn new(
@@ -254,6 +361,121 @@ impl CoordinatorActor {
         }
     }
 
+    async fn rehydrate_durable_dispatch_state(&mut self) {
+        let repo = DispatchStateRepository::new(self.db.clone());
+        match repo.cleanup_terminal().await {
+            Ok(pruned) if pruned > 0 => {
+                tracing::info!(
+                    pruned,
+                    "CoordinatorActor: pruned terminal durable dispatch-state rows"
+                )
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                error = %e,
+                "CoordinatorActor: failed to prune terminal durable dispatch-state rows; continuing startup"
+            ),
+        }
+
+        let records = match repo.list_all().await {
+            Ok(records) => records,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "CoordinatorActor: failed to load durable dispatch state; continuing with empty runtime maps"
+                );
+                return;
+            }
+        };
+
+        let summary = self.apply_rehydrated_dispatch_state(
+            records,
+            ::time::OffsetDateTime::now_utc(),
+            StdInstant::now(),
+        );
+        tracing::info!(
+            records = summary.records,
+            failure_streaks = summary.failure_streaks,
+            cooldowns = summary.cooldowns,
+            expired_cooldowns = summary.expired_cooldowns,
+            last_dispatched = summary.last_dispatched,
+            inflight = summary.inflight,
+            escalation_counts = summary.escalation_counts,
+            "CoordinatorActor: rehydrated durable dispatch state"
+        );
+    }
+
+    pub(super) fn apply_rehydrated_dispatch_state(
+        &mut self,
+        records: Vec<DispatchStateRecord>,
+        wall_now: ::time::OffsetDateTime,
+        instant_now: StdInstant,
+    ) -> RehydratedDispatchStateSummary {
+        let mut summary = RehydratedDispatchStateSummary {
+            records: records.len(),
+            ..Default::default()
+        };
+
+        for record in records {
+            if record.failure_streak > 0 {
+                self.dispatch_failure_streak.insert(
+                    record.task_id.clone(),
+                    record.failure_streak.min(u32::MAX as i64) as u32,
+                );
+                summary.failure_streaks += 1;
+            }
+
+            if record.escalation_count > 0 {
+                self.escalation_counts.insert(
+                    record.task_id.clone(),
+                    record.escalation_count.min(u32::MAX as i64) as u32,
+                );
+                summary.escalation_counts += 1;
+            }
+
+            if let Some(deadline) = record
+                .cooldown_until
+                .as_deref()
+                .and_then(parse_dispatch_wall_clock_ts)
+            {
+                if let Some(remaining) = positive_wall_clock_delta(deadline, wall_now) {
+                    self.dispatch_cooldowns
+                        .insert(record.task_id.clone(), instant_now + remaining);
+                    summary.cooldowns += 1;
+                } else {
+                    summary.expired_cooldowns += 1;
+                }
+            }
+
+            if let (Some(dispatched_at), Some(role)) = (
+                record
+                    .last_dispatched_at
+                    .as_deref()
+                    .and_then(parse_dispatch_wall_clock_ts),
+                record.last_dispatched_role.as_deref(),
+            ) {
+                let instant =
+                    instant_for_persisted_wall_clock(dispatched_at, wall_now, instant_now);
+                self.last_dispatched.insert(
+                    record.task_id.clone(),
+                    DispatchMarker {
+                        instant,
+                        role: role.to_owned(),
+                    },
+                );
+                summary.last_dispatched += 1;
+            }
+
+            if let Some(model_id) = record.inflight_model_id {
+                self.inflight_dispatches
+                    .insert(record.task_id, (record.inflight_creator_user_id, model_id));
+                summary.inflight += 1;
+            }
+        }
+
+        summary
+    }
+
     pub(super) async fn run(mut self) {
         tracing::info!("CoordinatorActor started");
 
@@ -276,6 +498,7 @@ impl CoordinatorActor {
         health::reap_stale_task_runs_for_startup(&self.db).await;
         let startup_context = self.maintenance_context();
         health::reap_orphaned_taskrun_jobs_for_startup(&self.db, &startup_context).await;
+        self.rehydrate_durable_dispatch_state().await;
 
         loop {
             tokio::select! {
