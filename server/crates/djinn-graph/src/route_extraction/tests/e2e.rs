@@ -10,7 +10,7 @@ const FULL_E2E_FETCH: &str = include_str!("fixtures/full_e2e/ui/src/api/fixture.
 
 #[derive(Debug)]
 struct RouteCounts {
-    route_nodes: usize,
+    route_display_names: Vec<String>,
     handles: Vec<RepoGraphEdge>,
     fetches: Vec<RepoGraphEdge>,
 }
@@ -55,11 +55,12 @@ fn ensure_canonical_graph_route_extraction_fixture(
 
 fn counts(graph: &crate::repo_graph::RepoDependencyGraph) -> RouteCounts {
     RouteCounts {
-        route_nodes: graph
+        route_display_names: graph
             .graph()
             .node_weights()
             .filter(|node| node.kind == RepoGraphNodeKind::Route)
-            .count(),
+            .map(|node| node.display_name.clone())
+            .collect(),
         handles: graph
             .graph()
             .edge_weights()
@@ -87,7 +88,7 @@ fn axum_only_round_trips_to_route_and_handler_edge_without_fetches() {
     assert_eq!(report.handles_route_edges_added, 1);
     assert_eq!(report.fetches_edges_added, 0);
     assert_eq!(report.unmatched_fetch_count, 0);
-    assert_eq!(counts.route_nodes, 1);
+    assert_eq!(counts.route_display_names, ["GET /api/fixture (axum)"]);
     assert_eq!(counts.handles.len(), 1);
     assert_eq!(counts.fetches.len(), 0);
 }
@@ -108,7 +109,7 @@ fn ts_only_no_match_records_unmatched_fetch_without_graph_pollution() {
     assert_eq!(report.handles_route_edges_added, 0);
     assert_eq!(report.fetches_edges_added, 0);
     assert_eq!(report.unmatched_fetch_count, 1);
-    assert_eq!(counts.route_nodes, 0);
+    assert!(counts.route_display_names.is_empty());
     assert_eq!(counts.handles.len(), 0);
     assert_eq!(counts.fetches.len(), 0);
 }
@@ -129,7 +130,7 @@ fn full_e2e_round_trips_to_route_handler_and_fetch_edges() {
     assert_eq!(report.handles_route_edges_added, 1);
     assert_eq!(report.fetches_edges_added, 1);
     assert_eq!(report.unmatched_fetch_count, 0);
-    assert_eq!(counts.route_nodes, 1);
+    assert_eq!(counts.route_display_names, ["GET /api/fixture (axum)"]);
 
     let [handles] = counts.handles.as_slice() else {
         panic!(
