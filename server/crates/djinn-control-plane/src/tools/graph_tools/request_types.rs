@@ -43,6 +43,22 @@ pub struct CodeGraphParams {
     /// Required for `neighbors`, `impact`, `implementations`, and `describe`.
     #[serde(default)]
     pub key: Option<String>,
+    /// Stable graph node UID returned by prior code_graph calls. Preferred
+    /// exact-match input for follow-up calls; normalized into `key` before
+    /// dispatch so MCP and chat surfaces share the same resolver path.
+    #[serde(default)]
+    pub uid: Option<String>,
+    /// Human-readable node name for resolver-based follow-up calls. Use with
+    /// `file_path` and `kind` when `uid` is not available.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional resolver kind hint paired with `name` + `file_path`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Optional repository-relative path hint paired with `name` + `kind` for
+    /// node disambiguation. Also accepted as a clearer alias for `file`.
+    #[serde(default)]
+    pub file_path: Option<String>,
     /// Edge direction filter for `neighbors`: `incoming`, `outgoing`, or omit for both.
     #[serde(default)]
     pub direction: Option<String>,
@@ -343,6 +359,10 @@ impl CodeGraphParams {
             }
         }
         clear(&mut self.key);
+        clear(&mut self.uid);
+        clear(&mut self.name);
+        clear(&mut self.kind);
+        clear(&mut self.file_path);
         clear(&mut self.workspace);
         clear(&mut self.direction);
         clear(&mut self.kind_filter);
@@ -383,6 +403,30 @@ impl CodeGraphParams {
         clear(&mut self.path);
         clear(&mut self.path_glob);
         clear(&mut self.framework);
+    }
+
+    /// Normalize public resolver aliases to the legacy `key` + `kind_hint`
+    /// fields consumed by the bridge. `uid` wins as an exact identity; `name`
+    /// is used only when neither `uid` nor `key` was supplied. `kind` mirrors
+    /// the MCP triplet vocabulary and feeds the existing disambiguation score.
+    pub fn normalize_resolver_inputs(&mut self) {
+        if let Some(uid) = self.uid.as_deref().filter(|s| !s.is_empty()) {
+            self.key = Some(uid.to_string());
+        } else if self.key.as_deref().filter(|s| !s.is_empty()).is_none()
+            && let Some(name) = self.name.as_deref().filter(|s| !s.is_empty())
+        {
+            self.key = Some(name.to_string());
+        }
+
+        if self
+            .kind_hint
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .is_none()
+            && let Some(kind) = self.kind.as_deref().filter(|s| !s.is_empty())
+        {
+            self.kind_hint = Some(kind.to_string());
+        }
     }
 
     /// df6s: resolve a non-negative offset from `self.offset`. Negative

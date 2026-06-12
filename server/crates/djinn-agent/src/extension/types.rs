@@ -360,12 +360,37 @@ pub(super) struct CodeGraphParams {
     pub workspace: Option<String>,
     #[serde(default)]
     pub key: Option<String>,
+    /// Stable graph node UID returned by prior `code_graph` calls. Exact-match
+    /// follow-up input; normalized into `key` before bridge dispatch.
+    #[serde(default)]
+    pub uid: Option<String>,
+    /// Human-readable resolver input. Use with `file_path` and `kind` when a
+    /// prior `uid` is unavailable.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Resolver kind hint paired with `name` + `file_path`.
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default)]
     pub direction: Option<String>,
     #[serde(default)]
     pub kind_filter: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Page offset for traversal triage responses (`neighbors`, `impact`,
+    /// `coupling_hotspots`). Pagination is an agent-boundary view only.
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// Counts-only traversal triage mode. CamelCase is accepted from MCP/chat
+    /// clients and normalized by serde.
+    #[serde(default, alias = "summaryOnly")]
+    pub summary_only: Option<bool>,
+    /// Request per-depth impact counts. CamelCase is accepted from MCP/chat.
+    #[serde(default, alias = "byDepthCounts")]
+    pub by_depth_counts: Option<bool>,
+    /// Distinct page cap for `impact`, where `limit` remains traversal depth.
+    #[serde(default, alias = "pageLimit")]
+    pub page_limit: Option<usize>,
     #[serde(default)]
     pub query: Option<String>,
     /// Natural-language subgraph query narrowing: coarse subsystem/API/type
@@ -526,6 +551,9 @@ impl CodeGraphParams {
             }
         }
         clear(&mut self.key);
+        clear(&mut self.uid);
+        clear(&mut self.name);
+        clear(&mut self.kind);
         clear(&mut self.workspace);
         clear(&mut self.direction);
         clear(&mut self.kind_filter);
@@ -552,6 +580,30 @@ impl CodeGraphParams {
         clear(&mut self.level);
         clear(&mut self.target);
         clear(&mut self.tests);
+    }
+
+    /// Normalize public resolver aliases to the legacy `key` + `kind_hint`
+    /// fields consumed by the bridge. `uid` wins as an exact identity; `name`
+    /// is used only when neither `uid` nor `key` was supplied. `kind` mirrors
+    /// the MCP triplet vocabulary and feeds the existing disambiguation score.
+    pub(super) fn normalize_resolver_inputs(&mut self) {
+        if let Some(uid) = self.uid.as_deref().filter(|s| !s.is_empty()) {
+            self.key = Some(uid.to_string());
+        } else if self.key.as_deref().filter(|s| !s.is_empty()).is_none()
+            && let Some(name) = self.name.as_deref().filter(|s| !s.is_empty())
+        {
+            self.key = Some(name.to_string());
+        }
+
+        if self
+            .kind_hint
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .is_none()
+            && let Some(kind) = self.kind.as_deref().filter(|s| !s.is_empty())
+        {
+            self.kind_hint = Some(kind.to_string());
+        }
     }
 }
 

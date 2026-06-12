@@ -1414,6 +1414,55 @@ async fn code_graph_dispatch_capabilities_returns_introspection_payload() {
 }
 
 #[test]
+fn code_graph_params_normalize_uid_triplet_and_traversal_controls() {
+    let mut by_uid: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "uid": "symbol:scip-rust pkg src/auth.rs `login`().",
+        "key": "stale-display-name",
+        "name": "login",
+        "file_path": "src/auth.rs",
+        "kind": "function",
+        "offset": 25,
+        "summaryOnly": true,
+        "byDepthCounts": true,
+        "pageLimit": 50,
+    }))
+    .expect("uid params parse");
+    by_uid.normalize();
+    by_uid.normalize_resolver_inputs();
+    assert_eq!(
+        by_uid.key.as_deref(),
+        Some("symbol:scip-rust pkg src/auth.rs `login`()."),
+        "stable uid must win over legacy key/name resolver input"
+    );
+    assert_eq!(by_uid.kind_hint.as_deref(), Some("function"));
+    assert_eq!(by_uid.file_path.as_deref(), Some("src/auth.rs"));
+    assert_eq!(by_uid.offset, Some(25));
+    assert_eq!(by_uid.summary_only, Some(true));
+    assert_eq!(by_uid.by_depth_counts, Some(true));
+    assert_eq!(by_uid.page_limit, Some(50));
+
+    let mut by_triplet: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "impact",
+        "uid": "",
+        "key": "",
+        "name": "UserService",
+        "file_path": "src/user/service.rs",
+        "kind": "class",
+        "summary_only": false,
+        "by_depth_counts": true,
+    }))
+    .expect("triplet params parse");
+    by_triplet.normalize();
+    by_triplet.normalize_resolver_inputs();
+    assert_eq!(by_triplet.key.as_deref(), Some("UserService"));
+    assert_eq!(by_triplet.kind_hint.as_deref(), Some("class"));
+    assert_eq!(by_triplet.file_path.as_deref(), Some("src/user/service.rs"));
+    assert_eq!(by_triplet.summary_only, Some(false));
+    assert_eq!(by_triplet.by_depth_counts, Some(true));
+}
+
+#[test]
 fn code_graph_workspace_traversal_keeps_seed_resolution_in_backend() {
     let mut impact: CodeGraphParams = serde_json::from_value(serde_json::json!({
         "operation": "impact",

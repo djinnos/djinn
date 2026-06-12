@@ -4,7 +4,7 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
 ---
 {
   "name": "code_graph",
-  "description": "Query the SCIP-built repository dependency graph. Set `operation` to one of the enum values; most ops accept optional filters (kind_filter, group_by, limit, min_confidence, workspace). WHEN TO USE: capabilities = cheap discovery of supported ops/params/defaults before spending graph budget; query_subgraph = ask a natural-language question in `query` and get a token-budgeted focused subgraph with narrowing hints; search = find candidate files/symbols by substring when you do not know a key; describe = inspect one exact file/symbol key; neighbors = direct callers/callees/imports around a known key; impact = bounded transitive dependents for what-breaks-if-this-changes; context = compact bucketed incoming/outgoing context for a symbol; ranked/cycles/orphans/path/edges = broader structural queries; symbols_at/diff_touches/detect_changes = line range to touched symbols; status/metrics_at/snapshot/workspaces = graph health/introspection; api_surface/dead_symbols/deprecated_callers = public surface health; boundary_check/blast_radius/touches_hot_path = change-impact analysis; hotspots/cochange/churn/coupling_hubs = git-coupling × PageRank centrality; complexity/refactor_candidates = budget-conscious discovery of risky/refactorable code. `workspaces` lists available workspace slugs plus name/node_count/commit_sha/warmed_at/status; responses that degrade an unknown non-empty workspace include `workspace_hint`, the available-workspace candidate slugs. Optional `workspace` scopes listing/bounded ops (ranked/orphans/snapshot/api_surface), scopes only seed resolution for traversal ops (impact/path/touches_hot_path/blast_radius), normalizes empty string to omitted, and unknown non-empty slugs return unscoped results with `workspace_hint` candidates where supported. AFTER THIS: after capabilities call the chosen op with only required fields; after query_subgraph inspect returned seeds/budget/truncation and retry with context_filter, file_filter, edge_filters, max_depth/max_seeds, or token_budget if too broad; after search pass a returned key to describe, neighbors, context, or impact; after describe call neighbors or context for relationships, or impact for dependents; after neighbors call describe on important nodes or impact to expand beyond direct edges; after impact call blast_radius or boundary_check for review/test planning; after context call describe/impact on highlighted neighbors.",
+  "description": "Query the SCIP-built repository dependency graph. Set `operation` to one of the enum values; most ops accept optional filters (uid, name+file_path+kind, kind_filter, group_by, limit, offset, summaryOnly, byDepthCounts, min_confidence, workspace). Stable `uid` is the preferred exact node input; use `name` + `file_path` + `kind` only when a UID is unavailable. Partial pages and capped summaries are triage views: absence from a page or summary is NOT evidence that a node, edge, or pair is absent from the full graph. WHEN TO USE: capabilities = cheap discovery of supported ops/params/defaults before spending graph budget; query_subgraph = ask a natural-language question in `query` and get a token-budgeted focused subgraph with narrowing hints; search = find candidate files/symbols by substring when you do not know a key; describe = inspect one exact file/symbol key; neighbors = direct callers/callees/imports around a known key; impact = bounded transitive dependents for what-breaks-if-this-changes; context = compact bucketed incoming/outgoing context for a symbol; ranked/cycles/orphans/path/edges = broader structural queries; symbols_at/diff_touches/detect_changes = line range to touched symbols; status/metrics_at/snapshot/workspaces = graph health/introspection; api_surface/dead_symbols/deprecated_callers = public surface health; boundary_check/blast_radius/touches_hot_path = change-impact analysis; hotspots/cochange/churn/coupling_hubs = git-coupling × PageRank centrality; complexity/refactor_candidates = budget-conscious discovery of risky/refactorable code. `workspaces` lists available workspace slugs plus name/node_count/commit_sha/warmed_at/status; responses that degrade an unknown non-empty workspace include `workspace_hint`, the available-workspace candidate slugs. Optional `workspace` scopes listing/bounded ops (ranked/orphans/snapshot/api_surface), scopes only seed resolution for traversal ops (impact/path/touches_hot_path/blast_radius), normalizes empty string to omitted, and unknown non-empty slugs return unscoped results with `workspace_hint` candidates where supported. AFTER THIS: after capabilities call the chosen op with only required fields; after query_subgraph inspect returned seeds/budget/truncation and retry with context_filter, file_filter, edge_filters, max_depth/max_seeds, or token_budget if too broad; after search pass a returned key to describe, neighbors, context, or impact; after describe call neighbors or context for relationships, or impact for dependents; after neighbors call describe on important nodes or impact to expand beyond direct edges; after impact call blast_radius or boundary_check for review/test planning; after context call describe/impact on highlighted neighbors.",
   "inputSchema": {
     "type": "object",
     "required": [
@@ -60,7 +60,23 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
       },
       "key": {
         "type": "string",
-        "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations, describe)"
+        "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations, describe). Prefer `uid` for exact follow-up when a prior response returned one."
+      },
+      "uid": {
+        "type": "string",
+        "description": "Stable graph node UID returned by code_graph results. Preferred exact-match input for follow-up neighbors/impact/implementations/describe/context calls."
+      },
+      "name": {
+        "type": "string",
+        "description": "Human-readable node name resolver input. Use with file_path and kind when uid is unavailable; ambiguous matches return ranked candidates with uid/name/kind/file_path/score."
+      },
+      "file_path": {
+        "type": "string",
+        "description": "Repository-relative file path for symbols_at, or resolver path hint paired with name + kind."
+      },
+      "kind": {
+        "type": "string",
+        "description": "Resolver kind hint paired with name + file_path (for example file, class, function, method, interface, struct, enum)."
       },
       "direction": {
         "type": "string",
@@ -81,7 +97,25 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
       "limit": {
         "type": "integer",
         "minimum": 1,
-        "description": "Max results (ranked/search/orphans/edges) or max traversal depth (impact)"
+        "description": "Max results (ranked/search/orphans/edges/neighbors/coupling_hotspots) or max traversal depth (impact). A capped page is a triage view, not proof absent items do not exist."
+      },
+      "offset": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Page offset for traversal ops (neighbors, impact, coupling_hotspots). Pagination is for triage; absence from a page is not absence from the full graph."
+      },
+      "summaryOnly": {
+        "type": "boolean",
+        "description": "Counts-only traversal response for triage. A capped summary is not an absence proof for omitted nodes, edges, or file pairs."
+      },
+      "byDepthCounts": {
+        "type": "boolean",
+        "description": "For impact, include by_depth_counts over the full unsliced impact set; useful with summaryOnly or paged results."
+      },
+      "pageLimit": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Traversal page cap when limit has another meaning (notably impact depth). Pages are triage views only."
       },
       "query": {
         "type": "string",

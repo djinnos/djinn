@@ -431,6 +431,49 @@ fn checked_in_mcp_snapshot_exposes_environment_config_workspace_metadata() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_graph_schema_exposes_uid_resolver_and_partial_result_controls() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let tools = mcp.all_tool_schemas();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some("code_graph"))
+        .expect("missing code_graph schema");
+    let input = &tool["inputSchema"];
+    let props = input["properties"]
+        .as_object()
+        .expect("code_graph input properties");
+
+    for field in [
+        "uid",
+        "name",
+        "file_path",
+        "kind",
+        "offset",
+        "summary_only",
+        "by_depth_counts",
+        "page_limit",
+    ] {
+        assert!(props.contains_key(field), "code_graph input schema missing {field}");
+    }
+
+    let rendered = serde_json::to_string(tool).expect("code_graph schema serializes");
+    for phrase in [
+        "stable uid",
+        "name + file_path + kind",
+        "summaryOnly",
+        "byDepthCounts",
+        "partial pages/capped summaries",
+        "not evidence",
+    ] {
+        assert!(
+            rendered.contains(phrase),
+            "code_graph schema should document {phrase}: {rendered}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_tools_schema_snapshot() {
     let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
     let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());

@@ -257,6 +257,7 @@ pub(crate) async fn call_code_graph(
 ) -> Result<serde_json::Value, String> {
     let mut p: CodeGraphParams = parse_args(arguments)?;
     p.normalize();
+    p.normalize_resolver_inputs();
     let mcp_state = state.to_mcp_state();
     let graph_ops = mcp_state.repo_graph();
     // Build the resolved ProjectCtx once; pass by reference to each op.
@@ -394,7 +395,16 @@ async fn call_code_graph_inner(
     graph_ops: &dyn RepoGraphOps,
 ) -> Result<serde_json::Value, String> {
     let _ = state;
-    let _ = (&p.edge_filters, p.token_budget, p.max_seeds, p.window_days);
+    let _ = (
+        &p.edge_filters,
+        p.token_budget,
+        p.max_seeds,
+        p.window_days,
+        p.offset,
+        p.summary_only,
+        p.by_depth_counts,
+        p.page_limit,
+    );
     let result: serde_json::Value = match p.operation.as_str() {
         "neighbors" => {
             let key = p

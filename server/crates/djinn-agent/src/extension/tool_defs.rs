@@ -379,7 +379,8 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
     RmcpTool::new(
         "code_graph".to_string(),
         "Query the SCIP-built repository dependency graph. Set `operation` to one of the enum \
-         values; most ops accept optional filters (kind_filter, group_by, limit, min_confidence, workspace). \
+         values; most ops accept optional filters (uid, name+file_path+kind, kind_filter, group_by, limit, offset, summaryOnly, byDepthCounts, min_confidence, workspace). \
+         Stable `uid` is the preferred exact node input; use `name` + `file_path` + `kind` only when a UID is unavailable. Partial pages and capped summaries are triage views: absence from a page or summary is NOT evidence that a node, edge, or pair is absent from the full graph. \
          WHEN TO USE: capabilities = cheap discovery of supported ops/params/defaults before spending \
          graph budget; query_subgraph = ask a natural-language question in `query` and get a \
          token-budgeted focused subgraph with narrowing hints; search = find candidate files/symbols by substring when you do not know a \
@@ -425,7 +426,23 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                 },
                 "key": {
                     "type": "string",
-                    "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations, describe)"
+                    "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations, describe). Prefer `uid` for exact follow-up when a prior response returned one."
+                },
+                "uid": {
+                    "type": "string",
+                    "description": "Stable graph node UID returned by code_graph results. Preferred exact-match input for follow-up neighbors/impact/implementations/describe/context calls."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Human-readable node name resolver input. Use with file_path and kind when uid is unavailable; ambiguous matches return ranked candidates with uid/name/kind/file_path/score."
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": "Repository-relative file path for symbols_at, or resolver path hint paired with name + kind."
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Resolver kind hint paired with name + file_path (for example file, class, function, method, interface, struct, enum)."
                 },
                 "direction": {
                     "type": "string",
@@ -440,7 +457,25 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Max results (ranked/search/orphans/edges) or max traversal depth (impact)"
+                    "description": "Max results (ranked/search/orphans/edges/neighbors/coupling_hotspots) or max traversal depth (impact). A capped page is a triage view, not proof absent items do not exist."
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Page offset for traversal ops (neighbors, impact, coupling_hotspots). Pagination is for triage; absence from a page is not absence from the full graph."
+                },
+                "summaryOnly": {
+                    "type": "boolean",
+                    "description": "Counts-only traversal response for triage. A capped summary is not an absence proof for omitted nodes, edges, or file pairs."
+                },
+                "byDepthCounts": {
+                    "type": "boolean",
+                    "description": "For impact, include by_depth_counts over the full unsliced impact set; useful with summaryOnly or paged results."
+                },
+                "pageLimit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Traversal page cap when limit has another meaning (notably impact depth). Pages are triage views only."
                 },
                 "query": {
                     "type": "string",

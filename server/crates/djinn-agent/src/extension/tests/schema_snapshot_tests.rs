@@ -237,10 +237,37 @@ fn code_graph_schema_embeds_workflow_guidance() {
         "commit_sha",
         "warmed_at",
         "status",
+        "uid",
+        "name+file_path+kind",
+        "offset",
+        "summaryOnly",
+        "byDepthCounts",
+        "Partial pages",
+        "NOT evidence",
     ] {
         assert!(
             description.contains(operation),
             "code_graph guidance should mention {operation}"
+        );
+    }
+
+    let properties = schema
+        .pointer("/inputSchema/properties")
+        .and_then(|value| value.as_object())
+        .expect("code_graph input schema has properties");
+    for field in [
+        "uid",
+        "name",
+        "file_path",
+        "kind",
+        "offset",
+        "summaryOnly",
+        "byDepthCounts",
+        "pageLimit",
+    ] {
+        assert!(
+            properties.contains_key(field),
+            "code_graph schema should expose public field {field}"
         );
     }
 

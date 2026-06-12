@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 456
 expression: signatures
 ---
 [
@@ -874,6 +873,12 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "file_path": {
+          "default": null,
+          "description": "Optional repository-relative path hint paired with `name` + `kind` for\nnode disambiguation. Also accepted as a clearer alias for `file`.",
+          "nullable": true,
+          "type": "string"
+        },
         "framework": {
           "default": null,
           "description": "Optional route framework filter for `route_map` discovery.",
@@ -919,6 +924,12 @@ expression: signatures
         "key": {
           "default": null,
           "description": "The node key to query (file path or SCIP symbol string).\nRequired for `neighbors`, `impact`, `implementations`, and `describe`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "kind": {
+          "default": null,
+          "description": "Optional resolver kind hint paired with `name` + `file_path`.",
           "nullable": true,
           "type": "string"
         },
@@ -997,6 +1008,12 @@ expression: signatures
         "module_glob": {
           "default": null,
           "description": "Optional module-path glob for `api_surface` (filter symbols by\n`file_path`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "name": {
+          "default": null,
+          "description": "Human-readable node name for resolver-based follow-up calls. Use with\n`file_path` and `kind` when `uid` is not available.",
           "nullable": true,
           "type": "string"
         },
@@ -1144,6 +1161,12 @@ expression: signatures
           "format": "int64",
           "nullable": true,
           "type": "integer"
+        },
+        "uid": {
+          "default": null,
+          "description": "Stable graph node UID returned by prior code_graph calls. Preferred\nexact-match input for follow-up calls; normalized into `key` before\ndispatch so MCP and chat surfaces share the same resolver path.",
+          "nullable": true,
+          "type": "string"
         },
         "visibility": {
           "default": null,

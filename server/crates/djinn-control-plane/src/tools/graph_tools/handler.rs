@@ -6,13 +6,14 @@ use super::*;
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph and file-coupling index. Operations include workspaces, neighbors, ranked, impact, implementations, search, query_subgraph, route_map, shape_check, api_impact, flow, cycles, orphans, path, edges, symbols_at, diff_touches, detect_changes, describe, context, status, snapshot, api_surface, boundary_check, hotspots, complexity, refactor_candidates, metrics_at, dead_symbols, deprecated_callers, touches_hot_path, coupling, churn, coupling_hotspots, and coupling_hubs."
+        description = "Query the repository dependency graph and file-coupling index. Operations include workspaces, neighbors, ranked, impact, implementations, search, query_subgraph, route_map, shape_check, api_impact, flow, cycles, orphans, path, edges, symbols_at, diff_touches, detect_changes, describe, context, status, snapshot, api_surface, boundary_check, hotspots, complexity, refactor_candidates, metrics_at, dead_symbols, deprecated_callers, touches_hot_path, coupling, churn, coupling_hotspots, and coupling_hubs. Prefer stable uid for exact node follow-ups; use name + file_path + kind as resolver hints when uid is unavailable. Traversal controls offset, limit/page_limit, summaryOnly, and byDepthCounts expose partial pages/capped summaries for triage only: absence from a page or summary is not evidence a node, edge, or pair is absent from the full graph."
     )]
     pub async fn code_graph(
         &self,
         Parameters(mut params): Parameters<CodeGraphParams>,
     ) -> Json<ErrorOr<CodeGraphResponse>> {
         params.normalize();
+        params.normalize_resolver_inputs();
         // Resolve `project` (UUID or slug) to (project_id, clone_path)
         // once here; inner handlers read the pre-populated `project_id`
         // and `project_path` fields without hitting the DB again.
