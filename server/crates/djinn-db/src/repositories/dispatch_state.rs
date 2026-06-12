@@ -1,8 +1,8 @@
-use djinn_core::models::TaskStatus;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
 use crate::database::Database;
+use crate::repositories::pg_placeholders;
 
 /// Durable coordinator dispatch-decision state for one task.
 ///
@@ -114,19 +114,37 @@ impl DispatchStateRepository {
         Ok(())
     }
 
-    /// Delete rows for terminal task statuses. Returns the number of rows pruned.
-    pub async fn cleanup_terminal(&self) -> Result<u64> {
+    /// Delete rows for terminal task statuses. Returns deleted task ids.
+    pub async fn cleanup_terminal(&self, terminal_statuses: &[&str]) -> Result<Vec<String>> {
         self.db.ensure_initialized().await?;
-        let result = sqlx::query(
-            "DELETE FROM dispatch_state ds
-             USING tasks t
-             WHERE t.id = ds.task_id
-               AND t.status = $1",
-        )
-        .bind(TaskStatus::Closed.as_str())
-        .execute(self.db.pool())
-        .await?;
-        Ok(result.rows_affected())
+        if terminal_statuses.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = pg_placeholders(terminal_statuses.len(), 1);
+        let select_sql = format!(
+            "SELECT ds.task_id
+             FROM dispatch_state ds
+             JOIN tasks t ON t.id = ds.task_id
+             WHERE t.status IN ({placeholders})
+             ORDER BY ds.task_id"
+        );
+        let mut select = sqlx::query_scalar::<_, String>(&select_sql);
+        for status in terminal_statuses {
+            select = select.bind(status);
+        }
+        let task_ids = select.fetch_all(self.db.pool()).await?;
+
+        if task_ids.is_empty() {
+            return Ok(task_ids);
+        }
+
+        sqlx::query("DELETE FROM dispatch_state WHERE task_id = ANY($1)")
+            .bind(&task_ids)
+            .execute(self.db.pool())
+            .await?;
+
+        Ok(task_ids)
     }
 
     /// Rows with an active cooldown after `after_iso`.
@@ -187,3 +205,248 @@ const DISPATCH_STATE_SELECT_ACTIVE_COOLDOWNS: &str = r#"
       AND cooldown_until > $1::timestamptz
     ORDER BY cooldown_until ASC
 "#;
+
+#[cfg(test)]
+mod tests {
+    use djinn_core::events::EventBus;
+
+    use super::*;
+    use crate::repositories::epic::EpicRepository;
+
+    fn test_db() -> Database {
+        Database::open_in_memory().unwrap()
+    }
+
+    /// Create a task via raw SQL (no TaskRepository dep), returns (project_id, task_id).
+    async fn create_task(db: &Database, bus: EventBus) -> (String, String) {
+        let epic_repo = EpicRepository::new(db.clone(), bus);
+        let epic = epic_repo
+            .create("Epic", "", "", "", "", None)
+            .await
+            .unwrap();
+
+        let task_id = uuid::Uuid::now_v7().to_string();
+        let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
+        sqlx::query!(
+            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+            task_id,
+            epic.project_id,
+            short_id,
+            epic.id
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        (epic.project_id, task_id)
+    }
+
+    fn populated_record(task_id: &str) -> DispatchStateUpsert<'_> {
+        DispatchStateUpsert {
+            task_id,
+            failure_streak: 3,
+            cooldown_until: Some("2026-01-02T03:04:05.678Z"),
+            escalation_count: 2,
+            last_dispatched_at: Some("2026-01-02T02:04:05.123Z"),
+            last_dispatched_role: Some("worker"),
+            inflight_creator_user_id: Some("user-123"),
+            inflight_model_id: Some("model-abc"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upsert_creates_row_when_missing() {
+        let db = test_db();
+        let (_project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = DispatchStateRepository::new(db);
+
+        repo.upsert(populated_record(&task_id)).await.unwrap();
+
+        let fetched = repo.get(&task_id).await.unwrap().expect("row must exist");
+        assert_eq!(fetched.task_id, task_id);
+        assert_eq!(fetched.failure_streak, 3);
+        assert_eq!(
+            fetched.cooldown_until.as_deref(),
+            Some("2026-01-02T03:04:05.678Z")
+        );
+        assert_eq!(fetched.escalation_count, 2);
+        assert_eq!(
+            fetched.last_dispatched_at.as_deref(),
+            Some("2026-01-02T02:04:05.123Z")
+        );
+        assert_eq!(fetched.last_dispatched_role.as_deref(), Some("worker"));
+        assert_eq!(
+            fetched.inflight_creator_user_id.as_deref(),
+            Some("user-123")
+        );
+        assert_eq!(fetched.inflight_model_id.as_deref(), Some("model-abc"));
+        assert!(!fetched.updated_at.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upsert_overwrites_fields_on_conflict() {
+        let db = test_db();
+        let (_project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = DispatchStateRepository::new(db);
+
+        repo.upsert(populated_record(&task_id)).await.unwrap();
+        let before = repo.get(&task_id).await.unwrap().expect("row must exist");
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        repo.upsert(DispatchStateUpsert {
+            task_id: &task_id,
+            failure_streak: 8,
+            cooldown_until: Some("2026-02-03T04:05:06.789Z"),
+            escalation_count: 5,
+            last_dispatched_at: Some("2026-02-03T03:05:06.321Z"),
+            last_dispatched_role: Some("reviewer"),
+            inflight_creator_user_id: Some("user-456"),
+            inflight_model_id: Some("model-def"),
+        })
+        .await
+        .unwrap();
+
+        let after = repo.get(&task_id).await.unwrap().expect("row must exist");
+        assert_eq!(after.failure_streak, 8);
+        assert_eq!(
+            after.cooldown_until.as_deref(),
+            Some("2026-02-03T04:05:06.789Z")
+        );
+        assert_eq!(after.escalation_count, 5);
+        assert_eq!(
+            after.last_dispatched_at.as_deref(),
+            Some("2026-02-03T03:05:06.321Z")
+        );
+        assert_eq!(after.last_dispatched_role.as_deref(), Some("reviewer"));
+        assert_eq!(after.inflight_creator_user_id.as_deref(), Some("user-456"));
+        assert_eq!(after.inflight_model_id.as_deref(), Some("model-def"));
+        assert!(
+            after.updated_at > before.updated_at,
+            "updated_at should advance on conflict update"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_returns_none_for_missing() {
+        let db = test_db();
+        let repo = DispatchStateRepository::new(db);
+
+        let missing = repo
+            .get("00000000-0000-0000-0000-000000000000")
+            .await
+            .unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clear_zeroes_fields_keeps_row() {
+        let db = test_db();
+        let (_project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = DispatchStateRepository::new(db.clone());
+
+        repo.upsert(populated_record(&task_id)).await.unwrap();
+        let before = repo.get(&task_id).await.unwrap().expect("row must exist");
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        repo.clear(&task_id).await.unwrap();
+
+        let after = repo.get(&task_id).await.unwrap().expect("row must remain");
+        assert_eq!(after.task_id, task_id);
+        assert_eq!(after.failure_streak, 0);
+        assert!(after.cooldown_until.is_none());
+        assert_eq!(after.escalation_count, 0);
+        assert!(after.last_dispatched_at.is_none());
+        assert!(after.last_dispatched_role.is_none());
+        assert!(after.inflight_creator_user_id.is_none());
+        assert!(after.inflight_model_id.is_none());
+        assert!(
+            after.updated_at > before.updated_at,
+            "updated_at should advance on clear"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        repo.upsert(DispatchStateUpsert {
+            task_id: &task_id,
+            failure_streak: 1,
+            cooldown_until: None,
+            escalation_count: 1,
+            last_dispatched_at: None,
+            last_dispatched_role: Some("planner"),
+            inflight_creator_user_id: None,
+            inflight_model_id: None,
+        })
+        .await
+        .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*)::bigint FROM dispatch_state WHERE task_id = $1")
+                .bind(&task_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "clear must keep one upsertable row");
+        let reupserted = repo.get(&task_id).await.unwrap().expect("row must exist");
+        assert_eq!(reupserted.failure_streak, 1);
+        assert!(reupserted.cooldown_until.is_none());
+        assert_eq!(reupserted.escalation_count, 1);
+        assert_eq!(reupserted.last_dispatched_role.as_deref(), Some("planner"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cleanup_terminal_deletes_only_terminal_rows() {
+        let db = test_db();
+        let (_closed_project_id, closed_task_id) = create_task(&db, EventBus::noop()).await;
+        let (_done_project_id, done_task_id) = create_task(&db, EventBus::noop()).await;
+        let (_open_project_id, open_task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = DispatchStateRepository::new(db.clone());
+
+        sqlx::query("UPDATE tasks SET status = $1 WHERE id = $2")
+            .bind("closed")
+            .bind(&closed_task_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tasks SET status = $1 WHERE id = $2")
+            .bind("done")
+            .bind(&done_task_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        for task_id in [&closed_task_id, &done_task_id, &open_task_id] {
+            repo.upsert(populated_record(task_id)).await.unwrap();
+        }
+
+        let mut expected = vec![closed_task_id.clone(), done_task_id.clone()];
+        expected.sort();
+        let deleted = repo.cleanup_terminal(&["closed", "done"]).await.unwrap();
+        assert_eq!(deleted, expected);
+        assert!(repo.get(&closed_task_id).await.unwrap().is_none());
+        assert!(repo.get(&done_task_id).await.unwrap().is_none());
+        assert!(repo.get(&open_task_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upsert_with_none_cooldown_is_idempotent() {
+        let db = test_db();
+        let (_project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = DispatchStateRepository::new(db);
+
+        repo.upsert(DispatchStateUpsert {
+            task_id: &task_id,
+            failure_streak: 0,
+            cooldown_until: None,
+            escalation_count: 0,
+            last_dispatched_at: None,
+            last_dispatched_role: None,
+            inflight_creator_user_id: None,
+            inflight_model_id: None,
+        })
+        .await
+        .unwrap();
+
+        let fetched = repo.get(&task_id).await.unwrap().expect("row must exist");
+        assert!(fetched.cooldown_until.is_none());
+    }
+}
