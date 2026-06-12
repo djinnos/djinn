@@ -2,11 +2,11 @@
 
 ## Final proposal 4369 residual-criteria reconciliation — 2026-06-12
 
-This evidence pack reconciles the remaining proposal 4369 / epic 8451 criteria against the three serialized evidence tasks:
+This evidence pack reconciles the remaining proposal 4369 / epic 8451 criteria against the completed evidence tasks:
 
 | Residual criterion | Evidence source | Reconciliation status |
 | --- | --- | --- |
-| Full Rust validation for the landed task-run teardown/backstop implementation. | `de12` (`019eb930-2164-7a23-ae8f-96d630fe1146`) | **Partially satisfied with an environmental blocker:** `cargo build` and strict `cargo clippy --all-features -- -D warnings` passed. `cargo nextest run` reached the test execution phase but could not complete because the required Postgres test service on `127.0.0.1:5433` was unavailable and Docker was not installed to start `postgres-test`. No teardown code defect was identified. |
+| Full Rust validation for the landed task-run teardown/backstop implementation. | `de12` (`019eb930-2164-7a23-ae8f-96d630fe1146`), `t2cs` (`019eb9c5-82a9-7e93-8ae5-cb2860fd792c`) | **Partially satisfied with an environmental blocker:** `cargo build` and strict `cargo clippy --all-features -- -D warnings` passed in `de12`. `t2cs` reran `cargo nextest run` after explicitly checking for the required Postgres path; Docker, `psql`, and `pg_isready` were absent, TCP `127.0.0.1:5433` refused connections, and nextest reached test execution then failed only in DB-backed tests with `Connection refused`. No teardown code defect was identified. |
 | Real Kubernetes proof that `execution_kill_task` removes `djinn-taskrun-*` Pods/Jobs within roughly 60 seconds. | `9l2v` (`019eb930-5068-7213-b348-2c2c2d2d75f7`), section [`execution_kill_task` cleanup verification attempt](#execution_kill_task-cleanup-verification-attempt--blocked-by-worker-cluster-access). | **Not satisfied:** a Kubernetes-backed attempt was made, but the worker environment was missing `kubectl`/`KUBECONFIG`, lacked RBAC to read Pods/Jobs/logs, and lacked an authenticated MCP/control-plane path to invoke `execution_kill_task`. No before/after cleanup success is claimed. |
 | Real Kubernetes proof that force-close/operator-close removes `djinn-taskrun-*` Pods/Jobs within roughly 60 seconds. | `6eg3` (`019eb930-803a-7033-9b7a-42678aac97a3`), section [Force-close/operator-close cleanup verification attempt](#force-closeoperator-close-cleanup-verification-attempt--blocked-by-worker-cluster-access). | **Not satisfied:** a Kubernetes-backed attempt was made, but the worker environment was missing `kubectl`/`KUBECONFIG`, lacked RBAC to read Pods/Jobs/logs, and available projected tokens were rejected by `/mcp` for operator/admin force-close. No force-close action was executed and no cleanup success is claimed. |
 
@@ -22,6 +22,83 @@ This evidence pack reconciles the remaining proposal 4369 / epic 8451 criteria a
   - `cd server && cargo nextest run`: **environmentally blocked after test compilation / during DB-backed test execution**. The required Postgres test service was unavailable on `127.0.0.1:5433`, and Docker was not installed so `docker compose up -d postgres-test` could not be used in that worker environment.
 - **Fix made during validation:** `server/src/mcp_contract_tests/settings_tools.rs` was adjusted to print the full `settings_set` response when the DB-backed settings contract assertion fails, exposing the underlying DB/environment error. No task-run teardown architecture was changed.
 - **Validation reconciliation:** build and strict clippy criteria are satisfied. The nextest criterion remains blocked by test infrastructure availability rather than by a known code defect; rerun `cd server && cargo nextest run` where `postgres-test` is running and reachable on `127.0.0.1:5433`.
+
+### Follow-up nextest outcome from `t2cs`
+
+- **Validation task:** `t2cs` / `019eb9c5-82a9-7e93-8ae5-cb2860fd792c`
+- **Attempt timestamp (UTC):** 2026-06-12T03:38:48Z
+- **Command:** `cd server && cargo nextest run`
+- **Preflight outcome:** the worker still could not provide the required Postgres test service. `docker` was not installed, so `docker compose up -d postgres-test` could not start the repository's `postgres-test` service. `psql` and `pg_isready` were also not installed, and a direct TCP probe to `127.0.0.1:5433` returned `Connection refused`.
+- **Nextest outcome:** environmentally blocked. The command compiled the test profile successfully, started nextest (`Nextest run ID 76807dfc-1ec3-40c3-a1da-005a18ba5ca2`), and ran 97 of 247 tests before fail-fast cancellation. The summary was `97/247 tests run: 92 passed, 5 failed, 2 skipped`; all five failures were DB-backed tests whose stderr showed `Connection refused` while creating or using a test project/database.
+- **Fixes made:** none. The failures are consistent with the missing Postgres infrastructure and do not indicate a task-run teardown code defect.
+- **Validation reconciliation:** the proposal validation criterion is **not yet satisfied** for nextest. The remaining blocker is operational: rerun `cd server && cargo nextest run` where Postgres is reachable at `127.0.0.1:5433`, or where Docker is available to run `docker compose up -d postgres-test` plus the documented test-template setup.
+
+Exact command output excerpt from `t2cs`:
+
+```console
+$ command -v docker || true
+
+$ docker compose up -d postgres-test
+bash: line 12: docker: command not found
+docker compose exit=127
+
+$ command -v psql || true
+
+$ command -v pg_isready || true
+
+$ bash -lc '</dev/tcp/127.0.0.1/5433'
+bash: connect: Connection refused
+bash: line 1: /dev/tcp/127.0.0.1/5433: Connection refused
+tcp 127.0.0.1:5433 unreachable
+
+$ cd server && cargo nextest run
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7m 39s
+────────────
+ Nextest run ID 76807dfc-1ec3-40c3-a1da-005a18ba5ca2 with nextest profile: default
+    Starting 247 tests across 2 binaries (2 tests skipped)
+        FAIL [   0.059s] ( 92/247) djinn-server mcp_contract_tests::session_tools::session_active_returns_error_without_pool
+  stderr ───
+
+    thread 'mcp_contract_tests::session_tools::session_active_returns_error_without_pool' (1322) panicked at src/test_helpers.rs:96:10:
+    failed to create test project: Sqlx(Io(Os { code: 111, kind: ConnectionRefused, message: "Connection refused" }))
+
+        FAIL [   0.101s] ( 93/247) djinn-server mcp_contract_tests::session_tools::session_for_task_returns_error_without_pool
+  stderr ───
+
+    thread 'mcp_contract_tests::session_tools::session_for_task_returns_error_without_pool' (1319) panicked at src/test_helpers.rs:96:10:
+    failed to create test project: Sqlx(Io(Os { code: 111, kind: ConnectionRefused, message: "Connection refused" }))
+
+        FAIL [   0.122s] ( 94/247) djinn-server mcp_contract_tests::project_tools::project_remove_success_and_missing
+  stderr ───
+
+    thread 'mcp_contract_tests::project_tools::project_remove_success_and_missing' (1315) panicked at src/test_helpers.rs:113:10:
+    failed to create test project: Sqlx(Io(Os { code: 111, kind: ConnectionRefused, message: "Connection refused" }))
+
+        FAIL [   0.127s] ( 95/247) djinn-server mcp_contract_tests::board_tools::board_reconcile_releases_stuck_in_progress_without_active_session
+  stderr ───
+
+    thread 'mcp_contract_tests::board_tools::board_reconcile_releases_stuck_in_progress_without_active_session' (1325) panicked at src/test_helpers.rs:96:10:
+    failed to create test project: Sqlx(Io(Os { code: 111, kind: ConnectionRefused, message: "Connection refused" }))
+
+        FAIL [   0.293s] ( 97/247) djinn-server mcp_contract_tests::settings_tools::settings_set_get_reset_round_trip
+  stderr ───
+
+    thread 'mcp_contract_tests::settings_tools::settings_set_get_reset_round_trip' (1320) panicked at src/mcp_contract_tests/settings_tools.rs:27:5:
+    assertion `left == right` failed: settings_set response: {"ok":false,"applied":false,"error":"database error: error communicating with database: Connection refused (os error 111)"}
+      left: Bool(false)
+     right: true
+
+────────────
+     Summary [   0.940s] 97/247 tests run: 92 passed, 5 failed, 2 skipped
+        FAIL [   0.059s] ( 92/247) djinn-server mcp_contract_tests::session_tools::session_active_returns_error_without_pool
+        FAIL [   0.101s] ( 93/247) djinn-server mcp_contract_tests::session_tools::session_for_task_returns_error_without_pool
+        FAIL [   0.122s] ( 94/247) djinn-server mcp_contract_tests::project_tools::project_remove_success_and_missing
+        FAIL [   0.127s] ( 95/247) djinn-server mcp_contract_tests::board_tools::board_reconcile_releases_stuck_in_progress_without_active_session
+        FAIL [   0.293s] ( 97/247) djinn-server mcp_contract_tests::settings_tools::settings_set_get_reset_round_trip
+warning: 150/247 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed
+cargo nextest exit=100
+```
 
 ### Kubernetes evidence outcome from `9l2v` (`execution_kill_task`)
 
