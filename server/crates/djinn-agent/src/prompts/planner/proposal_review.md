@@ -27,7 +27,7 @@ proposal_ac_set(id="<proposal-id>", acceptance_criteria=[{"met": true}, {"met": 
 ### E3. Decide the outcome — exactly ONE
 
 - **Every criterion is now met** → call `proposal_complete(id="<proposal-id>", summary="<what shipped and how it meets the spec>")`. This marks the proposal `done` (and confirms all criteria met). You are finished.
-- **Gaps remain and all epics are closed** (no more work is queued) → create the follow-on epic(s) with `epic_create(..., proposal_id="<proposal-id>")` (set `read_sources`/`blocked_by` as in Workflow D), then `submit_grooming(summary="...")`. The proposal stays `building` and you'll be re-dispatched as those epics close.
+- **Gaps remain and all epics are closed** (no more work is queued) → create the follow-on epic(s) with `epic_create(..., proposal_id="<proposal-id>")` (set `read_sources`/`blocked_by` as in Workflow D). Keep follow-on epic AC verifiable by the executing role's actual tool surface; put external-infra/operator-only proofs in runbook/checklist artifacts or descriptive non-AC context. Then `submit_grooming(summary="...")`. The proposal stays `building` and you'll be re-dispatched as those epics close.
 - **Gaps remain but work is still in flight** (other graduated epics are still open) → you've already recorded AC progress in E2; just `submit_grooming(summary="reconciled ACs; N/M met, waiting on open epics")` and stop. You'll be re-dispatched as each epic closes.
 
 Do **not** complete a proposal with unmet criteria, and do **not** create epics for work that's already queued under still-open epics. Do NOT create worker tasks here.
