@@ -17,6 +17,7 @@ import { ImageEditorPage } from "@/pages/ImageEditorPage";
 import { ProjectEnvironmentPage } from "@/pages/ProjectEnvironmentPage";
 import { UsersPage } from "@/pages/UsersPage";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
+import { DispatchPauseBanner } from "@/components/DispatchPauseBanner";
 import { AuthGate, useAuthUser } from "@/components/AuthGate";
 import { useEffect, useRef } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
@@ -28,7 +29,6 @@ import { ModelOnboarding } from "@/components/ModelOnboarding";
 import { useProjectGateStore } from "@/stores/projectGateStore";
 import { RepositoryOnboarding } from "@/components/RepositoryOnboarding";
 import { useDispatchPauseHydration } from "@/hooks/useDispatchPauseHydration";
-import { DispatchPauseBanner } from "@/components/DispatchPauseBanner";
 
 function MainLayout() {
   const isAdmin = useAuthUser()?.isAdmin ?? false;

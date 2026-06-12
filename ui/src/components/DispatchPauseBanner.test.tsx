@@ -20,25 +20,23 @@ const pause = (
   reason,
 });
 
+const statusBanner = () => screen.getByRole("status", { name: "Dispatch paused" });
+
 describe("DispatchPauseBanner", () => {
   beforeEach(() => {
     dispatchPauseStore.getState().clearAll();
     projectStore.setState({
       selectedProjectId: "project-a",
       projects: [
-        { id: "project-a", name: "Project A", path: "/tmp/a" },
-        { id: "project-b", name: "Project B", path: "/tmp/b" },
+        { id: "project-a", name: "Project A", github_owner: "acme", github_repo: "alpha" },
+        { id: "project-b", name: "Project B", github_owner: "acme", github_repo: "beta" },
       ],
     });
   });
 
   it("renders nothing when no pause applies", () => {
     const { container } = render(
-      <DispatchPauseBanner
-        entries={[]}
-        selectedProjectId="project-a"
-        currentUserId="user-1"
-      />,
+      <DispatchPauseBanner entries={[]} selectedProjectId="project-a" currentUserId="user-1" />,
     );
 
     expect(container).toBeEmptyDOMElement();
@@ -53,10 +51,10 @@ describe("DispatchPauseBanner", () => {
       />,
     );
 
-    expect(screen.getByRole("status", { name: "Dispatch paused" })).toBeInTheDocument();
-    expect(screen.getByText("Global dispatch pause")).toBeInTheDocument();
-    expect(screen.getByText("Reason: Global maintenance")).toBeInTheDocument();
-    expect(screen.getByText("Paused by admin-1")).toBeInTheDocument();
+    const banner = statusBanner();
+    expect(banner).toHaveTextContent("Global dispatch pause");
+    expect(banner).toHaveTextContent("Global maintenance");
+    expect(banner).toHaveTextContent("Paused by: admin-1");
   });
 
   it("filters project pauses to matching selected and all-project contexts", () => {
@@ -70,7 +68,7 @@ describe("DispatchPauseBanner", () => {
       />,
     );
 
-    expect(screen.queryByText("Project A maintenance")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Project A maintenance/)).not.toBeInTheDocument();
 
     rerender(
       <DispatchPauseBanner
@@ -80,7 +78,7 @@ describe("DispatchPauseBanner", () => {
         allProjectIds={["project-a", "project-b"]}
       />,
     );
-    expect(screen.getByText("Reason: Project A maintenance")).toBeInTheDocument();
+    expect(statusBanner()).toHaveTextContent("Project A maintenance");
 
     rerender(
       <DispatchPauseBanner
@@ -90,7 +88,7 @@ describe("DispatchPauseBanner", () => {
         allProjectIds={["project-a", "project-b"]}
       />,
     );
-    expect(screen.getByText("Reason: Project A maintenance")).toBeInTheDocument();
+    expect(statusBanner()).toHaveTextContent("Project A maintenance");
   });
 
   it("shows a current-user pause regardless of current project", () => {
@@ -105,8 +103,9 @@ describe("DispatchPauseBanner", () => {
       />,
     );
 
-    expect(screen.getByText("Reason: Current user pause")).toBeInTheDocument();
-    expect(screen.queryByText("Reason: Other user pause")).not.toBeInTheDocument();
+    const banner = statusBanner();
+    expect(banner).toHaveTextContent("Current user pause");
+    expect(banner).not.toHaveTextContent("Other user pause");
   });
 
   it("shows multiple applicable pauses without losing metadata or safety copy", () => {
@@ -123,14 +122,15 @@ describe("DispatchPauseBanner", () => {
       />,
     );
 
-    expect(screen.getByText(/Running sessions and chat are unaffected/i)).toBeInTheDocument();
-    expect(screen.getByText(/new dispatch is deferred/i)).toBeInTheDocument();
-    expect(screen.getByText("Reason: Fleet hold")).toBeInTheDocument();
-    expect(screen.getByText("Paused by admin")).toBeInTheDocument();
-    expect(screen.getByText("Reason: Repository hold")).toBeInTheDocument();
-    expect(screen.getByText("Paused by maintainer")).toBeInTheDocument();
-    expect(screen.getByText("Reason: User hold")).toBeInTheDocument();
-    expect(screen.getByText("Paused by pm")).toBeInTheDocument();
+    const banner = statusBanner();
+    expect(banner).toHaveTextContent(/Running sessions and chat are unaffected/i);
+    expect(banner).toHaveTextContent(/new dispatch is deferred/i);
+    expect(banner).toHaveTextContent("Fleet hold");
+    expect(banner).toHaveTextContent("Paused by: admin");
+    expect(banner).toHaveTextContent("Repository hold");
+    expect(banner).toHaveTextContent("Paused by: maintainer");
+    expect(banner).toHaveTextContent("User hold");
+    expect(banner).toHaveTextContent("Paused by: pm");
   });
 
   it("reacts to SSE upsert and resume clearing store state without a refresh", () => {
@@ -150,7 +150,7 @@ describe("DispatchPauseBanner", () => {
       });
     });
 
-    expect(screen.getByText("Reason: SSE pause")).toBeInTheDocument();
+    expect(statusBanner()).toHaveTextContent("SSE pause");
 
     act(() => {
       dispatchPauseStore.getState().applySsePayload({
