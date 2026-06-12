@@ -371,14 +371,20 @@ fn mixed_route_tool_artifact_bincode_round_trip_preserves_route_edges() {
     let restored = RepoDependencyGraph::from_artifact(&decoded);
 
     let restored_route = restored
-        .node_lookup
-        .get(&RepoNodeKey::Route("GET /api/helper (axum)".to_string()))
-        .copied()
+        .graph()
+        .node_indices()
+        .find(|&idx| {
+            let node = restored.node(idx);
+            node.kind == RepoGraphNodeKind::Route && node.display_name == "GET /api/helper (axum)"
+        })
         .expect("route node survives bincode round trip");
     let restored_tool = restored
-        .node_lookup
-        .get(&RepoNodeKey::Tool("helper.run".to_string()))
-        .copied()
+        .graph()
+        .node_indices()
+        .find(|&idx| {
+            let node = restored.node(idx);
+            node.kind == RepoGraphNodeKind::Tool && node.display_name == "helper.run"
+        })
         .expect("tool node survives bincode round trip");
     let restored_handler = restored
         .symbol_node(handler_symbol)
