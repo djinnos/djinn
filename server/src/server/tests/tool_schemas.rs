@@ -91,6 +91,54 @@ async fn all_tool_schemas_includes_cross_domain_tools() {
     }
 }
 
+#[test]
+fn checked_in_mcp_snapshot_exposes_code_graph_uid_pagination_contract() {
+    // The large insta snapshot is the public MCP contract consumed by agents
+    // and hosts. Keep a focused guard on the specific code_graph fields added
+    // by the stable-UID / pagination wave so a direct snapshot edit cannot
+    // accidentally omit them while still satisfying broad JSON validity.
+    let snapshot =
+        include_str!("snapshots/djinn_server__server__tests__tool_schemas__mcp_tools_schema.snap");
+    let json_body = snapshot
+        .splitn(3, "---\n")
+        .nth(2)
+        .expect("insta snapshot body after metadata header");
+    let tools: Vec<Value> = serde_json::from_str(json_body).expect("MCP schema snapshot is JSON");
+    let code_graph = tools
+        .iter()
+        .find(|t| t.get("name").and_then(Value::as_str) == Some("code_graph"))
+        .expect("checked-in MCP snapshot is missing `code_graph`");
+
+    let rendered = serde_json::to_string(code_graph).expect("code_graph snapshot entry serializes");
+    for required in [
+        "\"uid\"",
+        "Stable graph node UID",
+        "\"name\"",
+        "Human-readable node name",
+        "\"file_path\"",
+        "path hint",
+        "\"kind\"",
+        "kind hint",
+        "\"offset\"",
+        "page offset",
+        "\"summary_only\"",
+        "counts-only",
+        "\"by_depth_counts\"",
+        "per-depth counts",
+        "\"page_limit\"",
+        "result cap",
+        "Sliced **only**",
+        "unsliced result count",
+        "never be misread",
+        "omits the large node/pair lists",
+    ] {
+        assert!(
+            rendered.contains(required),
+            "checked-in code_graph MCP snapshot missing {required:?}: {rendered}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn all_tool_schemas_default_safety_annotations_fail_closed() {
     let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
