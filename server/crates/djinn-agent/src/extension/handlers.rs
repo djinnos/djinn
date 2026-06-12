@@ -51,11 +51,11 @@ mod task_epic;
 mod workspace;
 
 pub(crate) use ci::call_ci_job_log;
-#[cfg(test)]
-pub(super) use code_intel::should_pre_resolve_chat_key;
 pub(crate) use code_intel::{
     call_code_graph, call_github_fetch_file, call_github_search, call_lsp,
 };
+#[cfg(test)]
+pub(super) use code_intel::{call_code_graph_inner, should_pre_resolve_chat_key};
 use memory_agent::{
     call_agent_amend_prompt, call_agent_create, call_agent_metrics, call_memory_broken_links,
     call_memory_build_context, call_memory_edit, call_memory_extracted_audit, call_memory_health,
