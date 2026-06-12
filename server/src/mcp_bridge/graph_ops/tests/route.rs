@@ -159,7 +159,7 @@ fn route_map_returns_handler_consumers_middleware_and_summary() {
         Some("list_agents")
     );
     assert_eq!(entry.consumers[0].name, "loadAgents");
-    assert_eq!(entry.consumers[0].confidence_tier, "extracted");
+    assert_eq!(entry.consumers[0].confidence_tier, "inferred");
     assert!(entry.excluded_reason.is_none());
     let chain = entry.consumers[0]
         .route_language_chain
