@@ -52,11 +52,27 @@ fn derive_graph_warm_status_with_workspaces(
     graph_warmed_at: &Option<String>,
     workspace_statuses: &[WorkspaceWarmStatusEntry],
 ) -> String {
+    // Failed/timed_out always wins — an indexer that didn't produce a
+    // SCIP artifact is the operator's primary problem, and the graph-cache
+    // shrink backstop (see `canonical_graph::detect_graph_cache_shrink_warning`)
+    // explicitly suppresses its own warning when those statuses are present.
     if workspace_statuses
         .iter()
         .any(|entry| matches!(entry.status.as_str(), "failed" | "timed_out"))
     {
         return "failed".to_string();
+    }
+    // A non-fatal graph-cache shrink warning lands as a synthetic
+    // `graph-cache` row in `.djinn/graph_warm_status.json` (see
+    // `scip_indexer::append_graph_cache_shrink_warning`). It is
+    // warning-level (not failure-level) — preserve `graph_warmed_at`
+    // freshness, but surface it as `warning` so the UI can show the
+    // old/new counts and commit SHA to operators.
+    if workspace_statuses
+        .iter()
+        .any(|entry| entry.status.as_str() == "warning")
+    {
+        return "warning".to_string();
     }
     derive_graph_warm_status(image_status, graph_warmed_at)
 }
@@ -202,10 +218,18 @@ pub struct GetProjectDevcontainerStatusResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_warmed_at: Option<String>,
     /// Derived status for the UI banner. One of
-    /// `pending | running | ready | failed`. `pending` means no warm has
+    /// `pending | running | ready | warning | failed`. `pending` means no warm has
     /// ever run; `running` means the image is ready and a warm should be
     /// in flight (or imminent); `ready` means derived graph freshness exists;
-    /// `failed` mirrors the image build's failed status (no warm possible).
+    /// `warning` means a non-fatal graph-cache shrink backstop fired
+    /// (see `scip_indexer::append_graph_cache_shrink_warning` and
+    /// `canonical_graph::detect_graph_cache_shrink_warning`) — the cache
+    /// is still fresh and graph usage is unaffected, but operators should
+    /// inspect the matching `workspace_warm_statuses` row carrying the
+    /// old/new node counts and commit SHA; `failed` mirrors the image
+    /// build's failed status (no warm possible) or any
+    /// `failed`/`timed_out` workspace warm status (which always overrides
+    /// a shrink warning).
     pub graph_warm_status: String,
     /// Per-workspace graph warm results from the most recent indexer run.
     /// Entries with `failed` or `timed_out` explain which workspace did not
@@ -653,5 +677,203 @@ mod tests {
             graph_warmed_at_from_freshness(db, &project.id).await,
             Some(workspace_stamp)
         );
+    }
+
+    fn warm_entry(
+        workspace_slug: &str,
+        indexer: &str,
+        status: &str,
+        detail: Option<&str>,
+    ) -> WorkspaceWarmStatusEntry {
+        WorkspaceWarmStatusEntry {
+            workspace_slug: workspace_slug.to_string(),
+            indexer: indexer.to_string(),
+            status: status.to_string(),
+            detail: detail.map(str::to_string),
+        }
+    }
+
+    // `failed` always wins over `warning` so a workspace indexer blow-up
+    // is not masked by a co-existing graph-cache shrink warning. Mirrors
+    // the precedence in `canonical_graph::detect_graph_cache_shrink_warning`
+    // (clky) which suppresses the shrink warning on failed/timed_out
+    // workspaces — the warm-status surface must apply the same rule.
+    #[test]
+    fn graph_warm_status_failed_beats_warning() {
+        let statuses = vec![
+            warm_entry("server", "rust-analyzer", "ready", None),
+            warm_entry(
+                "graph-cache",
+                "rust-analyzer",
+                "warning",
+                Some("old=1000 new=700 delta=300"),
+            ),
+            warm_entry(
+                "desktop",
+                "scip-typescript",
+                "failed",
+                Some("indexer exit 1"),
+            ),
+        ];
+
+        assert_eq!(
+            derive_graph_warm_status_with_workspaces(
+                ProjectImageStatus::READY,
+                &Some("2026-06-12T00:00:00Z".to_string()),
+                &statuses,
+            ),
+            "failed"
+        );
+    }
+
+    // `timed_out` follows the same rule as `failed` (both suppress
+    // shrink warnings upstream and must also be terminal in the
+    // status surface).
+    #[test]
+    fn graph_warm_status_timed_out_beats_warning() {
+        let statuses = vec![
+            warm_entry("server", "rust-analyzer", "ready", None),
+            warm_entry(
+                "graph-cache",
+                "rust-analyzer",
+                "warning",
+                Some("old=1000 new=700 delta=300"),
+            ),
+            warm_entry(
+                "desktop",
+                "scip-typescript",
+                "timed_out",
+                Some("indexer exceeded 600s"),
+            ),
+        ];
+
+        assert_eq!(
+            derive_graph_warm_status_with_workspaces(
+                ProjectImageStatus::READY,
+                &Some("2026-06-12T00:00:00Z".to_string()),
+                &statuses,
+            ),
+            "failed"
+        );
+    }
+
+    // A non-fatal graph-cache shrink warning beats the regular
+    // ready/running precedence when no failed/timed_out workspaces are
+    // present — this is the user-visible path for the clky backstop.
+    // `graph_warmed_at` is preserved (the cache is fresh) but the
+    // derived status flips to `warning` so the UI banner can prompt
+    // the operator to inspect the matching `workspace_warm_statuses`
+    // row carrying old/new counts and commit SHA.
+    #[test]
+    fn graph_warm_status_warning_beats_ready_when_no_failures() {
+        let statuses = vec![
+            warm_entry("server", "rust-analyzer", "ready", None),
+            warm_entry(
+                "graph-cache",
+                "rust-analyzer",
+                "warning",
+                Some(
+                    r#"{"kind":"graph_cache_shrink_warning","project_id":"acme/wu8h","commit_sha":"abc123","old_node_count":1000,"new_node_count":700,"delta":300,"tolerance_min_absolute_delta":100,"tolerance_min_percent":0.1,"workspace_status_summary":"root:rust-analyzer=ready"}"#,
+                ),
+            ),
+        ];
+
+        assert_eq!(
+            derive_graph_warm_status_with_workspaces(
+                ProjectImageStatus::READY,
+                &Some("2026-06-12T00:00:00Z".to_string()),
+                &statuses,
+            ),
+            "warning"
+        );
+    }
+
+    // The warning must still surface when the image is in `running`
+    // state — the running/runnable projection should not mask a
+    // shrink warning. A shrink is a cache-integrity signal, not an
+    // image-build signal.
+    #[test]
+    fn graph_warm_status_warning_beats_running_when_no_failures() {
+        let statuses = vec![warm_entry(
+            "graph-cache",
+            "rust-analyzer",
+            "warning",
+            Some("old=1000 new=700 delta=300"),
+        )];
+
+        assert_eq!(
+            derive_graph_warm_status_with_workspaces(ProjectImageStatus::READY, &None, &statuses,),
+            "warning"
+        );
+    }
+
+    // Sanity: the existing normal-ready/running behavior must remain
+    // unchanged when no warning row is present.
+    #[test]
+    fn graph_warm_status_ready_when_warmed_and_workspaces_ready() {
+        let statuses = vec![warm_entry("server", "rust-analyzer", "ready", None)];
+
+        assert_eq!(
+            derive_graph_warm_status_with_workspaces(
+                ProjectImageStatus::READY,
+                &Some("2026-06-12T00:00:00Z".to_string()),
+                &statuses,
+            ),
+            "ready"
+        );
+    }
+
+    #[test]
+    fn graph_warm_status_running_when_image_ready_but_not_yet_warmed() {
+        let statuses = vec![warm_entry("server", "rust-analyzer", "ready", None)];
+
+        assert_eq!(
+            derive_graph_warm_status_with_workspaces(ProjectImageStatus::READY, &None, &statuses,),
+            "running"
+        );
+    }
+
+    #[test]
+    fn graph_warm_status_pending_when_nothing_warmed_and_no_workspaces() {
+        assert_eq!(
+            derive_graph_warm_status_with_workspaces(ProjectImageStatus::NONE, &None, &[],),
+            "pending"
+        );
+    }
+
+    // The clky append helper writes a `graph-cache` row with status
+    // "warning" carrying a JSON detail payload (old/new counts, commit
+    // SHA). The control-plane surface reads the same
+    // `.djinn/graph_warm_status.json` and must deserialize that row
+    // cleanly so the warning details flow through to the UI.
+    #[test]
+    fn workspace_warm_status_entries_round_trip_shrink_warning_payload() {
+        let detail = r#"{"kind":"graph_cache_shrink_warning","project_id":"acme/wu8h","commit_sha":"abc123","old_node_count":1000,"new_node_count":700,"delta":300}"#;
+        let entries = vec![
+            WorkspaceWarmStatusEntry {
+                workspace_slug: "server".to_string(),
+                indexer: "rust-analyzer".to_string(),
+                status: "ready".to_string(),
+                detail: None,
+            },
+            WorkspaceWarmStatusEntry {
+                workspace_slug: "graph-cache".to_string(),
+                indexer: "rust-analyzer".to_string(),
+                status: "warning".to_string(),
+                detail: Some(detail.to_string()),
+            },
+        ];
+
+        let serialized = serde_json::to_string(&entries).expect("serialize");
+        let parsed: Vec<WorkspaceWarmStatusEntry> =
+            serde_json::from_str(&serialized).expect("deserialize");
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].workspace_slug, "server");
+        assert_eq!(parsed[0].status, "ready");
+        assert_eq!(parsed[1].workspace_slug, "graph-cache");
+        assert_eq!(parsed[1].indexer, "rust-analyzer");
+        assert_eq!(parsed[1].status, "warning");
+        assert_eq!(parsed[1].detail.as_deref(), Some(detail));
     }
 }

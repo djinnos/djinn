@@ -38,8 +38,8 @@ export const MAX_RECONNECT_DELAY = 30000;
 export const RECONNECT_MULTIPLIER = 2;
 export const RECONNECT_JITTER_FACTOR = 0.2;
 export const MIN_RECONNECT_DELAY = 1;
-const SILENCE_TIMEOUT_MS = 60_000;
-const LIVENESS_WATCHDOG_INTERVAL_MS = 5_000;
+export const SILENCE_TIMEOUT_MS = 60_000;
+export const LIVENESS_WATCHDOG_INTERVAL_MS = 5_000;
 
 /**
  * Returns the capped exponential reconnect delay with symmetric bounded jitter.
