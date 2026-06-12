@@ -1,12 +1,14 @@
 use super::{
     AutoMergeFastPathState, AutoMergeTickDecision, Task, advisory_checks_section,
     blocking_failed_checks, build_ci_failure_sections, decide_auto_merge_tick,
-    dequeue_reason_is_failure, effective_review_decision, is_advisory_check_name,
-    is_conversation_resolution_block, is_merge_queue_405, is_racing_unmerged_status,
-    parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
+    dequeue_reason_is_failure, dequeue_requires_rework, effective_review_decision,
+    is_advisory_check_name, is_conversation_resolution_block, is_merge_queue_405,
+    is_racing_unmerged_status, parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
     should_auto_resolve_conversations,
 };
-use djinn_provider::github_api::{ActionsJob, ActionsJobStep, CheckRun, GitHubUser, PrReview};
+use djinn_provider::github_api::{
+    ActionsJob, ActionsJobStep, CheckRun, DequeueEvent, GitHubUser, PrReview,
+};
 use std::collections::HashMap;
 
 // ── Offloaded clean-merge fast-path guard ─────────────────────────────────
@@ -404,6 +406,22 @@ fn is_merge_queue_405_ignores_unrelated_405s() {
 }
 
 #[test]
+fn is_already_queued_matches_real_enqueue_rejection() {
+    // The exact production payload seen when re-delegating after a restart
+    // while GitHub still holds the queue entry.
+    let err = anyhow::anyhow!(
+        r#"enqueue_pull_request GraphQL error: [{{"type":"UNPROCESSABLE","path":["enqueuePullRequest"],"message":"Pull request is already in the queue"}}]"#
+    );
+    assert!(super::is_already_queued(&err));
+    // Other UNPROCESSABLE rejections (not ready, missing approval) must not
+    // be adopted as queue entries.
+    let other = anyhow::anyhow!(
+        r#"enqueue_pull_request GraphQL error: [{{"type":"UNPROCESSABLE","message":"Pull request is not mergeable"}}]"#
+    );
+    assert!(!super::is_already_queued(&other));
+}
+
+#[test]
 fn is_merge_queue_405_ignores_other_status_codes() {
     let err =
         anyhow::anyhow!("merge_pull_request failed (422): Pull Request is in the merge queue.");
@@ -470,6 +488,94 @@ fn dequeue_reasons_classified_correctly() {
     assert!(!dequeue_reason_is_failure(Some("QUEUE_CLEARED")));
     assert!(!dequeue_reason_is_failure(Some("DEQUEUED")));
     assert!(!dequeue_reason_is_failure(None));
+}
+
+// ── Sticky failure-dequeue decision ────────────────────────────────────────
+
+fn dequeue_event(reason: &str, created_at: Option<&str>) -> DequeueEvent {
+    DequeueEvent {
+        reason: Some(reason.to_string()),
+        merge_group_ref: None,
+        created_at: created_at.map(|s| s.to_string()),
+        // NOTE: beforeCommit on the real event is the merge-group head, not
+        // the PR head — the decision must not depend on it.
+        before_commit_sha: Some("merge-group-head".to_string()),
+    }
+}
+
+#[test]
+fn dequeue_requires_rework_on_unhandled_failure_with_no_commit_after() {
+    // The blind-requeue loop case (PRs #491/#492): queue rejected a head
+    // whose last commit predates the eviction and nothing consumed the
+    // event yet — must reopen even if the PR is already sitting back in
+    // the queue.
+    let dq = dequeue_event("failed_checks", Some("2026-06-12T14:30:33Z"));
+    assert!(dequeue_requires_rework(
+        Some(&dq),
+        Some("2026-06-12T14:12:31Z"),
+        None
+    ));
+    // A different handled timestamp is an older, already-consumed event —
+    // this one is new and still actionable.
+    assert!(dequeue_requires_rework(
+        Some(&dq),
+        Some("2026-06-12T14:12:31Z"),
+        Some("2026-06-12T13:56:01Z")
+    ));
+}
+
+#[test]
+fn dequeue_requires_rework_skips_when_rework_already_landed() {
+    // A commit landed after the eviction — the rejection is stale and the
+    // reworked head deserves a fresh queue run, not another reopen.
+    let dq = dequeue_event("failed_checks", Some("2026-06-12T14:05:59Z"));
+    assert!(!dequeue_requires_rework(
+        Some(&dq),
+        Some("2026-06-12T14:18:19Z"),
+        None
+    ));
+}
+
+#[test]
+fn dequeue_requires_rework_consumes_each_event_once() {
+    // Same created_at as the handled marker → already reopened for this
+    // event; don't re-fire while the rework is still in flight.
+    let dq = dequeue_event("failed_checks", Some("2026-06-12T14:30:33Z"));
+    assert!(!dequeue_requires_rework(
+        Some(&dq),
+        Some("2026-06-12T14:12:31Z"),
+        Some("2026-06-12T14:30:33Z")
+    ));
+}
+
+#[test]
+fn dequeue_requires_rework_ignores_non_failure_and_absent_events() {
+    let merged = dequeue_event("merged", Some("2026-06-12T14:50:36Z"));
+    assert!(!dequeue_requires_rework(
+        Some(&merged),
+        Some("2026-06-12T14:12:31Z"),
+        None
+    ));
+    assert!(!dequeue_requires_rework(
+        None,
+        Some("2026-06-12T14:12:31Z"),
+        None
+    ));
+}
+
+#[test]
+fn dequeue_requires_rework_degrades_conservatively_on_missing_fields() {
+    // No head timestamp (GraphQL field gap) → cannot prove rework landed;
+    // keep the pre-existing reopen behavior.
+    let dq = dequeue_event("failed_checks", Some("2026-06-12T14:30:33Z"));
+    assert!(dequeue_requires_rework(Some(&dq), None, None));
+    // No created_at → cannot compare or dedup; err on reopening.
+    let no_ts = dequeue_event("failed_checks", None);
+    assert!(dequeue_requires_rework(
+        Some(&no_ts),
+        Some("2026-06-12T14:12:31Z"),
+        Some("2026-06-12T14:30:33Z")
+    ));
 }
 
 #[test]

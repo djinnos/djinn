@@ -184,6 +184,14 @@ pub(super) struct CoordinatorActor {
     /// alongside the other per-SHA caches on merge / close / conflict / SHA
     /// change.
     pub(super) conversations_resolved: HashMap<String, String>,
+    /// Restart-safe-to-lose: task_id → `created_at` of the merge-queue failure
+    /// dequeue event already consumed (task reopened with `PrCiFailed`).
+    /// Prevents the sticky dequeue check in `observe_auto_merge_state` from
+    /// re-firing on the same event while rework on the same head SHA is still
+    /// in flight. A later dequeue carries a new timestamp and is processed
+    /// fresh; losing this map on restart at worst re-reopens a task whose
+    /// head SHA still matches the rejected one — the correct action anyway.
+    pub(super) handled_dequeues: HashMap<String, String>,
     /// Restart-safe-to-lose: SESSION IDs for which a stall-kill has already been issued.  Prevents
     /// repeated kill + activity-log spam while the async lifecycle cleanup
     /// is still in progress (the DB session record stays `running` until
@@ -364,6 +372,7 @@ impl CoordinatorActor {
             auto_approve_attempted: HashMap::new(),
             delegated_to_github: HashMap::new(),
             conversations_resolved: HashMap::new(),
+            handled_dequeues: HashMap::new(),
             stall_killed: HashSet::new(),
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,

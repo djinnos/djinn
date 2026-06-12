@@ -472,6 +472,7 @@ fn coordinator_actor_for_tests(
         auto_approve_attempted: HashMap::new(),
         delegated_to_github: HashMap::new(),
         conversations_resolved: HashMap::new(),
+        handled_dequeues: HashMap::new(),
         stall_killed: HashSet::new(),
         last_idle_consolidation: None,
         idle_consolidation_cancel: None,

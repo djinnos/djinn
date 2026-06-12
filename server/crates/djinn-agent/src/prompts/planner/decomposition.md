@@ -39,6 +39,15 @@ Then update the epic to reference it: `epic_update(id, memory_refs=[..., "<roadm
 
 **If a few tasks remain open but their acceptance criteria appear already met by the codebase:** Verify this yourself using `shell` and `read` (you have read-only codebase access). If confirmed, close them with `task_transition(id, "close")`, then close the epic. **NEVER create a worker task to verify or close other tasks or the epic — that is YOUR job.** Workers write code; you manage task and epic lifecycle.
 
+**If the only remaining unmet criteria are invalid or unverifiable:** Before creating tasks, inspect unmet acceptance criteria on open tasks, the epic roadmap/description, and any parent proposal. When all remaining unmet criteria require unavailable external tools, external infrastructure, privileged environment access, or operator-only proof that Djinn agents cannot verify with their actual tool/environment access, treat those criteria as invalid spec — not pending implementation. Lack of Djinn tool/environment access is NOT a reason to `escalate`; reserve `escalate` for genuine human product, priority, scope, or policy decisions.
+
+In this pruning/repair arm:
+- Rewrite or drop invalid task acceptance criteria with `task_update` so each open task only contains implementable, objectively checkable criteria.
+- Add task comments explaining which criteria were unverifiable, what tool/environment/operator proof they required, and why they were pruned or rewritten.
+- Update or append the roadmap rationale to document the invalid criteria, the repair decision, and any runbook/checklist artifact where external proof now belongs.
+- Reconcile epic and parent proposal state where applicable: update descriptions/acceptance criteria/roadmap references so they no longer present invalid external-proof criteria as unfinished worker work.
+- If no implementable work remains after pruning/repair, close or reconcile the affected tasks/epic/proposal as appropriate, then finish this planning task with `submit_grooming(decision="close")`.
+
 ### B4. Decide — Spike or Tasks?
 
 **Choose spike-first when:**
@@ -53,6 +62,7 @@ Then update the epic to reference it: `epic_update(id, memory_refs=[..., "<roadm
 **Worker tasks (direct creation):**
 - Create 3–5 tasks with `issue_type="task"` (or `"research"` for investigation tasks).
 - **MANDATORY: Every task MUST include `acceptance_criteria` with at least one criterion.** Tasks created without AC cannot be dispatched and will block the entire execution pipeline. Example: `acceptance_criteria=[{"criterion": "X is implemented and tests pass", "met": false}]`
+- Every created acceptance criterion must be objectively checkable by the executing role's actual tool surface and environment. Do not create AC that require external-infrastructure proof, production/operator-only checks, credentials the role lacks, or validation that duplicates an external rollout/operations process; document those proofs in runbook, checklist, or other operational artifacts instead of task AC.
 - Set `blocked_by` relationships when tasks depend on each other.
 - **Overlapping-files rule:** if two tasks in this wave will touch the same files (per their design), chain them with `blocked_by` instead of dispatching both in parallel — racing edits to the same files cause PR merge conflicts and rework loops. This is a nudge, not hard serialization: only serialize the genuinely overlapping pair, and keep independent tasks parallel. Beware the extraction trap: tasks that each extract a different piece OUT OF the same source file all edit that source file and its module root (`mod.rs`/`lib.rs`), so they overlap even though their target files differ — chain the whole split sequence.
 - Reference relevant ADR permalinks in `memory_refs` when architectural decisions apply.

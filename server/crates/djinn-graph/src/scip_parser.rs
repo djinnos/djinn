@@ -264,7 +264,22 @@ pub enum ScipSymbolKind {
 pub fn parse_scip_artifacts(artifacts: &[ScipArtifact]) -> Result<Vec<ParsedScipIndex>> {
     artifacts
         .iter()
-        .map(|artifact| parse_scip_file(&artifact.path, artifact.workspace_slug.clone()))
+        .map(|artifact| {
+            let mut parsed = parse_scip_file(&artifact.path, artifact.workspace_slug.clone())?;
+            // SCIP document paths are relative to the directory the indexer
+            // ran in (the workspace root), NOT the repo root. Re-root them
+            // here so every node `file_path` downstream is repo-relative —
+            // otherwise complexity attachment, route extraction, and every
+            // op that joins paths onto the project root (`symbols_at`,
+            // `diff_touches`, file_glob filters) silently misses files in
+            // sub-workspaces.
+            if !artifact.workspace_root.as_os_str().is_empty() {
+                for file in &mut parsed.files {
+                    file.relative_path = artifact.workspace_root.join(&file.relative_path);
+                }
+            }
+            Ok(parsed)
+        })
         .collect()
 }
 
@@ -1150,11 +1165,13 @@ mod tests {
                 workspace_slug: "server".to_string(),
                 path: first.clone(),
                 indexer: None,
+                workspace_root: PathBuf::from("server"),
             },
             ScipArtifact {
                 workspace_slug: "desktop".to_string(),
                 path: second.clone(),
                 indexer: None,
+                workspace_root: PathBuf::from("desktop"),
             },
         ])
         .expect("parse artifacts");
@@ -1162,8 +1179,43 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].workspace_slug, "server");
         assert_eq!(parsed[1].workspace_slug, "desktop");
+        // Document paths in a workspace-rooted index are relative to the
+        // workspace dir the indexer ran in; the artifact's workspace_root
+        // must re-root them to repo-relative so source-reading consumers
+        // (complexity, route extraction) and path-matching ops
+        // (`symbols_at`, `diff_touches`) resolve them.
+        assert_eq!(
+            parsed[0].files[0].relative_path,
+            PathBuf::from("server/src/lib.rs"),
+        );
+        assert_eq!(
+            parsed[1].files[0].relative_path,
+            PathBuf::from("desktop/src/lib.rs"),
+        );
         let _ = fs::remove_file(first);
         let _ = fs::remove_file(second);
+    }
+
+    #[test]
+    fn parse_scip_artifacts_keeps_repo_root_workspace_paths_unprefixed() {
+        let dir = PathBuf::from("tmp/scip-parser-tests");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("root.scip");
+        fs::write(&path, fixture_index_bytes()).expect("write fixture");
+
+        let parsed = parse_scip_artifacts(&[ScipArtifact {
+            workspace_slug: "root".to_string(),
+            path: path.clone(),
+            indexer: None,
+            workspace_root: PathBuf::new(),
+        }])
+        .expect("parse artifacts");
+
+        assert_eq!(
+            parsed[0].files[0].relative_path,
+            PathBuf::from("src/lib.rs"),
+        );
+        let _ = fs::remove_file(path);
     }
 
     #[test]
