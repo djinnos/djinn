@@ -23,6 +23,13 @@ pub(super) enum CoordinatorMessage {
         reason: String,
         project_id: String,
     },
+    /// Route a completed loop-guard trip through the shared Planner-intervention
+    /// machinery instead of the dispatch-failure streak/ladder.
+    RouteLoopGuardPlannerIntervention {
+        source_task_id: String,
+        role: &'static str,
+        reason: String,
+    },
     /// Increment the Lead escalation count for a task; reply with new count.
     IncrementEscalationCount {
         task_id: String,
