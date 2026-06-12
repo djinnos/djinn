@@ -718,9 +718,24 @@ impl CoordinatorActor {
                     .await;
             }
             CoordinatorMessage::IncrementEscalationCount { task_id, reply } => {
-                let count = self.escalation_counts.entry(task_id).or_insert(0);
-                *count += 1;
-                let _ = reply.send(*count);
+                match self.increment_durable_escalation_count(&task_id).await {
+                    Ok(count) => {
+                        self.escalation_counts.insert(task_id, count);
+                        let _ = reply.send(count);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            task_id = %task_id,
+                            error = %e,
+                            "CoordinatorActor: failed to persist escalation count increment; forcing escalation ceiling"
+                        );
+                        // Fail open to the escalation ceiling instead of returning
+                        // a reset in-memory count after restart. That keeps
+                        // repeated request_lead calls from being silently routed
+                        // back to Lead when durable state is unavailable.
+                        let _ = reply.send(u32::MAX);
+                    }
+                }
             }
         }
     }
