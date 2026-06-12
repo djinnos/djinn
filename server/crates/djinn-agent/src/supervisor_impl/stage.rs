@@ -153,7 +153,7 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
     }
 }
 
-fn stage_outcome_for_reply_loop_guard_error(error: &LoopGuardError) -> StageOutcome {
+fn runtime_trip_for_reply_loop_guard_error(error: &LoopGuardError) -> LoopGuardTrip {
     let kind = match error.condition.kind() {
         ReplyLoopGuardKind::RepeatedToolFailure => RuntimeLoopGuardKind::IdenticalToolFailure,
         ReplyLoopGuardKind::RepeatedPermissionOrSecurityDenial => {
@@ -163,7 +163,7 @@ fn stage_outcome_for_reply_loop_guard_error(error: &LoopGuardError) -> StageOutc
         ReplyLoopGuardKind::ConsecutiveToolFailures => RuntimeLoopGuardKind::ConsecutiveFailures,
     };
 
-    StageOutcome::LoopGuardTripped {
+    LoopGuardTrip {
         kind,
         offending_signature: error.condition.offending_signature_label(),
         threshold: error.condition.threshold,
@@ -171,6 +171,22 @@ fn stage_outcome_for_reply_loop_guard_error(error: &LoopGuardError) -> StageOutc
         turn_span: error.turn_span,
         session_id: error.session_id.clone(),
     }
+}
+
+fn stage_outcome_for_runtime_loop_guard_trip(trip: &LoopGuardTrip) -> StageOutcome {
+    StageOutcome::LoopGuardTripped {
+        kind: trip.kind,
+        offending_signature: trip.offending_signature.clone(),
+        threshold: trip.threshold,
+        observed: trip.observed,
+        turn_span: trip.turn_span,
+        session_id: trip.session_id.clone(),
+    }
+}
+
+fn stage_outcome_for_reply_loop_guard_error(error: &LoopGuardError) -> StageOutcome {
+    let trip = runtime_trip_for_reply_loop_guard_error(error);
+    stage_outcome_for_runtime_loop_guard_trip(&trip)
 }
 
 /// Read-only multi-repo: resolve the epic's read-source projects to slugs/names
@@ -557,14 +573,7 @@ pub(crate) async fn execute_stage(
     let stage_outcome = match reply_result {
         Err(e) => {
             if let Some(trip) = e.downcast_ref::<LoopGuardTrip>() {
-                StageOutcome::LoopGuardTripped {
-                    kind: trip.kind,
-                    offending_signature: trip.offending_signature.clone(),
-                    threshold: trip.threshold,
-                    observed: trip.observed,
-                    turn_span: trip.turn_span,
-                    session_id: trip.session_id.clone(),
-                }
+                stage_outcome_for_runtime_loop_guard_trip(trip)
             } else if let Some(guard_error) = e.downcast_ref::<LoopGuardError>() {
                 stage_outcome_for_reply_loop_guard_error(guard_error)
             } else {
@@ -880,6 +889,60 @@ mod tests {
         // no `ProviderError` source → must never trip the breaker.
         let untyped = anyhow::anyhow!("worker failed to push task_branch to mirror");
         assert_eq!(classify_provider_failure(&untyped), None);
+    }
+
+    #[test]
+    fn reply_loop_guard_error_maps_to_typed_stage_outcome_not_provider_failure() {
+        let signature = crate::actors::slot::reply_loop::loop_guard::ToolCallSignature::new(
+            "shell",
+            &serde_json::json!({"command": "false"}),
+        );
+        let error = LoopGuardError {
+            condition: crate::actors::slot::reply_loop::loop_guard::LoopGuardCondition {
+                reason: crate::actors::slot::reply_loop::loop_guard::LoopGuardReason::RepeatedToolFailure {
+                    signature,
+                },
+                observed: 4,
+                threshold: 3,
+            },
+            turn_span: (2, 5),
+            session_id: "session-123".to_string(),
+        };
+        let anyhow_error = anyhow::Error::new(error.clone());
+
+        assert_eq!(
+            classify_provider_failure(&anyhow_error),
+            None,
+            "loop-guard terminations must not masquerade as provider failures"
+        );
+
+        let trip = runtime_trip_for_reply_loop_guard_error(&error);
+        assert_eq!(trip.kind, RuntimeLoopGuardKind::IdenticalToolFailure);
+        assert_eq!(trip.observed, 4);
+        assert_eq!(trip.threshold, 3);
+        assert_eq!(trip.turn_span, (2, 5));
+        assert_eq!(trip.session_id, "session-123");
+        assert!(trip.offending_signature.contains("shell"));
+        assert!(trip.offending_signature.contains(r#"{"command":"false"}"#));
+
+        match stage_outcome_for_reply_loop_guard_error(&error) {
+            StageOutcome::LoopGuardTripped {
+                kind,
+                offending_signature,
+                threshold,
+                observed,
+                turn_span,
+                session_id,
+            } => {
+                assert_eq!(kind, RuntimeLoopGuardKind::IdenticalToolFailure);
+                assert_eq!(offending_signature, trip.offending_signature);
+                assert_eq!(threshold, 3);
+                assert_eq!(observed, 4);
+                assert_eq!(turn_span, (2, 5));
+                assert_eq!(session_id, "session-123");
+            }
+            other => panic!("expected typed loop-guard stage outcome, got {other:?}"),
+        }
     }
 
     #[test]
