@@ -1077,6 +1077,7 @@ fn build_worker_agent_context(
         graph_warmer: None,
         repo_graph_ops: None,
         runtime_ops: None,
+        cargo_target_runs_root: None,
         mirror: None,
         rpc_registry: None,
         // The K8s worker only ever serves one project per Pod, so default
