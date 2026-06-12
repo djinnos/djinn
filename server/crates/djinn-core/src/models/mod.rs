@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod credential;
+pub mod dispatch_state;
 pub mod epic;
 pub mod git_settings;
 pub mod project;
@@ -14,6 +15,7 @@ pub mod user_settings;
 
 pub use agent::Agent;
 pub use credential::Credential;
+pub use dispatch_state::DispatchStateRecord;
 pub use epic::Epic;
 pub use git_settings::GitSettings;
 pub use project::Project;
@@ -21,7 +23,7 @@ pub use proposal::{Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
 pub use session::{SessionRecord, SessionStatus};
 pub use session_message::SessionMessage;
-pub use settings::{DjinnSettings, Setting};
+pub use settings::{DispatchPause, DispatchPauseScope, DispatchPauseState, DjinnSettings, Setting};
 pub use task::{
     ActivityEntry, IssueType, PRIORITY_CRITICAL, Task, TaskStatus, TransitionAction,
     TransitionApply, compute_transition, compute_transition_for_issue_type,

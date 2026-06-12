@@ -9,7 +9,7 @@
 //! (`~/.djinn/oauth/copilot.json`) is supported as a migration fallback only.
 
 use anyhow::{Result, anyhow};
-use reqwest::Client;
+use reqwest::{Client, header::HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -175,13 +175,19 @@ fn build_client() -> Result<Client> {
         .user_agent("GithubCopilot/1.155.0")
         .default_headers({
             let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
+            headers.insert(
+                reqwest::header::ACCEPT,
+                HeaderValue::from_static("application/json"),
+            );
             headers.insert(
                 reqwest::header::CONTENT_TYPE,
-                "application/json".parse().unwrap(),
+                HeaderValue::from_static("application/json"),
             );
-            headers.insert("editor-version", "vscode/1.85.1".parse().unwrap());
-            headers.insert("editor-plugin-version", "copilot/1.155.0".parse().unwrap());
+            headers.insert("editor-version", HeaderValue::from_static("vscode/1.85.1"));
+            headers.insert(
+                "editor-plugin-version",
+                HeaderValue::from_static("copilot/1.155.0"),
+            );
             headers
         })
         .build()

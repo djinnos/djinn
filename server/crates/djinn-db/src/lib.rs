@@ -39,6 +39,8 @@ pub use repositories::{
         CouplingPairEvent, FileChurn, MAX_FILES_PER_COMMIT_FOR_PAIRS, coupling_event_key,
         derive_pair_events, derive_pair_events_into,
     },
+    dispatch_pause::{DispatchPauseMutation, DispatchPauseRepository, DispatchPauseTarget},
+    dispatch_state::{DispatchStateRecord, DispatchStateRepository, DispatchStateUpsert},
     epic::{
         EpicBlockerRef, EpicCountQuery, EpicCreateInput, EpicListQuery, EpicListResult,
         EpicRepository, EpicTaskCounts, EpicUpdateInput,

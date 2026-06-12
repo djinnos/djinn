@@ -56,6 +56,24 @@ pub enum RepoNodeKey {
     Tool(String),
 }
 
+impl RepoNodeKey {
+    /// Return the deterministic canonical UID for this repo-graph node key.
+    ///
+    /// The UID is derived only from the stable payload carried by the enum
+    /// variant, never from `NodeIndex` or other per-build graph state, so the
+    /// same logical node receives the same UID across graph rebuilds.
+    pub fn stable_uid(&self) -> String {
+        match self {
+            RepoNodeKey::File(path) => format!("file:{}", path.display()),
+            RepoNodeKey::Symbol(symbol) => format!("symbol:{symbol}"),
+            RepoNodeKey::Process(id) => format!("process:{id}"),
+            RepoNodeKey::Table(name) => format!("table:{name}"),
+            RepoNodeKey::Route(id) => format!("route:{id}"),
+            RepoNodeKey::Tool(id) => format!("tool:{id}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepoGraphNodeKind {
@@ -97,6 +115,11 @@ impl RepoGraphNodeKind {
     pub fn is_route_or_tool(self) -> bool {
         matches!(self, Self::Route | Self::Tool)
     }
+}
+
+/// Return the deterministic canonical UID for a repo-graph node.
+pub fn stable_node_uid(node: &RepoGraphNode) -> String {
+    node.stable_uid()
 }
 
 /// Reusable ranking/noise-filter predicate for synthetic route/tool nodes.
@@ -186,6 +209,11 @@ pub struct RepoGraphNode {
 impl RepoGraphNode {
     pub fn key(&self) -> RepoNodeKey {
         self.id.clone()
+    }
+
+    /// Return the deterministic canonical UID for this graph node.
+    pub fn stable_uid(&self) -> String {
+        self.id.stable_uid()
     }
 
     pub fn kind(&self) -> RepoGraphNodeKind {

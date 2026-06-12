@@ -37,7 +37,8 @@ mod tests;
 // `communities.rs`, etc. for the consumer side.
 pub use self::artifact::{
     RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphArtifactProcess,
-    RepoGraphArtifactSymbolRange, RouteExclusionConfig, deserialize_repo_graph_artifact_bincode,
+    RepoGraphArtifactSymbolRange, RouteExclusionConfig, RouteRef,
+    deserialize_repo_graph_artifact_bincode,
 };
 pub use self::constants::{REPO_GRAPH_ARTIFACT_VERSION, is_test_path};
 pub use self::edge::{
@@ -47,6 +48,7 @@ pub use self::edge::{
 pub use self::graph::{RepoDependencyGraph, RouteEdgeLanguageChain, SymbolRange};
 pub use self::node::{
     RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey, is_route_or_tool_node,
+    stable_node_uid,
 };
 pub use self::ranking::{
     RankedRepoGraphNode, RepoGraphRanking, is_singleton_route_without_consumers,
