@@ -36,6 +36,8 @@ pub mod route_extraction;
 pub mod scip_indexer;
 pub mod scip_parser;
 
+pub use repo_graph::stable_node_uid;
+
 #[cfg(test)]
 mod test_helpers;
 
