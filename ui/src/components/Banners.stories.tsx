@@ -8,6 +8,8 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@/components/ui/button";
 import { Loading02Icon } from "@hugeicons/core-free-icons";
+import { DispatchPauseBanner } from "@/components/DispatchPauseBanner";
+import type { DispatchPauseEntry } from "@/stores/dispatchPauseStore";
 
 /* ---------------------------------------------------------------------------
  * BoardHealthBanner — presentational mock
@@ -173,6 +175,80 @@ export const LspWarnings: StoryObj = {
         { server: "typescript", message: "TypeScript server not responding" },
         { server: "eslint", message: "ESLint server disconnected" },
       ]}
+    />
+  ),
+};
+
+/* ---- DispatchPauseBanner stories ---- */
+
+const dispatchPause = (
+  scope: DispatchPauseEntry["scope"],
+  targetId: string | null,
+  reason: string,
+  pausedBy = "ops-admin",
+): DispatchPauseEntry => ({
+  scope,
+  target_id: targetId,
+  paused_by: pausedBy,
+  paused_at: "2026-01-01T12:00:00Z",
+  reason,
+});
+
+export const DispatchPauseNoPause: StoryObj = {
+  render: () => (
+    <div className="rounded-md border border-dashed border-muted-foreground/40 p-4 text-sm text-muted-foreground">
+      <DispatchPauseBanner
+        entries={[]}
+        selectedProjectId="project-alpha"
+        currentUserId="user-1"
+      />
+      No pause banner is rendered for an empty status response.
+    </div>
+  ),
+};
+
+export const DispatchPauseGlobal: StoryObj = {
+  render: () => (
+    <DispatchPauseBanner
+      entries={[dispatchPause("global", null, "Coordinator maintenance window")]}
+      selectedProjectId="project-alpha"
+      currentUserId="user-1"
+    />
+  ),
+};
+
+export const DispatchPauseProject: StoryObj = {
+  render: () => (
+    <DispatchPauseBanner
+      entries={[dispatchPause("project", "project-alpha", "Repository migration")]}
+      selectedProjectId="project-alpha"
+      currentUserId="user-1"
+    />
+  ),
+};
+
+export const DispatchPauseUser: StoryObj = {
+  render: () => (
+    <DispatchPauseBanner
+      entries={[
+        dispatchPause("user", "user-1", "User dispatch temporarily held", "lead"),
+      ]}
+      selectedProjectId="unrelated-project"
+      currentUserId="user-1"
+    />
+  ),
+};
+
+export const DispatchPauseMultipleSimultaneous: StoryObj = {
+  render: () => (
+    <DispatchPauseBanner
+      entries={[
+        dispatchPause("global", null, "Fleet safety check"),
+        dispatchPause("project", "project-alpha", "Alpha dependency outage"),
+        dispatchPause("user", "user-1", "Manual review of user queue", "pm"),
+      ]}
+      selectedProjectId="project-alpha"
+      currentUserId="user-1"
     />
   ),
 };

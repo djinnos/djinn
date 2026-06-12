@@ -43,6 +43,19 @@ describe("dispatch pause status API", () => {
     );
   });
 
+  it("strips blank targets while preserving only exact status scope arguments", async () => {
+    await fetchDispatchPauseStatus({
+      scope: "project",
+      target_id: "   ",
+      stray: "ignored",
+    } as never);
+
+    expect(vi.mocked(callMcpTool)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(callMcpTool)).toHaveBeenCalledWith("dispatch_pause_status", {
+      scope: "project",
+    });
+  });
+
   it("fetches global status with exact empty arguments", async () => {
     await fetchGlobalDispatchPauseStatus();
 

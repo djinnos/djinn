@@ -28,6 +28,7 @@ import { ModelOnboarding } from "@/components/ModelOnboarding";
 import { useProjectGateStore } from "@/stores/projectGateStore";
 import { RepositoryOnboarding } from "@/components/RepositoryOnboarding";
 import { useDispatchPauseHydration } from "@/hooks/useDispatchPauseHydration";
+import { DispatchPauseBanner } from "@/components/DispatchPauseBanner";
 
 function MainLayout() {
   const isAdmin = useAuthUser()?.isAdmin ?? false;
@@ -37,6 +38,7 @@ function MainLayout() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="flex min-h-0 flex-1 flex-col">
           <ConnectionBanner />
+          <DispatchPauseBanner />
           <Routes>
             {/* Views — project selection lives in the projectStore, not the URL.
                 Tasks + Dependencies share the BoardLayout (filter header + view
