@@ -406,6 +406,22 @@ fn is_merge_queue_405_ignores_unrelated_405s() {
 }
 
 #[test]
+fn is_already_queued_matches_real_enqueue_rejection() {
+    // The exact production payload seen when re-delegating after a restart
+    // while GitHub still holds the queue entry.
+    let err = anyhow::anyhow!(
+        r#"enqueue_pull_request GraphQL error: [{{"type":"UNPROCESSABLE","path":["enqueuePullRequest"],"message":"Pull request is already in the queue"}}]"#
+    );
+    assert!(super::is_already_queued(&err));
+    // Other UNPROCESSABLE rejections (not ready, missing approval) must not
+    // be adopted as queue entries.
+    let other = anyhow::anyhow!(
+        r#"enqueue_pull_request GraphQL error: [{{"type":"UNPROCESSABLE","message":"Pull request is not mergeable"}}]"#
+    );
+    assert!(!super::is_already_queued(&other));
+}
+
+#[test]
 fn is_merge_queue_405_ignores_other_status_codes() {
     let err =
         anyhow::anyhow!("merge_pull_request failed (422): Pull Request is in the merge queue.");

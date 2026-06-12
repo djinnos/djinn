@@ -643,6 +643,26 @@ impl CoordinatorActor {
                                     .insert(task.id.clone(), current_sha.clone());
                                 self.merge_fail_count.remove(&task.id);
                             }
+                            // "Pull request is already in the queue": someone
+                            // else enqueued it (GitHub merge-when-ready, or a
+                            // pre-restart delegation this process no longer
+                            // remembers). The queue entry is the state we
+                            // wanted — adopt it and switch to observe mode.
+                            // Without this the poller retries enqueue every
+                            // tick and never reaches `observe_auto_merge_state`,
+                            // so a failure dequeue for the queued head would go
+                            // unhandled until GitHub evicts the PR again.
+                            Err(enqueue_err) if is_already_queued(&enqueue_err) => {
+                                tracing::info!(
+                                    task_id = %task.short_id,
+                                    pr = pull_number,
+                                    sha = %current_sha,
+                                    "PR poller: PR already in merge queue — adopting entry, switching to observe mode"
+                                );
+                                self.delegated_to_github
+                                    .insert(task.id.clone(), current_sha.clone());
+                                self.merge_fail_count.remove(&task.id);
+                            }
                             Err(enqueue_err) => {
                                 // Enqueue failed (PR not ready: missing
                                 // approval, failing checks, etc.). Don't
