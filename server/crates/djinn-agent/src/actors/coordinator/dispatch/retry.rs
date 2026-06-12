@@ -383,12 +383,44 @@ impl CoordinatorActor {
         self.route_planner_intervention(task, role, &reason).await
     }
 
+    /// Trigger C: a worker/reviewer run completed degenerate because the
+    /// reply-loop guard saw repeated identical behavior. This is not a provider
+    /// fault and not a dispatch failure; route it directly to the same Planner
+    /// intervention / second-strike park machinery used by triggers A and B.
+    pub(in crate::actors::coordinator) async fn route_loop_guard_planner_intervention(
+        &mut self,
+        task_id: &str,
+        role: &'static str,
+        reason: &str,
+    ) -> bool {
+        let task = match self.task_repo().get(task_id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => {
+                tracing::warn!(
+                    task_id,
+                    "CoordinatorActor: loop-guard planner intervention skipped; task not found"
+                );
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id,
+                    error = %e,
+                    "CoordinatorActor: loop-guard planner intervention skipped; task lookup failed"
+                );
+                return false;
+            }
+        };
+
+        self.route_planner_intervention(&task, role, reason).await
+    }
+
     /// Shared intervention router behind triggers A and B: second-strike
     /// terminal park, idempotency marker keyed by the task's CURRENT
     /// `reopen_count`, backoff-state clearing, and the Planner escalation
     /// dispatch. Returns `true` when the task was routed (or terminally
     /// parked) — the caller skips its dispatch this pass.
-    async fn route_planner_intervention(
+    pub(in crate::actors::coordinator) async fn route_planner_intervention(
         &mut self,
         task: &djinn_core::models::Task,
         role: &'static str,
@@ -434,6 +466,17 @@ impl CoordinatorActor {
             )
             .await;
             self.terminally_fail_task(task, role, &reason).await;
+            if let Err(e) = self
+                .task_repo()
+                .set_status_with_reason(&task.id, "closed", Some(&reason))
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "CoordinatorActor: failed to preserve planner second-strike close reason"
+                );
+            }
             return true;
         }
 
