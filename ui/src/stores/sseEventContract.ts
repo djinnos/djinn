@@ -24,7 +24,15 @@ export const SERVER_SSE_EVENT_NAMES = [
   "epic.updated",
   "epic.deleted",
   "git_settings.updated",
+  "image.ready",
+  "image.build_failed",
+  "image.updated",
   "lifecycle.step",
+  "note.created",
+  "note.updated",
+  "note.deleted",
+  "note.contradiction_candidates",
+  "note.missing_summary",
   "oauth.open_browser",
   "oauth.device_code",
   "project.created",
@@ -32,6 +40,9 @@ export const SERVER_SSE_EVENT_NAMES = [
   "project.deleted",
   "project.health_ok",
   "project.health_error",
+  "project_image.ready",
+  "project_image.build_failed",
+  "project_image.updated",
   "project_config.updated",
   "proposal.created",
   "proposal.updated",
@@ -45,6 +56,7 @@ export const SERVER_SSE_EVENT_NAMES = [
   "session.ended",
   "session.updated",
   "session.message",
+  "session_message.inserted",
   "session.token_update",
   "setting.updated",
   "sync.completed",
@@ -92,7 +104,21 @@ export const SERVER_SSE_EVENT_DECISIONS = {
   "epic.updated": { kind: "dispatch", eventType: "epic_updated" },
   "epic.deleted": { kind: "dispatch", eventType: "epic_deleted" },
   "git_settings.updated": { kind: "dispatch", eventType: "project_changed" },
+  "image.ready": { kind: "dispatch", eventType: "project_changed" },
+  "image.build_failed": { kind: "dispatch", eventType: "project_changed" },
+  "image.updated": { kind: "dispatch", eventType: "project_changed" },
   "lifecycle.step": { kind: "dispatch", eventType: "lifecycle_step" },
+  "note.created": { kind: "ignore", reason: "memory views load notes through MCP queries" },
+  "note.updated": { kind: "ignore", reason: "memory views load notes through MCP queries" },
+  "note.deleted": { kind: "ignore", reason: "memory views load notes through MCP queries" },
+  "note.contradiction_candidates": {
+    kind: "ignore",
+    reason: "contradiction follow-up is handled by the memory control-plane worker",
+  },
+  "note.missing_summary": {
+    kind: "ignore",
+    reason: "summary backfill is handled by the memory control-plane worker",
+  },
   "oauth.open_browser": { kind: "hook", reason: "oauth_open_browser" },
   "oauth.device_code": { kind: "ignore", reason: "device-code responses are consumed by the initiating flow" },
   "project.created": { kind: "dispatch", eventType: "project_changed" },
@@ -100,6 +126,9 @@ export const SERVER_SSE_EVENT_DECISIONS = {
   "project.deleted": { kind: "dispatch", eventType: "project_changed" },
   "project.health_ok": { kind: "dispatch", eventType: "project_changed" },
   "project.health_error": { kind: "dispatch", eventType: "project_changed" },
+  "project_image.ready": { kind: "dispatch", eventType: "project_changed" },
+  "project_image.build_failed": { kind: "dispatch", eventType: "project_changed" },
+  "project_image.updated": { kind: "dispatch", eventType: "project_changed" },
   "project_config.updated": { kind: "dispatch", eventType: "project_changed" },
   "proposal.created": { kind: "dispatch", eventType: "proposal_created" },
   "proposal.updated": { kind: "dispatch", eventType: "proposal_updated" },
@@ -113,6 +142,10 @@ export const SERVER_SSE_EVENT_DECISIONS = {
   "session.ended": { kind: "dispatch", eventType: "session_ended" },
   "session.updated": { kind: "dispatch", eventType: "session_ended" },
   "session.message": { kind: "dispatch", eventType: "session_message" },
+  "session_message.inserted": {
+    kind: "ignore",
+    reason: "legacy chat-message repository event; live task session messages use session.message",
+  },
   "session.token_update": { kind: "ignore", reason: "token counters are loaded through session detail queries" },
   "setting.updated": { kind: "dispatch", eventType: "project_changed" },
   "sync.completed": { kind: "dispatch", eventType: "sync_completed" },
@@ -127,7 +160,7 @@ export const SERVER_SSE_EVENT_DECISIONS = {
 const warnedUnknownEventNames = new Set<string>();
 
 export function isServerSSEEventName(rawName: string): rawName is ServerSSEEventName {
-  return Object.hasOwn(SERVER_SSE_EVENT_DECISIONS, rawName);
+  return Object.prototype.hasOwnProperty.call(SERVER_SSE_EVENT_DECISIONS, rawName);
 }
 
 export function resolveServerSSEEventName(

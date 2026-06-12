@@ -42,11 +42,24 @@ describe("sseEventContract", () => {
       kind: "dispatch",
       eventType: "credential_revoked",
     });
+    expect(resolveServerSSEEventName("project_image.ready")).toEqual({
+      kind: "dispatch",
+      eventType: "project_changed",
+    });
   });
 
   it("treats lagged and ping as explicit non-dispatch decisions", () => {
     expect(resolveServerSSEEventName("lagged")).toEqual({ kind: "hydrate", reason: "lagged" });
     expect(resolveServerSSEEventName("ping")).toEqual({ kind: "liveness", reason: "ping" });
+  });
+
+  it("keeps legacy or worker-consumed envelope names explicit instead of dispatching them", () => {
+    expect(resolveServerSSEEventName("session_message.inserted")).toMatchObject({
+      kind: "ignore",
+    });
+    expect(resolveServerSSEEventName("note.contradiction_candidates")).toMatchObject({
+      kind: "ignore",
+    });
   });
 
   it("warns at most once per unknown raw event name", () => {
