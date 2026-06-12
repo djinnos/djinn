@@ -8,6 +8,13 @@ use super::*;
 // "can only flatten structs and maps (got a sequence)". We now emit the list
 // under a named field that matches the desktop client parsers (`neighbors` for
 // the detailed shape, `file_groups` for the `group_by=file` rollup).
+//
+// df6s: `total` / `offset` / `limit` / `has_more` are added so callers
+// can distinguish "the graph has no more neighbors" from "you asked
+// for page 3 and only got an empty list back". `summary_only` is set
+// when the caller asked for a counts-only response — every field is
+// `Option`-skipped-on-`None` so the wire shape stays additive for
+// clients that haven't migrated yet.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct NeighborsResponse {
     pub key: String,
@@ -15,6 +22,29 @@ pub struct NeighborsResponse {
     pub neighbors: Option<Vec<GraphNeighbor>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_groups: Option<Vec<FileGroupEntry>>,
+    /// df6s: total entries in the **unsliced** result set (post-exclusion,
+    /// pre-`offset`/`limit`). `None` for full (non-paginated) responses so
+    /// the wire shape is additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<usize>,
+    /// df6s: page offset that was applied. `None` for the first page
+    /// (`offset == 0`) and for full responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    /// df6s: page cap that was applied. `None` for full responses and
+    /// for single-page (no `limit` cap) calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// df6s: `true` when more pages remain after the current one
+    /// (`offset + limit < total`). `None` for full responses and when
+    /// the result is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+    /// df6s: `true` when the caller asked for a counts-only response.
+    /// When `Some(true)`, the `neighbors` / `file_groups` lists are
+    /// omitted (or empty) and `total` carries the count signal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
@@ -80,6 +110,13 @@ impl ImpactRisk {
 // stays additive: callers that don't ask for risk classification (e.g.
 // `group_by=file` rollup with no risk computation) still serialize as
 // before.
+//
+// df6s: `total` / `offset` / `limit` / `has_more` follow the same
+// contract as `NeighborsResponse` — `total` is the unsliced result
+// count so a `LIMIT 50` page can never be misread as "the impact
+// set only has 50 nodes". `summary_only` and `by_depth_counts` are
+// the new df6s fields that mirror the request params and let
+// triage callers skip the full payload.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImpactResponse {
     pub key: String,
@@ -99,6 +136,37 @@ pub struct ImpactResponse {
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_hint: Option<Vec<String>>,
+    /// df6s: total entries in the **unsliced** result set
+    /// (post-exclusion, pre-`offset`/`page_limit`). `None` for full
+    /// (non-paginated) responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<usize>,
+    /// df6s: page offset that was applied. `None` for the first page
+    /// (`offset == 0`) and for full responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    /// df6s: page cap that was applied (`page_limit` for `impact`,
+    /// since `limit` is the BFS depth there). `None` for full
+    /// responses and for single-page calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// df6s: `true` when more pages remain after the current one
+    /// (`offset + limit < total`). `None` for full responses and
+    /// when the result is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+    /// df6s: `true` when the caller asked for a counts-only response.
+    /// When `Some(true)`, `impact` / `file_groups` are omitted (or
+    /// empty) and `total` + `summary` carry the count signal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_only: Option<bool>,
+    /// df6s: per-depth impact count, e.g. `{ "1": 12, "2": 7 }`.
+    /// Computed from the unsliced detailed set, so it always reflects
+    /// the full impact distribution even when the page is capped.
+    /// `None` when the caller didn't ask for it and didn't request
+    /// `summary_only` (which implies the breakdown).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by_depth_counts: Option<std::collections::BTreeMap<String, usize>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
@@ -337,9 +405,36 @@ pub struct ChurnResponse {
 
 /// Response for the `coupling_hotspots` op — top file pairs ranked by
 /// distinct-commit co-edit count.
+///
+/// df6s: `total` / `offset` / `limit` / `has_more` follow the
+/// `NeighborsResponse` contract — `total` reflects the
+/// coupling-index fetch, the page is the offset+limit slice, and
+/// `summary_only` (when `Some(true)`) drops the `pairs` list in
+/// favour of a count signal. All four pagination fields are
+/// `Option`-skipped-on-`None` so the wire shape stays additive.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CouplingHotspotsResponse {
     pub pairs: Vec<CoupledPairEntry>,
+    /// df6s: total entries in the **unsliced** result set
+    /// (post-exclusion, pre-`offset`/`limit`). `None` for full
+    /// (non-paginated) responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<usize>,
+    /// df6s: page offset that was applied. `None` for the first page
+    /// (`offset == 0`) and for full responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    /// df6s: page cap that was applied. `None` for full responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// df6s: `true` when more pages remain after the current one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+    /// df6s: `true` when the caller asked for a counts-only response.
+    /// When `Some(true)`, `pairs` is empty and `total` carries the
+    /// count signal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }

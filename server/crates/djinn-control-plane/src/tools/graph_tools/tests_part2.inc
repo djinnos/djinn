@@ -789,6 +789,10 @@
             mode: None,
             target: None,
             tests: None,
+            offset: None,
+            summary_only: None,
+            by_depth_counts: None,
+            page_limit: None,
         }
     }
 
