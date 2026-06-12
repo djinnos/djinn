@@ -152,6 +152,72 @@ impl CoordinatorActor {
         }
     }
 
+    pub(in crate::actors::coordinator) async fn clear_durable_dispatch_backoff_state(
+        &self,
+        task_id: &str,
+        task_short_id: Option<&str>,
+        reason: &str,
+    ) {
+        self.persist_durable_dispatch_state_update(
+            task_id,
+            task_short_id,
+            reason,
+            DurableDispatchStateUpdate {
+                failure_streak: Some(0),
+                cooldown_until: Some(None),
+                last_dispatched: Some(None),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    pub(in crate::actors::coordinator) async fn increment_durable_escalation_count(
+        &self,
+        task_id: &str,
+    ) -> djinn_db::Result<u32> {
+        let repo = DispatchStateRepository::new(self.db.clone());
+        let existing = repo.get(task_id).await?;
+        let existing_count = existing
+            .as_ref()
+            .map(|r| r.escalation_count.max(0).min(u32::MAX as i64) as u32)
+            .unwrap_or(0)
+            .max(self.escalation_counts.get(task_id).copied().unwrap_or(0));
+        let next_count = existing_count.saturating_add(1);
+
+        repo.upsert(DispatchStateUpsert {
+            task_id,
+            failure_streak: existing
+                .as_ref()
+                .map(|r| r.failure_streak)
+                .unwrap_or_else(|| {
+                    i64::from(
+                        self.dispatch_failure_streak
+                            .get(task_id)
+                            .copied()
+                            .unwrap_or(0),
+                    )
+                }),
+            cooldown_until: existing.as_ref().and_then(|r| r.cooldown_until.as_deref()),
+            escalation_count: i64::from(next_count),
+            last_dispatched_at: existing
+                .as_ref()
+                .and_then(|r| r.last_dispatched_at.as_deref()),
+            last_dispatched_role: existing
+                .as_ref()
+                .and_then(|r| r.last_dispatched_role.as_deref()),
+            inflight_creator_user_id: existing
+                .as_ref()
+                .and_then(|r| r.inflight_creator_user_id.as_deref()),
+            inflight_model_id: existing
+                .as_ref()
+                .and_then(|r| r.inflight_model_id.as_deref()),
+        })
+        .await?;
+
+        Ok(next_count)
+    }
+
     pub(in crate::actors::coordinator) async fn try_dispatch_to_pool<F, Fut>(
         &self,
         label: &str,
@@ -650,16 +716,10 @@ impl CoordinatorActor {
                         {
                             self.dispatch_failure_streak.remove(&task.id);
                             self.dispatch_cooldowns.remove(&task.id);
-                            self.persist_durable_dispatch_state_update(
+                            self.clear_durable_dispatch_backoff_state(
                                 &task.id,
                                 Some(&task.short_id),
                                 "cycling_planner_intervention_handoff_clear",
-                                DurableDispatchStateUpdate {
-                                    failure_streak: Some(0),
-                                    cooldown_until: Some(None),
-                                    last_dispatched: Some(None),
-                                    ..Default::default()
-                                },
                             )
                             .await;
                             continue;
@@ -680,16 +740,10 @@ impl CoordinatorActor {
                             .await;
                             self.dispatch_failure_streak.remove(&task.id);
                             self.dispatch_cooldowns.remove(&task.id);
-                            self.persist_durable_dispatch_state_update(
+                            self.clear_durable_dispatch_backoff_state(
                                 &task.id,
                                 Some(&task.short_id),
                                 "same_role_terminal_close_clear",
-                                DurableDispatchStateUpdate {
-                                    failure_streak: Some(0),
-                                    cooldown_until: Some(None),
-                                    last_dispatched: Some(None),
-                                    ..Default::default()
-                                },
                             )
                             .await;
                             continue;
@@ -756,16 +810,10 @@ impl CoordinatorActor {
                     Some(ReappearingDispatch::RoleTransition) | None => {
                         self.dispatch_failure_streak.remove(&task.id);
                         self.dispatch_cooldowns.remove(&task.id);
-                        self.persist_durable_dispatch_state_update(
+                        self.clear_durable_dispatch_backoff_state(
                             &task.id,
                             Some(&task.short_id),
                             "role_transition_dispatch_state_clear",
-                            DurableDispatchStateUpdate {
-                                failure_streak: Some(0),
-                                cooldown_until: Some(None),
-                                last_dispatched: Some(None),
-                                ..Default::default()
-                            },
                         )
                         .await;
                     }
@@ -837,16 +885,10 @@ impl CoordinatorActor {
                     .await;
                     self.dispatch_failure_streak.remove(&task.id);
                     self.dispatch_cooldowns.remove(&task.id);
-                    self.persist_durable_dispatch_state_update(
+                    self.clear_durable_dispatch_backoff_state(
                         &task.id,
                         Some(&task.short_id),
                         "no_eligible_model_terminal_close_clear",
-                        DurableDispatchStateUpdate {
-                            failure_streak: Some(0),
-                            cooldown_until: Some(None),
-                            last_dispatched: Some(None),
-                            ..Default::default()
-                        },
                     )
                     .await;
                 } else {
