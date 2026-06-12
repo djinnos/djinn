@@ -27,8 +27,9 @@ pub use self::graph_data::{
     QuerySubgraphSeedDebug, QuerySubgraphTraversalDebug, RankedNode, RefactorCandidate,
     RelatedSymbol, ResolveOutcome, RouteLanguageChain, RouteMapEntry, RouteMapResult, RouteRef,
     RouteShape, RouteSummary, SearchHit, SemanticQueryEmbedding, ShapeCheckResult, ShapeDrift,
-    ShapeField, SnapshotEdge, SnapshotLevel, SnapshotNode, SnapshotPayload, SymbolAtHit,
-    SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol, WorkspaceScope, WorkspacesResult,
+    ShapeField, ShapeTypeMismatch, SnapshotEdge, SnapshotLevel, SnapshotNode, SnapshotPayload,
+    SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol, WorkspaceScope,
+    WorkspacesResult,
 };
 pub use self::lsp_bridge::{LspOps, LspWarning};
 pub use self::runtime_bridge::{
