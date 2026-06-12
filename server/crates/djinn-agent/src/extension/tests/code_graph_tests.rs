@@ -96,6 +96,69 @@ fn code_graph_params_normalize_name_file_kind_when_uid_is_unavailable() {
     assert_eq!(params.kind_hint.as_deref(), Some("function"));
 }
 
+#[test]
+fn code_graph_chat_pagination_helpers_preserve_unsliced_traversal_counts() {
+    let params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "impact",
+        "name": "AuthService",
+        "file_path": "src/auth.rs",
+        "kind": "struct",
+        "offset": 1,
+        "pageLimit": 2,
+        "summaryOnly": false,
+        "byDepthCounts": true
+    }))
+    .expect("pagination params parse");
+
+    let pagination = AgentPagination::resolve(&params, 100);
+    assert_eq!(pagination.offset, 1);
+    assert_eq!(pagination.limit, 2);
+    assert!(!pagination.summary_only);
+    assert!(pagination.by_depth_counts);
+    assert!(
+        pagination.emit_metadata(4),
+        "offset/pageLimit must force pagination metadata on chat responses"
+    );
+
+    let entries = vec![
+        djinn_control_plane::bridge::ImpactEntry {
+            key: "symbol:a".to_string(),
+            uid: "symbol:a".to_string(),
+            depth: 1,
+            file_path: Some("src/a.rs".to_string()),
+            confidence_tier: None,
+            exclusion_reason: None,
+        },
+        djinn_control_plane::bridge::ImpactEntry {
+            key: "symbol:b".to_string(),
+            uid: "symbol:b".to_string(),
+            depth: 2,
+            file_path: Some("src/b.rs".to_string()),
+            confidence_tier: None,
+            exclusion_reason: None,
+        },
+        djinn_control_plane::bridge::ImpactEntry {
+            key: "symbol:c".to_string(),
+            uid: "symbol:c".to_string(),
+            depth: 2,
+            file_path: Some("src/c.rs".to_string()),
+            confidence_tier: None,
+            exclusion_reason: None,
+        },
+    ];
+    let counts = agent_by_depth_counts(&entries);
+    assert_eq!(counts.get("1"), Some(&1));
+    assert_eq!(counts.get("2"), Some(&2));
+
+    let mut page = vec!["zero", "one", "two", "three"];
+    let has_more = apply_agent_page_slice(&mut page, pagination);
+    assert_eq!(page, vec!["one", "two"]);
+    assert!(
+        has_more,
+        "the sliced page must report that another page remains"
+    );
+}
+
 #[tokio::test]
 async fn code_graph_dispatch_neighbors_reaches_graph_ops() {
     let worktree = crate::test_helpers::test_tempdir("djinn-cg-neighbors-");

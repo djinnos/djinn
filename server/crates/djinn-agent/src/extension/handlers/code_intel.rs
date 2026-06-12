@@ -388,6 +388,59 @@ fn json_with_optional_workspace_hint<T: serde::Serialize>(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AgentPagination {
+    pub(crate) offset: usize,
+    pub(crate) limit: usize,
+    pub(crate) summary_only: bool,
+    pub(crate) by_depth_counts: bool,
+}
+
+impl AgentPagination {
+    pub(crate) fn resolve(p: &CodeGraphParams, default_limit: usize) -> Self {
+        Self {
+            offset: p.offset.unwrap_or(0),
+            limit: p.page_limit.unwrap_or(default_limit).clamp(1, 1000),
+            summary_only: p.summary_only.unwrap_or(false),
+            by_depth_counts: p.by_depth_counts.unwrap_or(false),
+        }
+    }
+
+    pub(crate) fn emit_metadata(self, total: usize) -> bool {
+        self.offset > 0 || self.summary_only || total > self.limit
+    }
+}
+
+pub(crate) fn apply_agent_page_slice<T>(items: &mut Vec<T>, pagination: AgentPagination) -> bool {
+    let total = items.len();
+    if pagination.offset >= total {
+        items.clear();
+        return false;
+    }
+    if pagination.offset > 0 {
+        items.drain(0..pagination.offset);
+    }
+    if items.len() > pagination.limit {
+        items.truncate(pagination.limit);
+        true
+    } else {
+        false
+    }
+}
+
+pub(crate) fn agent_by_depth_counts(
+    entries: &[djinn_control_plane::bridge::ImpactEntry],
+) -> std::collections::BTreeMap<String, usize> {
+    let mut counts: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    for entry in entries {
+        *counts.entry(entry.depth).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(depth, count)| (depth.to_string(), count))
+        .collect()
+}
+
 async fn call_code_graph_inner(
     state: &AgentContext,
     p: &mut CodeGraphParams,
@@ -395,16 +448,7 @@ async fn call_code_graph_inner(
     graph_ops: &dyn RepoGraphOps,
 ) -> Result<serde_json::Value, String> {
     let _ = state;
-    let _ = (
-        &p.edge_filters,
-        p.token_budget,
-        p.max_seeds,
-        p.window_days,
-        p.offset,
-        p.summary_only,
-        p.by_depth_counts,
-        p.page_limit,
-    );
+    let _ = (&p.edge_filters, p.token_budget, p.max_seeds, p.window_days);
     let result: serde_json::Value = match p.operation.as_str() {
         "neighbors" => {
             let key = p
@@ -421,7 +465,48 @@ async fn call_code_graph_inner(
                     p.kind_filter.as_deref(),
                 )
                 .await?;
-            serde_json::to_value(&neighbors).map_err(|e| format!("serialize error: {e}"))?
+            let default_cap = p.limit.unwrap_or(20);
+            let pagination = AgentPagination::resolve(p, default_cap);
+            match neighbors {
+                djinn_control_plane::bridge::NeighborsResult::Detailed(mut neighbors) => {
+                    let total = neighbors.len();
+                    let has_more = apply_agent_page_slice(&mut neighbors, pagination);
+                    let mut value = if pagination.summary_only {
+                        serde_json::json!({ "key": key })
+                    } else {
+                        serde_json::json!({ "key": key, "neighbors": neighbors })
+                    };
+                    if pagination.summary_only {
+                        value["summary_only"] = serde_json::json!(true);
+                    }
+                    if pagination.emit_metadata(total) {
+                        value["total"] = serde_json::json!(total);
+                        value["offset"] = serde_json::json!(pagination.offset);
+                        value["limit"] = serde_json::json!(pagination.limit);
+                        value["has_more"] = serde_json::json!(has_more);
+                    }
+                    value
+                }
+                djinn_control_plane::bridge::NeighborsResult::Grouped(mut file_groups) => {
+                    let total = file_groups.len();
+                    let has_more = apply_agent_page_slice(&mut file_groups, pagination);
+                    let mut value = if pagination.summary_only {
+                        serde_json::json!({ "key": key })
+                    } else {
+                        serde_json::json!({ "key": key, "file_groups": file_groups })
+                    };
+                    if pagination.summary_only {
+                        value["summary_only"] = serde_json::json!(true);
+                    }
+                    if pagination.emit_metadata(total) {
+                        value["total"] = serde_json::json!(total);
+                        value["offset"] = serde_json::json!(pagination.offset);
+                        value["limit"] = serde_json::json!(pagination.limit);
+                        value["has_more"] = serde_json::json!(has_more);
+                    }
+                    value
+                }
+            }
         }
         "ranked" => {
             let limit = p.limit.unwrap_or(20);
@@ -479,8 +564,55 @@ async fn call_code_graph_inner(
                     p.min_confidence,
                 )
                 .await?;
-            let mut value =
-                serde_json::to_value(&impact).map_err(|e| format!("serialize error: {e}"))?;
+            let pagination = AgentPagination::resolve(p, 100);
+            let mut value = match impact {
+                djinn_control_plane::bridge::ImpactResult::Detailed(mut impact) => {
+                    let total = impact.len();
+                    let by_depth_counts = if pagination.summary_only || pagination.by_depth_counts {
+                        Some(agent_by_depth_counts(&impact))
+                    } else {
+                        None
+                    };
+                    let has_more = apply_agent_page_slice(&mut impact, pagination);
+                    let mut value = if pagination.summary_only {
+                        serde_json::json!({ "key": key })
+                    } else {
+                        serde_json::json!({ "key": key, "impact": impact })
+                    };
+                    if pagination.summary_only {
+                        value["summary_only"] = serde_json::json!(true);
+                    }
+                    if let Some(by_depth_counts) = by_depth_counts {
+                        value["by_depth_counts"] = serde_json::json!(by_depth_counts);
+                    }
+                    if pagination.emit_metadata(total) {
+                        value["total"] = serde_json::json!(total);
+                        value["offset"] = serde_json::json!(pagination.offset);
+                        value["limit"] = serde_json::json!(pagination.limit);
+                        value["has_more"] = serde_json::json!(has_more);
+                    }
+                    value
+                }
+                djinn_control_plane::bridge::ImpactResult::Grouped(mut file_groups) => {
+                    let total = file_groups.len();
+                    let has_more = apply_agent_page_slice(&mut file_groups, pagination);
+                    let mut value = if pagination.summary_only {
+                        serde_json::json!({ "key": key })
+                    } else {
+                        serde_json::json!({ "key": key, "file_groups": file_groups })
+                    };
+                    if pagination.summary_only {
+                        value["summary_only"] = serde_json::json!(true);
+                    }
+                    if pagination.emit_metadata(total) {
+                        value["total"] = serde_json::json!(total);
+                        value["offset"] = serde_json::json!(pagination.offset);
+                        value["limit"] = serde_json::json!(pagination.limit);
+                        value["has_more"] = serde_json::json!(has_more);
+                    }
+                    value
+                }
+            };
             attach_workspace_hint(&mut value, scope.hint);
             value
         }
@@ -928,8 +1060,30 @@ async fn call_code_graph_inner(
                     "coupled": coupled,
                 })
             } else {
-                let pairs = graph_ops.coupling_hotspots(ctx, limit, None, 15).await?;
-                serde_json::json!({ "pairs": pairs })
+                let pagination = AgentPagination::resolve(p, limit);
+                let fetch_limit = pagination
+                    .limit
+                    .saturating_mul(25)
+                    .clamp(pagination.limit, 500);
+                let mut pairs = graph_ops
+                    .coupling_hotspots(ctx, fetch_limit, None, 15)
+                    .await?;
+                let total = pairs.len();
+                let has_more = apply_agent_page_slice(&mut pairs, pagination);
+                if pagination.summary_only {
+                    pairs.clear();
+                }
+                let mut value = serde_json::json!({ "pairs": pairs });
+                if pagination.summary_only {
+                    value["summary_only"] = serde_json::json!(true);
+                }
+                if pagination.emit_metadata(total) {
+                    value["total"] = serde_json::json!(total);
+                    value["offset"] = serde_json::json!(pagination.offset);
+                    value["limit"] = serde_json::json!(pagination.limit);
+                    value["has_more"] = serde_json::json!(has_more);
+                }
+                value
             }
         }
         "churn" => {

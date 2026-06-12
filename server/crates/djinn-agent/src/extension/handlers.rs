@@ -52,7 +52,9 @@ mod workspace;
 
 pub(crate) use ci::call_ci_job_log;
 #[cfg(test)]
-pub(super) use code_intel::should_pre_resolve_chat_key;
+pub(super) use code_intel::{
+    AgentPagination, agent_by_depth_counts, apply_agent_page_slice, should_pre_resolve_chat_key,
+};
 pub(crate) use code_intel::{
     call_code_graph, call_github_fetch_file, call_github_search, call_lsp,
 };
