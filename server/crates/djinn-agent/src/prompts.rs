@@ -958,6 +958,151 @@ mod tests {
         );
     }
 
+    #[derive(Debug)]
+    struct ExternallyBlockedCriterion {
+        criterion: &'static str,
+        missing_access: &'static str,
+    }
+
+    #[derive(Debug)]
+    struct Planner4lzxExternallyBlockedReplay {
+        epic_id: &'static str,
+        open_planning_task_id: &'static str,
+        remaining_criteria: Vec<ExternallyBlockedCriterion>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum PlannerReplayAction {
+        RepairCriteriaWithTaskUpdate,
+        AddPruningRationaleComment,
+        CloseEpic,
+        SubmitGroomingClose,
+    }
+
+    impl Planner4lzxExternallyBlockedReplay {
+        fn synthetic_4lzx_externally_blocked_fixture() -> Self {
+            Self {
+                epic_id: "4lzx-epic",
+                open_planning_task_id: "4lzx-planning",
+                remaining_criteria: vec![
+                    ExternallyBlockedCriterion {
+                        criterion: "Run the Docker/Postgres integration stack and prove migrations succeed against a live database.",
+                        missing_access: "Docker and Postgres are unavailable to task-run pods",
+                    },
+                    ExternallyBlockedCriterion {
+                        criterion: "Deploy the operator to Kubernetes and verify the rollout from cluster state.",
+                        missing_access: "Kubernetes/operator access is unavailable to Djinn agents",
+                    },
+                    ExternallyBlockedCriterion {
+                        criterion: "Authenticate to a live Djinn deployment and capture operator-only proof of the production workflow.",
+                        missing_access: "production Djinn credentials and operator-only proof are unavailable",
+                    },
+                ],
+            }
+        }
+
+        fn all_remaining_work_is_external_or_operator_only(&self) -> bool {
+            !self.remaining_criteria.is_empty()
+                && self.remaining_criteria.iter().all(|criterion| {
+                    [
+                        "Docker",
+                        "Postgres",
+                        "Kubernetes",
+                        "operator",
+                        "credentials",
+                        "Djinn",
+                    ]
+                    .iter()
+                    .any(|blocked_term| {
+                        criterion.criterion.contains(blocked_term)
+                            || criterion.missing_access.contains(blocked_term)
+                    })
+                })
+        }
+
+        fn replay_against_prompt_policy(&self, planner_prompt: &str) -> Vec<PlannerReplayAction> {
+            let prompt_routes_external_proof_to_repair = planner_prompt
+                .contains("unavailable external tools, external infrastructure")
+                && planner_prompt.contains(
+                    "Rewrite or drop invalid task acceptance criteria with `task_update`",
+                )
+                && planner_prompt.contains(
+                    "Lack of Djinn tool/environment access is NOT a reason to `escalate`",
+                );
+            let prompt_requires_close_after_pruning = planner_prompt.contains("`epic_close(")
+                && planner_prompt.contains("submit_grooming(decision=\"close\")");
+
+            if self.all_remaining_work_is_external_or_operator_only()
+                && prompt_routes_external_proof_to_repair
+                && prompt_requires_close_after_pruning
+            {
+                vec![
+                    PlannerReplayAction::RepairCriteriaWithTaskUpdate,
+                    PlannerReplayAction::AddPruningRationaleComment,
+                    PlannerReplayAction::CloseEpic,
+                    PlannerReplayAction::SubmitGroomingClose,
+                ]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    #[test]
+    fn planner_4lzx_externally_blocked_replay_prunes_and_closes_in_one_session() {
+        let replay =
+            Planner4lzxExternallyBlockedReplay::synthetic_4lzx_externally_blocked_fixture();
+        let mut planning_task = make_task();
+        planning_task.id = replay.open_planning_task_id.into();
+        planning_task.issue_type = "planning".into();
+        planning_task.epic_id = Some(replay.epic_id.into());
+        planning_task.title = "Plan next wave for 4lzx externally blocked epic".into();
+        planning_task.description = "All implementation tasks are closed; only external-infrastructure/operator-only proof criteria remain.".into();
+        planning_task.acceptance_criteria = serde_json::json!(
+            replay
+                .remaining_criteria
+                .iter()
+                .map(|criterion| serde_json::json!({
+                    "criterion": criterion.criterion,
+                    "met": false,
+                }))
+                .collect::<Vec<_>>()
+        )
+        .to_string();
+
+        let planner_prompt = render_prompt(AgentType::Planner, &planning_task, &make_ctx());
+        let actions = replay.replay_against_prompt_policy(&planner_prompt);
+
+        assert!(
+            replay.all_remaining_work_is_external_or_operator_only(),
+            "fixture should model only Docker/Postgres/Kubernetes/operator/Djinn-auth blocked criteria"
+        );
+        assert_eq!(
+            actions,
+            vec![
+                PlannerReplayAction::RepairCriteriaWithTaskUpdate,
+                PlannerReplayAction::AddPruningRationaleComment,
+                PlannerReplayAction::CloseEpic,
+                PlannerReplayAction::SubmitGroomingClose,
+            ],
+            "4lzx-style replay must converge by repairing/pruning criteria, closing the epic, and closing the planning task in one Planner session"
+        );
+        assert!(
+            planner_prompt.contains("`task_update(")
+                && planner_prompt.contains("`epic_close(")
+                && planner_prompt.contains("`submit_grooming("),
+            "Planner tool surface must expose the complete prune-and-close path"
+        );
+        assert!(
+            !planner_prompt.contains("submit_grooming(decision=\"escalate\")"),
+            "externally-blocked criteria should not route to Planner escalation"
+        );
+        assert!(
+            !planner_prompt.contains("create retry worker tasks for external proof"),
+            "externally-blocked proof should be repaired/pruned, not redispatched as worker implementation"
+        );
+    }
+
     #[test]
     fn worker_prompt_routes_memory_crud_through_mcp() {
         let task = make_task();
