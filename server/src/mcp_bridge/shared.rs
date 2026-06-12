@@ -472,6 +472,7 @@ pub(super) fn impact_bfs(
             result.push((
                 current,
                 ImpactEntry {
+                    uid: node.stable_uid(),
                     key: format_node_key(&node.id),
                     depth,
                     file_path: node.file_path.as_ref().map(|p| p.display().to_string()),
@@ -575,6 +576,7 @@ pub(super) fn impact_bfs_with_policy(
             result.push((
                 current,
                 ImpactEntry {
+                    uid: node.stable_uid(),
                     key: format_node_key(&node.id),
                     depth,
                     file_path: node.file_path.as_ref().map(|p| p.display().to_string()),

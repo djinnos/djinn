@@ -866,6 +866,8 @@ fn synth_impact(direct: usize, extra_total: usize, modules: usize) -> Vec<Impact
     for i in 0..direct {
         let bucket = i % modules;
         entries.push(ImpactEntry {
+            // uid: test-only synthetic symbol key mirrors key.
+            uid: format!("symbol:caller_{i}"),
             key: format!("symbol:caller_{i}"),
             depth: 1,
             file_path: Some(format!("crate{bucket}/src/file_{i}.rs")),
@@ -876,6 +878,8 @@ fn synth_impact(direct: usize, extra_total: usize, modules: usize) -> Vec<Impact
     for i in 0..extra_total {
         let bucket = i % modules;
         entries.push(ImpactEntry {
+            // uid: test-only synthetic symbol key mirrors key.
+            uid: format!("symbol:transitive_{i}"),
             key: format!("symbol:transitive_{i}"),
             depth: 2,
             file_path: Some(format!("crate{bucket}/src/transitive_{i}.rs")),
