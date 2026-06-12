@@ -1,5 +1,17 @@
 # Scripts
 
+## Task-run backstop full validation
+
+`validate-taskrun-backstop.sh` is the epic 8451 full Rust validation entrypoint for hosts that have Docker/Postgres available. It starts the repo's `postgres-test` service, rebuilds `djinn_test_template`, creates the test vault key, then runs `cargo build`, strict workspace clippy, and full workspace nextest.
+
+```sh
+make validate-taskrun-backstop
+# or directly:
+./scripts/validate-taskrun-backstop.sh
+```
+
+Required tools for the direct script: Docker with Compose, Cargo, `cargo-nextest`, `sqlx-cli`, and OpenSSL. The Makefile target additionally requires Make. Logs are written under `.taskrun-backstop-validation/`, which is gitignored.
+
 ## Task-run backstop operator preflight
 
 `taskrun-backstop-preflight.sh` captures the operator/admin prerequisites needed before running `docs/TASKRUN_BACKSTOP_VERIFICATION.md`. It checks `kubectl`, current context/namespace, Pod/Job read RBAC, `deploy/djinn-server` log access, and Djinn MCP/control-plane authentication without killing or force-closing a task.
@@ -12,6 +24,48 @@ NS=djinn \
 ```
 
 Paste the generated Markdown bundle into `docs/TASKRUN_BACKSTOP_E2E_EVIDENCE.md` before collecting kill/force-close cleanup evidence, after redacting secrets.
+
+## Task-run backstop operator evidence runner
+
+`taskrun-backstop-e2e-evidence.sh` is the Wave 3 operator/admin evidence runner. It wraps the preflight plus the kill/force-close verification steps from `docs/TASKRUN_BACKSTOP_VERIFICATION.md` into a single auditable Markdown bundle that can be pasted straight into `docs/TASKRUN_BACKSTOP_E2E_EVIDENCE.md`.
+
+The runner captures:
+
+- the embedded preflight output from `taskrun-backstop-preflight.sh` (kubectl, context/namespace, Pod/Job RBAC, server log access, authenticated MCP `initialize`);
+- before-action `kubectl get jobs,pods` evidence filtered by the task-run label and the canonical `djinn-taskrun-$TASK_RUN_ID` prefix;
+- the exact `execution_kill_task` (or force-close/operator-close) action placeholder the operator is expected to issue from the same shell;
+- a 60-second post-action polling loop checking both the task-run label and the canonical Job/Pod name prefix;
+- `kubectl logs` for `deploy/djinn-server` filtered around task-run/backstop markers (`task-run Job backstop`, `backstop reaped orphaned task-run Job`, `task_run_id=...`, `job_name`).
+
+It redacts the operator bearer token, records task id, task run id, namespace/context, UTC timestamps, exact commands, and exit statuses, and fails closed (non-zero exit) when required inputs/access are missing. It does **not** claim cleanup success unless the preflight passes, the operator marks the bundle as `action=executed` (`ACTION_RESULT` set), and the 60-second post-action poll converges.
+
+```sh
+# Kill bundle (execution_kill_task).
+NS=djinn \
+  TASK_ID="<long-running-task-id>" \
+  TASK_RUN_ID="<active-task-run-id>" \
+  DJINN_MCP_URL="https://<operator-accessible-djinn-host>/mcp" \
+  DJINN_OPERATOR_BEARER_TOKEN="<operator/admin token>" \
+  MODE=kill \
+  ACTION_INVOKED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  ACTION_RESULT="execution_kill_task returned ok" \
+  ./scripts/taskrun-backstop-e2e-evidence.sh | tee taskrun-backstop-e2e-kill.md
+
+# Force-close bundle (operator/admin force-close or proposal abort).
+NS=djinn \
+  TASK_ID="<long-running-task-id>" \
+  TASK_RUN_ID="<active-task-run-id>" \
+  DJINN_MCP_URL="https://<operator-accessible-djinn-host>/mcp" \
+  DJINN_OPERATOR_BEARER_TOKEN="<operator/admin token>" \
+  MODE=force-close \
+  ACTION_INVOKED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  ACTION_RESULT="proposal abort 4711 closed task" \
+  ./scripts/taskrun-backstop-e2e-evidence.sh | tee taskrun-backstop-e2e-force-close.md
+```
+
+Set `DRY_RUN=1` to emit the same bundle shape with the action placeholder only — useful for rehearsing the paste workflow without invoking anything. Redact bearer tokens, kubeconfig client keys/certificates, cookies, database URLs, and full health payloads containing credentials before committing the bundle.
+
+See `docs/TASKRUN_BACKSTOP_VERIFICATION.md` (Wave 3 operator evidence runner section) and `docs/TASKRUN_BACKSTOP_E2E_EVIDENCE.md` (Wave 3 paste points) for the exact usage and paste location.
 
 ## Rust size guard
 

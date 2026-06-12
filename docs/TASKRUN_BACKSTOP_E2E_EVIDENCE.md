@@ -1,5 +1,46 @@
 # Task-run backstop E2E evidence
 
+## Wave 3 Postgres-backed full validation entrypoint
+
+A reproducible manual/CI entrypoint now exists for the remaining proposal 4369 / epic 8451 Rust validation blocker:
+
+```bash
+make validate-taskrun-backstop
+# equivalent direct form:
+./scripts/validate-taskrun-backstop.sh
+```
+
+The entrypoint provisions the repository's `docker-compose.yml` `postgres-test` service on `127.0.0.1:5433`, applies `djinn-db` Postgres migrations, rebuilds `djinn_test_template`, creates the test vault key at `/var/tmp/djinn-test-vault/vault.key`, configures a test git identity, then runs the full validation command sequence:
+
+```bash
+docker compose -f docker-compose.yml up -d postgres-test
+# reset postgres-test, apply djinn-db migrations, and rebuild djinn_test_template
+# create /var/tmp/djinn-test-vault/vault.key
+cd server && cargo build
+cd server && cargo clippy --workspace --all-targets --all-features -- -D warnings
+cd server && cargo nextest run --workspace --all-targets --all-features
+```
+
+- **Evidence timestamp (UTC):** 2026-06-12T11:26:21Z
+- **Attempted command:** `sh -n scripts/validate-taskrun-backstop.sh && ./scripts/validate-taskrun-backstop.sh`
+- **Local result:** **blocked by environment before Postgres provisioning**. The script syntax check passed, but this task-run worker does not have Docker installed, so the validation entrypoint stopped before starting `postgres-test`, building `djinn_test_template`, or running Cargo validation. A separate dry-run attempt of the Makefile target also showed `make: command not found` in this worker. These are environmental blockers, not task-run teardown code/test defects.
+- **Proposal validation criterion:** **not yet satisfied by a passing run**. It is now reproducible: rerun `make validate-taskrun-backstop` or `./scripts/validate-taskrun-backstop.sh` on a host with Docker Compose, `sqlx-cli`, `cargo-nextest`, Cargo, and OpenSSL available. The Makefile form additionally requires Make. A passing run of either command satisfies the full Rust validation portion of epic 8451.
+
+Captured local output:
+
+```console
+$ sh -n scripts/validate-taskrun-backstop.sh && ./scripts/validate-taskrun-backstop.sh
+
+[2026-06-12T11:26:21Z] Task-run backstop validation started
+
+[2026-06-12T11:26:21Z] Repository: /workspace/.tmp5yxXK4
+
+[2026-06-12T11:26:21Z] Log file: /workspace/.tmp5yxXK4/.taskrun-backstop-validation/validation-20260612T112621Z.log
+ERROR: required command not found: docker
+
+[2026-06-12T11:26:21Z] Task-run backstop validation failed with exit=127; see /workspace/.tmp5yxXK4/.taskrun-backstop-validation/validation-20260612T112621Z.log
+```
+
 ## Wave 2 final consolidation status
 
 Wave 2 did **not** clear all residual proposal 4369 / epic 8451 criteria. The operator preflight helper from `7jbf` is present and documents the exact evidence bundle required from a real operator/admin shell, but the subsequent Wave 2 runs still executed in worker environments that lacked the required infrastructure and access. The residual status is:
@@ -646,6 +687,49 @@ Epic 8451 should **remain open** for a follow-up wave. The exact residual blocke
 3. Run the same verification for force-close/operator-close with authenticated operator/admin/proposal-abort capability.
 
 Once those three residual items pass, the next Planner can close epic 8451. Until then, proposal 4369 residual Kubernetes cleanup proof criteria are not met, and the nextest criterion has only blocker evidence rather than a successful full pass.
+
+
+## Wave 3 operator evidence runner usage and paste points
+
+The Wave 3 follow-up work in task `7283` added an operator/admin evidence runner, `scripts/taskrun-backstop-e2e-evidence.sh`, so the remaining kill and force-close evidence does not have to be hand-typed. The runner reuses `scripts/taskrun-backstop-preflight.sh`, captures the before-action Kubernetes resources, emits the `execution_kill_task` or force-close/operator-close action placeholder, runs the 60-second post-action polling loop, captures the filtered `deploy/djinn-server` log capture, redacts the operator bearer token, and fails closed when any prerequisite is missing. The full usage and required env vars are documented in `docs/TASKRUN_BACKSTOP_VERIFICATION.md` (Wave 3 operator evidence runner section) and `scripts/README.md`.
+
+Operator workflow for the Wave 3 kill and force-close proofs (`8cd0`, `wu8h`):
+
+1. Run the dry-run form first to confirm the bundle shape and field substitution:
+
+   ```sh
+   NS=djinn \
+   TASK_ID="<long-running-task-id>" \
+   TASK_RUN_ID="<active-task-run-id>" \
+   DJINN_MCP_URL="https://<operator-accessible-djinn-host>/mcp" \
+   DJINN_OPERATOR_BEARER_TOKEN="<operator/admin token>" \
+   MODE=kill \
+   DRY_RUN=1 \
+     ./scripts/taskrun-backstop-e2e-evidence.sh | tee /tmp/taskrun-backstop-e2e-kill.dryrun.md
+   ```
+
+2. After issuing the action (`execution_kill_task` or force-close/operator-close) from the same shell, record the action window and re-run for the real bundle:
+
+   ```sh
+   export ACTION_INVOKED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+   export ACTION_RESULT="execution_kill_task returned ok"   # or "proposal abort <id> closed task"
+   MODE=kill \
+     ./scripts/taskrun-backstop-e2e-evidence.sh | tee taskrun-backstop-e2e-kill.md
+   ```
+
+3. Redact secrets, then paste the bundle into the matching Wave 3 paste point below. The paste points live directly under this section so the Wave 3 evidence is grouped together and easy for the next Planner to reconcile.
+
+### Wave 3 paste point: `execution_kill_task` operator evidence
+
+> Paste the `MODE=kill` runner output here. The bundle should include the embedded preflight (kubectl/context/RBAC/log/MCP), before-action `kubectl get jobs,pods` evidence filtered by the task-run label and the canonical `djinn-taskrun-$TASK_RUN_ID` prefix, the `execution_kill_task` action invocation and result, the 60-second post-action polling log with the final iteration showing `running_pods= jobs= canonical=` and `exit=0`, and the filtered `deploy/djinn-server` log capture around the backstop window.
+>
+> If the operator environment is unavailable, paste the runner output verbatim and explicitly state that the bundle is not claiming cleanup success.
+
+### Wave 3 paste point: force-close/operator-close evidence
+
+> Paste the `MODE=force-close` runner output here. The bundle should include the embedded preflight, before-action `kubectl get jobs,pods` evidence, the force-close/operator-close action invocation and result, the 60-second post-action polling log with the final iteration showing `running_pods= jobs= canonical=` and `exit=0`, and the filtered `deploy/djinn-server` log capture.
+>
+> If the operator environment is unavailable or the force-close mechanism cannot be safely exercised, paste the runner output verbatim and explicitly state that the bundle is not claiming cleanup success.
 
 
 ## `execution_kill_task` cleanup verification attempt — blocked by worker cluster access
