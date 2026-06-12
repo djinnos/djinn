@@ -852,6 +852,7 @@ async fn impact_returns_transitive_dependents() {
         if depth > 0 {
             let node = graph.node(current);
             result.push(ImpactEntry {
+                uid: node.stable_uid(),
                 key: format_node_key(&node.id),
                 depth,
                 file_path: node.file_path.as_ref().map(|p| p.display().to_string()),

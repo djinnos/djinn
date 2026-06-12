@@ -596,6 +596,8 @@ pub struct FileGroupEntry {
 /// edge passed every filter.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImpactEntry {
+    #[serde(default)]
+    pub uid: String,
     pub key: String,
     pub depth: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
