@@ -22,7 +22,8 @@ vi.mock("@/api/mcpClient", () => ({
 }));
 
 vi.mock("@/stores/dispatchPauseStore", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/stores/dispatchPauseStore")>();
+  const actual =
+    await importOriginal<typeof import("@/stores/dispatchPauseStore")>();
   return {
     ...actual,
     refreshDispatchPauseStatus: vi.fn().mockResolvedValue(undefined),
@@ -44,7 +45,8 @@ class MockEventSource {
   }
 
   addEventListener(type: string, listener: EventSourceListener): void {
-    const listeners = this.listeners.get(type) ?? new Set<EventSourceListener>();
+    const listeners =
+      this.listeners.get(type) ?? new Set<EventSourceListener>();
     listeners.add(listener);
     this.listeners.set(type, listeners);
   }
@@ -130,7 +132,9 @@ describe("useEventSource", () => {
     });
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SILENCE_TIMEOUT_MS - LIVENESS_CHECK_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(
+        SILENCE_TIMEOUT_MS - LIVENESS_CHECK_INTERVAL_MS,
+      );
     });
     expect(first.closed).toBe(false);
 
@@ -166,7 +170,9 @@ describe("useEventSource", () => {
     });
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SILENCE_TIMEOUT_MS - LIVENESS_CHECK_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(
+        SILENCE_TIMEOUT_MS - LIVENESS_CHECK_INTERVAL_MS,
+      );
     });
     expect(first.closed).toBe(false);
 
@@ -174,7 +180,9 @@ describe("useEventSource", () => {
       first.emit("ping");
     });
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SILENCE_TIMEOUT_MS - LIVENESS_CHECK_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(
+        SILENCE_TIMEOUT_MS - LIVENESS_CHECK_INTERVAL_MS,
+      );
     });
     expect(first.closed).toBe(false);
 
@@ -182,21 +190,29 @@ describe("useEventSource", () => {
       first.emit("lagged");
     });
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SILENCE_TIMEOUT_MS - LIVENESS_CHECK_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(
+        SILENCE_TIMEOUT_MS - LIVENESS_CHECK_INTERVAL_MS,
+      );
     });
     expect(first.closed).toBe(false);
 
     act(() => {
       first.emit(
         "task.updated",
-        JSON.stringify({ entity_type: "task", action: "updated", payload: { task: { id: "t1" } } }),
+        JSON.stringify({
+          entity_type: "task",
+          action: "updated",
+          payload: { task: { id: "t1" } },
+        }),
         "evt-2",
       );
     });
     expect(sseStore.getState().lastEventId).toBe("evt-2");
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SILENCE_TIMEOUT_MS - LIVENESS_CHECK_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(
+        SILENCE_TIMEOUT_MS - LIVENESS_CHECK_INTERVAL_MS,
+      );
     });
     expect(first.closed).toBe(false);
   });
@@ -216,7 +232,9 @@ describe("useEventSource", () => {
     expect(first.closed).toBe(true);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SILENCE_TIMEOUT_MS + INITIAL_RECONNECT_DELAY);
+      await vi.advanceTimersByTimeAsync(
+        SILENCE_TIMEOUT_MS + INITIAL_RECONNECT_DELAY,
+      );
       await flushPromises();
     });
 

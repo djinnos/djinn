@@ -36,6 +36,10 @@ import {
 export const INITIAL_RECONNECT_DELAY = 1000;
 export const MAX_RECONNECT_DELAY = 30000;
 export const RECONNECT_MULTIPLIER = 2;
+/**
+ * Reconnect jitter is +/-20% around the exponential base delay, with the upper
+ * bound never exceeding MAX_RECONNECT_DELAY even after the base delay is capped.
+ */
 export const RECONNECT_JITTER_RATIO = 0.2;
 export const SILENCE_TIMEOUT_MS = 60_000;
 export const LIVENESS_CHECK_INTERVAL_MS = 1_000;
@@ -49,7 +53,10 @@ export function calculateReconnectDelay(
     MAX_RECONNECT_DELAY,
   );
   const minDelay = Math.max(0, baseDelay * (1 - RECONNECT_JITTER_RATIO));
-  const maxDelay = Math.min(MAX_RECONNECT_DELAY, baseDelay * (1 + RECONNECT_JITTER_RATIO));
+  const maxDelay = Math.min(
+    MAX_RECONNECT_DELAY,
+    baseDelay * (1 + RECONNECT_JITTER_RATIO),
+  );
   return Math.round(minDelay + random() * (maxDelay - minDelay));
 }
 
@@ -133,6 +140,7 @@ export function useEventSource() {
 
       reconnectTimerRef.current = setTimeout(async () => {
         if (!isActive) return;
+        reconnectTimerRef.current = null;
         // Reset MCP client so the next tool call reconnects cleanly.
         try {
           await resetMcpClient();
@@ -152,9 +160,14 @@ export function useEventSource() {
         if (typeof url !== "string" || !url) return;
         const win = window.open(url, "_blank", "noopener,noreferrer");
         if (!win) {
-          sseStore.getState().setError(
-            new Error("Browser blocked the OAuth popup. Open this URL manually: " + url),
-          );
+          sseStore
+            .getState()
+            .setError(
+              new Error(
+                "Browser blocked the OAuth popup. Open this URL manually: " +
+                  url,
+              ),
+            );
           console.warn("oauth.open_browser: popup blocked; url:", url);
         }
       } catch (err) {
@@ -224,14 +237,15 @@ export function useEventSource() {
                 return;
               }
 
-              if (decision.kind === "hook") {
+              if (decision.kind !== "dispatch") {
                 return;
               }
 
-              const data = JSON.parse(event.data);
+              const messageEvent = event as MessageEvent;
+              const data = JSON.parse(messageEvent.data);
 
               // Track the event ID from the SSE message if present
-              const eventId = (event as MessageEvent).lastEventId || undefined;
+              const eventId = messageEvent.lastEventId || undefined;
               if (eventId) {
                 sseStore.getState().setLastEventId(eventId);
               }
@@ -261,7 +275,9 @@ export function useEventSource() {
         if (!isActive) return;
         console.error("Failed to connect to EventSource:", err);
         sseStore.getState().setConnectionStatus("error");
-        sseStore.getState().setError(err instanceof Error ? err : new Error(String(err)));
+        sseStore
+          .getState()
+          .setError(err instanceof Error ? err : new Error(String(err)));
       }
     };
 
