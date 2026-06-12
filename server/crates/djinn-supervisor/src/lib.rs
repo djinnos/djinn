@@ -1462,6 +1462,17 @@ impl TaskRunSupervisor {
                                 "supervisor: planner-Failed close transition skipped"
                             );
                         }
+                        if let Some(class) = provider_failure {
+                            tracing::warn!(
+                                target: "djinn_supervisor::provider_failure",
+                                kind = "provider_failure",
+                                provider_failure_class = ?class,
+                                task_id = %spec.task_id,
+                                task_run_id = %run_id,
+                                stage = role_kind.as_str(),
+                                "provider_failure"
+                            );
+                        }
                         result = Some(TaskRunOutcome::Failed {
                             stage: role_kind.as_str().into(),
                             reason,
@@ -2129,7 +2140,7 @@ mod tests {
             outcome: stage_outcome,
             updated_statuses: std::sync::Arc::clone(&updated_statuses),
         });
-        let supervisor = TaskRunSupervisor::new(mirror, services);
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
             task_run_id: task_run_id.into(),
             task_id: task_id.into(),
@@ -2191,6 +2202,43 @@ mod tests {
             "loop guard must settle through update_task_run_status/record_status path"
         );
 
+        let provider_services: Arc<dyn SupervisorServices> = Arc::new(ScriptedLoopGuardServices {
+            cancel: CancellationToken::new(),
+            task: fixture_task(task_id, project_id),
+            outcome: StageOutcome::Failed {
+                reason: "provider rejected request".into(),
+                provider_failure: Some(djinn_runtime::ProviderFailureClass::Failure),
+            },
+            updated_statuses: std::sync::Arc::clone(&updated_statuses),
+        });
+        let provider_supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), provider_services);
+        let provider_spec = TaskRunSpec {
+            task_run_id: "run-provider-failure".into(),
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "djinn/loop-guard".into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+        };
+        let provider_report = provider_supervisor
+            .run(provider_spec)
+            .await
+            .expect("provider failure supervisor run");
+        assert!(matches!(
+            provider_report.outcome,
+            TaskRunOutcome::Failed {
+                provider_failure: Some(djinn_runtime::ProviderFailureClass::Failure),
+                ..
+            }
+        ));
+
         let captured = logs.take();
         assert!(
             captured.contains("djinn_supervisor::loop_guard_tripped"),
@@ -2212,8 +2260,15 @@ mod tests {
             "expected loop_guard_tripped info event with full payload, got:\n{captured}"
         );
         assert!(
-            !captured.contains("provider_failure") && !captured.contains("budget_park"),
-            "loop guard telemetry must be distinguishable from provider failures and budget parks, got:\n{captured}"
+            captured.contains("djinn_supervisor::provider_failure")
+                && captured.contains("kind=\"provider_failure\"")
+                && captured.contains("provider_failure_class=Failure")
+                && captured.contains("task_run_id=run-provider-failure"),
+            "expected distinct provider-failure telemetry discriminator, got:\n{captured}"
+        );
+        assert!(
+            !captured.contains("kind=\"budget_park\""),
+            "loop guard and provider failure telemetry must remain distinct from budget parks, got:\n{captured}"
         );
     }
 

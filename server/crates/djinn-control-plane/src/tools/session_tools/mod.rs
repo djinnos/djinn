@@ -197,8 +197,83 @@ pub struct TimelineMessage {
 pub struct TimelineActivity {
     pub event_type: String,
     pub actor_role: String,
+    /// Renderer-friendly discriminator. Usually mirrors `event_type`; for
+    /// structured payloads this is the semantic timeline kind.
+    pub kind: String,
     pub payload: super::json_object::AnyJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<super::json_object::AnyJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     pub timestamp: String,
+}
+
+fn render_timeline_activity(e: &djinn_core::models::ActivityEntry) -> TimelineActivity {
+    let payload_value: serde_json::Value =
+        serde_json::from_str(&e.payload).unwrap_or_else(|_| serde_json::json!({}));
+    let kind = if e.event_type == "loop_guard_tripped" {
+        "loop_guard_tripped".to_owned()
+    } else {
+        payload_value
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&e.event_type)
+            .to_owned()
+    };
+    let details = if kind == "loop_guard_tripped" {
+        payload_value
+            .get("details")
+            .cloned()
+            .map(super::json_object::AnyJson)
+    } else {
+        None
+    };
+    let summary = if kind == "loop_guard_tripped" {
+        Some(loop_guard_timeline_summary(&payload_value))
+    } else {
+        payload_value
+            .get("body")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+    };
+
+    TimelineActivity {
+        event_type: e.event_type.clone(),
+        actor_role: e.actor_role.clone(),
+        kind,
+        payload: super::json_object::AnyJson(payload_value),
+        details,
+        summary,
+        timestamp: e.created_at.clone(),
+    }
+}
+
+fn loop_guard_timeline_summary(payload: &serde_json::Value) -> String {
+    let details = payload.get("details").unwrap_or(payload);
+    let guard_kind = details
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown_guard");
+    let signature = details
+        .get("offending_signature")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown_signature");
+    let turn_span = details.get("turn_span");
+    let start = turn_span
+        .and_then(|v| v.get("start"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| turn_span.and_then(|v| v.get(0)).and_then(|v| v.as_u64()));
+    let end = turn_span
+        .and_then(|v| v.get("end"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| turn_span.and_then(|v| v.get(1)).and_then(|v| v.as_u64()));
+
+    match (start, end) {
+        (Some(start), Some(end)) => {
+            format!("Loop guard `{guard_kind}` tripped on turns {start}..={end}: `{signature}`")
+        }
+        _ => format!("Loop guard `{guard_kind}` tripped: `{signature}`"),
+    }
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -649,17 +724,7 @@ impl DjinnMcpServer {
             offset: 0,
         };
         let activity = match task_repo.query_activity(q).await {
-            Ok(entries) => entries
-                .iter()
-                .map(|e| TimelineActivity {
-                    event_type: e.event_type.clone(),
-                    actor_role: e.actor_role.clone(),
-                    payload: super::json_object::AnyJson(
-                        serde_json::from_str(&e.payload).unwrap_or_else(|_| serde_json::json!({})),
-                    ),
-                    timestamp: e.created_at.clone(),
-                })
-                .collect(),
+            Ok(entries) => entries.iter().map(render_timeline_activity).collect(),
             Err(e) => return err(e.to_string()),
         };
 
