@@ -1,8 +1,10 @@
 import { useMemo } from "react";
-import { HugeiconsIcon } from "@hugeicons/react";
 import { Alert02Icon } from "@hugeicons/core-free-icons";
-import { Card, CardContent } from "@/components/ui/card";
+import { HugeiconsIcon } from "@hugeicons/react";
+
 import { useAuthUser } from "@/components/AuthGate";
+import { Card, CardContent } from "@/components/ui/card";
+import type { Project } from "@/api/types";
 import {
   useDispatchPauseStore,
   type DispatchPauseEntry,
@@ -10,7 +12,6 @@ import {
 } from "@/stores/dispatchPauseStore";
 import { ALL_PROJECTS } from "@/stores/projectStore";
 import { useProjectStore } from "@/stores/useProjectStore";
-import type { Project } from "@/api/types";
 
 interface ProjectContext {
   isAllProjects: boolean;
@@ -23,6 +24,17 @@ interface DecoratedDispatchPauseEntry {
   key: string;
   label: string;
   scopeLabel: string;
+}
+
+export interface DispatchPauseBannerProps {
+  /** Test/story override. When omitted, applicable pauses are selected from stores. */
+  entries?: DispatchPauseEntry[];
+  /** Test/story override for project filtering. Defaults to projectStore selection. */
+  selectedProjectId?: string | null;
+  /** Test/story override for current-user filtering. Defaults to AuthGate user id. */
+  currentUserId?: string | null;
+  /** Test/story override for all-project expansion. Defaults to projectStore projects. */
+  allProjectIds?: string[];
 }
 
 function normalizeId(value: string | null | undefined): string | null {
@@ -64,6 +76,36 @@ function currentUserPauseApplies(entry: DispatchPauseEntry, currentUserId: strin
   return false;
 }
 
+function stateFromEntryList(entries: DispatchPauseEntry[]): Pick<DispatchPauseState, "global" | "projects" | "users"> {
+  const state: Pick<DispatchPauseState, "global" | "projects" | "users"> = {
+    global: null,
+    projects: {},
+    users: {},
+  };
+
+  for (const entry of entries) {
+    const targetId = normalizeId(entry.target_id);
+    if (entry.scope === "global") {
+      state.global = { ...entry, target_id: null };
+    } else if (entry.scope === "project" && targetId) {
+      state.projects[targetId] = { ...entry, target_id: targetId };
+    } else if (entry.scope === "user" && targetId) {
+      state.users[targetId] = { ...entry, target_id: targetId };
+    }
+  }
+
+  return state;
+}
+
+function projectFromId(projectId: string): Project {
+  return {
+    id: projectId,
+    name: projectId,
+    github_owner: "story",
+    github_repo: projectId,
+  } satisfies Project;
+}
+
 export function selectVisibleDispatchPauseEntries(
   entries: Pick<DispatchPauseState, "global" | "projects" | "users">,
   projectContext: ProjectContext,
@@ -83,7 +125,10 @@ export function selectVisibleDispatchPauseEntries(
       (project) => project.id === projectContext.selectedProjectId,
     );
     visible.push(
-      ...projectEntries.filter((entry) => projectMatchesTarget(selectedProject, entry.target_id)),
+      ...projectEntries.filter((entry) => {
+        if (projectMatchesTarget(selectedProject, entry.target_id)) return true;
+        return normalizeId(entry.target_id) === normalizeId(projectContext.selectedProjectId);
+      }),
     );
   }
 
@@ -169,17 +214,34 @@ function summaryFor(entries: DecoratedDispatchPauseEntry[]): string {
   return `${count} dispatch pauses affect this view (${parts.join(", ")})`;
 }
 
-export function DispatchPauseBanner() {
-  const currentUserId = normalizeId(useAuthUser()?.id ?? null);
-  const { projects, selectedProjectId } = useProjectStore((state) => ({
+export function DispatchPauseBanner({
+  entries: entryOverride,
+  selectedProjectId: selectedProjectIdOverride,
+  currentUserId: currentUserIdOverride,
+  allProjectIds,
+}: DispatchPauseBannerProps = {}) {
+  const authUser = useAuthUser();
+  const projectStoreContext = useProjectStore((state) => ({
     projects: state.projects,
     selectedProjectId: state.selectedProjectId,
   }));
-  const pauseEntries = useDispatchPauseStore((state) => ({
+  const storePauseEntries = useDispatchPauseStore((state) => ({
     global: state.global,
     projects: state.projects,
     users: state.users,
   }));
+
+  const selectedProjectId = selectedProjectIdOverride ?? projectStoreContext.selectedProjectId;
+  const projects = useMemo(() => {
+    if (!allProjectIds) return projectStoreContext.projects;
+    const knownProjects = new Map(projectStoreContext.projects.map((project) => [project.id, project]));
+    return allProjectIds.map((projectId) => knownProjects.get(projectId) ?? projectFromId(projectId));
+  }, [allProjectIds, projectStoreContext.projects]);
+  const pauseEntries = useMemo(
+    () => (entryOverride ? stateFromEntryList(entryOverride) : storePauseEntries),
+    [entryOverride, storePauseEntries],
+  );
+  const currentUserId = normalizeId(currentUserIdOverride ?? authUser?.id ?? null);
 
   const visibleEntries = useMemo(
     () =>
@@ -203,7 +265,12 @@ export function DispatchPauseBanner() {
   if (decoratedEntries.length === 0) return null;
 
   return (
-    <Card className="mx-4 border-red-500/25 bg-red-500/[0.06]" role="status" aria-live="polite">
+    <Card
+      className="mx-4 border-red-500/25 bg-red-500/[0.06]"
+      role="status"
+      aria-label="Dispatch paused"
+      aria-live="polite"
+    >
       <CardContent className="py-3">
         <div className="flex items-start gap-2.5">
           <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-red-500/15">
@@ -213,11 +280,11 @@ export function DispatchPauseBanner() {
             <div className="space-y-1">
               <p className="text-sm font-semibold text-red-100">{summaryFor(decoratedEntries)}</p>
               <p className="text-xs leading-relaxed text-red-100/80">
-                Running sessions and chat continue normally. New dispatch is deferred until the pause is resumed.
+                Running sessions and chat are unaffected. New dispatch is deferred until the pause is resumed.
               </p>
             </div>
 
-            <div className="flex flex-col gap-1.5">
+            <div className="flex flex-col gap-1.5" aria-label="Active dispatch pauses">
               {decoratedEntries.map(({ entry, key, label, scopeLabel }) => (
                 <div key={key} className="rounded-md border border-red-500/15 bg-black/10 px-2.5 py-2 text-xs text-red-100/85">
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1">

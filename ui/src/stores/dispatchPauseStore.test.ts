@@ -65,6 +65,22 @@ describe('dispatchPauseStore', () => {
     expect(dispatchPauseStore.getState().global?.reason).toBe('global pause');
     expect(dispatchPauseStore.getState().projects['project-1']).toBeUndefined();
     expect(dispatchPauseStore.getState().users['user-1']?.reason).toBe('user pause');
+
+    dispatchPauseStore.getState().applySsePayload({
+      scope: 'global',
+      current: null,
+      previous: pause('global pause'),
+      resumed_by: 'admin-2',
+    });
+    dispatchPauseStore.getState().applySsePayload({
+      scope: 'user',
+      target_id: 'user-1',
+      current: null,
+      previous: pause('user pause'),
+      resumed_by: 'admin-2',
+    });
+
+    expect(dispatchPauseStore.getState().getAffectedEntries(['project-1'], 'user-1')).toEqual([]);
   });
 
   it('selects affected global, project, and user entries without conflating scopes', () => {
