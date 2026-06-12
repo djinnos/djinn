@@ -158,29 +158,84 @@ where
 /// 7. Triggers redispatch for the project
 pub(crate) fn spawn_verification(task_id: String, project_path: String, app_state: AgentContext) {
     let pipeline_timeout = compute_pipeline_timeout();
-    app_state.register_verification(&task_id);
-    let task_id_for_pipeline = task_id.clone();
-    let project_path_for_pipeline = project_path.clone();
-    let app_state_for_pipeline = app_state.clone();
-    let pipeline = async move {
-        run_verification_pipeline(
-            &task_id_for_pipeline,
-            &project_path_for_pipeline,
-            &app_state_for_pipeline,
+    // Detach a tiny admission task first so durable administrative dispatch
+    // pauses are checked before registering or spawning the host verification
+    // pipeline. The task is tied to a concrete task/project/user, so scoped
+    // pauses are honored here in addition to the proposal-required global gate.
+    std::mem::drop(tokio::spawn(async move {
+        let task_for_gate = match load_task(&task_id, &app_state).await {
+            Ok(task) => task,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "Verification pipeline deferred — failed to load task before dispatch-pause gate"
+                );
+                return;
+            }
+        };
+
+        let pause_state = match crate::dispatch_pause::load_dispatch_pause_state(
+            app_state.db.clone(),
+            app_state.event_bus.clone(),
         )
         .await
-    };
+        {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_for_gate.short_id,
+                    task_uuid = %task_for_gate.id,
+                    project_id = %task_for_gate.project_id,
+                    error = %e,
+                    "Verification pipeline deferred — failed to load dispatch-pause state"
+                );
+                return;
+            }
+        };
 
-    // Detach the verification `JoinHandle` — the pipeline owns its own
-    // lifetime via `VerificationRegistrationGuard` and we have no further work
-    // to do here. This is intentional fire-and-forget of a tokio task handle,
-    // not a state-bearing drop.
-    std::mem::drop(spawn_verification_with_timeout(
-        task_id,
-        app_state,
-        pipeline_timeout,
-        pipeline,
-    ));
+        if let Some((pause_scope, pause_target_id, pause)) =
+            crate::dispatch_pause::matching_task_dispatch_pause(&pause_state, &task_for_gate)
+        {
+            tracing::info!(
+                task_id = %task_for_gate.short_id,
+                task_uuid = %task_for_gate.id,
+                project_id = %task_for_gate.project_id,
+                created_by_user_id = ?task_for_gate.created_by_user_id,
+                pause_scope,
+                pause_target_id,
+                paused_by = %pause.paused_by,
+                paused_at = %pause.paused_at,
+                reason = %pause.reason,
+                "Verification pipeline deferred by administrative dispatch pause"
+            );
+            return;
+        }
+
+        app_state.register_verification(&task_id);
+        let task_id_for_pipeline = task_id.clone();
+        let project_path_for_pipeline = project_path.clone();
+        let app_state_for_pipeline = app_state.clone();
+        let pipeline = async move {
+            run_verification_pipeline(
+                &task_id_for_pipeline,
+                &project_path_for_pipeline,
+                &app_state_for_pipeline,
+            )
+            .await
+        };
+
+        // Detach the verification `JoinHandle` — the pipeline owns its own
+        // lifetime via `VerificationRegistrationGuard` and we have no further
+        // work to do here. This is intentional fire-and-forget of a tokio task
+        // handle, not a state-bearing drop.
+        std::mem::drop(spawn_verification_with_timeout(
+            task_id,
+            app_state,
+            pipeline_timeout,
+            pipeline,
+        ));
+    }));
 }
 
 /// Resolve the role-level `verification_command` override for the given task.
@@ -645,7 +700,7 @@ mod tests {
     use crate::verification::service::VerificationResult;
     use djinn_core::commands::CommandResult;
     use djinn_core::models::TransitionAction;
-    use djinn_db::TaskRepository;
+    use djinn_db::{DispatchPauseRepository, DispatchPauseTarget, TaskRepository};
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
@@ -653,6 +708,15 @@ mod tests {
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::ZERO).await;
         tokio::task::yield_now().await;
+    }
+
+    fn dispatch_pause() -> djinn_core::models::DispatchPause {
+        djinn_core::models::DispatchPause {
+            paused_by: "admin".to_owned(),
+            paused_at: "2026-06-12T00:00:00Z".to_owned(),
+            reason: "maintenance".to_owned(),
+            expires_at: None,
+        }
     }
 
     fn make_result(stdout: &str, stderr: &str) -> VerificationResult {
@@ -886,6 +950,28 @@ mod tests {
         assert!(
             !app_state.has_verification(&task_id),
             "verification should be released after timeout"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spawn_verification_defers_without_registering_when_global_pause_is_active() {
+        let (_task_repo, task_id, app_state) = setup_verifying_task_with_count_blocking(0);
+        DispatchPauseRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+            .pause(DispatchPauseTarget::global(), dispatch_pause())
+            .await
+            .expect("pause dispatch globally");
+
+        spawn_verification(
+            task_id.clone(),
+            "/unused/project/path".to_owned(),
+            app_state.clone(),
+        );
+        tick_spawned_verification().await;
+        tick_spawned_verification().await;
+
+        assert!(
+            !app_state.has_verification(&task_id),
+            "global dispatch pause must prevent registering/spawning host verification work"
         );
     }
 
