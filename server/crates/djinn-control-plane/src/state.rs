@@ -719,4 +719,28 @@ pub mod stubs {
             Arc::new(StubRepoGraphOps),
         )
     }
+
+    /// Same as [`test_mcp_state`] but lets the test plug in a concrete
+    /// `EventBus`. Used by the dispatch-pause read-only regression tests
+    /// (in `server_tests.rs`), which need to observe whether a status call
+    /// emits a `dispatch_pause.changed` envelope. The default `noop()` bus
+    /// drops every envelope, so it cannot prove the absence of an event
+    /// emission — tests that need that guarantee must build a recording
+    /// bus and route the server's `McpState` through it.
+    pub fn test_mcp_state_with_event_bus(db: Database, event_bus: EventBus) -> McpState {
+        McpState::new(
+            db,
+            event_bus,
+            CatalogService::new(),
+            HealthTracker::new(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(StubLspOps),
+            Arc::new(StubRuntimeOps),
+            Arc::new(StubGitOps),
+            Arc::new(StubRepoGraphOps),
+        )
+    }
 }
