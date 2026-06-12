@@ -372,7 +372,7 @@ impl CoordinatorActor {
         }
     }
 
-    async fn rehydrate_durable_dispatch_state(&mut self) {
+    pub(super) async fn rehydrate_durable_dispatch_state(&mut self) {
         let repo = DispatchStateRepository::new(self.db.clone());
         match repo.cleanup_terminal(&["closed", "done"]).await {
             Ok(pruned) if !pruned.is_empty() => {
