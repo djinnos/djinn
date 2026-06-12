@@ -64,7 +64,7 @@ pub fn assert_ykcg_extractor_graph_parity(
     if report.passed {
         Ok(report)
     } else {
-        Err(YkcgExtractorParityError::Diff(report))
+        Err(YkcgExtractorParityError::Diff(Box::new(report)))
     }
 }
 
@@ -84,7 +84,7 @@ pub fn assert_ykcg_extractor_artifact_blob_parity(
     let baseline = RepoDependencyGraph::from_artifact(&baseline_artifact);
     let live = RepoDependencyGraph::from_artifact(&live_artifact);
     assert_ykcg_extractor_graph_parity(&baseline, &live, config)
-        .map_err(YkcgExtractorArtifactBlobParityError::Diff)
+        .map_err(|err| YkcgExtractorArtifactBlobParityError::Diff(Box::new(err)))
 }
 
 /// Structured report suitable for PR/CI logs.
@@ -226,7 +226,7 @@ pub struct AllowedAdditionReport {
 /// Error returned by [`assert_ykcg_extractor_graph_parity`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum YkcgExtractorParityError {
-    Diff(YkcgExtractorParityReport),
+    Diff(Box<YkcgExtractorParityReport>),
 }
 
 impl fmt::Display for YkcgExtractorParityError {
@@ -244,7 +244,7 @@ impl std::error::Error for YkcgExtractorParityError {}
 pub enum YkcgExtractorArtifactBlobParityError {
     DeserializeBaseline(String),
     DeserializeLive(String),
-    Diff(YkcgExtractorParityError),
+    Diff(Box<YkcgExtractorParityError>),
 }
 
 impl fmt::Display for YkcgExtractorArtifactBlobParityError {
