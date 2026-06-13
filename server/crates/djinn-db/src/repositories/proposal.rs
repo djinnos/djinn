@@ -1,4 +1,6 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
+use std::collections::HashMap;
+
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
     Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff, ProposalTarget,
@@ -706,6 +708,15 @@ impl ProposalRepository {
         )
         .execute(self.db.pool())
         .await?;
+        if let Some(proposal) = self.get(proposal_id).await?
+            && proposal.status == "building"
+        {
+            let seq = proposal
+                .last_reconciled_revision_seq
+                .unwrap_or(proposal.latest_revision_seq);
+            self.record_epic_reconciliation(proposal_id, epic_id, seq)
+                .await?;
+        }
         Ok(())
     }
 
@@ -721,6 +732,52 @@ impl ProposalRepository {
         Ok(rows
             .into_iter()
             .map(|r| (r.epic_id, r.project_id))
+            .collect())
+    }
+
+    /// Stamp that one graduated epic has been reconciled against a proposal
+    /// revision. Idempotent for repeated reconcile runs of the same revision.
+    pub async fn record_epic_reconciliation(
+        &self,
+        proposal_id: &str,
+        epic_id: &str,
+        revision_seq: i32,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            r#"INSERT INTO proposal_reconciliations (proposal_id, epic_id, revision_seq)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (proposal_id, epic_id, revision_seq) DO NOTHING"#,
+        )
+        .bind(proposal_id)
+        .bind(epic_id)
+        .bind(revision_seq)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Latest reconciled proposal revision per graduated epic for a proposal.
+    pub async fn latest_epic_reconciliations(
+        &self,
+        proposal_id: &str,
+    ) -> Result<HashMap<String, i32>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query_as::<_, (String, Option<i32>)>(
+            r#"SELECT pe.epic_id, MAX(pr.revision_seq) AS revision_seq
+               FROM proposal_epics pe
+               LEFT JOIN proposal_reconciliations pr
+                 ON pr.proposal_id = pe.proposal_id
+                AND pr.epic_id = pe.epic_id
+               WHERE pe.proposal_id = $1
+               GROUP BY pe.epic_id"#,
+        )
+        .bind(proposal_id)
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(epic_id, revision_seq)| revision_seq.map(|seq| (epic_id, seq)))
             .collect())
     }
 
@@ -813,6 +870,36 @@ impl ProposalRepository {
         Ok(proposal)
     }
 
+    /// Mark the current build as reconciled to the proposal's head revision and
+    /// stamp each graduated epic. This is the successful reconcile write site;
+    /// callers that apply a reconcile should use this instead of updating
+    /// `last_reconciled_revision_seq` directly so per-epic badges stay in sync.
+    pub async fn mark_reconciled(&self, proposal_id: &str) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+        let proposal = self.get_required(proposal_id).await?;
+        let revision_seq = proposal.latest_revision_seq;
+        let epics = self.graduated_epics(proposal_id).await?;
+        for (epic_id, _) in epics {
+            self.record_epic_reconciliation(proposal_id, &epic_id, revision_seq)
+                .await?;
+        }
+        sqlx::query(
+            r#"UPDATE proposals SET last_reconciled_revision_seq = $1,
+                    pending_reconcile = false,
+                    reconciled_at = now(),
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE id = $2"#,
+        )
+        .bind(revision_seq)
+        .bind(proposal_id)
+        .execute(self.db.pool())
+        .await?;
+        let proposal = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&proposal));
+        Ok(proposal)
+    }
+
     /// The proposal a graduated epic belongs to, if any. Reverse of
     /// [`Self::link_epic`] — used by the coordinator to decide whether closing
     /// an epic completes its parent proposal.
@@ -851,16 +938,28 @@ impl ProposalRepository {
 
     /// Mark a proposal `done` (terminal). Stamps `closed_at` if not already set.
     /// Used by the Planner's `proposal_complete` tool after reviewing the
-    /// finished build.
+    /// finished build. Completing is also a successful reconcile: stamp every
+    /// graduated epic at the proposal head and clear proposal-level drift before
+    /// moving to the terminal state.
     pub async fn set_done(&self, proposal_id: &str) -> Result<Proposal> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
+        let proposal = self.get_required(proposal_id).await?;
+        let revision_seq = proposal.latest_revision_seq;
+        let epics = self.graduated_epics(proposal_id).await?;
+        for (epic_id, _) in epics {
+            self.record_epic_reconciliation(proposal_id, &epic_id, revision_seq)
+                .await?;
+        }
+        sqlx::query(
             r#"UPDATE proposals SET status = 'done',
+                    last_reconciled_revision_seq = latest_revision_seq,
+                    pending_reconcile = false,
+                    reconciled_at = now(),
                     closed_at = COALESCE(closed_at, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')),
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $1"#,
-            proposal_id
         )
+        .bind(proposal_id)
         .execute(self.db.pool())
         .await?;
         let proposal = self.get_required(proposal_id).await?;
@@ -1948,6 +2047,18 @@ mod tests {
         let building = repo.set_building(&p.id, "user-x").await.unwrap();
         assert_eq!(building.last_reconciled_revision_seq, Some(1));
         assert!(!building.pending_reconcile);
+        assert!(
+            repo.latest_epic_reconciliations(&p.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let linked_while_building = insert_epic(&db, &proj, "eg02").await;
+        repo.link_epic(&p.id, &linked_while_building, &proj)
+            .await
+            .unwrap();
+        let latest_by_epic = repo.latest_epic_reconciliations(&p.id).await.unwrap();
+        assert_eq!(latest_by_epic.get(&linked_while_building), Some(&1));
 
         // Status-only update (no spec change) remains allowed: status stays
         // `building`, no new revision, no new drift.
@@ -1997,12 +2108,24 @@ mod tests {
         assert!(updated.pending_reconcile);
         assert_eq!(repo.revisions(&p.id).await.unwrap().len(), 2);
 
-        // A status-only path that closes out a build is still allowed and
-        // does not require the drift to be resolved first — the build owner
-        // owns the final say.
+        let reconciled = repo.mark_reconciled(&p.id).await.unwrap();
+        assert_eq!(reconciled.last_reconciled_revision_seq, Some(2));
+        assert!(!reconciled.pending_reconcile);
+        let latest_by_epic = repo.latest_epic_reconciliations(&p.id).await.unwrap();
+        assert_eq!(latest_by_epic.get(&epic), Some(&2));
+        repo.record_epic_reconciliation(&p.id, &epic, 1)
+            .await
+            .unwrap();
+        let latest_by_epic = repo.latest_epic_reconciliations(&p.id).await.unwrap();
+        assert_eq!(latest_by_epic.get(&epic), Some(&2));
+
+        // A closeout is itself a successful reconcile: it stamps current
+        // per-epic metadata and clears proposal-level drift before moving to
+        // the terminal state.
         let done = repo.set_done(&p.id).await.unwrap();
         assert_eq!(done.status, "done");
-        assert!(done.pending_reconcile);
+        assert!(!done.pending_reconcile);
+        assert_eq!(done.last_reconciled_revision_seq, Some(2));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

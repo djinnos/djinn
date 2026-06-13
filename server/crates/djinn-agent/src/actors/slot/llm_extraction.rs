@@ -19,8 +19,9 @@
 //! [`run_llm_extraction`] is driven by
 //! `session_extraction::run_post_session_extraction`, which runs server-side
 //! (fire-and-forget) when a task-run completes. The production path resolves
-//! the model via creator-scoped dispatch-style resolution, with an org-shared
-//! memory-provider fallback when the creator-scoped path cannot resolve.
+//! the model via creator-scoped dispatch-style resolution, with an explicit
+//! org-shared/no-user memory-provider fallback when the creator-scoped path
+//! cannot resolve.
 //! The file-level `#[allow(dead_code)]` is retained only to cover the
 //! `_with_provider` test entry points and helpers exercised solely by tests.
 
@@ -435,7 +436,7 @@ pub(crate) async fn run_llm_extraction(
 }
 
 /// Test-only entry point that injects a pre-built LLM provider, bypassing
-/// credential loading and `resolve_memory_provider`.
+/// credential loading and memory provider resolution.
 #[cfg(test)]
 pub(crate) async fn run_llm_extraction_with_provider(
     session_id: String,
@@ -467,7 +468,7 @@ pub(crate) async fn run_llm_extraction_with_provider_and_candidate_lookup(
 /// Inner implementation that accepts an optional provider override for test injection.
 ///
 /// When `provider_override` is `Some`, the given provider is used directly
-/// instead of calling `resolve_memory_provider`.
+/// instead of resolving a memory provider.
 async fn run_llm_extraction_inner(
     session_id: String,
     mut taxonomy: SessionTaxonomy,
@@ -611,7 +612,8 @@ async fn run_llm_extraction_inner(
         // it under the creator's `SESSION_USER_ID` scope reuses the proven
         // provider path: e.g. an `openai/*` id served via the connected
         // `chatgpt_codex` credential. If creator-scoped resolution fails, fall
-        // back only to the org-shared/no-user memory-provider scope.
+        // back only to the explicit org-shared/no-user memory-provider scope;
+        // never borrow another user's private credential.
         let creator = task.created_by_user_id.clone();
         let attributed_user_id = creator
             .clone()
@@ -628,7 +630,7 @@ async fn run_llm_extraction_inner(
         const MEMORY_CONTEXT_WINDOW: u32 = 128_000;
         let creator_scoped = djinn_core::auth_context::SESSION_USER_ID
             .scope(
-                creator,
+                creator.clone(),
                 crate::actors::slot::lifecycle::model_resolution::resolve_model_and_credential(
                     &memory_model_id,
                     &task_id,
@@ -655,7 +657,7 @@ async fn run_llm_extraction_inner(
                 tracing::debug!(
                     session_id = %session_id,
                     error = %e.reason,
-                    "llm_extraction: creator-scoped model resolution failed; trying global memory provider"
+                    "llm_extraction: creator-scoped model resolution failed; trying scoped memory provider fallback"
                 );
                 None
             }
