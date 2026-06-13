@@ -22,12 +22,25 @@ use crate::repo_graph::{
     RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
     RouteExclusionConfig,
 };
+use crate::ykcg_parity::{
+    YkcgExtractorParityConfig, YkcgExtractorParityError, YkcgExtractorParityReport,
+    assert_ykcg_extractor_graph_parity,
+};
 
-/// Environment flag that disables route extraction when set to `0` / `false`
-/// / `no` / `off` (case-insensitive). Default = on.
+/// Temporary rollout flag for route extraction.
+///
+/// This disables the extractor when set to `0` / `false` / `no` / `off`
+/// (case-insensitive). Default = on. Keep this seam rollout-only: it is not a
+/// second permanent graph pipeline and should be deleted once Route extraction
+/// ships broadly.
 pub const ROUTE_DETECTION_FLAG: &str = "DJINN_ROUTE_DETECTION";
 
-/// Environment flag for the route-parity rollout gate. Default = on.
+/// Temporary rollout flag for the route graph-parity gate. Default = on.
+///
+/// The gate compares the pre-extractor graph to the route-enabled graph through
+/// the reusable ykcg parity adapter, allowing only Route nodes plus
+/// HandlesRoute/Fetches edges as intentional extractor output. Keep this seam
+/// rollout-only and remove it with [`ROUTE_DETECTION_FLAG`] after rollout.
 pub const ROUTE_PARITY_FLAG: &str = "DJINN_ROUTE_PARITY";
 
 fn env_flag_enabled(value: Option<&str>) -> bool {
@@ -98,6 +111,29 @@ pub fn route_parity_enabled() -> bool {
 /// Pure helper for tests/callers that already resolved the env var.
 pub fn route_parity_enabled_from_var(value: Option<&str>) -> bool {
     env_flag_enabled(value)
+}
+
+/// ykcg parity config for the Route extractor rollout gate.
+pub fn route_extraction_parity_config() -> YkcgExtractorParityConfig {
+    YkcgExtractorParityConfig::new(
+        "route-extraction",
+        [RepoGraphNodeKind::Route],
+        [RepoGraphEdgeKind::HandlesRoute, RepoGraphEdgeKind::Fetches],
+    )
+}
+
+/// Assert route-extractor parity between a disabled baseline and enabled graph.
+///
+/// The baseline must be the canonical graph before route extraction runs (the
+/// `DJINN_ROUTE_DETECTION=0` shape); `live` must be the graph after the enabled
+/// extractor pass. This delegates to the ykcg adapter so core file/symbol/table
+/// process/tool populations remain strict while Route/HandlesRoute/Fetches
+/// additions are reported as allowed rollout output.
+pub fn assert_route_extraction_graph_parity(
+    baseline: &RepoDependencyGraph,
+    live: &RepoDependencyGraph,
+) -> Result<YkcgExtractorParityReport, YkcgExtractorParityError> {
+    assert_ykcg_extractor_graph_parity(baseline, live, &route_extraction_parity_config())
 }
 
 #[cfg(test)]
@@ -833,40 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn route_parity_enabled_live_counts_do_not_exceed_disabled_shadow_counts() {
-        let _guard = ROUTE_DETECTION_ENV_LOCK.lock().unwrap();
-        let old = std::env::var(ROUTE_PARITY_FLAG).ok();
-
-        let (disabled_nodes, disabled_edges) = route_parity_fixture_counts(Some("0"));
-        let (enabled_nodes, enabled_edges) = route_parity_fixture_counts(Some("1"));
-
-        unsafe {
-            if let Some(old) = old {
-                std::env::set_var(ROUTE_PARITY_FLAG, old);
-            } else {
-                std::env::remove_var(ROUTE_PARITY_FLAG);
-            }
-        }
-
-        assert!(
-            enabled_nodes <= disabled_nodes,
-            "route parity live node count ({enabled_nodes}) must not exceed shadow baseline ({disabled_nodes})"
-        );
-        assert!(
-            enabled_edges <= disabled_edges,
-            "route parity live edge count ({enabled_edges}) must not exceed shadow baseline ({disabled_edges})"
-        );
-    }
-
-    fn route_parity_fixture_counts(value: Option<&str>) -> (usize, usize) {
-        unsafe {
-            if let Some(value) = value {
-                std::env::set_var(ROUTE_PARITY_FLAG, value);
-            } else {
-                std::env::remove_var(ROUTE_PARITY_FLAG);
-            }
-        }
-
+    fn route_parity_enabled_reports_route_additions_and_core_counts() {
         let temp = tempfile::tempdir().expect("create temp fixture dir");
         let root = temp.path();
         std::fs::create_dir_all(root.join("server/src")).unwrap();
@@ -882,9 +885,69 @@ mod tests {
         )
         .unwrap();
 
-        let mut graph = fixture_graph();
-        let _report = detect_routes(&mut graph, root);
-        (graph.node_count(), graph.edge_count())
+        let baseline = fixture_graph();
+        let mut live = baseline.clone();
+        let extraction = detect_routes(&mut live, root);
+        let parity = assert_route_extraction_graph_parity(&baseline, &live)
+            .expect("Route/HandlesRoute/Fetches additions should be allowlisted");
+
+        assert_eq!(extraction.route_nodes_added, 1);
+        assert_eq!(extraction.handles_route_edges_added, 1);
+        assert_eq!(extraction.fetches_edges_added, 1);
+        assert!(parity.passed);
+        assert_eq!(
+            parity.node_counts_by_kind.baseline[&RepoGraphNodeKind::File],
+            parity.node_counts_by_kind.live[&RepoGraphNodeKind::File]
+        );
+        assert_eq!(
+            parity.node_counts_by_kind.baseline[&RepoGraphNodeKind::Symbol],
+            parity.node_counts_by_kind.live[&RepoGraphNodeKind::Symbol]
+        );
+        assert_eq!(
+            parity.allowed_added_nodes[&RepoGraphNodeKind::Route].count,
+            1
+        );
+        assert_eq!(
+            parity.allowed_added_edges[&RepoGraphEdgeKind::HandlesRoute].count,
+            1
+        );
+        assert_eq!(
+            parity.allowed_added_edges[&RepoGraphEdgeKind::Fetches].count,
+            1
+        );
+        let rendered = parity.render_for_ci();
+        assert!(rendered.contains("route-extraction"));
+        assert!(rendered.contains("allowed added nodes"));
+    }
+
+    #[test]
+    fn route_parity_gate_fails_core_symbol_drift() {
+        let baseline = fixture_graph();
+        let mut live = baseline.clone();
+        live.graph_mut_unchecked().add_node(fixture_node(
+            RepoNodeKey::Symbol("rust server/src/routes.rs `unexpected`().".to_string()),
+            RepoGraphNodeKind::Symbol,
+            "unexpected",
+            Some("rust"),
+            Some("server/src/routes.rs"),
+            Some("rust server/src/routes.rs `unexpected`()."),
+            false,
+        ));
+
+        let err = assert_route_extraction_graph_parity(&baseline, &live)
+            .expect_err("core symbol additions are not route extractor output");
+        let YkcgExtractorParityError::Diff(report) = err;
+
+        assert!(!report.passed);
+        let diff = report.failing_diff.as_ref().expect("failing diff");
+        assert_eq!(
+            diff.nodes
+                .added_counts_by_kind
+                .get(&RepoGraphNodeKind::Symbol)
+                .copied(),
+            Some(1)
+        );
+        assert!(report.render_for_ci().contains("failing diff samples"));
     }
 
     #[test]

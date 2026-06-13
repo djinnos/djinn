@@ -55,6 +55,7 @@ fn scan_file(path: &Path, violations: &mut Vec<String>) {
     let mut pending_cfg_test = false;
     let mut cfg_test_brace_depth: Option<i32> = None;
     let mut credential_repo_vars = BTreeSet::new();
+    let mut pending_credential_repo_binding: Option<String> = None;
 
     for (index, line) in content.lines().enumerate() {
         let trimmed = line.trim();
@@ -84,8 +85,18 @@ fn scan_file(path: &Path, violations: &mut Vec<String>) {
         }
 
         let line_number = index + 1;
-        if let Some(var_name) = credential_repo_var_name(line) {
-            credential_repo_vars.insert(var_name.to_string());
+        if let Some(var_name) = let_binding_var_name(line) {
+            pending_credential_repo_binding = Some(var_name.to_string());
+        }
+        if line.contains("CredentialRepository::new(") {
+            if let Some(var_name) = credential_repo_var_name(line)
+                .map(str::to_string)
+                .or_else(|| pending_credential_repo_binding.take())
+            {
+                credential_repo_vars.insert(var_name);
+            }
+        } else if line.contains(';') {
+            pending_credential_repo_binding = None;
         }
         if contains_unscoped_memory_resolver(path, line) {
             violations.push(format!("{}:{line_number}: {trimmed}", path.display()));
@@ -113,6 +124,10 @@ fn credential_repo_var_name(line: &str) -> Option<&str> {
         return None;
     }
 
+    let_binding_var_name(line)
+}
+
+fn let_binding_var_name(line: &str) -> Option<&str> {
     let binding = line.split_once("let ")?.1.trim_start();
     binding
         .strip_prefix("mut ")
