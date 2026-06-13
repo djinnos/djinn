@@ -75,7 +75,8 @@ use task_epic::{
     call_task_show, call_task_update, call_task_update_ac,
 };
 pub(crate) use task_epic::{
-    call_epic_show, call_epic_tasks, call_epic_update, call_proposal_ac_amend, call_proposal_ac_set,
+    call_epic_show, call_epic_tasks, call_epic_update, call_proposal_ac_amend,
+    call_proposal_ac_set, call_proposal_feedback_add,
 };
 pub(crate) use workspace::{
     call_apply_patch, call_code_search, call_edit, call_read, call_shell, call_write,
@@ -196,6 +197,7 @@ where
         }
         "proposal_show" => call_proposal_show(state, &call.arguments).await,
         "proposal_complete" => call_proposal_complete(state, &call.arguments).await,
+        "proposal_feedback_add" => call_proposal_feedback_add(state, &call.arguments).await,
         "proposal_ac_set" => call_proposal_ac_set(state, &call.arguments).await,
         "proposal_ac_amend" => call_proposal_ac_amend(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments, &project_ref).await,

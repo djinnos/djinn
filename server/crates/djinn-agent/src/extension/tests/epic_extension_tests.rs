@@ -286,6 +286,78 @@ async fn proposal_ac_set_stays_status_only_without_revision_bump() {
 }
 
 #[tokio::test]
+async fn proposal_feedback_add_records_blocked_reconcile_without_marking_reconciled() {
+    let db = create_test_db();
+    let proposal_repo = djinn_db::ProposalRepository::new(db.clone(), EventBus::noop());
+    let proposal = proposal_repo
+        .create(djinn_db::ProposalCreateInput {
+            title: "blocked reconcile proposal",
+            body: "body",
+            acceptance_criteria: Some(r#"[{"criterion":"Ship it","met":false}]"#),
+            status: Some("draft"),
+        })
+        .await
+        .expect("create proposal");
+    let built = proposal_repo
+        .set_building(&proposal.id, "builder")
+        .await
+        .expect("mark building");
+    let drifted = proposal_repo
+        .update(
+            &proposal.id,
+            djinn_db::ProposalUpdateInput {
+                title: "blocked reconcile proposal v2",
+                body: "body v2",
+                acceptance_criteria: r#"[{"criterion":"Ship it better","met":false}]"#,
+                status: "building",
+                superseded_by: None,
+            },
+        )
+        .await
+        .expect("amend while building");
+    assert!(drifted.pending_reconcile);
+
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let args = Some(
+        serde_json::json!({
+            "proposal_id": proposal.short_id,
+            "body": "new spec conflicts with existing graduated tasks",
+            "target_section": "reconcile",
+            "author_kind": "ai",
+            "author_model": "claude-fable-5"
+        })
+        .as_object()
+        .expect("args object")
+        .clone(),
+    );
+    let response = call_proposal_feedback_add(&state, &args)
+        .await
+        .expect("feedback succeeds");
+    assert_eq!(response["ok"], serde_json::json!(true));
+    assert_eq!(response["author_kind"], serde_json::json!("ai"));
+    assert_eq!(response["target_section"], serde_json::json!("reconcile"));
+
+    let feedback = proposal_repo
+        .feedback(&proposal.id)
+        .await
+        .expect("load feedback");
+    assert_eq!(feedback.len(), 1);
+    assert_eq!(feedback[0].author_kind, "ai");
+    assert_eq!(feedback[0].target_section.as_deref(), Some("reconcile"));
+
+    let reread = proposal_repo
+        .get(&proposal.id)
+        .await
+        .expect("reload proposal")
+        .expect("proposal exists");
+    assert_eq!(
+        reread.last_reconciled_revision_seq,
+        built.last_reconciled_revision_seq
+    );
+    assert!(reread.pending_reconcile);
+}
+
+#[tokio::test]
 async fn proposal_ac_set_records_successful_reconcile_for_graduated_epics() {
     let db = create_test_db();
     let project = create_test_project(&db).await;

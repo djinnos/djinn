@@ -1004,6 +1004,10 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
     // only be called on a `building` proposal with `revision_seq <=
     // latest_revision_seq`, and the tool enforces both.
     tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_feedback_add(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_mark_reconciled(),
         idempotent_mutation(),
     ));

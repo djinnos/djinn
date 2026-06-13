@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
-assertion_line: 782
 expression: tool_schemas_architect()
 ---
 [
@@ -1244,6 +1243,48 @@ expression: tool_schemas_architect()
             "type": "string"
           },
           "description": "Epics (UUIDs or short_ids; may be in other repos) that must CLOSE before this epic's breakdown auto-dispatches. Use to sequence epics — e.g. a consumer epic blocked on a schema epic."
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
+    "name": "proposal_feedback_add",
+    "description": "Add a feedback comment to a proposal. Architect reconcile tasks use this for the blocked-reconcile safety gate: pass `author_kind=\"ai\"`, `author_model`, `target_section=\"reconcile\"|\"build\"`, and a body explaining the conflict. This does NOT mark the proposal reconciled; on success the reconcile task must call `proposal_mark_reconciled` instead.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "proposal_id",
+        "body"
+      ],
+      "properties": {
+        "proposal_id": {
+          "type": "string",
+          "description": "Proposal UUID or short ID."
+        },
+        "body": {
+          "type": "string",
+          "description": "Feedback body explaining the discussion item or blocked reconcile conflict."
+        },
+        "target_section": {
+          "type": "string",
+          "description": "Optional pointer to the spec/build section; use \"reconcile\" or \"build\" for blocked reconcile feedback."
+        },
+        "parent_id": {
+          "type": "string",
+          "description": "Parent feedback id for a threaded reply."
+        },
+        "author_kind": {
+          "type": "string",
+          "description": "`user` (default) or `ai`; architect blocked-reconcile feedback must use `ai`."
+        },
+        "author_model": {
+          "type": "string",
+          "description": "Model id when author_kind is `ai`."
         }
       }
     },

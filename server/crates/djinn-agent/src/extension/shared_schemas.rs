@@ -308,6 +308,25 @@ pub(crate) fn tool_proposal_ac_set() -> RmcpTool {
     )
 }
 
+pub(crate) fn tool_proposal_feedback_add() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_feedback_add".to_string(),
+        "Add a feedback comment to a proposal. Architect reconcile tasks use this for the blocked-reconcile safety gate: pass `author_kind=\"ai\"`, `author_model`, `target_section=\"reconcile\"|\"build\"`, and a body explaining the conflict. This does NOT mark the proposal reconciled; on success the reconcile task must call `proposal_mark_reconciled` instead.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["proposal_id", "body"],
+            "properties": {
+                "proposal_id": {"type": "string", "description": "Proposal UUID or short ID."},
+                "body": {"type": "string", "description": "Feedback body explaining the discussion item or blocked reconcile conflict."},
+                "target_section": {"type": "string", "description": "Optional pointer to the spec/build section; use \"reconcile\" or \"build\" for blocked reconcile feedback."},
+                "parent_id": {"type": "string", "description": "Parent feedback id for a threaded reply."},
+                "author_kind": {"type": "string", "description": "`user` (default) or `ai`; architect blocked-reconcile feedback must use `ai`."},
+                "author_model": {"type": "string", "description": "Model id when author_kind is `ai`."}
+            }
+        }),
+    )
+}
+
 pub(crate) fn tool_proposal_mark_reconciled() -> RmcpTool {
     RmcpTool::new(
         "proposal_mark_reconciled".to_string(),

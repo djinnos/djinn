@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
-assertion_line: 777
 expression: names
 ---
 [
@@ -29,6 +28,7 @@ expression: names
   "epic_tasks",
   "epic_close",
   "epic_create",
+  "proposal_feedback_add",
   "proposal_mark_reconciled",
   "task_transition",
   "task_comment_add",

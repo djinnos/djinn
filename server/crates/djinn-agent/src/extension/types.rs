@@ -146,6 +146,20 @@ pub(super) struct ProposalAcSetParams {
 }
 
 #[derive(Deserialize)]
+pub(super) struct ProposalFeedbackAddParams {
+    pub proposal_id: String,
+    pub body: String,
+    #[serde(default)]
+    pub target_section: Option<String>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub author_kind: Option<String>,
+    #[serde(default)]
+    pub author_model: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct ProposalAcAmendParams {
     pub id: String,
     #[serde(default)]

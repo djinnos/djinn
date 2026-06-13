@@ -489,6 +489,52 @@ pub(crate) async fn call_proposal_complete(
     }))
 }
 
+/// Add an AI/user feedback entry to a proposal. Architect reconcile tasks use
+/// this as the blocked-reconcile safety-gate path: it records the conflict in
+/// the proposal discussion thread without advancing reconcile metadata.
+pub(crate) async fn call_proposal_feedback_add(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalFeedbackAddParams = parse_args(arguments)?;
+    let body = p.body.trim();
+    if body.is_empty() {
+        return Err("proposal_feedback_add requires a non-empty body".to_string());
+    }
+    let author_kind = p.author_kind.as_deref().unwrap_or("user");
+    if !matches!(author_kind, "user" | "ai") {
+        return Err(format!(
+            "invalid author_kind: {author_kind:?} (expected user or ai)"
+        ));
+    }
+
+    let proposal_repo = ProposalRepository::new(state.db.clone(), state.event_bus.clone());
+    let Some(proposal) = proposal_repo.resolve(&p.proposal_id).await.ok().flatten() else {
+        return Err(format!("proposal not found: {}", p.proposal_id));
+    };
+    let feedback = proposal_repo
+        .add_feedback(djinn_db::ProposalFeedbackCreateInput {
+            proposal_id: &proposal.id,
+            parent_id: p.parent_id.as_deref(),
+            author_kind,
+            author_model: p.author_model.as_deref(),
+            body,
+            target_section: p.target_section.as_deref(),
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "id": feedback.id,
+        "proposal_id": feedback.proposal_id,
+        "author_kind": feedback.author_kind,
+        "author_model": feedback.author_model,
+        "target_section": feedback.target_section,
+        "resolved_at": feedback.resolved_at,
+    }))
+}
+
 /// Reconcile a proposal's acceptance-criteria `met` flags (Planner Workflow E).
 /// Lightweight status annotation — does NOT bump a spec revision or clear
 /// sign-offs. Mirrors `task_update_ac`: the incoming list is merged by index
