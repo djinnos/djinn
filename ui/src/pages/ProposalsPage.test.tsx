@@ -362,7 +362,7 @@ describe("ProposalsPage", () => {
 
     expect(screen.getByRole("button", { name: "Hide diff" })).toHaveFocus();
     expect(screen.getByText(/Base body/)).toBeInTheDocument();
-    expect(screen.getByText(/Head body/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Head body/)).toHaveLength(2);
   });
 
   it("shows an inline error when proposal_list fails", async () => {
