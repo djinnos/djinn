@@ -22,7 +22,10 @@ impl DjinnMcpServer {
     ) -> Json<MemoryNoteResponse> {
         self.memory_write_with_decider(
             Parameters(p),
-            &LlmMemoryWriteDedupDecider::new(self.state.db().clone()),
+            &LlmMemoryWriteDedupDecider::new(
+                self.state.db().clone(),
+                djinn_core::auth_context::current_user_id(),
+            ),
         )
         .await
     }

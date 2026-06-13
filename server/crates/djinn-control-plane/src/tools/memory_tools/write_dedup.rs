@@ -20,9 +20,9 @@ pub(crate) struct LlmMemoryWriteDedupDecider {
 }
 
 impl LlmMemoryWriteDedupDecider {
-    pub(crate) fn new(db: djinn_db::Database) -> Self {
+    pub(crate) fn new(db: djinn_db::Database, user_id: Option<String>) -> Self {
         Self {
-            runtime: Box::new(LlmMemoryWriteProviderRuntime::new(db)),
+            runtime: Box::new(LlmMemoryWriteProviderRuntime::new(db, user_id)),
         }
     }
 

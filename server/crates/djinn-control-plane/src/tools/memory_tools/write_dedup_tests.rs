@@ -12,12 +12,17 @@ mod tests {
     }
     use async_trait::async_trait;
     use djinn_core::events::EventBus;
-    use djinn_db::{Database, NoteRepository, ProjectRepository};
+    use djinn_db::{
+        Database, NoteRepository, ProjectRepository, SettingsRepository, UserRepository,
+    };
+    use djinn_provider::provider::AuthMethod;
+    use djinn_provider::repos::CredentialRepository;
     use djinn_provider::{CompletionRequest, CompletionResponse};
 
     use crate::tools::memory_tools::write_dedup::{
         LlmMemoryWriteDedupDecider, apply_dedup_decision, maybe_apply_write_dedup,
     };
+    use crate::tools::memory_tools::write_dedup_runtime::LlmMemoryWriteProviderRuntime;
     use crate::tools::memory_tools::write_dedup_runtime::MemoryWriteProviderRuntime;
     use crate::tools::memory_tools::write_dedup_types::{
         MemoryWriteDedupDecider, MemoryWriteDedupDecision, MemoryWriteDedupDecisionInput,
@@ -60,6 +65,21 @@ mod tests {
             .create("test-project", "test", "test-project")
             .await
             .unwrap()
+    }
+
+    async fn seed_memory_model(db: &Database) {
+        SettingsRepository::new(db.clone(), EventBus::noop())
+            .set("settings.raw", r#"{"models":["openai/gpt-4.1-mini"]}"#)
+            .await
+            .unwrap();
+    }
+
+    async fn seed_user(db: &Database, github_id: i64, login: &str) -> String {
+        UserRepository::new(db.clone())
+            .upsert_from_github(github_id, login, None, None)
+            .await
+            .unwrap()
+            .id
     }
 
     #[tokio::test]
@@ -162,6 +182,96 @@ mod tests {
             MemoryWriteDedupDecision::ReuseExisting {
                 candidate_id: "note_1".to_string()
             }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn llm_runtime_resolves_private_credential_for_scoped_user_and_attaches_telemetry() {
+        let db = Database::open_in_memory().unwrap();
+        seed_memory_model(&db).await;
+        let user_a = seed_user(&db, 4001, "dedup-a").await;
+        let user_b = seed_user(&db, 4002, "dedup-b").await;
+        let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
+        credentials
+            .set_with_owner("openai", "OPENAI_API_KEY", "cred_a", Some(&user_a))
+            .await
+            .unwrap();
+        credentials
+            .set_with_owner("openai", "OPENAI_API_KEY", "cred_b", Some(&user_b))
+            .await
+            .unwrap();
+
+        for (user_id, expected_key) in [(&user_a, "cred_a"), (&user_b, "cred_b")] {
+            let runtime = LlmMemoryWriteProviderRuntime::new(db.clone(), Some(user_id.clone()));
+            let provider = runtime.resolve_provider().await.unwrap();
+            let config = provider.config_snapshot().unwrap();
+
+            match config.auth {
+                AuthMethod::BearerToken(key) => assert_eq!(key, expected_key),
+                _ => panic!("expected openai bearer-token auth"),
+            }
+
+            let telemetry = config.telemetry.expect("dedup telemetry attached");
+            assert_eq!(telemetry.operation.as_deref(), Some("memory_write_dedup"));
+            assert_eq!(telemetry.user_id.as_deref(), Some(user_id.as_str()));
+            assert_eq!(telemetry.agent_type.as_deref(), Some("memory_write_dedup"));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_session_user_without_org_shared_credential_falls_back_to_create_new() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        seed_memory_model(&db).await;
+        let private_user = seed_user(&db, 4003, "dedup-private-only").await;
+        CredentialRepository::new(db.clone(), EventBus::noop())
+            .set_with_owner(
+                "openai",
+                "OPENAI_API_KEY",
+                "private-only",
+                Some(&private_user),
+            )
+            .await
+            .unwrap();
+        assert!(
+            LlmMemoryWriteProviderRuntime::new(db.clone(), None)
+                .resolve_provider()
+                .await
+                .is_err(),
+            "background scope must not resolve a private-only credential"
+        );
+
+        let project = create_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+        repo.create(
+            &project.id,
+            "Existing Pattern",
+            "Use channels to coordinate background workers.",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let decider = LlmMemoryWriteDedupDecider::new(db.clone(), None);
+        let response = maybe_apply_write_dedup(
+            &repo,
+            &decider,
+            PendingWriteDedup {
+                project_path: tmp.path().to_str().unwrap(),
+                project_id: &project.id,
+                title: "Background Worker Pattern",
+                content: "Use channels to coordinate background workers and shutdown.",
+                note_type: "pattern",
+                status: None,
+                tags_json: "[]",
+            },
+        )
+        .await;
+
+        assert!(
+            response.is_none(),
+            "unscoped dedup must safely choose CreateNew instead of using another user's credential"
         );
     }
 }

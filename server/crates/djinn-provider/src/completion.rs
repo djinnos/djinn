@@ -369,7 +369,7 @@ pub(crate) async fn provider_config_for_model_for_user(
 ) -> Result<ProviderConfig> {
     match resolved.effective_provider_id.as_str() {
         "chatgpt_codex" => {
-            let tokens = CodexTokens::load_from_db(credential_repo)
+            let tokens = CodexTokens::load_from_db_for_user(credential_repo, user_id)
                 .await
                 .ok_or_else(|| {
                     anyhow!(
@@ -384,7 +384,7 @@ pub(crate) async fn provider_config_for_model_for_user(
             ))
         }
         "githubcopilot" => {
-            let tokens = CopilotTokens::load_from_db(credential_repo)
+            let tokens = CopilotTokens::load_from_db_for_user(credential_repo, user_id)
                 .await
                 .ok_or_else(|| {
                     anyhow!(
@@ -546,7 +546,7 @@ fn is_transient_error(error: &anyhow::Error) -> bool {
 mod tests {
     use std::pin::Pin;
     use std::sync::{
-        Mutex,
+        Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -590,17 +590,39 @@ mod tests {
     }
 
     fn credential(provider_id: &str, key_name: &str) -> Credential {
+        credential_with_owner(provider_id, key_name, None)
+    }
+
+    fn credential_with_owner(
+        provider_id: &str,
+        key_name: &str,
+        owner_user_id: Option<&str>,
+    ) -> Credential {
         Credential {
             id: "cred".to_string(),
             provider_id: provider_id.to_string(),
             key_name: key_name.to_string(),
-            owner_user_id: None,
+            owner_user_id: owner_user_id.map(ToOwned::to_owned),
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }
     }
 
+    fn ensure_test_vault_key() {
+        static INIT: OnceLock<()> = OnceLock::new();
+        INIT.get_or_init(|| {
+            let path = std::path::Path::new("/var/tmp/djinn-test-vault/vault.key");
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create test vault dir");
+            }
+            if !path.exists() {
+                std::fs::write(path, [7u8; 32]).expect("write test vault key");
+            }
+        });
+    }
+
     fn repo() -> CredentialRepository {
+        ensure_test_vault_key();
         let db = Database::open_in_memory().expect("test db");
         CredentialRepository::new(db, EventBus::noop())
     }
@@ -754,6 +776,135 @@ mod tests {
 
         assert_eq!(config.model_id, resolved.model.id);
         assert!(matches!(config.auth, AuthMethod::BearerToken(_)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn api_key_provider_config_honors_explicit_user_scope() {
+        ensure_test_vault_key();
+        let catalog = setup_catalog();
+        let db = Database::open_in_memory().expect("test db");
+        let users = UserRepository::new(db.clone());
+        let alice = users
+            .upsert_from_github(7001, "memory-config-alice", None, None)
+            .await
+            .expect("seed alice")
+            .id;
+        let bob = users
+            .upsert_from_github(7002, "memory-config-bob", None, None)
+            .await
+            .expect("seed bob")
+            .id;
+        let repo = CredentialRepository::new(db, EventBus::noop());
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "bob-secret", Some(&bob))
+            .await
+            .expect("save bob key");
+
+        let resolved = select_memory_model(
+            &catalog,
+            &[credential_with_owner(
+                "openai",
+                "OPENAI_API_KEY",
+                Some(&bob),
+            )],
+            Some("openai/gpt-4.1-mini"),
+        )
+        .expect("model should resolve from supplied listing");
+
+        let error = match provider_config_for_model_for_user(&resolved, &repo, Some(&alice)).await {
+            Ok(_) => panic!("alice must not read bob's key"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("missing credential 'OPENAI_API_KEY'")
+        );
+
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "alice-secret", Some(&alice))
+            .await
+            .expect("save alice key");
+        let config = provider_config_for_model_for_user(&resolved, &repo, Some(&alice))
+            .await
+            .expect("alice key should resolve");
+        match config.auth {
+            AuthMethod::BearerToken(token) => assert_eq!(token, "alice-secret"),
+            _ => panic!("expected bearer auth"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn codex_provider_config_honors_explicit_user_scope() {
+        ensure_test_vault_key();
+        let catalog = setup_catalog();
+        let db = Database::open_in_memory().expect("test db");
+        let users = UserRepository::new(db.clone());
+        let alice = users
+            .upsert_from_github(7003, "memory-config-codex-alice", None, None)
+            .await
+            .expect("seed alice")
+            .id;
+        let bob = users
+            .upsert_from_github(7004, "memory-config-codex-bob", None, None)
+            .await
+            .expect("seed bob")
+            .id;
+        let repo = CredentialRepository::new(db, EventBus::noop());
+        let bob_tokens = CodexTokens {
+            access_token: "bob-access".to_string(),
+            refresh_token: "bob-refresh".to_string(),
+            id_token: None,
+            expires_at: i64::MAX,
+            account_id: None,
+        };
+        repo.set_with_owner(
+            "chatgpt_codex",
+            "__OAUTH_CHATGPT_CODEX",
+            &serde_json::to_string(&bob_tokens).expect("serialize bob tokens"),
+            Some(&bob),
+        )
+        .await
+        .expect("save bob tokens");
+
+        let resolved = select_memory_model(
+            &catalog,
+            &[credential_with_owner(
+                "chatgpt_codex",
+                "__OAUTH_CHATGPT_CODEX",
+                Some(&bob),
+            )],
+            Some("openai/codex-mini-latest"),
+        )
+        .expect("oauth model should resolve from supplied listing");
+
+        let error = match provider_config_for_model_for_user(&resolved, &repo, Some(&alice)).await {
+            Ok(_) => panic!("alice must not read bob's tokens"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("missing OAuth tokens"));
+
+        let alice_tokens = CodexTokens {
+            access_token: "alice-access".to_string(),
+            refresh_token: "alice-refresh".to_string(),
+            id_token: None,
+            expires_at: i64::MAX,
+            account_id: None,
+        };
+        repo.set_with_owner(
+            "chatgpt_codex",
+            "__OAUTH_CHATGPT_CODEX",
+            &serde_json::to_string(&alice_tokens).expect("serialize alice tokens"),
+            Some(&alice),
+        )
+        .await
+        .expect("save alice tokens");
+
+        let config = provider_config_for_model_for_user(&resolved, &repo, Some(&alice))
+            .await
+            .expect("alice tokens should resolve");
+        match config.auth {
+            AuthMethod::BearerToken(token) => assert_eq!(token, "alice-access"),
+            _ => panic!("expected bearer auth"),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -732,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn route_parity_live_graph_is_no_larger_than_shadow_when_enabled() {
+    fn route_parity_live_graph_reports_allowlisted_axum_additions() {
         assert!(crate::route_extraction::route_parity_enabled_from_var(
             Some("1")
         ));
@@ -746,37 +746,37 @@ mod tests {
             }
             async fn list_agents() {}
         "#;
-        let shadow_hits = 2usize;
         let temp = tempfile::tempdir().expect("create temp fixture dir");
         let root = temp.path();
         std::fs::write(root.join("routes.rs"), source).expect("write temporary route fixture");
-        let mut graph = fixture_graph(&[("routes.rs", source)]);
+        let baseline = fixture_graph(&[("routes.rs", source)]);
+        let mut live = baseline.clone();
 
-        let report = detect_axum_routes(&mut graph, root);
-        let live_route_nodes = graph
-            .graph()
-            .node_weights()
-            .filter(|node| node.kind == RepoGraphNodeKind::Route)
-            .count();
-        let live_handles_edges = graph
-            .graph()
-            .edge_references()
-            .filter(|edge| edge.weight().kind == RepoGraphEdgeKind::HandlesRoute)
-            .count();
+        let report = detect_axum_routes(&mut live, root);
+        let parity =
+            crate::route_extraction::assert_route_extraction_graph_parity(&baseline, &live)
+                .expect("axum extractor may add only Route nodes and HandlesRoute edges");
 
         assert_eq!(
             report.hits.len(),
             1,
             "live extractor applies same-file dedup"
         );
-        assert!(
-            live_route_nodes <= shadow_hits,
-            "DJINN_ROUTE_PARITY live route graph must not exceed shadow route nodes",
+        assert!(parity.passed);
+        assert_eq!(
+            parity.allowed_added_nodes[&RepoGraphNodeKind::Route].count,
+            1
+        );
+        assert_eq!(
+            parity.allowed_added_edges[&RepoGraphEdgeKind::HandlesRoute].count,
+            1
         );
         assert!(
-            live_handles_edges <= shadow_hits,
-            "DJINN_ROUTE_PARITY live route graph must not exceed shadow route edges",
+            !parity
+                .allowed_added_edges
+                .contains_key(&RepoGraphEdgeKind::Fetches)
         );
+        assert!(parity.render_for_ci().contains("allowed added edges"));
     }
 
     #[test]

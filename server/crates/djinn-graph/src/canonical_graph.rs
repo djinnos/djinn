@@ -75,12 +75,26 @@ pub fn derive_graph_caches(
 fn run_route_extraction_post_processor(
     graph: &mut crate::repo_graph::RepoDependencyGraph,
     project_root: &Path,
-) -> Option<crate::route_extraction::RouteExtractionReport> {
+) -> Result<Option<crate::route_extraction::RouteExtractionReport>, String> {
     if !crate::route_extraction::route_detection_enabled() {
-        return None;
+        return Ok(None);
     }
 
+    // Temporary ykcg Route rollout gate: snapshot the graph after
+    // `build_with_source` and DB-access but before route extraction. This is
+    // the `DJINN_ROUTE_DETECTION=0` baseline shape; it must not become a
+    // permanent alternate graph pipeline and should be deleted after rollout.
+    let parity_baseline = crate::route_extraction::route_parity_enabled().then(|| graph.clone());
     let report = crate::route_extraction::detect_routes(graph, project_root);
+    if let Some(baseline) = &parity_baseline {
+        let parity_report =
+            crate::route_extraction::assert_route_extraction_graph_parity(baseline, graph)
+                .map_err(|err| format!("route extraction parity failed:\n{err}"))?;
+        tracing::info!(
+            route_parity_report = %parity_report.render_for_ci(),
+            "ensure_canonical_graph: route_extraction parity gate passed"
+        );
+    }
     for (file, messages) in &report.file_failures {
         for message in messages {
             tracing::warn!(
@@ -103,7 +117,7 @@ fn run_route_extraction_post_processor(
         "ensure_canonical_graph: route_extraction pass complete"
     );
 
-    Some(report)
+    Ok(Some(report))
 }
 
 /// Public entrypoint invoked by `djinn-agent-worker warm-graph
@@ -332,10 +346,10 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             let _ = std::fs::remove_dir_all(&output_dir_for_blocking);
 
             let t_build = std::time::Instant::now();
-            let mut graph = crate::repo_graph::RepoDependencyGraph::build_with_source(
+            let mut graph = crate::repo_graph::RepoDependencyGraph::try_build_with_source(
                 &parsed,
                 Some(&project_root_for_blocking),
-            );
+            )?;
             // DB-access post-processor: opt-in via
             // `DJINN_DB_ACCESS_DETECTION`. Reads files from the index
             // tree and stamps `Reads`/`Writes` edges from caller
@@ -355,7 +369,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             // stamped any source-derived edges. Keep it before cache derivation
             // and bincode serialization so Route/HandlesRoute/Fetches metadata
             // is installed both in memory and in repo_graph_cache.
-            let _ = run_route_extraction_post_processor(&mut graph, &project_root_for_blocking);
+            let _ = run_route_extraction_post_processor(&mut graph, &project_root_for_blocking)?;
             let build_ms = t_build.elapsed().as_millis() as u64;
             let node_count = graph.node_count();
             let edge_count = graph.edge_count();
@@ -1395,7 +1409,8 @@ mod tests {
         for disabled_value in ["0", "false", "no", "off", " OFF "] {
             // SAFETY: test-only env mutation is serialized by ROUTE_DETECTION_ENV_LOCK.
             unsafe { std::env::set_var("DJINN_ROUTE_DETECTION", disabled_value) };
-            let report = run_route_extraction_post_processor(&mut graph, project_root);
+            let report = run_route_extraction_post_processor(&mut graph, project_root)
+                .expect("disabled route extraction should not fail");
 
             assert!(
                 report.is_none(),
@@ -1433,6 +1448,7 @@ mod tests {
         let mut graph = crate::repo_graph::RepoDependencyGraph::build(&[index]);
 
         let report = run_route_extraction_post_processor(&mut graph, project_root)
+            .expect("default-on route extraction should not fail")
             .expect("default-on route extraction should run");
 
         assert_eq!(report.route_nodes_added, 0);

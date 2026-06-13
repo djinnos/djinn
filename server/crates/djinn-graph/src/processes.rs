@@ -33,6 +33,10 @@ use petgraph::visit::EdgeRef;
 use sha2::{Digest, Sha256};
 
 use crate::repo_graph::{RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind, RepoNodeKey};
+use crate::ykcg_parity::{
+    YkcgExtractorParityConfig, YkcgExtractorParityError, YkcgExtractorParityReport,
+    assert_ykcg_extractor_graph_parity,
+};
 
 /// Hard cap on the number of candidate outgoing edges a step can have
 /// before the trace bails out. Tuned to match the plan's "branch
@@ -55,15 +59,67 @@ const PROCESS_ID_HEX_LEN: usize = 16;
 /// when set to `0` / `false`. Default = on.
 pub const PROCESS_DETECTION_FLAG: &str = "DJINN_PROCESS_DETECTION";
 
-/// Returns `true` when the process detector should run.
-pub fn process_detection_enabled() -> bool {
-    match std::env::var(PROCESS_DETECTION_FLAG) {
-        Ok(value) => !matches!(
+/// Temporary rollout flag for the Process enrichment graph-parity gate.
+///
+/// Default = on. While Process enrichment is rolling out, the build path keeps a
+/// short-lived baseline-vs-live seam around the detector and proves through the
+/// reusable ykcg parity adapter that only `Process` nodes and `StepInProcess`
+/// edges were added. Delete this flag and seam once the extractor ships broadly;
+/// it is not a permanent forked graph pipeline.
+pub const PROCESS_PARITY_FLAG: &str = "DJINN_PROCESS_PARITY";
+
+fn env_flag_enabled(value: Option<&str>) -> bool {
+    match value {
+        Some(value) => !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "0" | "false" | "no" | "off"
         ),
-        Err(_) => true,
+        None => true,
     }
+}
+
+/// Returns `true` when the process detector should run.
+pub fn process_detection_enabled() -> bool {
+    process_detection_enabled_from_var(std::env::var(PROCESS_DETECTION_FLAG).ok().as_deref())
+}
+
+/// Pure helper for tests/callers that already resolved the env var.
+pub fn process_detection_enabled_from_var(value: Option<&str>) -> bool {
+    env_flag_enabled(value)
+}
+
+/// Returns `true` when process parity behavior should be active.
+pub fn process_parity_enabled() -> bool {
+    process_parity_enabled_from_var(std::env::var(PROCESS_PARITY_FLAG).ok().as_deref())
+}
+
+/// Pure helper for tests/callers that already resolved the env var.
+pub fn process_parity_enabled_from_var(value: Option<&str>) -> bool {
+    env_flag_enabled(value)
+}
+
+/// ykcg parity config for the Process enrichment rollout gate.
+pub fn process_enrichment_parity_config() -> YkcgExtractorParityConfig {
+    YkcgExtractorParityConfig::new(
+        "process-enrichment",
+        [RepoGraphNodeKind::Process],
+        [RepoGraphEdgeKind::StepInProcess],
+    )
+}
+
+/// Assert process-enrichment parity between a disabled baseline and enabled graph.
+///
+/// The baseline must be the canonical graph after entry-point detection but
+/// before Process enrichment (the `DJINN_PROCESS_DETECTION=0` shape); `live`
+/// must be the graph after the enabled detector pass. This delegates to the
+/// ykcg adapter so all pre-existing file/node/edge/community populations remain
+/// strict while Process/StepInProcess additions are reported as allowed rollout
+/// output.
+pub fn assert_process_enrichment_graph_parity(
+    baseline: &RepoDependencyGraph,
+    live: &RepoDependencyGraph,
+) -> Result<YkcgExtractorParityReport, YkcgExtractorParityError> {
+    assert_ykcg_extractor_graph_parity(baseline, live, &process_enrichment_parity_config())
 }
 
 /// One detected execution-flow process pinned to a chain of nodes in
@@ -345,7 +401,7 @@ mod tests {
 
     use super::*;
     use crate::entry_points::detect_entry_points;
-    use crate::repo_graph::RepoDependencyGraph;
+    use crate::repo_graph::{RepoDependencyGraph, RepoGraphBuildOptions};
     use crate::scip_parser::{
         ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipSymbol,
         ScipSymbolKind, ScipSymbolRole, ScipVisibility,
@@ -566,6 +622,93 @@ mod tests {
     }
 
     #[test]
+    fn process_parity_defaults_enabled_and_accepts_env_matrix() {
+        assert!(process_detection_enabled_from_var(None));
+        assert!(process_parity_enabled_from_var(None));
+        for value in ["1", "true", "yes", "on", "anything"] {
+            assert!(process_detection_enabled_from_var(Some(value)));
+            assert!(process_parity_enabled_from_var(Some(value)));
+        }
+        for value in ["0", "false", "no", "off", " OFF "] {
+            assert!(!process_detection_enabled_from_var(Some(value)));
+            assert!(!process_parity_enabled_from_var(Some(value)));
+        }
+    }
+
+    #[test]
+    fn process_parity_reports_allowed_additions_and_core_counts() {
+        let baseline = RepoDependencyGraph::build_with_options(
+            &[linear_chain_index()],
+            RepoGraphBuildOptions::from_env()
+                .with_process_detection(false)
+                .with_process_parity(false),
+        );
+        let live = RepoDependencyGraph::build_with_options(
+            &[linear_chain_index()],
+            RepoGraphBuildOptions::from_env()
+                .with_process_detection(true)
+                .with_process_parity(true),
+        );
+
+        let parity = assert_process_enrichment_graph_parity(&baseline, &live)
+            .expect("Process/StepInProcess additions should be allowlisted");
+
+        assert!(baseline.processes().is_empty());
+        assert!(!live.processes().is_empty());
+        assert!(parity.passed);
+        assert_eq!(
+            parity.node_counts_by_kind.baseline[&RepoGraphNodeKind::File],
+            parity.node_counts_by_kind.live[&RepoGraphNodeKind::File]
+        );
+        assert_eq!(
+            parity.node_counts_by_kind.baseline[&RepoGraphNodeKind::Symbol],
+            parity.node_counts_by_kind.live[&RepoGraphNodeKind::Symbol]
+        );
+        assert_eq!(
+            parity.allowed_added_nodes[&RepoGraphNodeKind::Process].count,
+            live.processes().len()
+        );
+        assert_eq!(
+            parity.allowed_added_edges[&RepoGraphEdgeKind::StepInProcess].count,
+            live.processes().iter().map(|p| p.step_count).sum::<usize>()
+        );
+        let rendered = parity.render_for_ci();
+        assert!(rendered.contains("process-enrichment"));
+        assert!(rendered.contains("allowed added nodes"));
+        assert!(rendered.contains("allowed added edges"));
+    }
+
+    #[test]
+    fn process_parity_gate_fails_core_node_drift_with_actionable_report() {
+        let baseline = RepoDependencyGraph::build_with_options(
+            &[linear_chain_index()],
+            RepoGraphBuildOptions::from_env()
+                .with_process_detection(false)
+                .with_process_parity(false),
+        );
+        let mut live = baseline.clone();
+        live.ensure_table_node("public.users");
+
+        let err = assert_process_enrichment_graph_parity(&baseline, &live)
+            .expect_err("core table additions are not Process enrichment output");
+        let YkcgExtractorParityError::Diff(report) = err;
+
+        assert!(!report.passed);
+        let diff = report.failing_diff.as_ref().expect("failing diff");
+        assert_eq!(
+            diff.nodes
+                .added_counts_by_kind
+                .get(&RepoGraphNodeKind::Table)
+                .copied(),
+            Some(1)
+        );
+        let rendered = report.render_for_ci();
+        assert!(rendered.contains("process-enrichment"));
+        assert!(rendered.contains("failing diff samples"));
+        assert!(rendered.contains("table:public.users"));
+    }
+
+    #[test]
     fn processes_for_node_returns_membership() {
         let graph = RepoDependencyGraph::build(&[linear_chain_index()]);
         // Find the `b` symbol node — it should be a step in the
@@ -616,21 +759,19 @@ mod tests {
 
     #[test]
     fn process_detection_flag_disables_detector() {
-        // Verify the gate at the function level rather than mutating
-        // process-wide env vars (cargo test runs tests in parallel,
-        // so a `set_var` here would race with sibling tests that
-        // expect detection enabled). The default-on / off-on-"false"
-        // matrix is exercised directly through
-        // `process_detection_enabled` instead.
-        assert!(process_detection_enabled() || !process_detection_enabled());
-        // Walking the graph with detection disabled is the production
-        // path the gate guards. Build a graph with detection forcibly
-        // skipped (we just don't call `detect_processes` here):
-        let mut graph = RepoDependencyGraph::build(&[linear_chain_index()]);
-        graph.set_processes(Vec::new());
+        // Build a graph with detection forcibly skipped without mutating
+        // process-wide env vars (cargo test runs tests in parallel, so a
+        // `set_var` here would race with sibling tests that expect detection
+        // enabled).
+        let graph = RepoDependencyGraph::build_with_options(
+            &[linear_chain_index()],
+            RepoGraphBuildOptions::from_env()
+                .with_process_detection(false)
+                .with_process_parity(false),
+        );
         assert!(
             graph.processes().is_empty(),
-            "set_processes(empty) must clear the sidecar"
+            "disabled process detection must leave the sidecar empty"
         );
     }
 
