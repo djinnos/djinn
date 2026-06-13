@@ -796,6 +796,21 @@ impl ProposalRepository {
         Ok(())
     }
 
+    /// Drop one graduated-epic link for a proposal. Idempotent.
+    ///
+    /// This is the scoped counterpart to [`Self::unlink_epics`], used by
+    /// proposal reconcile when retiring one obsolete epic subtree while leaving
+    /// unrelated graduated epics attached to the still-building proposal.
+    pub async fn unlink_epic(&self, proposal_id: &str, epic_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("DELETE FROM proposal_epics WHERE proposal_id = $1 AND epic_id = $2")
+            .bind(proposal_id)
+            .bind(epic_id)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
     /// Record the `epic_breakdown` task created at graduation.
     pub async fn set_breakdown_task(&self, proposal_id: &str, task_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
