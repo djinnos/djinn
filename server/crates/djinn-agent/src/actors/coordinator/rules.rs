@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy coordinator rules module over size-guard threshold; split when touched substantively.
 // Coordinator tick rules (ADR-034):
 //   (1) Spike/research task closure → create planning task for Planner.
 //   (2) Batch completion (all worker tasks closed under open epic) → new planning task.
@@ -1529,13 +1530,17 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn proposal_reconcile_dispatches_once_for_building_revision_drift() {
-        use djinn_db::{ProposalCreateInput, ProposalRepository, ProposalUpdateInput};
+        use djinn_db::{ProposalCreateInput, ProposalRepository, ProposalUpdateInput, UserRepository};
 
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let project = test_helpers::create_test_project(&db).await;
         let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
         let proposal_repo = ProposalRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let build_owner = UserRepository::new(db.clone())
+            .upsert_from_github(42, "build-owner", None, None)
+            .await
+            .unwrap();
 
         let proposal = proposal_repo
             .create(ProposalCreateInput {
@@ -1551,7 +1556,7 @@ mod tests {
             .await
             .unwrap();
         proposal_repo
-            .set_building(&proposal.id, "user-x")
+            .set_building(&proposal.id, &build_owner.id)
             .await
             .unwrap();
         let drifted = proposal_repo
@@ -1604,7 +1609,7 @@ mod tests {
         assert!(task.epic_id.is_none());
         assert_eq!(task.priority, PRIORITY_CRITICAL);
         assert_eq!(task.owner, "planner");
-        assert_eq!(task.created_by_user_id.as_deref(), Some("user-x"));
+        assert_eq!(task.created_by_user_id.as_deref(), Some(build_owner.id.as_str()));
         assert!(task.design.contains("Single-flight / coalesce first"));
         assert!(task.design.contains("do **not** re-scope running tasks"));
         assert!(
