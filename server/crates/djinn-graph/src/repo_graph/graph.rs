@@ -141,6 +141,43 @@ pub struct SymbolRange {
     pub node: NodeIndex,
 }
 
+/// Temporary build toggles for ykcg extractor rollout parity tests.
+///
+/// This is deliberately narrow: production build paths derive these values from
+/// env flags, while tests can construct the Process-disabled baseline without
+/// racing on global process environment. Delete the Process fields with the
+/// temporary Process dual-build seam after rollout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepoGraphBuildOptions {
+    pub process_detection_enabled: bool,
+    pub process_parity_enabled: bool,
+}
+
+impl RepoGraphBuildOptions {
+    pub fn from_env() -> Self {
+        Self {
+            process_detection_enabled: crate::processes::process_detection_enabled(),
+            process_parity_enabled: crate::processes::process_parity_enabled(),
+        }
+    }
+
+    pub fn with_process_detection(mut self, enabled: bool) -> Self {
+        self.process_detection_enabled = enabled;
+        self
+    }
+
+    pub fn with_process_parity(mut self, enabled: bool) -> Self {
+        self.process_parity_enabled = enabled;
+        self
+    }
+}
+
+impl Default for RepoGraphBuildOptions {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
 /// Computed audit metadata for route-consumer edges. Kept out of persisted edge
 /// structs so old graph artifacts remain compatible while op-layer callers can
 /// still display the language chain that justified a `Fetches`/route link.
@@ -201,6 +238,16 @@ impl RepoDependencyGraph {
         Self::build_with_source(indices, None)
     }
 
+    /// Build with explicit rollout toggles for tests and temporary extractor
+    /// parity seams. Production callers should use [`Self::build`] /
+    /// [`Self::build_with_source`] so env flags remain the single live control
+    /// plane; this helper exists to construct the disabled baseline in parity
+    /// tests without mutating process-wide environment variables.
+    pub fn build_with_options(indices: &[ParsedScipIndex], options: RepoGraphBuildOptions) -> Self {
+        Self::try_build_with_source_options(indices, None, options)
+            .expect("repo graph build should satisfy enabled parity gates")
+    }
+
     /// Build with an optional project-clone root. When `project_root` is
     /// `Some`, the edge-classification path will read source files via
     /// the [`crate::access_classifier::AccessClassifier`] to recover
@@ -209,6 +256,34 @@ impl RepoDependencyGraph {
     /// Tests that don't need access classification should call
     /// [`Self::build`] (no on-disk file required).
     pub fn build_with_source(indices: &[ParsedScipIndex], project_root: Option<&Path>) -> Self {
+        Self::try_build_with_source_options(
+            indices,
+            project_root,
+            RepoGraphBuildOptions::from_env(),
+        )
+        .expect("repo graph build should satisfy enabled parity gates")
+    }
+
+    /// Fallible form of [`Self::build_with_source`] used by canonical graph
+    /// warming so temporary rollout parity failures surface as structured,
+    /// actionable errors instead of panics.
+    pub fn try_build_with_source(
+        indices: &[ParsedScipIndex],
+        project_root: Option<&Path>,
+    ) -> Result<Self, String> {
+        Self::try_build_with_source_options(
+            indices,
+            project_root,
+            RepoGraphBuildOptions::from_env(),
+        )
+    }
+
+    /// Fallible build with explicit temporary rollout toggles.
+    pub fn try_build_with_source_options(
+        indices: &[ParsedScipIndex],
+        project_root: Option<&Path>,
+        options: RepoGraphBuildOptions,
+    ) -> Result<Self, String> {
         // The builder lives in `super::builder` (task `3hrr` placeholder
         // until that follow-up lands) and is reachable through `super`
         // because `graph` is a child of the parent module. For now this
@@ -235,9 +310,24 @@ impl RepoDependencyGraph {
         // `Process` synthetic node + `StepInProcess` edges. Off-by-
         // default escape hatch via the `DJINN_PROCESS_DETECTION`
         // env var. No-op when entry-point detection didn't fire.
-        if crate::processes::process_detection_enabled() {
+        if options.process_detection_enabled {
+            // Temporary ykcg Process rollout seam: snapshot the graph after
+            // entry-point detection but before Process enrichment. This is the
+            // `DJINN_PROCESS_DETECTION=0` baseline shape; it must not become a
+            // permanent alternate graph pipeline and should be deleted after
+            // Process enrichment rollout.
+            let parity_baseline = options.process_parity_enabled.then(|| graph.clone());
             let processes = crate::processes::detect_processes(&mut graph);
             graph.set_processes(processes);
+            if let Some(baseline) = &parity_baseline {
+                let parity_report =
+                    crate::processes::assert_process_enrichment_graph_parity(baseline, &graph)
+                        .map_err(|err| format!("process enrichment parity failed:\n{err}"))?;
+                tracing::info!(
+                    process_parity_report = %parity_report.render_for_ci(),
+                    "repo graph build: process enrichment parity gate passed"
+                );
+            }
         }
         // Iteration 26: attach per-function complexity metrics
         // (cyclomatic, cognitive, nloc, max_nesting, param_count) to
@@ -250,7 +340,7 @@ impl RepoDependencyGraph {
                 std::fs::read_to_string(root.join(rel)).ok()
             });
         }
-        graph
+        Ok(graph)
     }
 
     pub fn graph(&self) -> &DiGraph<RepoGraphNode, RepoGraphEdge> {
