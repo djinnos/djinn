@@ -8,9 +8,10 @@ use djinn_memory::Note;
 pub(crate) fn schedule_summary_regeneration(server: &DjinnMcpServer, note_id: &str) {
     let db = server.state.db().clone();
     let note_id = note_id.to_string();
+    let user_id = djinn_core::auth_context::current_user_id();
     tokio::spawn(async move {
-        let service = NoteSummaryService::new(db.clone());
-        match djinn_provider::resolve_memory_provider(&db).await {
+        let service = NoteSummaryService::new_for_user(db.clone(), user_id.clone());
+        match djinn_provider::resolve_memory_provider_for_user(&db, user_id.as_deref()).await {
             Ok(_) => service.generate_for_note_ids(&[note_id]).await,
             Err(_) => service.apply_fallback_for_note_id(&note_id).await,
         }
@@ -43,6 +44,7 @@ pub(crate) async fn detect_emit_and_schedule_contradictions(
         ));
 
     let input = ContradictionAnalysisInput {
+        user_id: djinn_core::auth_context::current_user_id(),
         note_id: note.id.clone(),
         note_title: note.title.clone(),
         note_summary: note

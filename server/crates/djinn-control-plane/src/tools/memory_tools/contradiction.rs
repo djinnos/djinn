@@ -4,7 +4,9 @@
 use djinn_core::events::EventBus;
 use djinn_db::{CONTRADICTION, NoteRepository, STALE_CITATION};
 use djinn_memory::ContradictionCandidate;
-use djinn_provider::{CompletionRequest, complete, provider::LlmProvider, resolve_memory_provider};
+use djinn_provider::{
+    CompletionRequest, complete, provider::LlmProvider, resolve_memory_provider_for_user,
+};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -64,6 +66,9 @@ fn render_classification_prompt(
 
 /// Input for the contradiction analysis worker task.
 pub(crate) struct ContradictionAnalysisInput {
+    /// Caller scope captured when the request scheduled this background work.
+    /// `None` is intentional org-shared-only background behavior.
+    pub user_id: Option<String>,
     pub note_id: String,
     pub note_title: String,
     pub note_summary: String,
@@ -98,7 +103,7 @@ pub(crate) async fn run_contradiction_analysis(
     db: djinn_db::Database,
     input: ContradictionAnalysisInput,
 ) {
-    let provider = match resolve_memory_provider(&db).await {
+    let provider = match resolve_memory_provider_for_user(&db, input.user_id.as_deref()).await {
         Ok(p) => p,
         Err(e) => {
             warn!(error = %e, "contradiction analysis: LLM unavailable, skipping");
@@ -396,6 +401,7 @@ mod tests {
 
         let provider = MockLlmProvider::new(r#"{"relation":"contradicts"}"#);
         let input = ContradictionAnalysisInput {
+            user_id: None,
             note_id: id1.clone(),
             note_title: note1_before.title.clone(),
             note_summary: note1_before.content.chars().take(500).collect(),
@@ -452,6 +458,7 @@ mod tests {
 
         let provider = MockLlmProvider::new(r#"{"relation":"supersedes"}"#);
         let input = ContradictionAnalysisInput {
+            user_id: None,
             note_id: id1.clone(),
             note_title: note1_before.title.clone(),
             note_summary: note1_before.content.chars().take(500).collect(),
@@ -500,6 +507,7 @@ mod tests {
 
         let provider = MockLlmProvider::new(r#"{"relation":"elaborates"}"#);
         let input = ContradictionAnalysisInput {
+            user_id: None,
             note_id: id1.clone(),
             note_title: note1_before.title.clone(),
             note_summary: note1_before.content.chars().take(500).collect(),
@@ -537,6 +545,7 @@ mod tests {
 
         let provider = MockLlmProvider::new(r#"{"relation":"compatible"}"#);
         let input = ContradictionAnalysisInput {
+            user_id: None,
             note_id: id1.clone(),
             note_title: note1_before.title.clone(),
             note_summary: note1_before.content.chars().take(500).collect(),
