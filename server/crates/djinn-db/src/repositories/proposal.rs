@@ -1988,11 +1988,12 @@ mod tests {
         // and `mark_reconciled` advances the build baseline, clears
         // `pending_reconcile`, stamps `reconciled_at`, refreshes the row, and
         // emits a `proposal_updated` event a non-noop bus can capture.
+        let db = test_db();
         let (bus, captured) = capturing_bus();
-        let repo = ProposalRepository::new(test_db(), bus);
-        let proj = insert_project(&test_db(), "svc-reconcile").await;
+        let repo = ProposalRepository::new(db.clone(), bus);
+        let proj = insert_project(&db, "svc-reconcile").await;
         let p = repo.create(create_input("Reconcile")).await.unwrap();
-        let epic = insert_epic(&test_db(), &proj, "re01").await;
+        let epic = insert_epic(&db, &proj, "re01").await;
         repo.link_epic(&p.id, &epic, &proj).await.unwrap();
         let building = repo.set_building(&p.id, "user-x").await.unwrap();
         assert_eq!(building.last_reconciled_revision_seq, Some(1));
