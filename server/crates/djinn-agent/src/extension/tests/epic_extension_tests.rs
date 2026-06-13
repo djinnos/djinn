@@ -284,3 +284,72 @@ async fn proposal_ac_set_stays_status_only_without_revision_bump() {
     assert_eq!(criteria[0]["met"], true);
     assert_eq!(criteria[1]["criterion"], "Also keep");
 }
+
+#[tokio::test]
+async fn proposal_ac_set_records_successful_reconcile_for_graduated_epics() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let proposal_repo = djinn_db::ProposalRepository::new(db.clone(), EventBus::noop());
+    let proposal = proposal_repo
+        .create(djinn_db::ProposalCreateInput {
+            title: "reconcile proposal",
+            body: "body",
+            acceptance_criteria: Some(r#"[{"criterion":"Ship it","met":false}]"#),
+            status: Some("approved"),
+        })
+        .await
+        .expect("create proposal");
+    proposal_repo
+        .link_epic(&proposal.id, &epic.id, &project.id)
+        .await
+        .expect("link graduated epic");
+    proposal_repo
+        .set_building(&proposal.id, "builder")
+        .await
+        .expect("mark building");
+    let drifted = proposal_repo
+        .update(
+            &proposal.id,
+            djinn_db::ProposalUpdateInput {
+                title: "reconcile proposal v2",
+                body: "body v2",
+                acceptance_criteria: r#"[{"criterion":"Ship it better","met":false}]"#,
+                status: "building",
+                superseded_by: None,
+            },
+        )
+        .await
+        .expect("amend while building");
+    assert_eq!(drifted.latest_revision_seq, 2);
+    assert!(drifted.pending_reconcile);
+
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let args = Some(
+        serde_json::json!({
+            "id": proposal.short_id,
+            "acceptance_criteria": [{"met": true}],
+        })
+        .as_object()
+        .expect("args object")
+        .clone(),
+    );
+    let response = call_proposal_ac_set(&state, &args)
+        .await
+        .expect("set succeeds");
+    assert_eq!(response["ok"], serde_json::json!(true));
+    assert_eq!(response["met"], serde_json::json!(1));
+
+    let reconciled = proposal_repo
+        .get(&proposal.id)
+        .await
+        .expect("reload proposal")
+        .expect("proposal exists");
+    assert_eq!(reconciled.last_reconciled_revision_seq, Some(2));
+    assert!(!reconciled.pending_reconcile);
+    let latest_by_epic = proposal_repo
+        .latest_epic_reconciliations(&proposal.id)
+        .await
+        .expect("latest epic reconciliations");
+    assert_eq!(latest_by_epic.get(&epic.id), Some(&2));
+}

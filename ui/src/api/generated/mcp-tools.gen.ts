@@ -5007,6 +5007,8 @@ export namespace ProposalShowOutputSchema {
    */
   epic_title: string
   project_path: string
+  reconciled_at_revision_seq: (number | null)
+  needs_reconcile: boolean
   status: string
   [k: string]: any
   }
