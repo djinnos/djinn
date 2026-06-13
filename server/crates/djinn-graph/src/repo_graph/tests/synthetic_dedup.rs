@@ -135,6 +135,54 @@ fn tools_without_workspace_do_not_merge_across_unknown_projects() {
     );
 }
 
+#[test]
+fn tool_additions_use_ykcg_parity_allowlist_path() {
+    let baseline = RepoDependencyGraph::build(&[fixture_index()]);
+    let mut live = baseline.clone();
+    live.ensure_tool_node(
+        "agents.list",
+        "agents.list",
+        Some("rust"),
+        Some("root"),
+        Some(Path::new("src/tools/agents.rs")),
+    );
+
+    let allowlisted = crate::ykcg_parity::YkcgExtractorParityConfig::new(
+        "tool-extractor",
+        [RepoGraphNodeKind::Tool],
+        [],
+    );
+    let report =
+        crate::ykcg_parity::assert_ykcg_extractor_graph_parity(&baseline, &live, &allowlisted)
+            .expect("explicitly allowlisted Tool additions should pass");
+
+    assert!(report.passed);
+    assert_eq!(
+        report.allowed_added_nodes[&RepoGraphNodeKind::Tool].count,
+        1
+    );
+    assert!(
+        report.allowed_added_nodes[&RepoGraphNodeKind::Tool]
+            .samples
+            .iter()
+            .any(|sample| sample.contains("agents.list")),
+        "structured report should sample the allowed Tool addition: {report:#?}"
+    );
+    assert!(report.render_for_ci().contains("allowed added nodes"));
+
+    let strict =
+        crate::ykcg_parity::YkcgExtractorParityConfig::new("tool-extractor-strict", [], []);
+    let err = crate::ykcg_parity::assert_ykcg_extractor_graph_parity(&baseline, &live, &strict)
+        .expect_err("unallowlisted Tool additions must fail");
+    let crate::ykcg_parity::YkcgExtractorParityError::Diff(report) = err;
+    assert!(!report.passed);
+    assert!(report.allowed_added_nodes.is_empty());
+    let diff = report
+        .failing_diff
+        .expect("strict report should retain the diff");
+    assert_eq!(diff.nodes.added_counts_by_kind[&RepoGraphNodeKind::Tool], 1);
+}
+
 fn symbol_node(symbol: &str, display_name: &str) -> RepoGraphNode {
     RepoGraphNode {
         id: RepoNodeKey::Symbol(symbol.to_string()),
