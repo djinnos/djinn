@@ -285,10 +285,10 @@ pub struct ProposalMarkReconciledParams {
     /// against. Stamped into `last_reconciled_revision_seq` so the coordinator's
     /// drift sweep treats the row as caught up.
     pub revision_seq: i32,
-    /// Free-form summary of the reconcile outcome (e.g. what epics/tasks were
-    /// re-mapped or closed). Recorded into the proposal's `updated_at` audit
-    /// window only; the durable reconcile stamp is the row-level
-    /// `last_reconciled_revision_seq`/`reconciled_at` pair.
+    /// Optional free-form summary of the reconcile outcome (e.g. what
+    /// epics/tasks were re-mapped or closed). Accepted for forward-compatible
+    /// architect-task callers; the durable reconcile record remains the
+    /// row-level `last_reconciled_revision_seq`/`reconciled_at` pair.
     pub summary: Option<String>,
 }
 
@@ -1054,7 +1054,13 @@ impl DjinnMcpServer {
     /// so the discussion thread carries the conflict without stamping the
     /// build as caught up.
     #[tool(
-        description = "Mark an in-flight proposal build as reconciled through a specific proposal revision. The architect reconcile task calls this on success: it advances the build's reconciled baseline to `revision_seq`, clears `pending_reconcile`, stamps `reconciled_at` + `updated_at`, and emits a `proposal_updated` event the coordinator's drift sweep reads. The blocked-reconcile path uses `proposal_feedback_add` with `author_kind=\"ai\"` and a `reconcile`/`build` `target_section` instead, so the safety gate does NOT call this tool. Requires the proposal to be `building` and the engineer role (or admin)."
+        description = "Mark an in-flight proposal build as reconciled through a specific proposal revision. The architect reconcile task calls this on success: it advances the build's reconciled baseline to `revision_seq`, clears `pending_reconcile`, stamps `reconciled_at` + `updated_at`, and emits a `proposal_updated` event the coordinator's drift sweep reads. The blocked-reconcile path uses `proposal_feedback_add` with `author_kind=\"ai\"` and a `reconcile`/`build` `target_section` instead, so the safety gate does NOT call this tool. Requires the proposal to be `building` and the engineer role (or admin).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     pub async fn proposal_mark_reconciled(
         &self,

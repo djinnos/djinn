@@ -1273,7 +1273,7 @@ expression: tool_schemas_architect()
         },
         "summary": {
           "type": "string",
-          "description": "Optional reconcile summary."
+          "description": "Optional reconcile summary for forward-compatible architect-task callers; the durable record is the proposal's reconcile stamp."
         }
       }
     },

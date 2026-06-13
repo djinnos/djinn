@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 510
 expression: signatures
 ---
 [
@@ -9871,6 +9872,11 @@ expression: signatures
           "description": "True when the in-flight build is behind the latest proposal revision.",
           "type": "boolean"
         },
+        "reconciled_at": {
+          "description": "Wall-clock time of the last reconcile stamp. Surfaced so the proposal\nshow / list / mark_reconciled responses all carry the stamp the\narchitect's reconcile task wrote.",
+          "nullable": true,
+          "type": "string"
+        },
         "short_id": {
           "type": "string"
         },
@@ -10288,6 +10294,11 @@ expression: signatures
           "description": "True when the in-flight build is behind the latest proposal revision.",
           "type": "boolean"
         },
+        "reconciled_at": {
+          "description": "Wall-clock time of the last reconcile stamp. Surfaced so the proposal\nshow / list / mark_reconciled responses all carry the stamp the\narchitect's reconcile task wrote.",
+          "nullable": true,
+          "type": "string"
+        },
         "short_id": {
           "type": "string"
         },
@@ -10538,7 +10549,7 @@ expression: signatures
           "type": "integer"
         },
         "summary": {
-          "description": "Free-form summary of the reconcile outcome (e.g. what epics/tasks were\nre-mapped or closed). Recorded into the proposal's `updated_at` audit\nwindow only; the durable reconcile stamp is the row-level\n`last_reconciled_revision_seq`/`reconciled_at` pair.",
+          "description": "Optional free-form summary of the reconcile outcome (e.g. what\nepics/tasks were re-mapped or closed). Accepted for forward-compatible\narchitect-task callers; the durable reconcile record remains the\nrow-level `last_reconciled_revision_seq`/`reconciled_at` pair.",
           "nullable": true,
           "type": "string"
         }
@@ -11248,6 +11259,11 @@ expression: signatures
           "description": "True when the in-flight build is behind the latest proposal revision.",
           "type": "boolean"
         },
+        "reconciled_at": {
+          "description": "Wall-clock time of the last reconcile stamp. Surfaced so the proposal\nshow / list / mark_reconciled responses all carry the stamp the\narchitect's reconcile task wrote.",
+          "nullable": true,
+          "type": "string"
+        },
         "short_id": {
           "type": "string"
         },
@@ -11379,6 +11395,11 @@ expression: signatures
         "pending_reconcile": {
           "description": "True when the in-flight build is behind the latest proposal revision.",
           "type": "boolean"
+        },
+        "reconciled_at": {
+          "description": "Wall-clock time of the last reconcile stamp. Surfaced so the proposal\nshow / list / mark_reconciled responses all carry the stamp the\narchitect's reconcile task wrote.",
+          "nullable": true,
+          "type": "string"
         },
         "short_id": {
           "type": "string"

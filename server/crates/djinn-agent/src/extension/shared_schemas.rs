@@ -318,7 +318,7 @@ pub(crate) fn tool_proposal_mark_reconciled() -> RmcpTool {
             "properties": {
                 "id": {"type": "string", "description": "Proposal UUID or short ID of a `building` proposal."},
                 "revision_seq": {"type": "integer", "description": "Latest revision reconciled."},
-                "summary": {"type": "string", "description": "Optional reconcile summary."}
+                "summary": {"type": "string", "description": "Optional reconcile summary for forward-compatible architect-task callers; the durable record is the proposal's reconcile stamp."}
             }
         }),
     )
