@@ -668,7 +668,9 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "task_kill_session"
         | "agent_create"
         | "agent_amend_prompt" => Some(destructive),
-        "task_reset_counters" | "proposal_complete" => Some(idempotent_destructive),
+        "task_reset_counters" | "proposal_complete" | "proposal_reconcile_obsolete_epic" => {
+            Some(idempotent_destructive)
+        }
         _ => None,
     }
 }
@@ -732,6 +734,7 @@ fn role_tool_schemas_pin_destructive_and_open_world_sets() {
         "apply_patch".to_string(),
         "edit".to_string(),
         "proposal_complete".to_string(),
+        "proposal_reconcile_obsolete_epic".to_string(),
         "shell".to_string(),
         "task_archive_activity".to_string(),
         "task_delete_branch".to_string(),
