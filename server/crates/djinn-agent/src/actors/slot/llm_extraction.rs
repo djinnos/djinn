@@ -19,9 +19,9 @@
 //! [`run_llm_extraction`] is driven by
 //! `session_extraction::run_post_session_extraction`, which runs server-side
 //! (fire-and-forget) when a task-run completes. The production path resolves
-//! the model via creator-scoped model resolution with a scoped memory-provider fallback — which falls back to the org's
-//! configured model priority when no dedicated memory model is set, so it
-//! reuses the same model the task ran on with no extra credential plumbing.
+//! the model via creator-scoped dispatch-style resolution, with a scoped
+//! memory-provider fallback when the creator-scoped path cannot resolve. If no
+//! creator is available, the fallback is explicit org-shared/no-user scope.
 //! The file-level `#[allow(dead_code)]` is retained only to cover the
 //! `_with_provider` test entry points and helpers exercised solely by tests.
 
@@ -35,7 +35,7 @@ use djinn_db::{
     NoteRepository, ProjectRepository, SessionRepository, TaskRepository, folder_for_type,
     permalink_for,
 };
-use djinn_provider::provider::LlmProvider;
+use djinn_provider::provider::{LlmProvider, create_provider};
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider_for_user};
 use serde::Deserialize;
 
@@ -567,14 +567,20 @@ async fn run_llm_extraction_inner(
         // session already ran on `session.model_id` for this user, so resolving
         // it under the creator's `SESSION_USER_ID` scope reuses the proven
         // provider path: e.g. an `openai/*` id served via the connected
-        // `chatgpt_codex` credential (the catalog-only `resolve_memory_provider`
-        // can't resolve that and skipped extraction entirely → zero notes).
-        // Falls back to the scoped memory-provider path if this fails; it never
-        // lists all-owner credentials.
+        // `chatgpt_codex` credential. If creator-scoped resolution fails, fall
+        // back only to the creator-visible memory-provider scope, or the explicit
+        // org-shared/no-user scope when there is no creator.
         let creator = task.created_by_user_id.clone();
+        let attributed_user_id = creator
+            .clone()
+            .or_else(djinn_core::auth_context::current_user_id);
         let memory_model_id = session.model_id.clone();
-        let telemetry =
-            crate::actors::slot::helpers::build_telemetry_meta("memory_extraction", &task_id);
+        let telemetry = crate::actors::slot::helpers::build_telemetry_meta_with_attribution(
+            "memory_extraction",
+            &task_id,
+            Some("memory_extraction"),
+            attributed_user_id.as_deref(),
+        );
         // One-shot completion over a small (taxonomy) prompt — no compaction —
         // so a generous fixed context window is safe.
         const MEMORY_CONTEXT_WINDOW: u32 = 128_000;
@@ -598,7 +604,7 @@ async fn run_llm_extraction_inner(
                 crate::actors::slot::helpers::build_provider_from_resolved(
                     resolved,
                     MEMORY_CONTEXT_WINDOW,
-                    Some(telemetry),
+                    Some(telemetry.clone()),
                     None,
                     base_url,
                 )
@@ -616,7 +622,13 @@ async fn run_llm_extraction_inner(
             Some(p) => p,
             None => match resolve_memory_provider_for_user(&app_state.db, creator.as_deref()).await
             {
-                Ok(p) => p,
+                Ok(provider) => match provider.config_snapshot() {
+                    Some(mut config) => {
+                        config.telemetry = Some(telemetry.clone());
+                        create_provider(config)
+                    }
+                    None => provider,
+                },
                 Err(e) => {
                     tracing::warn!(
                         session_id = %session_id,
