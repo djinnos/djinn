@@ -162,6 +162,14 @@ pub(super) struct ProposalAcAmendmentParams {
 }
 
 #[derive(Deserialize)]
+pub(super) struct ProposalReconcileObsoleteEpicParams {
+    pub proposal_id: String,
+    pub epic_id: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct EpicTasksParams {
     pub id: String,
     pub limit: Option<i64>,

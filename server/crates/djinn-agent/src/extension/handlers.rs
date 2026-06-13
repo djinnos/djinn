@@ -75,7 +75,8 @@ use task_epic::{
     call_task_show, call_task_update, call_task_update_ac,
 };
 pub(crate) use task_epic::{
-    call_epic_show, call_epic_tasks, call_epic_update, call_proposal_ac_amend, call_proposal_ac_set,
+    call_epic_show, call_epic_tasks, call_epic_update, call_proposal_ac_amend,
+    call_proposal_ac_set, call_proposal_reconcile_obsolete_epic,
 };
 pub(crate) use workspace::{
     call_apply_patch, call_code_search, call_edit, call_read, call_shell, call_write,
@@ -198,6 +199,9 @@ where
         "proposal_complete" => call_proposal_complete(state, &call.arguments).await,
         "proposal_ac_set" => call_proposal_ac_set(state, &call.arguments).await,
         "proposal_ac_amend" => call_proposal_ac_amend(state, &call.arguments).await,
+        "proposal_reconcile_obsolete_epic" => {
+            call_proposal_reconcile_obsolete_epic(state, &call.arguments).await
+        }
         "memory_read" => call_memory_read(state, &call.arguments, &project_ref).await,
         "memory_search" => {
             call_memory_search(state, &call.arguments, session_task_id, &project_ref).await

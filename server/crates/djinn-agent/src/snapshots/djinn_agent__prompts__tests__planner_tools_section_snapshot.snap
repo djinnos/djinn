@@ -1,6 +1,6 @@
 ---
 source: crates/djinn-agent/src/prompts.rs
-assertion_line: 1068
+assertion_line: 1277
 expression: section
 ---
 - `task_show(id)` — Show details of a work item including recent activity and blockers.
@@ -32,6 +32,7 @@ expression: section
 - `proposal_ac_set(acceptance_criteria, id)` — Reconcile a proposal's acceptance-criteria `met` flags (Planner Workflow E) as graduated epics land. Send the FULL list in order — one entry per criterion, each `{"met": true|false}` (criterion text is preserved automatically). A status annotation only: it does not edit the spec, bump a revision, or clear sign-offs. Returns {met, total}.
 - `proposal_ac_amend(amendments, id, reason)` — Amend a proposal's acceptance-criteria spec with audited revision semantics. Each amendment targets a zero-based criterion index and uses operation `rewrite`, `drop`, or `waive`: rewrite replaces criterion text and requires `criterion`; drop removes the criterion; waive keeps the criterion visible with `waived: true`. Requires a non-empty top-level reason. This is a real spec edit: it bumps the proposal revision, retains sign-offs, and records feedback/audit. Use proposal_ac_set instead when only reconciling met flags.
 - `proposal_complete(id, summary?)` — Mark a `building` proposal as `done` (Planner Workflow E). Call this only after reviewing a proposal whose every graduated epic has closed and confirming the delivered work meets the acceptance criteria. If work remains instead, create more epics with epic_create(proposal_id=...) rather than completing.
+- `proposal_reconcile_obsolete_epic(epic_id, proposal_id, reason?)` — Scoped proposal-reconcile teardown for one obsolete graduated epic. Lists/validates only the requested proposal+epic link, blocks terminally if any task in that subtree has merged work (recording AI proposal feedback), otherwise force-closes only that epic's tasks, closes the epic, unlinks only that epic from the proposal, and leaves unrelated graduated epics untouched. Use this instead of whole-build proposal_stop_build during Reconcile proposal tasks.
 - `epic_blockers_list(id)` — List the epics that BLOCK a given epic (its dependencies — they must close before this epic's breakdown auto-dispatches).
 - `epic_blocked_list(id)` — List the epics blocked BY a given epic (its dependents — epics whose breakdown waits on this one).
 - `task_transition(action, id, reason?, replacement_task_ids?)` — Transition a task using a named workflow action.

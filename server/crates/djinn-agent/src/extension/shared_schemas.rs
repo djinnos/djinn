@@ -343,6 +343,22 @@ pub(crate) fn tool_proposal_ac_amend() -> RmcpTool {
     )
 }
 
+pub(crate) fn tool_proposal_reconcile_obsolete_epic() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_reconcile_obsolete_epic".to_string(),
+        "Scoped proposal-reconcile teardown for one obsolete graduated epic. Lists/validates only the requested proposal+epic link, blocks terminally if any task in that subtree has merged work (recording AI proposal feedback), otherwise force-closes only that epic's tasks, closes the epic, unlinks only that epic from the proposal, and leaves unrelated graduated epics untouched. Use this instead of whole-build proposal_stop_build during Reconcile proposal tasks.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["proposal_id", "epic_id"],
+            "properties": {
+                "proposal_id": {"type": "string", "description": "Proposal UUID or short ID being reconciled"},
+                "epic_id": {"type": "string", "description": "Obsolete graduated epic UUID or short ID to retire"},
+                "reason": {"type": "string", "description": "Optional reconcile note explaining why this graduated epic is obsolete"}
+            }
+        }),
+    )
+}
+
 pub(crate) fn tool_task_list() -> RmcpTool {
     RmcpTool::new(
         "task_list".to_string(),
