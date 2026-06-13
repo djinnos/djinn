@@ -684,6 +684,8 @@ pub(crate) async fn run_supervisor_dispatch(
                     app_state.clone(),
                 );
             }
+
+            persist_loop_guard_activity(&task_repo, &task.id, &report).await;
             // Feed the model circuit-breaker on a productive run. A terminal
             // outcome that maps to `Completed` (PR opened / closed / escalated)
             // with at least one completed stage means the model produced tokens
@@ -908,6 +910,70 @@ fn provider_failure_class_for_report(report: &TaskRunReport) -> Option<ProviderF
             ..
         } => Some(*class),
         _ => None,
+    }
+}
+
+async fn persist_loop_guard_activity(
+    task_repo: &TaskRepository,
+    task_id: &str,
+    report: &TaskRunReport,
+) {
+    let TaskRunOutcome::LoopGuardTripped {
+        kind,
+        offending_signature,
+        threshold,
+        observed,
+        turn_span,
+        session_id,
+    } = &report.outcome
+    else {
+        return;
+    };
+
+    let details = serde_json::json!({
+        "kind": loop_guard_kind_label(*kind),
+        "offending_signature": offending_signature,
+        "threshold": threshold,
+        "observed": observed,
+        "turn_span": {
+            "start": turn_span.0,
+            "end": turn_span.1,
+        },
+        "session_id": session_id,
+        "task_run_id": report.task_run_id,
+    });
+    let payload = serde_json::json!({
+        "kind": "loop_guard_tripped",
+        "details": details,
+        "body": format!(
+            "Reply-loop guard `{}` tripped in session `{}` on turns {}..={}: `{}` \
+             (observed {}/{})",
+            loop_guard_kind_label(*kind),
+            session_id,
+            turn_span.0,
+            turn_span.1,
+            offending_signature,
+            observed,
+            threshold,
+        ),
+    })
+    .to_string();
+
+    if let Err(e) = task_repo
+        .log_activity(
+            Some(task_id),
+            "agent-supervisor",
+            "system",
+            "loop_guard_tripped",
+            &payload,
+        )
+        .await
+    {
+        tracing::warn!(
+            task_id = %task_id,
+            error = %e,
+            "supervisor dispatch: failed to persist loop_guard_tripped activity"
+        );
     }
 }
 

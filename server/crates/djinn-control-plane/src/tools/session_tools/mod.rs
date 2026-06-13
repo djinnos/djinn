@@ -197,8 +197,32 @@ pub struct TimelineMessage {
 pub struct TimelineActivity {
     pub event_type: String,
     pub actor_role: String,
+    /// Renderer-friendly discriminator. Usually mirrors `event_type`; for
+    /// structured payloads this is the semantic timeline kind.
+    pub kind: String,
     pub payload: super::json_object::AnyJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<super::json_object::AnyJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     pub timestamp: String,
+}
+
+fn render_timeline_activity(e: &djinn_core::models::ActivityEntry) -> TimelineActivity {
+    let payload_value: serde_json::Value =
+        serde_json::from_str(&e.payload).unwrap_or_else(|_| serde_json::json!({}));
+    let (kind, details, summary) =
+        super::task_tools::ops::render_activity_metadata(&e.event_type, &payload_value);
+
+    TimelineActivity {
+        event_type: e.event_type.clone(),
+        actor_role: e.actor_role.clone(),
+        kind,
+        payload: super::json_object::AnyJson(payload_value),
+        details,
+        summary,
+        timestamp: e.created_at.clone(),
+    }
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -649,17 +673,7 @@ impl DjinnMcpServer {
             offset: 0,
         };
         let activity = match task_repo.query_activity(q).await {
-            Ok(entries) => entries
-                .iter()
-                .map(|e| TimelineActivity {
-                    event_type: e.event_type.clone(),
-                    actor_role: e.actor_role.clone(),
-                    payload: super::json_object::AnyJson(
-                        serde_json::from_str(&e.payload).unwrap_or_else(|_| serde_json::json!({})),
-                    ),
-                    timestamp: e.created_at.clone(),
-                })
-                .collect(),
+            Ok(entries) => entries.iter().map(render_timeline_activity).collect(),
             Err(e) => return err(e.to_string()),
         };
 

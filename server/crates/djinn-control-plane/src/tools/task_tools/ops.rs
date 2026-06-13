@@ -77,24 +77,88 @@ pub(crate) fn task_to_response(task: &Task) -> TaskResponse {
 }
 
 pub(crate) fn activity_entry_response(entry: ActivityEntry) -> ActivityEntryResponse {
+    let payload_value: serde_json::Value =
+        serde_json::from_str(&entry.payload).unwrap_or_else(|_| serde_json::json!({}));
+    let (kind, details, summary) = render_activity_metadata(&entry.event_type, &payload_value);
+
     ActivityEntryResponse {
         id: entry.id,
         task_id: entry.task_id,
         actor_id: entry.actor_id,
         actor_role: entry.actor_role,
         event_type: entry.event_type,
-        payload: parse_any_json(&entry.payload),
+        kind,
+        payload: crate::tools::AnyJson(payload_value),
+        details,
+        summary,
         created_at: entry.created_at,
+    }
+}
+
+pub(crate) fn render_activity_metadata(
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> (String, Option<crate::tools::AnyJson>, Option<String>) {
+    let kind = if event_type == "loop_guard_tripped" {
+        "loop_guard_tripped".to_owned()
+    } else {
+        payload
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or(event_type)
+            .to_owned()
+    };
+    let details = payload.get("details").cloned().map(crate::tools::AnyJson);
+    let summary = if kind == "loop_guard_tripped" {
+        Some(loop_guard_activity_summary(payload))
+    } else {
+        payload
+            .get("body")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned)
+    };
+
+    (kind, details, summary)
+}
+
+pub(crate) fn loop_guard_activity_summary(payload: &serde_json::Value) -> String {
+    let details = payload.get("details").unwrap_or(payload);
+    let guard_kind = details
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown_guard");
+    let signature = details
+        .get("offending_signature")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown_signature");
+    let turn_span = details.get("turn_span");
+    let start = turn_span
+        .and_then(|value| value.get("start"))
+        .and_then(|value| value.as_u64())
+        .or_else(|| {
+            turn_span
+                .and_then(|value| value.get(0))
+                .and_then(|value| value.as_u64())
+        });
+    let end = turn_span
+        .and_then(|value| value.get("end"))
+        .and_then(|value| value.as_u64())
+        .or_else(|| {
+            turn_span
+                .and_then(|value| value.get(1))
+                .and_then(|value| value.as_u64())
+        });
+
+    match (start, end) {
+        (Some(start), Some(end)) => {
+            format!("Loop guard `{guard_kind}` tripped on turns {start}..={end}: `{signature}`")
+        }
+        _ => format!("Loop guard `{guard_kind}` tripped: `{signature}`"),
     }
 }
 
 pub(crate) fn parse_string_array(value: &str) -> Vec<String> {
     serde_json::from_str(value).unwrap_or_default()
-}
-
-pub(crate) fn parse_any_json(value: &str) -> crate::tools::AnyJson {
-    serde_json::from_str(value)
-        .unwrap_or_else(|_| serde_json::Value::String(value.to_owned()).into())
 }
 
 pub(crate) fn not_found(id: &str) -> ErrorResponse {

@@ -14321,11 +14321,30 @@ expression: signatures
             "actor_role": {
               "type": "string"
             },
+            "details": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnyJson"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ]
+            },
             "event_type": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "Renderer-friendly discriminator. Usually mirrors `event_type`; for\nstructured payloads this is the semantic timeline kind.",
               "type": "string"
             },
             "payload": {
               "$ref": "#/$defs/AnyJson"
+            },
+            "summary": {
+              "nullable": true,
+              "type": "string"
             },
             "timestamp": {
               "type": "string"
@@ -14334,6 +14353,7 @@ expression: signatures
           "required": [
             "event_type",
             "actor_role",
+            "kind",
             "payload",
             "timestamp"
           ],

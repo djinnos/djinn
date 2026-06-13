@@ -422,6 +422,62 @@ async fn activity_log() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activity_log_persists_loop_guard_details_payload() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
+    let repo = TaskRepository::new(db, event_bus_for(&tx));
+
+    let task = repo
+        .create(&epic.id, "T", "", "", "task", 0, "", Some("open"))
+        .await
+        .unwrap();
+    repo.log_activity(
+        Some(&task.id),
+        "agent-supervisor",
+        "system",
+        "loop_guard_tripped",
+        &serde_json::json!({
+            "kind": "loop_guard_tripped",
+            "details": {
+                "kind": "identical_tool_failure",
+                "offending_signature": "shell:cargo-test",
+                "threshold": 3,
+                "observed": 4,
+                "turn_span": { "start": 7, "end": 12 },
+                "session_id": "session-123",
+                "task_run_id": "run-123"
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+
+    let entries = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("loop_guard_tripped".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].event_type, "loop_guard_tripped");
+
+    let payload: serde_json::Value = serde_json::from_str(&entries[0].payload).unwrap();
+    let details = payload.get("details").expect("details payload");
+    assert_eq!(details["kind"], "identical_tool_failure");
+    assert_eq!(details["offending_signature"], "shell:cargo-test");
+    assert_eq!(details["threshold"], 3);
+    assert_eq!(details["observed"], 4);
+    assert_eq!(details["turn_span"]["start"], 7);
+    assert_eq!(details["turn_span"]["end"], 12);
+    assert_eq!(details["session_id"], "session-123");
+    assert_eq!(details["task_run_id"], "run-123");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_by_epic() {
     let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);

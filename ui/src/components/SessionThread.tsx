@@ -34,6 +34,7 @@ import type {
   CommentBlock,
   ContentBlock,
   VerificationBlock,
+  LoopGuardTrippedBlock,
 } from "@/hooks/useSessionMessages";
 
 // ── Chat bubble wrapper with RPG avatar ─────────────────────────────────────
@@ -535,6 +536,62 @@ function CommandRow({ entry }: { entry: CommandBlock }) {
   );
 }
 
+// ── Loop guard card (degenerate reply-loop termination) ─────────────────────
+
+function LoopGuardCard({ entry }: { entry: LoopGuardTrippedBlock }) {
+  const turnSpan = formatTurnSpan(entry.turnSpan);
+
+  return (
+    <div className="my-3 overflow-hidden rounded-lg border border-amber-500/35 bg-amber-500/5">
+      <div className="flex items-center gap-2.5 border-b border-amber-500/20 px-4 py-2.5">
+        <div className="flex h-6 w-6 items-center justify-center rounded-full bg-amber-500/20 text-sm font-bold text-amber-300">
+          !
+        </div>
+        <div>
+          <div className="text-sm font-semibold text-amber-300">Loop guard tripped</div>
+          <div className="text-xs text-amber-100/70">Planner intervention required for a repeated loop pattern.</div>
+        </div>
+      </div>
+      <dl className="grid gap-2 px-4 py-3 text-sm sm:grid-cols-2">
+        <div>
+          <dt className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Guard kind</dt>
+          <dd className="font-mono text-foreground">{entry.guardKind ?? "unknown"}</dd>
+        </div>
+        <div>
+          <dt className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Turn span</dt>
+          <dd className="font-mono text-foreground">{turnSpan}</dd>
+        </div>
+        <div className="sm:col-span-2">
+          <dt className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Offending signature</dt>
+          <dd className="break-all font-mono text-foreground">{entry.offendingSignature ?? "unknown"}</dd>
+        </div>
+        {(entry.threshold !== undefined || entry.observed !== undefined) && (
+          <div>
+            <dt className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Threshold / observed</dt>
+            <dd className="font-mono text-foreground">
+              {entry.threshold ?? "?"} / {entry.observed ?? "?"}
+            </dd>
+          </div>
+        )}
+        {entry.sessionId && (
+          <div>
+            <dt className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Session</dt>
+            <dd className="break-all font-mono text-foreground">{entry.sessionId}</dd>
+          </div>
+        )}
+      </dl>
+    </div>
+  );
+}
+
+function formatTurnSpan(turnSpan: LoopGuardTrippedBlock["turnSpan"]): string {
+  if (!turnSpan) return "unknown";
+  if (turnSpan.start !== undefined && turnSpan.end !== undefined) return `${turnSpan.start}–${turnSpan.end}`;
+  if (turnSpan.start !== undefined) return `${turnSpan.start}–?`;
+  if (turnSpan.end !== undefined) return `?–${turnSpan.end}`;
+  return "unknown";
+}
+
 // ── Streaming thinking indicator ─────────────────────────────────────────────
 
 function StreamingThinkingBubble({ text, agentType }: { text: string; agentType?: string }) {
@@ -666,6 +723,8 @@ export function SessionThread({
               : <CommandRow key={idx} entry={entry} />;
           case "comment":
             return <CommentCard key={idx} entry={entry} />;
+          case "loop_guard_tripped":
+            return <LoopGuardCard key={idx} entry={entry} />;
           default:
             return null;
         }

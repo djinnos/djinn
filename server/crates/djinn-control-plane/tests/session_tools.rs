@@ -12,6 +12,7 @@ mod common;
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::events::EventBus;
 use djinn_db::SessionMessageRepository;
+use djinn_db::TaskRepository;
 use serde_json::json;
 
 #[tokio::test]
@@ -243,6 +244,136 @@ async fn task_timeline_returns_chronological_session_and_message_history() {
         .and_then(|v| v.as_str())
         .unwrap();
     assert!(ts0 <= ts1);
+}
+
+#[tokio::test]
+async fn task_timeline_renders_loop_guard_activity_distinctly() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db();
+    let project = common::create_test_project(db).await;
+    let epic = common::create_test_epic(db, &project.id).await;
+    let task = common::create_test_task(db, &project.id, &epic.id).await;
+    let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+
+    task_repo
+        .log_activity(
+            Some(&task.id),
+            "agent-supervisor",
+            "system",
+            "loop_guard_tripped",
+            &json!({
+                "kind": "loop_guard_tripped",
+                "details": {
+                    "kind": "identical_tool_failure",
+                    "offending_signature": "shell:cargo-test",
+                    "threshold": 3,
+                    "observed": 4,
+                    "turn_span": { "start": 7, "end": 12 },
+                    "session_id": "session-123"
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+    task_repo
+        .log_activity(
+            Some(&task.id),
+            "agent-supervisor",
+            "system",
+            "failed",
+            &json!({ "kind": "failed", "details": { "reason": "provider fault" } }).to_string(),
+        )
+        .await
+        .unwrap();
+    task_repo
+        .log_activity(
+            Some(&task.id),
+            "agent-supervisor",
+            "system",
+            "escalated",
+            &json!({ "kind": "escalated", "details": { "reason": "needs input" } }).to_string(),
+        )
+        .await
+        .unwrap();
+
+    let payload = harness
+        .call_tool(
+            "task_timeline",
+            json!({ "task_id": task.id, "project": project.slug() }),
+        )
+        .await
+        .expect("task_timeline should dispatch");
+    assert_eq!(payload.get("error"), None);
+    let activity = payload.get("activity").and_then(|v| v.as_array()).unwrap();
+    let loop_guard = activity
+        .iter()
+        .find(|entry| entry.get("kind").and_then(|v| v.as_str()) == Some("loop_guard_tripped"))
+        .expect("timeline should include distinct loop_guard_tripped entry");
+    assert_eq!(
+        loop_guard
+            .get("details")
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str()),
+        Some("identical_tool_failure")
+    );
+    assert_eq!(
+        loop_guard
+            .get("details")
+            .and_then(|v| v.get("offending_signature"))
+            .and_then(|v| v.as_str()),
+        Some("shell:cargo-test")
+    );
+    assert!(
+        loop_guard
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.contains("turns 7..=12") && s.contains("shell:cargo-test"))
+    );
+
+    let activity_payload = harness
+        .call_tool(
+            "task_activity_list",
+            json!({ "id": task.id, "project": project.slug() }),
+        )
+        .await
+        .expect("task_activity_list should dispatch");
+    assert_eq!(activity_payload.get("error"), None);
+    let activity_entries = activity_payload
+        .get("entries")
+        .and_then(|value| value.as_array())
+        .unwrap();
+    let loop_guard_activity = activity_entries
+        .iter()
+        .find(|entry| {
+            entry.get("kind").and_then(|value| value.as_str()) == Some("loop_guard_tripped")
+        })
+        .expect("activity feed should include distinct loop_guard_tripped entry");
+    assert_eq!(
+        loop_guard_activity
+            .get("details")
+            .and_then(|value| value.get("kind"))
+            .and_then(|value| value.as_str()),
+        Some("identical_tool_failure")
+    );
+    assert!(
+        loop_guard_activity
+            .get("summary")
+            .and_then(|value| value.as_str())
+            .is_some_and(
+                |summary| summary.contains("turns 7..=12") && summary.contains("shell:cargo-test")
+            )
+    );
+    assert!(
+        activity
+            .iter()
+            .any(|entry| entry.get("kind").and_then(|v| v.as_str()) == Some("failed"))
+    );
+    assert!(
+        activity
+            .iter()
+            .any(|entry| entry.get("kind").and_then(|v| v.as_str()) == Some("escalated"))
+    );
 }
 
 #[tokio::test]
