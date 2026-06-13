@@ -1762,6 +1762,17 @@ mod tests {
             .unwrap();
     }
 
+    async fn reconciliation_count(db: &Database, proposal_id: &str, epic_id: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM proposal_reconciliations WHERE proposal_id = $1 AND epic_id = $2",
+        )
+        .bind(proposal_id)
+        .bind(epic_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn proposal_completion_lifecycle() {
         let db = test_db();
@@ -2213,6 +2224,67 @@ mod tests {
         );
         // Idempotent: a second unlink on an already-empty proposal is a no-op.
         repo.unlink_epics(&p1.id).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unlink_epic_removes_only_requested_link_and_cascades_reconciliation() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proj = insert_project(&db, "svc-unlink-one").await;
+        let p1 = repo.create(create_input("P1 selective")).await.unwrap();
+        let p2 = repo.create(create_input("P2 untouched")).await.unwrap();
+        let e1 = insert_epic(&db, &proj, "uo01").await;
+        let e2 = insert_epic(&db, &proj, "uo02").await;
+        let e3 = insert_epic(&db, &proj, "uo03").await;
+
+        repo.link_epic(&p1.id, &e1, &proj).await.unwrap();
+        repo.link_epic(&p1.id, &e2, &proj).await.unwrap();
+        // Link the same epic from another proposal too: the selective unlink is
+        // keyed by both proposal_id and epic_id, not by epic_id alone.
+        repo.link_epic(&p2.id, &e1, &proj).await.unwrap();
+        repo.link_epic(&p2.id, &e3, &proj).await.unwrap();
+
+        repo.record_epic_reconciliation(&p1.id, &e1, 1)
+            .await
+            .unwrap();
+        repo.record_epic_reconciliation(&p1.id, &e2, 2)
+            .await
+            .unwrap();
+        repo.record_epic_reconciliation(&p2.id, &e1, 3)
+            .await
+            .unwrap();
+        repo.record_epic_reconciliation(&p2.id, &e3, 4)
+            .await
+            .unwrap();
+
+        repo.unlink_epic(&p1.id, &e1).await.unwrap();
+
+        assert_eq!(
+            repo.graduated_epics(&p1.id).await.unwrap(),
+            vec![(e2.clone(), proj.clone())]
+        );
+        let mut p2_links = repo.graduated_epics(&p2.id).await.unwrap();
+        p2_links.sort();
+        let mut expected_p2_links = vec![(e1.clone(), proj.clone()), (e3.clone(), proj.clone())];
+        expected_p2_links.sort();
+        assert_eq!(p2_links, expected_p2_links);
+
+        assert_eq!(reconciliation_count(&db, &p1.id, &e1).await, 0);
+        assert_eq!(reconciliation_count(&db, &p1.id, &e2).await, 1);
+        assert_eq!(reconciliation_count(&db, &p2.id, &e1).await, 1);
+        assert_eq!(reconciliation_count(&db, &p2.id, &e3).await, 1);
+
+        let p1_reconciliations = repo.latest_epic_reconciliations(&p1.id).await.unwrap();
+        assert_eq!(p1_reconciliations.get(&e1), None);
+        assert_eq!(p1_reconciliations.get(&e2), Some(&2));
+        let p2_reconciliations = repo.latest_epic_reconciliations(&p2.id).await.unwrap();
+        assert_eq!(p2_reconciliations.get(&e1), Some(&3));
+        assert_eq!(p2_reconciliations.get(&e3), Some(&4));
+
+        // Idempotent: unlinking the already-removed pair again is a no-op.
+        repo.unlink_epic(&p1.id, &e1).await.unwrap();
+        assert_eq!(repo.graduated_epics(&p1.id).await.unwrap().len(), 1);
+        assert_eq!(reconciliation_count(&db, &p1.id, &e1).await, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
