@@ -5333,7 +5333,7 @@ export namespace ProposalMarkReconciledInputSchema {
 
 }
 export type ProposalMarkReconciledInput = ProposalMarkReconciledInputSchema.ProposalMarkReconciledInput;
-export type ProposalMarkReconciledOutput = ProposalSingleResponse;
+export type ProposalMarkReconciledOutput = ProposalUpdateOutput;
 export namespace ProposalUpdateInputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
 
