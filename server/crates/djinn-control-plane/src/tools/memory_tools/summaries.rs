@@ -21,11 +21,16 @@ pub(crate) const SUMMARY_BACKFILL_DELAY: Duration = Duration::from_millis(100);
 /// MCP-owned worker that generates and persists L0/L1 note summaries.
 pub struct NoteSummaryService {
     db: Database,
+    user_id: Option<String>,
 }
 
 impl NoteSummaryService {
     pub fn new(db: Database) -> Self {
-        Self { db }
+        Self::new_for_user(db, None)
+    }
+
+    pub fn new_for_user(db: Database, user_id: Option<String>) -> Self {
+        Self { db, user_id }
     }
 
     /// Generate summaries for the provided note IDs.
@@ -35,7 +40,9 @@ impl NoteSummaryService {
     pub async fn generate_for_note_ids(&self, note_ids: &[String]) {
         let repo = NoteRepository::new(self.db.clone(), EventBus::noop());
 
-        let provider = match resolve_memory_provider_for_user(&self.db, None).await {
+        let provider = match resolve_memory_provider_for_user(&self.db, self.user_id.as_deref())
+            .await
+        {
             Ok(provider) => Some(provider),
             Err(error) => {
                 warn!(error = %error, "note summary generation: provider unavailable, using fallback summaries");
@@ -134,7 +141,9 @@ impl NoteSummaryService {
 pub(crate) fn spawn_summary_backfill_worker(db: Database) -> mpsc::Sender<String> {
     let (tx, mut rx) = mpsc::channel(SUMMARY_BACKFILL_QUEUE_CAPACITY);
     tokio::spawn(async move {
-        let service = NoteSummaryService::new(db);
+        // Backfill is a process-owned background worker: no request user exists,
+        // so memory provider resolution is intentionally org-shared only.
+        let service = NoteSummaryService::new_for_user(db, None);
         while let Some(note_id) = rx.recv().await {
             service.generate_for_note_ids(&[note_id]).await;
             tokio::time::sleep(SUMMARY_BACKFILL_DELAY).await;

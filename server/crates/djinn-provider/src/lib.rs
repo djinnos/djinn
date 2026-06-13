@@ -13,7 +13,8 @@ pub mod repos;
 
 pub use completion::{
     CompletionRequest, CompletionResponse, complete, resolve_memory_provider,
-    resolve_memory_provider_config, resolve_memory_provider_for_user,
+    resolve_memory_provider_config, resolve_memory_provider_config_for_user,
+    resolve_memory_provider_for_user,
 };
 
 pub use prompts::{MEMORY_L0_ABSTRACT, MEMORY_L1_OVERVIEW};
