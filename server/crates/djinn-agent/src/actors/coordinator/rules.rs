@@ -282,19 +282,26 @@ impl CoordinatorActor {
                   the default.\n\
                 - **Newly required work:** create a new `[amend] ...` epic linked to this proposal, then \
                   let normal epic breakdown produce tasks.\n\
-                - **Obsolete work:** close or unlink only the obsolete epic subtree; do not disturb \
-                  unrelated graduated epics. Force-close only tasks whose parent epic became obsolete, \
-                  and use the existing abort/teardown primitives so workers are stopped cleanly.\n\
+               - **Obsolete work:** close or unlink only the obsolete epic subtree; do not disturb \
+                 unrelated graduated epics. Use the scoped teardown tool \
+                 `proposal_reconcile_obsolete_epic(proposal_id=..., epic_id=...)` for obsolete \
+                 graduated epics after listing the proposal's graduated epics and their tasks. \
+                 Do **not** use whole-build `proposal_stop_build` and do not hand-close or unlink \
+                 unrelated work.\n\
              5. **Merged-work safety gate.** Before auto-closing any obsolete epic subtree, inspect every \
-                task in that subtree. If any task has `merge_commit_sha IS NOT NULL`, do not auto-close \
-                that subtree. Instead add an AI proposal feedback entry explaining that reconcile is \
-                blocked by already-merged work, then stop without marking the proposal reconciled.\n\
+               task in that subtree. If any task has `merge_commit_sha IS NOT NULL`, the scoped \
+               `proposal_reconcile_obsolete_epic` call returns a blocked response and records AI \
+               proposal feedback. Treat that blocked response as terminal for this reconcile pass: \
+               preserve all state, leave unrelated epics untouched, stop immediately, and do not mark \
+               the proposal reconciled.\n\
              6. **In-flight rule.** Do NOT re-scope running tasks. Leave running work to finish and express \
                 amendments as comments, next-wave work, or obsolete-subtree aborts only.\n\
-             7. On success, after all required epic/task edits are complete, call the reconcile completion \
-                surface for the current latest revision — `proposal_repository::mark_reconciled` if you \
-                are operating in code, or the MCP/control-plane proposal reconcile completion tool if \
-                available. Mark reconciled only after you have reconciled the latest proposal head.\n\n\
+            7. On success, after all required patches, new linked `[amend]` epics, and \
+               `proposal_reconcile_obsolete_epic` teardown operations have succeeded against the \
+               current latest proposal revision, call the reconcile completion surface for that \
+               latest revision — `proposal_ac_set` / `proposal_repository::mark_reconciled` if you \
+               are operating in code, or the MCP/control-plane proposal reconcile completion tool if \
+               available. Mark reconciled only after you have reconciled the latest proposal head.\n\n\
              This task has no `epic_id` — that is expected (you operate one level above epics).",
             proposal.short_id,
             proposal.id,
@@ -306,9 +313,9 @@ impl CoordinatorActor {
         );
         let ac = serde_json::json!([
             {"criterion": "Latest proposal revision re-read on task open and all drift from last_reconciled_revision_seq through the current latest revision reconciled in one pass without spawning another reconcile task", "met": false},
-            {"criterion": "Graduated epics and tasks inspected, with unchanged work left alone, not-yet-broken-down work patched in place, partially built work handled by comments/follow-up without re-scoping running tasks, newly required work represented by linked [amend] epics, and obsolete work limited to its own subtree", "met": false},
-            {"criterion": "Merged-work safety gate applied: any obsolete subtree containing merged work blocks auto-close, records AI proposal feedback, and does not mark reconciled", "met": false},
-            {"criterion": "On successful reconciliation, proposal marked reconciled for the latest revision via the reconcile completion surface", "met": false}
+            {"criterion": "Graduated epics and tasks inspected before acting, with unchanged work left alone, not-yet-broken-down work patched in place, partially built work handled by comments/follow-up without re-scoping running tasks, newly required work represented by linked [amend] epics, and obsolete work retired only through proposal_reconcile_obsolete_epic for its own subtree", "met": false},
+            {"criterion": "Merged-work safety gate applied: any proposal_reconcile_obsolete_epic blocked response for merged work records AI proposal feedback, preserves all state, leaves unrelated epics untouched, stops the reconcile pass, and does not mark reconciled", "met": false},
+            {"criterion": "On successful reconciliation, proposal marked reconciled for the latest revision via proposal_ac_set / mark_reconciled only after all required patches, new linked epics, and obsolete teardowns succeeded", "met": false}
         ])
         .to_string();
 
@@ -1949,12 +1956,27 @@ mod tests {
         );
         assert!(task.design.contains("Single-flight / coalesce first"));
         assert!(task.design.contains("do **not** re-scope running tasks"));
+        assert!(task.design.contains("proposal_reconcile_obsolete_epic"));
         assert!(
             task.design
-                .contains("Force-close only tasks whose parent epic became obsolete")
+                .contains("Do **not** use whole-build `proposal_stop_build`")
         );
         assert!(task.design.contains("merge_commit_sha IS NOT NULL"));
+        assert!(task.design.contains("blocked response as terminal"));
+        assert!(task.design.contains("preserve all state"));
+        assert!(task.design.contains("leave unrelated epics untouched"));
+        assert!(task.design.contains("proposal_ac_set"));
         assert!(task.design.contains("mark_reconciled"));
+
+        let ac: Vec<serde_json::Value> = serde_json::from_str(&task.acceptance_criteria).unwrap();
+        let ac_text = ac
+            .iter()
+            .filter_map(|c| c.get("criterion").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(ac_text.contains("proposal_reconcile_obsolete_epic"));
+        assert!(ac_text.contains("blocked response"));
+        assert!(ac_text.contains("leaves unrelated epics untouched"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
+assertion_line: 792
 expression: names
 ---
 [
@@ -32,6 +33,7 @@ expression: names
   "proposal_ac_set",
   "proposal_ac_amend",
   "proposal_complete",
+  "proposal_reconcile_obsolete_epic",
   "epic_blockers_list",
   "epic_blocked_list",
   "task_transition",

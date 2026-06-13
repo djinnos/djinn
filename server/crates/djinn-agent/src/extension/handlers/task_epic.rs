@@ -538,6 +538,140 @@ pub(crate) async fn call_proposal_ac_set(
     }))
 }
 
+/// Retire one obsolete graduated epic during proposal reconciliation.
+pub(crate) async fn call_proposal_reconcile_obsolete_epic(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalReconcileObsoleteEpicParams = parse_args(arguments)?;
+    let proposal_repo = ProposalRepository::new(state.db.clone(), state.event_bus.clone());
+    let epic_repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
+    let task_repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
+
+    let Some(proposal) = proposal_repo.resolve(&p.proposal_id).await.ok().flatten() else {
+        return Err(format!("proposal not found: {}", p.proposal_id));
+    };
+    let Some(epic) = epic_repo.resolve(&p.epic_id).await.ok().flatten() else {
+        return Err(format!("epic not found: {}", p.epic_id));
+    };
+
+    let linked_epics = proposal_repo
+        .graduated_epics(&proposal.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !linked_epics
+        .iter()
+        .any(|(linked_epic_id, _)| linked_epic_id == &epic.id)
+    {
+        return Err(format!(
+            "epic {} is not linked to proposal {}",
+            epic.short_id, proposal.short_id
+        ));
+    }
+
+    let tasks = task_repo
+        .list_by_epic(&epic.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let merged: Vec<_> = tasks
+        .iter()
+        .filter(|task| {
+            task.merge_commit_sha
+                .as_deref()
+                .is_some_and(|sha| !sha.is_empty())
+        })
+        .collect();
+    if !merged.is_empty() {
+        let merged_summary = merged
+            .iter()
+            .map(|task| {
+                format!(
+                    "{} ({}, merge_commit_sha={})",
+                    task.short_id,
+                    task.title,
+                    task.merge_commit_sha.as_deref().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let reason = p
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("obsolete graduated epic contains merged work");
+        proposal_repo
+            .add_feedback(djinn_db::repositories::proposal::ProposalFeedbackCreateInput {
+                proposal_id: &proposal.id,
+                parent_id: None,
+                author_kind: "ai",
+                author_model: Some("proposal_reconcile_obsolete_epic"),
+                body: &format!(
+                    "Reconcile blocked while retiring obsolete epic {} ({}): {reason}. Already-merged tasks: {merged_summary}. No epics were unlinked or closed; do not mark the proposal reconciled until this is resolved.",
+                    epic.short_id, epic.title
+                ),
+                target_section: Some("reconcile"),
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(serde_json::json!({
+            "ok": false,
+            "blocked": true,
+            "proposal_id": proposal.id,
+            "proposal_short_id": proposal.short_id,
+            "epic_id": epic.id,
+            "epic_short_id": epic.short_id,
+            "blocked_reason": "merged_work",
+            "message": "AI proposal feedback recorded; preserve all state, leave unrelated epics untouched, stop this reconcile pass, and do not mark reconciled.",
+            "merged_tasks": merged.iter().map(|task| serde_json::json!({
+                "id": task.id,
+                "short_id": task.short_id,
+                "title": task.title,
+                "merge_commit_sha": task.merge_commit_sha,
+            })).collect::<Vec<_>>()
+        }));
+    }
+
+    let close_reason = p
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("obsolete graduated epic retired by proposal reconciliation");
+    let mut closed_task_ids = Vec::new();
+    for task in tasks.iter().filter(|task| task.status != "closed") {
+        task_repo
+            .transition(
+                &task.id,
+                djinn_core::models::TransitionAction::ForceClose,
+                "proposal_reconcile_obsolete_epic",
+                "ai",
+                Some(close_reason),
+                None,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        closed_task_ids.push(task.id.clone());
+    }
+    let closed_epic = epic_repo.close(&epic.id).await.map_err(|e| e.to_string())?;
+    proposal_repo
+        .unlink_epic(&proposal.id, &epic.id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "blocked": false,
+        "proposal_id": proposal.id,
+        "proposal_short_id": proposal.short_id,
+        "epic_id": closed_epic.id,
+        "epic_short_id": closed_epic.short_id,
+        "epic_status": closed_epic.status,
+        "closed_task_ids": closed_task_ids,
+        "unrelated_epics_preserved": true,
+    }))
+}
+
 /// Apply real acceptance-criteria spec amendments (rewrite/drop/waive) with a
 /// required audit reason. Unlike `proposal_ac_set`, this delegates to the DB
 /// repository's revision-bumping amendment path rather than met-flag merge.

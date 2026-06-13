@@ -889,6 +889,10 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
         idempotent_destructive(),
     ));
     tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_reconcile_obsolete_epic(),
+        idempotent_destructive(),
+    ));
+    tool_values.push(serialize_tool(
         shared_schemas::tool_epic_blockers_list(),
         read_only(),
     ));

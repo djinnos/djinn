@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
+assertion_line: 797
 expression: tool_schemas_planner()
 ---
 [
@@ -1026,6 +1027,36 @@ expression: tool_schemas_planner()
         "summary": {
           "type": "string",
           "description": "Short note on what shipped and how it satisfies the spec (recorded in logs)."
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
+    "name": "proposal_reconcile_obsolete_epic",
+    "description": "Scoped proposal-reconcile teardown for one obsolete graduated epic. Lists/validates only the requested proposal+epic link, blocks terminally if any task in that subtree has merged work (recording AI proposal feedback), otherwise force-closes only that epic's tasks, closes the epic, unlinks only that epic from the proposal, and leaves unrelated graduated epics untouched. Use this instead of whole-build proposal_stop_build during Reconcile proposal tasks.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "proposal_id",
+        "epic_id"
+      ],
+      "properties": {
+        "proposal_id": {
+          "type": "string",
+          "description": "Proposal UUID or short ID being reconciled"
+        },
+        "epic_id": {
+          "type": "string",
+          "description": "Obsolete graduated epic UUID or short ID to retire"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Optional reconcile note explaining why this graduated epic is obsolete"
         }
       }
     },

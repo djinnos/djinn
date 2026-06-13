@@ -327,6 +327,33 @@ fn proposal_ac_amend_schema_documents_operations_and_reasons() {
 }
 
 #[test]
+fn proposal_reconcile_obsolete_epic_schema_documents_scope_and_blocking() {
+    let schema = serde_json::to_value(shared_schemas::tool_proposal_reconcile_obsolete_epic())
+        .expect("serialize proposal_reconcile_obsolete_epic schema");
+    assert_eq!(schema["name"], "proposal_reconcile_obsolete_epic");
+    let description = schema["description"]
+        .as_str()
+        .expect("proposal_reconcile_obsolete_epic has a description");
+    for required in [
+        "Scoped proposal-reconcile teardown",
+        "blocks terminally",
+        "AI proposal feedback",
+        "unlinks only that epic",
+        "leaves unrelated graduated epics untouched",
+        "instead of whole-build proposal_stop_build",
+    ] {
+        assert!(
+            description.contains(required),
+            "proposal_reconcile_obsolete_epic description should mention {required}: {description}"
+        );
+    }
+    assert_eq!(
+        schema["inputSchema"]["required"],
+        serde_json::json!(["proposal_id", "epic_id"])
+    );
+}
+
+#[test]
 fn loaded_skills_and_progressive_disclosure_reference_only_registered_worker_tools() {
     let project_root = crate::test_helpers::test_tempdir("djinn-skill-lockstep-");
     let skill_dir = project_root.path().join(".djinn").join("skills");

@@ -353,3 +353,136 @@ async fn proposal_ac_set_records_successful_reconcile_for_graduated_epics() {
         .expect("latest epic reconciliations");
     assert_eq!(latest_by_epic.get(&epic.id), Some(&2));
 }
+
+#[tokio::test]
+async fn proposal_reconcile_obsolete_epic_then_ac_set_preserves_unrelated_epics() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let obsolete_epic = create_test_epic(&db, &project.id).await;
+    let preserved_epic = create_test_epic(&db, &project.id).await;
+    let obsolete_task = create_test_task(&db, &project.id, &obsolete_epic.id).await;
+    let preserved_task = create_test_task(&db, &project.id, &preserved_epic.id).await;
+    let proposal_repo = djinn_db::ProposalRepository::new(db.clone(), EventBus::noop());
+    let task_repo = djinn_db::TaskRepository::new(db.clone(), EventBus::noop());
+    let epic_repo = djinn_db::EpicRepository::new(db.clone(), EventBus::noop());
+    let proposal = proposal_repo
+        .create(djinn_db::ProposalCreateInput {
+            title: "obsolete reconcile proposal",
+            body: "body",
+            acceptance_criteria: Some(r#"[{"criterion":"Ship revised scope","met":false}]"#),
+            status: Some("approved"),
+        })
+        .await
+        .expect("create proposal");
+    proposal_repo
+        .link_epic(&proposal.id, &obsolete_epic.id, &project.id)
+        .await
+        .expect("link obsolete epic");
+    proposal_repo
+        .link_epic(&proposal.id, &preserved_epic.id, &project.id)
+        .await
+        .expect("link preserved epic");
+    proposal_repo
+        .set_building(&proposal.id, "builder")
+        .await
+        .expect("mark building");
+    let drifted = proposal_repo
+        .update(
+            &proposal.id,
+            djinn_db::ProposalUpdateInput {
+                title: "obsolete reconcile proposal v2",
+                body: "body v2",
+                acceptance_criteria: r#"[{"criterion":"Ship revised scope","met":false}]"#,
+                status: "building",
+                superseded_by: None,
+            },
+        )
+        .await
+        .expect("amend while building");
+    assert_eq!(drifted.latest_revision_seq, 2);
+    assert!(drifted.pending_reconcile);
+
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let teardown_args = Some(
+        serde_json::json!({
+            "proposal_id": proposal.short_id,
+            "epic_id": obsolete_epic.short_id,
+            "reason": "amended proposal removed this work",
+        })
+        .as_object()
+        .expect("teardown args object")
+        .clone(),
+    );
+    let teardown = call_proposal_reconcile_obsolete_epic(&state, &teardown_args)
+        .await
+        .expect("obsolete teardown succeeds");
+    assert_eq!(teardown["ok"], serde_json::json!(true));
+    assert_eq!(teardown["blocked"], serde_json::json!(false));
+
+    let closed_obsolete_task = task_repo
+        .get(&obsolete_task.id)
+        .await
+        .expect("load obsolete task")
+        .expect("obsolete task exists");
+    assert_eq!(closed_obsolete_task.status, "closed");
+    let untouched_preserved_task = task_repo
+        .get(&preserved_task.id)
+        .await
+        .expect("load preserved task")
+        .expect("preserved task exists");
+    assert_ne!(untouched_preserved_task.status, "closed");
+    let closed_obsolete_epic = epic_repo
+        .get(&obsolete_epic.id)
+        .await
+        .expect("load obsolete epic")
+        .expect("obsolete epic exists");
+    assert_eq!(closed_obsolete_epic.status, "closed");
+    let untouched_preserved_epic = epic_repo
+        .get(&preserved_epic.id)
+        .await
+        .expect("load preserved epic")
+        .expect("preserved epic exists");
+    assert_ne!(untouched_preserved_epic.status, "closed");
+    let linked = proposal_repo
+        .graduated_epics(&proposal.id)
+        .await
+        .expect("list linked epics");
+    assert!(
+        !linked
+            .iter()
+            .any(|(epic_id, _)| epic_id == &obsolete_epic.id)
+    );
+    assert!(
+        linked
+            .iter()
+            .any(|(epic_id, _)| epic_id == &preserved_epic.id)
+    );
+
+    let ac_args = Some(
+        serde_json::json!({
+            "id": proposal.short_id,
+            "acceptance_criteria": [{"met": true}],
+        })
+        .as_object()
+        .expect("ac args object")
+        .clone(),
+    );
+    let ac_response = call_proposal_ac_set(&state, &ac_args)
+        .await
+        .expect("proposal_ac_set succeeds");
+    assert_eq!(ac_response["ok"], serde_json::json!(true));
+
+    let reconciled = proposal_repo
+        .get(&proposal.id)
+        .await
+        .expect("reload proposal")
+        .expect("proposal exists");
+    assert_eq!(reconciled.last_reconciled_revision_seq, Some(2));
+    assert!(!reconciled.pending_reconcile);
+    let latest_by_epic = proposal_repo
+        .latest_epic_reconciliations(&proposal.id)
+        .await
+        .expect("latest epic reconciliations");
+    assert_eq!(latest_by_epic.get(&preserved_epic.id), Some(&2));
+    assert!(!latest_by_epic.contains_key(&obsolete_epic.id));
+}
