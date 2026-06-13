@@ -10660,6 +10660,9 @@ expression: signatures
               "description": "Epic title, for display alongside the short id.",
               "type": "string"
             },
+            "needs_reconcile": {
+              "type": "boolean"
+            },
             "project_path": {
               "type": "string"
             },
@@ -10667,9 +10670,6 @@ expression: signatures
               "format": "int32",
               "nullable": true,
               "type": "integer"
-            },
-            "needs_reconcile": {
-              "type": "boolean"
             },
             "status": {
               "type": "string"
@@ -10682,7 +10682,6 @@ expression: signatures
             "epic_emoji",
             "project_path",
             "status",
-            "reconciled_at_revision_seq",
             "needs_reconcile"
           ],
           "type": "object"
