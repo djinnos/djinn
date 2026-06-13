@@ -507,6 +507,19 @@ pub(crate) async fn call_proposal_ac_set(
         .set_acceptance_criteria(&proposal.id, &ac_json)
         .await
         .map_err(|e| e.to_string())?;
+    // `proposal_ac_set` is the Planner Workflow E reconciliation tool: when it
+    // successfully records the delivered AC state, also advance proposal-level
+    // and per-graduated-epic reconciliation metadata to the revision just
+    // reconciled so proposal.show badges reflect the actual closeout path.
+    let updated = if updated.status == "building" {
+        let revision_seq = updated.latest_revision_seq;
+        proposal_repo
+            .mark_reconciled(&updated.id, revision_seq)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        updated
+    };
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&updated.acceptance_criteria).unwrap_or_default();
     let met = parsed

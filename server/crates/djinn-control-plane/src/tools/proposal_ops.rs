@@ -60,6 +60,8 @@ pub struct ProposalEpicModel {
     pub epic_emoji: String,
     pub project_path: String,
     pub status: String,
+    pub reconciled_at_revision_seq: Option<i32>,
+    pub needs_reconcile: bool,
 }
 
 impl From<&Proposal> for ProposalModel {

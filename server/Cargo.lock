@@ -1099,6 +1099,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "wait-timeout",
  "workspace-hack",
