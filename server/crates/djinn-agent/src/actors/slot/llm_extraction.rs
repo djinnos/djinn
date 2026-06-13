@@ -19,9 +19,9 @@
 //! [`run_llm_extraction`] is driven by
 //! `session_extraction::run_post_session_extraction`, which runs server-side
 //! (fire-and-forget) when a task-run completes. The production path resolves
-//! the model via creator-scoped dispatch-style resolution, with a scoped
-//! memory-provider fallback when the creator-scoped path cannot resolve. If no
-//! creator is available, the fallback is explicit org-shared/no-user scope.
+//! the model via creator-scoped dispatch-style resolution, with an explicit
+//! org-shared/no-user memory-provider fallback when the creator-scoped path
+//! cannot resolve.
 //! The file-level `#[allow(dead_code)]` is retained only to cover the
 //! `_with_provider` test entry points and helpers exercised solely by tests.
 
@@ -35,7 +35,7 @@ use djinn_db::{
     NoteRepository, ProjectRepository, SessionRepository, TaskRepository, folder_for_type,
     permalink_for,
 };
-use djinn_provider::provider::{LlmProvider, create_provider};
+use djinn_provider::provider::{LlmProvider, TelemetryMeta, create_provider};
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider_for_user};
 use serde::Deserialize;
 
@@ -69,6 +69,50 @@ const TRANSCRIPT_EXCERPT_CHARS: usize = 12_000;
 /// silently dropped every note. 4096 gives enough headroom for the full
 /// structured payload while staying well within the model's context window.
 const EXTRACTION_MAX_TOKENS: u32 = 4096;
+
+const NO_LLM_PROVIDER_WARNING: &str =
+    "llm_extraction: no LLM provider available; skipping extraction";
+
+enum LlmExtractionProviderResolution {
+    Provider(Box<dyn LlmProvider>),
+    NoProvider {
+        warning_message: &'static str,
+        error: String,
+    },
+}
+
+async fn resolve_llm_extraction_provider_after_creator_attempt(
+    db: &djinn_db::Database,
+    session_id: &str,
+    creator_resolved_provider: Option<Box<dyn LlmProvider>>,
+    telemetry: TelemetryMeta,
+) -> LlmExtractionProviderResolution {
+    if let Some(provider) = creator_resolved_provider {
+        return LlmExtractionProviderResolution::Provider(provider);
+    }
+
+    match resolve_memory_provider_for_user(db, None).await {
+        Ok(provider) => match provider.config_snapshot() {
+            Some(mut config) => {
+                config.telemetry = Some(telemetry);
+                LlmExtractionProviderResolution::Provider(create_provider(config))
+            }
+            None => LlmExtractionProviderResolution::Provider(provider),
+        },
+        Err(e) => {
+            let error = e.to_string();
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "llm_extraction: no LLM provider available; skipping extraction"
+            );
+            LlmExtractionProviderResolution::NoProvider {
+                warning_message: NO_LLM_PROVIDER_WARNING,
+                error,
+            }
+        }
+    }
+}
 
 /// Render a compact transcript excerpt for the extraction prompt: assistant
 /// reasoning, tool actions, and (truncated) tool results, capped to `max_chars`
@@ -568,8 +612,8 @@ async fn run_llm_extraction_inner(
         // it under the creator's `SESSION_USER_ID` scope reuses the proven
         // provider path: e.g. an `openai/*` id served via the connected
         // `chatgpt_codex` credential. If creator-scoped resolution fails, fall
-        // back only to the creator-visible memory-provider scope, or the explicit
-        // org-shared/no-user scope when there is no creator.
+        // back only to the explicit org-shared/no-user memory-provider scope;
+        // never borrow another user's private credential.
         let creator = task.created_by_user_id.clone();
         let attributed_user_id = creator
             .clone()
@@ -618,26 +662,16 @@ async fn run_llm_extraction_inner(
                 None
             }
         };
-        match via_creator {
-            Some(p) => p,
-            None => match resolve_memory_provider_for_user(&app_state.db, creator.as_deref()).await
-            {
-                Ok(provider) => match provider.config_snapshot() {
-                    Some(mut config) => {
-                        config.telemetry = Some(telemetry.clone());
-                        create_provider(config)
-                    }
-                    None => provider,
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %e,
-                        "llm_extraction: no LLM provider available; skipping extraction"
-                    );
-                    return;
-                }
-            },
+        match resolve_llm_extraction_provider_after_creator_attempt(
+            &app_state.db,
+            &session_id,
+            via_creator,
+            telemetry,
+        )
+        .await
+        {
+            LlmExtractionProviderResolution::Provider(provider) => provider,
+            LlmExtractionProviderResolution::NoProvider { .. } => return,
         }
     };
 
@@ -1541,6 +1575,162 @@ mod tests {
     use super::*;
     use crate::actors::slot::session_extraction::ExtractionQuality;
     use crate::test_helpers::{agent_context_from_db, create_test_db, test_path};
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn take(&self) -> String {
+            let mut buf = self.0.lock().expect("captured logs mutex poisoned");
+            let out =
+                String::from_utf8(buf.clone()).expect("captured log bytes were not valid utf-8");
+            buf.clear();
+            out
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogsWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogsWriter {
+                inner: std::sync::Arc::clone(&self.0),
+            }
+        }
+    }
+
+    struct CapturedLogsWriter {
+        inner: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for CapturedLogsWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner
+                .lock()
+                .expect("captured logs mutex poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn extraction_telemetry_for_test(
+        task_id: &str,
+        creator: Option<&str>,
+    ) -> djinn_provider::provider::TelemetryMeta {
+        crate::actors::slot::helpers::build_telemetry_meta_with_attribution(
+            "memory_extraction",
+            task_id,
+            Some("memory_extraction"),
+            creator,
+        )
+    }
+
+    #[tokio::test]
+    async fn llm_extraction_fallback_returns_early_when_no_org_shared_provider() {
+        use tracing::dispatcher::Dispatch;
+
+        let db = djinn_db::Database::open_in_memory().expect("in-memory db");
+        djinn_db::SettingsRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .set("settings.raw", r#"{"models":["openai/gpt-4.1-mini"]}"#)
+            .await
+            .expect("configure memory model without credentials");
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(false)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = Dispatch::new(subscriber);
+
+        let guard = tracing::dispatcher::set_default(&dispatch);
+        let resolution = resolve_llm_extraction_provider_after_creator_attempt(
+            &db,
+            "session-no-provider",
+            None,
+            extraction_telemetry_for_test("task-no-provider", Some("user_a")),
+        )
+        .await;
+        drop(guard);
+
+        let captured = logs.take();
+        assert!(
+            captured.contains(NO_LLM_PROVIDER_WARNING),
+            "fallback branch must emit the existing loud warning; captured: {captured}"
+        );
+        assert!(
+            captured.contains("session-no-provider"),
+            "warning should retain session context; captured: {captured}"
+        );
+
+        match resolution {
+            LlmExtractionProviderResolution::NoProvider {
+                warning_message,
+                error,
+            } => {
+                assert_eq!(warning_message, NO_LLM_PROVIDER_WARNING);
+                assert!(
+                    error.contains("no connected builtin provider models are available"),
+                    "fallback should fail before any completion-capable provider is returned: {error}"
+                );
+            }
+            LlmExtractionProviderResolution::Provider(provider) => panic!(
+                "expected no provider and therefore no possible LLM completion call, got {}",
+                provider.name()
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_extraction_fallback_uses_org_shared_provider_with_memory_telemetry() {
+        let db = djinn_db::Database::open_in_memory().expect("in-memory db");
+        djinn_db::SettingsRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .set(
+                "settings.raw",
+                r#"{"models":["anthropic/claude-3-5-haiku-latest"]}"#,
+            )
+            .await
+            .expect("configure org-shared memory model");
+        djinn_provider::repos::CredentialRepository::new(
+            db.clone(),
+            djinn_core::events::EventBus::noop(),
+        )
+        .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "org-key", None)
+        .await
+        .expect("configure org-shared credential");
+
+        let resolution = resolve_llm_extraction_provider_after_creator_attempt(
+            &db,
+            "session-fallback",
+            None,
+            extraction_telemetry_for_test("task-fallback", Some("user_a")),
+        )
+        .await;
+
+        let provider = match resolution {
+            LlmExtractionProviderResolution::Provider(provider) => provider,
+            LlmExtractionProviderResolution::NoProvider { error, .. } => {
+                panic!("expected org-shared fallback provider, got error: {error}")
+            }
+        };
+        assert_eq!(provider.name(), "anthropic");
+
+        let config = provider
+            .config_snapshot()
+            .expect("org-shared fallback provider should expose config snapshot");
+        let telemetry = config
+            .telemetry
+            .expect("fallback branch must attach memory extraction telemetry");
+        assert_eq!(telemetry.user_id.as_deref(), Some("user_a"));
+        assert_eq!(telemetry.operation.as_deref(), Some("memory_extraction"));
+    }
 
     /// B5a: knowledge extraction is a cheap background distillation. The call
     /// site downgrades its resolved provider to the weakest reasoning tier
