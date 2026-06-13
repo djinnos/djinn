@@ -10437,6 +10437,11 @@ expression: signatures
               "description": "True when the in-flight build is behind the latest proposal revision.",
               "type": "boolean"
             },
+            "reconciled_at": {
+              "description": "Wall-clock time of the last reconcile stamp. Surfaced so the proposal\nshow / list / mark_reconciled responses all carry the stamp the\narchitect's reconcile task wrote.",
+              "nullable": true,
+              "type": "string"
+            },
             "short_id": {
               "type": "string"
             },
@@ -10510,6 +10515,149 @@ expression: signatures
         }
       },
       "title": "ProposalListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_mark_reconciled",
+    "read_only": false,
+    "destructive": false,
+    "idempotent": true,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Proposal UUID or short_id (must be `building`).",
+          "type": "string"
+        },
+        "revision_seq": {
+          "description": "The latest proposal revision the reconcile task actually reconciled\nagainst. Stamped into `last_reconciled_revision_seq` so the coordinator's\ndrift sweep treats the row as caught up.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "summary": {
+          "description": "Free-form summary of the reconcile outcome (e.g. what epics/tasks were\nre-mapped or closed). Recorded into the proposal's `updated_at` audit\nwindow only; the durable reconcile stamp is the row-level\n`last_reconciled_revision_seq`/`reconciled_at` pair.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "revision_seq"
+      ],
+      "title": "ProposalMarkReconciledParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Structured acceptance criteria (`{criterion, met}` or plain string),\nsame shape as tasks. `met` means \"agreed during scoping\".",
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterionItem"
+          },
+          "type": "array"
+        },
+        "author_user_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "build_owner_user_id": {
+          "description": "Build owner once graduated.",
+          "nullable": true,
+          "type": "string"
+        },
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_reconciled_revision_seq": {
+          "description": "Last proposal revision that the in-flight build has reconciled against.",
+          "format": "int32",
+          "nullable": true,
+          "type": "integer"
+        },
+        "latest_revision_seq": {
+          "description": "Head revision number (sign-offs anchored earlier are stale).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "pending_reconcile": {
+          "description": "True when the in-flight build is behind the latest proposal revision.",
+          "type": "boolean"
+        },
+        "reconciled_at": {
+          "description": "Wall-clock time of the last reconcile stamp. Surfaced so the proposal\nshow / list / mark_reconciled responses all carry the stamp the\narchitect's reconcile task wrote.",
+          "nullable": true,
+          "type": "string"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "description": "Lifecycle: draft | in_review | approved | building | done | rejected |\narchived | superseded.",
+          "type": "string"
+        },
+        "superseded_by": {
+          "nullable": true,
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "unresolved_feedback_count": {
+          "default": 0,
+          "description": "Count of unresolved feedback entries — drives the per-row badge in the\nproposals list. Only populated on `proposal_list`; `0` on show paths.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "ProposalSingleResponse",
       "type": "object"
     }
   },
@@ -10785,6 +10933,11 @@ expression: signatures
             "pending_reconcile": {
               "description": "True when the in-flight build is behind the latest proposal revision.",
               "type": "boolean"
+            },
+            "reconciled_at": {
+              "description": "Wall-clock time of the last reconcile stamp. Surfaced so the proposal\nshow / list / mark_reconciled responses all carry the stamp the\narchitect's reconcile task wrote.",
+              "nullable": true,
+              "type": "string"
             },
             "short_id": {
               "type": "string"
@@ -11487,6 +11640,11 @@ expression: signatures
         "pending_reconcile": {
           "description": "True when the in-flight build is behind the latest proposal revision.",
           "type": "boolean"
+        },
+        "reconciled_at": {
+          "description": "Wall-clock time of the last reconcile stamp. Surfaced so the proposal\nshow / list / mark_reconciled responses all carry the stamp the\narchitect's reconcile task wrote.",
+          "nullable": true,
+          "type": "string"
         },
         "short_id": {
           "type": "string"

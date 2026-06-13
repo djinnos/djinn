@@ -33,6 +33,11 @@ pub struct ProposalModel {
     /// Last proposal revision that the in-flight build has reconciled against.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_reconciled_revision_seq: Option<i32>,
+    /// Wall-clock time of the last reconcile stamp. Surfaced so the proposal
+    /// show / list / mark_reconciled responses all carry the stamp the
+    /// architect's reconcile task wrote.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciled_at: Option<String>,
     /// True when the in-flight build is behind the latest proposal revision.
     pub pending_reconcile: bool,
     /// Build owner once graduated.
@@ -81,6 +86,7 @@ impl ProposalModel {
             closed_at: p.closed_at.clone(),
             latest_revision_seq: p.latest_revision_seq,
             last_reconciled_revision_seq: p.last_reconciled_revision_seq,
+            reconciled_at: p.reconciled_at.clone(),
             pending_reconcile: p.pending_reconcile,
             build_owner_user_id: p.build_owner_user_id.clone(),
             unresolved_feedback_count,

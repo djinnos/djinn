@@ -9,6 +9,33 @@
 // adversarial-review findings). Sign-offs gate approval, revisions/diffs track
 // edits, and `proposal_graduate` kicks an approved proposal off into one epic
 // per primary target (the existing single-repo-write execution engine).
+//
+// Reconcile-while-building (epic `e42y`, task `gxlt`): the architect
+// reconcile task needs an agent-accessible success path that stamps
+// `last_reconciled_revision_seq` / `reconciled_at` / clears `pending_reconcile`
+// on a `building` proposal. Audit findings (2026-06-13):
+//
+//   * SUCCESS PATH — `proposal_mark_reconciled` (added here) is a thin
+//     control-plane wrapper around `ProposalRepository::mark_reconciled`.
+//     It enforces `revision_seq <= latest_revision_seq` so a too-high
+//     reconcile baseline cannot mask future drift (the coordinator's sweep
+//     filters on `latest_revision_seq > COALESCE(last_reconciled... 0)`).
+//
+//   * BLOCKED-FEEDBACK PATH — the existing `proposal_feedback_add` is
+//     already the agent-accessible surface for AI feedback (it accepts
+//     `author_kind="ai"`, `author_model`, and a `target_section`). The
+//     safety gate calls it with `target_section="reconcile"` or `"build"`
+//     and a body explaining the conflict; it MUST NOT call
+//     `proposal_mark_reconciled` on the blocked path. The doc comment on
+//     `proposal_feedback_add` makes this explicit for future readers.
+//
+//   * TOOLING SHAPE — the success tool is exposed to the architect via the
+//     `Architect.role_config().tool_schemas` curated list
+//     (`tool_schemas_architect` in `djinn-agent/src/extension/tool_defs.rs`),
+//     not as a free addition to the global MCP surface. The Planner and
+//     other roles do NOT see the new tool — only the architect reconcile
+//     task does — mirroring the existing `proposal_show` /
+//     `proposal_ac_set` visibility model.
 
 use std::borrow::Cow;
 
@@ -248,6 +275,21 @@ pub struct ProposalStopBuildResponse {
     /// Running worker sessions killed (abort) or live now (preview).
     pub sessions_killed: i64,
     pub error: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalMarkReconciledParams {
+    /// Proposal UUID or short_id (must be `building`).
+    pub id: String,
+    /// The latest proposal revision the reconcile task actually reconciled
+    /// against. Stamped into `last_reconciled_revision_seq` so the coordinator's
+    /// drift sweep treats the row as caught up.
+    pub revision_seq: i32,
+    /// Free-form summary of the reconcile outcome (e.g. what epics/tasks were
+    /// re-mapped or closed). Recorded into the proposal's `updated_at` audit
+    /// window only; the durable reconcile stamp is the row-level
+    /// `last_reconciled_revision_seq`/`reconciled_at` pair.
+    pub summary: Option<String>,
 }
 
 // ── Tool router ──────────────────────────────────────────────────────────────
@@ -610,8 +652,19 @@ impl DjinnMcpServer {
     }
 
     /// Add a feedback entry (plain discussion) to a proposal.
+    ///
+    /// AUDIT (epic e42y / task gxlt): this is the agent-accessible
+    /// "blocked-reconcile feedback" surface. The reconcile-while-building
+    /// safety gate calls this with `author_kind="ai"`, `author_model` set to
+    /// the running model, a `target_section` of `reconcile` or `build`, and a
+    /// body explaining the conflict. Critically, the safety gate does NOT
+    /// call `proposal_mark_reconciled` on the blocked path — the proposal
+    /// stays in the drift set so the coordinator's sweep redispatches a
+    /// fresh reconcile task after the human author addresses the feedback.
+    /// The existing `user` author kind is the unchanged default for human
+    /// discussion comments.
     #[tool(
-        description = "Add a feedback comment to a proposal. Feedback is plain discussion — it is NOT applied to the spec directly; the proposal owner asks djinn in chat to apply it, which rewrites the spec as a new revision and resolves the feedback. `author_kind` is `user` (default) or `ai` (set `author_model` for AI). `parent_id` threads a reply."
+        description = "Add a feedback comment to a proposal. Feedback is plain discussion — it is NOT applied to the spec directly; the proposal owner asks djinn in chat to apply it, which rewrites the spec as a new revision and resolves the feedback. `author_kind` is `user` (default) or `ai` (set `author_model` for AI). `parent_id` threads a reply. Agent tasks also use this for the blocked-reconcile feedback path (epic e42y): pass `author_kind=\"ai\"` with `target_section=\"reconcile\"` or `\"build\"` and a body explaining the conflict. The blocked path must NOT call `proposal_mark_reconciled`."
     )]
     pub async fn proposal_feedback_add(
         &self,
@@ -972,6 +1025,81 @@ impl DjinnMcpServer {
             other => err(format!(
                 "unknown mode '{other}' — expected abort | freeze | unfreeze"
             )),
+        }
+    }
+
+    /// Mark an in-flight proposal build as reconciled through a specific
+    /// proposal revision.
+    ///
+    /// The dispatched architect reconcile task (epic `e42y`) calls this on
+    /// success: it advances the build's reconciled baseline to
+    /// `revision_seq`, clears the `pending_reconcile` flag, stamps
+    /// `reconciled_at` + `updated_at`, and emits a `proposal_updated` event
+    /// that the coordinator's drift sweep observes so the row falls out of
+    /// the drift set. Agent tasks operate through the control-plane/MCP tool
+    /// surface rather than importing [`ProposalRepository::mark_reconciled`]
+    /// directly — the tool is the agent-accessible wrapper around it.
+    ///
+    /// The blocked-reconcile path (safety gate) does NOT use this tool; the
+    /// safety gate instead records an AI-authored feedback entry through
+    /// `proposal_feedback_add(author_kind="ai", target_section="reconcile"|"build")`
+    /// so the discussion thread carries the conflict without stamping the
+    /// build as caught up.
+    #[tool(
+        description = "Mark an in-flight proposal build as reconciled through a specific proposal revision. The architect reconcile task calls this on success: it advances the build's reconciled baseline to `revision_seq`, clears `pending_reconcile`, stamps `reconciled_at` + `updated_at`, and emits a `proposal_updated` event the coordinator's drift sweep reads. The blocked-reconcile path uses `proposal_feedback_add` with `author_kind=\"ai\"` and a `reconcile`/`build` `target_section` instead, so the safety gate does NOT call this tool. Requires the proposal to be `building` and the engineer role (or admin)."
+    )]
+    pub async fn proposal_mark_reconciled(
+        &self,
+        Parameters(p): Parameters<ProposalMarkReconciledParams>,
+    ) -> Json<ProposalSingleResponse> {
+        // Capability: engineer/admin only. The reconcile task is dispatched
+        // onto the architect role, which inherits the same kickoff/freeze
+        // gating as the build-control inverse operations.
+        match acting_caps(self.state.db()).await {
+            Ok(Some(caps)) if !caps.can_kickoff() => {
+                return Json(err_single(
+                    "marking a proposal reconciled requires the engineer role (or admin)"
+                        .to_string(),
+                ));
+            }
+            Err(e) => return Json(err_single(e)),
+            _ => {}
+        }
+
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(err_single(proposal_not_found_error(&p.id)));
+        };
+        if proposal.status != "building" {
+            return Json(err_single(format!(
+                "only a building proposal can be marked reconciled (current: {})",
+                proposal.status
+            )));
+        }
+        if p.revision_seq < 0 {
+            return Json(err_single(format!(
+                "revision_seq must be non-negative (got {})",
+                p.revision_seq
+            )));
+        }
+        // `revision_seq` MUST be a real revision the proposal has reached.
+        // Stamping a seq beyond `latest_revision_seq` would mask future drift
+        // — the coordinator's sweep filters on
+        // `latest_revision_seq > COALESCE(last_reconciled_revision_seq, 0)`,
+        // so a too-high reconcile baseline would silently suppress the next
+        // reconcile dispatch on this proposal.
+        if p.revision_seq > proposal.latest_revision_seq {
+            return Json(err_single(format!(
+                "revision_seq {} is ahead of the proposal's latest_revision_seq {}; refusing to mask future drift",
+                p.revision_seq, proposal.latest_revision_seq
+            )));
+        }
+        match repo.mark_reconciled(&proposal.id, p.revision_seq).await {
+            Ok(updated) => Json(ProposalSingleResponse {
+                proposal: Some(ProposalModel::from(&updated)),
+                error: None,
+            }),
+            Err(e) => Json(err_single(e.to_string())),
         }
     }
 }
@@ -1436,5 +1564,292 @@ mod stop_build_tests {
             .await
             .0;
         assert!(!r2.ok);
+    }
+}
+
+#[cfg(test)]
+mod mark_reconciled_tests {
+    //! Focused tests for the `proposal_mark_reconciled` agent-accessible tool
+    //! and the `proposal_feedback_add` AI feedback path it pairs with on the
+    //! reconcile-while-building safety gate (epic e42y / task gxlt).
+    //!
+    //! The success path (`proposal_mark_reconciled`) must stamp
+    //! `last_reconciled_revision_seq` and clear `pending_reconcile` on a
+    //! `building` proposal; the blocked-feedback path
+    //! (`proposal_feedback_add` with `author_kind="ai"` and a `reconcile` /
+    //! `build` `target_section`) must insert a discussion entry WITHOUT
+    //! touching the reconcile fields. Both halves are exercised below so a
+    //! future refactor that conflates them trips the focused assertions.
+    use super::*;
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{
+        Database, ProjectRepository, ProposalCreateInput, ProposalRepository, ProposalUpdateInput,
+    };
+
+    /// Create a `building` proposal in `db`, drift it (latest > last_reconciled,
+    /// `pending_reconcile = true`), and return the proposal id. Mirrors the
+    /// shape the architect reconcile task sees after the coordinator dispatches
+    /// it on a `proposal_updated` event.
+    async fn drifted_building_proposal() -> (Database, String) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let bus = EventBus::noop();
+        // The project exists so the proposal is a well-formed building target
+        // for the coordinator's reconcile sweep; we don't need it for the
+        // tool's success path, but a missing `targets` row would surface a
+        // different error than the one we want to assert.
+        let _ = ProjectRepository::new(db.clone(), bus.clone())
+            .create("svc-reconcile-tool", "test", "svc-reconcile-tool")
+            .await
+            .unwrap();
+        let repo = ProposalRepository::new(db.clone(), bus);
+        let p = repo
+            .create(ProposalCreateInput {
+                title: "Drift me",
+                body: "",
+                acceptance_criteria: None,
+                status: None,
+            })
+            .await
+            .unwrap();
+        // Material edit (title change bumps the head revision) then
+        // `set_building`, so the proposal lands in `building` with
+        // `last_reconciled_revision_seq = latest_revision_seq` and
+        // `pending_reconcile = false`. Then a second material edit flips
+        // `pending_reconcile` back to true — the drift the reconcile task
+        // is dispatched against.
+        let edited = repo
+            .update(
+                &p.id,
+                ProposalUpdateInput {
+                    title: "Drift me v2",
+                    body: "",
+                    acceptance_criteria: "[]",
+                    status: "draft",
+                    superseded_by: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited.latest_revision_seq, 2);
+        let built = repo.set_building(&p.id, "owner-1").await.unwrap();
+        assert_eq!(built.last_reconciled_revision_seq, Some(2));
+        assert!(!built.pending_reconcile);
+        let drifted = repo
+            .update(
+                &p.id,
+                ProposalUpdateInput {
+                    title: "Drift me v3",
+                    body: "",
+                    acceptance_criteria: "[]",
+                    status: "building",
+                    superseded_by: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(drifted.latest_revision_seq, 3);
+        assert!(drifted.pending_reconcile);
+        assert_eq!(drifted.last_reconciled_revision_seq, Some(2));
+        (db, p.id)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mark_reconciled_clears_drift_and_stamps_reconciled_at() {
+        // Success path: a drifted building proposal is marked reconciled
+        // through the head revision. The tool must:
+        // - Resolve the proposal by id
+        // - Call `ProposalRepository::mark_reconciled` (audit confirms the
+        //   row ends up with `last_reconciled_revision_seq == head` and
+        //   `pending_reconcile == false`)
+        // - Return the refreshed proposal so the architect's reconcile task
+        //   can hand it back to the coordinator's drift sweep as a stale-free
+        //   observation.
+        let (db, pid) = drifted_building_proposal().await;
+        let server = DjinnMcpServer::new(test_mcp_state(db.clone()));
+
+        let r = server
+            .proposal_mark_reconciled(Parameters(ProposalMarkReconciledParams {
+                id: pid.clone(),
+                revision_seq: 3,
+                summary: Some("re-mapped e42y to new grad tree".into()),
+            }))
+            .await
+            .0;
+        let proposal = r.proposal.expect("success returns a refreshed proposal");
+        assert!(r.error.is_none());
+        assert_eq!(proposal.id, pid);
+        assert_eq!(proposal.status, "building", "status stays building");
+        assert!(!proposal.pending_reconcile, "pending_reconcile cleared");
+        assert_eq!(
+            proposal.last_reconciled_revision_seq,
+            Some(3),
+            "build baseline advanced to head"
+        );
+        assert!(
+            proposal.reconciled_at.is_some(),
+            "reconciled_at surfaced on the tool response"
+        );
+
+        // Persisted state: the row in the DB matches the tool response.
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let reread = repo.get(&pid).await.unwrap().unwrap();
+        assert_eq!(reread.last_reconciled_revision_seq, Some(3));
+        assert!(!reread.pending_reconcile);
+        assert!(reread.reconciled_at.is_some());
+
+        // The proposal is no longer drifted after mark_reconciled.
+        let drift_ids: Vec<String> = repo
+            .drift_building_proposals()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert!(
+            !drift_ids.contains(&pid),
+            "mark_reconciled removes the proposal from the drift set"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mark_reconciled_rejects_ahead_of_head_revision() {
+        // Refuse to mask future drift. The coordinator's drift sweep
+        // filters on `latest_revision_seq > COALESCE(last_reconciled..., 0)`,
+        // so stamping a `revision_seq` beyond the current head would
+        // silently suppress the next reconcile dispatch. The tool MUST
+        // reject this with a clear error.
+        let (db, pid) = drifted_building_proposal().await;
+        let server = DjinnMcpServer::new(test_mcp_state(db.clone()));
+
+        let r = server
+            .proposal_mark_reconciled(Parameters(ProposalMarkReconciledParams {
+                id: pid.clone(),
+                revision_seq: 99,
+                summary: None,
+            }))
+            .await
+            .0;
+        assert!(r.proposal.is_none());
+        let err = r.error.expect("ahead-of-head must error");
+        assert!(
+            err.contains("99") && err.contains("latest_revision_seq"),
+            "error mentions both numbers so the operator can fix it: {err}"
+        );
+
+        // Persisted state is unchanged.
+        let repo = ProposalRepository::new(db, EventBus::noop());
+        let reread = repo.get(&pid).await.unwrap().unwrap();
+        assert_eq!(reread.last_reconciled_revision_seq, Some(2));
+        assert!(reread.pending_reconcile);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mark_reconciled_rejects_non_building_proposal() {
+        // `mark_reconciled` only makes sense on a `building` proposal; a
+        // pre-build status has no in-flight reconcile baseline to advance.
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let bus = EventBus::noop();
+        let repo = ProposalRepository::new(db.clone(), bus);
+        let p = repo
+            .create(ProposalCreateInput {
+                title: "not building",
+                body: "",
+                acceptance_criteria: None,
+                status: None,
+            })
+            .await
+            .unwrap();
+        let server = DjinnMcpServer::new(test_mcp_state(db));
+
+        let r = server
+            .proposal_mark_reconciled(Parameters(ProposalMarkReconciledParams {
+                id: p.id.clone(),
+                revision_seq: 1,
+                summary: None,
+            }))
+            .await
+            .0;
+        assert!(r.proposal.is_none());
+        let err = r.error.expect("non-building must error");
+        assert!(
+            err.contains("building"),
+            "error names the required status: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_reconcile_feedback_inserts_ai_entry_without_touching_reconcile_fields() {
+        // Blocked-reconcile path: the safety gate calls
+        // `proposal_feedback_add` with `author_kind="ai"`, a `reconcile`
+        // `target_section`, and a body explaining the conflict. This MUST
+        // NOT stamp the build as reconciled — the proposal stays in the
+        // drift set so the coordinator's sweep redispatches a fresh
+        // reconcile task after the human author addresses the feedback.
+        let (db, pid) = drifted_building_proposal().await;
+        let server = DjinnMcpServer::new(test_mcp_state(db.clone()));
+
+        let r = server
+            .proposal_feedback_add(Parameters(ProposalFeedbackAddParams {
+                proposal_id: pid.clone(),
+                body: "spec §2 contradicts the existing grad tree; resolve before stamping".into(),
+                target_section: Some("reconcile".into()),
+                parent_id: None,
+                author_kind: Some("ai".into()),
+                author_model: Some("claude-fable-5".into()),
+            }))
+            .await
+            .0;
+        let entry = r.feedback.expect("blocked feedback returns the new entry");
+        assert_eq!(entry.author_kind, "ai");
+        assert_eq!(entry.author_model.as_deref(), Some("claude-fable-5"));
+        assert_eq!(entry.target_section.as_deref(), Some("reconcile"));
+        assert!(r.error.is_none());
+
+        // The feedback is visible on the proposal's show response.
+        let shown = server
+            .proposal_show(Parameters(ProposalShowParams { id: pid.clone() }))
+            .await
+            .0;
+        let feedback = shown.feedback.expect("show returns feedback");
+        assert_eq!(feedback.len(), 1);
+        assert_eq!(feedback[0].id, entry.id);
+        assert_eq!(feedback[0].author_kind, "ai");
+
+        // The reconcile fields are UNCHANGED. The safety gate must never
+        // stamp the proposal as caught up; that would mask the conflict
+        // and the coordinator's sweep would silently drop the row.
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let reread = repo.get(&pid).await.unwrap().unwrap();
+        assert_eq!(
+            reread.last_reconciled_revision_seq,
+            Some(2),
+            "blocked feedback must not advance the reconcile baseline"
+        );
+        assert!(
+            reread.pending_reconcile,
+            "blocked feedback must not clear pending_reconcile — the proposal stays in the drift set"
+        );
+        // The durable contract: the drift set still contains the row, so
+        // the coordinator's sweep will redispatch a fresh reconcile task
+        // after the human author addresses the feedback. (`reconciled_at`
+        // is NOT asserted on this path — `set_building` already stamped
+        // it during the test fixture, and the goal here is that the
+        // blocked-feedback call does not advance `last_reconciled_revision_seq`
+        // or clear `pending_reconcile`, which is what the sweep reads.)
+        let drift_ids: Vec<String> = repo
+            .drift_building_proposals()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert!(
+            drift_ids.contains(&pid),
+            "after blocked feedback, the proposal is still drifted (sweep will redispatch)"
+        );
     }
 }

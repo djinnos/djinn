@@ -126,7 +126,9 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq,
+                    to_char(reconciled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS reconciled_at,
+                    pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE id = $1"#,
             id
         )
@@ -140,7 +142,9 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq,
+                    to_char(reconciled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS reconciled_at,
+                    pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE short_id = $1"#,
             short_id
         )
@@ -155,7 +159,9 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq,
+                    to_char(reconciled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS reconciled_at,
+                    pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE id = $1 OR short_id = $2"#,
             id_or_short,
             id_or_short
@@ -481,7 +487,9 @@ impl ProposalRepository {
         // the `proposal_feedback_unresolved` partial index) for the list badge.
         let sql = format!(
             r#"SELECT id, short_id, title, body, acceptance_criteria::text AS acceptance_criteria,
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id,
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq,
+                    to_char(reconciled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS reconciled_at,
+                    pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id,
                     (SELECT COUNT(*) FROM proposal_feedback pf
                        WHERE pf.proposal_id = proposals.id AND pf.resolved_at IS NULL) AS unresolved_feedback_count
              FROM proposals WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
@@ -1075,7 +1083,9 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq,
+                    to_char(reconciled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS reconciled_at,
+                    pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals p
              WHERE p.status = 'building'
                AND EXISTS (SELECT 1 FROM proposal_epics pe WHERE pe.proposal_id = p.id)
@@ -1088,6 +1098,73 @@ impl ProposalRepository {
         )
         .fetch_all(self.db.pool())
         .await?)
+    }
+
+    /// `building` proposals whose latest revision is newer than the revision the
+    /// in-flight build has reconciled against. The coordinator's reconcile-while-
+    /// building sweep reads this to find proposals that need a reconcile task
+    /// dispatched or backstopped.
+    ///
+    /// `NULL last_reconciled_revision_seq` is treated as `0` (no reconcile stamp
+    /// yet) so a freshly graduated proposal that never had its build baseline
+    /// advanced still surfaces as drift. Task-dedup (e.g. "an open reconcile
+    /// task already exists") is intentionally NOT baked in here — the
+    /// coordinator helper owns that check, so this query stays a pure drift
+    /// signal.
+    ///
+    /// Ordered by `latest_revision_seq ASC, id ASC` for deterministic iteration
+    /// across sweeps (oldest drift first).
+    pub async fn drift_building_proposals(&self) -> Result<Vec<Proposal>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            Proposal,
+            r#"SELECT id, short_id, title, body,
+                    acceptance_criteria::text AS "acceptance_criteria!",
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq,
+                    to_char(reconciled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS reconciled_at,
+                    pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
+             FROM proposals p
+             WHERE p.status = 'building'
+               AND p.latest_revision_seq > COALESCE(p.last_reconciled_revision_seq, 0)
+             ORDER BY p.latest_revision_seq ASC, p.id ASC"#
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Stamp a proposal as reconciled through `new_revision_seq`. The architect
+    /// reconcile task calls this on success: it advances the build's reconciled
+    /// baseline, clears the `pending_reconcile` flag, and stamps `reconciled_at`
+    /// + `updated_at` so the next sweep treats the proposal as caught up.
+    ///
+    /// Emits a `proposal_updated` event with the refreshed proposal so the
+    /// coordinator's own drift-sweep does not immediately re-dispatch on the
+    /// row it just stamped.
+    ///
+    /// Wrapped by the agent-accessible `proposal_mark_reconciled` MCP tool in
+    /// `djinn-control-plane` — agent reconcile tasks go through the control
+    /// plane rather than importing this repository directly.
+    pub async fn mark_reconciled(
+        &self,
+        proposal_id: &str,
+        new_revision_seq: i32,
+    ) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            r#"UPDATE proposals SET last_reconciled_revision_seq = $1,
+                    pending_reconcile = false,
+                    reconciled_at = now(),
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $2"#,
+            new_revision_seq,
+            proposal_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let proposal = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&proposal));
+        Ok(proposal)
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────
@@ -1906,6 +1983,192 @@ mod tests {
             "no graduated epics means not drained"
         );
         assert!(!ids.contains(&p4.id), "non-building is never drained");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mark_reconciled_stamps_drift_and_emits_event() {
+        // Drives the architect-side completion surface: a building proposal
+        // accumulates drift via a material edit, the reconcile task finishes,
+        // and `mark_reconciled` advances the build baseline, clears
+        // `pending_reconcile`, stamps `reconciled_at`, refreshes the row, and
+        // emits a `proposal_updated` event a non-noop bus can capture.
+        let db = test_db();
+        let (bus, captured) = capturing_bus();
+        let repo = ProposalRepository::new(db.clone(), bus);
+        let proj = insert_project(&db, "svc-reconcile").await;
+        let p = repo.create(create_input("Reconcile")).await.unwrap();
+        let epic = insert_epic(&db, &proj, "re01").await;
+        repo.link_epic(&p.id, &epic, &proj).await.unwrap();
+        let building = repo.set_building(&p.id, "user-x").await.unwrap();
+        assert_eq!(building.last_reconciled_revision_seq, Some(1));
+        // `set_building` already stamps `reconciled_at`; we re-read it here
+        // so a future regression that drops that stamp is caught early.
+        assert!(
+            building.reconciled_at.is_some(),
+            "set_building must surface reconciled_at"
+        );
+        captured.lock().unwrap().clear();
+
+        // Material edit: latest_revision_seq bumps to 2, pending_reconcile
+        // flips true, last_reconciled_revision_seq stays at 1 (the build is
+        // now behind). This is the drift the coordinator's sweep reads.
+        let drifted = repo
+            .update(
+                &p.id,
+                update_input("Reconcile v2", "new body", "[]", "building"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(drifted.latest_revision_seq, 2);
+        assert!(drifted.pending_reconcile);
+        assert_eq!(drifted.last_reconciled_revision_seq, Some(1));
+        captured.lock().unwrap().clear();
+
+        // The reconcile task calls `mark_reconciled` on success: advance the
+        // build baseline, clear the pending flag, refresh `reconciled_at`.
+        let reconciled = repo.mark_reconciled(&p.id, 2).await.unwrap();
+        assert_eq!(reconciled.latest_revision_seq, 2);
+        assert_eq!(reconciled.last_reconciled_revision_seq, Some(2));
+        assert!(!reconciled.pending_reconcile);
+        assert!(
+            reconciled.reconciled_at.is_some(),
+            "reconciled_at must be surfaced on the row read back"
+        );
+
+        // Persisted: a fresh `get` reads the same drift-clear state.
+        let reread = repo.get(&p.id).await.unwrap().unwrap();
+        assert_eq!(reread.last_reconciled_revision_seq, Some(2));
+        assert!(!reread.pending_reconcile);
+        assert!(reread.reconciled_at.is_some());
+
+        // Event emission: the architect's reconcile completion drives the
+        // coordinator's own sweep, so the refreshed proposal must be
+        // observable through the event bus — the captured envelope carries
+        // the cleared drift.
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1, "exactly one proposal_updated event");
+        let envelope = &events[0];
+        assert_eq!(envelope.entity_type, "proposal");
+        assert_eq!(envelope.action, "updated");
+        let payload = &envelope.payload;
+        assert_eq!(payload["id"], serde_json::json!(p.id));
+        assert_eq!(
+            payload["last_reconciled_revision_seq"],
+            serde_json::json!(2)
+        );
+        assert_eq!(payload["pending_reconcile"], serde_json::json!(false));
+        assert!(payload["reconciled_at"].is_string());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drift_building_proposals_filters_by_building_and_drift() {
+        // Mirrors the coordinator's reconcile-sweep read shape: return only
+        // `building` proposals whose latest revision is newer than the build's
+        // reconciled baseline. Reconciled, non-building, and zero-drift rows
+        // must be excluded. Drift is the only signal — task-dedup lives in
+        // the coordinator helper, not here.
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proj = insert_project(&db, "svc-drift").await;
+
+        // p1: building, last_reconciled < latest (drift) — included.
+        let p1 = repo.create(create_input("Drifted")).await.unwrap();
+        let e1 = insert_epic(&db, &proj, "drp1").await;
+        repo.link_epic(&p1.id, &e1, &proj).await.unwrap();
+        let p1_built = repo.set_building(&p1.id, "u").await.unwrap();
+        assert_eq!(p1_built.last_reconciled_revision_seq, Some(1));
+        let p1_drifted = repo
+            .update(&p1.id, update_input("Drifted v2", "body", "[]", "building"))
+            .await
+            .unwrap();
+        assert_eq!(p1_drifted.latest_revision_seq, 2);
+        assert_eq!(p1_drifted.last_reconciled_revision_seq, Some(1));
+
+        // p2: building, reconciled up to its head (zero drift) — excluded.
+        let p2 = repo.create(create_input("Caught up")).await.unwrap();
+        let e2 = insert_epic(&db, &proj, "drp2").await;
+        repo.link_epic(&p2.id, &e2, &proj).await.unwrap();
+        let p2_built = repo.set_building(&p2.id, "u").await.unwrap();
+        assert_eq!(p2_built.last_reconciled_revision_seq, Some(1));
+
+        // p3: building, no reconciled baseline AND latest is 1 — included
+        // (NULL last_reconciled_revision_seq is treated as 0). Achieve this
+        // by stamping a building state via a raw update that explicitly NULLs
+        // the baseline.
+        let p3 = repo
+            .create(create_input("Unreconciled baseline"))
+            .await
+            .unwrap();
+        let e3 = insert_epic(&db, &proj, "drp3").await;
+        repo.link_epic(&p3.id, &e3, &proj).await.unwrap();
+        sqlx::query!(
+            "UPDATE proposals SET status = 'building', build_owner_user_id = $1,
+                                  last_reconciled_revision_seq = NULL,
+                                  pending_reconcile = true
+             WHERE id = $2",
+            "u",
+            p3.id
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // p4: NOT building (draft) with drift potential — excluded.
+        let p4 = repo.create(create_input("Draft drift")).await.unwrap();
+        let e4 = insert_epic(&db, &proj, "drp4").await;
+        repo.link_epic(&p4.id, &e4, &proj).await.unwrap();
+        let p4_drifted = repo
+            .update(
+                &p4.id,
+                update_input("Draft drift v2", "body", "[]", "draft"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(p4_drifted.latest_revision_seq, 2);
+
+        let ids: Vec<String> = repo
+            .drift_building_proposals()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert!(
+            ids.contains(&p1.id),
+            "drifted building proposal is included"
+        );
+        assert!(
+            !ids.contains(&p2.id),
+            "reconciled (zero drift) building proposal is excluded"
+        );
+        assert!(
+            ids.contains(&p3.id),
+            "building proposal with NULL baseline is treated as drift"
+        );
+        assert!(
+            !ids.contains(&p4.id),
+            "non-building proposals are never drift candidates"
+        );
+
+        // After `mark_reconciled`, p1 falls off the sweep — the row is no
+        // longer drifted. This is the steady-state the architect's reconcile
+        // task lands in.
+        repo.mark_reconciled(&p1.id, 2).await.unwrap();
+        let ids_after: Vec<String> = repo
+            .drift_building_proposals()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert!(
+            !ids_after.contains(&p1.id),
+            "mark_reconciled removes a building proposal from the drift set"
+        );
+        assert!(
+            ids_after.contains(&p3.id),
+            "p3 is still drifted (baseline still NULL)"
+        );
     }
 
     /// Helper: insert an open `task` row under an epic and return its id.

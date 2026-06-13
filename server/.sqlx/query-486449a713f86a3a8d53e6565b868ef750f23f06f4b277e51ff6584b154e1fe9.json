@@ -1,0 +1,10 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE proposals SET status = 'building', build_owner_user_id = $1,\n                                  last_reconciled_revision_seq = NULL,\n                                  pending_reconcile = true\n             WHERE id = $2",
+  "describe": {
+    "columns": [],
+    "nullable": [],
+    "parameters": { "Left": [ "Varchar", "Text" ] }
+  },
+  "hash": "486449a713f86a3a8d53e6565b868ef750f23f06f4b277e51ff6584b154e1fe9"
+}

@@ -308,6 +308,22 @@ pub(crate) fn tool_proposal_ac_set() -> RmcpTool {
     )
 }
 
+pub(crate) fn tool_proposal_mark_reconciled() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_mark_reconciled".to_string(),
+        "Mark a `building` proposal as reconciled through `revision_seq` (architect reconcile-while-building success path; epic e42y). `revision_seq` must be <= the proposal's `latest_revision_seq`; the blocked-reconcile path uses `proposal_feedback_add` with `author_kind=\"ai\"` and `target_section=\"reconcile\"|\"build\"`.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id", "revision_seq"],
+            "properties": {
+                "id": {"type": "string", "description": "Proposal UUID or short ID of a `building` proposal."},
+                "revision_seq": {"type": "integer", "description": "Latest revision reconciled."},
+                "summary": {"type": "string", "description": "Optional reconcile summary."}
+            }
+        }),
+    )
+}
+
 pub(crate) fn tool_proposal_ac_amend() -> RmcpTool {
     RmcpTool::new(
         "proposal_ac_amend".to_string(),

@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
+assertion_line: 782
 expression: tool_schemas_architect()
 ---
 [
@@ -1249,6 +1250,36 @@ expression: tool_schemas_architect()
     "readOnly": false,
     "destructive": false,
     "idempotent": false,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
+    "name": "proposal_mark_reconciled",
+    "description": "Mark a `building` proposal as reconciled through `revision_seq` (architect reconcile-while-building success path; epic e42y). `revision_seq` must be <= the proposal's `latest_revision_seq`; the blocked-reconcile path uses `proposal_feedback_add` with `author_kind=\"ai\"` and `target_section=\"reconcile\"|\"build\"`.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id",
+        "revision_seq"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Proposal UUID or short ID of a `building` proposal."
+        },
+        "revision_seq": {
+          "type": "integer",
+          "description": "Latest revision reconciled."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Optional reconcile summary."
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": true,
     "openWorld": false,
     "concurrent_safe": false
   },
