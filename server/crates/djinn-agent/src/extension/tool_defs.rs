@@ -997,12 +997,7 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
         shared_schemas::tool_epic_create(),
         mutation(),
     ));
-    // `proposal_mark_reconciled` is a build-baseline stamp — calling it
-    // twice with the same `revision_seq` produces the same reconciled
-    // state (idempotent), which is why it carries `idempotent_mutation`
-    // rather than the plain `mutation` shape. Safety-critical: it can
-    // only be called on a `building` proposal with `revision_seq <=
-    // latest_revision_seq`, and the tool enforces both.
+    // Reconcile tasks can either report blocked feedback or stamp success.
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_feedback_add(),
         mutation(),
