@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 510
 expression: signatures
 ---
 [
@@ -10510,6 +10511,117 @@ expression: signatures
         }
       },
       "title": "ProposalListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_reconcile_obsolete_epic",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "epic_id": {
+          "description": "Epic UUID or short_id to retire from this proposal's graduated epics.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Proposal UUID or short_id. Alias for `proposal_id`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "preview": {
+          "description": "When true, compute blast radius without closing tasks, closing/unlinking the epic, or killing sessions.",
+          "nullable": true,
+          "type": "boolean"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short_id. Alias for `id`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why obsolete work is being force-closed. Defaults to a reconcile teardown reason.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "epic_id"
+      ],
+      "title": "ProposalReconcileObsoleteEpicParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "blocked": {
+          "description": "`true` when merged work in the target epic prevented mutation.",
+          "type": "boolean"
+        },
+        "blocked_feedback_body": {
+          "nullable": true,
+          "type": "string"
+        },
+        "blocked_feedback_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "epic_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "epics_closed": {
+          "description": "Target epic closed, or that would be closed in preview.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "merged_tasks": {
+          "default": [],
+          "description": "Task UUIDs in the target epic that have merged work and caused a block.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "preview": {
+          "description": "`true` when this was a dry-run that did not mutate anything.",
+          "type": "boolean"
+        },
+        "proposal_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "sessions_killed": {
+          "description": "Running target-epic worker sessions killed, or live sessions in preview.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "tasks_closed": {
+          "description": "Target-epic tasks force-closed, or open target-epic tasks in preview.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ok",
+        "preview",
+        "blocked",
+        "epics_closed",
+        "tasks_closed",
+        "sessions_killed"
+      ],
+      "title": "ProposalReconcileObsoleteEpicResponse",
       "type": "object"
     }
   },

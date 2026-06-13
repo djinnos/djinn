@@ -260,6 +260,34 @@ pub struct ProposalFeedbackResponse {
 }
 
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalReconcileObsoleteEpicResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epic_id: Option<String>,
+    /// `true` when this was a dry-run that did not mutate anything.
+    pub preview: bool,
+    /// `true` when merged work in the target epic prevented mutation.
+    pub blocked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_feedback_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_feedback_body: Option<String>,
+    /// Task UUIDs in the target epic that have merged work and caused a block.
+    #[serde(default)]
+    pub merged_tasks: Vec<String>,
+    /// Target epic closed, or that would be closed in preview.
+    pub epics_closed: i64,
+    /// Target-epic tasks force-closed, or open target-epic tasks in preview.
+    pub tasks_closed: i64,
+    /// Running target-epic worker sessions killed, or live sessions in preview.
+    pub sessions_killed: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 pub struct ProposalDeleteResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
