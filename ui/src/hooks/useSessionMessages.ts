@@ -84,7 +84,30 @@ export interface StreamingDelta {
   text: string;
 }
 
-export type TimelineEntry = ChatMessage | SystemDivider | CommandBlock | CommentBlock | VerificationBlock | StreamingDelta;
+export interface LoopGuardTurnSpan {
+  start?: number;
+  end?: number;
+}
+
+export interface LoopGuardTrippedBlock {
+  kind: "loop_guard_tripped";
+  guardKind?: string;
+  offendingSignature?: string;
+  threshold?: number;
+  observed?: number;
+  turnSpan?: LoopGuardTurnSpan;
+  sessionId?: string;
+  timestamp: string;
+}
+
+export type TimelineEntry =
+  | ChatMessage
+  | SystemDivider
+  | CommandBlock
+  | CommentBlock
+  | VerificationBlock
+  | StreamingDelta
+  | LoopGuardTrippedBlock;
 
 export interface SessionInfo {
   id: string;
@@ -167,7 +190,10 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
 
       // Add activity log entries as dividers and commands
       for (const entry of result.activity ?? []) {
-        if (entry.event_type === "status_changed") {
+        const loopGuardEntry = mapLoopGuardActivity(entry as Record<string, unknown>);
+        if (loopGuardEntry) {
+          entries.push(loopGuardEntry);
+        } else if (entry.event_type === "status_changed") {
           const payload = entry.payload as Record<string, unknown>;
           const from = payload?.from_status as string | undefined;
           const to = payload?.to_status as string | undefined;
@@ -434,4 +460,65 @@ function setsOverlap(a: Set<string>, b: Set<string>): boolean {
 
 function formatStatus(status: string): string {
   return STATUS_LABELS[status] ?? status;
+}
+
+export function mapLoopGuardActivity(entry: Record<string, unknown>): LoopGuardTrippedBlock | null {
+  const payload = asRecord(entry.payload);
+  const topLevelKind = asString(entry.kind);
+  const eventType = asString(entry.event_type);
+  const payloadKind = asString(payload?.kind);
+  const isLoopGuard =
+    topLevelKind === "loop_guard_tripped"
+    || eventType === "loop_guard_tripped"
+    || payloadKind === "loop_guard_tripped";
+
+  if (!isLoopGuard) return null;
+
+  const details = asRecord(entry.details) ?? asRecord(payload?.details) ?? payload ?? {};
+  const turnSpan = normalizeTurnSpan(details.turn_span);
+
+  return {
+    kind: "loop_guard_tripped",
+    guardKind: asString(details.kind),
+    offendingSignature: asString(details.offending_signature),
+    threshold: asNumber(details.threshold),
+    observed: asNumber(details.observed),
+    turnSpan,
+    sessionId: asString(details.session_id),
+    timestamp: asString(entry.timestamp) ?? new Date(0).toISOString(),
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function normalizeTurnSpan(value: unknown): LoopGuardTurnSpan | undefined {
+  const record = asRecord(value);
+  if (record) {
+    const start = asNumber(record.start);
+    const end = asNumber(record.end);
+    return start === undefined && end === undefined ? undefined : { start, end };
+  }
+  if (Array.isArray(value)) {
+    const start = asNumber(value[0]);
+    const end = asNumber(value[1]);
+    return start === undefined && end === undefined ? undefined : { start, end };
+  }
+  return undefined;
 }

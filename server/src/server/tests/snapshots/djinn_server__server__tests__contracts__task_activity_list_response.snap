@@ -10,9 +10,11 @@ expression: task_activity
       "actor_id": "[UUID]",
       "actor_role": "user",
       "event_type": "comment",
+      "kind": "comment",
       "payload": {
         "body": "snapshot comment"
       },
+      "summary": "snapshot comment",
       "created_at": "[TIMESTAMP]"
     }
   ],
