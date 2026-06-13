@@ -1120,6 +1120,186 @@ impl DjinnMcpServer {
             error: None,
         })
     }
+
+    /// Tear down exactly one obsolete graduated epic subtree for proposal reconcile.
+    ///
+    /// This is the scoped form of the abort cascade: it never touches the
+    /// proposal build metadata, the breakdown task, or unrelated graduated epics.
+    /// If any task in the target subtree has merged work, the operation records
+    /// AI feedback and returns blocked before preview success or mutation.
+    #[allow(dead_code)]
+    async fn teardown_obsolete_proposal_epic(
+        &self,
+        repo: &ProposalRepository,
+        proposal: &djinn_core::models::Proposal,
+        epic_id: &str,
+        reason: &str,
+        preview: bool,
+    ) -> Json<ProposalStopBuildResponse> {
+        use djinn_core::models::TransitionAction;
+
+        let scoped_err = |msg: String| {
+            Json(ProposalStopBuildResponse {
+                ok: false,
+                mode: "obsolete_epic_teardown".to_string(),
+                proposal_id: Some(proposal.id.clone()),
+                status: None,
+                preview: false,
+                epics_closed: 0,
+                tasks_closed: 0,
+                sessions_killed: 0,
+                error: Some(msg),
+            })
+        };
+
+        if proposal.status != "building" {
+            return scoped_err(format!(
+                "only a building proposal can tear down an obsolete epic (current: {})",
+                proposal.status
+            ));
+        }
+
+        let graduated = match repo.graduated_epics(&proposal.id).await {
+            Ok(v) => v,
+            Err(e) => return scoped_err(e.to_string()),
+        };
+        if !graduated.iter().any(|(id, _)| id == epic_id) {
+            return scoped_err(format!(
+                "epic {epic_id} is not a graduated epic for proposal {}",
+                proposal.id
+            ));
+        }
+
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
+        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+        let pool = self.state.pool().await;
+
+        let all_tasks = match task_repo.list_by_epic(epic_id).await {
+            Ok(tasks) => tasks,
+            Err(e) => return scoped_err(e.to_string()),
+        };
+
+        let merged_tasks: Vec<_> = all_tasks
+            .iter()
+            .filter(|t| t.merge_commit_sha.is_some())
+            .collect();
+        if !merged_tasks.is_empty() {
+            let task_list = merged_tasks
+                .iter()
+                .map(|t| {
+                    format!(
+                        "- {} ({}) merged at {}",
+                        t.short_id,
+                        t.id,
+                        t.merge_commit_sha.as_deref().unwrap_or("<unknown>")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let body = format!(
+                "Obsolete-subtree teardown is blocked for epic `{epic_id}` because it contains merged work. Preserve the subtree and reconcile manually before unlinking or closing it.\n\nMerged tasks:\n{task_list}"
+            );
+            let _ = repo
+                .add_feedback(djinn_db::ProposalFeedbackCreateInput {
+                    proposal_id: &proposal.id,
+                    parent_id: None,
+                    author_kind: "ai",
+                    author_model: Some("proposal-reconcile"),
+                    body: &body,
+                    target_section: None,
+                })
+                .await;
+            return Json(ProposalStopBuildResponse {
+                ok: false,
+                mode: "obsolete_epic_teardown".to_string(),
+                proposal_id: Some(proposal.id.clone()),
+                status: Some(proposal.status.clone()),
+                preview: false,
+                epics_closed: 0,
+                tasks_closed: 0,
+                sessions_killed: 0,
+                error: Some(format!(
+                    "obsolete epic teardown blocked by merged work in {} task(s)",
+                    merged_tasks.len()
+                )),
+            });
+        }
+
+        let open_tasks: Vec<_> = all_tasks
+            .into_iter()
+            .filter(|t| t.status != "closed")
+            .collect();
+
+        let mut live_sessions = 0i64;
+        if let Some(pool) = pool.as_ref() {
+            for t in &open_tasks {
+                if pool.has_session(&t.id).await.unwrap_or(false) {
+                    live_sessions += 1;
+                }
+            }
+        }
+
+        if preview {
+            return Json(ProposalStopBuildResponse {
+                ok: true,
+                mode: "obsolete_epic_teardown".to_string(),
+                proposal_id: Some(proposal.id.clone()),
+                status: Some(proposal.status.clone()),
+                preview: true,
+                epics_closed: 1,
+                tasks_closed: open_tasks.len() as i64,
+                sessions_killed: live_sessions,
+                error: None,
+            });
+        }
+
+        let mut sessions_killed = 0i64;
+        let mut tasks_closed = 0i64;
+        for t in &open_tasks {
+            if let Some(pool) = pool.as_ref()
+                && pool.has_session(&t.id).await.unwrap_or(false)
+            {
+                let _ = pool.kill_session(&t.id).await;
+                sessions_killed += 1;
+            }
+            if task_repo
+                .transition(
+                    &t.id,
+                    TransitionAction::ForceClose,
+                    "system",
+                    "system",
+                    Some(reason),
+                    None,
+                )
+                .await
+                .is_ok()
+            {
+                tasks_closed += 1;
+                self.state.cleanup_task_branches(&t.id).await;
+            }
+        }
+
+        let epics_closed = if epic_repo.close(epic_id).await.is_ok() {
+            1
+        } else {
+            0
+        };
+        if let Err(e) = repo.unlink_epic(&proposal.id, epic_id).await {
+            return scoped_err(e.to_string());
+        }
+
+        Json(ProposalStopBuildResponse {
+            ok: true,
+            mode: "obsolete_epic_teardown".to_string(),
+            proposal_id: Some(proposal.id.clone()),
+            status: Some(proposal.status.clone()),
+            preview: false,
+            epics_closed,
+            tasks_closed,
+            sessions_killed,
+            error: None,
+        })
+    }
 }
 
 // ── Permission gates ─────────────────────────────────────────────────────────
@@ -1406,6 +1586,178 @@ mod stop_build_tests {
             .unwrap()
             .unwrap();
         assert_eq!(epic.status, "open");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scoped_teardown_closes_only_target_epic_and_preserves_build() {
+        let (server, db, pid, target_epic_id, target_task_ids, breakdown_id) =
+            building_proposal().await;
+        let bus = EventBus::noop();
+        let project_repo = ProjectRepository::new(db.clone(), bus.clone());
+        let project_id = project_repo
+            .resolve("test/svc-stop")
+            .await
+            .unwrap()
+            .unwrap();
+        let project = project_repo.get(&project_id).await.unwrap().unwrap();
+        let other_epic = EpicRepository::new(db.clone(), bus.clone())
+            .create_for_project(
+                &project.id,
+                EpicCreateInput {
+                    title: "Other",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: None,
+                    auto_breakdown: Some(false),
+                    originating_adr_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        let trepo = TaskRepository::new(db.clone(), bus.clone());
+        let other_task = trepo
+            .create_in_project(
+                &project.id,
+                Some(&other_epic.id),
+                "other-task",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                Some("open"),
+                Some("[\"do\"]"),
+            )
+            .await
+            .unwrap();
+        let prepo = ProposalRepository::new(db.clone(), bus.clone());
+        prepo
+            .link_epic(&pid, &other_epic.id, &project.id)
+            .await
+            .unwrap();
+        let proposal = prepo.get(&pid).await.unwrap().unwrap();
+
+        let r = server
+            .teardown_obsolete_proposal_epic(
+                &prepo,
+                &proposal,
+                &target_epic_id,
+                "obsolete after reconcile",
+                false,
+            )
+            .await
+            .0;
+        assert!(r.ok, "scoped teardown failed: {:?}", r.error);
+        assert_eq!(r.epics_closed, 1);
+        assert_eq!(r.tasks_closed, target_task_ids.len() as i64);
+        assert_eq!(r.status.as_deref(), Some("building"));
+
+        let p = prepo.get(&pid).await.unwrap().unwrap();
+        assert_eq!(p.status, "building");
+        assert_eq!(
+            p.build_breakdown_task_id.as_deref(),
+            Some(breakdown_id.as_str())
+        );
+        assert_eq!(p.build_owner_user_id.as_deref(), Some("owner"));
+        assert_eq!(
+            prepo.graduated_epics(&pid).await.unwrap(),
+            vec![(other_epic.id.clone(), project.id.clone())]
+        );
+
+        let erepo = EpicRepository::new(db.clone(), bus.clone());
+        assert_eq!(
+            erepo.get(&target_epic_id).await.unwrap().unwrap().status,
+            "closed"
+        );
+        assert_eq!(
+            erepo.get(&other_epic.id).await.unwrap().unwrap().status,
+            "open"
+        );
+
+        for tid in &target_task_ids {
+            assert_eq!(trepo.get(tid).await.unwrap().unwrap().status, "closed");
+        }
+        assert_eq!(
+            trepo.get(&other_task.id).await.unwrap().unwrap().status,
+            "open"
+        );
+        assert_eq!(
+            trepo.get(&breakdown_id).await.unwrap().unwrap().status,
+            "open"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scoped_teardown_blocks_merged_work_before_preview_or_mutation() {
+        let (server, db, pid, target_epic_id, target_task_ids, breakdown_id) =
+            building_proposal().await;
+        let bus = EventBus::noop();
+        let trepo = TaskRepository::new(db.clone(), bus.clone());
+        trepo
+            .set_merge_commit_sha(&target_task_ids[0], "abc123")
+            .await
+            .unwrap();
+        let prepo = ProposalRepository::new(db.clone(), bus.clone());
+        let proposal = prepo.get(&pid).await.unwrap().unwrap();
+
+        let r = server
+            .teardown_obsolete_proposal_epic(
+                &prepo,
+                &proposal,
+                &target_epic_id,
+                "obsolete after reconcile",
+                true,
+            )
+            .await
+            .0;
+        assert!(!r.ok);
+        assert!(
+            r.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("blocked by merged work")
+        );
+        assert_eq!(r.epics_closed, 0);
+        assert_eq!(r.tasks_closed, 0);
+
+        let p = prepo.get(&pid).await.unwrap().unwrap();
+        assert_eq!(p.status, "building");
+        assert_eq!(
+            p.build_breakdown_task_id.as_deref(),
+            Some(breakdown_id.as_str())
+        );
+        assert_eq!(
+            prepo.graduated_epics(&pid).await.unwrap(),
+            vec![(
+                target_epic_id.clone(),
+                trepo
+                    .get(&target_task_ids[0])
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .project_id
+            )]
+        );
+        assert_eq!(
+            EpicRepository::new(db.clone(), bus.clone())
+                .get(&target_epic_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "open"
+        );
+        for tid in &target_task_ids {
+            assert_eq!(trepo.get(tid).await.unwrap().unwrap().status, "open");
+        }
+        let feedback = prepo.feedback(&pid).await.unwrap();
+        assert_eq!(feedback.len(), 1);
+        assert_eq!(feedback[0].author_kind, "ai");
+        assert!(feedback[0].body.contains("contains merged work"));
+        assert!(feedback[0].body.contains(&target_task_ids[0]));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
