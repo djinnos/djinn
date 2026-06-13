@@ -23,8 +23,8 @@ use crate::tools::list_response::{
 };
 use crate::tools::proposal_ops::{
     ProposalDeleteResponse, ProposalEpicModel, ProposalFeedbackResponse, ProposalModel,
-    ProposalShowResponse, ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel,
-    ProposalTargetsResponse,
+    ProposalReconcileObsoleteEpicResponse, ProposalShowResponse, ProposalSignoffModel,
+    ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
 };
 use crate::tools::validation::{
     validate_ac_count, validate_body, validate_design, validate_limit, validate_offset,
@@ -228,6 +228,20 @@ pub struct ProposalStopBuildParams {
     pub reason: Option<String>,
     /// When true on `abort`, compute and return the blast radius (epics, open
     /// tasks, running sessions) WITHOUT mutating anything.
+    pub preview: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalReconcileObsoleteEpicParams {
+    /// Proposal UUID or short_id. Alias for `proposal_id`.
+    pub id: Option<String>,
+    /// Proposal UUID or short_id. Alias for `id`.
+    pub proposal_id: Option<String>,
+    /// Epic UUID or short_id to retire from this proposal's graduated epics.
+    pub epic_id: String,
+    /// Why obsolete work is being force-closed. Defaults to a reconcile teardown reason.
+    pub reason: Option<String>,
+    /// When true, compute blast radius without closing tasks, closing/unlinking the epic, or killing sessions.
     pub preview: Option<bool>,
 }
 
@@ -982,6 +996,74 @@ impl DjinnMcpServer {
             )),
         }
     }
+
+    /// Tear down exactly one obsolete graduated epic subtree during proposal reconcile.
+    #[tool(
+        description = "Proposal reconcile helper: retire one obsolete graduated epic subtree without aborting the build. Pass `proposal_id` (or `id`) and `epic_id` (UUID or short_id). The tool verifies the epic is linked to the building proposal, blocks and records AI feedback if any target task has merged work, supports `preview=true` for read-only blast radius, and otherwise force-closes only target-epic tasks, kills their live sessions, closes/unlinks only that epic, and leaves the proposal building with unrelated graduated epics linked. Response includes ok, proposal_id, epic_id, preview, blocked/error, epics_closed, tasks_closed, sessions_killed, and merged-work blocked details."
+    )]
+    pub async fn proposal_reconcile_obsolete_epic(
+        &self,
+        Parameters(p): Parameters<ProposalReconcileObsoleteEpicParams>,
+    ) -> Json<ProposalReconcileObsoleteEpicResponse> {
+        let err = |proposal_id: Option<String>, epic_id: Option<String>, msg: String| {
+            Json(ProposalReconcileObsoleteEpicResponse {
+                ok: false,
+                proposal_id,
+                epic_id,
+                preview: p.preview.unwrap_or(false),
+                blocked: false,
+                blocked_feedback_id: None,
+                blocked_feedback_body: None,
+                merged_tasks: Vec::new(),
+                epics_closed: 0,
+                tasks_closed: 0,
+                sessions_killed: 0,
+                error: Some(msg),
+            })
+        };
+
+        match acting_caps(self.state.db()).await {
+            Ok(Some(caps)) if !caps.can_kickoff() => {
+                return err(
+                    None,
+                    None,
+                    "reconciling obsolete epics requires the engineer role (or admin)".to_string(),
+                );
+            }
+            Err(e) => return err(None, None, e),
+            _ => {}
+        }
+
+        let Some(proposal_ref) = p.proposal_id.as_deref().or(p.id.as_deref()) else {
+            return err(None, None, "missing proposal_id (or id)".to_string());
+        };
+
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(proposal) = repo.resolve(proposal_ref).await.ok().flatten() else {
+            return err(None, None, proposal_not_found_error(proposal_ref));
+        };
+        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(epic) = epic_repo.resolve(&p.epic_id).await.ok().flatten() else {
+            return err(
+                Some(proposal.id.clone()),
+                None,
+                format!("epic not found: {}", p.epic_id),
+            );
+        };
+
+        let reason = p
+            .reason
+            .as_deref()
+            .unwrap_or("proposal reconcile obsolete-subtree teardown");
+        self.teardown_obsolete_proposal_epic(
+            &repo,
+            &proposal,
+            &epic.id,
+            reason,
+            p.preview.unwrap_or(false),
+        )
+        .await
+    }
 }
 
 // ── Build teardown (abort cascade) ───────────────────────────────────────────
@@ -1127,7 +1209,6 @@ impl DjinnMcpServer {
     /// proposal build metadata, the breakdown task, or unrelated graduated epics.
     /// If any task in the target subtree has merged work, the operation records
     /// AI feedback and returns blocked before preview success or mutation.
-    #[allow(dead_code)]
     async fn teardown_obsolete_proposal_epic(
         &self,
         repo: &ProposalRepository,
@@ -1135,16 +1216,19 @@ impl DjinnMcpServer {
         epic_id: &str,
         reason: &str,
         preview: bool,
-    ) -> Json<ProposalStopBuildResponse> {
+    ) -> Json<ProposalReconcileObsoleteEpicResponse> {
         use djinn_core::models::TransitionAction;
 
         let scoped_err = |msg: String| {
-            Json(ProposalStopBuildResponse {
+            Json(ProposalReconcileObsoleteEpicResponse {
                 ok: false,
-                mode: "obsolete_epic_teardown".to_string(),
                 proposal_id: Some(proposal.id.clone()),
-                status: None,
+                epic_id: Some(epic_id.to_string()),
                 preview: false,
+                blocked: false,
+                blocked_feedback_id: None,
+                blocked_feedback_body: None,
+                merged_tasks: Vec::new(),
                 epics_closed: 0,
                 tasks_closed: 0,
                 sessions_killed: 0,
@@ -1199,7 +1283,7 @@ impl DjinnMcpServer {
             let body = format!(
                 "Obsolete-subtree teardown is blocked for epic `{epic_id}` because it contains merged work. Preserve the subtree and reconcile manually before unlinking or closing it.\n\nMerged tasks:\n{task_list}"
             );
-            let _ = repo
+            let feedback = repo
                 .add_feedback(djinn_db::ProposalFeedbackCreateInput {
                     proposal_id: &proposal.id,
                     parent_id: None,
@@ -1209,12 +1293,15 @@ impl DjinnMcpServer {
                     target_section: None,
                 })
                 .await;
-            return Json(ProposalStopBuildResponse {
+            return Json(ProposalReconcileObsoleteEpicResponse {
                 ok: false,
-                mode: "obsolete_epic_teardown".to_string(),
                 proposal_id: Some(proposal.id.clone()),
-                status: Some(proposal.status.clone()),
+                epic_id: Some(epic_id.to_string()),
                 preview: false,
+                blocked: true,
+                blocked_feedback_id: feedback.as_ref().ok().map(|f| f.id.clone()),
+                blocked_feedback_body: Some(body),
+                merged_tasks: merged_tasks.iter().map(|t| t.id.clone()).collect(),
                 epics_closed: 0,
                 tasks_closed: 0,
                 sessions_killed: 0,
@@ -1240,12 +1327,15 @@ impl DjinnMcpServer {
         }
 
         if preview {
-            return Json(ProposalStopBuildResponse {
+            return Json(ProposalReconcileObsoleteEpicResponse {
                 ok: true,
-                mode: "obsolete_epic_teardown".to_string(),
                 proposal_id: Some(proposal.id.clone()),
-                status: Some(proposal.status.clone()),
+                epic_id: Some(epic_id.to_string()),
                 preview: true,
+                blocked: false,
+                blocked_feedback_id: None,
+                blocked_feedback_body: None,
+                merged_tasks: Vec::new(),
                 epics_closed: 1,
                 tasks_closed: open_tasks.len() as i64,
                 sessions_killed: live_sessions,
@@ -1288,12 +1378,15 @@ impl DjinnMcpServer {
             return scoped_err(e.to_string());
         }
 
-        Json(ProposalStopBuildResponse {
+        Json(ProposalReconcileObsoleteEpicResponse {
             ok: true,
-            mode: "obsolete_epic_teardown".to_string(),
             proposal_id: Some(proposal.id.clone()),
-            status: Some(proposal.status.clone()),
+            epic_id: Some(epic_id.to_string()),
             preview: false,
+            blocked: false,
+            blocked_feedback_id: None,
+            blocked_feedback_body: None,
+            merged_tasks: Vec::new(),
             epics_closed,
             tasks_closed,
             sessions_killed,
@@ -1589,6 +1682,43 @@ mod stop_build_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scoped_teardown_preview_reports_blast_radius_without_mutating() {
+        let (server, db, pid, epic_id, task_ids, breakdown_id) = building_proposal().await;
+        let r = server
+            .dispatch_tool(
+                "proposal_reconcile_obsolete_epic",
+                serde_json::json!({
+                    "proposal_id": pid.clone(),
+                    "epic_id": epic_id.clone(),
+                    "preview": true,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(r.get("preview").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(r.get("epics_closed").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(
+            r.get("tasks_closed").and_then(|v| v.as_i64()),
+            Some(task_ids.len() as i64)
+        );
+
+        let bus = EventBus::noop();
+        let prepo = ProposalRepository::new(db.clone(), bus.clone());
+        assert_eq!(prepo.get(&pid).await.unwrap().unwrap().status, "building");
+        let links = prepo.graduated_epics(&pid).await.unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].0, epic_id);
+
+        let erepo = EpicRepository::new(db.clone(), bus.clone());
+        assert_eq!(erepo.get(&epic_id).await.unwrap().unwrap().status, "open");
+        let trepo = TaskRepository::new(db.clone(), bus.clone());
+        for tid in task_ids.iter().chain(std::iter::once(&breakdown_id)) {
+            assert_eq!(trepo.get(tid).await.unwrap().unwrap().status, "open");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn scoped_teardown_closes_only_target_epic_and_preserves_build() {
         let (server, db, pid, target_epic_id, target_task_ids, breakdown_id) =
             building_proposal().await;
@@ -1638,22 +1768,24 @@ mod stop_build_tests {
             .link_epic(&pid, &other_epic.id, &project.id)
             .await
             .unwrap();
-        let proposal = prepo.get(&pid).await.unwrap().unwrap();
-
         let r = server
-            .teardown_obsolete_proposal_epic(
-                &prepo,
-                &proposal,
-                &target_epic_id,
-                "obsolete after reconcile",
-                false,
+            .dispatch_tool(
+                "proposal_reconcile_obsolete_epic",
+                serde_json::json!({
+                    "proposal_id": pid.clone(),
+                    "epic_id": target_epic_id.clone(),
+                    "reason": "obsolete after reconcile",
+                }),
             )
             .await
-            .0;
-        assert!(r.ok, "scoped teardown failed: {:?}", r.error);
-        assert_eq!(r.epics_closed, 1);
-        assert_eq!(r.tasks_closed, target_task_ids.len() as i64);
-        assert_eq!(r.status.as_deref(), Some("building"));
+            .unwrap();
+        assert_eq!(r.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(r.get("epics_closed").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(
+            r.get("tasks_closed").and_then(|v| v.as_i64()),
+            Some(target_task_ids.len() as i64)
+        );
+        assert_eq!(r.get("blocked").and_then(|v| v.as_bool()), Some(false));
 
         let p = prepo.get(&pid).await.unwrap().unwrap();
         assert_eq!(p.status, "building");
@@ -1701,27 +1833,33 @@ mod stop_build_tests {
             .await
             .unwrap();
         let prepo = ProposalRepository::new(db.clone(), bus.clone());
-        let proposal = prepo.get(&pid).await.unwrap().unwrap();
-
         let r = server
-            .teardown_obsolete_proposal_epic(
-                &prepo,
-                &proposal,
-                &target_epic_id,
-                "obsolete after reconcile",
-                true,
+            .dispatch_tool(
+                "proposal_reconcile_obsolete_epic",
+                serde_json::json!({
+                    "id": pid.clone(),
+                    "epic_id": target_epic_id.clone(),
+                    "preview": true,
+                }),
             )
             .await
-            .0;
-        assert!(!r.ok);
+            .unwrap();
+        assert_eq!(r.get("ok").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(r.get("blocked").and_then(|v| v.as_bool()), Some(true));
         assert!(
-            r.error
-                .as_deref()
+            r.get("error")
+                .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .contains("blocked by merged work")
         );
-        assert_eq!(r.epics_closed, 0);
-        assert_eq!(r.tasks_closed, 0);
+        assert_eq!(r.get("epics_closed").and_then(|v| v.as_i64()), Some(0));
+        assert_eq!(r.get("tasks_closed").and_then(|v| v.as_i64()), Some(0));
+        assert!(
+            r.get("blocked_feedback_body")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .contains("contains merged work")
+        );
 
         let p = prepo.get(&pid).await.unwrap().unwrap();
         assert_eq!(p.status, "building");
