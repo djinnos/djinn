@@ -52,7 +52,7 @@ export function ProposalKickoff({
   }, [proposal.author_user_id, detail.signoffs]);
 
   const [owner, setOwner] = useState<string>(
-    me?.id && participants.includes(me.id) ? me.id : (participants[0] ?? "")
+    me?.id && participants.includes(me.id) ? me.id : (participants[0] ?? ""),
   );
   const [busy, setBusy] = useState(false);
 
@@ -78,11 +78,16 @@ export function ProposalKickoff({
     return (
       <div className="space-y-2 rounded-md border p-3">
         <div className="flex items-center justify-between">
-          <Label className="text-xs uppercase text-muted-foreground">Build</Label>
+          <Label className="text-xs uppercase text-muted-foreground">
+            Graduated epics
+          </Label>
           {proposal.build_owner_user_id && (
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
               owned by
-              <UserAvatar user={userFor(proposal.build_owner_user_id)} className="size-4" />
+              <UserAvatar
+                user={userFor(proposal.build_owner_user_id)}
+                className="size-4"
+              />
               {nameFor(proposal.build_owner_user_id)}
             </span>
           )}
@@ -92,17 +97,39 @@ export function ProposalKickoff({
             <li key={e.epic_id}>
               <button
                 type="button"
-                onClick={() => navigate(`/tasks?epic=${encodeURIComponent(e.epic_id)}`)}
+                onClick={() =>
+                  navigate(`/tasks?epic=${encodeURIComponent(e.epic_id)}`)
+                }
                 className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-sm hover:bg-muted/50"
                 title="View this epic and its tasks on the board"
               >
-                <Badge variant="outline" className="font-mono">{e.epic_short_id}</Badge>
+                <Badge variant="outline" className="font-mono">
+                  {e.epic_short_id}
+                </Badge>
                 <span className="flex min-w-0 items-center gap-1.5">
-                  <span className="shrink-0 leading-none">{e.epic_emoji || "📌"}</span>
+                  <span className="shrink-0 leading-none">
+                    {e.epic_emoji || "📌"}
+                  </span>
                   <span className="truncate font-medium">{e.epic_title}</span>
                 </span>
-                <span className="shrink-0 text-muted-foreground">{e.project_path}</span>
-                <Badge variant="secondary" className="capitalize">{e.status}</Badge>
+                <span className="shrink-0 text-muted-foreground">
+                  {e.project_path}
+                </span>
+                <Badge variant="secondary" className="capitalize">
+                  {e.status}
+                </Badge>
+                {e.needs_reconcile === true ? (
+                  <Badge
+                    variant="outline"
+                    className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                  >
+                    needs reconcile
+                  </Badge>
+                ) : typeof e.reconciled_at_revision_seq === "number" ? (
+                  <Badge variant="secondary" className="text-muted-foreground">
+                    reconciled at rev {e.reconciled_at_revision_seq}
+                  </Badge>
+                ) : null}
               </button>
             </li>
           ))}
@@ -116,10 +143,15 @@ export function ProposalKickoff({
 
   return (
     <div className="space-y-3 rounded-md border border-primary/40 bg-primary/5 p-3">
-      <Label className="text-xs uppercase text-muted-foreground">Ready to build</Label>
+      <Label className="text-xs uppercase text-muted-foreground">
+        Ready to build
+      </Label>
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm">Owner</span>
-        <Select value={owner} onValueChange={(v) => typeof v === "string" && setOwner(v)}>
+        <Select
+          value={owner}
+          onValueChange={(v) => typeof v === "string" && setOwner(v)}
+        >
           <SelectTrigger className="h-8 w-[200px] text-sm">
             {/* Render the resolved name explicitly: `owner` is set
                 programmatically, so Radix never captures the selected item's
@@ -149,7 +181,8 @@ export function ProposalKickoff({
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">
-        Hands the proposal to djinn's planner, which breaks it down into epics across the target repos and builds it.
+        Hands the proposal to djinn's planner, which breaks it down into epics
+        across the target repos and builds it.
       </p>
     </div>
   );

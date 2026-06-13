@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Route, Routes } from "react-router-dom";
 import { callMcpTool } from "@/api/mcpClient";
 import { fetchUsers, type OrgUser } from "@/api/users";
-import type { Proposal } from "@/api/types";
+import type { Proposal, ProposalEpic } from "@/api/types";
 import { render, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { ProposalsPage } from "./ProposalsPage";
 
@@ -87,7 +87,10 @@ function makeProposal(
   };
 }
 
-function makeProposalShowResponse(proposal: Proposal) {
+function makeProposalShowResponse(
+  proposal: Proposal,
+  overrides: { epics?: ProposalEpic[] } = {},
+) {
   return {
     proposal,
     targets: [],
@@ -114,6 +117,7 @@ function makeProposalShowResponse(proposal: Proposal) {
     ],
     signoffs: [],
     epics: [],
+    ...overrides,
   };
 }
 
@@ -150,7 +154,9 @@ describe("ProposalsPage", () => {
         short_id: "aprv",
         title: "Approve safer rollout",
         status: "approved",
-        acceptance_criteria: [{ criterion: "Rollout plan documented", met: true }],
+        acceptance_criteria: [
+          { criterion: "Rollout plan documented", met: true },
+        ],
         author_user_id: "user-1",
         updated_at: "2026-06-03T00:00:00Z",
       }),
@@ -180,7 +186,9 @@ describe("ProposalsPage", () => {
 
     renderProposalsRoute("/proposals");
 
-    const approvedSection = (await screen.findByText("Approved")).closest("section");
+    const approvedSection = (await screen.findByText("Approved")).closest(
+      "section",
+    );
     const reviewSection = screen.getByText("In Review").closest("section");
 
     expect(approvedSection).not.toBeNull();
@@ -210,7 +218,9 @@ describe("ProposalsPage", () => {
       title: "Tighten proposal workflow",
       status: "draft",
       body: "## Why\nOperators need a clearer proposal flow.",
-      acceptance_criteria: [{ criterion: "Status changes are persisted", met: false }],
+      acceptance_criteria: [
+        { criterion: "Status changes are persisted", met: false },
+      ],
       author_user_id: "user-1",
     });
 
@@ -255,7 +265,9 @@ describe("ProposalsPage", () => {
     expect(
       await screen.findByRole("heading", { name: "Tighten proposal workflow" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Status changes are persisted")).toBeInTheDocument();
+    expect(
+      screen.getByText("Status changes are persisted"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Core UI")).toBeInTheDocument();
     expect(
       screen.getByText("Operators need a clearer proposal flow."),
@@ -287,9 +299,13 @@ describe("ProposalsPage", () => {
 
     renderProposalsRoute("/proposals/proposal-done");
 
-    expect(await screen.findByRole("heading", { name: "Finished proposal" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Finished proposal" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/spec at rev/)).not.toBeInTheDocument();
-    expect(screen.queryByText("Proposal revision diff")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Proposal revision diff"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows muted reconciled text for building proposals without drift", async () => {
@@ -307,9 +323,13 @@ describe("ProposalsPage", () => {
 
     renderProposalsRoute("/proposals/proposal-building-clean");
 
-    expect(await screen.findByText("spec at rev 2 · build reconciled")).toBeInTheDocument();
+    expect(
+      await screen.findByText("spec at rev 2 · build reconciled"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Proposal revision diff")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /reconciling/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /reconciling/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows amber drift text for building proposals pending reconcile", async () => {
@@ -351,7 +371,9 @@ describe("ProposalsPage", () => {
     const user = userEvent.setup();
     renderProposalsRoute("/proposals/proposal-building-open-diff");
 
-    expect(await screen.findByText("Proposal revision diff")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Proposal revision diff"),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/Base body/)).not.toBeInTheDocument();
 
     await user.click(
@@ -365,6 +387,118 @@ describe("ProposalsPage", () => {
     expect(screen.getAllByText(/Head body/)).toHaveLength(2);
   });
 
+  it("shows an amber needs-reconcile badge for graduated epics that need reconcile", async () => {
+    const proposal = makeProposal({
+      id: "proposal-epic-needs-reconcile",
+      short_id: "epnr",
+      title: "Epic needs reconcile",
+      status: "building",
+    });
+
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === "proposal_show") {
+        return makeProposalShowResponse(proposal, {
+          epics: [
+            {
+              epic_id: "epic-needs-reconcile",
+              epic_short_id: "need",
+              epic_title: "Refresh spawned epic",
+              epic_emoji: "🛠️",
+              project_path: "djinnos/djinn",
+              status: "open",
+              reconciled_at_revision_seq: 1,
+              needs_reconcile: true,
+            },
+          ],
+        }) as never;
+      }
+      return {} as never;
+    });
+
+    renderProposalsRoute("/proposals/proposal-epic-needs-reconcile");
+
+    expect(await screen.findByText("Refresh spawned epic")).toBeInTheDocument();
+    expect(screen.getByText("needs reconcile")).toHaveClass(
+      "border-amber-500/40",
+    );
+  });
+
+  it("shows a muted reconciled-at badge for graduated epics with reconcile history", async () => {
+    const proposal = makeProposal({
+      id: "proposal-epic-reconciled",
+      short_id: "eprc",
+      title: "Epic reconciled",
+      status: "building",
+    });
+
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === "proposal_show") {
+        return makeProposalShowResponse(proposal, {
+          epics: [
+            {
+              epic_id: "epic-reconciled",
+              epic_short_id: "reco",
+              epic_title: "Already reconciled epic",
+              epic_emoji: "✅",
+              project_path: "djinnos/djinn",
+              status: "open",
+              reconciled_at_revision_seq: 3,
+              needs_reconcile: false,
+            },
+          ],
+        }) as never;
+      }
+      return {} as never;
+    });
+
+    renderProposalsRoute("/proposals/proposal-epic-reconciled");
+
+    expect(
+      await screen.findByText("Already reconciled epic"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("reconciled at rev 3")).toHaveClass(
+      "text-muted-foreground",
+    );
+    expect(screen.queryByText("needs reconcile")).not.toBeInTheDocument();
+  });
+
+  it("hides reconcile badges for graduated epics with no reconcile history", async () => {
+    const proposal = makeProposal({
+      id: "proposal-epic-no-history",
+      short_id: "epnh",
+      title: "Epic no reconcile history",
+      status: "building",
+    });
+
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === "proposal_show") {
+        return makeProposalShowResponse(proposal, {
+          epics: [
+            {
+              epic_id: "epic-no-history",
+              epic_short_id: "hist",
+              epic_title: "Pre-amend spawned epic",
+              epic_emoji: "📌",
+              project_path: "djinnos/djinn",
+              status: "open",
+              reconciled_at_revision_seq: null,
+              needs_reconcile: false,
+            },
+          ],
+        }) as never;
+      }
+      return {} as never;
+    });
+
+    renderProposalsRoute("/proposals/proposal-epic-no-history");
+
+    expect(
+      await screen.findByText("Pre-amend spawned epic"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("needs reconcile")).not.toBeInTheDocument();
+    expect(screen.queryByText(/reconciled at rev/)).not.toBeInTheDocument();
+  });
+
   it("shows an inline error when proposal_list fails", async () => {
     vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
       if (toolName === "proposal_list") {
@@ -375,6 +509,8 @@ describe("ProposalsPage", () => {
 
     renderProposalsRoute("/proposals");
 
-    expect(await screen.findByText("Could not load proposals")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Could not load proposals"),
+    ).toBeInTheDocument();
   });
 });
