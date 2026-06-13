@@ -87,6 +87,45 @@ function makeProposal(
   };
 }
 
+function makeProposalShowResponse(proposal: Proposal) {
+  return {
+    proposal,
+    targets: [],
+    feedback: [],
+    revisions: [
+      {
+        id: "rev-1",
+        seq: 1,
+        title: proposal.title,
+        body: "Base body",
+        acceptance_criteria: [],
+        created_at: "2026-06-01T00:00:00Z",
+        edited_by_user_id: "user-1",
+      },
+      {
+        id: "rev-2",
+        seq: 2,
+        title: proposal.title,
+        body: proposal.body,
+        acceptance_criteria: proposal.acceptance_criteria,
+        created_at: "2026-06-02T00:00:00Z",
+        edited_by_user_id: "user-1",
+      },
+    ],
+    signoffs: [],
+    epics: [],
+  };
+}
+
+function mockProposalShow(proposal: Proposal) {
+  vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+    if (toolName === "proposal_show") {
+      return makeProposalShowResponse(proposal) as never;
+    }
+    return {} as never;
+  });
+}
+
 function renderProposalsRoute(initialEntry: string) {
   return render(
     <Routes>
@@ -231,6 +270,99 @@ describe("ProposalsPage", () => {
         status: "in_review",
       });
     });
+  });
+
+  it("hides proposal drift state and diff for non-building proposals", async () => {
+    const proposal = makeProposal({
+      id: "proposal-done",
+      short_id: "done",
+      title: "Finished proposal",
+      status: "done",
+      latest_revision_seq: 2,
+      last_reconciled_revision_seq: 1,
+      pending_reconcile: true,
+    });
+
+    mockProposalShow(proposal);
+
+    renderProposalsRoute("/proposals/proposal-done");
+
+    expect(await screen.findByRole("heading", { name: "Finished proposal" })).toBeInTheDocument();
+    expect(screen.queryByText(/spec at rev/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Proposal revision diff")).not.toBeInTheDocument();
+  });
+
+  it("shows muted reconciled text for building proposals without drift", async () => {
+    const proposal = makeProposal({
+      id: "proposal-building-clean",
+      short_id: "bldc",
+      title: "Clean building proposal",
+      status: "building",
+      latest_revision_seq: 2,
+      last_reconciled_revision_seq: 2,
+      pending_reconcile: false,
+    });
+
+    mockProposalShow(proposal);
+
+    renderProposalsRoute("/proposals/proposal-building-clean");
+
+    expect(await screen.findByText("spec at rev 2 · build reconciled")).toBeInTheDocument();
+    expect(screen.getByText("Proposal revision diff")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reconciling/i })).not.toBeInTheDocument();
+  });
+
+  it("shows amber drift text for building proposals pending reconcile", async () => {
+    const proposal = makeProposal({
+      id: "proposal-building-drift",
+      short_id: "bldd",
+      title: "Drifting building proposal",
+      status: "building",
+      latest_revision_seq: 2,
+      last_reconciled_revision_seq: 1,
+      pending_reconcile: true,
+    });
+
+    mockProposalShow(proposal);
+
+    renderProposalsRoute("/proposals/proposal-building-drift");
+
+    expect(
+      await screen.findByRole("button", {
+        name: "spec at rev 2 · build reconciled to rev 1 · reconciling…",
+      }),
+    ).toHaveClass("border-amber-500/40");
+  });
+
+  it("opens the mounted proposal diff when clicking the drift badge", async () => {
+    const proposal = makeProposal({
+      id: "proposal-building-open-diff",
+      short_id: "bldo",
+      title: "Open drift diff",
+      status: "building",
+      body: "Head body",
+      latest_revision_seq: 2,
+      last_reconciled_revision_seq: 1,
+      pending_reconcile: true,
+    });
+
+    mockProposalShow(proposal);
+
+    const user = userEvent.setup();
+    renderProposalsRoute("/proposals/proposal-building-open-diff");
+
+    expect(await screen.findByText("Proposal revision diff")).toBeInTheDocument();
+    expect(screen.queryByText(/Base body/)).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "spec at rev 2 · build reconciled to rev 1 · reconciling…",
+      }),
+    );
+
+    expect(screen.getByRole("button", { name: "Hide diff" })).toHaveFocus();
+    expect(screen.getByText(/Base body/)).toBeInTheDocument();
+    expect(screen.getByText(/Head body/)).toBeInTheDocument();
   });
 
   it("shows an inline error when proposal_list fails", async () => {
