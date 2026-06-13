@@ -593,6 +593,7 @@ impl CoordinatorActor {
                     }
                     if self.last_proposal_review_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
                         self.sweep_proposals_needing_review().await;
+                        self.sweep_proposals_needing_reconcile().await;
                         self.last_proposal_review_sweep = StdInstant::now();
                     }
                     if self.last_graph_refresh.elapsed() >= GRAPH_REFRESH_INTERVAL {
@@ -805,26 +806,15 @@ impl CoordinatorActor {
                     self.maybe_review_proposal_on_epic_close(&epic).await;
                 }
             }
-            // Proposal updated → if a building proposal's latest revision has
-            // drifted beyond the build's last reconciled revision, dispatch one
-            // proposal reconcile task. The task itself single-flights/coalesces
-            // any subsequent revisions while it remains open.
+            // Proposal updated → if a material amend landed while the proposal
+            // is already building, dispatch a single reconcile task. Status-only
+            // updates are filtered by the proposal drift fields.
             ("proposal", "updated") => {
                 let Some(proposal) = envelope.parse_payload::<djinn_core::models::Proposal>()
                 else {
                     return;
                 };
-                if proposal.status == "building"
-                    && proposal.latest_revision_seq
-                        > proposal.last_reconciled_revision_seq.unwrap_or(0)
-                {
-                    let repo = djinn_db::ProposalRepository::new(
-                        self.db.clone(),
-                        crate::events::event_bus_for(&self.events_tx),
-                    );
-                    self.dispatch_proposal_reconcile(&repo, &proposal, "proposal_updated")
-                        .await;
-                }
+                self.maybe_reconcile_proposal_on_update(&proposal).await;
             }
             // ADR-051 §7 — exit recheck.  When a planner session ends, look
             // up the epic its task was attached to and recheck whether an
