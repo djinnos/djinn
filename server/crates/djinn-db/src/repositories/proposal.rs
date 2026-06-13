@@ -1678,6 +1678,11 @@ mod tests {
 
     /// Helper: insert an open epic row and return its id.
     async fn insert_epic(db: &Database, project_id: &str, short_id: &str) -> String {
+        // This helper performs a raw insert instead of going through a
+        // repository method. Make the per-test database clone explicit so the
+        // helper is safe even when called before any repository operation has
+        // touched the lazy test pool.
+        db.ensure_initialized().await.unwrap();
         let epic_id = uuid::Uuid::now_v7().to_string();
         sqlx::query!(
             "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, auto_breakdown)
