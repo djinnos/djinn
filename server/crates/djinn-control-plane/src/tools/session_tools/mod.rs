@@ -211,31 +211,8 @@ pub struct TimelineActivity {
 fn render_timeline_activity(e: &djinn_core::models::ActivityEntry) -> TimelineActivity {
     let payload_value: serde_json::Value =
         serde_json::from_str(&e.payload).unwrap_or_else(|_| serde_json::json!({}));
-    let kind = if e.event_type == "loop_guard_tripped" {
-        "loop_guard_tripped".to_owned()
-    } else {
-        payload_value
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&e.event_type)
-            .to_owned()
-    };
-    let details = if kind == "loop_guard_tripped" {
-        payload_value
-            .get("details")
-            .cloned()
-            .map(super::json_object::AnyJson)
-    } else {
-        None
-    };
-    let summary = if kind == "loop_guard_tripped" {
-        Some(loop_guard_timeline_summary(&payload_value))
-    } else {
-        payload_value
-            .get("body")
-            .and_then(|v| v.as_str())
-            .map(ToOwned::to_owned)
-    };
+    let (kind, details, summary) =
+        super::task_tools::ops::render_activity_metadata(&e.event_type, &payload_value);
 
     TimelineActivity {
         event_type: e.event_type.clone(),
@@ -245,34 +222,6 @@ fn render_timeline_activity(e: &djinn_core::models::ActivityEntry) -> TimelineAc
         details,
         summary,
         timestamp: e.created_at.clone(),
-    }
-}
-
-fn loop_guard_timeline_summary(payload: &serde_json::Value) -> String {
-    let details = payload.get("details").unwrap_or(payload);
-    let guard_kind = details
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown_guard");
-    let signature = details
-        .get("offending_signature")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown_signature");
-    let turn_span = details.get("turn_span");
-    let start = turn_span
-        .and_then(|v| v.get("start"))
-        .and_then(|v| v.as_u64())
-        .or_else(|| turn_span.and_then(|v| v.get(0)).and_then(|v| v.as_u64()));
-    let end = turn_span
-        .and_then(|v| v.get("end"))
-        .and_then(|v| v.as_u64())
-        .or_else(|| turn_span.and_then(|v| v.get(1)).and_then(|v| v.as_u64()));
-
-    match (start, end) {
-        (Some(start), Some(end)) => {
-            format!("Loop guard `{guard_kind}` tripped on turns {start}..={end}: `{signature}`")
-        }
-        _ => format!("Loop guard `{guard_kind}` tripped: `{signature}`"),
     }
 }
 

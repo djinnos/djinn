@@ -495,7 +495,16 @@ pub struct ActivityEntryResponse {
     pub actor_id: String,
     pub actor_role: String,
     pub event_type: String,
+    /// Renderer-friendly discriminator. Usually mirrors `event_type`; for
+    /// structured activity payloads this is the semantic activity kind.
+    pub kind: String,
     pub payload: AnyJson,
+    /// Structured event details surfaced for operator UIs when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<AnyJson>,
+    /// Human-readable event summary for activity-feed/timeline renderers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     pub created_at: String,
 }
 

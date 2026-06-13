@@ -734,16 +734,8 @@ impl DjinnMcpServer {
         match repo.query_activity(q).await {
             Ok(entries) => {
                 let items: Vec<ActivityEntryResponse> = entries
-                    .iter()
-                    .map(|e| ActivityEntryResponse {
-                        id: e.id.clone(),
-                        task_id: e.task_id.clone(),
-                        actor_id: e.actor_id.clone(),
-                        actor_role: e.actor_role.clone(),
-                        event_type: e.event_type.clone(),
-                        payload: parse_any_json(&e.payload),
-                        created_at: e.created_at.clone(),
-                    })
+                    .into_iter()
+                    .map(ops::activity_entry_response)
                     .collect();
                 Json(ErrorOr::Ok(TaskActivityListResponse {
                     count: items.len(),

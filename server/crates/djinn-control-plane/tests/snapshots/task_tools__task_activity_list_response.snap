@@ -10,9 +10,11 @@ expression: activity
       "actor_id": "[UUID]",
       "actor_role": "user",
       "event_type": "comment",
+      "kind": "comment",
       "payload": {
         "body": "hello"
       },
+      "summary": "hello",
       "created_at": "[TIMESTAMP]"
     }
   ],

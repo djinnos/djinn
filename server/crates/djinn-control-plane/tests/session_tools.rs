@@ -330,6 +330,40 @@ async fn task_timeline_renders_loop_guard_activity_distinctly() {
             .and_then(|v| v.as_str())
             .is_some_and(|s| s.contains("turns 7..=12") && s.contains("shell:cargo-test"))
     );
+
+    let activity_payload = harness
+        .call_tool(
+            "task_activity_list",
+            json!({ "id": task.id, "project": project.slug() }),
+        )
+        .await
+        .expect("task_activity_list should dispatch");
+    assert_eq!(activity_payload.get("error"), None);
+    let activity_entries = activity_payload
+        .get("entries")
+        .and_then(|value| value.as_array())
+        .unwrap();
+    let loop_guard_activity = activity_entries
+        .iter()
+        .find(|entry| {
+            entry.get("kind").and_then(|value| value.as_str()) == Some("loop_guard_tripped")
+        })
+        .expect("activity feed should include distinct loop_guard_tripped entry");
+    assert_eq!(
+        loop_guard_activity
+            .get("details")
+            .and_then(|value| value.get("kind"))
+            .and_then(|value| value.as_str()),
+        Some("identical_tool_failure")
+    );
+    assert!(
+        loop_guard_activity
+            .get("summary")
+            .and_then(|value| value.as_str())
+            .is_some_and(
+                |summary| summary.contains("turns 7..=12") && summary.contains("shell:cargo-test")
+            )
+    );
     assert!(
         activity
             .iter()
