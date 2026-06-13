@@ -561,6 +561,55 @@ mod tests {
     use djinn_db::UserRepository;
 
     #[test]
+    fn production_memory_resolver_does_not_list_all_credentials() {
+        let production_sources = [
+            (
+                "djinn-provider/src/completion.rs",
+                include_str!("completion.rs"),
+            ),
+            (
+                "djinn-agent/src/actors/slot/llm_extraction.rs",
+                include_str!("../../djinn-agent/src/actors/slot/llm_extraction.rs"),
+            ),
+            (
+                "djinn-control-plane/src/tools/memory_tools/summaries.rs",
+                include_str!("../../djinn-control-plane/src/tools/memory_tools/summaries.rs"),
+            ),
+            (
+                "djinn-control-plane/src/tools/memory_tools/write_dedup_runtime.rs",
+                include_str!(
+                    "../../djinn-control-plane/src/tools/memory_tools/write_dedup_runtime.rs"
+                ),
+            ),
+            (
+                "djinn-control-plane/src/tools/memory_tools/lifecycle.rs",
+                include_str!("../../djinn-control-plane/src/tools/memory_tools/lifecycle.rs"),
+            ),
+            (
+                "djinn-control-plane/src/tools/memory_tools/contradiction.rs",
+                include_str!("../../djinn-control-plane/src/tools/memory_tools/contradiction.rs"),
+            ),
+        ];
+
+        for (path, source) in production_sources {
+            let production_segment = source
+                .split("#[cfg(test)]")
+                .next()
+                .expect("production source segment should exist");
+            for forbidden in [
+                "CredentialRepository::list(",
+                ".list().await",
+                "credential_repo.list()",
+            ] {
+                assert!(
+                    !production_segment.contains(forbidden),
+                    "production memory provider resolution in {path} must use scoped list_for_user()/scoped credential loaders, not {forbidden}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn transient_error_prefers_typed_then_substring() {
         // Typed retryable variants short-circuit to true.
         assert!(is_transient_error(
