@@ -82,6 +82,7 @@ enum LlmExtractionProviderResolution {
 
 async fn resolve_llm_extraction_provider_after_creator_attempt(
     db: &djinn_db::Database,
+    session_id: &str,
     creator_resolved_provider: Option<Box<dyn LlmProvider>>,
     telemetry: TelemetryMeta,
 ) -> LlmExtractionProviderResolution {
@@ -97,10 +98,18 @@ async fn resolve_llm_extraction_provider_after_creator_attempt(
             }
             None => LlmExtractionProviderResolution::Provider(provider),
         },
-        Err(e) => LlmExtractionProviderResolution::NoProvider {
-            warning_message: NO_LLM_PROVIDER_WARNING,
-            error: e.to_string(),
-        },
+        Err(e) => {
+            let error = e.to_string();
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "llm_extraction: no LLM provider available; skipping extraction"
+            );
+            LlmExtractionProviderResolution::NoProvider {
+                warning_message: NO_LLM_PROVIDER_WARNING,
+                error,
+            }
+        }
     }
 }
 
@@ -653,23 +662,14 @@ async fn run_llm_extraction_inner(
         };
         match resolve_llm_extraction_provider_after_creator_attempt(
             &app_state.db,
+            &session_id,
             via_creator,
             telemetry,
         )
         .await
         {
             LlmExtractionProviderResolution::Provider(provider) => provider,
-            LlmExtractionProviderResolution::NoProvider {
-                warning_message,
-                error,
-            } => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %error,
-                    warning_message
-                );
-                return;
-            }
+            LlmExtractionProviderResolution::NoProvider { .. } => return,
         }
     };
 
@@ -1574,6 +1574,47 @@ mod tests {
     use crate::actors::slot::session_extraction::ExtractionQuality;
     use crate::test_helpers::{agent_context_from_db, create_test_db, test_path};
 
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn take(&self) -> String {
+            let mut buf = self.0.lock().expect("captured logs mutex poisoned");
+            let out =
+                String::from_utf8(buf.clone()).expect("captured log bytes were not valid utf-8");
+            buf.clear();
+            out
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogsWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogsWriter {
+                inner: std::sync::Arc::clone(&self.0),
+            }
+        }
+    }
+
+    struct CapturedLogsWriter {
+        inner: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for CapturedLogsWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner
+                .lock()
+                .expect("captured logs mutex poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     fn extraction_telemetry_for_test(
         task_id: &str,
         creator: Option<&str>,
@@ -1588,18 +1629,44 @@ mod tests {
 
     #[tokio::test]
     async fn llm_extraction_fallback_returns_early_when_no_org_shared_provider() {
+        use tracing::dispatcher::Dispatch;
+
         let db = djinn_db::Database::open_in_memory().expect("in-memory db");
         djinn_db::SettingsRepository::new(db.clone(), djinn_core::events::EventBus::noop())
             .set("settings.raw", r#"{"models":["openai/gpt-4.1-mini"]}"#)
             .await
             .expect("configure memory model without credentials");
 
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(false)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = Dispatch::new(subscriber);
+
+        let guard = tracing::dispatcher::set_default(&dispatch);
         let resolution = resolve_llm_extraction_provider_after_creator_attempt(
             &db,
+            "session-no-provider",
             None,
             extraction_telemetry_for_test("task-no-provider", Some("user_a")),
         )
         .await;
+        drop(guard);
+
+        let captured = logs.take();
+        assert!(
+            captured.contains(NO_LLM_PROVIDER_WARNING),
+            "fallback branch must emit the existing loud warning; captured: {captured}"
+        );
+        assert!(
+            captured.contains("session-no-provider"),
+            "warning should retain session context; captured: {captured}"
+        );
 
         match resolution {
             LlmExtractionProviderResolution::NoProvider {
@@ -1639,6 +1706,7 @@ mod tests {
 
         let resolution = resolve_llm_extraction_provider_after_creator_attempt(
             &db,
+            "session-fallback",
             None,
             extraction_telemetry_for_test("task-fallback", Some("user_a")),
         )
