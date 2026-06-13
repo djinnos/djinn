@@ -346,10 +346,10 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             let _ = std::fs::remove_dir_all(&output_dir_for_blocking);
 
             let t_build = std::time::Instant::now();
-            let mut graph = crate::repo_graph::RepoDependencyGraph::build_with_source(
+            let mut graph = crate::repo_graph::RepoDependencyGraph::try_build_with_source(
                 &parsed,
                 Some(&project_root_for_blocking),
-            );
+            )?;
             // DB-access post-processor: opt-in via
             // `DJINN_DB_ACCESS_DETECTION`. Reads files from the index
             // tree and stamps `Reads`/`Writes` edges from caller

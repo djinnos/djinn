@@ -772,10 +772,9 @@ mod tests {
             1
         );
         assert!(
-            parity
+            !parity
                 .allowed_added_edges
-                .get(&RepoGraphEdgeKind::Fetches)
-                .is_none()
+                .contains_key(&RepoGraphEdgeKind::Fetches)
         );
         assert!(parity.render_for_ci().contains("allowed added edges"));
     }
