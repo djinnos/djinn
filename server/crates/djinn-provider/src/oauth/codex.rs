@@ -135,6 +135,40 @@ impl CodexTokens {
         None
     }
 
+    /// Load tokens visible to `user_id` from the encrypted credential DB:
+    /// prefer that user's private row, otherwise use the org-shared fallback.
+    /// `user_id = None` resolves only the org-shared row.
+    ///
+    /// This mirrors credential listing/model-selection visibility for provider
+    /// construction. Filesystem cache migration is intentionally limited to the
+    /// no-user/org-shared scope so a scoped memory request never inherits a
+    /// local cache outside its DB-visible credential set.
+    pub async fn load_from_db_for_user(
+        repo: &CredentialRepository,
+        user_id: Option<&str>,
+    ) -> Option<Self> {
+        if let Ok(Some(json)) = repo
+            .get_decrypted_for_user(CODEX_OAUTH_DB_KEY, user_id)
+            .await
+        {
+            if let Ok(tokens) = serde_json::from_str::<Self>(&json) {
+                return Some(tokens);
+            }
+            tracing::warn!("Codex: corrupt token JSON in DB, ignoring");
+        }
+        if user_id.is_none()
+            && let Some(tokens) = Self::load_cached()
+        {
+            tracing::info!("Codex: migrating tokens from filesystem to DB");
+            if let Err(e) = tokens.save_to_db(repo).await {
+                tracing::warn!("Codex: migration save failed: {e}");
+            }
+            let _ = std::fs::remove_file(Self::cache_path());
+            return Some(tokens);
+        }
+        None
+    }
+
     /// Load tokens owned *exactly* by `owner` from the encrypted credential DB,
     /// with **no** org-shared fallback and no filesystem migration for targeted
     /// users.

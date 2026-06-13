@@ -120,6 +120,39 @@ impl CopilotTokens {
         None
     }
 
+    /// Load tokens visible to `user_id` from the encrypted credential DB:
+    /// prefer that user's private row, otherwise use the org-shared fallback.
+    /// `user_id = None` resolves only the org-shared row.
+    ///
+    /// Filesystem cache migration remains no-user/org-shared only so scoped
+    /// memory provider construction cannot inherit tokens outside its DB-visible
+    /// credential set.
+    pub async fn load_from_db_for_user(
+        repo: &CredentialRepository,
+        user_id: Option<&str>,
+    ) -> Option<Self> {
+        if let Ok(Some(json)) = repo
+            .get_decrypted_for_user(COPILOT_OAUTH_DB_KEY, user_id)
+            .await
+        {
+            if let Ok(tokens) = serde_json::from_str::<Self>(&json) {
+                return Some(tokens);
+            }
+            tracing::warn!("Copilot: corrupt token JSON in DB, ignoring");
+        }
+        if user_id.is_none()
+            && let Some(tokens) = Self::load_cached()
+        {
+            tracing::info!("Copilot: migrating tokens from filesystem to DB");
+            if let Err(e) = tokens.save_to_db(repo).await {
+                tracing::warn!("Copilot: migration save failed: {e}");
+            }
+            let _ = std::fs::remove_file(Self::cache_path());
+            return Some(tokens);
+        }
+        None
+    }
+
     /// Persist tokens to the encrypted credential DB.
     pub async fn save_to_db(&self, repo: &CredentialRepository) -> Result<()> {
         let json = serde_json::to_string(self)?;
