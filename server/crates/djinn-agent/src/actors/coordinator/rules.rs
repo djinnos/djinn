@@ -11,6 +11,8 @@ use djinn_core::models::IssueType;
 use djinn_core::models::task::{PRIORITY_CRITICAL, PROPOSAL_REVIEW_TITLE_PREFIX};
 use djinn_db::{EpicRepository, ProposalRepository};
 
+const PROPOSAL_RECONCILE_TITLE_PREFIX: &str = "Reconcile proposal";
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Rolling window for throughput tracking.
@@ -228,6 +230,163 @@ impl CoordinatorActor {
             // a review task; dispatch_proposal_review logs and skips it.
             self.dispatch_proposal_review(&repo, proposal, None, "backfill_sweep")
                 .await;
+        }
+    }
+
+    /// Backfill sweep: dispatch a reconcile task for any `building` proposal
+    /// whose latest revision has not been reconciled into its graduated build.
+    /// Catches missed `proposal.updated` events and relies on the normal
+    /// reconcile-task dedup helper for single-flight behavior.
+    pub(super) async fn sweep_proposals_needing_reconcile(&self) {
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let drifted = match repo.drift_building_proposals().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: drift_building_proposals query failed");
+                return;
+            }
+        };
+        for proposal in &drifted {
+            self.dispatch_proposal_reconcile(&repo, proposal, "backfill_sweep")
+                .await;
+        }
+    }
+
+    /// Called on `proposal.updated`: if a `building` proposal has unreconciled
+    /// revision drift, dispatch one open reconcile task and let that task re-read
+    /// the latest revision. Non-material/status-only updates are filtered by the
+    /// drift fields on the proposal model.
+    pub(super) async fn maybe_reconcile_proposal_on_update(
+        &self,
+        proposal: &djinn_core::models::Proposal,
+    ) {
+        if proposal.status != "building" {
+            return;
+        }
+        let reconciled_seq = proposal.last_reconciled_revision_seq.unwrap_or(0);
+        if !proposal.pending_reconcile && proposal.latest_revision_seq <= reconciled_seq {
+            return;
+        }
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        self.dispatch_proposal_reconcile(&repo, proposal, "proposal_updated")
+            .await;
+    }
+
+    /// Dispatch a single proposal-reconcile task for a `building` proposal with
+    /// unreconciled revision drift. Shared by the event path and backfill sweep.
+    pub(super) async fn dispatch_proposal_reconcile(
+        &self,
+        repo: &ProposalRepository,
+        proposal: &djinn_core::models::Proposal,
+        trigger: &str,
+    ) {
+        let home_project_id = match repo.targets(&proposal.id).await {
+            Ok(targets) => targets
+                .iter()
+                .find(|t| t.role == "primary")
+                .map(|t| t.project_id.clone()),
+            Err(_) => None,
+        };
+        let Some(home_project_id) = home_project_id else {
+            tracing::warn!(proposal_id = %proposal.id, "CoordinatorActor: no home project for proposal reconcile — skipping");
+            return;
+        };
+
+        let task_repo = self.task_repo();
+        if self
+            .open_reconcile_task_exists(&task_repo, &home_project_id, &proposal.short_id)
+            .await
+        {
+            return;
+        }
+
+        let from_seq = proposal.last_reconciled_revision_seq.unwrap_or(0);
+        let to_seq = proposal.latest_revision_seq;
+        let title = format!(
+            "{PROPOSAL_RECONCILE_TITLE_PREFIX} {}: {}",
+            proposal.short_id, proposal.title
+        );
+        let design = format!(
+            "Proposal `{}` ({}) was amended while its build is already in progress.\n\n\
+             Reconcile proposal revisions {} → {} into the graduated epic/task tree. Re-read \
+             the latest proposal with `proposal_show(id=\"{}\")` before editing anything; if this \
+             task sat open through additional amends, coalesce to the latest revision rather than \
+             creating or requesting another reconcile task.\n\n\
+             Map the proposal diff onto the existing graduated epics/tasks: update scopes and \
+             acceptance criteria, add follow-on epics/tasks when required, obsolete only work that \
+             is truly superseded, and preserve useful completed work. When the build matches the \
+             latest proposal revision, mark the proposal reconciled via the available proposal \
+             reconcile completion surface. If reconciliation is blocked by a product/architecture \
+             decision, record the blocker in your task summary instead of silently closing.",
+            proposal.short_id, proposal.id, from_seq, to_seq, proposal.id,
+        );
+        let ac = serde_json::json!([
+            {"criterion": "Latest proposal revision read and compared against the last reconciled build revision", "met": false},
+            {"criterion": "Graduated epics/tasks updated or extended so the in-flight build reflects the latest proposal revision", "met": false},
+            {"criterion": "Proposal marked reconciled, or a concrete reconcile blocker recorded", "met": false},
+        ])
+        .to_string();
+
+        match task_repo
+            .create_in_project(
+                &home_project_id,
+                None,
+                &title,
+                &design,
+                &design,
+                IssueType::EpicBreakdown.as_str(),
+                PRIORITY_CRITICAL,
+                "planner",
+                Some("open"),
+                Some(&ac),
+            )
+            .await
+        {
+            Ok(task) => {
+                if let Some(owner) = proposal.build_owner_user_id.as_deref() {
+                    let _ = task_repo.set_created_by_user_id(&task.id, owner).await;
+                }
+                tracing::info!(
+                    proposal_id = %proposal.id,
+                    proposal_short_id = %proposal.short_id,
+                    task_short_id = %task.short_id,
+                    trigger,
+                    "CoordinatorActor: dispatched proposal reconcile task"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal.id,
+                    error = %e,
+                    "CoordinatorActor: failed to create proposal reconcile task"
+                );
+            }
+        }
+    }
+
+    /// `true` if an open proposal-reconcile `epic_breakdown` task already exists
+    /// in the home project for this proposal (matched by exact title marker and
+    /// issue type). This is the single-flight/coalescing guard.
+    pub(super) async fn open_reconcile_task_exists(
+        &self,
+        task_repo: &djinn_db::TaskRepository,
+        home_project_id: &str,
+        proposal_short_id: &str,
+    ) -> bool {
+        let marker = format!("{PROPOSAL_RECONCILE_TITLE_PREFIX} {proposal_short_id}:");
+        match task_repo.list_by_project(home_project_id).await {
+            Ok(tasks) => tasks.iter().any(|t| {
+                t.issue_type.as_str() == "epic_breakdown"
+                    && t.status != "closed"
+                    && t.title.starts_with(&marker)
+            }),
+            Err(_) => false,
         }
     }
 
@@ -730,6 +889,48 @@ mod tests {
                     && t.title.starts_with(&marker)
             })
             .count()
+    }
+
+    /// Count of open proposal-reconcile (`epic_breakdown`) tasks for a proposal
+    /// in the given project, matched by the exact reconcile marker and issue
+    /// type (not a loose title contains).
+    async fn reconcile_task_count(
+        task_repo: &TaskRepository,
+        project_id: &str,
+        proposal_short_id: &str,
+    ) -> usize {
+        let marker = format!("{PROPOSAL_RECONCILE_TITLE_PREFIX} {proposal_short_id}:");
+        task_repo
+            .list_by_project(project_id)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|t| {
+                t.issue_type.as_str() == "epic_breakdown"
+                    && t.status != "closed"
+                    && t.title.starts_with(&marker)
+            })
+            .count()
+    }
+
+    async fn assert_reconcile_task_count(
+        task_repo: &TaskRepository,
+        project_id: &str,
+        proposal_short_id: &str,
+        expected: usize,
+        message: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let count = reconcile_task_count(task_repo, project_id, proposal_short_id).await;
+            if count == expected {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                assert_eq!(count, expected, "{message}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
     }
 
     async fn assert_review_task_count(
@@ -1270,6 +1471,292 @@ mod tests {
             review_task_count(&task_repo, &project.id, &proposal.short_id).await,
             1,
             "sweep must not duplicate an already-open review"
+        );
+    }
+
+    // ── Proposal reconcile: amend event path + backfill sweep ────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn amend_while_building_dispatches_one_reconcile_task_from_event() {
+        use djinn_db::{ProposalCreateInput, ProposalRepository, ProposalUpdateInput};
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let proposal_repo = ProposalRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        let proposal = proposal_repo
+            .create(ProposalCreateInput {
+                title: "Live spec",
+                body: "v1",
+                acceptance_criteria: Some(r#"[{"criterion":"do X","met":false}]"#),
+                status: None,
+            })
+            .await
+            .unwrap();
+        proposal_repo
+            .add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+        let epic = make_epic(&db, &project.id, &tx).await;
+        proposal_repo
+            .link_epic(&proposal.id, &epic.id, &project.id)
+            .await
+            .unwrap();
+        let building = proposal_repo
+            .set_building(&proposal.id, "user-x")
+            .await
+            .unwrap();
+
+        let _handle = spawn_coordinator(&db, &tx);
+        proposal_repo
+            .update(
+                &building.id,
+                ProposalUpdateInput {
+                    title: "Live spec v2",
+                    body: "v2",
+                    acceptance_criteria: r#"[{"criterion":"do X better","met":false}]"#,
+                    status: "building",
+                    superseded_by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_reconcile_task_count(
+            &task_repo,
+            &project.id,
+            &building.short_id,
+            1,
+            "material amend while building should dispatch exactly one reconcile task",
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rapid_successive_building_amends_coalesce_to_one_open_reconcile_task() {
+        use djinn_db::{ProposalCreateInput, ProposalRepository, ProposalUpdateInput};
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let proposal_repo = ProposalRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        let proposal = proposal_repo
+            .create(ProposalCreateInput {
+                title: "Coalesce",
+                body: "v1",
+                acceptance_criteria: Some(r#"[{"criterion":"do X","met":false}]"#),
+                status: None,
+            })
+            .await
+            .unwrap();
+        proposal_repo
+            .add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+        let epic = make_epic(&db, &project.id, &tx).await;
+        proposal_repo
+            .link_epic(&proposal.id, &epic.id, &project.id)
+            .await
+            .unwrap();
+        let building = proposal_repo
+            .set_building(&proposal.id, "user-x")
+            .await
+            .unwrap();
+
+        let _handle = spawn_coordinator(&db, &tx);
+        proposal_repo
+            .update(
+                &building.id,
+                ProposalUpdateInput {
+                    title: "Coalesce v2",
+                    body: "v2",
+                    acceptance_criteria: r#"[{"criterion":"do X v2","met":false}]"#,
+                    status: "building",
+                    superseded_by: None,
+                },
+            )
+            .await
+            .unwrap();
+        proposal_repo
+            .update(
+                &building.id,
+                ProposalUpdateInput {
+                    title: "Coalesce v3",
+                    body: "v3",
+                    acceptance_criteria: r#"[{"criterion":"do X v3","met":false}]"#,
+                    status: "building",
+                    superseded_by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_reconcile_task_count(
+            &task_repo,
+            &project.id,
+            &building.short_id,
+            1,
+            "rapid material amends must coalesce to one open reconcile task",
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(
+            reconcile_task_count(&task_repo, &project.id, &building.short_id).await,
+            1,
+            "an open reconcile task must not be duplicated by later amend events"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sweep_recovers_missed_building_amend_and_does_not_duplicate() {
+        use djinn_db::{ProposalCreateInput, ProposalRepository, ProposalUpdateInput};
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let proposal_repo = ProposalRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        let proposal = proposal_repo
+            .create(ProposalCreateInput {
+                title: "Missed event",
+                body: "v1",
+                acceptance_criteria: Some(r#"[{"criterion":"do X","met":false}]"#),
+                status: None,
+            })
+            .await
+            .unwrap();
+        proposal_repo
+            .add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+        let epic = make_epic(&db, &project.id, &tx).await;
+        proposal_repo
+            .link_epic(&proposal.id, &epic.id, &project.id)
+            .await
+            .unwrap();
+        let building = proposal_repo
+            .set_building(&proposal.id, "user-x")
+            .await
+            .unwrap();
+
+        // No coordinator is running for this material update, so the only way to
+        // recover is the drift sweep.
+        proposal_repo
+            .update(
+                &building.id,
+                ProposalUpdateInput {
+                    title: "Missed event v2",
+                    body: "v2",
+                    acceptance_criteria: r#"[{"criterion":"do X after downtime","met":false}]"#,
+                    status: "building",
+                    superseded_by: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reconcile_task_count(&task_repo, &project.id, &building.short_id).await,
+            0,
+            "precondition: missed event created drift but no reconcile task"
+        );
+
+        let actor = make_coordinator_actor(&db, &tx);
+        actor.sweep_proposals_needing_reconcile().await;
+        assert_reconcile_task_count(
+            &task_repo,
+            &project.id,
+            &building.short_id,
+            1,
+            "drift sweep should dispatch reconcile for missed building amend",
+        )
+        .await;
+
+        actor.sweep_proposals_needing_reconcile().await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            reconcile_task_count(&task_repo, &project.id, &building.short_id).await,
+            1,
+            "second drift sweep must not duplicate an already-open reconcile task"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_not_dispatched_for_non_building_or_zero_drift_proposals() {
+        use djinn_db::{ProposalCreateInput, ProposalRepository, ProposalUpdateInput};
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let proposal_repo = ProposalRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        let draft = proposal_repo
+            .create(ProposalCreateInput {
+                title: "Draft drift",
+                body: "v1",
+                acceptance_criteria: Some(r#"[{"criterion":"do X","met":false}]"#),
+                status: None,
+            })
+            .await
+            .unwrap();
+        proposal_repo
+            .add_target(&draft.id, &project.id, "primary")
+            .await
+            .unwrap();
+        proposal_repo
+            .update(
+                &draft.id,
+                ProposalUpdateInput {
+                    title: "Draft drift v2",
+                    body: "v2",
+                    acceptance_criteria: r#"[{"criterion":"do X maybe","met":false}]"#,
+                    status: "draft",
+                    superseded_by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let clean = proposal_repo
+            .create(ProposalCreateInput {
+                title: "Clean build",
+                body: "v1",
+                acceptance_criteria: Some(r#"[{"criterion":"do Y","met":false}]"#),
+                status: None,
+            })
+            .await
+            .unwrap();
+        proposal_repo
+            .add_target(&clean.id, &project.id, "primary")
+            .await
+            .unwrap();
+        let epic = make_epic(&db, &project.id, &tx).await;
+        proposal_repo
+            .link_epic(&clean.id, &epic.id, &project.id)
+            .await
+            .unwrap();
+        let clean_building = proposal_repo
+            .set_building(&clean.id, "user-x")
+            .await
+            .unwrap();
+
+        let actor = make_coordinator_actor(&db, &tx);
+        actor.sweep_proposals_needing_reconcile().await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            reconcile_task_count(&task_repo, &project.id, &draft.short_id).await,
+            0,
+            "non-building proposal drift must not dispatch reconcile"
+        );
+        assert_eq!(
+            reconcile_task_count(&task_repo, &project.id, &clean_building.short_id).await,
+            0,
+            "building proposal without revision drift must not dispatch reconcile"
         );
     }
 

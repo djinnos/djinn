@@ -1189,6 +1189,28 @@ impl ProposalRepository {
         .await?)
     }
 
+    /// `building` proposals whose proposal head has drifted ahead of the
+    /// revision stamped as reconciled into the graduated build. Used by the
+    /// coordinator's reconcile backstop sweep to recover missed
+    /// `proposal.updated` events.
+    pub async fn drift_building_proposals(&self) -> Result<Vec<Proposal>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Proposal>(
+            r#"SELECT id, short_id, title, body,
+                    acceptance_criteria::text AS acceptance_criteria,
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
+             FROM proposals p
+             WHERE p.status = 'building'
+               AND (
+                   p.pending_reconcile = true
+                   OR p.latest_revision_seq > COALESCE(p.last_reconciled_revision_seq, 0)
+               )
+             ORDER BY p.updated_at"#
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────────────
 
     async fn get_required(&self, id: &str) -> Result<Proposal> {

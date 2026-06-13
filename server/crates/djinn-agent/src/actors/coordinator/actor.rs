@@ -593,6 +593,7 @@ impl CoordinatorActor {
                     }
                     if self.last_proposal_review_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
                         self.sweep_proposals_needing_review().await;
+                        self.sweep_proposals_needing_reconcile().await;
                         self.last_proposal_review_sweep = StdInstant::now();
                     }
                     if self.last_graph_refresh.elapsed() >= GRAPH_REFRESH_INTERVAL {
@@ -804,6 +805,16 @@ impl CoordinatorActor {
                 if epic.status == "closed" {
                     self.maybe_review_proposal_on_epic_close(&epic).await;
                 }
+            }
+            // Proposal updated → if a material amend landed while the proposal
+            // is already building, dispatch a single reconcile task. Status-only
+            // updates are filtered by the proposal drift fields.
+            ("proposal", "updated") => {
+                let Some(proposal) = envelope.parse_payload::<djinn_core::models::Proposal>()
+                else {
+                    return;
+                };
+                self.maybe_reconcile_proposal_on_update(&proposal).await;
             }
             // ADR-051 §7 — exit recheck.  When a planner session ends, look
             // up the epic its task was attached to and recheck whether an
