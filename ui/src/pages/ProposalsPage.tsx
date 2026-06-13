@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
@@ -21,6 +21,10 @@ import {
   type ProposalStatus,
 } from "@/components/proposals/proposalStatus";
 import { StatusIcon } from "@/components/proposals/StatusIcon";
+import {
+  ProposalDiff,
+  type ProposalDiffHandle,
+} from "@/components/proposals/ProposalDiff";
 import { ProposalSignoffs } from "@/components/proposals/ProposalSignoffs";
 import { ProposalKickoff } from "@/components/proposals/ProposalKickoff";
 import { ProposalHistory } from "@/components/proposals/ProposalHistory";
@@ -77,6 +81,30 @@ const MANUAL_STATUSES: ProposalStatus[] = [
   "archived",
   "superseded",
 ];
+
+interface ProposalDriftState {
+  latestSeq: number;
+  reconciledSeq: number;
+  hasDrift: boolean;
+}
+
+function proposalDriftState(proposal: Proposal): ProposalDriftState | null {
+  if (proposal.status !== "building") return null;
+
+  const latestSeq = proposal.latest_revision_seq;
+  const reconciledSeq = proposal.last_reconciled_revision_seq;
+  const hasPendingReconcile = Boolean(proposal.pending_reconcile);
+
+  if (typeof latestSeq !== "number" || typeof reconciledSeq !== "number") {
+    return null;
+  }
+
+  return {
+    latestSeq,
+    reconciledSeq,
+    hasDrift: hasPendingReconcile || latestSeq > reconciledSeq,
+  };
+}
 
 export function ProposalsPage() {
   const { id } = useParams<{ id?: string }>();
@@ -253,6 +281,7 @@ function ProposalDetailView({
   onChanged: () => void;
 }) {
   const proposal = detail.proposal as Proposal;
+  const diffRef = useRef<ProposalDiffHandle>(null);
   const me = useAuthUser();
   const caps = capsFromUser(me);
   const usersQuery = useQuery(usersQueryOptions());
@@ -265,6 +294,12 @@ function ProposalDetailView({
     () => projects.filter((p) => !detail.targets.some((t) => t.project_id === p.id)),
     [projects, detail.targets]
   );
+  const driftState = proposalDriftState(proposal);
+
+  const openRevisionDiff = () => {
+    diffRef.current?.open();
+    diffRef.current?.focus();
+  };
 
   const run = async (fn: () => Promise<{ error?: string }>, ok: string) => {
     try {
@@ -297,6 +332,25 @@ function ProposalDetailView({
               )}
               <span>·</span>
               <span>updated {relativeTime(proposal.updated_at)}</span>
+              {driftState && (
+                <>
+                  <span>·</span>
+                  {driftState.hasDrift ? (
+                    <button
+                      type="button"
+                      onClick={openRevisionDiff}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-700 transition hover:bg-amber-500/15 focus:outline-none focus:ring-2 focus:ring-amber-500/40 dark:text-amber-300"
+                    >
+                      <StatusIcon status="in_review" size={12} />
+                      {`spec at rev ${driftState.latestSeq} · build reconciled to rev ${driftState.reconciledSeq} · reconciling…`}
+                    </button>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+                      spec at rev {driftState.latestSeq} · build reconciled
+                    </span>
+                  )}
+                </>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -334,6 +388,15 @@ function ProposalDetailView({
             </Select>
           </div>
         </div>
+
+        {driftState && (
+          <ProposalDiff
+            ref={diffRef}
+            revisions={detail.revisions}
+            baseSeq={driftState.reconciledSeq}
+            headSeq={driftState.latestSeq}
+          />
+        )}
 
         {/* Targets */}
         <div className="space-y-2">
