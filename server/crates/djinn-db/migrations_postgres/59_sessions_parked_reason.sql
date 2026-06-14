@@ -1,4 +1,5 @@
--- Add nullable reason marker for sessions deliberately parked after completion.
+-- Persist deliberate session park reason metadata (for example budget parks)
+-- without adding new values to the session status enum/string lifecycle.
 ALTER TABLE sessions
     ADD COLUMN parked_reason text NULL;
 

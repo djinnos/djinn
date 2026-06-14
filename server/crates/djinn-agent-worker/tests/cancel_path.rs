@@ -244,6 +244,7 @@ async fn start_fake_server(
                                 cache_write_tokens: 0,
                                 task_run_id: None,
                                 title: None,
+                                parked_reason: None,
                             }))
                         }
                         ServiceRpcRequest::UpdateSessionStatus { .. } => {
