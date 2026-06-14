@@ -211,6 +211,7 @@ function ProposalsListView() {
                 <section key={g.status}>
                   <button
                     type="button"
+                    aria-label={`${statusLabel(g.status)} ${g.items.length}`}
                     aria-expanded={!isCollapsed}
                     aria-controls={listId}
                     onClick={() =>
@@ -421,7 +422,7 @@ function ProposalDetailView({
                 )
               }
             >
-              <SelectTrigger className="w-[150px]">
+              <SelectTrigger className="w-[150px]" aria-label="Proposal status">
                 <span className="flex items-center gap-2">
                   <StatusIcon status={proposal.status} />
                   {statusLabel(proposal.status)}
@@ -497,7 +498,7 @@ function ProposalDetailView({
                   )
                 }
               >
-                <SelectTrigger className="h-7 w-[150px] text-xs">
+                <SelectTrigger className="h-7 w-[150px] text-xs" aria-label="Add target">
                   <SelectValue placeholder="+ Add target" />
                 </SelectTrigger>
                 <SelectContent>

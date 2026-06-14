@@ -391,7 +391,7 @@ describe("ProposalsPage", () => {
       screen.getByText("Operators need a clearer proposal flow."),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("combobox"));
+    await user.click(screen.getByRole("combobox", { name: "Proposal status" }));
     await user.click(await screen.findByRole("option", { name: /In Review/i }));
 
     await waitFor(() => {
@@ -428,7 +428,7 @@ describe("ProposalsPage", () => {
       await screen.findByRole("heading", { name: "Externally implemented proposal" }),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("combobox"));
+    await user.click(screen.getByRole("combobox", { name: "Proposal status" }));
     await user.click(
       await screen.findByRole("option", {
         name: /Mark done \(implemented externally\)/i,
