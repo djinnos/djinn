@@ -5084,8 +5084,12 @@ export namespace ProposalShowOutputSchema {
   body: string
   created_at: string
   edited_by_user_id?: string
+  event_kind: string
+  event_metadata?: string
   id: string
   seq: number
+  status_from?: string
+  status_to?: string
   title: string
   [k: string]: any
   }

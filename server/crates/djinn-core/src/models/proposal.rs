@@ -46,9 +46,9 @@ pub struct Proposal {
     pub build_breakdown_task_id: Option<String>,
 }
 
-/// An immutable snapshot of a proposal's spec at a point in time. Appended on
-/// every material edit; diffs between revisions drive the "changes since your
-/// approval" review.
+/// An immutable proposal-history row. Spec revisions are appended on every
+/// material edit; status/audit events may also be appended at the current spec
+/// sequence without advancing `proposals.latest_revision_seq`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 pub struct ProposalRevision {
@@ -61,6 +61,13 @@ pub struct ProposalRevision {
     /// structured AC parser).
     pub acceptance_criteria: String,
     pub edited_by_user_id: Option<String>,
+    /// `spec_revision` for material proposal snapshots, or an audit event kind
+    /// such as `status_change` for non-spec lifecycle history.
+    pub event_kind: String,
+    pub status_from: Option<String>,
+    pub status_to: Option<String>,
+    /// Optional JSON metadata for non-spec history rows, serialized as text.
+    pub event_metadata: Option<String>,
     pub created_at: String,
 }
 
