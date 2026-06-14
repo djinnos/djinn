@@ -211,6 +211,124 @@ describe("ProposalsPage", () => {
     });
   });
 
+  it("defaults terminal proposal groups collapsed and active groups expanded with counts visible", async () => {
+    const proposals = [
+      makeProposal({
+        id: "proposal-done",
+        short_id: "done",
+        title: "Completed proposal",
+        status: "done",
+      }),
+      makeProposal({
+        id: "proposal-building",
+        short_id: "bldg",
+        title: "Building proposal",
+        status: "building",
+      }),
+      makeProposal({
+        id: "proposal-rejected",
+        short_id: "rjct",
+        title: "Rejected proposal",
+        status: "rejected",
+      }),
+    ];
+
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === "proposal_list") {
+        return { proposals } as never;
+      }
+      return {} as never;
+    });
+
+    renderProposalsRoute("/proposals");
+
+    const doneHeader = await screen.findByRole("button", { name: /Done\s+1/ });
+    const buildingHeader = screen.getByRole("button", { name: /Building\s+1/ });
+    const rejectedHeader = screen.getByRole("button", { name: /Rejected\s+1/ });
+
+    expect(doneHeader).toHaveAttribute("aria-expanded", "false");
+    expect(buildingHeader).toHaveAttribute("aria-expanded", "true");
+    expect(rejectedHeader).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Completed proposal")).not.toBeInTheDocument();
+    expect(screen.getByText("Building proposal")).toBeInTheDocument();
+    expect(screen.queryByText("Rejected proposal")).not.toBeInTheDocument();
+  });
+
+  it("toggles a collapsed proposal status group while keeping its count visible", async () => {
+    const proposals = [
+      makeProposal({
+        id: "proposal-done",
+        short_id: "done",
+        title: "Completed proposal",
+        status: "done",
+      }),
+    ];
+
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === "proposal_list") {
+        return { proposals } as never;
+      }
+      return {} as never;
+    });
+
+    const user = userEvent.setup();
+    renderProposalsRoute("/proposals");
+
+    const doneHeader = await screen.findByRole("button", { name: /Done\s+1/ });
+
+    expect(doneHeader).toHaveAttribute("aria-expanded", "false");
+    expect(within(doneHeader).getByText("1")).toBeInTheDocument();
+    expect(screen.queryByText("Completed proposal")).not.toBeInTheDocument();
+
+    await user.click(doneHeader);
+
+    expect(doneHeader).toHaveAttribute("aria-expanded", "true");
+    expect(within(doneHeader).getByText("1")).toBeInTheDocument();
+    expect(screen.getByText("Completed proposal")).toBeInTheDocument();
+  });
+
+  it("keeps archived and superseded proposal groups hidden until Show archived is enabled", async () => {
+    const proposals = [
+      makeProposal({
+        id: "proposal-superseded",
+        short_id: "supr",
+        title: "Superseded proposal",
+        status: "superseded",
+      }),
+      makeProposal({
+        id: "proposal-archived",
+        short_id: "arch",
+        title: "Archived proposal",
+        status: "archived",
+      }),
+    ];
+
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === "proposal_list") {
+        return { proposals } as never;
+      }
+      return {} as never;
+    });
+
+    const user = userEvent.setup();
+    renderProposalsRoute("/proposals");
+
+    expect(await screen.findByText("No proposals yet.")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Superseded\s+1/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Archived\s+1/ }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Show archived"));
+
+    expect(
+      await screen.findByRole("button", { name: /Superseded\s+1/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Archived\s+1/ })).toBeInTheDocument();
+  });
+
   it("loads proposal detail and sends a status update through proposal_update", async () => {
     const proposal = makeProposal({
       id: "proposal-1",
@@ -280,6 +398,47 @@ describe("ProposalsPage", () => {
       expect(callMcpTool).toHaveBeenCalledWith("proposal_update", {
         id: "proposal-1",
         status: "in_review",
+      });
+    });
+  });
+
+  it("offers a clear manual done action for non-terminal proposals through proposal_update", async () => {
+    const proposal = makeProposal({
+      id: "proposal-1",
+      short_id: "prop",
+      title: "Externally implemented proposal",
+      status: "draft",
+      author_user_id: "user-1",
+    });
+
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === "proposal_show") {
+        return makeProposalShowResponse(proposal) as never;
+      }
+      if (toolName === "proposal_update") {
+        return {} as never;
+      }
+      return {} as never;
+    });
+
+    const user = userEvent.setup();
+    renderProposalsRoute("/proposals/proposal-1");
+
+    expect(
+      await screen.findByRole("heading", { name: "Externally implemented proposal" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox"));
+    await user.click(
+      await screen.findByRole("option", {
+        name: /Mark done \(implemented externally\)/i,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(callMcpTool).toHaveBeenCalledWith("proposal_update", {
+        id: "proposal-1",
+        status: "done",
       });
     });
   });
