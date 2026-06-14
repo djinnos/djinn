@@ -893,6 +893,7 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
             1,
             0,
             0,
+            None,
         )
         .await
         .unwrap();

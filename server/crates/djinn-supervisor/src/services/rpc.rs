@@ -607,6 +607,7 @@ impl SupervisorServices for RpcServices {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn update_session_status(
         &self,
         session_id: String,
@@ -1052,6 +1053,7 @@ impl SupervisorServices for UnimplementedRpcServices {
         unimplemented!("UnimplementedRpcServices::invoke_llm — construct RpcServices for real RPC")
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn update_session_status(
         &self,
         _session_id: String,

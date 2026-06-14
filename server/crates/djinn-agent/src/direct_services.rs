@@ -303,6 +303,7 @@ impl SupervisorServices for DirectServices {
         Ok(response)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn update_session_status(
         &self,
         session_id: String,

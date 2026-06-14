@@ -1366,6 +1366,7 @@ mod tests {
             unimplemented!("not exercised in server tests")
         }
 
+        #[allow(clippy::too_many_arguments)]
         async fn update_session_status(
             &self,
             _session_id: String,
