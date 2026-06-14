@@ -10963,12 +10963,25 @@ expression: signatures
               "nullable": true,
               "type": "string"
             },
+            "event_kind": {
+              "description": "`spec_revision` for material spec snapshots, `status_change` for\nlifecycle-only history rows. Omitted for legacy rows without metadata.",
+              "nullable": true,
+              "type": "string"
+            },
             "id": {
               "type": "string"
             },
             "seq": {
               "format": "int32",
               "type": "integer"
+            },
+            "status_from": {
+              "nullable": true,
+              "type": "string"
+            },
+            "status_to": {
+              "nullable": true,
+              "type": "string"
             },
             "title": {
               "type": "string"

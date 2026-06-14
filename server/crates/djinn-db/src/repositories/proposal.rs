@@ -248,6 +248,9 @@ impl ProposalRepository {
         } else {
             current.latest_revision_seq
         };
+        let status_changed = current.status != effective_status;
+        let record_done_status_event =
+            !content_changed && status_changed && effective_status == "done";
 
         sqlx::query!(
             r#"UPDATE proposals SET title = $1, body = $2, acceptance_criteria = $3, status = $4,
@@ -280,6 +283,19 @@ impl ProposalRepository {
                 input.body,
                 &acceptance_criteria,
                 editor.as_deref(),
+            )
+            .await?;
+        } else if record_done_status_event {
+            let editor = djinn_core::auth_context::current_user_id();
+            self.insert_status_change_event(
+                id,
+                next_seq,
+                &current.title,
+                &current.body,
+                &current_ac,
+                editor.as_deref(),
+                &current.status,
+                effective_status,
             )
             .await?;
         }
@@ -520,33 +536,66 @@ impl ProposalRepository {
         edited_by: Option<&str>,
     ) -> Result<()> {
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query!(
-            "INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, acceptance_criteria, edited_by_user_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            id,
-            proposal_id,
-            seq,
-            title,
-            body,
-            acceptance_criteria,
-            edited_by
+        sqlx::query(
+            r#"INSERT INTO proposal_revisions
+                (id, proposal_id, seq, title, body, acceptance_criteria, edited_by_user_id, event_kind)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'spec_revision')"#,
         )
+        .bind(id)
+        .bind(proposal_id)
+        .bind(seq)
+        .bind(title)
+        .bind(body)
+        .bind(acceptance_criteria)
+        .bind(edited_by)
         .execute(self.db.pool())
         .await?;
         Ok(())
     }
 
-    /// Revisions of a proposal, oldest first.
+    async fn insert_status_change_event(
+        &self,
+        proposal_id: &str,
+        seq: i32,
+        title: &str,
+        body: &str,
+        acceptance_criteria: &serde_json::Value,
+        edited_by: Option<&str>,
+        status_from: &str,
+        status_to: &str,
+    ) -> Result<()> {
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            r#"INSERT INTO proposal_revisions
+                (id, proposal_id, seq, title, body, acceptance_criteria, edited_by_user_id, event_kind, status_from, status_to)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'status_change', $8, $9)"#,
+        )
+        .bind(id)
+        .bind(proposal_id)
+        .bind(seq)
+        .bind(title)
+        .bind(body)
+        .bind(acceptance_criteria)
+        .bind(edited_by)
+        .bind(status_from)
+        .bind(status_to)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Revisions/history events of a proposal, oldest first.
     pub async fn revisions(&self, proposal_id: &str) -> Result<Vec<ProposalRevision>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            ProposalRevision,
+        Ok(sqlx::query_as::<_, ProposalRevision>(
             r#"SELECT id, proposal_id, seq, title, body,
-                    acceptance_criteria::text AS "acceptance_criteria!",
-                    edited_by_user_id, created_at
-             FROM proposal_revisions WHERE proposal_id = $1 ORDER BY seq"#,
-            proposal_id
+                    acceptance_criteria::text AS acceptance_criteria,
+                    edited_by_user_id, event_kind, status_from, status_to, created_at
+             FROM proposal_revisions
+             WHERE proposal_id = $1
+             ORDER BY created_at, id"#,
         )
+        .bind(proposal_id)
         .fetch_all(self.db.pool())
         .await?)
     }
@@ -1639,6 +1688,47 @@ mod tests {
         assert_eq!(edited.latest_revision_seq, 2);
         assert_eq!(repo.revisions(&p.id).await.unwrap().len(), 2);
         assert!(repo.signoffs(&p.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manual_done_status_update_records_history_without_bumping_spec_revision() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Externally done")).await.unwrap();
+        repo.update(
+            &p.id,
+            update_input("Externally done", "", "[]", "in_review"),
+        )
+        .await
+        .unwrap();
+        repo.add_signoff(&p.id, "scoped", "user-a").await.unwrap();
+        repo.add_signoff(&p.id, "technical", "user-b")
+            .await
+            .unwrap();
+
+        let updated = djinn_core::auth_context::SESSION_USER_ID
+            .scope(
+                Some("manual-user".to_owned()),
+                repo.update(&p.id, update_input("Externally done", "", "[]", "done")),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.status, "done");
+        assert_eq!(updated.latest_revision_seq, 1);
+        assert!(updated.closed_at.is_some());
+        assert_eq!(repo.signoffs(&p.id).await.unwrap().len(), 2);
+
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[0].seq, 1);
+        assert_eq!(revisions[0].event_kind.as_deref(), Some("spec_revision"));
+        let event = &revisions[1];
+        assert_eq!(event.seq, 1);
+        assert_eq!(event.event_kind.as_deref(), Some("status_change"));
+        assert_eq!(event.edited_by_user_id.as_deref(), Some("manual-user"));
+        assert_eq!(event.status_from.as_deref(), Some("approved"));
+        assert_eq!(event.status_to.as_deref(), Some("done"));
+        assert!(event.created_at.ends_with('Z'));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

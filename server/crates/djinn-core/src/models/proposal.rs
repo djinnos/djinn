@@ -61,6 +61,11 @@ pub struct ProposalRevision {
     /// structured AC parser).
     pub acceptance_criteria: String,
     pub edited_by_user_id: Option<String>,
+    /// History row kind. `None` is treated as `spec_revision` for rows written
+    /// before proposal-history event metadata existed.
+    pub event_kind: Option<String>,
+    pub status_from: Option<String>,
+    pub status_to: Option<String>,
     pub created_at: String,
 }
 

@@ -44,6 +44,10 @@ export interface ProposalDetail {
   proposal: Proposal | null;
   targets: ProposalTarget[];
   feedback: ProposalFeedback[];
+  /**
+   * Chronological proposal history rows. Spec-revision fields remain present;
+   * status-history metadata is optional for non-spec lifecycle events.
+   */
   revisions: ProposalRevision[];
   signoffs: ProposalSignoff[];
   epics: ProposalEpic[];

@@ -99,6 +99,14 @@ pub struct ProposalRevisionModel {
     pub acceptance_criteria: Vec<AcceptanceCriterionItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edited_by_user_id: Option<String>,
+    /// `spec_revision` for material spec snapshots, `status_change` for
+    /// lifecycle-only history rows. Omitted for legacy rows without metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_to: Option<String>,
     pub created_at: String,
 }
 
@@ -111,6 +119,9 @@ impl From<&ProposalRevision> for ProposalRevisionModel {
             body: r.body.clone(),
             acceptance_criteria: parse_acceptance_criteria(&r.acceptance_criteria),
             edited_by_user_id: r.edited_by_user_id.clone(),
+            event_kind: r.event_kind.clone(),
+            status_from: r.status_from.clone(),
+            status_to: r.status_to.clone(),
             created_at: r.created_at.clone(),
         }
     }
