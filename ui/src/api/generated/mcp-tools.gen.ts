@@ -5086,9 +5086,10 @@ export namespace ProposalShowOutputSchema {
   edited_by_user_id?: string
   /**
    * `spec_revision` for material spec snapshots, `status_change` for
-   * lifecycle-only history rows. Omitted for legacy rows without metadata.
+   * lifecycle-only history rows.
    */
-  event_kind?: string
+  event_kind: string
+  event_metadata?: string
   id: string
   status_from?: string
   status_to?: string

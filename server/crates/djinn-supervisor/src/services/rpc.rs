@@ -1569,6 +1569,7 @@ mod tests {
                         cache_write_tokens: 0,
                         task_run_id: params.task_run_id.clone(),
                         title: None,
+                        parked_reason: None,
                     };
                     let reply = Frame {
                         correlation_id: frame.correlation_id,

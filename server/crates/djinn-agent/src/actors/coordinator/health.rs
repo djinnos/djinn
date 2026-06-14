@@ -438,7 +438,8 @@ async fn list_sessions_for_task_run(
     Ok(sqlx::query_as::<_, djinn_core::models::SessionRecord>(
         r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
             status, tokens_in, tokens_out,
-            cache_read_tokens, cache_write_tokens, task_run_id, title
+            cache_read_tokens, cache_write_tokens, task_run_id, title,
+            parked_reason
          FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
     )
     .bind(task_run_id)
