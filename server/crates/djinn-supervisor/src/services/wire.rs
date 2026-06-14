@@ -957,6 +957,7 @@ mod tests {
             cache_write_tokens: 0,
             task_run_id: Some("run-1".into()),
             title: None,
+            parked_reason: None,
         };
         let resp = ServiceRpcResponse::CreateSession(Ok(session.clone()));
         let f = Frame {

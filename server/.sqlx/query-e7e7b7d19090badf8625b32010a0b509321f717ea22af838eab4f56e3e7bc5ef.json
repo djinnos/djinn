@@ -1,0 +1,106 @@
+{
+   "db_name" : "PostgreSQL",
+   "describe" : {
+      "columns" : [
+         {
+            "name" : "id",
+            "ordinal" : 0,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "project_id",
+            "ordinal" : 1,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "task_id",
+            "ordinal" : 2,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "model_id",
+            "ordinal" : 3,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "agent_type",
+            "ordinal" : 4,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "started_at",
+            "ordinal" : 5,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "ended_at",
+            "ordinal" : 6,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "status!",
+            "ordinal" : 7,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "tokens_in",
+            "ordinal" : 8,
+            "type_info" : "Int8"
+         },
+         {
+            "name" : "tokens_out",
+            "ordinal" : 9,
+            "type_info" : "Int8"
+         },
+         {
+            "name" : "cache_read_tokens",
+            "ordinal" : 10,
+            "type_info" : "Int8"
+         },
+         {
+            "name" : "cache_write_tokens",
+            "ordinal" : 11,
+            "type_info" : "Int8"
+         },
+         {
+            "name" : "task_run_id",
+            "ordinal" : 12,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "title",
+            "ordinal" : 13,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "parked_reason?",
+            "ordinal" : 14,
+            "type_info" : "Text"
+         }
+      ],
+      "nullable" : [
+         false,
+         true,
+         true,
+         false,
+         false,
+         false,
+         true,
+         false,
+         false,
+         false,
+         false,
+         false,
+         true,
+         true,
+         true
+      ],
+      "parameters" : {
+         "Left" : [
+            "Text"
+         ]
+      }
+   },
+   "hash" : "e60a09f4bbea77e889a7e5a9927a987af831e22a3d6d9c82aa4bc7393254b1f2",
+   "query" : "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.status AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.cache_read_tokens, s.cache_write_tokens,\n                    s.task_run_id, s.title,\n                    s.parked_reason AS \"parked_reason?\"\n             FROM sessions s\n             LEFT JOIN (\n                SELECT session_id, MAX(created_at) AS last_at\n                FROM session_messages\n                GROUP BY session_id\n             ) m ON m.session_id = s.id\n             WHERE s.agent_type = 'chat' AND s.created_by_user_id = $1\n             ORDER BY COALESCE(m.last_at, s.started_at) DESC"
+}
