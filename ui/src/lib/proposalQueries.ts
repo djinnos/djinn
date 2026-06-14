@@ -17,6 +17,17 @@ import type {
   ProposalTarget,
 } from "@/api/types";
 
+export type ProposalHistoryEntry = ProposalRevision & {
+  /** `spec_revision` for spec snapshots, `status_change` for lifecycle events. */
+  event_kind: string;
+  /** Previous proposal status for lifecycle status events. */
+  status_from?: string | null;
+  /** New proposal status for lifecycle status events. */
+  status_to?: string | null;
+  /** Optional JSON metadata attached to non-spec history events. */
+  event_metadata?: string | null;
+};
+
 export interface ProposalListFilters {
   status?: string;
   text?: string;
@@ -44,7 +55,11 @@ export interface ProposalDetail {
   proposal: Proposal | null;
   targets: ProposalTarget[];
   feedback: ProposalFeedback[];
-  revisions: ProposalRevision[];
+  /**
+   * Chronological proposal history rows. Spec-revision fields remain present;
+   * status-history metadata is optional for non-spec lifecycle events.
+   */
+  revisions: ProposalHistoryEntry[];
   signoffs: ProposalSignoff[];
   epics: ProposalEpic[];
 }
@@ -59,7 +74,7 @@ export function proposalDetailQueryOptions(id: string | null) {
         proposal: (res.proposal ?? null) as Proposal | null,
         targets: (res.targets ?? []) as ProposalTarget[],
         feedback: (res.feedback ?? []) as ProposalFeedback[],
-        revisions: (res.revisions ?? []) as ProposalRevision[],
+        revisions: (res.revisions ?? []) as ProposalHistoryEntry[],
         signoffs: (res.signoffs ?? []) as ProposalSignoff[],
         epics: (res.epics ?? []) as ProposalEpic[],
       };
