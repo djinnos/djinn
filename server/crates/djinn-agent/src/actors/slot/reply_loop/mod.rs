@@ -14,6 +14,7 @@
 //! `crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop}` keeps
 //! resolving identically.
 
+pub(crate) mod budget;
 pub(crate) mod error_handling;
 pub(crate) mod loop_guard;
 mod persistence;
