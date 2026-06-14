@@ -102,21 +102,49 @@ describe('sseEventHandlers', () => {
 
   it('routes task events from DjinnEventEnvelope format', () => {
     const cleanup = initSSEEventHandlers();
+    const createdMergeCommitSha = 'abc123def4567890abc123def4567890abc123de';
+    const updatedMergeCommitSha = 'def456abc1237890def456abc1237890def456ab';
 
     sseStore.getState().emit({
       type: 'task_created',
-      data: { entity_type: 'task', action: 'created', payload: { task: { id: 't2', title: 'Envelope', status: 'open' }, from_sync: false } },
+      data: {
+        entity_type: 'task',
+        action: 'created',
+        payload: {
+          task: {
+            id: 't2',
+            title: 'Envelope',
+            status: 'open',
+            merge_commit_sha: createdMergeCommitSha,
+          },
+          from_sync: false,
+        },
+      },
       timestamp: 1,
     });
     expect(taskStore.getState().getTask('t2')).toBeTruthy();
     expect(taskStore.getState().getTask('t2')?.title).toBe('Envelope');
+    expect(taskStore.getState().getTask('t2')?.merge_commit_sha).toBe(createdMergeCommitSha);
 
     sseStore.getState().emit({
       type: 'task_updated',
-      data: { entity_type: 'task', action: 'updated', payload: { task: { id: 't2', title: 'Updated', status: 'in_progress' }, from_sync: false } },
+      data: {
+        entity_type: 'task',
+        action: 'updated',
+        payload: {
+          task: {
+            id: 't2',
+            title: 'Updated',
+            status: 'in_progress',
+            merge_commit_sha: updatedMergeCommitSha,
+          },
+          from_sync: false,
+        },
+      },
       timestamp: 2,
     });
     expect(taskStore.getState().getTask('t2')?.title).toBe('Updated');
+    expect(taskStore.getState().getTask('t2')?.merge_commit_sha).toBe(updatedMergeCommitSha);
 
     sseStore.getState().emit({
       type: 'task_deleted',

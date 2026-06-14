@@ -15,6 +15,7 @@ import { CopyButton } from "@/components/CopyButton";
 import { InlineError } from "@/components/InlineError";
 import { relativeTime } from "@/components/memory/memoryUtils";
 import {
+  PROPOSAL_STATUS_META,
   PROPOSAL_STATUS_KEYS,
   isArchivedLike,
   statusLabel,
@@ -72,15 +73,36 @@ function proposalAsMarkdown(proposal: Proposal): string {
 }
 
 // Statuses a human sets directly. `approved` is reached via sign-offs;
-// `building`/`done` via graduation.
+// `building` via graduation. `done` is also exposed below for proposals that
+// were implemented externally and should leave active proposal history.
 const MANUAL_STATUSES: ProposalStatus[] = [
   "triage",
   "draft",
   "in_review",
+  "done",
   "rejected",
   "archived",
   "superseded",
 ];
+
+const TERMINAL_COLLAPSED_STATUSES = new Set<ProposalStatus>([
+  "done",
+  "rejected",
+]);
+
+function defaultCollapsed(status: ProposalStatus): boolean {
+  return TERMINAL_COLLAPSED_STATUSES.has(status);
+}
+
+function manualStatusLabel(
+  status: ProposalStatus,
+  currentStatus: ProposalStatus,
+): string {
+  if (status === "done" && currentStatus !== "done") {
+    return "Mark done (implemented externally)";
+  }
+  return statusLabel(status);
+}
 
 interface ProposalDriftState {
   latestSeq: number;
@@ -118,6 +140,9 @@ function ProposalsListView() {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<
+    Partial<Record<ProposalStatus, boolean>>
+  >({});
 
   const listQuery = useQuery(
     proposalListQueryOptions({ text: search.trim() || undefined })
@@ -177,53 +202,81 @@ function ProposalsListView() {
           </p>
         ) : (
           <div className="pb-10">
-            {groups.map((g) => (
-              <section key={g.status}>
-                <div className="flex items-center gap-2 bg-muted/40 px-4 py-1.5 text-xs font-medium text-muted-foreground">
-                  <StatusIcon status={g.status} />
-                  <span>{statusLabel(g.status)}</span>
-                  <span className="text-muted-foreground/60">{g.items.length}</span>
-                </div>
-                <ul>
-                  {g.items.map((p) => (
-                    <li key={p.id}>
-                      <button
-                        onClick={() => navigate(`/proposals/${p.id}`)}
-                        className="flex w-full items-center gap-3 border-b border-border/40 px-4 py-2.5 text-left hover:bg-muted/40"
-                      >
-                        <StatusIcon status={p.status} />
-                        <span className="min-w-0 flex-1 truncate text-sm">{p.title}</span>
-                        {(p.unresolved_feedback_count ?? 0) > 0 && (
-                          <span
-                            className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground"
-                            title={`${p.unresolved_feedback_count} unresolved comment${
-                              p.unresolved_feedback_count === 1 ? "" : "s"
-                            }`}
+            {groups.map((g) => {
+              const isCollapsed =
+                collapsedGroups[g.status] ?? defaultCollapsed(g.status);
+              const listId = `proposal-status-group-${g.status}`;
+
+              return (
+                <section key={g.status}>
+                  <button
+                    type="button"
+                    aria-label={`${statusLabel(g.status)} ${g.items.length}`}
+                    aria-expanded={!isCollapsed}
+                    aria-controls={listId}
+                    onClick={() =>
+                      setCollapsedGroups((current) => ({
+                        ...current,
+                        [g.status]: !(current[g.status] ?? defaultCollapsed(g.status)),
+                      }))
+                    }
+                    className="flex w-full items-center gap-2 bg-muted/40 px-4 py-1.5 text-left text-xs font-medium text-muted-foreground hover:bg-muted/60 focus:outline-none focus:ring-2 focus:ring-ring"
+                  >
+                    <span
+                      className="w-3 text-muted-foreground/70"
+                      aria-hidden="true"
+                    >
+                      {isCollapsed ? "▸" : "▾"}
+                    </span>
+                    <StatusIcon status={g.status} />
+                    <span>{statusLabel(g.status)}</span>
+                    <span className="text-muted-foreground/60">{g.items.length}</span>
+                  </button>
+                  {!isCollapsed && (
+                    <ul id={listId}>
+                      {g.items.map((p) => (
+                        <li key={p.id}>
+                          <button
+                            onClick={() => navigate(`/proposals/${p.id}`)}
+                            className="flex w-full items-center gap-3 border-b border-border/40 px-4 py-2.5 text-left hover:bg-muted/40"
                           >
-                            <HugeiconsIcon icon={Comment01Icon} size={13} />
-                            {p.unresolved_feedback_count}
-                          </span>
-                        )}
-                        <AcceptanceProgressBadge
-                          criteria={p.acceptance_criteria}
-                          className="shrink-0"
-                        />
-                        <span className="hidden shrink-0 font-mono text-xs text-muted-foreground sm:inline">
-                          {p.short_id}
-                        </span>
-                        <span className="shrink-0 text-xs text-muted-foreground">
-                          {relativeTime(p.updated_at)}
-                        </span>
-                        <UserAvatar
-                          user={userFor(p.author_user_id)}
-                          className="size-5"
-                        />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            ))}
+                            <StatusIcon status={p.status} />
+                            <span className="min-w-0 flex-1 truncate text-sm">
+                              {p.title}
+                            </span>
+                            {(p.unresolved_feedback_count ?? 0) > 0 && (
+                              <span
+                                className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground"
+                                title={`${p.unresolved_feedback_count} unresolved comment${
+                                  p.unresolved_feedback_count === 1 ? "" : "s"
+                                }`}
+                              >
+                                <HugeiconsIcon icon={Comment01Icon} size={13} />
+                                {p.unresolved_feedback_count}
+                              </span>
+                            )}
+                            <AcceptanceProgressBadge
+                              criteria={p.acceptance_criteria}
+                              className="shrink-0"
+                            />
+                            <span className="hidden shrink-0 font-mono text-xs text-muted-foreground sm:inline">
+                              {p.short_id}
+                            </span>
+                            <span className="shrink-0 text-xs text-muted-foreground">
+                              {relativeTime(p.updated_at)}
+                            </span>
+                            <UserAvatar
+                              user={userFor(p.author_user_id)}
+                              className="size-5"
+                            />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              );
+            })}
           </div>
         )}
       </div>
@@ -369,18 +422,23 @@ function ProposalDetailView({
                 )
               }
             >
-              <SelectTrigger className="w-[150px]">
+              <SelectTrigger className="w-[150px]" aria-label="Proposal status">
                 <span className="flex items-center gap-2">
                   <StatusIcon status={proposal.status} />
                   {statusLabel(proposal.status)}
                 </span>
               </SelectTrigger>
               <SelectContent>
-                {MANUAL_STATUSES.map((s) => (
+                {MANUAL_STATUSES.filter(
+                  (s) =>
+                    s !== "done" ||
+                    !PROPOSAL_STATUS_META[proposal.status as ProposalStatus]
+                      ?.terminal,
+                ).map((s) => (
                   <SelectItem key={s} value={s}>
                     <span className="flex items-center gap-2">
                       <StatusIcon status={s} />
-                      {statusLabel(s)}
+                      {manualStatusLabel(s, proposal.status as ProposalStatus)}
                     </span>
                   </SelectItem>
                 ))}
@@ -440,7 +498,7 @@ function ProposalDetailView({
                   )
                 }
               >
-                <SelectTrigger className="h-7 w-[150px] text-xs">
+                <SelectTrigger className="h-7 w-[150px] text-xs" aria-label="Add target">
                   <SelectValue placeholder="+ Add target" />
                 </SelectTrigger>
                 <SelectContent>
