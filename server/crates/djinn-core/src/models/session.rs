@@ -58,7 +58,7 @@ pub struct SessionRecord {
     #[serde(default)]
     pub title: Option<String>,
     /// Optional reason a terminal session was deliberately parked instead of
-    /// being treated as an ordinary completion/failure. Added in migration 58.
+    /// being treated as an ordinary completion/failure. Added in migration 59.
     #[serde(default)]
     pub parked_reason: Option<String>,
 }

@@ -127,7 +127,7 @@ async fn assert_parked_reason_schema(db_url: &str) {
 }
 
 #[tokio::test]
-async fn migration_58_applies_on_fresh_database() {
+async fn migration_59_applies_on_fresh_database() {
     with_temp_database("fresh", |db_url| async move {
         let pool = PgPoolOptions::new()
             .max_connections(1)
@@ -146,16 +146,16 @@ async fn migration_58_applies_on_fresh_database() {
 }
 
 #[tokio::test]
-async fn migration_58_applies_after_migrations_1_through_57() {
+async fn migration_59_applies_after_prior_migrations() {
     with_temp_database("prior", |db_url| async move {
         let mut conn = PgConnection::connect(&db_url)
             .await
             .expect("connect prior migration database");
         for (version, path) in migration_entries(&migrations_dir()) {
-            if version > 58 {
+            if version > 59 {
                 break;
             }
-            if version == 0 || version == 58 {
+            if version == 0 || version == 59 {
                 continue;
             }
             let sql = std::fs::read_to_string(&path).expect("read migration sql");
@@ -164,11 +164,11 @@ async fn migration_58_applies_after_migrations_1_through_57() {
                 .unwrap_or_else(|err| panic!("apply migration {} failed: {err}", path.display()));
         }
 
-        let migration_58 = migrations_dir().join("58_sessions_parked_reason.sql");
-        let sql = std::fs::read_to_string(&migration_58).expect("read migration 58 sql");
+        let migration_59 = migrations_dir().join("59_sessions_parked_reason.sql");
+        let sql = std::fs::read_to_string(&migration_59).expect("read migration 59 sql");
         conn.execute(sql.as_str())
             .await
-            .expect("apply migration 58 after migrations 1..57");
+            .expect("apply migration 59 after prior migrations");
         drop(conn);
 
         assert_parked_reason_schema(&db_url).await;
