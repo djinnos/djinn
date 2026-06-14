@@ -14,6 +14,7 @@ function revision(
     title: "Original proposal",
     body: "Keep the existing body.",
     acceptance_criteria: [{ criterion: "Existing criterion", met: false }],
+    event_kind: "spec_revision",
     created_at: "2026-06-01T00:00:00Z",
     ...overrides,
   };

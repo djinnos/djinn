@@ -10963,12 +10963,27 @@ expression: signatures
               "nullable": true,
               "type": "string"
             },
+            "event_kind": {
+              "type": "string"
+            },
+            "event_metadata": {
+              "nullable": true,
+              "type": "string"
+            },
             "id": {
               "type": "string"
             },
             "seq": {
               "format": "int32",
               "type": "integer"
+            },
+            "status_from": {
+              "nullable": true,
+              "type": "string"
+            },
+            "status_to": {
+              "nullable": true,
+              "type": "string"
             },
             "title": {
               "type": "string"
@@ -10980,6 +10995,7 @@ expression: signatures
             "title",
             "body",
             "acceptance_criteria",
+            "event_kind",
             "created_at"
           ],
           "type": "object"
