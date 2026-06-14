@@ -25,6 +25,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useProjectRoute } from '@/hooks/useProjectRoute';
 import { useDevcontainerWarnings } from '@/hooks/useDevcontainerWarnings';
 import { proposalListQueryOptions } from '@/lib/proposalQueries';
+import { PROPOSAL_STATUS_META, type ProposalStatus } from '@/components/proposals/proposalStatus';
 
 interface NavItemProps {
   icon: React.ReactNode;
@@ -117,10 +118,12 @@ export function Sidebar() {
   const { navigateToView } = useProjectRoute();
   const user = useAuthUser();
   const proposalsQuery = useQuery(proposalListQueryOptions());
-  // Badge: active proposals still being worked (not archived/superseded).
+  // Badge: active proposals still being worked. Excludes any status flagged
+  // as `terminal` in `PROPOSAL_STATUS_META` (done, rejected, archived,
+  // superseded) so terminal proposals don't inflate the badge.
   const proposalCount =
     proposalsQuery.data?.filter(
-      (p) => p.status !== 'archived' && p.status !== 'superseded',
+      (p) => !PROPOSAL_STATUS_META[p.status as ProposalStatus]?.terminal,
     ).length ?? 0;
   const { count: devcontainerWarningCount } = useDevcontainerWarnings();
 
