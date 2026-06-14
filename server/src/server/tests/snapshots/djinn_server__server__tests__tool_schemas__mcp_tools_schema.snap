@@ -10964,6 +10964,7 @@ expression: signatures
               "type": "string"
             },
             "event_kind": {
+              "description": "`spec_revision` for material spec snapshots, `status_change` for\nlifecycle-only history rows.",
               "type": "string"
             },
             "event_metadata": {
