@@ -554,9 +554,8 @@ mod tests {
     use crate::models::{DispatchPause, DispatchPauseScope, Project, Setting, Task};
     use serde_json::json;
 
-    #[test]
-    fn envelope_task_created_round_trip_and_parse_payload() {
-        let task = Task {
+    fn task_with_merge_commit_sha(merge_commit_sha: Option<&str>) -> Task {
+        Task {
             id: "task-1".into(),
             project_id: "p1".into(),
             short_id: "T-1".into(),
@@ -577,7 +576,7 @@ mod tests {
             updated_at: "2025-01-01T00:00:00Z".into(),
             closed_at: None,
             close_reason: None,
-            merge_commit_sha: None,
+            merge_commit_sha: merge_commit_sha.map(str::to_owned),
             pr_url: None,
             merge_conflict_metadata: None,
             memory_refs: "[]".into(),
@@ -588,7 +587,12 @@ mod tests {
             total_verification_failure_count: 0,
             intervention_count: 0,
             last_intervention_at: None,
-        };
+        }
+    }
+
+    #[test]
+    fn envelope_task_created_round_trip_and_parse_payload() {
+        let task = task_with_merge_commit_sha(None);
 
         let envelope = DjinnEventEnvelope::task_created(&task, true);
         assert_eq!(envelope.entity_type(), "task");
@@ -599,6 +603,19 @@ mod tests {
 
         let parsed: Option<serde_json::Value> = envelope.parse_payload();
         assert_eq!(parsed, Some(json!({ "task": task, "from_sync": true })));
+    }
+
+    #[test]
+    fn task_created_and_updated_payloads_include_merge_commit_sha() {
+        let sha = "abc123def4567890abc123def4567890abc123de";
+        let task = task_with_merge_commit_sha(Some(sha));
+
+        for envelope in [
+            DjinnEventEnvelope::task_created(&task, false),
+            DjinnEventEnvelope::task_updated(&task, false),
+        ] {
+            assert_eq!(envelope.payload()["task"]["merge_commit_sha"], sha);
+        }
     }
 
     #[test]

@@ -787,3 +787,57 @@ pub fn validate_labels(labels: &[String]) -> Result<Vec<String>, String> {
     validate_labels_count(labels.len())?;
     labels.iter().map(|l| validate_label(l)).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_core::models::Task;
+
+    fn task_with_merge_commit_sha(merge_commit_sha: Option<&str>) -> Task {
+        Task {
+            id: "task-1".into(),
+            project_id: "project-1".into(),
+            short_id: "T-1".into(),
+            epic_id: Some("epic-1".into()),
+            title: "Landed work".into(),
+            description: "".into(),
+            design: "".into(),
+            issue_type: "task".into(),
+            status: "closed".into(),
+            priority: 0,
+            owner: "".into(),
+            labels: "[]".into(),
+            acceptance_criteria: "[]".into(),
+            reopen_count: 0,
+            continuation_count: 0,
+            verification_failure_count: 0,
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: "2026-06-14T00:00:00Z".into(),
+            updated_at: "2026-06-14T00:01:00Z".into(),
+            closed_at: Some("2026-06-14T00:02:00Z".into()),
+            close_reason: Some("completed".into()),
+            merge_commit_sha: merge_commit_sha.map(str::to_owned),
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".into(),
+            agent_type: None,
+            created_by_user_id: None,
+            unresolved_blocker_count: 0,
+        }
+    }
+
+    #[test]
+    fn task_list_item_serialization_preserves_merge_commit_sha() {
+        let sha = "abc123def4567890abc123def4567890abc123de";
+        let task = task_with_merge_commit_sha(Some(sha));
+
+        let list_item = task_to_list_item(&task, None, 0);
+        let serialized = serde_json::to_value(&list_item).unwrap();
+
+        assert_eq!(list_item.merge_commit_sha.as_deref(), Some(sha));
+        assert_eq!(serialized["merge_commit_sha"], sha);
+    }
+}
