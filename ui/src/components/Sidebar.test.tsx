@@ -103,4 +103,39 @@ describe('Sidebar component', () => {
 
     expect(await screen.findByLabelText('Proposals has 2 pending proposals')).toBeInTheDocument();
   });
+
+  it('excludes terminal statuses (done, rejected, archived, superseded) from the badge count', async () => {
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === 'proposal_list') {
+        return {
+          proposals: [
+            // Active — counted
+            { id: 'p-triage', short_id: 'tria', title: 'Triage 1', status: 'triage', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+            { id: 'p-draft', short_id: 'draf', title: 'Draft 1', status: 'draft', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+            { id: 'p-review', short_id: 'revw', title: 'Review 1', status: 'in_review', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+            { id: 'p-approved', short_id: 'aprv', title: 'Approved 1', status: 'approved', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+            { id: 'p-building', short_id: 'bldg', title: 'Building 1', status: 'building', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+            // Terminal — NOT counted
+            { id: 'p-done', short_id: 'done', title: 'Done 1', status: 'done', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+            { id: 'p-rejected', short_id: 'rjct', title: 'Rejected 1', status: 'rejected', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+            { id: 'p-archived', short_id: 'arch', title: 'Archived 1', status: 'archived', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+            { id: 'p-superseded', short_id: 'supr', title: 'Superseded 1', status: 'superseded', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+          ],
+        } as never;
+      }
+
+      return {} as never;
+    });
+
+    render(<Sidebar />, {
+      wrapperOptions: {
+        routerProps: {
+          initialEntries: ['/proposals'],
+        },
+      },
+    });
+
+    // Five active statuses in the fixture, four terminal ones — badge must be 5.
+    expect(await screen.findByLabelText('Proposals has 5 pending proposals')).toBeInTheDocument();
+  });
 });
