@@ -1168,6 +1168,7 @@ async fn dispatch(
             tokens_out,
             cache_read,
             cache_write,
+            parked_reason,
         } => {
             let result = services
                 .update_session_status(
@@ -1177,6 +1178,7 @@ async fn dispatch(
                     tokens_out,
                     cache_read,
                     cache_write,
+                    parked_reason,
                 )
                 .await;
             ServiceRpcResponse::UpdateSessionStatus(result)
@@ -1372,6 +1374,7 @@ mod tests {
             _tokens_out: i64,
             _cache_read: i64,
             _cache_write: i64,
+            _parked_reason: Option<String>,
         ) -> Result<(), String> {
             unimplemented!("not exercised in server tests")
         }

@@ -1778,6 +1778,7 @@ mod tests {
                 _: i64,
                 _: i64,
                 _: i64,
+                _: Option<String>,
             ) -> Result<(), String> {
                 unimplemented!()
             }

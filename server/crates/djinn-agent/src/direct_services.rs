@@ -311,6 +311,7 @@ impl SupervisorServices for DirectServices {
         tokens_out: i64,
         cache_read: i64,
         cache_write: i64,
+        parked_reason: Option<String>,
     ) -> Result<(), String> {
         let ctx = &self.callbacks.agent_context;
         let repo = SessionRepository::new(ctx.db.clone(), ctx.event_bus.clone());
@@ -321,6 +322,7 @@ impl SupervisorServices for DirectServices {
             tokens_out,
             cache_read,
             cache_write,
+            parked_reason,
         )
         .await
         .map(|_record| ())

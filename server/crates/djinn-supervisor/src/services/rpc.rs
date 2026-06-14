@@ -615,6 +615,7 @@ impl SupervisorServices for RpcServices {
         tokens_out: i64,
         cache_read: i64,
         cache_write: i64,
+        parked_reason: Option<String>,
     ) -> Result<(), String> {
         match self
             .roundtrip(ServiceRpcRequest::UpdateSessionStatus {
@@ -624,6 +625,7 @@ impl SupervisorServices for RpcServices {
                 tokens_out,
                 cache_read,
                 cache_write,
+                parked_reason,
             })
             .await
         {
@@ -1058,6 +1060,7 @@ impl SupervisorServices for UnimplementedRpcServices {
         _tokens_out: i64,
         _cache_read: i64,
         _cache_write: i64,
+        _parked_reason: Option<String>,
     ) -> Result<(), String> {
         unimplemented!(
             "UnimplementedRpcServices::update_session_status — construct RpcServices for real RPC"

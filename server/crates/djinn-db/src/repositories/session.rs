@@ -124,26 +124,29 @@ impl SessionRepository {
         tokens_out: i64,
         cache_read: i64,
         cache_write: i64,
+        parked_reason: Option<String>,
     ) -> Result<SessionRecord> {
         self.db.ensure_initialized().await?;
 
         let status_str = status.as_str();
-        sqlx::query!(
+        sqlx::query(
             r#"UPDATE sessions
              SET status = $1,
                  tokens_in = $2,
                  tokens_out = $3,
                  cache_read_tokens = $4,
                  cache_write_tokens = $5,
-                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                 parked_reason = COALESCE($7, parked_reason)
              WHERE id = $6"#,
-            status_str,
-            tokens_in,
-            tokens_out,
-            cache_read,
-            cache_write,
-            id
         )
+        .bind(status_str)
+        .bind(tokens_in)
+        .bind(tokens_out)
+        .bind(cache_read)
+        .bind(cache_write)
+        .bind(id)
+        .bind(parked_reason)
         .execute(self.db.pool())
         .await?;
 
@@ -1035,7 +1038,7 @@ mod tests {
         captured.lock().unwrap().clear();
 
         let updated = repo
-            .update(&created.id, SessionStatus::Completed, 10, 20, 5, 3)
+            .update(&created.id, SessionStatus::Completed, 10, 20, 5, 3, None)
             .await
             .unwrap();
         assert_eq!(updated.status, "completed");
@@ -1052,6 +1055,77 @@ mod tests {
         assert!(completed.is_some(), "expected session.completed event");
         let s: SessionRecord = serde_json::from_value(completed.unwrap().payload.clone()).unwrap();
         assert_eq!(s.id, created.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_sets_parked_reason_without_clobbering_on_none() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let parked = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+            })
+            .await
+            .unwrap();
+
+        repo.update(
+            &parked.id,
+            SessionStatus::Completed,
+            10,
+            20,
+            5,
+            3,
+            Some("budget".to_string()),
+        )
+        .await
+        .unwrap();
+        let reason: Option<String> =
+            sqlx::query_scalar("SELECT parked_reason FROM sessions WHERE id = $1")
+                .bind(&parked.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(reason.as_deref(), Some("budget"));
+
+        repo.update(&parked.id, SessionStatus::Completed, 11, 21, 6, 4, None)
+            .await
+            .unwrap();
+        let reason: Option<String> =
+            sqlx::query_scalar("SELECT parked_reason FROM sessions WHERE id = $1")
+                .bind(&parked.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(reason.as_deref(), Some("budget"));
+
+        let fresh = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5-fresh",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+            })
+            .await
+            .unwrap();
+        repo.update(&fresh.id, SessionStatus::Completed, 1, 2, 0, 0, None)
+            .await
+            .unwrap();
+        let reason: Option<String> =
+            sqlx::query_scalar("SELECT parked_reason FROM sessions WHERE id = $1")
+                .bind(&fresh.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert!(reason.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1285,9 +1359,17 @@ mod tests {
             })
             .await
             .unwrap();
-        repo.update(&finished_planner.id, SessionStatus::Completed, 0, 0, 0, 0)
-            .await
-            .unwrap();
+        repo.update(
+            &finished_planner.id,
+            SessionStatus::Completed,
+            0,
+            0,
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
 
         let matches = repo.active_planner_for_epic(&epic_a.id).await.unwrap();
         assert_eq!(

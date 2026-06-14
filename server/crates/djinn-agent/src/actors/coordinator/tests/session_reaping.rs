@@ -851,7 +851,15 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
         .await
         .unwrap();
     session_repo
-        .update(&completed_session.id, SessionStatus::Completed, 1, 1, 0, 0)
+        .update(
+            &completed_session.id,
+            SessionStatus::Completed,
+            1,
+            1,
+            0,
+            0,
+            None,
+        )
         .await
         .unwrap();
 

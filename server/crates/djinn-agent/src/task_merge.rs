@@ -96,6 +96,7 @@ pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &A
             paused.tokens_out,
             paused.cache_read_tokens,
             paused.cache_write_tokens,
+            None,
         )
         .await
     {
