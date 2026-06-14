@@ -101,6 +101,6 @@
          ]
       }
    },
-   "hash" : "578aecfed4e1fb5e36737d598f3d66c33a551e9230dcd7ba0b01b6d98a8cd6f8",
+   "hash": "b5cd7c6cc6f10ca0dde42323a641f7307f0971009ad912f65289913c2eb27d7e",
    "query" : "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\"\n             FROM sessions WHERE id = $1 AND agent_type = 'chat'"
 }

@@ -101,6 +101,6 @@
          ]
       }
    },
-   "hash" : "c42b68977693b01e716ef99684f2265afd16dae463ddea723e48f4ca9b5c99b1",
+   "hash": "a2bbd92e273c3122e23e2b6ef728cad8ce41b79e6d4092dcc1e2731de0d6aa01",
    "query" : "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.status AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.cache_read_tokens, s.cache_write_tokens,\n                    s.task_run_id, s.title,\n                    s.parked_reason AS \"parked_reason?\"\n             FROM sessions s\n             INNER JOIN tasks t ON t.id = s.task_id\n             WHERE s.status = 'running' AND s.agent_type = 'planner' AND t.epic_id = $1\n             ORDER BY s.started_at DESC"
 }

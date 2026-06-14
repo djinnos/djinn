@@ -101,6 +101,6 @@
          ]
       }
    },
-   "hash" : "55865d645d9aa8863076d67b9f38f9e314972c5117cd2275d56a2a1481b885cd",
+   "hash": "7008d3fddad2e7d4f32f8bb354d33f82c41ebb5740fd16de0b2f8fe4c7eb8e21",
    "query" : "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\"\n             FROM sessions\n             WHERE task_id = $1 AND status = 'running' ORDER BY started_at DESC LIMIT 1"
 }

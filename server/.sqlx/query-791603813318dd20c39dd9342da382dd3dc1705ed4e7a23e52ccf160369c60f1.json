@@ -99,6 +99,6 @@
          "Left" : []
       }
    },
-   "hash" : "1a350bcf1d96fca05812f8f872cf6c8d90763736d8bf67a5a64bca2d66405142",
+   "hash": "791603813318dd20c39dd9342da382dd3dc1705ed4e7a23e52ccf160369c60f1",
    "query" : "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\"\n             FROM sessions WHERE status = 'running'"
 }

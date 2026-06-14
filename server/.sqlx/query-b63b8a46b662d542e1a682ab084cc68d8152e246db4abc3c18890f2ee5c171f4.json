@@ -99,6 +99,6 @@
          "Left" : []
       }
    },
-   "hash" : "08a87773bbd023360b059ef99df4885fb289ab5e128de176f16088f710885e45",
+   "hash": "b63b8a46b662d542e1a682ab084cc68d8152e246db4abc3c18890f2ee5c171f4",
    "query" : "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.status AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.cache_read_tokens, s.cache_write_tokens,\n                    s.task_run_id, s.title,\n                    s.parked_reason AS \"parked_reason?\"\n             FROM sessions s\n             LEFT JOIN (\n                SELECT session_id, MAX(created_at) AS last_at\n                FROM session_messages\n                GROUP BY session_id\n             ) m ON m.session_id = s.id\n             WHERE s.agent_type = 'chat'\n             ORDER BY COALESCE(m.last_at, s.started_at) DESC"
 }

@@ -102,6 +102,6 @@
          ]
       }
    },
-   "hash" : "6251c3d32c112460b0eb1446ae8003f0c18ae02c735df63f67dc00e7497bea55",
+   "hash": "c84af21a836160a1974cbdae9406bb27dd23e8fa066a310044aa3791b181c82d",
    "query" : "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\"\n             FROM sessions WHERE project_id = $1 AND id = $2"
 }
