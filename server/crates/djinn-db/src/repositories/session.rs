@@ -62,7 +62,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -92,7 +93,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -159,7 +161,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions WHERE status = 'running'"#
         )
         .fetch_all(self.db.pool())
@@ -194,7 +197,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions WHERE task_id = $1 AND status = 'running'"#,
             task_id
         )
@@ -228,7 +232,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -246,7 +251,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions WHERE project_id = $1 AND id = $2"#,
             project_id,
             id
@@ -261,7 +267,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions WHERE task_id = $1 ORDER BY started_at DESC"#,
             task_id
         )
@@ -277,7 +284,8 @@ impl SessionRepository {
         Ok(sqlx::query_as::<_, SessionRecord>(
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status, tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
         )
         .bind(task_run_id)
@@ -295,7 +303,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions
              WHERE project_id = $1 AND task_id = $2 ORDER BY started_at DESC"#,
             project_id,
@@ -311,7 +320,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions
              WHERE status = 'running' ORDER BY started_at DESC"#
         )
@@ -360,7 +370,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions
              WHERE project_id = $1 AND status = 'running' ORDER BY started_at DESC"#,
             project_id
@@ -381,7 +392,8 @@ impl SessionRepository {
                     s.started_at, s.ended_at,
                     s.status AS "status!", s.tokens_in, s.tokens_out,
                     s.cache_read_tokens, s.cache_write_tokens,
-                    s.task_run_id, s.title
+                    s.task_run_id, s.title,
+                    s.parked_reason AS "parked_reason?"
              FROM sessions s
              INNER JOIN tasks t ON t.id = s.task_id
              WHERE s.status = 'running' AND s.agent_type = 'planner' AND t.epic_id = $1
@@ -398,7 +410,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions
              WHERE task_id = $1 AND status = 'running' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -510,7 +523,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -588,7 +602,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' AND agent_type = $2
              ORDER BY started_at DESC LIMIT 1"#,
@@ -651,7 +666,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -710,7 +726,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
-                cache_read_tokens, cache_write_tokens, task_run_id, title
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?"
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -732,7 +749,8 @@ impl SessionRepository {
                     s.started_at, s.ended_at,
                     s.status AS "status!", s.tokens_in, s.tokens_out,
                     s.cache_read_tokens, s.cache_write_tokens,
-                    s.task_run_id, s.title
+                    s.task_run_id, s.title,
+                    s.parked_reason AS "parked_reason?"
              FROM sessions s
              LEFT JOIN (
                 SELECT session_id, MAX(created_at) AS last_at
@@ -764,7 +782,8 @@ impl SessionRepository {
                     s.started_at, s.ended_at,
                     s.status AS "status!", s.tokens_in, s.tokens_out,
                     s.cache_read_tokens, s.cache_write_tokens,
-                    s.task_run_id, s.title
+                    s.task_run_id, s.title,
+                    s.parked_reason AS "parked_reason?"
              FROM sessions s
              LEFT JOIN (
                 SELECT session_id, MAX(created_at) AS last_at
@@ -1044,6 +1063,7 @@ mod tests {
         assert_eq!(updated.tokens_in, 10);
         assert_eq!(updated.tokens_out, 20);
         assert!(updated.ended_at.is_some());
+        assert!(updated.parked_reason.is_none());
 
         let events = captured.lock().unwrap();
         let completed = events
@@ -1052,6 +1072,35 @@ mod tests {
         assert!(completed.is_some(), "expected session.completed event");
         let s: SessionRecord = serde_json::from_value(completed.unwrap().payload.clone()).unwrap();
         assert_eq!(s.id, created.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_record_maps_nullable_parked_reason() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(created.parked_reason.is_none());
+
+        sqlx::query("UPDATE sessions SET parked_reason = 'budget' WHERE id = $1")
+            .bind(&created.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.parked_reason.as_deref(), Some("budget"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
