@@ -111,7 +111,7 @@ describe("ProposalHistory", () => {
     expect(screen.getByText("done")).toBeInTheDocument();
     expect(screen.getByText("2h ago")).toBeInTheDocument();
     await waitFor(() =>
-      expect(screen.getByText("Pat Manager")).toBeInTheDocument(),
+      expect(screen.getAllByText("Pat Manager").length).toBeGreaterThan(0),
     );
 
     expect(screen.queryByText("rev 0")).not.toBeInTheDocument();
@@ -138,7 +138,7 @@ describe("ProposalHistory", () => {
     expect(screen.getByText("rev 2")).toBeInTheDocument();
     expect(screen.queryByText("Add rollout notes.")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button"));
+    fireEvent.click(screen.getByRole("button", { name: /rev 2/ }));
 
     expect(screen.getByText("Add rollout notes.")).toBeInTheDocument();
     expect(screen.getByText("Original proposal")).toBeInTheDocument();
