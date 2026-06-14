@@ -85,6 +85,7 @@ describe("KanbanBoard", () => {
         title: "Done task",
         status: "closed",
         epic_id: epicA.id,
+        merge_commit_sha: "abc123merged",
       }),
     ];
 
@@ -171,27 +172,45 @@ describe("KanbanBoard", () => {
     });
   });
 
-  it("hides review and breakdown tasks from done/merged column", () => {
+  it("only shows closed tasks with landed merge SHAs in the merged column", () => {
     const tasks: Task[] = [
       makeTask({
-        id: "t-done-task",
-        title: "Regular done",
+        id: "t-merged-pr",
+        title: "Merged PR task",
+        status: "closed",
+        issue_type: "task",
+        epic_id: epicA.id,
+        pr_url: "https://github.com/example/repo/pull/42",
+        merge_commit_sha: "abc123merged",
+      }),
+      makeTask({
+        id: "t-direct-push",
+        title: "Direct push merged task",
+        status: "closed",
+        issue_type: "task",
+        epic_id: epicA.id,
+        pr_url: null,
+        merge_commit_sha: "def456direct",
+      }),
+      makeTask({
+        id: "t-closed-no-merge",
+        title: "Closed without merge",
         status: "closed",
         issue_type: "task",
         epic_id: epicA.id,
       }),
       makeTask({
-        id: "t-done-review",
-        title: "Done review",
+        id: "t-closed-review",
+        title: "Closed review without merge",
         status: "closed",
         issue_type: "review",
         epic_id: epicA.id,
       }),
       makeTask({
-        id: "t-done-breakdown",
-        title: "Done breakdown",
+        id: "t-closed-planning",
+        title: "Closed planning without merge",
         status: "closed",
-        issue_type: "decomposition",
+        issue_type: "planning",
         epic_id: epicA.id,
       }),
     ];
@@ -204,10 +223,16 @@ describe("KanbanBoard", () => {
     );
 
     const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
-    expect(doneCol).toHaveTextContent("1");
-    expect(screen.getByText("Regular done")).toBeInTheDocument();
-    expect(screen.queryByText("Done review")).not.toBeInTheDocument();
-    expect(screen.queryByText("Done breakdown")).not.toBeInTheDocument();
+    expect(doneCol).toHaveTextContent("2");
+    expect(screen.getByText("Merged PR task")).toBeInTheDocument();
+    expect(screen.getByText("Direct push merged task")).toBeInTheDocument();
+    expect(screen.queryByText("Closed without merge")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Closed review without merge"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Closed planning without merge"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows empty board state when no tasks", () => {
