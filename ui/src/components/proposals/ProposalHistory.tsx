@@ -27,8 +27,8 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
     () =>
       [...detail.revisions].sort(
         (a, b) =>
-          b.seq - a.seq ||
           b.created_at.localeCompare(a.created_at) ||
+          b.seq - a.seq ||
           b.id.localeCompare(a.id),
       ),
     [detail.revisions],
@@ -50,9 +50,11 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
       cur.includes(id) ? cur.filter((s) => s !== id) : [...cur, id],
     );
 
-  // A lone seed revision has nothing to compare against yet, unless there are
-  // non-spec audit events to show.
-  if (history.length <= 1) return null;
+  const statusEvents = history.filter((r) => r.event_kind !== "spec_revision");
+
+  // A lone seed revision has nothing to compare against yet, but status audit
+  // events still need to be visible even when no material spec edit exists.
+  if (specRevisions.length <= 1 && statusEvents.length === 0) return null;
 
   return (
     <div className="space-y-2">
@@ -68,16 +70,22 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
           const isSpecRevision = r.event_kind === "spec_revision";
           const titleChanged = !!prev && prev.title !== r.title;
           if (!isSpecRevision) {
+            const statusLabel =
+              r.status_to === "done"
+                ? "Marked done (implemented externally)"
+                : "Status changed";
             return (
               <li key={r.id}>
                 <div className="flex w-full items-center gap-2 px-3 py-2 text-sm">
                   <Badge variant="secondary" className="font-mono">
                     status
                   </Badge>
-                  <span className="text-muted-foreground">changed</span>
+                  <span className="font-medium">{statusLabel}</span>
+                  <span className="text-muted-foreground">(</span>
                   <span className="font-medium">{r.status_from ?? "—"}</span>
                   <span className="text-muted-foreground">→</span>
                   <span className="font-medium">{r.status_to ?? "—"}</span>
+                  <span className="text-muted-foreground">)</span>
                   <span className="flex min-w-0 items-center gap-1.5">
                     <UserAvatar user={editor} className="size-4" />
                     <span className="truncate">
