@@ -68,8 +68,10 @@ const STATUS_COLUMNS: Array<{
   },
 ];
 
-function taskToColumnKey(task: Task): ColumnKey {
-  if (task.status === "closed") return "done";
+function taskToColumnKey(task: Task): ColumnKey | null {
+  if (task.status === "closed") {
+    return task.merge_commit_sha != null ? "done" : null;
+  }
   if (
     task.status === "approved" ||
     task.status === "pr_draft" ||
@@ -218,14 +220,7 @@ export function KanbanBoard({
     for (const task of filteredTasks) {
       const epicKey = task.epic_id ?? "no-epic";
       const columnKey = taskToColumnKey(task);
-      // Hide review, breakdown, and planning tasks from the done/merged column
-      if (
-        columnKey === "done" &&
-        (task.issue_type === "review" ||
-          task.issue_type === "decomposition" ||
-          task.issue_type === "planning")
-      )
-        continue;
+      if (columnKey === null) continue;
       const columnMap = byColumn.get(columnKey);
       if (!columnMap) continue;
 
