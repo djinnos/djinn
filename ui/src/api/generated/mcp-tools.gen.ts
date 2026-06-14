@@ -5084,12 +5084,16 @@ export namespace ProposalShowOutputSchema {
   body: string
   created_at: string
   edited_by_user_id?: string
+  /**
+   * `spec_revision` for material spec snapshots, `status_change` for
+   * lifecycle-only history rows.
+   */
   event_kind: string
   event_metadata?: string
   id: string
-  seq: number
   status_from?: string
   status_to?: string
+  seq: number
   title: string
   [k: string]: any
   }

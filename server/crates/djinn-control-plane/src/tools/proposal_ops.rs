@@ -99,6 +99,8 @@ pub struct ProposalRevisionModel {
     pub acceptance_criteria: Vec<AcceptanceCriterionItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edited_by_user_id: Option<String>,
+    /// `spec_revision` for material spec snapshots, `status_change` for
+    /// lifecycle-only history rows.
     pub event_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_from: Option<String>,
