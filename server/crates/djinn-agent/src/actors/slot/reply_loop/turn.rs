@@ -11,6 +11,7 @@ use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::telemetry;
 
 use super::super::{runtime_env_diagnostics, runtime_fs_diagnostics};
+use super::budget::SessionBudgetPolicy;
 use super::error_handling::{
     MAX_COMPACTION_RETRIES, empty_turn_backoff, is_context_length_error,
     is_orphaned_tool_call_error, next_nudge_message, should_retry_after_tool_call_compaction,
@@ -24,20 +25,6 @@ use super::loop_guard::{
 use super::persistence::{persist_session_message, serialize_llm_input, serialize_message};
 use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
-
-const MAX_TURNS: u32 = 1000;
-/// Resolve the effective step cap for this reply loop.
-///
-/// Defaults to [`MAX_TURNS`]. An explicit `override` (set on
-/// [`ReplyLoopContext::max_turns_override`]) takes precedence so the graceful
-/// wind-down path (G9) can be exercised with a small cap in tests without
-/// driving a thousand mock turns — and without mutating a process-global env
-/// var that races concurrent tests. Values `<= 1` are clamped to `2` because
-/// the wind-down consumes one of the permitted turns — a cap of 1 would leave
-/// no room to do any real work before winding down.
-fn effective_max_turns(override_value: Option<u32>) -> u32 {
-    override_value.map(|v| v.max(2)).unwrap_or(MAX_TURNS)
-}
 
 fn permission_denial_text(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
@@ -160,10 +147,10 @@ pub(crate) struct ReplyLoopContext<'a> {
     pub active_skill_names: &'a [String],
     /// MCP server names connected in this session (for Langfuse metadata).
     pub active_mcp_server_names: &'a [String],
-    /// Optional override for the per-session step cap (defaults to
-    /// [`MAX_TURNS`]). Used by tests to exercise the graceful wind-down (G9)
-    /// path with a tiny cap without driving a thousand mock turns. Production
-    /// callers pass `None`.
+    /// Optional override for the per-session step cap. Used by tests to
+    /// exercise the graceful wind-down (G9) path with a tiny cap without
+    /// driving the policy default number of mock turns. Production callers pass
+    /// `None`, so the role/model-aware [`SessionBudgetPolicy`] decides.
     pub max_turns_override: Option<u32>,
 }
 
@@ -335,7 +322,29 @@ pub(crate) async fn run_reply_loop(
         let mut last_assistant_text = String::new();
 
         let mut turns: u32 = 0;
-        let max_turns = effective_max_turns(max_turns_override);
+        let session_budget = SessionBudgetPolicy::from_env()
+            .unwrap_or_else(|err| {
+                tracing::warn!(
+                    error = %err,
+                    "ReplyLoop: invalid session budget configuration; using defaults"
+                );
+                SessionBudgetPolicy::default()
+            })
+            .resolve(role_name, model_id, context_window, max_turns_override);
+        let max_turns = session_budget.effective_max_turns;
+        tracing::debug!(
+            task_id = %task_id,
+            session_id = %session_id,
+            agent_type = %session_budget.role_name,
+            model_id = %session_budget.model_id,
+            context_window_tokens = session_budget.context_window_tokens,
+            context_window_known = session_budget.context_window_known,
+            max_turns,
+            max_cumulative_tokens = session_budget.max_cumulative_tokens,
+            soft_threshold_ratio = session_budget.soft_threshold_ratio,
+            hard_threshold_ratio = session_budget.hard_threshold_ratio,
+            "ReplyLoop: resolved session budget policy"
+        );
         // G9: graceful step-cap wind-down. When the loop reaches the final
         // permitted turn we inject a one-shot directive asking the agent to
         // summarize work done + what remains, then allow EXACTLY ONE more turn
