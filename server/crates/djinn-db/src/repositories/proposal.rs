@@ -260,6 +260,8 @@ impl ProposalRepository {
             current.latest_revision_seq
         };
         let status_changed = current.status != effective_status;
+        let record_done_status_event =
+            !content_changed && status_changed && effective_status == "done";
 
         sqlx::query!(
             r#"UPDATE proposals SET title = $1, body = $2, acceptance_criteria = $3, status = $4,
@@ -294,12 +296,11 @@ impl ProposalRepository {
                 editor.as_deref(),
             )
             .await?;
-        }
-        if !content_changed && status_changed && effective_status == "done" {
+        } else if record_done_status_event {
             let editor = djinn_core::auth_context::current_user_id();
             self.insert_status_event(ProposalStatusEvent {
                 proposal_id: id,
-                seq: current.latest_revision_seq,
+                seq: next_seq,
                 title: input.title,
                 body: input.body,
                 acceptance_criteria: &acceptance_criteria,
@@ -546,17 +547,18 @@ impl ProposalRepository {
         edited_by: Option<&str>,
     ) -> Result<()> {
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query!(
-            "INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, acceptance_criteria, edited_by_user_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            id,
-            proposal_id,
-            seq,
-            title,
-            body,
-            acceptance_criteria,
-            edited_by
+        sqlx::query(
+            r#"INSERT INTO proposal_revisions
+                (id, proposal_id, seq, title, body, acceptance_criteria, edited_by_user_id, event_kind)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'spec_revision')"#,
         )
+        .bind(id)
+        .bind(proposal_id)
+        .bind(seq)
+        .bind(title)
+        .bind(body)
+        .bind(acceptance_criteria)
+        .bind(edited_by)
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -584,7 +586,7 @@ impl ProposalRepository {
         Ok(())
     }
 
-    /// Revisions of a proposal, oldest first.
+    /// Revisions/history events of a proposal, oldest first.
     pub async fn revisions(&self, proposal_id: &str) -> Result<Vec<ProposalRevision>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, ProposalRevision>(
@@ -594,7 +596,7 @@ impl ProposalRepository {
                     event_metadata::text AS event_metadata, created_at
              FROM proposal_revisions
              WHERE proposal_id = $1
-             ORDER BY seq, created_at, id"#,
+             ORDER BY created_at, id"#,
         )
         .bind(proposal_id)
         .fetch_all(self.db.pool())

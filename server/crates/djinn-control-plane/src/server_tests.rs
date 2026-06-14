@@ -509,6 +509,67 @@ mod tests {
             Some(2)
         );
     }
+    #[tokio::test]
+    async fn proposal_show_includes_manual_done_status_history_event() {
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        create_project(&db, std::path::Path::new("")).await;
+        let server = DjinnMcpServer::new(state);
+
+        let created = server
+            .dispatch_tool(
+                "proposal_create",
+                json!({ "title": "External implementation" }),
+            )
+            .await
+            .expect("dispatch proposal_create");
+        let id = created
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("proposal id")
+            .to_string();
+
+        server
+            .dispatch_tool(
+                "proposal_update",
+                json!({ "id": id, "status": "in_review" }),
+            )
+            .await
+            .expect("dispatch proposal_update in_review");
+        server
+            .dispatch_tool("proposal_update", json!({ "id": id, "status": "done" }))
+            .await
+            .expect("dispatch proposal_update done");
+
+        let shown = server
+            .dispatch_tool("proposal_show", json!({ "id": id }))
+            .await
+            .expect("dispatch proposal_show");
+        let revisions = shown
+            .get("revisions")
+            .and_then(|v| v.as_array())
+            .expect("revisions array");
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(
+            revisions[0].get("event_kind").and_then(|v| v.as_str()),
+            Some("spec_revision")
+        );
+        let event = &revisions[1];
+        assert_eq!(
+            event.get("event_kind").and_then(|v| v.as_str()),
+            Some("status_change")
+        );
+        assert_eq!(
+            event.get("status_from").and_then(|v| v.as_str()),
+            Some("in_review")
+        );
+        assert_eq!(
+            event.get("status_to").and_then(|v| v.as_str()),
+            Some("done")
+        );
+        assert_eq!(event.get("seq").and_then(|v| v.as_i64()), Some(1));
+        assert!(event.get("created_at").and_then(|v| v.as_str()).is_some());
+    }
 
     /// Parity check between the two MCP dispatch paths (see
     /// `dispatch.rs` vs the `#[tool_router]`-generated router).
