@@ -294,6 +294,7 @@ pub enum ServiceRpcRequest {
         tokens_out: i64,
         cache_read: i64,
         cache_write: i64,
+        parked_reason: Option<String>,
     },
     /// [`crate::SupervisorServices::emit_djinn_event`].  Phase 7-followup
     /// gap-2 — bridges worker-side `event_bus.send(..)` calls to the host's
@@ -1217,52 +1218,82 @@ mod tests {
 
     #[test]
     fn update_session_status_request_roundtrip() {
-        let f = Frame {
-            correlation_id: 42,
-            payload: FramePayload::Rpc(ServiceRpcRequest::UpdateSessionStatus {
-                session_id: "s1".into(),
-                status: SessionStatus::Completed,
-                tokens_in: 1234,
-                tokens_out: 567,
-                cache_read: 89,
-                cache_write: 12,
-            }),
-        };
-        let bytes = bincode::serialize(&f).unwrap();
-        let back: Frame = bincode::deserialize(&bytes).unwrap();
-        match back.payload {
-            FramePayload::Rpc(ServiceRpcRequest::UpdateSessionStatus {
-                session_id,
-                status,
-                tokens_in,
-                tokens_out,
-                cache_read,
-                cache_write,
-            }) => {
-                assert_eq!(session_id, "s1");
-                assert_eq!(status, SessionStatus::Completed);
-                assert_eq!(tokens_in, 1234);
-                assert_eq!(tokens_out, 567);
-                assert_eq!(cache_read, 89);
-                assert_eq!(cache_write, 12);
+        for parked_reason in [Some("budget".to_string()), None] {
+            let f = Frame {
+                correlation_id: 42,
+                payload: FramePayload::Rpc(ServiceRpcRequest::UpdateSessionStatus {
+                    session_id: "s1".into(),
+                    status: SessionStatus::Completed,
+                    tokens_in: 1234,
+                    tokens_out: 567,
+                    cache_read: 89,
+                    cache_write: 12,
+                    parked_reason: parked_reason.clone(),
+                }),
+            };
+            let bytes = bincode::serialize(&f).unwrap();
+            let back: Frame = bincode::deserialize(&bytes).unwrap();
+            match back.payload {
+                FramePayload::Rpc(ServiceRpcRequest::UpdateSessionStatus {
+                    session_id,
+                    status,
+                    tokens_in,
+                    tokens_out,
+                    cache_read,
+                    cache_write,
+                    parked_reason: got_parked_reason,
+                }) => {
+                    assert_eq!(session_id, "s1");
+                    assert_eq!(status, SessionStatus::Completed);
+                    assert_eq!(tokens_in, 1234);
+                    assert_eq!(tokens_out, 567);
+                    assert_eq!(cache_read, 89);
+                    assert_eq!(cache_write, 12);
+                    assert_eq!(got_parked_reason, parked_reason);
+                }
+                other => panic!("unexpected: {other:?}"),
             }
-            other => panic!("unexpected: {other:?}"),
         }
     }
 
     #[test]
     fn update_session_status_reply_roundtrip() {
-        let resp = ServiceRpcResponse::UpdateSessionStatus(Ok(()));
-        let f = Frame {
-            correlation_id: 42,
-            payload: FramePayload::RpcReply(resp),
-        };
-        let bytes = bincode::serialize(&f).unwrap();
-        let back: Frame = bincode::deserialize(&bytes).unwrap();
-        assert!(matches!(
-            back.payload,
-            FramePayload::RpcReply(ServiceRpcResponse::UpdateSessionStatus(Ok(())))
-        ));
+        for parked_reason in [Some("budget".to_string()), None] {
+            let request = Frame {
+                correlation_id: 42,
+                payload: FramePayload::Rpc(ServiceRpcRequest::UpdateSessionStatus {
+                    session_id: "s1".into(),
+                    status: SessionStatus::Completed,
+                    tokens_in: 1234,
+                    tokens_out: 567,
+                    cache_read: 89,
+                    cache_write: 12,
+                    parked_reason: parked_reason.clone(),
+                }),
+            };
+            let bytes = bincode::serialize(&request).unwrap();
+            let back: Frame = bincode::deserialize(&bytes).unwrap();
+            match back.payload {
+                FramePayload::Rpc(ServiceRpcRequest::UpdateSessionStatus {
+                    parked_reason: got_parked_reason,
+                    ..
+                }) => assert_eq!(got_parked_reason, parked_reason),
+                other => panic!("unexpected: {other:?}"),
+            }
+
+            let response = Frame {
+                correlation_id: 43,
+                payload: FramePayload::RpcReply(ServiceRpcResponse::UpdateSessionStatus(Ok(()))),
+            };
+            let bytes = bincode::serialize(&response).unwrap();
+            let back: Frame = bincode::deserialize(&bytes).unwrap();
+            match back.payload {
+                FramePayload::RpcReply(ServiceRpcResponse::UpdateSessionStatus(got)) => {
+                    assert_eq!(got, Ok(()));
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
     }
 
     #[test]

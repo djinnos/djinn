@@ -164,6 +164,7 @@ pub(super) async fn board_reconcile_impl(
                         session.tokens_out,
                         session.cache_read_tokens,
                         session.cache_write_tokens,
+                        None,
                     )
                     .await
                     .is_ok()

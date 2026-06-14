@@ -30,6 +30,7 @@ pub use wire::{
 /// `Self`-by-value receivers. `async_trait` handles the `Pin<Box<dyn
 /// Future + Send>>` boxing so the trait can be used behind
 /// `Arc<dyn SupervisorServices>`.
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait SupervisorServices: Send + Sync + 'static {
     /// Supervisor-wide cancellation token.  Flagged when the task-run is torn
@@ -174,6 +175,7 @@ pub trait SupervisorServices: Send + Sync + 'static {
         tokens_out: i64,
         cache_read: i64,
         cache_write: i64,
+        parked_reason: Option<String>,
     ) -> Result<(), String>;
 
     /// Best-effort mid-flight flush of a running session's cumulative token

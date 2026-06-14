@@ -200,6 +200,7 @@ impl SupervisorServices for FakeServices {
         _tokens_out: i64,
         _cache_read: i64,
         _cache_write: i64,
+        _parked_reason: Option<String>,
     ) -> Result<(), String> {
         unimplemented!("not exercised on the auth-rejection path")
     }
