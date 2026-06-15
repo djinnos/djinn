@@ -117,6 +117,48 @@ async fn inject_loop_guard_correction(
     conversation.push(msg);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindDownReason {
+    TurnCap,
+    TokenBudget,
+}
+
+impl WindDownReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TurnCap => "turn_cap",
+            Self::TokenBudget => "token_budget",
+        }
+    }
+
+    fn hard_error(self, max_turns: u32) -> anyhow::Error {
+        match self {
+            Self::TurnCap => anyhow::anyhow!(
+                "max turns ({}) exceeded without text-only response (wind-down summary \
+                 directive was injected but the agent did not terminate)",
+                max_turns
+            ),
+            Self::TokenBudget => anyhow::anyhow!(
+                "hard token budget exceeded without text-only response (wind-down summary \
+                 directive was injected but the agent did not terminate)"
+            ),
+        }
+    }
+}
+
+fn cumulative_budget_tokens(input_tokens: u64, output_tokens: u64, reasoning_tokens: u64) -> u64 {
+    input_tokens
+        .saturating_add(output_tokens)
+        .saturating_add(reasoning_tokens)
+}
+
+fn hard_token_budget_reached(consumed_tokens: u64, max_tokens: u64, hard_ratio: f64) -> bool {
+    if max_tokens == 0 {
+        return false;
+    }
+    consumed_tokens as f64 / max_tokens as f64 >= hard_ratio
+}
+
 pub(crate) struct ReplyLoopContext<'a> {
     pub provider: &'a dyn LlmProvider,
     pub tools: &'a [serde_json::Value],
@@ -353,19 +395,47 @@ pub(crate) async fn run_reply_loop(
         // wind-down turn runs, the next cap check falls through to the hard
         // error if the agent still hasn't reached a terminal action.
         let mut wind_down_injected = false;
+        let mut wind_down_reason: Option<WindDownReason> = None;
+        let mut budget_tokens_in: u64 = 0;
+        let mut budget_tokens_out: u64 = 0;
+        let mut budget_reasoning_tokens: u64 = 0;
 
         loop {
-            if turns >= max_turns {
+            let budget_tokens_consumed = cumulative_budget_tokens(
+                budget_tokens_in,
+                budget_tokens_out,
+                budget_reasoning_tokens,
+            );
+            let turn_cap_reached = turns >= max_turns;
+            let token_budget_reached = hard_token_budget_reached(
+                budget_tokens_consumed,
+                session_budget.max_cumulative_tokens,
+                session_budget.hard_threshold_ratio,
+            );
+            let wind_down_trigger = if turn_cap_reached {
+                Some(WindDownReason::TurnCap)
+            } else if token_budget_reached {
+                Some(WindDownReason::TokenBudget)
+            } else {
+                None
+            };
+
+            if let Some(trigger_reason) = wind_down_trigger {
                 if !wind_down_injected {
                     // One turn before the hard cap: inject the wind-down
                     // directive and grant a single extra turn for the summary.
                     wind_down_injected = true;
+                    wind_down_reason = Some(trigger_reason);
                     tracing::warn!(
                         task_id = %task_id,
                         agent_type = %role_name,
+                        wind_down_reason = trigger_reason.as_str(),
                         turns,
                         max_turns,
-                        "ReplyLoop: step cap reached — injecting wind-down summary directive \
+                        consumed_tokens = budget_tokens_consumed,
+                        max_cumulative_tokens = session_budget.max_cumulative_tokens,
+                        hard_threshold_ratio = session_budget.hard_threshold_ratio,
+                        "ReplyLoop: wind-down threshold reached — injecting summary directive \
                          (one final turn before hard stop)"
                     );
                     let msg = wind_down_message();
@@ -377,11 +447,7 @@ pub(crate) async fn run_reply_loop(
                 } else {
                     // The agent ignored the wind-down (or produced no terminal
                     // action) — fall back to the existing hard-error behavior.
-                    return Err(anyhow::anyhow!(
-                        "max turns ({}) exceeded without text-only response (wind-down summary \
-                         directive was injected but the agent did not terminate)",
-                        max_turns
-                    ));
+                    return Err(wind_down_reason.unwrap_or(trigger_reason).hard_error(max_turns));
                 }
             }
             turns += 1;
@@ -518,6 +584,10 @@ pub(crate) async fn run_reply_loop(
                 streaming_dispatched,
             } = stream_state;
             saw_any_event |= saw_round_event;
+            budget_tokens_in = budget_tokens_in.saturating_add(u64::from(turn_tokens_in));
+            budget_tokens_out = budget_tokens_out.saturating_add(u64::from(turn_tokens_out));
+            budget_reasoning_tokens =
+                budget_reasoning_tokens.saturating_add(u64::from(turn_reasoning_out));
 
             // ── End OTel generation span for this turn ───────────────────────
             if let Some(llm) = otel_llm {
