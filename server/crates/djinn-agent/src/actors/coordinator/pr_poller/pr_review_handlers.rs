@@ -327,6 +327,38 @@ impl CoordinatorActor {
         }
     }
 
+    /// Close a task whose PR has merged, recording the landed merge-commit SHA.
+    ///
+    /// The SHA is persisted *before* the `PrMerge` transition so the
+    /// `task_updated` event the transition emits already carries it — that is
+    /// what lets the board place the card in the Merged column and the
+    /// coordinator record a throughput event (both gate on
+    /// `merge_commit_sha IS NOT NULL`). An empty/absent SHA degrades to a plain
+    /// `PrMerge` (task still closes; it just won't show as merged) rather than
+    /// blocking the close.
+    pub(in crate::actors::coordinator) async fn apply_pr_merge(
+        &self,
+        task_id: &str,
+        merge_commit_sha: Option<&str>,
+    ) {
+        if let Some(sha) = merge_commit_sha.filter(|s| !s.is_empty()) {
+            if let Err(e) = self.task_repo().set_merge_commit_sha(task_id, sha).await {
+                tracing::warn!(
+                    task_id,
+                    error = %e,
+                    "PR poller: failed to persist merge_commit_sha (task will still close)"
+                );
+            }
+        } else {
+            tracing::warn!(
+                task_id,
+                "PR poller: PR merged without a known merge_commit_sha — task closes but won't show as merged"
+            );
+        }
+        self.apply_pr_transition(task_id, TransitionAction::PrMerge, None)
+            .await;
+    }
+
     pub(in crate::actors::coordinator) async fn apply_pr_transition(
         &self,
         task_id: &str,

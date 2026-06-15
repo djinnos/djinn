@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use super::*;
 use crate::test_helpers;
 
-use super::super::{ModelSlotConfig, SlotHandle, SlotPoolConfig};
+use super::super::{ModelSlotConfig, SlotHandle, SlotPoolConfig, SlotState};
 use super::actor::SlotPool;
 use std::sync::{Arc, Mutex};
 
@@ -250,6 +250,83 @@ fn test_slot_factory(
 
         SlotHandle::spawn_with_test_runner(slot_id, model_id, event_tx, app_state, cancel, runner)
     })
+}
+
+struct SlotPoolInvariantHarness<'a> {
+    pool: &'a SlotPool,
+}
+
+impl<'a> SlotPoolInvariantHarness<'a> {
+    fn new(pool: &'a SlotPool) -> Self {
+        Self { pool }
+    }
+
+    fn assert_after(&self, event: &str) {
+        self.assert_per_model_free_list_uniqueness(event);
+        self.assert_retired_slots_absent_from_free_lists(event);
+        self.assert_mapped_or_busy_slots_not_free(event);
+    }
+
+    fn assert_per_model_free_list_uniqueness(&self, event: &str) {
+        for (model_id, free_slots) in self.pool.test_free_slots_by_model() {
+            let mut seen = HashSet::new();
+            for slot_id in &free_slots {
+                assert!(
+                    seen.insert(*slot_id),
+                    "slot-pool invariant failed after {event}: model '{model_id}' free list contains duplicate slot id {slot_id}; free_slots={free_slots:?}"
+                );
+            }
+        }
+    }
+
+    fn assert_retired_slots_absent_from_free_lists(&self, event: &str) {
+        let retired = self.pool.test_retired_slots();
+        for (model_id, free_slots) in self.pool.test_free_slots_by_model() {
+            for slot_id in &free_slots {
+                assert!(
+                    !retired.contains(slot_id),
+                    "slot-pool invariant failed after {event}: retired slot id {slot_id} is present in model '{model_id}' free list; retired_slots={retired:?}, free_slots={free_slots:?}"
+                );
+            }
+        }
+    }
+
+    fn assert_mapped_or_busy_slots_not_free(&self, event: &str) {
+        let task_slots = self.pool.test_task_slots();
+        let slot_states = self.pool.test_slot_states();
+        for (model_id, free_slots) in self.pool.test_free_slots_by_model() {
+            for slot_id in &free_slots {
+                if let Some((task_id, _)) = task_slots.iter().find(|(_, mapped)| *mapped == slot_id)
+                {
+                    panic!(
+                        "slot-pool invariant failed after {event}: mapped slot id {slot_id} for task '{task_id}' is present in model '{model_id}' free list; free_slots={free_slots:?}, task_slots={task_slots:?}"
+                    );
+                }
+
+                if let Some(SlotState::Busy { task_id, .. }) = slot_states.get(slot_id) {
+                    panic!(
+                        "slot-pool invariant failed after {event}: busy slot id {slot_id} for task '{task_id}' is present in model '{model_id}' free list; free_slots={free_slots:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn assert_slot_pool_invariants_after(pool: &SlotPool, event: &str) {
+    SlotPoolInvariantHarness::new(pool).assert_after(event);
+}
+
+fn inject_stale_busy_free_slot(pool: &mut SlotPool, task_id: &str, model_id: &str) -> usize {
+    let slot_id = pool.test_slot_of(task_id).unwrap_or_else(|| {
+        panic!("task '{task_id}' should hold a slot before stale-free injection")
+    });
+    assert!(
+        !pool.test_free_slots(model_id).contains(&slot_id),
+        "test precondition failed: slot id {slot_id} for task '{task_id}' is already free on model '{model_id}' before stale-free injection"
+    );
+    pool.test_inject_free(slot_id, model_id);
+    slot_id
 }
 
 async fn wait_until_no_sessions(pool: &SlotPoolHandle, task_ids: &[String]) {
@@ -999,17 +1076,16 @@ async fn dispatch_recovers_from_stale_busy_free_slot() {
     pool.test_dispatch("task-a", "/tmp/project", "model-a")
         .await
         .expect("first dispatch should occupy a slot");
-    let slot_a = pool
-        .test_slot_of("task-a")
-        .expect("task-a should hold a slot");
+    assert_slot_pool_invariants_after(&pool, "dispatch task-a");
 
     // Inject the exact desync: the still-busy slot back on the free list.
-    pool.test_inject_free(slot_a, "model-a");
+    let slot_a = inject_stale_busy_free_slot(&mut pool, "task-a", "model-a");
 
     // Must self-heal: drop the stale entry and spawn a fresh slot — NOT wedge.
     pool.test_dispatch("task-b", "/tmp/project", "model-a")
         .await
         .expect("second dispatch must recover instead of wedging on the busy slot");
+    assert_slot_pool_invariants_after(&pool, "dispatch task-b after stale busy free-list entry");
     let slot_b = pool
         .test_slot_of("task-b")
         .expect("task-b should hold a slot");
@@ -1021,6 +1097,46 @@ async fn dispatch_recovers_from_stale_busy_free_slot() {
     assert!(
         !pool.test_free_slots("model-a").contains(&slot_a),
         "the stale busy slot must be dropped from the free list, not re-queued"
+    );
+}
+
+/// Focused harness regression: the invariant helper guards the stale-busy-slot
+/// self-heal path that later table-driven lifecycle race tests will exercise
+/// after each event. The intentionally poisoned free-list entry is dropped on
+/// dispatch, rather than requeued, and the reusable helper verifies uniqueness,
+/// retired-slot exclusion, and busy/mapped-slot exclusion in one assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invariant_harness_accepts_stale_busy_slot_self_heal() {
+    let (app_state, cancel, _temp) = test_app_state();
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let (_pool_tx, pool_rx) = mpsc::channel(8);
+    let mut pool = SlotPool::new_with_factory(
+        pool_rx,
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(3600), signal_tx),
+    );
+
+    assert_slot_pool_invariants_after(&pool, "initial spawn");
+
+    pool.test_dispatch("task-a", "/tmp/project", "model-a")
+        .await
+        .expect("first dispatch should occupy the pre-warmed slot");
+    let stale_slot = inject_stale_busy_free_slot(&mut pool, "task-a", "model-a");
+
+    pool.test_dispatch("task-b", "/tmp/project", "model-a")
+        .await
+        .expect("dispatch should self-heal the stale busy free-list entry");
+
+    assert_slot_pool_invariants_after(&pool, "self-healed dispatch after stale busy injection");
+    assert!(
+        !pool.test_free_slots("model-a").contains(&stale_slot),
+        "stale busy slot id {stale_slot} must be dropped instead of requeued"
     );
 }
 
@@ -1047,9 +1163,11 @@ async fn mark_slot_free_is_idempotent_and_skips_retired() {
 
     // spawn_slots_for_config already created slot 0, free exactly once.
     assert_eq!(pool.test_free_slots("model-a"), vec![0]);
+    assert_slot_pool_invariants_after(&pool, "initial spawn");
 
     // Re-freeing an already-free slot is a no-op, never a duplicate.
     pool.test_mark_slot_free(0, "model-a");
+    assert_slot_pool_invariants_after(&pool, "idempotent mark_slot_free");
     assert_eq!(
         pool.test_free_slots("model-a"),
         vec![0],
@@ -1060,12 +1178,15 @@ async fn mark_slot_free_is_idempotent_and_skips_retired() {
     pool.test_dispatch("task-a", "/tmp/project", "model-a")
         .await
         .expect("dispatch should occupy slot 0");
+    assert_slot_pool_invariants_after(&pool, "dispatch before retire");
     assert_eq!(pool.test_slot_of("task-a"), Some(0));
     assert!(!pool.test_free_slots("model-a").contains(&0));
     pool.test_retire(0);
+    assert_slot_pool_invariants_after(&pool, "manual retire while busy");
 
     // A stale Free event for a retired slot must not return it to rotation.
     pool.test_mark_slot_free(0, "model-a");
+    assert_slot_pool_invariants_after(&pool, "stale free event for retired slot");
     assert!(
         !pool.test_free_slots("model-a").contains(&0),
         "mark_slot_free must refuse to resurrect a retired slot"
