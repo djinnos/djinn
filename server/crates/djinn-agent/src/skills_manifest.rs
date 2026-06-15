@@ -828,6 +828,82 @@ mod tests {
     }
 
     #[test]
+    fn manifest_hashes_cover_progressive_disclosure_and_skill_read_body_cases() {
+        let tmp = test_tempdir("djinn-skills-progressive-manifest-");
+        let skills_dir = djinn_skills_dir(tmp.path());
+
+        write_flat_skill(
+            &skills_dir,
+            "required-rules",
+            "---\nname: required-rules\ndescription: Required house rules\nrequired: true\n---\n\nRequired full body.\n",
+        );
+        write_flat_skill(
+            &skills_dir,
+            "ondemand-rust",
+            "---\nname: ondemand-rust\ndescription: Optional Rust guidance\nrequired: false\n---\n\nOn-demand full body.\n",
+        );
+
+        let manifest = generate_manifest(tmp.path(), None).unwrap();
+        assert_eq!(manifest.skills.len(), 2);
+        fs::create_dir_all(tmp.path().join(".djinn")).unwrap();
+        fs::write(
+            tmp.path().join(DEFAULT_MANIFEST_PATH),
+            to_pretty_json(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_verified_skills(
+            tmp.path(),
+            &["required-rules".to_string(), "ondemand-rust".to_string()],
+        )
+        .expect("fresh manifest should verify for prompt/skill_read runtime path");
+        let section = crate::skills::format_skills_section_with(&loaded, true);
+
+        assert!(section.contains("**required-rules**: Required house rules"));
+        assert!(section.contains("Required full body."));
+        assert!(!section.contains("skill_read(name=\"required-rules\")"));
+
+        assert!(section.contains("**ondemand-rust**: Optional Rust guidance"));
+        assert!(section.contains("skill_read(name=\"ondemand-rust\")"));
+        assert!(
+            !section.contains("On-demand full body."),
+            "non-required body must stay out of progressive disclosure prompt"
+        );
+
+        for skill in &loaded {
+            let entry = manifest
+                .skills
+                .iter()
+                .find(|entry| entry.id == skill.name)
+                .expect("manifest entry for loaded skill");
+            assert_eq!(entry.required, skill.required);
+            assert_eq!(entry.description, skill.description);
+            assert_eq!(
+                entry.summary_hash,
+                sha256_prefixed(summary_bytes(skill).as_bytes())
+            );
+            assert_eq!(
+                entry.content_hash,
+                sha256_prefixed(skill.content.as_bytes())
+            );
+        }
+
+        // A stale materialized summary field must be caught before prompt
+        // rendering can disclose the wrong name/description/required tuple.
+        write_flat_skill(
+            &skills_dir,
+            "ondemand-rust",
+            "---\nname: ondemand-rust\ndescription: Tampered optional guidance\nrequired: false\n---\n\nOn-demand full body.\n",
+        );
+        let err = load_verified_skills(tmp.path(), &["ondemand-rust".to_string()])
+            .expect_err("summary tamper must fail the runtime verification path");
+        assert!(
+            err.to_string().contains("description") || err.to_string().contains("summary_hash"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn generate_manifest_content_hash_covers_served_body_with_references() {
         let tmp = test_tempdir("djinn-skills-content-");
         let skills_dir = djinn_skills_dir(tmp.path());
