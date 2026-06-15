@@ -1,7 +1,9 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
 use crate::github_api::transport::handle_rate_limit;
-use crate::github_api::{GitHubApiClient, PrReview, PrReviewFeedback, ReviewComment};
+use crate::github_api::{
+    GitHubApiClient, GitHubApiError, PrReview, PrReviewFeedback, ReviewComment,
+};
 
 impl GitHubApiClient {
     /// List review comments on a pull request.
@@ -10,7 +12,7 @@ impl GitHubApiClient {
         owner: &str,
         repo: &str,
         pull_number: u64,
-    ) -> Result<Vec<ReviewComment>> {
+    ) -> std::result::Result<Vec<ReviewComment>, GitHubApiError> {
         let url = format!(
             "{}/repos/{}/{}/pulls/{}/comments",
             self.base_url, owner, repo, pull_number
@@ -36,13 +38,20 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "list_pull_request_reviews failed ({}): {}",
+            return Err(GitHubApiError::http(
+                "list_pull_request_reviews",
+                format!("/repos/{owner}/{repo}/pulls/{pull_number}/comments"),
                 status,
-                body
+                body,
             ));
         }
-        Ok(resp.json().await?)
+        resp.json().await.map_err(|e| {
+            GitHubApiError::transport(
+                "list_pull_request_reviews",
+                format!("/repos/{owner}/{repo}/pulls/{pull_number}/comments"),
+                e.to_string(),
+            )
+        })
     }
 
     /// List top-level reviews submitted on a pull request.
@@ -51,7 +60,7 @@ impl GitHubApiClient {
         owner: &str,
         repo: &str,
         pull_number: u64,
-    ) -> Result<Vec<PrReview>> {
+    ) -> std::result::Result<Vec<PrReview>, GitHubApiError> {
         let url = format!(
             "{}/repos/{}/{}/pulls/{}/reviews",
             self.base_url, owner, repo, pull_number
@@ -77,13 +86,20 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "list_pr_review_states failed ({}): {}",
+            return Err(GitHubApiError::http(
+                "list_pr_review_states",
+                format!("/repos/{owner}/{repo}/pulls/{pull_number}/reviews"),
                 status,
-                body
+                body,
             ));
         }
-        Ok(resp.json().await?)
+        resp.json().await.map_err(|e| {
+            GitHubApiError::transport(
+                "list_pr_review_states",
+                format!("/repos/{owner}/{repo}/pulls/{pull_number}/reviews"),
+                e.to_string(),
+            )
+        })
     }
 
     /// Fetch aggregated PR review feedback for a pull request.
