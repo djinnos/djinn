@@ -6102,6 +6102,10 @@ export namespace SessionShowOutputSchema {
   id?: string
   model_id?: string
   /**
+   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
+   */
+  parked_reason?: string
+  /**
    * `None` for chat sessions (global, user-scoped); `Some(_)` for every
    * other agent type. See `SessionRecord::project_id`.
    */
