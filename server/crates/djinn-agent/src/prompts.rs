@@ -462,12 +462,18 @@ mod tests {
                 description: "Alpha desc".into(),
                 content: "Alpha body.".into(),
                 required: false,
+                trust_level: "project".into(),
+                recommended_for_roles: vec![],
+                tags: vec![],
             },
             crate::skills::ResolvedSkill {
                 name: "beta".into(),
                 description: "Beta desc".into(),
                 content: "Beta body.".into(),
                 required: true,
+                trust_level: "project".into(),
+                recommended_for_roles: vec![],
+                tags: vec![],
             },
         ];
         let out = apply_skills("BASE", &skills);
