@@ -297,6 +297,28 @@ impl InterventionChaosHarness {
         );
     }
 
+    async fn assert_latest_status_change_reason_contains(&self, needle: &str) {
+        let entries = self.repo.list_activity(&self.task_id).await.unwrap();
+        let reason = entries
+            .iter()
+            .rev()
+            .find(|entry| entry.event_type == "status_changed")
+            .and_then(|entry| serde_json::from_str::<serde_json::Value>(&entry.payload).ok())
+            .and_then(|payload| {
+                payload
+                    .get("reason")
+                    .and_then(|reason| reason.as_str())
+                    .map(str::to_owned)
+            });
+
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains(needle)),
+            "latest status-change reason should contain {needle:?}; got {reason:?}"
+        );
+    }
+
     async fn assert_marker_reopen_counts(&self, expected: &[i64]) {
         let actual: Vec<i64> = self
             .planner_intervention_markers()
@@ -648,14 +670,14 @@ async fn same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes() {
         "hard cap must consume the cycle instead of redispatching indefinitely"
     );
     assert_eq!(terminal.status, "closed");
-    assert!(
-        terminal
-            .close_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("repeated dispatch failures")),
-        "terminal close reason should identify repeated dispatch failures; got {:?}",
-        terminal.close_reason
+    assert_eq!(
+        terminal.close_reason.as_deref(),
+        Some("force_closed"),
+        "terminal close should use force_close semantics"
     );
+    harness
+        .assert_latest_status_change_reason_contains("repeated dispatch failures")
+        .await;
     harness.assert_dispatch_backoff_cleared().await;
     harness.assert_source_task_not_ready_open().await;
     harness.assert_planner_marker_count(1).await;
