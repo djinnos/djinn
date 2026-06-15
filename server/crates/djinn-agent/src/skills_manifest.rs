@@ -93,12 +93,12 @@ pub struct ManifestSkill {
     /// `tags:` frontmatter list. Empty when omitted.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// sha256 over `name|description|required` — the disclosure summary the
-    /// model sees in the system prompt.
+    /// `sha256:<hex>` over `name|description|required` — the disclosure
+    /// summary the model sees in the system prompt.
     pub summary_hash: String,
-    /// sha256 over the effective served body (`ResolvedSkill.content`),
-    /// including sorted `references/` content. Matches what `skill_read` and
-    /// prompt materialization actually serve.
+    /// `sha256:<hex>` over the effective served body
+    /// (`ResolvedSkill.content`), including sorted `references/` content.
+    /// Matches what `skill_read` and prompt materialization actually serve.
     pub content_hash: String,
     /// All on-disk files that contribute to this skill, sorted by relative
     /// path. The first entry is the top-level skill file; remaining entries
@@ -215,8 +215,8 @@ fn build_manifest_skill(
     skill: &ResolvedSkill,
     source_path: &Path,
 ) -> std::io::Result<ManifestSkill> {
-    let summary_hash = sha256_hex(summary_bytes(skill).as_bytes());
-    let content_hash = sha256_hex(skill.content.as_bytes());
+    let summary_hash = sha256_prefixed(summary_bytes(skill).as_bytes());
+    let content_hash = sha256_prefixed(skill.content.as_bytes());
 
     let mut source_files: Vec<ManifestSourceFile> = Vec::new();
     let top_level = ManifestSourceFile {
@@ -272,7 +272,7 @@ pub fn verify_manifest(
             .ok_or_else(|| ManifestError::SkillMissing(entry.id.clone()))?;
         let (skill, _resolved_path) = resolved;
 
-        let actual_summary = sha256_hex(summary_bytes(&skill).as_bytes());
+        let actual_summary = sha256_prefixed(summary_bytes(&skill).as_bytes());
         if actual_summary != entry.summary_hash {
             return Err(ManifestError::SummaryHashMismatch {
                 skill: entry.id.clone(),
@@ -281,7 +281,7 @@ pub fn verify_manifest(
             });
         }
 
-        let actual_content = sha256_hex(skill.content.as_bytes());
+        let actual_content = sha256_prefixed(skill.content.as_bytes());
         if actual_content != entry.content_hash {
             return Err(ManifestError::ContentHashMismatch {
                 skill: entry.id.clone(),
@@ -489,6 +489,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn sha256_prefixed(bytes: &[u8]) -> String {
+    format!("sha256:{}", sha256_hex(bytes))
+}
+
 fn sha256_file(path: &Path) -> std::io::Result<String> {
     let bytes = fs::read(path)?;
     Ok(sha256_hex(&bytes))
@@ -573,7 +577,7 @@ mod tests {
             "name={}\ndescription={}\nrequired={}",
             skill.name, skill.description, skill.required
         ));
-        let expected = format!("{:x}", h1.finalize());
+        let expected = format!("sha256:{:x}", h1.finalize());
         assert_eq!(skill.summary_hash, expected);
 
         // Flipping `required` must change the summary hash.
@@ -615,7 +619,7 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         let mut h = Sha256::new();
         h.update(loaded[0].content.as_bytes());
-        let expected = format!("{:x}", h.finalize());
+        let expected = format!("sha256:{:x}", h.finalize());
         assert_eq!(skill.content_hash, expected);
     }
 
