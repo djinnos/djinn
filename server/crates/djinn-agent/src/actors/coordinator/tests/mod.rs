@@ -803,6 +803,111 @@ async fn restart_rehydrates_persisted_inflight_ledger_for_cap_overlay() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_mover_evidence_collects_dispatch_markers_pr_review_and_blockers() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _project_path) = create_simple_task(
+        &db,
+        &tx,
+        "task",
+        "live mover evidence dispatch and board facts",
+    )
+    .await;
+    let (blocking_task, _project_path) =
+        create_simple_task(&db, &tx, "task", "live mover blocker").await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    repo.add_blocker(&task.id, &blocking_task.id).await.unwrap();
+    let task = repo.set_status(&task.id, "pr_review").await.unwrap();
+    let task = repo
+        .set_pr_url(&task.id, "https://github.com/example/repo/pull/1")
+        .await
+        .unwrap();
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.last_dispatched.insert(
+        task.id.clone(),
+        DispatchMarker {
+            instant: StdInstant::now(),
+            role: "worker".to_owned(),
+        },
+    );
+    actor
+        .inflight_dispatches
+        .insert(task.id.clone(), (None, DEFAULT_MODEL_ID.to_owned()));
+
+    let evidence = actor.collect_live_mover_evidence(&task).await.unwrap();
+
+    assert!(!evidence.active_session);
+    assert!(evidence.dispatch_inflight);
+    assert!(evidence.recently_dispatched);
+    assert!(evidence.open_pr);
+    assert!(evidence.pr_poller_owned);
+    assert!(evidence.unresolved_blockers);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_mover_evidence_collects_active_session() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, project_path) =
+        create_simple_task(&db, &tx, "task", "live mover active session").await;
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.pool = SlotPoolHandle::spawn_with_factory(
+        test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
+        CancellationToken::new(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: DEFAULT_MODEL_ID.to_owned(),
+                max_slots: 1,
+                roles: ["worker", "reviewer"]
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+            let runner: crate::actors::slot::TestLifecycleRunner = Arc::new(
+                |_task_id, _project_path, _model_id, _app_state, _kill, _pause| {
+                    Box::pin(async { std::future::pending::<anyhow::Result<()>>().await })
+                },
+            );
+            SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+
+    actor
+        .pool
+        .dispatch(&task.id, &project_path, DEFAULT_MODEL_ID)
+        .await
+        .unwrap();
+
+    let evidence = actor.collect_live_mover_evidence(&task).await.unwrap();
+
+    assert!(evidence.active_session);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_mover_evidence_collects_no_evidence_for_closed_task() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _project_path) =
+        create_simple_task(&db, &tx, "task", "live mover no evidence").await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = repo.set_status(&task.id, "closed").await.unwrap();
+    let actor = coordinator_actor_for_tests(&db, &tx);
+
+    let evidence = actor.collect_live_mover_evidence(&task).await.unwrap();
+
+    assert_eq!(
+        evidence,
+        crate::supervisor_impl::disposition::LiveMoverEvidence::default()
+    );
+}
+
 async fn create_simple_task(
     db: &Database,
     tx: &broadcast::Sender<DjinnEventEnvelope>,
