@@ -1789,20 +1789,34 @@ mod inflight_ledger_tests {
             let mut running_sessions: HashMap<String, String> = HashMap::new();
             let mut active_tasks = Vec::new();
 
-            clear_dispatch_cap_observations();
-            actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-            assert_wnd1_observed_cap(cap, &mut observations, "initial cold-DB dispatch pass");
+            while actor.dispatched < u64::from(cap) {
+                let before = actor.dispatched;
+                clear_dispatch_cap_observations();
+                actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+                assert_wnd1_observed_cap(
+                    cap,
+                    &mut observations,
+                    "initial cold-DB dispatch passes before running rows materialize",
+                );
+                assert!(
+                    actor.dispatched > before,
+                    "cap {cap}: initial bounded fill pass made no progress before reaching cap"
+                );
+
+                for _ in before..actor.dispatched {
+                    let task_id = wnd1_recv_started(&mut started_rx).await;
+                    active_tasks.push(task_id.clone());
+                }
+            }
             assert_eq!(
                 actor.dispatched,
                 u64::from(cap),
-                "cap {cap}: initial pass must fill exactly the configured in-flight cap"
+                "cap {cap}: initial bounded passes must fill exactly the configured in-flight cap"
             );
 
-            for _ in 0..cap {
-                let task_id = wnd1_recv_started(&mut started_rx).await;
-                active_tasks.push(task_id.clone());
-                let session_id = materialize_wnd1_running_session(&db, &fixture, &task_id).await;
-                running_sessions.insert(task_id, session_id);
+            for task_id in &active_tasks {
+                let session_id = materialize_wnd1_running_session(&db, &fixture, task_id).await;
+                running_sessions.insert(task_id.clone(), session_id);
             }
 
             clear_dispatch_cap_observations();
