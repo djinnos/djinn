@@ -78,7 +78,7 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: PR merged → closing task"
                 );
-                self.apply_pr_transition(&task.id, TransitionAction::PrMerge, None)
+                self.apply_pr_merge(&task.id, pr.merge_commit_sha.as_deref())
                     .await;
                 self.pr_status_cache.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
@@ -610,13 +610,21 @@ impl CoordinatorActor {
                 .merge_pull_request(&owner, &repo, pull_number, MergeMethod::Squash, &pr.title)
                 .await
             {
-                Ok(_) => {
+                Ok(merge_response) => {
+                    // The PUT /merge response carries the landed squash-commit
+                    // SHA (`{"sha": ..., "merged": true}`); record it so the
+                    // task lands in the board's Merged column.
+                    let merge_commit_sha = merge_response
+                        .get("sha")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
                     tracing::info!(
                         task_id = %task.short_id,
                         pr = pull_number,
+                        sha = merge_commit_sha.as_deref().unwrap_or("<unknown>"),
                         "PR poller: squash merge succeeded → closing task"
                     );
-                    self.apply_pr_transition(&task.id, TransitionAction::PrMerge, None)
+                    self.apply_pr_merge(&task.id, merge_commit_sha.as_deref())
                         .await;
                     self.pr_status_cache.remove(&task.id);
                     self.merge_fail_count.remove(&task.id);

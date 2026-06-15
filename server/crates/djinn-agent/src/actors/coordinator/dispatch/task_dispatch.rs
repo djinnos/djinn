@@ -44,6 +44,87 @@ fn overlay_inflight_ledger(
         let entry = running_by_user_model.entry(key).or_insert(0);
         *entry = (*entry).max(lcount);
     }
+    #[cfg(test)]
+    observe_dispatch_cap_counts(
+        DispatchCapObservationStage::LedgerOverlay,
+        running_by_user_model,
+    );
+}
+
+/// Test-only cap-count instrumentation for wnd1 stress coverage.
+///
+/// Production dispatch behavior is unchanged: in non-test builds the observer
+/// types and recording calls are not compiled. Tests can clear the shared sink,
+/// drive a dispatch pass (or the ledger helper directly), then take the ordered
+/// observations to assert instantaneous per-user/per-model counts.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::actors::coordinator) struct DispatchCapObservation {
+    pub creator_user_id: String,
+    pub model: String,
+    pub effective_count: u32,
+    pub stage: DispatchCapObservationStage,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::actors::coordinator) enum DispatchCapObservationStage {
+    /// Count after DB-seeded running rows have been overlaid with the in-flight
+    /// ledger via `max(db_count, ledger_count)`.
+    LedgerOverlay,
+    /// Count consulted by the per-user cap gate for a candidate model.
+    CapConsidered,
+    /// Count immediately after a successful dispatch increments local state and
+    /// records an in-flight ledger entry, before any session row may exist.
+    InflightIncremented,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static DISPATCH_CAP_OBSERVATIONS: std::cell::RefCell<Vec<DispatchCapObservation>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(in crate::actors::coordinator) fn clear_dispatch_cap_observations() {
+    DISPATCH_CAP_OBSERVATIONS.with(|observations| observations.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(in crate::actors::coordinator) fn take_dispatch_cap_observations() -> Vec<DispatchCapObservation>
+{
+    DISPATCH_CAP_OBSERVATIONS.with(|observations| std::mem::take(&mut *observations.borrow_mut()))
+}
+
+#[cfg(test)]
+fn observe_dispatch_cap_count(
+    stage: DispatchCapObservationStage,
+    creator_user_id: &str,
+    model: &str,
+    effective_count: u32,
+) {
+    DISPATCH_CAP_OBSERVATIONS.with(|observations| {
+        observations.borrow_mut().push(DispatchCapObservation {
+            creator_user_id: creator_user_id.to_owned(),
+            model: model.to_owned(),
+            effective_count,
+            stage,
+        });
+    });
+}
+
+#[cfg(test)]
+fn observe_dispatch_cap_counts(
+    stage: DispatchCapObservationStage,
+    running_by_user_model: &HashMap<(String, String), u32>,
+) {
+    let mut counts: Vec<_> = running_by_user_model.iter().collect();
+    counts.sort_by(|((creator_a, model_a), _), ((creator_b, model_b), _)| {
+        creator_a.cmp(creator_b).then_with(|| model_a.cmp(model_b))
+    });
+    for ((creator, model), count) in counts {
+        observe_dispatch_cap_count(stage, creator, model, *count);
+    }
 }
 
 #[derive(Default)]
@@ -1019,6 +1100,13 @@ impl CoordinatorActor {
                         .get(&(c.to_string(), m.clone()))
                         .copied()
                         .unwrap_or(0);
+                    #[cfg(test)]
+                    observe_dispatch_cap_count(
+                        DispatchCapObservationStage::CapConsidered,
+                        c,
+                        m,
+                        used,
+                    );
                     used < caps.get(m).copied().unwrap_or(1)
                 });
                 if model_ids.is_empty() {
@@ -1134,6 +1222,16 @@ impl CoordinatorActor {
                         *running_by_user_model
                             .entry((c.to_string(), used.clone()))
                             .or_insert(0) += 1;
+                        #[cfg(test)]
+                        observe_dispatch_cap_count(
+                            DispatchCapObservationStage::InflightIncremented,
+                            c,
+                            used,
+                            running_by_user_model
+                                .get(&(c.to_string(), used.clone()))
+                                .copied()
+                                .unwrap_or(0),
+                        );
                         // Record in the in-flight ledger so the NEXT pass counts
                         // this dispatch against the cap immediately — before its
                         // `running` session row lands (pod boot lags 20-60s).
@@ -1325,6 +1423,7 @@ mod inflight_ledger_tests {
     /// defers instead of dispatching four more.
     #[test]
     fn ledger_overlay_counts_inflight_dispatches_when_db_seed_is_cold() {
+        clear_dispatch_cap_observations();
         let mut running: HashMap<(String, String), u32> = HashMap::new(); // cold DB seed
         let mut inflight: HashMap<String, (Option<String>, String)> = HashMap::new();
         for i in 0..4 {
@@ -1341,6 +1440,16 @@ mod inflight_ledger_tests {
             Some(4),
             "four in-flight dispatches must count against the cap even with a cold DB seed"
         );
+        assert_eq!(
+            take_dispatch_cap_observations(),
+            vec![DispatchCapObservation {
+                creator_user_id: "user-a".to_owned(),
+                model: "openai/gpt-5.5".to_owned(),
+                effective_count: 4,
+                stage: DispatchCapObservationStage::LedgerOverlay,
+            }],
+            "observer must see the cold-DB in-flight count used by dispatch"
+        );
     }
 
     /// `max`, not sum: a task counted in BOTH the running rows and the ledger
@@ -1348,6 +1457,7 @@ mod inflight_ledger_tests {
     /// yet) must count once. Also: a larger DB count wins over a smaller ledger.
     #[test]
     fn ledger_overlay_takes_max_never_double_counts() {
+        clear_dispatch_cap_observations();
         let mut running: HashMap<(String, String), u32> = HashMap::new();
         running.insert(key("user-a", "m"), 3); // 3 already running in DB
         running.insert(key("user-b", "m"), 5); // 5 running, ledger will be lower
@@ -1365,16 +1475,59 @@ mod inflight_ledger_tests {
 
         assert_eq!(running.get(&key("user-a", "m")).copied(), Some(3));
         assert_eq!(running.get(&key("user-b", "m")).copied(), Some(5));
+        assert_eq!(
+            take_dispatch_cap_observations(),
+            vec![
+                DispatchCapObservation {
+                    creator_user_id: "user-a".to_owned(),
+                    model: "m".to_owned(),
+                    effective_count: 3,
+                    stage: DispatchCapObservationStage::LedgerOverlay,
+                },
+                DispatchCapObservation {
+                    creator_user_id: "user-b".to_owned(),
+                    model: "m".to_owned(),
+                    effective_count: 5,
+                    stage: DispatchCapObservationStage::LedgerOverlay,
+                },
+            ],
+            "observer must see max(db, ledger), never db + ledger"
+        );
+    }
+
+    #[test]
+    fn dispatch_cap_observer_records_new_inflight_increments() {
+        clear_dispatch_cap_observations();
+
+        observe_dispatch_cap_count(
+            DispatchCapObservationStage::InflightIncremented,
+            "user-a",
+            "m",
+            2,
+        );
+
+        assert_eq!(
+            take_dispatch_cap_observations(),
+            vec![DispatchCapObservation {
+                creator_user_id: "user-a".to_owned(),
+                model: "m".to_owned(),
+                effective_count: 2,
+                stage: DispatchCapObservationStage::InflightIncremented,
+            }],
+            "observer must capture the count after dispatch increments local in-flight state"
+        );
     }
 
     /// Creator-less (legacy system) dispatches are ungated by the per-user cap,
     /// so they must not contribute to any count.
     #[test]
     fn ledger_overlay_ignores_creatorless_entries() {
+        clear_dispatch_cap_observations();
         let mut running: HashMap<(String, String), u32> = HashMap::new();
         let mut inflight: HashMap<String, (Option<String>, String)> = HashMap::new();
         inflight.insert("sys".into(), (None, "m".into()));
         overlay_inflight_ledger(&mut running, &inflight);
         assert!(running.is_empty());
+        assert!(take_dispatch_cap_observations().is_empty());
     }
 }
