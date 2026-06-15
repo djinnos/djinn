@@ -33,6 +33,8 @@ use crate::actors::slot::helpers::default_target_branch;
 use crate::github_error_render::render_github_write_error;
 use crate::task_merge::build_app_push_url;
 
+use super::disposition::LiveMoverEvidence;
+
 /// Open (or adopt) a GitHub PR for the completed task-run.
 ///
 /// Returns:
@@ -677,6 +679,68 @@ async fn handle_noop_disposition(
     close_noop(task, task_repo).await
 }
 
+/// Predicate-driven orphan/no-mover entry point for already-settled runs that
+/// never reached the PR-open zero-commit fork.
+///
+/// The existing PR-open `Ok(0)` guard remains the canonical branch-aware path.
+/// This helper is for coordinator recovery paths that have already established
+/// the task is otherwise settled (no live verifier/session/dispatch/PR mover)
+/// and would previously park or release the task without consulting the D3b/D3c
+/// no-op disposition ladder.  It deliberately delegates to
+/// [`handle_noop_disposition`] so nudges, `continuation_count`, release actions,
+/// and terminal no-op close semantics stay shared with the original fork.
+pub(crate) async fn handle_settled_noop_without_live_mover(
+    task: &djinn_core::models::Task,
+    callbacks: &SupervisorCallbackContext,
+    evidence: &LiveMoverEvidence,
+) -> Option<TaskRunOutcome> {
+    if !should_route_settled_noop_without_live_mover(task, evidence) {
+        tracing::debug!(
+            task_id = %task.id,
+            evidence = ?evidence,
+            "supervisor no-mover disposition: live mover present; leaving task on existing path"
+        );
+        return None;
+    }
+
+    let app_state = &callbacks.agent_context;
+    let merge_target = default_target_branch(&task.project_id, app_state).await;
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+
+    tracing::info!(
+        task_id = %task.id,
+        status = %task.status,
+        "supervisor no-mover disposition: settled task has no live mover; routing through no-op disposition"
+    );
+    Some(handle_noop_disposition(task, &task_repo, &merge_target).await)
+}
+
+fn should_route_settled_noop_without_live_mover(
+    task: &djinn_core::models::Task,
+    evidence: &LiveMoverEvidence,
+) -> bool {
+    use super::disposition::has_live_mover;
+
+    if has_live_mover(evidence) {
+        return false;
+    }
+
+    // If a PR already exists, the PR poller owns forward progress.  The
+    // live-mover evidence should normally carry this as `open_pr` /
+    // `pr_poller_owned`; keep this direct guard as a non-semantic safety belt so
+    // a stale or incomplete evidence collector cannot close a PR-backed task.
+    if task
+        .pr_url
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|url| !url.is_empty())
+    {
+        return false;
+    }
+
+    true
+}
+
 /// The historical no-commits terminal close: transition the task to closed
 /// (completed) and report the run as `Closed`. Factored out so both the
 /// budget-exhausted and the nudge-fallback paths share one definition, and so
@@ -851,13 +915,55 @@ mod tests {
     use super::{
         PR_ALREADY_EXISTS_HINT, TASK_OUTCOME_BODY_EXCERPT_BYTES, is_concurrent_push_race,
         pr_open_failure_outcome, pr_open_untyped_failure_outcome,
+        should_route_settled_noop_without_live_mover,
     };
     use crate::github_error_render::render_github_write_error;
+    use crate::supervisor_impl::disposition::{
+        LiveMoverEvidence, NUDGE_CAP, RunDisposition, decide_run_disposition,
+    };
+    use djinn_core::models::Task;
+    use djinn_core::run_progress::{RunProgressSignals, classify_run_progress};
     use djinn_core::tool_error::ErrorClass;
     use djinn_git::GitError;
     use djinn_provider::github_api::GitHubApiError;
     use djinn_runtime::spec::TaskRunOutcome;
     use reqwest::StatusCode;
+
+    fn settled_noop_task() -> Task {
+        Task {
+            id: "task-uuid".into(),
+            project_id: "project-uuid".into(),
+            short_id: "noop1".into(),
+            epic_id: None,
+            title: "No-op fixture".into(),
+            description: "Do the requested work".into(),
+            design: String::new(),
+            issue_type: "task".into(),
+            status: "verifying".into(),
+            priority: 1,
+            owner: String::new(),
+            labels: "[]".into(),
+            acceptance_criteria: "[]".into(),
+            reopen_count: 0,
+            continuation_count: 0,
+            verification_failure_count: 0,
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".into(),
+            agent_type: None,
+            created_by_user_id: None,
+            unresolved_blocker_count: 0,
+        }
+    }
 
     #[test]
     fn detects_real_github_lock_rejection() {
@@ -880,6 +986,84 @@ mod tests {
         // "reference already exists" qualifier is a different problem.
         let err = GitError::Other(anyhow::anyhow!("cannot lock ref 'foo': corrupted"));
         assert!(!is_concurrent_push_race(&err));
+    }
+
+    #[test]
+    fn no_mover_settled_noop_predicate_enters_same_disposition_ladder_as_pr_open_fork() {
+        let task = settled_noop_task();
+        let evidence = LiveMoverEvidence::default();
+
+        assert!(should_route_settled_noop_without_live_mover(
+            &task, &evidence
+        ));
+
+        let signals = RunProgressSignals {
+            commits_ahead: 0,
+            files_changed: 0,
+            ac_newly_satisfied: 0,
+        };
+        let progress = classify_run_progress(&signals);
+        assert_eq!(
+            decide_run_disposition(progress, task.continuation_count, NUDGE_CAP),
+            RunDisposition::Nudge
+        );
+    }
+
+    #[test]
+    fn no_mover_settled_noop_predicate_defers_when_any_live_mover_exists() {
+        let task = settled_noop_task();
+        let live_mover_cases = [
+            LiveMoverEvidence {
+                active_session: true,
+                ..Default::default()
+            },
+            LiveMoverEvidence {
+                queued_dispatch: true,
+                ..Default::default()
+            },
+            LiveMoverEvidence {
+                dispatch_inflight: true,
+                ..Default::default()
+            },
+            LiveMoverEvidence {
+                recently_dispatched: true,
+                ..Default::default()
+            },
+            LiveMoverEvidence {
+                open_pr: true,
+                ..Default::default()
+            },
+            LiveMoverEvidence {
+                pr_poller_owned: true,
+                ..Default::default()
+            },
+            LiveMoverEvidence {
+                review_pending_with_reviewer: true,
+                ..Default::default()
+            },
+            LiveMoverEvidence {
+                unresolved_blockers: true,
+                ..Default::default()
+            },
+        ];
+
+        for evidence in live_mover_cases {
+            assert!(
+                !should_route_settled_noop_without_live_mover(&task, &evidence),
+                "live mover evidence must keep task on existing path: {evidence:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_mover_settled_noop_predicate_preserves_existing_pr_path() {
+        let mut task = settled_noop_task();
+        task.pr_url = Some("https://github.example/pr/1".into());
+
+        assert!(!should_route_settled_noop_without_live_mover(
+            &task,
+            &LiveMoverEvidence::default()
+        ));
     }
 
     #[test]

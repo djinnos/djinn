@@ -644,7 +644,7 @@ impl CoordinatorActor {
         });
     }
 
-    fn maintenance_context(&self) -> crate::context::AgentContext {
+    pub(super) fn maintenance_context(&self) -> crate::context::AgentContext {
         crate::context::AgentContext {
             db: self.db.clone(),
             event_bus: crate::events::event_bus_for(&self.events_tx),

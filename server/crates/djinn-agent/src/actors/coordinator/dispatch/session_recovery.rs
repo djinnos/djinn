@@ -1,6 +1,8 @@
 use super::super::*;
 use djinn_core::models::{TaskStatus, TransitionAction};
 
+use crate::supervisor_impl::disposition::LiveMoverEvidence;
+
 impl CoordinatorActor {
     async fn teardown_zombie_taskrun_job(
         &self,
@@ -566,6 +568,21 @@ impl CoordinatorActor {
             }
         };
 
+        let active_verifying_task_ids: std::collections::HashSet<String> =
+            match djinn_db::SessionRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            )
+            .list_active()
+            .await
+            {
+                Ok(sessions) => sessions.into_iter().filter_map(|s| s.task_id).collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "CoordinatorActor: failed to load active sessions for no-mover disposition guard; assuming none");
+                    std::collections::HashSet::new()
+                }
+            };
+
         for task in verifying {
             if let Some(project_id) = project_filter
                 && task.project_id != project_id
@@ -604,6 +621,44 @@ impl CoordinatorActor {
             if let Ok(cutoff_iso) = cutoff.format(&format)
                 && task.updated_at.as_str() > cutoff_iso.as_str()
             {
+                continue;
+            }
+
+            let evidence = LiveMoverEvidence {
+                active_session: active_verifying_task_ids.contains(&task.id),
+                queued_dispatch: false,
+                dispatch_inflight: self.inflight_dispatches.contains_key(&task.id),
+                recently_dispatched: self.last_dispatched.contains_key(&task.id),
+                open_pr: task
+                    .pr_url
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|url| !url.is_empty()),
+                pr_poller_owned: task
+                    .pr_url
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|url| !url.is_empty()),
+                review_pending_with_reviewer: false,
+                unresolved_blockers: task.unresolved_blocker_count > 0,
+            };
+            let callbacks = crate::supervisor_impl::SupervisorCallbackContext {
+                agent_context: self.maintenance_context(),
+                cancel: tokio_util::sync::CancellationToken::new(),
+                provider_override: None,
+            };
+            if let Some(outcome) =
+                crate::supervisor_impl::pr::handle_settled_noop_without_live_mover(
+                    &task, &callbacks, &evidence,
+                )
+                .await
+            {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    outcome = ?outcome,
+                    "CoordinatorActor: orphaned verifying task routed through no-mover no-op disposition"
+                );
+                affected += 1;
                 continue;
             }
 
