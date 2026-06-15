@@ -407,6 +407,8 @@ impl CoordinatorActor {
                         self.conversations_resolved.remove(&task.id);
                     }
                     Err(e) => {
+                        let github_error =
+                            render_github_write_error("GitHub update-branch failed", &e);
                         // The GitHub API refused (race on expected head SHA,
                         // permissions, transient). Don't just warn-and-spin —
                         // fall back to the same mechanical merge the conflict
@@ -421,7 +423,7 @@ impl CoordinatorActor {
                         tracing::warn!(
                             task_id = %task.short_id,
                             pr = pull_number,
-                            error = %e,
+                            error = %github_error,
                             "PR poller: update-branch failed — falling back to local mechanical merge (background)"
                         );
                         // Offloaded fallback: a clean background merge bumps the
@@ -664,6 +666,10 @@ impl CoordinatorActor {
                                 self.merge_fail_count.remove(&task.id);
                             }
                             Err(enqueue_err) => {
+                                let github_error = render_github_write_error(
+                                    "GitHub enqueue PR failed",
+                                    &enqueue_err,
+                                );
                                 // Enqueue failed (PR not ready: missing
                                 // approval, failing checks, etc.). Don't
                                 // mark delegated — next tick re-checks
@@ -720,7 +726,7 @@ impl CoordinatorActor {
                                     task_id = %task.short_id,
                                     pr = pull_number,
                                     attempt = *count,
-                                    error = %enqueue_err,
+                                    error = %github_error,
                                     "PR poller: enqueue_pull_request failed (will retry next tick)"
                                 );
                                 if *count >= MERGE_RETRY_RECHECK_THRESHOLD {
@@ -779,13 +785,14 @@ impl CoordinatorActor {
                         }
                     }
 
+                    let github_error = render_github_write_error("GitHub PR merge failed", &e);
                     let count = self.merge_fail_count.entry(task.id.clone()).or_insert(0);
                     *count += 1;
                     tracing::warn!(
                         task_id = %task.short_id,
                         pr = pull_number,
                         attempt = *count,
-                        error = %e,
+                        error = %github_error,
                         "PR poller: merge failed (will retry next tick)"
                     );
                     // After repeated failures, invalidate the CI cache so the
