@@ -1311,9 +1311,14 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
 
 #[tokio::test]
 async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
+    let _env_guard = SESSION_BUDGET_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    install_session_budget_env_with_hard(1_000, 0.5, 0.92);
+
     let tools = vec![dummy_tool_schema("missing_tool")];
     let mut responses = Vec::new();
-    for step in 1..=5 {
+    for step in 1..=2 {
         responses.push(MockResponse::tool_call_with_input(
             &format!("t{step}"),
             "missing_tool",
@@ -1345,7 +1350,7 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
             worktree_path: &worktree_path,
             role_name: "worker",
             finalize_tool_names: &["submit_work", "request_lead"],
-            context_window: 100,
+            context_window: 10_000,
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
@@ -1360,6 +1365,9 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
         false,
     )
     .await;
+
+    clear_session_budget_env();
+    let _ = &_env_guard;
 
     assert!(
         result.is_ok(),
@@ -1386,9 +1394,14 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
 
 #[tokio::test]
 async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
+    let _env_guard = SESSION_BUDGET_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    install_session_budget_env_with_hard(1_000, 0.5, 0.92);
+
     let tools = vec![dummy_tool_schema("missing_tool")];
     let mut responses = Vec::new();
-    for step in 1..=6 {
+    for step in 1..=3 {
         responses.push(MockResponse::tool_call_with_input(
             &format!("t{step}"),
             "missing_tool",
@@ -1416,7 +1429,7 @@ async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
             worktree_path: &worktree_path,
             role_name: "worker",
             finalize_tool_names: &["submit_work", "request_lead"],
-            context_window: 100,
+            context_window: 10_000,
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
@@ -1431,6 +1444,9 @@ async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
         false,
     )
     .await;
+
+    clear_session_budget_env();
+    let _ = &_env_guard;
 
     assert!(
         result.is_err(),
@@ -1821,6 +1837,21 @@ fn install_session_budget_env(max_cumulative_tokens: u64, soft_ratio: f64) {
         std::env::set_var(
             "DJINN_SESSION_BUDGET_WORKER_SOFT_THRESHOLD_RATIO",
             soft_ratio.to_string(),
+        );
+    }
+}
+
+fn install_session_budget_env_with_hard(
+    max_cumulative_tokens: u64,
+    soft_ratio: f64,
+    hard_ratio: f64,
+) {
+    install_session_budget_env(max_cumulative_tokens, soft_ratio);
+    // SAFETY: always called under SESSION_BUDGET_ENV_LOCK.
+    unsafe {
+        std::env::set_var(
+            "DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO",
+            hard_ratio.to_string(),
         );
     }
 }
