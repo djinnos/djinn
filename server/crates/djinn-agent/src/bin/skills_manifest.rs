@@ -1,32 +1,45 @@
-//! `djinn-skills-manifest` — generate the project's `skills.json` manifest.
+//! `djinn-skills-manifest` — generate/check the project's `skills.json` manifest.
 //!
 //! Usage:
 //!
 //! ```text
-//! djinn-skills-manifest [--out <path>] [--root <project-root>]
+//! djinn-skills-manifest [generate|check] [--out <path>] [--root <project-root>]
 //! ```
 //!
 //! Defaults match the ihl1-roadmap design: `--root .`, `--out
-//! .djinn/skills.json`. The binary is intentionally tiny — it is the
-//! canonical entry point for both the local developer flow (`cargo run -p
-//! djinn-agent --bin djinn-skills-manifest`) and the T2 CI drift check
-//! (`verify` subcommand in a follow-up).
+//! .djinn/skills.json`. `generate` (the default) rewrites the checked artifact;
+//! `check` regenerates in memory and exits non-zero if the bytes differ.
 //!
-//! The binary prints the generated path to stderr and exits non-zero on
-//! failure. Stdout is reserved for future piped use (e.g. `--check`).
+//! The binary prints status to stderr and exits non-zero on failure. In check
+//! mode, the drift error points contributors to `make skills-manifest-generate`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use djinn_agent::skills_manifest::{DEFAULT_MANIFEST_PATH, generate_manifest, to_pretty_json};
+use djinn_agent::skills_manifest::{
+    DEFAULT_MANIFEST_PATH, check_manifest_drift, generate_manifest, to_pretty_json,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Command {
+    Generate,
+    Check,
+}
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let mut out: Option<PathBuf> = None;
     let mut root: Option<PathBuf> = None;
+    let mut command = Command::Generate;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "generate" => {
+                command = Command::Generate;
+            }
+            "check" => {
+                command = Command::Check;
+            }
             "--out" => {
                 out = args.next().map(PathBuf::from);
             }
@@ -35,9 +48,12 @@ fn main() -> ExitCode {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "djinn-skills-manifest — generate .djinn/skills.json\n\n\
+                    "djinn-skills-manifest — generate/check .djinn/skills.json\n\n\
                      USAGE:\n    \
-                     djinn-skills-manifest [--root <project-root>] [--out <path>]\n\n\
+                     djinn-skills-manifest [generate|check] [--root <project-root>] [--out <path>]\n\n\
+                     LOCAL COMMANDS:\n    \
+                     make skills-manifest-check      # fail if checked manifest is stale\n    \
+                     make skills-manifest-generate   # update checked manifest\n\n\
                      Defaults: --root .  --out {DEFAULT_MANIFEST_PATH}\n"
                 );
                 return ExitCode::SUCCESS;
@@ -51,6 +67,24 @@ fn main() -> ExitCode {
 
     let root = root.unwrap_or_else(|| PathBuf::from("."));
     let out = out.unwrap_or_else(|| PathBuf::from(DEFAULT_MANIFEST_PATH));
+    let manifest_path = if out.is_absolute() {
+        out.clone()
+    } else {
+        root.join(&out)
+    };
+
+    if command == Command::Check {
+        match check_manifest_drift(&root, &manifest_path) {
+            Ok(()) => {
+                eprintln!("skills manifest is up to date: {}", manifest_path.display());
+                return ExitCode::SUCCESS;
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
 
     let manifest = match generate_manifest(&root, None) {
         Ok(m) => m,
@@ -71,7 +105,7 @@ fn main() -> ExitCode {
         }
     };
 
-    if let Some(parent) = out.parent()
+    if let Some(parent) = manifest_path.parent()
         && !parent.as_os_str().is_empty()
     {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -80,15 +114,18 @@ fn main() -> ExitCode {
         }
     }
 
-    if let Err(e) = std::fs::write(&out, &json) {
-        eprintln!("failed to write manifest to `{}`: {e}", out.display());
+    if let Err(e) = std::fs::write(&manifest_path, &json) {
+        eprintln!(
+            "failed to write manifest to `{}`: {e}",
+            manifest_path.display()
+        );
         return ExitCode::FAILURE;
     }
 
     eprintln!(
         "wrote {} skill(s) to {}",
         manifest.skills.len(),
-        out.display()
+        manifest_path.display()
     );
     ExitCode::SUCCESS
 }

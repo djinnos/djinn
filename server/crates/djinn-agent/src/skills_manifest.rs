@@ -27,12 +27,18 @@
 //! preserved in declaration order. Re-running the generator on an unchanged
 //! tree produces identical bytes, which is what the CI drift check relies on.
 //!
-//! ## Verification
+//! ## Drift checking
+//!
+//! [`check_manifest_drift`] regenerates the complete manifest JSON and compares
+//! those bytes against the checked artifact. This is the local/CI guard for
+//! stale manifests: run `make skills-manifest-check` to verify, or
+//! `make skills-manifest-generate` to update `.djinn/skills.json` after editing
+//! a skill or reference file.
 //!
 //! [`verify_manifest`] re-loads skills and recomputes hashes from disk, then
-//! compares them against the manifest. It returns the first mismatch it
-//! finds (or `Ok(())` if everything matches). The runtime worker task
-//! (T3 in the ihl1 wave) wraps this to fail closed on tamper/drift.
+//! compares them against the manifest. It returns the first mismatch it finds
+//! (or `Ok(())` if everything matches). The runtime worker task (T3 in the ihl1
+//! wave) wraps this to fail closed on tamper/drift.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -65,6 +71,65 @@ pub struct SkillsManifest {
     pub generated_by: String,
     /// All skills discovered under the canonical directories, sorted by `id`.
     pub skills: Vec<ManifestSkill>,
+}
+
+/// Regenerate the manifest and compare it byte-for-byte with the checked file.
+///
+/// This catches every drift class the manifest covers, including added or
+/// removed skills that a per-entry verifier cannot see. The returned error is
+/// intentionally actionable for contributors and CI logs: it points at the
+/// exact generation command instead of only exposing a raw diff.
+pub fn check_manifest_drift(
+    project_root: &Path,
+    manifest_path: &Path,
+) -> Result<(), ManifestDriftError> {
+    let generated =
+        generate_manifest(project_root, None).map_err(|source| ManifestDriftError::Io {
+            path: manifest_path.display().to_string(),
+            source,
+        })?;
+    let generated_json = to_pretty_json(&generated)?;
+    let checked_json =
+        fs::read_to_string(manifest_path).map_err(|source| ManifestDriftError::Io {
+            path: manifest_path.display().to_string(),
+            source,
+        })?;
+
+    if checked_json == generated_json {
+        return Ok(());
+    }
+
+    Err(ManifestDriftError::Drift {
+        manifest_path: manifest_path.display().to_string(),
+        update_command: "make skills-manifest-generate".to_string(),
+        checked_len: checked_json.len(),
+        generated_len: generated_json.len(),
+    })
+}
+
+/// Errors from the CI/local byte-for-byte drift check.
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestDriftError {
+    /// Could not regenerate or read the checked manifest artifact.
+    #[error("failed to read or generate skills manifest `{path}`: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Generated manifest serialization failed.
+    #[error("failed to serialize regenerated skills manifest: {0}")]
+    Serialize(#[from] serde_json::Error),
+    /// The checked artifact does not match freshly generated output.
+    #[error(
+        "skills manifest drift detected at `{manifest_path}`. Run `{update_command}` from the repository root and commit the updated manifest."
+    )]
+    Drift {
+        manifest_path: String,
+        update_command: String,
+        checked_len: usize,
+        generated_len: usize,
+    },
 }
 
 /// Per-skill manifest entry. Fields mirror the ihl1-roadmap schema sketch.
@@ -823,6 +888,63 @@ mod tests {
             matches!(err, ManifestError::SummaryHashMismatch { .. }),
             "expected SummaryHashMismatch, got {err:?}"
         );
+    }
+
+    #[test]
+    fn check_manifest_drift_detects_skill_file_changed_without_regeneration() {
+        let tmp = test_tempdir("djinn-skills-drift-skill-");
+        let skills_dir = djinn_skills_dir(tmp.path());
+        write_flat_skill(
+            &skills_dir,
+            "drifty",
+            "---\ndescription: Drift check\n---\n\nOriginal body.\n",
+        );
+        let manifest_path = tmp.path().join(DEFAULT_MANIFEST_PATH);
+        fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        let manifest = generate_manifest(tmp.path(), None).unwrap();
+        fs::write(&manifest_path, to_pretty_json(&manifest).unwrap()).unwrap();
+
+        check_manifest_drift(tmp.path(), &manifest_path).expect("fresh manifest should pass");
+
+        write_flat_skill(
+            &skills_dir,
+            "drifty",
+            "---\ndescription: Drift check\n---\n\nModified body.\n",
+        );
+        let err = check_manifest_drift(tmp.path(), &manifest_path)
+            .expect_err("changed skill without regenerate must fail");
+        let message = err.to_string();
+        assert!(message.contains("skills manifest drift detected"));
+        assert!(message.contains("make skills-manifest-generate"));
+    }
+
+    #[test]
+    fn check_manifest_drift_detects_reference_file_changed_without_regeneration() {
+        let tmp = test_tempdir("djinn-skills-drift-reference-");
+        let skills_dir = djinn_skills_dir(tmp.path());
+        write_with_references(
+            &skills_dir,
+            "ref-drifty",
+            "---\ndescription: Reference drift check\n---\n\nPrimary.\n",
+            &[("a.md", "Original reference\n")],
+        );
+        let manifest_path = tmp.path().join(DEFAULT_MANIFEST_PATH);
+        fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        let manifest = generate_manifest(tmp.path(), None).unwrap();
+        fs::write(&manifest_path, to_pretty_json(&manifest).unwrap()).unwrap();
+
+        fs::write(
+            skills_dir
+                .join("ref-drifty")
+                .join("references")
+                .join("a.md"),
+            "Modified reference\n",
+        )
+        .unwrap();
+
+        let err = check_manifest_drift(tmp.path(), &manifest_path)
+            .expect_err("changed reference without regenerate must fail");
+        assert!(err.to_string().contains("make skills-manifest-generate"));
     }
 
     #[test]
