@@ -186,6 +186,11 @@ impl CoordinatorActor {
         task_id: &str,
         reason: &str,
     ) {
+        // Planned lifecycle completions (including budget parks and ignored
+        // wind-down parks) are successful settlements, not same-role dispatch
+        // failures. Drop any stale recovery/backoff attribution before the next
+        // continuation dispatch so they cannot advance Trigger-B or terminal
+        // close accounting during recovery/refactor paths.
         self.dispatch_failure_streak.remove(task_id);
         self.dispatch_cooldowns.remove(task_id);
         self.last_dispatched.remove(task_id);
