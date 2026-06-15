@@ -140,17 +140,33 @@ pub(crate) async fn resolve_mcp_and_skills(
 
     // ── Load and resolve skills from worktree .djinn/skills/ ─────────────────
     // Skills are markdown files with YAML frontmatter. Missing skills are logged
-    // as warnings and skipped — they never block the session from starting.
+    // as warnings and skipped when no checked manifest exists. If
+    // `.djinn/skills.json` exists, stale/tampered materialized skills fail
+    // closed so prompt summaries and inlined bodies cannot drift from the
+    // generated hashes.
     let resolved_skills = if !effective_skills.is_empty() {
-        let loaded = crate::skills::load_skills(worktree_path, &effective_skills);
-        tracing::info!(
-            task_id = %task_short_id,
-            role = %runtime_role.config().name,
-            requested_count = effective_skills.len(),
-            resolved_count = loaded.len(),
-            "Lifecycle: resolved role skills"
-        );
-        loaded
+        match crate::skills_manifest::load_verified_skills(worktree_path, &effective_skills) {
+            Ok(loaded) => {
+                tracing::info!(
+                    task_id = %task_short_id,
+                    role = %runtime_role.config().name,
+                    requested_count = effective_skills.len(),
+                    resolved_count = loaded.len(),
+                    "Lifecycle: resolved role skills"
+                );
+                loaded
+            }
+            Err(error) => {
+                tracing::error!(
+                    task_id = %task_short_id,
+                    role = %runtime_role.config().name,
+                    requested_count = effective_skills.len(),
+                    error = %error,
+                    "Lifecycle: skills manifest verification failed"
+                );
+                Vec::new()
+            }
+        }
     } else {
         Vec::new()
     };
