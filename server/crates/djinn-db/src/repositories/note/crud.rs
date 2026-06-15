@@ -42,7 +42,7 @@ impl NoteRepository {
         tags: &str,
     ) -> Result<Note> {
         self.create_internal(
-            project_id, None, title, content, note_type, None, tags, "[]",
+            project_id, None, title, content, note_type, None, tags, "[]", None,
         )
         .await
     }
@@ -65,6 +65,7 @@ impl NoteRepository {
             None,
             tags,
             scope_paths,
+            None,
         )
         .await
     }
@@ -76,21 +77,44 @@ impl NoteRepository {
         let scope_paths: serde_json::Value = serde_json::from_str(scope_paths)
             .map_err(|e| Error::InvalidData(format!("invalid json for notes.scope_paths: {e}")))?;
 
-        sqlx::query!(
+        sqlx::query(
             r#"UPDATE notes SET
                 scope_paths = $1,
                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $2"#,
-            scope_paths,
-            id
         )
+        .bind(scope_paths)
+        .bind(&id)
         .execute(self.db.pool())
         .await?;
 
-        let note = note_select_where_id!(id).fetch_one(self.db.pool()).await?;
+        let note = note_select_where_id!(&id).fetch_one(self.db.pool()).await?;
 
         self.events.send(djinn_memory::events::note_updated(&note));
         Ok(note)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_db_note_with_permalink_and_retrieval_anchor(
+        &self,
+        project_id: &str,
+        permalink: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        tags: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> Result<Note> {
+        self.create_db_note_with_permalink_internal(
+            project_id,
+            permalink,
+            title,
+            content,
+            note_type,
+            tags,
+            retrieval_anchor,
+        )
+        .await
     }
 
     pub async fn update_tags(&self, id: &str, tags: &str) -> Result<Note> {
@@ -100,18 +124,18 @@ impl NoteRepository {
         let tags: serde_json::Value = serde_json::from_str(tags)
             .map_err(|e| Error::InvalidData(format!("invalid json for notes.tags: {e}")))?;
 
-        sqlx::query!(
+        sqlx::query(
             r#"UPDATE notes SET
                 tags = $1,
                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $2"#,
-            tags,
-            id
         )
+        .bind(&tags)
+        .bind(&id)
         .execute(self.db.pool())
         .await?;
 
-        let note = note_select_where_id!(id).fetch_one(self.db.pool()).await?;
+        let note = note_select_where_id!(&id).fetch_one(self.db.pool()).await?;
 
         self.events.send(djinn_memory::events::note_updated(&note));
         Ok(note)
@@ -126,6 +150,23 @@ impl NoteRepository {
         note_type: &str,
         tags: &str,
     ) -> Result<Note> {
+        self.create_db_note_with_permalink_internal(
+            project_id, permalink, title, content, note_type, tags, None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_db_note_with_permalink_internal(
+        &self,
+        project_id: &str,
+        permalink: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        tags: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> Result<Note> {
         self.db.ensure_initialized().await?;
 
         let id = uuid::Uuid::now_v7().to_string();
@@ -133,6 +174,7 @@ impl NoteRepository {
         let permalink = permalink.to_owned();
         let title = title.to_owned();
         let content = content.to_owned();
+        let retrieval_anchor = retrieval_anchor.map(str::to_owned);
         let note_type = note_type.to_owned();
         let folder = folder_for_type(&note_type).to_owned();
         let tags = tags.to_owned();
@@ -151,29 +193,30 @@ impl NoteRepository {
                 // `storage` and `file_path` are vestigial columns from the
                 // file-on-disk era; we still write them for back-compat with
                 // pre-cut-over rows but they are no longer read by new code.
-                sqlx::query!(
+                sqlx::query(
                     "INSERT INTO notes
                         (id, project_id, permalink, title, file_path,
-                         storage, note_type, folder, tags, content, content_hash, scope_paths)
-                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, $7, $8, $9, $10)",
-                    id,
-                    project_id,
-                    permalink,
-                    title,
-                    note_type,
-                    folder,
-                    tags_json,
-                    content,
-                    content_hash,
-                    empty_scope
+                         storage, note_type, folder, tags, content, retrieval_anchor, content_hash, scope_paths)
+                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, $7, $8, $9, $10, $11)"
                 )
+                .bind(&id)
+                .bind(&project_id)
+                .bind(&permalink)
+                .bind(&title)
+                .bind(&note_type)
+                .bind(&folder)
+                .bind(&tags_json)
+                .bind(&content)
+                .bind(&retrieval_anchor)
+                .bind(&content_hash)
+                .bind(&empty_scope)
                 .execute(&mut *tx)
                 .await?;
 
                 index_links_for_note(&mut tx, &id, &project_id, &content).await?;
                 resolve_links_for_note(&mut tx, &id, &title, &permalink, &project_id).await?;
 
-                let note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
+                let note = note_select_where_id!(&id).fetch_one(&mut *tx).await?;
 
                 tx.commit().await?;
                 Ok::<_, crate::Error>(note)
@@ -199,7 +242,7 @@ impl NoteRepository {
         tags: &str,
     ) -> Result<Note> {
         self.create_internal(
-            project_id, None, title, content, note_type, None, tags, "[]",
+            project_id, None, title, content, note_type, None, tags, "[]", None,
         )
         .await
     }
@@ -214,7 +257,7 @@ impl NoteRepository {
         tags: &str,
     ) -> Result<Note> {
         self.create_internal(
-            project_id, None, title, content, note_type, status, tags, "[]",
+            project_id, None, title, content, note_type, status, tags, "[]", None,
         )
         .await
     }
@@ -240,6 +283,81 @@ impl NoteRepository {
             status,
             tags,
             scope_paths,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_with_scope_and_retrieval_anchor(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        status: Option<&str>,
+        tags: &str,
+        scope_paths: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> Result<Note> {
+        self.create_internal(
+            project_id,
+            None,
+            title,
+            content,
+            note_type,
+            status,
+            tags,
+            scope_paths,
+            retrieval_anchor,
+        )
+        .await
+    }
+
+    pub async fn create_with_retrieval_anchor(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        tags: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> Result<Note> {
+        self.create_internal(
+            project_id,
+            None,
+            title,
+            content,
+            note_type,
+            None,
+            tags,
+            "[]",
+            retrieval_anchor,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_with_status_and_retrieval_anchor(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        status: Option<&str>,
+        tags: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> Result<Note> {
+        self.create_internal(
+            project_id,
+            None,
+            title,
+            content,
+            note_type,
+            status,
+            tags,
+            "[]",
+            retrieval_anchor,
         )
         .await
     }
@@ -265,6 +383,7 @@ impl NoteRepository {
         status: Option<&str>,
         tags: &str,
         scope_paths: &str,
+        retrieval_anchor: Option<&str>,
     ) -> Result<Note> {
         self.db.ensure_initialized().await?;
 
@@ -278,6 +397,7 @@ impl NoteRepository {
         let project_id = project_id.to_owned();
         let title = title.to_owned();
         let content = content.to_owned();
+        let retrieval_anchor = retrieval_anchor.map(str::to_owned);
         let note_type = note_type.to_owned();
         let folder = folder_for_type_with_status(&note_type, status).to_owned();
         let tags_json: serde_json::Value = serde_json::from_str(tags)
@@ -301,29 +421,30 @@ impl NoteRepository {
                 // string. Both columns are vestiges of the file-on-disk
                 // era, kept on the schema to avoid a migration in the same
                 // PR that does the cut-over. Drop them in a follow-up.
-                sqlx::query!(
+                sqlx::query(
                     "INSERT INTO notes
                         (id, project_id, permalink, title, file_path,
-                         storage, note_type, folder, tags, content, content_hash, scope_paths)
-                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, $7, $8, $9, $10)",
-                    id,
-                    project_id,
-                    permalink,
-                    title,
-                    note_type,
-                    folder,
-                    tags_json,
-                    content,
-                    content_hash,
-                    scope_paths_json
+                         storage, note_type, folder, tags, content, retrieval_anchor, content_hash, scope_paths)
+                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, $7, $8, $9, $10, $11)"
                 )
+                .bind(&id)
+                .bind(&project_id)
+                .bind(&permalink)
+                .bind(&title)
+                .bind(&note_type)
+                .bind(&folder)
+                .bind(&tags_json)
+                .bind(&content)
+                .bind(&retrieval_anchor)
+                .bind(&content_hash)
+                .bind(&scope_paths_json)
                 .execute(&mut *tx)
                 .await?;
 
                 index_links_for_note(&mut tx, &id, &project_id, &content).await?;
                 resolve_links_for_note(&mut tx, &id, &title, &permalink, &project_id).await?;
 
-                let note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
+                let note = note_select_where_id!(&id).fetch_one(&mut *tx).await?;
 
                 tx.commit().await?;
                 Ok::<_, crate::Error>(note)
@@ -338,16 +459,15 @@ impl NoteRepository {
 
     pub async fn get(&self, id: &str) -> Result<Option<Note>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            Note,
+        Ok(sqlx::query_as::<_, Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                      storage, note_type, folder, tags::text AS "tags!", content,
-                      created_at, updated_at, last_accessed,
+                      storage, note_type, folder, tags::text AS tags, content,
+                      retrieval_anchor, created_at, updated_at, last_accessed,
                       access_count, confidence, abstract as abstract_, overview,
-                      scope_paths::text AS "scope_paths!"
+                      scope_paths::text AS scope_paths
                FROM notes WHERE id = $1"#,
-            id,
         )
+        .bind(id)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -358,17 +478,16 @@ impl NoteRepository {
         permalink: &str,
     ) -> Result<Option<Note>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            Note,
+        Ok(sqlx::query_as::<_, Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                      storage, note_type, folder, tags::text AS "tags!", content,
-                      created_at, updated_at, last_accessed,
+                      storage, note_type, folder, tags::text AS tags, content,
+                      retrieval_anchor, created_at, updated_at, last_accessed,
                       access_count, confidence, abstract as abstract_, overview,
-                      scope_paths::text AS "scope_paths!"
+                      scope_paths::text AS scope_paths
                FROM notes WHERE project_id = $1 AND permalink = $2"#,
-            project_id,
-            permalink,
         )
+        .bind(project_id)
+        .bind(permalink)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -379,36 +498,34 @@ impl NoteRepository {
         content_hash: &str,
     ) -> Result<Option<Note>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            Note,
+        Ok(sqlx::query_as::<_, Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                      storage, note_type, folder, tags::text AS "tags!", content,
-                      created_at, updated_at, last_accessed,
+                      storage, note_type, folder, tags::text AS tags, content,
+                      retrieval_anchor, created_at, updated_at, last_accessed,
                       access_count, confidence, abstract as abstract_, overview,
-                      scope_paths::text AS "scope_paths!"
+                      scope_paths::text AS scope_paths
                FROM notes
                WHERE project_id = $1 AND content_hash = $2
                ORDER BY created_at ASC
                LIMIT 1"#,
-            project_id,
-            content_hash,
         )
+        .bind(project_id)
+        .bind(content_hash)
         .fetch_optional(self.db.pool())
         .await?)
     }
 
     pub async fn get_summary_state(&self, id: &str) -> Result<Option<Note>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            Note,
+        Ok(sqlx::query_as::<_, Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                      storage, note_type, folder, tags::text AS "tags!", content,
-                      created_at, updated_at, last_accessed,
+                      storage, note_type, folder, tags::text AS tags, content,
+                      retrieval_anchor, created_at, updated_at, last_accessed,
                       access_count, confidence, abstract as abstract_, overview,
-                      scope_paths::text AS "scope_paths!"
+                      scope_paths::text AS scope_paths
                FROM notes WHERE id = $1"#,
-            id,
         )
+        .bind(id)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -455,32 +572,30 @@ impl NoteRepository {
     pub async fn list(&self, project_id: &str, folder: Option<&str>) -> Result<Vec<Note>> {
         self.db.ensure_initialized().await?;
         if let Some(folder) = folder {
-            Ok(sqlx::query_as!(
-                Note,
+            Ok(sqlx::query_as::<_, Note>(
                 r#"SELECT id, project_id, permalink, title, file_path,
-                          storage, note_type, folder, tags::text AS "tags!", content,
-                          created_at, updated_at, last_accessed,
+                          storage, note_type, folder, tags::text AS tags, content,
+                          retrieval_anchor, created_at, updated_at, last_accessed,
                           access_count, confidence, abstract as abstract_, overview,
-                          scope_paths::text AS "scope_paths!"
+                          scope_paths::text AS scope_paths
                    FROM notes WHERE project_id = $1 AND folder = $2
                    ORDER BY folder, title"#,
-                project_id,
-                folder,
             )
+            .bind(project_id)
+            .bind(folder)
             .fetch_all(self.db.pool())
             .await?)
         } else {
-            Ok(sqlx::query_as!(
-                Note,
+            Ok(sqlx::query_as::<_, Note>(
                 r#"SELECT id, project_id, permalink, title, file_path,
-                          storage, note_type, folder, tags::text AS "tags!", content,
-                          created_at, updated_at, last_accessed,
+                          storage, note_type, folder, tags::text AS tags, content,
+                          retrieval_anchor, created_at, updated_at, last_accessed,
                           access_count, confidence, abstract as abstract_, overview,
-                          scope_paths::text AS "scope_paths!"
+                          scope_paths::text AS scope_paths
                    FROM notes WHERE project_id = $1
                    ORDER BY folder, title"#,
-                project_id,
             )
+            .bind(project_id)
             .fetch_all(self.db.pool())
             .await?)
         }
@@ -511,7 +626,7 @@ impl NoteRepository {
             let content_hash = note_content_hash(&content);
 
             let stage = async {
-                sqlx::query!(
+                sqlx::query(
                     r#"UPDATE notes SET
                         title   = $1,
                         content = $2,
@@ -519,12 +634,12 @@ impl NoteRepository {
                         content_hash = $4,
                         updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                      WHERE id = $5"#,
-                    title,
-                    content,
-                    tags,
-                    content_hash,
-                    id
                 )
+                .bind(&title)
+                .bind(&content)
+                .bind(&tags)
+                .bind(&content_hash)
+                .bind(&id)
                 .execute(&mut *tx)
                 .await?;
 
@@ -532,7 +647,7 @@ impl NoteRepository {
                 resolve_links_for_note(&mut tx, &id, &title, &permalink, &current.project_id)
                     .await?;
 
-                let note: Note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
+                let note: Note = note_select_where_id!(&id).fetch_one(&mut *tx).await?;
                 tx.commit().await?;
                 Ok::<_, crate::Error>(note)
             };
@@ -556,6 +671,36 @@ impl NoteRepository {
         Ok(note)
     }
 
+    pub async fn update_retrieval_anchor(
+        &self,
+        id: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> Result<Note> {
+        self.db.ensure_initialized().await?;
+
+        let id = id.to_owned();
+        let retrieval_anchor = retrieval_anchor.map(str::to_owned);
+        let mut tx = self.db.pool().begin().await?;
+
+        sqlx::query(
+            r#"UPDATE notes SET
+                retrieval_anchor = $1,
+                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $2"#,
+        )
+        .bind(&retrieval_anchor)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+
+        let note: Note = note_select_where_id!(&id).fetch_one(&mut *tx).await?;
+
+        tx.commit().await?;
+        self.spawn_note_embedding_sync(&note);
+        self.events.send(djinn_memory::events::note_updated(&note));
+        Ok(note)
+    }
+
     pub async fn update_summaries(
         &self,
         id: &str,
@@ -566,20 +711,20 @@ impl NoteRepository {
         let id = id.to_owned();
         let mut tx = self.db.pool().begin().await?;
 
-        sqlx::query!(
+        sqlx::query(
             r#"UPDATE notes SET
                 abstract = $1,
                 overview = $2,
                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $3"#,
-            abstract_summary,
-            overview,
-            id
         )
+        .bind(abstract_summary)
+        .bind(overview)
+        .bind(&id)
         .execute(&mut *tx)
         .await?;
 
-        let note: Note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
+        let note: Note = note_select_where_id!(&id).fetch_one(&mut *tx).await?;
 
         tx.commit().await?;
         self.events.send(djinn_memory::events::note_updated(&note));
@@ -606,7 +751,8 @@ impl NoteRepository {
         crate::retry::retry_on_serialization_failure(crate::retry::DEFAULT_MAX_TX_RETRIES, || {
             let id_owned = id_owned.clone();
             async move {
-                sqlx::query!("DELETE FROM notes WHERE id = $1", id_owned)
+                sqlx::query("DELETE FROM notes WHERE id = $1")
+                    .bind(&id_owned)
                     .execute(self.db.pool())
                     .await?;
                 Ok::<_, crate::Error>(())
@@ -630,13 +776,13 @@ impl NoteRepository {
             .await?
             .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
 
-        sqlx::query!(
+        sqlx::query(
             r#"UPDATE notes SET
                 last_accessed = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                 access_count = access_count + 1
              WHERE id = $1"#,
-            id
         )
+        .bind(id)
         .execute(self.db.pool())
         .await?;
 
@@ -677,7 +823,7 @@ impl NoteRepository {
 
             let stage = async {
                 // file_path stays empty (no on-disk mirror anymore).
-                sqlx::query!(
+                sqlx::query(
                     r#"UPDATE notes SET
                         title      = $1,
                         file_path  = '',
@@ -686,12 +832,12 @@ impl NoteRepository {
                         permalink  = $4,
                         updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                      WHERE id = $5"#,
-                    new_title,
-                    new_note_type,
-                    new_folder,
-                    new_permalink,
-                    id
                 )
+                .bind(new_title)
+                .bind(new_note_type)
+                .bind(&new_folder)
+                .bind(&new_permalink)
+                .bind(id)
                 .execute(&mut *tx)
                 .await?;
 
@@ -699,7 +845,7 @@ impl NoteRepository {
                 resolve_links_for_note(&mut tx, id, new_title, &new_permalink, &current.project_id)
                     .await?;
 
-                let note: Note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
+                let note: Note = note_select_where_id!(&id).fetch_one(&mut *tx).await?;
                 tx.commit().await?;
                 Ok::<_, crate::Error>(note)
             };

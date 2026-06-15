@@ -59,14 +59,13 @@ impl NoteRepository {
     ) -> Result<u64> {
         self.db.ensure_initialized().await?;
 
-        let notes = sqlx::query_as!(
-            Note,
+        let notes = sqlx::query_as::<_, Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                        storage, note_type, folder, tags::text AS "tags!", content,
-                        created_at, updated_at, last_accessed,
+                        storage, note_type, folder, tags::text AS tags, content,
+                        retrieval_anchor, created_at, updated_at, last_accessed,
                         access_count, confidence,
                         abstract AS abstract_, overview,
-                        scope_paths::text AS "scope_paths!"
+                        scope_paths::text AS scope_paths
              FROM notes n
              WHERE n.project_id = $1
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
@@ -75,8 +74,8 @@ impl NoteRepository {
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
                )"#,
-            project_id
         )
+        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
