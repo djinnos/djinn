@@ -191,26 +191,38 @@ impl ReasoningEffort {
     }
 }
 
-/// Default reasoning-effort policy for capability-driven provider resolution.
+/// Derive the default reasoning-effort tier for a catalog model.
 ///
-/// Catalog metadata (`Model::reasoning`) is the capability source of truth. For
-/// Anthropic/Google wire formats, `None` disables explicit thinking controls, so
-/// reasoning-capable models opt in at the shared default tier. OpenAI chat has
-/// no request-side reasoning knob here, and OpenAI Responses already preserves
-/// its legacy medium default when `ProviderConfig::reasoning_effort` is `None`,
-/// so those formats intentionally stay `None` to avoid changing their wire
-/// behavior.
-pub fn default_reasoning_effort(
-    model_supports_reasoning: bool,
+/// The policy is intentionally capability-driven: callers pass the model's
+/// catalog `reasoning` capability plus the resolved wire [`FormatFamily`], not a
+/// provider ID. Formats where [`ProviderConfig::reasoning_effort`] set to `None`
+/// suppresses reasoning should opt reasoning-capable models into a shared
+/// default tier here. Formats where `None` already has reasoning semantics keep
+/// returning `None` so existing request bodies remain unchanged.
+pub fn default_reasoning_effort_for_model(
+    reasoning: bool,
     format_family: FormatFamily,
+    _model_id: &str,
 ) -> Option<ReasoningEffort> {
-    if !model_supports_reasoning {
+    if !reasoning {
         return None;
     }
 
     match format_family {
-        FormatFamily::Anthropic | FormatFamily::Google => Some(ReasoningEffort::Medium),
-        FormatFamily::OpenAI | FormatFamily::OpenAIResponses => None,
+        // Anthropic-compatible formats suppress extended thinking when this is
+        // `None`, so enable the shared default tier for reasoning-capable
+        // catalog models (including Anthropic-format third-party providers).
+        FormatFamily::Anthropic => Some(ReasoningEffort::Medium),
+        // OpenAI Responses already renders `None` as `reasoning.effort =
+        // "medium"` for its own reasoning-capable model families, with
+        // model-family gating in the request builder. Preserving `None` keeps
+        // Codex/gpt-5.x request bytes unchanged and avoids enabling Responses
+        // reasoning for unrelated compatible model IDs solely because catalog
+        // metadata says `reasoning = true`.
+        FormatFamily::OpenAIResponses => None,
+        // OpenAI Chat has no shared reasoning-effort request knob here, and
+        // Google remains opt-in until its live defaults are characterized.
+        FormatFamily::OpenAI | FormatFamily::Google => None,
     }
 }
 
@@ -367,6 +379,43 @@ pub fn create_provider(config: ProviderConfig) -> Box<dyn LlmProvider> {
 mod reasoning_effort_override_tests {
     use super::*;
     use std::pin::Pin;
+
+    #[test]
+    fn default_reasoning_effort_enables_anthropic_reasoning_model() {
+        assert_eq!(
+            default_reasoning_effort_for_model(true, FormatFamily::Anthropic, "claude-sonnet-4"),
+            Some(ReasoningEffort::Medium)
+        );
+    }
+
+    #[test]
+    fn default_reasoning_effort_keeps_non_reasoning_model_disabled() {
+        for family in [
+            FormatFamily::OpenAI,
+            FormatFamily::OpenAIResponses,
+            FormatFamily::Anthropic,
+            FormatFamily::Google,
+        ] {
+            assert_eq!(
+                default_reasoning_effort_for_model(false, family, "plain-model"),
+                None,
+                "{family:?} non-reasoning catalog models must not opt into reasoning"
+            );
+        }
+    }
+
+    #[test]
+    fn default_reasoning_effort_preserves_openai_responses_none() {
+        assert_eq!(
+            default_reasoning_effort_for_model(
+                true,
+                FormatFamily::OpenAIResponses,
+                "gpt-5.1-codex"
+            ),
+            None,
+            "OpenAI Responses maps None to its existing medium default in the request builder"
+        );
+    }
 
     fn config_for(format_family: FormatFamily) -> ProviderConfig {
         ProviderConfig {

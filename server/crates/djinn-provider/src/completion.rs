@@ -9,7 +9,8 @@ use tokio::time::{Duration, timeout};
 use crate::catalog::{CatalogService, builtin};
 use crate::oauth::{self, codex::CodexTokens, copilot::CopilotTokens};
 use crate::provider::{
-    LlmProvider, ProviderConfig, StreamEvent, TokenUsage, create_provider, default_reasoning_effort,
+    LlmProvider, ProviderConfig, StreamEvent, TokenUsage, create_provider,
+    default_reasoning_effort_for_model,
 };
 use crate::repos::CredentialRepository;
 
@@ -530,7 +531,11 @@ fn api_key_provider_config(
         session_affinity_key: None,
         provider_headers: Default::default(),
         capabilities: builtin_provider.capabilities(),
-        reasoning_effort: default_reasoning_effort(model.reasoning, format_family),
+        reasoning_effort: default_reasoning_effort_for_model(
+            model.reasoning,
+            format_family,
+            &model.id,
+        ),
     }
 }
 
@@ -711,6 +716,75 @@ mod tests {
         }
     }
 
+    #[test]
+    fn api_key_provider_config_defaults_reasoning_for_anthropic_reasoning_model() {
+        let builtin_provider = builtin::find_builtin_provider("minimax-coding-plan")
+            .expect("minimax provider row should exist");
+        let model = test_model(
+            "minimax-coding-plan",
+            "minimax-coding-plan/MiniMax-M1",
+            true,
+        );
+
+        let config = api_key_provider_config(
+            "minimax-coding-plan",
+            &model,
+            builtin_provider,
+            "test-key".to_string(),
+        );
+
+        assert_eq!(config.format_family, FormatFamily::Anthropic);
+        assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Medium));
+        assert!(matches!(config.auth, AuthMethod::BearerToken(ref key) if key == "test-key"));
+        assert_eq!(config.capabilities.max_tokens_default, Some(64_000));
+    }
+
+    #[test]
+    fn api_key_provider_config_keeps_non_reasoning_model_disabled() {
+        let builtin_provider = builtin::find_builtin_provider("anthropic")
+            .expect("anthropic provider row should exist");
+        let model = test_model("anthropic", "anthropic/claude-3-5-haiku-latest", false);
+
+        let config = api_key_provider_config(
+            "anthropic",
+            &model,
+            builtin_provider,
+            "test-key".to_string(),
+        );
+
+        assert_eq!(config.format_family, FormatFamily::Anthropic);
+        assert_eq!(config.reasoning_effort, None);
+    }
+
+    #[test]
+    fn api_key_provider_config_preserves_openai_reasoning_policy() {
+        let builtin_provider =
+            builtin::find_builtin_provider("openai").expect("openai provider row should exist");
+        let chat_model = test_model("openai", "gpt-4.1-mini", true);
+        let responses_model = test_model("openai", "gpt-5.1", true);
+
+        let chat_config = api_key_provider_config(
+            "openai",
+            &chat_model,
+            builtin_provider,
+            "test-key".to_string(),
+        );
+        let responses_config = api_key_provider_config(
+            "openai",
+            &responses_model,
+            builtin_provider,
+            "test-key".to_string(),
+        );
+
+        assert_eq!(chat_config.format_family, FormatFamily::OpenAI);
+        assert_eq!(chat_config.reasoning_effort, None);
+        assert_eq!(
+            responses_config.format_family,
+            FormatFamily::OpenAIResponses
+        );
+        assert_eq!(responses_config.reasoning_effort, None);
+    }
+
     enum ProviderBehavior {
         Stream(Vec<anyhow::Result<StreamEvent>>),
         Error(String),
@@ -867,9 +941,12 @@ mod tests {
 
     #[test]
     fn default_reasoning_policy_preserves_openai_wire_behavior() {
-        assert_eq!(default_reasoning_effort(true, FormatFamily::OpenAI), None);
         assert_eq!(
-            default_reasoning_effort(true, FormatFamily::OpenAIResponses),
+            default_reasoning_effort_for_model(true, FormatFamily::OpenAI, "gpt-4.1-mini"),
+            None
+        );
+        assert_eq!(
+            default_reasoning_effort_for_model(true, FormatFamily::OpenAIResponses, "gpt-5.1"),
             None
         );
     }

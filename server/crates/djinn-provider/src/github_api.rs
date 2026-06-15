@@ -36,6 +36,7 @@ pub mod search;
 mod tests;
 mod transport;
 mod types;
+mod write_errors;
 
 use std::sync::Arc;
 
@@ -48,6 +49,9 @@ pub use types::{
     ActionsJob, ActionsJobStep, AutoMergeRequest, CheckAnnotation, CheckRun, CheckRunsResponse,
     CreatePrParams, DequeueEvent, GitHubUser, MergeMethod, MergeQueueEntry, MergeQueueEntryState,
     PrMergeQueueState, PrRef, PrReview, PrReviewFeedback, PrState, PullRequest, ReviewComment,
+};
+pub use write_errors::{
+    GitHubWriteErrorEnvelope, GitHubWriteErrorInput, github_write_error_envelope,
 };
 
 /// GitHub REST API v3 base URL.
