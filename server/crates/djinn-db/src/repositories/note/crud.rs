@@ -337,6 +337,7 @@ impl NoteRepository {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_with_status_and_retrieval_anchor(
         &self,
         project_id: &str,
@@ -466,7 +467,7 @@ impl NoteRepository {
                       scope_paths::text AS scope_paths
                FROM notes WHERE id = $1"#,
         )
-        .bind(&id)
+        .bind(id)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -524,7 +525,7 @@ impl NoteRepository {
                       scope_paths::text AS scope_paths
                FROM notes WHERE id = $1"#,
         )
-        .bind(&id)
+        .bind(id)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -781,7 +782,7 @@ impl NoteRepository {
                 access_count = access_count + 1
              WHERE id = $1"#,
         )
-        .bind(&id)
+        .bind(id)
         .execute(self.db.pool())
         .await?;
 
@@ -836,7 +837,7 @@ impl NoteRepository {
                 .bind(new_note_type)
                 .bind(&new_folder)
                 .bind(&new_permalink)
-                .bind(&id)
+                .bind(id)
                 .execute(&mut *tx)
                 .await?;
 
