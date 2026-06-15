@@ -125,6 +125,12 @@ pub struct PullRequest {
     pub title: String,
     pub state: PrState,
     pub merged: Option<bool>,
+    /// The SHA of the merge commit on the base branch once the PR is merged.
+    /// GitHub populates this with the real landed commit when `merged == true`
+    /// (and with a speculative test-merge SHA while the PR is still open, which
+    /// we only ever read on the `merged` path). `None` when GitHub omits it.
+    #[serde(default)]
+    pub merge_commit_sha: Option<String>,
     pub html_url: String,
     pub head: PrRef,
     pub base: PrRef,
