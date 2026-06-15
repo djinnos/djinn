@@ -510,6 +510,44 @@ async fn mcp_tools_schema_snapshot() {
     assert_json_snapshot!("mcp_tools_schema", signatures);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_surfaces_advertise_nullable_parked_reason() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let tools = mcp.all_tool_schemas();
+
+    let find_tool = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+            .unwrap_or_else(|| panic!("missing {name} schema"))
+    };
+
+    let list = find_tool("session_list");
+    let show = find_tool("session_show");
+    let timeline = find_tool("task_timeline");
+    let expected = json!({
+        "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
+        "nullable": true,
+        "type": "string"
+    });
+
+    assert_eq!(
+        list["outputSchema"]["$defs"]["SessionToolSession"]["properties"]["parked_reason"],
+        expected,
+        "session_list output schema must expose nullable parked_reason"
+    );
+    assert_eq!(
+        show["outputSchema"]["properties"]["parked_reason"], expected,
+        "session_show output schema must expose nullable parked_reason"
+    );
+    assert_eq!(
+        timeline["outputSchema"]["$defs"]["SessionToolSession"]["properties"]["parked_reason"],
+        expected,
+        "task_timeline sessions schema must expose nullable parked_reason"
+    );
+}
+
 // ── Dispatch-pause public MCP contract ─────────────────────────────────────────
 //
 // The dispatch-pause epic introduces three new MCP tools — `dispatch_pause`,
