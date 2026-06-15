@@ -22,6 +22,10 @@ pub struct WriteParams {
     pub tags: Option<Vec<String>>,
     /// Crate/module path prefixes this note applies to. Empty array means global.
     pub scope_paths: Option<Vec<String>>,
+    /// Objective situation where this note should be retrieved. Also accepted as
+    /// `applies_when` for prompt/API language compatibility.
+    #[serde(default, alias = "applies_when")]
+    pub retrieval_anchor: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -57,6 +61,10 @@ pub struct EditParams {
     #[serde(rename = "type")]
     #[schemars(rename = "type")]
     pub note_type: Option<String>,
+    /// Replace the note's retrieval anchor without modifying the note body.
+    /// Also accepted as `applies_when`.
+    #[serde(default, alias = "applies_when")]
+    pub retrieval_anchor: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -276,6 +284,7 @@ pub struct MemoryNoteResponse {
     pub folder: Option<String>,
     pub tags: Option<Vec<String>>,
     pub content: Option<String>,
+    pub retrieval_anchor: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub last_accessed: Option<String>,
@@ -485,6 +494,7 @@ impl MemoryNoteResponse {
             folder: Some(note.folder.clone()),
             tags: Some(note.parsed_tags()),
             content: Some(note.content.clone()),
+            retrieval_anchor: note.retrieval_anchor.clone(),
             created_at: Some(note.created_at.clone()),
             updated_at: Some(note.updated_at.clone()),
             last_accessed: Some(note.last_accessed.clone()),
@@ -504,6 +514,7 @@ impl MemoryNoteResponse {
             folder: None,
             tags: None,
             content: None,
+            retrieval_anchor: None,
             created_at: None,
             updated_at: None,
             last_accessed: None,

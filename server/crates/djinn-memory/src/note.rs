@@ -20,6 +20,9 @@ pub struct Note {
     pub folder: String,
     pub tags: String,    // JSON array string, e.g. '["rust","db"]'
     pub content: String, // Markdown body without frontmatter
+    /// Objective retrieval situation where this note applies. Stored separately
+    /// from `content` so embeddings/prompts can use it without mutating body text.
+    pub retrieval_anchor: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub last_accessed: String,
@@ -56,6 +59,7 @@ impl Note {
             "folder": self.folder,
             "tags": self.parsed_tags(),
             "content": self.content,
+            "retrieval_anchor": self.retrieval_anchor,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "last_accessed": self.last_accessed,

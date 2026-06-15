@@ -342,3 +342,76 @@ async fn db_create_and_delete_persists_state() {
         0
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retrieval_anchor_persists_and_legacy_null_hydrates() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    let legacy = repo
+        .create(
+            &project.id,
+            "Legacy Anchor",
+            "legacy body",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let legacy = repo.get(&legacy.id).await.unwrap().unwrap();
+    assert_eq!(legacy.retrieval_anchor, None);
+    assert_eq!(
+        legacy.to_value()["retrieval_anchor"],
+        serde_json::Value::Null
+    );
+
+    let anchored = repo
+        .create_with_retrieval_anchor(
+            &project.id,
+            "Anchored Note",
+            "anchored body",
+            "pattern",
+            r#"[\"anchor\"]"#,
+            Some("When a worker needs anchor persistence."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        anchored.retrieval_anchor.as_deref(),
+        Some("When a worker needs anchor persistence.")
+    );
+    assert_eq!(
+        anchored.to_value()["retrieval_anchor"],
+        serde_json::json!("When a worker needs anchor persistence.")
+    );
+
+    let changed_anchor = repo
+        .update_retrieval_anchor(&anchored.id, Some("When updating an existing note anchor."))
+        .await
+        .unwrap();
+    assert_eq!(
+        changed_anchor.retrieval_anchor.as_deref(),
+        Some("When updating an existing note anchor.")
+    );
+
+    let retagged = repo
+        .update_tags(&changed_anchor.id, r#"[\"anchor\",\"retagged\"]"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        retagged.retrieval_anchor.as_deref(),
+        Some("When updating an existing note anchor.")
+    );
+
+    let scoped = repo
+        .update_scope_paths(&changed_anchor.id, r#"[\"server/crates\"]"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        scoped.retrieval_anchor.as_deref(),
+        Some("When updating an existing note anchor.")
+    );
+}

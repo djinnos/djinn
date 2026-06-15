@@ -59,6 +59,16 @@ pub(super) async fn memory_edit(
         .await
     {
         Ok(updated) => {
+            let updated = match p.retrieval_anchor.as_deref() {
+                Some(anchor) => match repo
+                    .update_retrieval_anchor(&updated.id, Some(anchor))
+                    .await
+                {
+                    Ok(note) => note,
+                    Err(e) => return Json(MemoryNoteResponse::error(e.to_string())),
+                },
+                None => updated,
+            };
             super::lifecycle::schedule_summary_regeneration(server, &updated.id);
             Json(MemoryNoteResponse::from_note(&updated))
         }
