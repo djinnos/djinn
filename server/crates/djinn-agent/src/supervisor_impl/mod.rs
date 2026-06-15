@@ -26,6 +26,16 @@ pub(crate) mod disposition;
 pub(crate) mod pr;
 pub(crate) mod stage;
 
+/// Non-PR reusable live-mover API surface for post-run and orphan-task checks
+/// (e.g. the future `vnwi` doctor orphan-task check). The crate-internal
+/// `supervisor_impl` module root is the canonical call site for callers that
+/// must not depend on PR-open-specific code — these re-exports are what makes
+/// the API reachable without importing `supervisor_impl::pr`.
+#[allow(unused_imports)]
+pub(crate) use disposition::{
+    LiveMoverEvidence, LiveMoverReason, LiveMoverSummary, has_live_mover, live_mover_reasons,
+    live_mover_summary, summarize_live_mover,
+};
 pub(crate) use pr::supervisor_pr_open;
 pub(crate) use stage::execute_stage;
 
