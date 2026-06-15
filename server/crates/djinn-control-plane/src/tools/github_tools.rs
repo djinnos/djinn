@@ -173,11 +173,6 @@ impl DjinnMcpServer {
     #[tool(
         description = "Search GitHub code across public repositories. Returns compact, navigable matches with snippets, file paths, URLs, and metadata suitable for browsing. Each result has a result_id for reference. Use github_fetch_file to inspect the full file of a promising result. Supports language, repo, and path filters."
     )]
-    // TODO(dfk7 / T2): migrate to `ToolError::from_untyped` once the typed
-    // GitHubApiError is available upstream — the `from_http_error` wrapper
-    // is a soft deprecation until then. The `#[allow(deprecated)]` keeps
-    // `-D warnings` green for the duration.
-    #[allow(deprecated)]
     pub async fn github_search(
         &self,
         Parameters(params): Parameters<GithubSearchParams>,
@@ -204,9 +199,10 @@ impl DjinnMcpServer {
             .await
         {
             Ok(result) => Json(ToolOutcome::Ok(GithubSearchResponse::from(result))),
-            // Upstream HTTP failure: classify into a structured envelope so the
-            // agent can branch on `status` (404/422/429/network) and act on the hint.
-            Err(e) => Json(ToolOutcome::Err(ToolError::from_http_error(
+            // The provider read client still returns anyhow::Error here, so no
+            // typed HTTP status is available at this call site. Treat it as an
+            // untyped/internal failure rather than reparsing the display string.
+            Err(e) => Json(ToolOutcome::Err(ToolError::from_untyped(
                 "github_search",
                 &path,
                 &e.to_string(),
@@ -219,11 +215,6 @@ impl DjinnMcpServer {
     #[tool(
         description = "Fetch the full contents of a file from a public GitHub repository. Use after github_search to inspect a promising result. Supports optional start_line/end_line for reading specific sections of large files. Returns the file content with metadata including size, ref, and URL."
     )]
-    // TODO(dfk7 / T2): migrate to `ToolError::from_untyped` once the typed
-    // GitHubApiError is available upstream — the `from_http_error` wrapper
-    // is a soft deprecation until then. The `#[allow(deprecated)]` keeps
-    // `-D warnings` green for the duration.
-    #[allow(deprecated)]
     pub async fn github_fetch_file(
         &self,
         Parameters(params): Parameters<GithubFetchFileParams>,
@@ -252,7 +243,7 @@ impl DjinnMcpServer {
             .await
         {
             Ok(result) => Json(ToolOutcome::Ok(GithubFetchFileResponse::from(result))),
-            Err(e) => Json(ToolOutcome::Err(ToolError::from_http_error(
+            Err(e) => Json(ToolOutcome::Err(ToolError::from_untyped(
                 "github_fetch_file",
                 &resource,
                 &e.to_string(),
