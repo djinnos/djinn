@@ -1,5 +1,6 @@
 use super::*;
 use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
+use djinn_core::models::SessionStatus;
 use djinn_core::run_progress::RunProgress;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -173,6 +174,88 @@ async fn budget_park_governance_does_not_route_trigger_b_or_touch_breaker_state(
         actor.dispatch_cooldowns.get(&task_id).is_none(),
         "budget parks must not create dispatch-failure cooldown state"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_budget_park_sessions_clear_recovery_backoff_without_fault_routing() {
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+
+    for (wind_down_ignored, label) in [
+        (false, "summary-budget-park"),
+        (true, "ignored-wind-down-budget-park"),
+    ] {
+        let task_id = format!("task-{label}");
+        let session = djinn_core::models::SessionRecord {
+            id: format!("session-{label}"),
+            project_id: Some(format!("project-{label}")),
+            task_id: Some(task_id.clone()),
+            model_id: DEFAULT_MODEL_ID.to_owned(),
+            agent_type: "worker".to_owned(),
+            started_at: "2026-06-15T00:00:00.000Z".to_owned(),
+            ended_at: Some("2026-06-15T00:05:00.000Z".to_owned()),
+            status: SessionStatus::Completed.as_str().to_owned(),
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            task_run_id: Some(format!("run-{label}")),
+            title: None,
+            parked_reason: Some("budget".to_owned()),
+        };
+        assert_eq!(session.status, SessionStatus::Completed.as_str());
+        assert_eq!(session.parked_reason.as_deref(), Some("budget"));
+
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor
+            .dispatch_failure_streak
+            .insert(task_id.clone(), MAX_DISPATCH_FAILURES - 1);
+        actor.dispatch_cooldowns.insert(
+            task_id.clone(),
+            StdInstant::now() + std::time::Duration::from_secs(300),
+        );
+        actor.last_dispatched.insert(
+            task_id.clone(),
+            DispatchMarker {
+                instant: StdInstant::now(),
+                role: "worker".into(),
+            },
+        );
+        let breaker_available_before = actor.health.is_available(None, DEFAULT_MODEL_ID);
+
+        actor
+            .clear_planned_dispatch_completion(
+                &task_id,
+                if wind_down_ignored {
+                    "budget_park_ignored_wind_down_completion"
+                } else {
+                    "budget_park_summary_completion"
+                },
+            )
+            .await;
+
+        assert!(
+            !actor.dispatch_failure_streak.contains_key(&task_id),
+            "parked_reason=budget wind_down_ignored={wind_down_ignored} must clear stale failure streak, not advance toward MAX_DISPATCH_FAILURES"
+        );
+        assert!(
+            !actor.dispatch_cooldowns.contains_key(&task_id),
+            "parked_reason=budget wind_down_ignored={wind_down_ignored} must not leave dispatch-failure cooldown state"
+        );
+        assert!(
+            !actor.last_dispatched.contains_key(&task_id),
+            "parked_reason=budget wind_down_ignored={wind_down_ignored} must clear same-role attribution before continuation dispatch"
+        );
+        assert_eq!(
+            actor.health.is_available(None, DEFAULT_MODEL_ID),
+            breaker_available_before,
+            "parked_reason=budget wind_down_ignored={wind_down_ignored} must not trip provider/model breaker state"
+        );
+        assert!(
+            actor.health.take_task_provider_failure(&task_id).is_none(),
+            "budget parks must not seed typed provider-failure side-channel state"
+        );
+    }
 }
 
 #[test]
