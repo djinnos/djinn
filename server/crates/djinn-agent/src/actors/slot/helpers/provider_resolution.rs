@@ -153,6 +153,12 @@ impl ProviderCredential {
 /// The worker (Phase 7b) will deserialise this and reconstruct a live
 /// `ProviderConfig` — the two-way translation lives outside this file because
 /// the worker links a different subset of crates than the coordinator.
+///
+/// `reasoning_effort` mirrors the host-resolved `ProviderConfig.reasoning_effort`
+/// so the capability-driven policy (epic 160n / 5dej) survives the Secret JSON
+/// round-trip on OAuth paths. The field is `#[serde(default)]` so legacy blobs
+/// shipped before this field existed still decode to `None` and reconstruct a
+/// `ProviderConfig` with reasoning suppressed — exactly the pre-policy shape.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct OAuthConfigWire {
     pub base_url: String,
@@ -163,6 +169,12 @@ pub struct OAuthConfigWire {
     pub session_affinity_key: Option<String>,
     pub provider_headers: std::collections::HashMap<String, String>,
     pub capabilities: OAuthCapabilitiesWire,
+    /// Optional reasoning-effort tier resolved by the host-side capability
+    /// policy (`default_reasoning_effort_for_model`). Reuses the upstream
+    /// `ReasoningEffort` enum (already serde-friendly, `rename_all =
+    /// "lowercase"`) so wire tokens match the rest of the provider pipeline.
+    #[serde(default)]
+    pub reasoning_effort: Option<djinn_provider::provider::ReasoningEffort>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -217,6 +229,11 @@ impl OAuthConfigWire {
                 streaming: cfg.capabilities.streaming,
                 max_tokens_default: cfg.capabilities.max_tokens_default,
             },
+            // Round-trip the host-resolved reasoning-effort tier (epic 160n
+            // wire preservation). For Anthropic-format OAuth paths this is
+            // the `Some(Medium)` the capability policy selected; for Codex /
+            // OpenAI Responses it remains `None` per the shared policy.
+            reasoning_effort: cfg.reasoning_effort,
         }
     }
 
@@ -228,6 +245,12 @@ impl OAuthConfigWire {
     /// `telemetry` and `session_affinity_key` are left at the wire-encoded
     /// values; the worker overrides them per-stage before constructing the
     /// concrete provider client.
+    ///
+    /// `reasoning_effort` is reconstructed from the wire-encoded value (epic
+    /// 160n wire preservation). For legacy JSON blobs that predate the field,
+    /// `#[serde(default)]` decodes it as `None` and the reconstructed config
+    /// preserves the pre-policy `None` behavior — a safe no-op for older
+    /// workers / hosts.
     pub fn to_provider_config(self) -> djinn_provider::provider::ProviderConfig {
         use djinn_provider::provider::{
             AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig,
@@ -258,7 +281,7 @@ impl OAuthConfigWire {
                 streaming: self.capabilities.streaming,
                 max_tokens_default: self.capabilities.max_tokens_default,
             },
-            reasoning_effort: None,
+            reasoning_effort: self.reasoning_effort,
         }
     }
 }
@@ -466,4 +489,211 @@ pub(crate) fn resolved_needs_base_url(
         resolved.provider_credential,
         Some(ProviderCredential::ApiKey(..))
     )
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_provider::provider::{
+        AuthMethod, FormatFamily, ProviderCapabilities, ReasoningEffort,
+    };
+    use serde_json::Value;
+
+    fn sample_oauth_config(
+        reasoning: Option<ReasoningEffort>,
+    ) -> djinn_provider::provider::ProviderConfig {
+        djinn_provider::provider::ProviderConfig {
+            base_url: "https://api.minimax.io/anthropic".to_string(),
+            auth: AuthMethod::BearerToken("test-token".to_string()),
+            format_family: FormatFamily::Anthropic,
+            model_id: "minimax-coding-plan/M-2".to_string(),
+            context_window: 200_000,
+            telemetry: None,
+            session_affinity_key: Some("session-123".to_string()),
+            provider_headers: std::collections::HashMap::from([(
+                "chatgpt-account-id".to_string(),
+                "acc-1".to_string(),
+            )]),
+            capabilities: ProviderCapabilities {
+                streaming: true,
+                max_tokens_default: Some(64_000),
+            },
+            reasoning_effort: reasoning,
+        }
+    }
+
+    /// 7mhn: `Some(ReasoningEffort::Medium)` survives the
+    /// `OAuthConfigWire` host→Secret→worker round-trip exactly.
+    #[test]
+    fn oauth_wire_round_trip_preserves_some_medium() {
+        let original = sample_oauth_config(Some(ReasoningEffort::Medium));
+        let wire = OAuthConfigWire::from_provider_config(&original);
+        let json = serde_json::to_string(&wire).expect("serialize");
+        let decoded: OAuthConfigWire = serde_json::from_str(&json).expect("deserialize");
+        let reconstructed = decoded.to_provider_config();
+
+        assert_eq!(
+            reconstructed.reasoning_effort,
+            Some(ReasoningEffort::Medium)
+        );
+        assert_eq!(reconstructed.base_url, original.base_url);
+        assert_eq!(reconstructed.model_id, original.model_id);
+        assert_eq!(reconstructed.context_window, original.context_window);
+        assert_eq!(
+            reconstructed.session_affinity_key,
+            original.session_affinity_key
+        );
+        assert_eq!(reconstructed.provider_headers, original.provider_headers);
+        // `telemetry` is intentionally dropped on the wire (per-call metadata
+        // the worker rebuilds locally).
+        assert!(reconstructed.telemetry.is_none());
+    }
+
+    /// 7mhn: a host-resolved `None` (e.g. Codex/OpenAI Responses) round-trips
+    /// cleanly so the policy's "preserve None" outcome is observable.
+    #[test]
+    fn oauth_wire_round_trip_preserves_none() {
+        let original = sample_oauth_config(None);
+        let wire = OAuthConfigWire::from_provider_config(&original);
+        let json = serde_json::to_string(&wire).expect("serialize");
+        let decoded: OAuthConfigWire = serde_json::from_str(&json).expect("deserialize");
+        let reconstructed = decoded.to_provider_config();
+
+        assert_eq!(reconstructed.reasoning_effort, None);
+    }
+
+    /// 7mhn: a legacy OAuth JSON blob shipped before the
+    /// `reasoning_effort` field existed must still deserialize and reconstruct
+    /// with `reasoning_effort: None` (the pre-policy safe default). The
+    /// `#[serde(default)]` annotation on the wire field is what makes this
+    /// possible.
+    #[test]
+    fn oauth_wire_legacy_blob_without_field_deserializes_to_none() {
+        let legacy = r#"{
+            "base_url": "https://api.openai.com",
+            "auth": { "BearerToken": "tok" },
+            "format_family": "OpenAIResponses",
+            "model_id": "gpt-5.1-codex",
+            "context_window": 400000,
+            "session_affinity_key": null,
+            "provider_headers": {},
+            "capabilities": { "streaming": true, "max_tokens_default": null }
+        }"#;
+        let decoded: OAuthConfigWire =
+            serde_json::from_str(legacy).expect("legacy blob must still deserialize");
+        let reconstructed = decoded.to_provider_config();
+        assert_eq!(reconstructed.reasoning_effort, None);
+        assert_eq!(reconstructed.format_family, FormatFamily::OpenAIResponses);
+        assert_eq!(reconstructed.model_id, "gpt-5.1-codex");
+    }
+
+    /// 7mhn: the JSON wire token for `Some(Medium)` is the literal `"medium"`
+    /// (the upstream enum derives `Serialize`/`Deserialize` with
+    /// `rename_all = "lowercase"`), so the policy output is visible in the
+    /// Secret blob and easily greppable in `kubectl describe`/`oc get secret`
+    /// dumps.
+    #[test]
+    fn oauth_wire_serializes_some_medium_as_lowercase_token() {
+        let original = sample_oauth_config(Some(ReasoningEffort::Medium));
+        let wire = OAuthConfigWire::from_provider_config(&original);
+        let json: Value = serde_json::to_value(&wire).expect("to_value");
+        assert_eq!(
+            json["reasoning_effort"],
+            Value::String("medium".to_string())
+        );
+
+        // The other tier tokens must round-trip with their lowercase spelling.
+        for (tier, token) in [
+            (ReasoningEffort::Minimal, "minimal"),
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::High, "high"),
+        ] {
+            let cfg = sample_oauth_config(Some(tier));
+            let v: Value = serde_json::to_value(OAuthConfigWire::from_provider_config(&cfg))
+                .expect("to_value");
+            assert_eq!(v["reasoning_effort"], Value::String(token.to_string()));
+        }
+    }
+
+    /// 7mhn acceptance criteria: Codex/gpt-5.x OpenAI Responses request
+    /// rendering is unchanged or byte-equivalent under the shared policy.
+    ///
+    /// The capability-driven policy from 5dej explicitly returns `None` for
+    /// `FormatFamily::OpenAIResponses` (including `gpt-5.1-codex`), so a
+    /// host-resolved `ProviderConfig` always lands with `reasoning_effort:
+    /// None` for Codex. The OpenAI Responses request builder already renders
+    /// that `None` as `reasoning.effort = "medium"` (its pre-B5 default), and
+    /// the byte-equivalence of the request body across the wire is guarded by
+    /// the upstream `test_default_policy_preserves_openai_responses_request_bytes`
+    /// test in `djinn-provider`.
+    ///
+    /// This test is the host-side wire contract: the wire round-trip must
+    /// preserve the host's `None` so the worker's reconstructed
+    /// `ProviderConfig` is identical to the host's, and the request body
+    /// rendered from the reconstructed config matches the host's. We also
+    /// assert the shared policy keeps `gpt-5.1-codex` at `None` (so a future
+    /// change to the policy cannot silently turn on Responses reasoning for
+    /// Codex without breaking this guard).
+    #[test]
+    fn oauth_wire_codex_openai_responses_request_rendering_is_byte_equivalent() {
+        use djinn_provider::provider::default_reasoning_effort_for_model;
+
+        // (a) The shared capability-driven policy must keep Codex at `None`:
+        // this is the load-bearing reason the request body is byte-equivalent
+        // across the wire. The wire cannot make Codex byte-different from the
+        // host's `None` baseline if the wire is the only seam.
+        let policy_for_codex = default_reasoning_effort_for_model(
+            true,
+            FormatFamily::OpenAIResponses,
+            "gpt-5.1-codex",
+        );
+        assert_eq!(
+            policy_for_codex, None,
+            "shared policy must keep Codex/gpt-5.1-codex reasoning_effort at None; \
+             otherwise Codex request bodies would change under the policy"
+        );
+
+        // (b) A host-resolved `ProviderConfig` for Codex has `None`
+        // (per the policy above). The OAuth wire round-trip must preserve
+        // that `None` exactly so the worker's reconstructed config is
+        // byte-equivalent to the host's.
+        let mut host_config = sample_oauth_config(None);
+        host_config.base_url = "https://api.openai.com".to_string();
+        host_config.format_family = FormatFamily::OpenAIResponses;
+        host_config.model_id = "gpt-5.1-codex".to_string();
+        host_config.context_window = 400_000;
+
+        // Sanity: the host config starts at `None` (per the policy).
+        assert_eq!(host_config.reasoning_effort, None);
+
+        let wire = OAuthConfigWire::from_provider_config(&host_config);
+        let json = serde_json::to_string(&wire).expect("serialize");
+        let decoded: OAuthConfigWire = serde_json::from_str(&json).expect("deserialize");
+        let reconstructed = decoded.to_provider_config();
+
+        // (c) Byte-equivalence at the wire seam: the reconstructed
+        // `ProviderConfig` matches the host's for every wire-surviving field.
+        assert_eq!(reconstructed.reasoning_effort, host_config.reasoning_effort);
+        assert_eq!(reconstructed.reasoning_effort, None);
+        assert_eq!(reconstructed.format_family, host_config.format_family);
+        assert_eq!(reconstructed.model_id, host_config.model_id);
+        assert_eq!(reconstructed.base_url, host_config.base_url);
+        assert_eq!(reconstructed.context_window, host_config.context_window);
+        assert_eq!(reconstructed.provider_headers, host_config.provider_headers);
+        assert_eq!(
+            reconstructed.capabilities.streaming,
+            host_config.capabilities.streaming
+        );
+        assert_eq!(
+            reconstructed.capabilities.max_tokens_default,
+            host_config.capabilities.max_tokens_default
+        );
+
+        // `telemetry` is intentionally dropped on the wire (per-call metadata
+        // the worker rebuilds locally); the worker overrides it before
+        // constructing the concrete provider client.
+        assert!(reconstructed.telemetry.is_none());
+    }
 }

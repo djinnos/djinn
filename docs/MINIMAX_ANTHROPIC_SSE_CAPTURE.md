@@ -149,6 +149,11 @@ For a live operator result, classify by either using the helper in a small local
 ## Result checklist/template
 
 Copy this template into the relevant task/proposal note after a reviewed live capture. Do not paste secrets, raw private prompts, or unreviewed full frame contents.
+Compute a local artifact hash before sharing the result so the sanitized note can be tied back to the reviewed file without committing raw frames, for example:
+
+```sh
+sha256sum /var/tmp/minimax-anthropic-sse-capture.json
+```
 
 ```md
 # MiniMax Anthropic thinking stream capture result
@@ -157,8 +162,10 @@ Copy this template into the relevant task/proposal note after a reviewed live ca
 - Operator/environment:
 - Command mode: live capture / dry-run only
 - Artifact path: /var/tmp/minimax-anthropic-sse-capture.json
+- Artifact SHA-256:
 - Reviewed/sanitized artifact committed? no / yes: <path>
 - Base URL: https://api.minimax.io/anthropic/v1
+- Request path: /v1/messages
 - Model:
 - Reasoning effort requested: minimal / low / medium / high / none
 - Max tokens:
