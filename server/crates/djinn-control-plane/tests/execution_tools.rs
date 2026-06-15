@@ -54,7 +54,7 @@ async fn execution_kill_task_with_nonexistent_task_returns_error_shape() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn execution_kill_task_reaches_real_slot_pool_terminate_session() {
+async fn execution_kill_task_settles_live_run_through_control_plane_tool_route() {
     let harness = RealPoolKillHarness::new().await;
     let seeded = harness
         .seed_running_session_with_task_run("kill-smoke-run")
@@ -72,6 +72,7 @@ async fn execution_kill_task_reaches_real_slot_pool_terminate_session() {
         vec![seeded.task_id.clone()],
         "real-pool bridge status should expose the dispatched task before kill"
     );
+    harness.assert_pool_capacity(1, 0).await;
     assert_eq!(harness.running_count_for_cap().await, 1);
 
     let response = harness
@@ -108,6 +109,11 @@ async fn execution_kill_task_reaches_real_slot_pool_terminate_session() {
         0,
         "settled session must not count against per-user/model capacity"
     );
+    harness.wait_for_pool_capacity(0, 1).await;
+    assert!(
+        harness.running_task_ids().await.is_empty(),
+        "pool status should not report running tasks after kill settlement"
+    );
 
     harness.dispatch(&seeded.task_id).await;
     harness.wait_for_pool_session(&seeded.task_id).await;
@@ -115,6 +121,7 @@ async fn execution_kill_task_reaches_real_slot_pool_terminate_session() {
         harness.pool_has_session(&seeded.task_id).await,
         "terminated task should be redispatchable through the real pool"
     );
+    harness.assert_pool_capacity(1, 0).await;
     harness.shutdown();
 }
 
@@ -310,6 +317,44 @@ impl RealPoolKillHarness {
             .collect();
         task_ids.sort();
         task_ids
+    }
+
+    async fn assert_pool_capacity(&self, expected_active: u32, expected_free: u32) {
+        let status = self
+            .pool
+            .get_status()
+            .await
+            .expect("pool status should succeed");
+        let model = status
+            .per_model
+            .get("model-a")
+            .expect("model-a status should be present");
+        assert_eq!(
+            (model.active, model.free),
+            (expected_active, expected_free),
+            "unexpected pool capacity state: {status:?}"
+        );
+    }
+
+    async fn wait_for_pool_capacity(&self, expected_active: u32, expected_free: u32) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let status = self
+                .pool
+                .get_status()
+                .await
+                .expect("pool status should succeed");
+            if let Some(model) = status.per_model.get("model-a")
+                && (model.active, model.free) == (expected_active, expected_free)
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for model-a capacity active={expected_active} free={expected_free}; status={status:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     async fn wait_for_pool_session(&self, task_id: &str) {
