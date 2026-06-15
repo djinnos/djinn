@@ -369,6 +369,15 @@ pub enum TaskRunOutcome {
         turn_span: (u32, u32),
         session_id: String,
     },
+    /// The worker deliberately parked after budget wind-down. Added LAST to
+    /// preserve bincode discriminants of all existing terminal-report variants.
+    Parked {
+        reason: String,
+        wind_down_ignored: bool,
+        session_id: String,
+        tokens_in: i64,
+        tokens_out: i64,
+    },
 }
 
 /// Return value of `TaskRunSupervisor::run`.

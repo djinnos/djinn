@@ -170,9 +170,58 @@ async fn session_show_returns_full_shape_with_tokens() {
         "status",
         "tokens_in",
         "tokens_out",
+        "parked_reason",
     ] {
         assert!(payload.get(key).is_some(), "missing key {key}");
     }
+}
+
+#[tokio::test]
+async fn session_list_and_show_surface_parked_reason() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db();
+    let project = common::create_test_project(db).await;
+    let epic = common::create_test_epic(db, &project.id).await;
+    let task = common::create_test_task(db, &project.id, &epic.id).await;
+    let session = common::create_test_session(db, &project.id, &task.id).await;
+
+    let repo = djinn_db::SessionRepository::new(db.clone(), EventBus::noop());
+    repo.update(
+        &session.id,
+        djinn_core::models::SessionStatus::Completed,
+        11,
+        22,
+        0,
+        0,
+        Some("budget".to_string()),
+    )
+    .await
+    .expect("set parked_reason");
+
+    let show = harness
+        .call_tool(
+            "session_show",
+            json!({ "id": session.id, "project": project.slug() }),
+        )
+        .await
+        .expect("session_show should dispatch");
+    assert_eq!(
+        show.get("parked_reason").and_then(|v| v.as_str()),
+        Some("budget")
+    );
+
+    let list = harness
+        .call_tool(
+            "session_list",
+            json!({ "task_id": task.id, "project": project.slug() }),
+        )
+        .await
+        .expect("session_list should dispatch");
+    let sessions = list.get("sessions").and_then(|v| v.as_array()).unwrap();
+    assert_eq!(
+        sessions[0].get("parked_reason").and_then(|v| v.as_str()),
+        Some("budget")
+    );
 }
 
 #[tokio::test]

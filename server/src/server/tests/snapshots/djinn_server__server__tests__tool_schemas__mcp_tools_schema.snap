@@ -12855,6 +12855,11 @@ expression: signatures
               "nullable": true,
               "type": "string"
             },
+            "parked_reason": {
+              "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
+              "nullable": true,
+              "type": "string"
+            },
             "started_at": {
               "type": "string"
             },
@@ -13045,6 +13050,11 @@ expression: signatures
             },
             "project_id": {
               "description": "`None` for chat sessions (global, user-scoped); `Some(_)` for every\nother agent type. See `SessionRecord::project_id`.",
+              "nullable": true,
+              "type": "string"
+            },
+            "parked_reason": {
+              "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
               "nullable": true,
               "type": "string"
             },
@@ -14405,6 +14415,11 @@ expression: signatures
             },
             "project_id": {
               "description": "`None` for chat sessions (global, user-scoped); `Some(_)` for every\nother agent type. See `SessionRecord::project_id`.",
+              "nullable": true,
+              "type": "string"
+            },
+            "parked_reason": {
+              "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
               "nullable": true,
               "type": "string"
             },

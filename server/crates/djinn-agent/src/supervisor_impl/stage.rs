@@ -189,6 +189,25 @@ fn stage_outcome_for_reply_loop_guard_error(error: &LoopGuardError) -> StageOutc
     stage_outcome_for_runtime_loop_guard_trip(&trip)
 }
 
+fn remaining_concerns_starts_budget_parked(payload: &Option<serde_json::Value>) -> bool {
+    let Some(value) = payload
+        .as_ref()
+        .and_then(|payload| payload.get("remaining_concerns"))
+    else {
+        return false;
+    };
+
+    value
+        .as_str()
+        .is_some_and(|s| s.starts_with("budget-parked:"))
+        || value.as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item.as_str()
+                    .is_some_and(|s| s.starts_with("budget-parked:"))
+            })
+        })
+}
+
 /// Read-only multi-repo: resolve the epic's read-source projects to slugs/names
 /// so the prompt can flag them as specifically relevant. We no longer clone
 /// them eagerly — the agent reads any registered repo on demand via
@@ -552,7 +571,17 @@ pub(crate) async fn execute_stage(
             .await;
 
     // ── Finalize session ─────────────────────────────────────────────────────
-    let session_status = if reply_result.is_ok() {
+    let budget_summary_parked = reply_result.is_ok()
+        && final_output.finalize_tool_name.as_deref() == Some("submit_work")
+        && remaining_concerns_starts_budget_parked(&final_output.finalize_payload);
+    let wind_down_ignored_park = reply_result.as_ref().err().is_some_and(|e| {
+        e.to_string()
+            .contains("wind-down summary directive was injected")
+    });
+    let parked_reason =
+        (budget_summary_parked || wind_down_ignored_park).then(|| "budget".to_string());
+
+    let session_status = if reply_result.is_ok() || wind_down_ignored_park {
         SessionStatus::Completed
     } else {
         SessionStatus::Failed
@@ -565,7 +594,7 @@ pub(crate) async fn execute_stage(
             tokens_out,
             cache_read,
             cache_write,
-            None,
+            parked_reason,
         )
         .await
     {
@@ -581,7 +610,15 @@ pub(crate) async fn execute_stage(
     let final_error = reply_result.as_ref().err().map(|e| e.to_string());
     let stage_outcome = match reply_result {
         Err(e) => {
-            if let Some(trip) = e.downcast_ref::<LoopGuardTrip>() {
+            if wind_down_ignored_park {
+                StageOutcome::Parked {
+                    reason: "budget".to_string(),
+                    wind_down_ignored: true,
+                    session_id: session_id.clone(),
+                    tokens_in,
+                    tokens_out,
+                }
+            } else if let Some(trip) = e.downcast_ref::<LoopGuardTrip>() {
                 stage_outcome_for_runtime_loop_guard_trip(trip)
             } else if let Some(guard_error) = e.downcast_ref::<LoopGuardError>() {
                 stage_outcome_for_reply_loop_guard_error(guard_error)
@@ -598,6 +635,13 @@ pub(crate) async fn execute_stage(
             let finalize_name = final_output.finalize_tool_name.as_deref().unwrap_or("");
             match role_kind {
                 RoleKind::Worker => match finalize_name {
+                    "submit_work" if budget_summary_parked => StageOutcome::Parked {
+                        reason: "budget".to_string(),
+                        wind_down_ignored: false,
+                        session_id: session_id.clone(),
+                        tokens_in,
+                        tokens_out,
+                    },
                     "submit_work" => StageOutcome::WorkerDone,
                     "request_lead" => StageOutcome::Escalate {
                         reason: extract_reason(&final_output.finalize_payload)

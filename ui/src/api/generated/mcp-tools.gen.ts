@@ -5927,6 +5927,10 @@ export namespace SessionActiveOutputSchema {
    * other agent type. See `SessionRecord::project_id`.
    */
   project_id?: string
+  /**
+   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
+   */
+  parked_reason?: string
   started_at: string
   status: string
   task_id?: string
@@ -6015,6 +6019,10 @@ export namespace SessionListOutputSchema {
    * other agent type. See `SessionRecord::project_id`.
    */
   project_id?: string
+  /**
+   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
+   */
+  parked_reason?: string
   started_at: string
   status: string
   task_id?: string
@@ -6729,6 +6737,10 @@ export namespace TaskTimelineOutputSchema {
    * other agent type. See `SessionRecord::project_id`.
    */
   project_id?: string
+  /**
+   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
+   */
+  parked_reason?: string
   started_at: string
   status: string
   task_id?: string

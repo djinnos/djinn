@@ -26,6 +26,48 @@ export interface ContentBlock {
   [k: string]: unknown;
 }
 
+export function mapBudgetParkActivity(
+  entry: Record<string, unknown>,
+  sessionsById: Map<string, Record<string, unknown>>,
+): BudgetParkBlock | null {
+  const eventType = asString(entry.event_type);
+  if (eventType !== "work_submitted") return null;
+
+  const payload = asRecord(entry.payload) ?? {};
+  const remainingConcerns = budgetParkConcern(payload.remaining_concerns);
+  if (!remainingConcerns) return null;
+
+  const sessionId = asString(payload.session_id) ?? asString(entry.session_id);
+  const parkedReason = sessionId
+    ? asString(sessionsById.get(sessionId)?.parked_reason)
+    : onlyParkedReason(sessionsById);
+  if (!parkedReason) return null;
+
+  return {
+    kind: "budget_park",
+    summary: asString(payload.summary) ?? asString(entry.summary) ?? "Budget-parked with no summary text.",
+    remainingConcerns,
+    parkedReason,
+    sessionId,
+    timestamp: asString(entry.timestamp) ?? new Date(0).toISOString(),
+  };
+}
+
+function budgetParkConcern(value: unknown): string | undefined {
+  if (typeof value === "string" && value.startsWith("budget-parked:")) return value;
+  if (Array.isArray(value)) {
+    return value.find((item): item is string => typeof item === "string" && item.startsWith("budget-parked:"));
+  }
+  return undefined;
+}
+
+function onlyParkedReason(sessionsById: Map<string, Record<string, unknown>>): string | undefined {
+  const parked = Array.from(sessionsById.values())
+    .map((session) => asString(session.parked_reason))
+    .filter((reason): reason is string => Boolean(reason));
+  return parked.length === 1 ? parked[0] : undefined;
+}
+
 export interface ChatMessage {
   kind: "message";
   role: "system" | "user" | "assistant";
@@ -100,6 +142,15 @@ export interface LoopGuardTrippedBlock {
   timestamp: string;
 }
 
+export interface BudgetParkBlock {
+  kind: "budget_park";
+  summary: string;
+  remainingConcerns?: string;
+  parkedReason: string;
+  sessionId?: string;
+  timestamp: string;
+}
+
 export type TimelineEntry =
   | ChatMessage
   | SystemDivider
@@ -107,7 +158,8 @@ export type TimelineEntry =
   | CommentBlock
   | VerificationBlock
   | StreamingDelta
-  | LoopGuardTrippedBlock;
+  | LoopGuardTrippedBlock
+  | BudgetParkBlock;
 
 export interface SessionInfo {
   id: string;
@@ -120,6 +172,7 @@ export interface SessionInfo {
   tokensOut: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  parkedReason?: string;
 }
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
@@ -156,6 +209,9 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
       }
 
       const sessionList = result.sessions ?? [];
+      const sessionsById = new Map(
+        sessionList.map((s) => [s.id, s] as const)
+      );
       setSessions(
         sessionList.map((s) => ({
           id: s.id,
@@ -168,6 +224,7 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
           tokensOut: s.tokens_out,
           cacheReadTokens: s.cache_read_tokens ?? 0,
           cacheWriteTokens: s.cache_write_tokens ?? 0,
+          parkedReason: s.parked_reason ?? undefined,
         }))
       );
 
@@ -191,8 +248,11 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
       // Add activity log entries as dividers and commands
       for (const entry of result.activity ?? []) {
         const loopGuardEntry = mapLoopGuardActivity(entry as Record<string, unknown>);
+        const budgetParkEntry = mapBudgetParkActivity(entry as Record<string, unknown>, sessionsById);
         if (loopGuardEntry) {
           entries.push(loopGuardEntry);
+        } else if (budgetParkEntry) {
+          entries.push(budgetParkEntry);
         } else if (entry.event_type === "status_changed") {
           const payload = entry.payload as Record<string, unknown>;
           const from = payload?.from_status as string | undefined;

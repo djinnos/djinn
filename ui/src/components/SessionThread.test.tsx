@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import { SessionThread } from '@/components/SessionThread';
-import { mapLoopGuardActivity } from '@/hooks/useSessionMessages';
+import { mapBudgetParkActivity, mapLoopGuardActivity } from '@/hooks/useSessionMessages';
 import type { TimelineEntry } from '@/hooks/useSessionMessages';
 
 function makeMessage(overrides: Partial<Extract<TimelineEntry, { kind: 'message' }>> = {}): Extract<TimelineEntry, { kind: 'message' }> {
@@ -147,6 +147,58 @@ describe('SessionThread', () => {
 
     expect(screen.getByText('Work Submitted')).toBeInTheDocument();
     expect(screen.getByText('Implemented feature X')).toBeInTheDocument();
+  });
+
+  it('renders budget-park work_submitted activity as a distinct card', () => {
+    const budgetParkEntry = mapBudgetParkActivity(
+      {
+        event_type: 'work_submitted',
+        timestamp: '2026-01-01T00:04:00Z',
+        payload: {
+          session_id: 'session-budget',
+          summary: 'Implemented the safe subset before budget ran out.',
+          remaining_concerns: 'budget-parked: finish the UI snapshot update',
+        },
+      },
+      new Map([['session-budget', { id: 'session-budget', parked_reason: 'budget' }]])
+    );
+
+    expect(budgetParkEntry).toMatchObject({
+      kind: 'budget_park',
+      summary: 'Implemented the safe subset before budget ran out.',
+      remainingConcerns: 'budget-parked: finish the UI snapshot update',
+      parkedReason: 'budget',
+      sessionId: 'session-budget',
+    });
+    expect(mapBudgetParkActivity(
+      {
+        event_type: 'work_submitted',
+        timestamp: '2026-01-01T00:04:00Z',
+        payload: {
+          summary: 'ordinary submit',
+          remaining_concerns: 'budget-parked: but no parked session',
+        },
+      },
+      new Map()
+    )).toBeNull();
+
+    if (!budgetParkEntry) throw new Error('expected budget park timeline entry');
+
+    render(
+      <SessionThread
+        timeline={[budgetParkEntry]}
+        streamingText={new Map()}
+        loading={false}
+        error={null}
+      />
+    );
+
+    expect(screen.getByText('Budget park')).toBeInTheDocument();
+    expect(screen.getByText('Budget park — summary')).toBeInTheDocument();
+    expect(screen.getByText('parked_reason: budget')).toBeInTheDocument();
+    expect(screen.getByText('Implemented the safe subset before budget ran out.')).toBeInTheDocument();
+    expect(screen.getByText('budget-parked: finish the UI snapshot update')).toBeInTheDocument();
+    expect(screen.queryByText('Work Submitted')).not.toBeInTheDocument();
   });
 
   it('shows loading state when loading and no timeline yet', () => {
