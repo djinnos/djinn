@@ -48,6 +48,7 @@ use djinn_core::models::{SessionRecord, SessionStatus, Task, TaskRunStatus};
 use djinn_provider::message::Conversation;
 use djinn_provider::provider::{
     LlmProvider, LlmResponse, ProviderCapabilities, ProviderConfig, ToolChoice, create_provider,
+    default_reasoning_effort_for_model,
 };
 use djinn_runtime::{ResolvedCredentials, RoleKind, SerializableCredential};
 use djinn_stack::environment::EnvironmentConfig;
@@ -133,13 +134,30 @@ pub(crate) fn build_provider_from_serializable(
     context_window: u32,
     base_url_override: Option<String>,
 ) -> Result<Arc<dyn LlmProvider>, StageError> {
+    let cfg =
+        build_provider_config_from_serializable(cred, model_id, context_window, base_url_override)?;
+    Ok(Arc::from(create_provider(cfg)))
+}
+
+pub(crate) fn build_provider_config_from_serializable(
+    cred: &SerializableCredential,
+    model_id: &str,
+    context_window: u32,
+    base_url_override: Option<String>,
+) -> Result<ProviderConfig, StageError> {
     match cred {
         SerializableCredential::ApiKey { api_key, .. } => {
             let (provider_id, model_name) = parse_model_id(model_id)
                 .map_err(|e| StageError::ModelResolution(format!("parse_model_id: {e}")))?;
             let format_family = format_family_for_provider(&provider_id, &model_name);
             let base_url = base_url_override.unwrap_or_else(|| default_base_url(&provider_id));
-            let provider = create_provider(ProviderConfig {
+            let reasoning_effort = djinn_provider::catalog::CatalogService::new()
+                .find_model(model_id)
+                .and_then(|model| {
+                    default_reasoning_effort_for_model(model.reasoning, format_family, &model.id)
+                });
+
+            Ok(ProviderConfig {
                 base_url,
                 auth: auth_method_for_provider(&provider_id, api_key),
                 format_family,
@@ -149,9 +167,8 @@ pub(crate) fn build_provider_from_serializable(
                 session_affinity_key: None,
                 provider_headers: Default::default(),
                 capabilities: capabilities_for_provider(&provider_id),
-                reasoning_effort: None,
-            });
-            Ok(Arc::from(provider))
+                reasoning_effort,
+            })
         }
         SerializableCredential::OAuthConfig { config_json } => {
             let wire: OAuthConfigWire = serde_json::from_str(config_json).map_err(|e| {
@@ -173,8 +190,7 @@ pub(crate) fn build_provider_from_serializable(
                     max_tokens_default: cfg.capabilities.max_tokens_default,
                 };
             }
-            let provider = create_provider(cfg);
-            Ok(Arc::from(provider))
+            Ok(cfg)
         }
     }
 }
@@ -479,5 +495,98 @@ impl SupervisorServices for WorkerSupervisorServices {
         arguments: serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
         self.rpc.tool_ci_job_log(session_task_id, arguments).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_provider::provider::{AuthMethod, FormatFamily, ReasoningEffort};
+
+    fn api_key_credential() -> SerializableCredential {
+        SerializableCredential::ApiKey {
+            key_name: "MINIMAX_API_KEY".to_string(),
+            api_key: "test-key".to_string(),
+        }
+    }
+
+    #[test]
+    fn api_key_reconstruction_enables_minimax_reasoning_from_catalog() {
+        let cfg = build_provider_config_from_serializable(
+            &api_key_credential(),
+            "minimax-coding-plan/MiniMax-M2.5",
+            262_144,
+            Some("https://api.minimax.io/anthropic/v1".to_string()),
+        )
+        .expect("config builds");
+
+        assert_eq!(cfg.format_family, FormatFamily::Anthropic);
+        assert_eq!(cfg.model_id, "MiniMax-M2.5");
+        assert_eq!(cfg.reasoning_effort, Some(ReasoningEffort::Medium));
+    }
+
+    #[test]
+    fn api_key_reconstruction_keeps_non_reasoning_catalog_model_none() {
+        let cfg = build_provider_config_from_serializable(
+            &api_key_credential(),
+            "openai/gpt-4.1-mini",
+            1_047_576,
+            Some("https://api.openai.com".to_string()),
+        )
+        .expect("config builds");
+
+        assert_eq!(cfg.format_family, FormatFamily::OpenAI);
+        assert_eq!(cfg.model_id, "gpt-4.1-mini");
+        assert_eq!(cfg.reasoning_effort, None);
+    }
+
+    #[test]
+    fn api_key_reconstruction_falls_back_to_none_when_catalog_lookup_misses() {
+        let cfg = build_provider_config_from_serializable(
+            &api_key_credential(),
+            "minimax-coding-plan/not-in-catalog",
+            262_144,
+            Some("https://api.minimax.io/anthropic/v1".to_string()),
+        )
+        .expect("config builds");
+
+        assert_eq!(cfg.format_family, FormatFamily::Anthropic);
+        assert_eq!(cfg.reasoning_effort, None);
+    }
+
+    #[test]
+    fn oauth_reconstruction_preserves_wire_reasoning_effort() {
+        let cfg = ProviderConfig {
+            base_url: "https://api.minimax.io/anthropic/v1".to_string(),
+            auth: AuthMethod::BearerToken("oauth-token".to_string()),
+            format_family: FormatFamily::Anthropic,
+            model_id: "provider-default".to_string(),
+            context_window: 1,
+            telemetry: None,
+            session_affinity_key: Some("host-affinity".to_string()),
+            provider_headers: Default::default(),
+            capabilities: ProviderCapabilities {
+                streaming: true,
+                max_tokens_default: Some(64_000),
+            },
+            reasoning_effort: Some(ReasoningEffort::High),
+        };
+        let wire = OAuthConfigWire::from_provider_config(&cfg);
+        let cred = SerializableCredential::OAuthConfig {
+            config_json: serde_json::to_string(&wire).expect("wire serializes"),
+        };
+
+        let rebuilt = build_provider_config_from_serializable(
+            &cred,
+            "minimax-coding-plan/MiniMax-M2.5",
+            262_144,
+            None,
+        )
+        .expect("config builds");
+
+        assert_eq!(rebuilt.model_id, "MiniMax-M2.5");
+        assert_eq!(rebuilt.context_window, 262_144);
+        assert_eq!(rebuilt.session_affinity_key, None);
+        assert_eq!(rebuilt.reasoning_effort, Some(ReasoningEffort::High));
     }
 }
