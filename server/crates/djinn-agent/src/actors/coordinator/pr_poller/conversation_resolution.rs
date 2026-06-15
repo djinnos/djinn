@@ -42,7 +42,7 @@ impl CoordinatorActor {
     }
 }
 pub(in crate::actors::coordinator) fn is_conversation_resolution_block(
-    err: &anyhow::Error,
+    err: &(impl std::fmt::Display + ?Sized),
 ) -> bool {
     let msg = format!("{err}").to_lowercase();
     if !msg.contains("405") {
