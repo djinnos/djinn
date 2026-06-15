@@ -797,7 +797,10 @@ pub(crate) async fn execute_stage(
     {
         crate::actors::slot::finalize_handlers::handle_budget_park(
             summary,
-            "budget-triggered wind-down summary captured",
+            final_output
+                .budget_wind_down_details
+                .as_deref()
+                .unwrap_or("budget-triggered wind-down summary captured"),
             &task.id,
             agent_context,
         )

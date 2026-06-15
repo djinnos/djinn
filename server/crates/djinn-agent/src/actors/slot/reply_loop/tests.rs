@@ -1982,6 +1982,14 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         output.budget_wind_down_summary.as_deref(),
         Some("Budget handoff: implemented A; B remains.")
     );
+    assert!(
+        output
+            .budget_wind_down_details
+            .as_deref()
+            .is_some_and(|details| details.contains("hard budget threshold reached")),
+        "budget wind-down should preserve structured trigger details: {:?}",
+        output.budget_wind_down_details
+    );
     assert_eq!(provider.remaining(), 0);
     let user_text = role_text(&conv, Role::User);
     assert!(user_text.contains("You are out of steps"));
@@ -2054,5 +2062,9 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
     assert!(
         output.budget_wind_down_summary.is_none(),
         "ignored wind-down must not synthesize a misleading summary"
+    );
+    assert!(
+        output.budget_wind_down_details.is_none(),
+        "ignored wind-down without summary must not synthesize handoff details"
     );
 }

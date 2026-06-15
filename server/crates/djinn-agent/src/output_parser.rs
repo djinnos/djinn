@@ -20,6 +20,11 @@ pub(crate) struct ParsedAgentOutput {
     /// can park the run and persist an extractor-compatible `work_submitted`
     /// activity without treating every text-only stop as a budget park.
     pub budget_wind_down_summary: Option<String>,
+    /// Structured details describing why the budget wind-down was triggered.
+    /// Paired with `budget_wind_down_summary` so the handoff activity can record
+    /// `remaining_concerns: "budget-parked: <details>"` instead of a generic
+    /// placeholder.
+    pub budget_wind_down_details: Option<String>,
 }
 
 impl Default for ParsedAgentOutput {
@@ -37,6 +42,7 @@ impl ParsedAgentOutput {
             finalize_payload: None,
             finalize_tool_name: None,
             budget_wind_down_summary: None,
+            budget_wind_down_details: None,
         }
     }
 

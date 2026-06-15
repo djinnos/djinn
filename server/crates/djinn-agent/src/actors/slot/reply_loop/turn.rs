@@ -962,6 +962,9 @@ pub(crate) async fn run_reply_loop(
                     let summary = turn_text.trim();
                     if !summary.is_empty() {
                         output.budget_wind_down_summary = Some(summary.to_string());
+                        output.budget_wind_down_details = wind_down_reason
+                            .as_ref()
+                            .map(WindDownReason::details);
                     }
                 }
                 tracing::info!(
