@@ -11,6 +11,15 @@ pub struct ResolvedSkill {
     /// content on demand, so `required: true` skills opt out of disclosure.
     /// Sourced from the skill's `required:` frontmatter key (default `false`).
     pub required: bool,
+    /// `trust_level:` frontmatter key, defaulting to `"project"`. Free-form
+    /// string so projects can adopt their own taxonomy; the manifest records
+    /// whatever the skill declared verbatim.
+    pub trust_level: String,
+    /// `recommended_for_roles:` frontmatter list. Empty when omitted.
+    pub recommended_for_roles: Vec<String>,
+    /// `tags:` frontmatter list. Empty when omitted. Each entry is trimmed;
+    /// empty/whitespace tags are dropped by the parser.
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -18,7 +27,18 @@ struct SkillFrontmatter {
     name: Option<String>,
     description: Option<String>,
     required: bool,
+    /// Optional `trust_level:` frontmatter key. Defaults to `"project"` for
+    /// skills that do not declare it; legacy skills are unaffected.
+    trust_level: String,
+    /// Optional `recommended_for_roles:` frontmatter list. Defaults to empty.
+    recommended_for_roles: Vec<String>,
+    /// Optional `tags:` frontmatter list. Defaults to empty.
+    tags: Vec<String>,
 }
+
+/// Default `trust_level` used when a skill's frontmatter omits the key. Keeps
+/// existing skills manifest-friendly without forcing an edit.
+pub(crate) const DEFAULT_TRUST_LEVEL: &str = "project";
 
 /// Returns `true` when the value is a truthy frontmatter flag
 /// (`true` / `1` / `yes` / `on`, case-insensitive).
@@ -29,11 +49,39 @@ fn parse_bool_flag(value: &str) -> bool {
     )
 }
 
+/// Parse a YAML-style flow/inline list (e.g. `[worker, reviewer]`) or
+/// comma-separated values into a `Vec<String>`. Empty/whitespace entries are
+/// dropped; matching `trim_matches('"')` / `'\''` is applied per element.
+fn parse_inline_list(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    if inner.is_empty() {
+        return Vec::new();
+    }
+    inner
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim()
+                .to_string()
+        })
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
 fn parse_frontmatter(frontmatter_raw: &str) -> Option<SkillFrontmatter> {
     let mut frontmatter = SkillFrontmatter {
         name: None,
         description: None,
         required: false,
+        trust_level: DEFAULT_TRUST_LEVEL.to_string(),
+        recommended_for_roles: Vec::new(),
+        tags: Vec::new(),
     };
     for line in frontmatter_raw.lines() {
         let line = line.trim();
@@ -54,6 +102,18 @@ fn parse_frontmatter(frontmatter_raw: &str) -> Option<SkillFrontmatter> {
             "name" => frontmatter.name = Some(value),
             "description" => frontmatter.description = Some(value),
             "required" => frontmatter.required = parse_bool_flag(&value),
+            "trust_level" => {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    frontmatter.trust_level = trimmed.to_string();
+                }
+            }
+            "recommended_for_roles" => {
+                frontmatter.recommended_for_roles = parse_inline_list(&value);
+            }
+            "tags" => {
+                frontmatter.tags = parse_inline_list(&value);
+            }
             _ => {}
         }
     }
@@ -70,13 +130,33 @@ pub fn load_skills(project_root: &Path, names: &[String]) -> Vec<ResolvedSkill> 
         .collect()
 }
 
+/// Load skills together with the on-disk path each one was resolved from.
+///
+/// Mirrors [`load_skills`] exactly — same candidate-order resolution, same
+/// frontmatter parsing, same `references/` inclusion. Exists so the manifest
+/// generator can record per-skill `source_files[].path` without re-resolving
+/// names and risking a different file matching between load and manifest.
+pub(crate) fn load_skills_with_sources(
+    project_root: &Path,
+    names: &[String],
+) -> Vec<(ResolvedSkill, PathBuf)> {
+    names
+        .iter()
+        .filter_map(|name| {
+            let path = skill_path(project_root, name)?;
+            let skill = load_skill(&path, name)?;
+            Some((skill, path))
+        })
+        .collect()
+}
+
 fn load_skill(path: &Path, default_name: &str) -> Option<ResolvedSkill> {
     let content = fs::read_to_string(path).ok()?;
     let references = skill_references_content(path);
     parse_skill_file(default_name, &content, references.as_deref())
 }
 
-fn skill_path(project_root: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn skill_path(project_root: &Path, name: &str) -> Option<PathBuf> {
     let candidates = [
         project_root
             .join(".claude")
@@ -140,7 +220,11 @@ fn skill_references_content(skill_path: &Path) -> Option<String> {
     }
 }
 
-fn collect_reference_files(root: &Path, current_dir: &Path, files: &mut Vec<(PathBuf, PathBuf)>) {
+pub(crate) fn collect_reference_files(
+    root: &Path,
+    current_dir: &Path,
+    files: &mut Vec<(PathBuf, PathBuf)>,
+) {
     let Ok(entries) = fs::read_dir(current_dir) else {
         return;
     };
@@ -207,6 +291,9 @@ fn parse_skill_file(
         description,
         content,
         required,
+        trust_level: frontmatter.trust_level,
+        recommended_for_roles: frontmatter.recommended_for_roles,
+        tags: frontmatter.tags,
     })
 }
 
@@ -573,12 +660,14 @@ mod tests {
                 description: "Safe Rust guidelines".to_string(),
                 content: "Avoid unsafe blocks.".to_string(),
                 required: false,
+                ..sample_metadata()
             },
             ResolvedSkill {
                 name: "git-workflow".to_string(),
                 description: "Git practices".to_string(),
                 content: "Commit small changes.".to_string(),
                 required: false,
+                ..sample_metadata()
             },
         ];
         let section = format_skills_section(&skills);
@@ -597,11 +686,24 @@ mod tests {
             description: "My skill description".to_string(),
             content: String::new(),
             required: false,
+            ..sample_metadata()
         }];
         let section = format_skills_section(&skills);
 
         assert!(section.contains("## Available Skills"));
         assert!(section.contains("**my-skill**: My skill description"));
+    }
+
+    fn sample_metadata() -> ResolvedSkill {
+        ResolvedSkill {
+            name: String::new(),
+            description: String::new(),
+            content: String::new(),
+            required: false,
+            trust_level: String::new(),
+            recommended_for_roles: Vec::new(),
+            tags: Vec::new(),
+        }
     }
 
     fn sample_skills() -> Vec<ResolvedSkill> {
@@ -611,12 +713,14 @@ mod tests {
                 description: "Safe Rust guidelines".to_string(),
                 content: "Avoid unsafe blocks.".to_string(),
                 required: false,
+                ..sample_metadata()
             },
             ResolvedSkill {
                 name: "house-rules".to_string(),
                 description: "Mandatory house rules".to_string(),
                 content: "Always run the tests.".to_string(),
                 required: true,
+                ..sample_metadata()
             },
         ]
     }
@@ -655,6 +759,75 @@ mod tests {
             "Always run the tests."
         );
         assert_eq!(section, expected);
+    }
+
+    #[test]
+    fn parse_skill_metadata_defaults_when_keys_omitted() {
+        // Skills without the new optional keys must still parse and expose
+        // safe defaults — preserving legacy behaviour.
+        let content = "---\ndescription: Plain skill\n---\n\nBody.\n";
+        let skill = parse_skill_file("plain", content, None).expect("skill should parse");
+        assert_eq!(skill.trust_level, "project");
+        assert!(skill.recommended_for_roles.is_empty());
+        assert!(skill.tags.is_empty());
+        assert!(!skill.required);
+    }
+
+    #[test]
+    fn parse_skill_metadata_reads_trust_level_roles_and_tags() {
+        let content = "---\nname: annotated\ndescription: With metadata\ntrust_level: trusted\nrecommended_for_roles: [worker, reviewer]\ntags: [alpha, beta]\n---\n\nBody.\n";
+        let skill = parse_skill_file("fallback", content, None).expect("skill should parse");
+        assert_eq!(skill.trust_level, "trusted");
+        assert_eq!(skill.recommended_for_roles, vec!["worker", "reviewer"]);
+        assert_eq!(skill.tags, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn parse_skill_metadata_supports_comma_separated_lists() {
+        // Comma-separated values (no brackets) should also parse, since the
+        // existing frontmatter style is plain `key: a, b, c`.
+        let content = "---\ndescription: Comma\nrecommended_for_roles: worker, reviewer\ntags: alpha, beta, gamma\n---\n\nBody.\n";
+        let skill = parse_skill_file("fallback", content, None).expect("skill should parse");
+        assert_eq!(skill.recommended_for_roles, vec!["worker", "reviewer"]);
+        assert_eq!(skill.tags, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn parse_skill_metadata_drops_empty_list_entries() {
+        let content =
+            "---\ndescription: Empty tags\ntags: [\"\", alpha, \"  \", beta]\n---\n\nBody.\n";
+        let skill = parse_skill_file("fallback", content, None).expect("skill should parse");
+        assert_eq!(skill.tags, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn parse_skill_empty_trust_level_falls_back_to_default() {
+        // An explicit-but-empty `trust_level:` should fall back to the default
+        // so the manifest never records an empty value.
+        let content = "---\ndescription: Empty trust\ntrust_level: \"\"\n---\n\nBody.\n";
+        let skill = parse_skill_file("fallback", content, None).expect("skill should parse");
+        assert_eq!(skill.trust_level, "project");
+    }
+
+    #[test]
+    fn load_skills_with_sources_returns_source_path_per_skill() {
+        let tmp = crate::test_helpers::test_tempdir("djinn-skills-sources-");
+        let skills_dir = make_skill_dir(&tmp, ".djinn");
+        write_flat_skill(
+            &skills_dir,
+            "with-path",
+            "---\ndescription: Has path\n---\n\nBody.\n",
+        );
+
+        let resolved = load_skills_with_sources(tmp.path(), &["with-path".to_string()]);
+        assert_eq!(resolved.len(), 1);
+        let (skill, path) = &resolved[0];
+        assert_eq!(skill.name, "with-path");
+        assert!(
+            path.ends_with("with-path.md"),
+            "expected source path to end with with-path.md, got {:?}",
+            path
+        );
     }
 
     #[test]
