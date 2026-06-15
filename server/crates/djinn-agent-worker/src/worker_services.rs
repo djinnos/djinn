@@ -412,6 +412,7 @@ impl SupervisorServices for WorkerSupervisorServices {
         tokens_out: i64,
         cache_read: i64,
         cache_write: i64,
+        parked_reason: Option<String>,
     ) -> Result<(), String> {
         self.rpc
             .update_session_status(
@@ -421,6 +422,7 @@ impl SupervisorServices for WorkerSupervisorServices {
                 tokens_out,
                 cache_read,
                 cache_write,
+                parked_reason,
             )
             .await
     }

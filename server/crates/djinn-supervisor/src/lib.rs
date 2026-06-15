@@ -1974,6 +1974,7 @@ mod tests {
             unimplemented!("not exercised")
         }
 
+        #[allow(clippy::too_many_arguments)]
         async fn update_session_status(
             &self,
             _session_id: String,
@@ -1982,6 +1983,7 @@ mod tests {
             _tokens_out: i64,
             _cache_read: i64,
             _cache_write: i64,
+            _parked_reason: Option<String>,
         ) -> Result<(), String> {
             unimplemented!("not exercised")
         }

@@ -472,7 +472,15 @@ pub(crate) async fn execute_stage(
             Some(provider) => provider,
             None => {
                 let _ = services
-                    .update_session_status(session_id.clone(), SessionStatus::Failed, 0, 0, 0, 0)
+                    .update_session_status(
+                        session_id.clone(),
+                        SessionStatus::Failed,
+                        0,
+                        0,
+                        0,
+                        0,
+                        None,
+                    )
                     .await;
                 return Err(StageError::ModelResolution(
                     "no provider credential resolved for model".into(),
@@ -557,6 +565,7 @@ pub(crate) async fn execute_stage(
             tokens_out,
             cache_read,
             cache_write,
+            None,
         )
         .await
     {

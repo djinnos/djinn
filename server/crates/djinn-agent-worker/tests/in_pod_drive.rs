@@ -290,6 +290,7 @@ async fn handle_rpc(
             tokens_out,
             cache_read,
             cache_write,
+            parked_reason,
         } => {
             audit.lock().await.update_session_status += 1;
             let _ = (
@@ -299,6 +300,7 @@ async fn handle_rpc(
                 tokens_out,
                 cache_read,
                 cache_write,
+                parked_reason,
             );
             ServiceRpcResponse::UpdateSessionStatus(Ok(()))
         }
