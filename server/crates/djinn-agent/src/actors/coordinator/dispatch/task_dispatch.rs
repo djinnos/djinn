@@ -44,6 +44,87 @@ fn overlay_inflight_ledger(
         let entry = running_by_user_model.entry(key).or_insert(0);
         *entry = (*entry).max(lcount);
     }
+    #[cfg(test)]
+    observe_dispatch_cap_counts(
+        DispatchCapObservationStage::LedgerOverlay,
+        running_by_user_model,
+    );
+}
+
+/// Test-only cap-count instrumentation for wnd1 stress coverage.
+///
+/// Production dispatch behavior is unchanged: in non-test builds the observer
+/// types and recording calls are not compiled. Tests can clear the shared sink,
+/// drive a dispatch pass (or the ledger helper directly), then take the ordered
+/// observations to assert instantaneous per-user/per-model counts.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::actors::coordinator) struct DispatchCapObservation {
+    pub creator_user_id: String,
+    pub model: String,
+    pub effective_count: u32,
+    pub stage: DispatchCapObservationStage,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::actors::coordinator) enum DispatchCapObservationStage {
+    /// Count after DB-seeded running rows have been overlaid with the in-flight
+    /// ledger via `max(db_count, ledger_count)`.
+    LedgerOverlay,
+    /// Count consulted by the per-user cap gate for a candidate model.
+    CapConsidered,
+    /// Count immediately after a successful dispatch increments local state and
+    /// records an in-flight ledger entry, before any session row may exist.
+    InflightIncremented,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static DISPATCH_CAP_OBSERVATIONS: std::cell::RefCell<Vec<DispatchCapObservation>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(in crate::actors::coordinator) fn clear_dispatch_cap_observations() {
+    DISPATCH_CAP_OBSERVATIONS.with(|observations| observations.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(in crate::actors::coordinator) fn take_dispatch_cap_observations() -> Vec<DispatchCapObservation>
+{
+    DISPATCH_CAP_OBSERVATIONS.with(|observations| std::mem::take(&mut *observations.borrow_mut()))
+}
+
+#[cfg(test)]
+fn observe_dispatch_cap_count(
+    stage: DispatchCapObservationStage,
+    creator_user_id: &str,
+    model: &str,
+    effective_count: u32,
+) {
+    DISPATCH_CAP_OBSERVATIONS.with(|observations| {
+        observations.borrow_mut().push(DispatchCapObservation {
+            creator_user_id: creator_user_id.to_owned(),
+            model: model.to_owned(),
+            effective_count,
+            stage,
+        });
+    });
+}
+
+#[cfg(test)]
+fn observe_dispatch_cap_counts(
+    stage: DispatchCapObservationStage,
+    running_by_user_model: &HashMap<(String, String), u32>,
+) {
+    let mut counts: Vec<_> = running_by_user_model.iter().collect();
+    counts.sort_by(|((creator_a, model_a), _), ((creator_b, model_b), _)| {
+        creator_a.cmp(creator_b).then_with(|| model_a.cmp(model_b))
+    });
+    for ((creator, model), count) in counts {
+        observe_dispatch_cap_count(stage, creator, model, *count);
+    }
 }
 
 #[derive(Default)]
@@ -1019,6 +1100,13 @@ impl CoordinatorActor {
                         .get(&(c.to_string(), m.clone()))
                         .copied()
                         .unwrap_or(0);
+                    #[cfg(test)]
+                    observe_dispatch_cap_count(
+                        DispatchCapObservationStage::CapConsidered,
+                        c,
+                        m,
+                        used,
+                    );
                     used < caps.get(m).copied().unwrap_or(1)
                 });
                 if model_ids.is_empty() {
@@ -1134,6 +1222,16 @@ impl CoordinatorActor {
                         *running_by_user_model
                             .entry((c.to_string(), used.clone()))
                             .or_insert(0) += 1;
+                        #[cfg(test)]
+                        observe_dispatch_cap_count(
+                            DispatchCapObservationStage::InflightIncremented,
+                            c,
+                            used,
+                            running_by_user_model
+                                .get(&(c.to_string(), used.clone()))
+                                .copied()
+                                .unwrap_or(0),
+                        );
                         // Record in the in-flight ledger so the NEXT pass counts
                         // this dispatch against the cap immediately — before its
                         // `running` session row lands (pod boot lags 20-60s).
@@ -1304,6 +1402,162 @@ mod inflight_ledger_tests {
         (creator.to_string(), model.to_string())
     }
 
+    const WND1_READY_TASK_COUNT: usize = 10;
+    const WND1_STABLE_MODEL_ID: &str = "openai/gpt-5.5";
+
+    struct Wnd1DispatchFixture {
+        project_id: String,
+        created_by_user_id: String,
+        model_id: String,
+        task_ids: Vec<String>,
+    }
+
+    async fn seed_wnd1_ready_worker_tasks(
+        db: &djinn_db::Database,
+        count: usize,
+    ) -> Wnd1DispatchFixture {
+        assert!(
+            count >= WND1_READY_TASK_COUNT,
+            "wnd1 dispatch fixtures must seed at least {WND1_READY_TASK_COUNT} ready tasks"
+        );
+
+        let event_bus = djinn_core::events::EventBus::noop();
+        let project = crate::test_helpers::create_test_project(db).await;
+        let user = djinn_db::UserRepository::new(db.clone())
+            .upsert_from_github(
+                985_100,
+                "wnd1-cap-fixture-user",
+                Some("wnd1 cap fixture user"),
+                None,
+            )
+            .await
+            .expect("create wnd1 fixture user");
+        let user_id = user.id.clone();
+
+        let settings = djinn_db::UserSettingsRepository::new(db.clone());
+        settings
+            .upsert_models(&user_id, &[WND1_STABLE_MODEL_ID.to_owned()])
+            .await
+            .expect("configure wnd1 fixture selected model");
+
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), event_bus);
+        let task_ids = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                let mut ids = Vec::with_capacity(count);
+                for i in 0..count {
+                    let task = task_repo
+                        .create_in_project(
+                            &project.id,
+                            None,
+                            &format!("wnd1 dispatch race fixture task {i}"),
+                            "Ready worker task for wnd1 per-user cap race tests.",
+                            "",
+                            "task",
+                            i64::try_from(i).expect("fixture task index fits i64"),
+                            "worker",
+                            Some("open"),
+                            Some("[]"),
+                        )
+                        .await
+                        .expect("seed wnd1 ready worker task");
+                    ids.push(task.id);
+                }
+                ids
+            })
+            .await;
+
+        Wnd1DispatchFixture {
+            project_id: project.id,
+            created_by_user_id: user_id,
+            model_id: WND1_STABLE_MODEL_ID.to_owned(),
+            task_ids,
+        }
+    }
+
+    async fn configure_wnd1_user_max_sessions(
+        db: &djinn_db::Database,
+        user_id: &str,
+        model_id: &str,
+        cap: u32,
+    ) -> djinn_core::models::UserSettings {
+        assert!(
+            (1..=5).contains(&cap),
+            "wnd1 fixture caps intentionally cover the 1..=5 stress range"
+        );
+        djinn_db::UserSettingsRepository::new(db.clone())
+            .upsert_max_sessions(user_id, &HashMap::from([(model_id.to_owned(), cap)]))
+            .await
+            .expect("configure wnd1 user max_sessions cap")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wnd1_ready_queue_fixture_is_visible_to_dispatch_selection_and_reads_caps() {
+        let db = crate::test_helpers::create_test_db();
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        assert_eq!(fixture.task_ids.len(), WND1_READY_TASK_COUNT);
+
+        let ready = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .list_ready(djinn_db::ReadyQuery {
+                project_id: Some(fixture.project_id.clone()),
+                limit: 25,
+                ..Default::default()
+            })
+            .await
+            .expect("dispatch ready selection query should see fixture tasks");
+        let fixture_ready: Vec<_> = ready
+            .iter()
+            .filter(|task| fixture.task_ids.contains(&task.id))
+            .collect();
+
+        assert_eq!(
+            fixture_ready.len(),
+            WND1_READY_TASK_COUNT,
+            "all wnd1 fixture tasks must be visible to the same list_ready path dispatch uses"
+        );
+        assert!(fixture_ready.iter().all(|task| {
+            task.status == "open"
+                && task.issue_type == "task"
+                && task.created_by_user_id.as_deref() == Some(fixture.created_by_user_id.as_str())
+                && crate::roles::RoleRegistry::new()
+                    .role_for_task(task, &crate::roles::DispatchContext)
+                    == Some("worker")
+        }));
+
+        for cap in 1..=5 {
+            configure_wnd1_user_max_sessions(
+                &db,
+                &fixture.created_by_user_id,
+                &fixture.model_id,
+                cap,
+            )
+            .await;
+            let settings = djinn_db::UserSettingsRepository::new(db.clone())
+                .get(&fixture.created_by_user_id)
+                .await
+                .expect("read wnd1 user settings")
+                .expect("wnd1 user settings row exists");
+            assert_eq!(
+                settings
+                    .max_sessions
+                    .as_ref()
+                    .and_then(|caps| caps.get(&fixture.model_id))
+                    .copied(),
+                Some(cap),
+                "configured cap {cap} should round-trip for the stable wnd1 model"
+            );
+        }
+
+        let running_counts =
+            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+                .count_active_by_user_and_model()
+                .await
+                .expect("dispatch cap count query should work against fixture database");
+        assert!(
+            running_counts.is_empty(),
+            "ready-task fixture should not require pre-existing running sessions"
+        );
+    }
+
     #[test]
     fn dispatch_wall_clock_timestamps_are_millisecond_precision() {
         let ts = ::time::OffsetDateTime::parse(
@@ -1325,6 +1579,7 @@ mod inflight_ledger_tests {
     /// defers instead of dispatching four more.
     #[test]
     fn ledger_overlay_counts_inflight_dispatches_when_db_seed_is_cold() {
+        clear_dispatch_cap_observations();
         let mut running: HashMap<(String, String), u32> = HashMap::new(); // cold DB seed
         let mut inflight: HashMap<String, (Option<String>, String)> = HashMap::new();
         for i in 0..4 {
@@ -1341,6 +1596,16 @@ mod inflight_ledger_tests {
             Some(4),
             "four in-flight dispatches must count against the cap even with a cold DB seed"
         );
+        assert_eq!(
+            take_dispatch_cap_observations(),
+            vec![DispatchCapObservation {
+                creator_user_id: "user-a".to_owned(),
+                model: "openai/gpt-5.5".to_owned(),
+                effective_count: 4,
+                stage: DispatchCapObservationStage::LedgerOverlay,
+            }],
+            "observer must see the cold-DB in-flight count used by dispatch"
+        );
     }
 
     /// `max`, not sum: a task counted in BOTH the running rows and the ledger
@@ -1348,6 +1613,7 @@ mod inflight_ledger_tests {
     /// yet) must count once. Also: a larger DB count wins over a smaller ledger.
     #[test]
     fn ledger_overlay_takes_max_never_double_counts() {
+        clear_dispatch_cap_observations();
         let mut running: HashMap<(String, String), u32> = HashMap::new();
         running.insert(key("user-a", "m"), 3); // 3 already running in DB
         running.insert(key("user-b", "m"), 5); // 5 running, ledger will be lower
@@ -1365,16 +1631,59 @@ mod inflight_ledger_tests {
 
         assert_eq!(running.get(&key("user-a", "m")).copied(), Some(3));
         assert_eq!(running.get(&key("user-b", "m")).copied(), Some(5));
+        assert_eq!(
+            take_dispatch_cap_observations(),
+            vec![
+                DispatchCapObservation {
+                    creator_user_id: "user-a".to_owned(),
+                    model: "m".to_owned(),
+                    effective_count: 3,
+                    stage: DispatchCapObservationStage::LedgerOverlay,
+                },
+                DispatchCapObservation {
+                    creator_user_id: "user-b".to_owned(),
+                    model: "m".to_owned(),
+                    effective_count: 5,
+                    stage: DispatchCapObservationStage::LedgerOverlay,
+                },
+            ],
+            "observer must see max(db, ledger), never db + ledger"
+        );
+    }
+
+    #[test]
+    fn dispatch_cap_observer_records_new_inflight_increments() {
+        clear_dispatch_cap_observations();
+
+        observe_dispatch_cap_count(
+            DispatchCapObservationStage::InflightIncremented,
+            "user-a",
+            "m",
+            2,
+        );
+
+        assert_eq!(
+            take_dispatch_cap_observations(),
+            vec![DispatchCapObservation {
+                creator_user_id: "user-a".to_owned(),
+                model: "m".to_owned(),
+                effective_count: 2,
+                stage: DispatchCapObservationStage::InflightIncremented,
+            }],
+            "observer must capture the count after dispatch increments local in-flight state"
+        );
     }
 
     /// Creator-less (legacy system) dispatches are ungated by the per-user cap,
     /// so they must not contribute to any count.
     #[test]
     fn ledger_overlay_ignores_creatorless_entries() {
+        clear_dispatch_cap_observations();
         let mut running: HashMap<(String, String), u32> = HashMap::new();
         let mut inflight: HashMap<String, (Option<String>, String)> = HashMap::new();
         inflight.insert("sys".into(), (None, "m".into()));
         overlay_inflight_ledger(&mut running, &inflight);
         assert!(running.is_empty());
+        assert!(take_dispatch_cap_observations().is_empty());
     }
 }
