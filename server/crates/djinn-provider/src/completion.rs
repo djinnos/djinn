@@ -8,7 +8,10 @@ use tokio::time::{Duration, timeout};
 
 use crate::catalog::{CatalogService, builtin};
 use crate::oauth::{self, codex::CodexTokens, copilot::CopilotTokens};
-use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, create_provider};
+use crate::provider::{
+    LlmProvider, ProviderConfig, StreamEvent, TokenUsage, create_provider,
+    default_reasoning_effort_for_model,
+};
 use crate::repos::CredentialRepository;
 
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -498,22 +501,42 @@ async fn api_key_provider_config_for_user(
             )
         })?;
 
+    Ok(api_key_provider_config(
+        provider_id,
+        model,
+        builtin_provider,
+        api_key,
+    ))
+}
+
+fn api_key_provider_config(
+    provider_id: &str,
+    model: &Model,
+    builtin_provider: &builtin::BuiltinProvider,
+    api_key: String,
+) -> ProviderConfig {
     // G8: format_family / auth shape / capabilities are now carried on the
     // `BuiltinProvider` row (see `catalog::builtin`) instead of three separate
     // per-provider `match` arms keyed on the provider id. The row was already
     // resolved above as `builtin_provider`, so these are direct lookups.
-    Ok(ProviderConfig {
+    let format_family = builtin_provider.format_family(&model.id);
+
+    ProviderConfig {
         base_url: provider_base_url(provider_id),
         auth: builtin_provider.auth_method(api_key),
-        format_family: builtin_provider.format_family(&model.id),
+        format_family,
         model_id: model.id.clone(),
         context_window: model.context_window.max(0) as u32,
         telemetry: None,
         session_affinity_key: None,
         provider_headers: Default::default(),
         capabilities: builtin_provider.capabilities(),
-        reasoning_effort: None,
-    })
+        reasoning_effort: default_reasoning_effort_for_model(
+            model.reasoning,
+            format_family,
+            &model.id,
+        ),
+    }
 }
 
 fn provider_base_url(provider_id: &str) -> String {
@@ -557,7 +580,10 @@ mod tests {
     use super::*;
     use crate::catalog::builtin::{AuthShape, FormatRule};
     use crate::provider::error::ProviderError;
-    use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ToolChoice};
+    use crate::provider::{
+        AuthMethod, FormatFamily, ProviderCapabilities, ReasoningEffort, ToolChoice,
+    };
+    use djinn_core::models::Pricing;
     use djinn_db::UserRepository;
 
     #[test]
@@ -674,6 +700,89 @@ mod tests {
         ensure_test_vault_key();
         let db = Database::open_in_memory().expect("test db");
         CredentialRepository::new(db, EventBus::noop())
+    }
+
+    fn test_model(provider_id: &str, id: &str, reasoning: bool) -> Model {
+        Model {
+            id: id.to_string(),
+            provider_id: provider_id.to_string(),
+            name: id.to_string(),
+            tool_call: true,
+            reasoning,
+            attachment: false,
+            context_window: 128_000,
+            output_limit: 64_000,
+            pricing: Pricing::default(),
+        }
+    }
+
+    #[test]
+    fn api_key_provider_config_defaults_reasoning_for_anthropic_reasoning_model() {
+        let builtin_provider = builtin::find_builtin_provider("minimax-coding-plan")
+            .expect("minimax provider row should exist");
+        let model = test_model(
+            "minimax-coding-plan",
+            "minimax-coding-plan/MiniMax-M1",
+            true,
+        );
+
+        let config = api_key_provider_config(
+            "minimax-coding-plan",
+            &model,
+            builtin_provider,
+            "test-key".to_string(),
+        );
+
+        assert_eq!(config.format_family, FormatFamily::Anthropic);
+        assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Medium));
+        assert!(matches!(config.auth, AuthMethod::BearerToken(ref key) if key == "test-key"));
+        assert_eq!(config.capabilities.max_tokens_default, Some(64_000));
+    }
+
+    #[test]
+    fn api_key_provider_config_keeps_non_reasoning_model_disabled() {
+        let builtin_provider = builtin::find_builtin_provider("anthropic")
+            .expect("anthropic provider row should exist");
+        let model = test_model("anthropic", "anthropic/claude-3-5-haiku-latest", false);
+
+        let config = api_key_provider_config(
+            "anthropic",
+            &model,
+            builtin_provider,
+            "test-key".to_string(),
+        );
+
+        assert_eq!(config.format_family, FormatFamily::Anthropic);
+        assert_eq!(config.reasoning_effort, None);
+    }
+
+    #[test]
+    fn api_key_provider_config_preserves_openai_reasoning_policy() {
+        let builtin_provider =
+            builtin::find_builtin_provider("openai").expect("openai provider row should exist");
+        let chat_model = test_model("openai", "gpt-4.1-mini", true);
+        let responses_model = test_model("openai", "gpt-5.1", true);
+
+        let chat_config = api_key_provider_config(
+            "openai",
+            &chat_model,
+            builtin_provider,
+            "test-key".to_string(),
+        );
+        let responses_config = api_key_provider_config(
+            "openai",
+            &responses_model,
+            builtin_provider,
+            "test-key".to_string(),
+        );
+
+        assert_eq!(chat_config.format_family, FormatFamily::OpenAI);
+        assert_eq!(chat_config.reasoning_effort, None);
+        assert_eq!(
+            responses_config.format_family,
+            FormatFamily::OpenAIResponses
+        );
+        assert_eq!(responses_config.reasoning_effort, None);
     }
 
     enum ProviderBehavior {
@@ -796,6 +905,49 @@ mod tests {
             error
                 .to_string()
                 .contains("missing credential 'OPENAI_API_KEY'")
+        );
+    }
+
+    #[test]
+    fn api_key_config_defaults_reasoning_for_anthropic_reasoning_model() {
+        let model = test_model("minimax-coding-plan", "MiniMax-M3", true);
+        let config = api_key_provider_config(
+            "minimax-coding-plan",
+            &model,
+            builtin::find_builtin_provider("minimax-coding-plan").expect("minimax builtin"),
+            "minimax-secret".to_string(),
+        );
+
+        assert_eq!(config.format_family, FormatFamily::Anthropic);
+        assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Medium));
+        assert_eq!(config.model_id, "MiniMax-M3");
+        assert!(matches!(config.auth, AuthMethod::BearerToken(token) if token == "minimax-secret"));
+    }
+
+    #[test]
+    fn api_key_config_leaves_non_reasoning_model_without_reasoning_effort() {
+        let model = test_model("openai", "gpt-4.1-mini", false);
+        let config = api_key_provider_config(
+            "openai",
+            &model,
+            builtin::find_builtin_provider("openai").expect("openai builtin"),
+            "openai-secret".to_string(),
+        );
+
+        assert_eq!(config.format_family, FormatFamily::OpenAI);
+        assert_eq!(config.reasoning_effort, None);
+        assert!(matches!(config.auth, AuthMethod::BearerToken(token) if token == "openai-secret"));
+    }
+
+    #[test]
+    fn default_reasoning_policy_preserves_openai_wire_behavior() {
+        assert_eq!(
+            default_reasoning_effort_for_model(true, FormatFamily::OpenAI, "gpt-4.1-mini"),
+            None
+        );
+        assert_eq!(
+            default_reasoning_effort_for_model(true, FormatFamily::OpenAIResponses, "gpt-5.1"),
+            None
         );
     }
 

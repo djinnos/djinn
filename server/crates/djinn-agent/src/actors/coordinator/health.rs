@@ -1,6 +1,6 @@
 use super::*;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// How long a `task_run` may stay in `running` without an `ended_at` before
@@ -21,6 +21,14 @@ const STARTUP_TASK_RUN_THRESHOLD_SECS: i64 = 10;
 
 const CARGO_TARGET_RUNS_ROOT: &str = djinn_supervisor::CARGO_TARGET_RUNS_ROOT;
 
+/// Default durable output-stash retention window for coordinator maintenance.
+///
+/// Terminal-session stash pointers are eligible for GC after 30 days by
+/// default. Operators may override this with
+/// `DJINN_OUTPUT_STASH_GC_RETENTION_DAYS` (whole days, minimum 1).
+const OUTPUT_STASH_GC_DEFAULT_RETENTION_DAYS: u64 = 30;
+const OUTPUT_STASH_GC_RETENTION_ENV: &str = "DJINN_OUTPUT_STASH_GC_RETENTION_DAYS";
+
 // ─── Stale-resource sweep ────────────────────────────────────────────────────
 
 pub(super) async fn sweep_stale_resources(
@@ -30,6 +38,7 @@ pub(super) async fn sweep_stale_resources(
     reap_stale_task_runs(db).await;
     reap_orphaned_taskrun_jobs(db, app_state, "periodic").await;
     sweep_orphaned_cargo_target_run_dirs(db, app_state.cargo_target_runs_root.as_deref()).await;
+    sweep_durable_output_stash(db).await;
 
     let project_repo = ProjectRepository::new(db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(db.clone(), app_state.event_bus.clone());
@@ -111,6 +120,168 @@ pub(super) async fn sweep_stale_resources(
                 }
             }
         }
+    }
+}
+
+// ─── Durable output-stash GC ────────────────────────────────────────────────
+
+async fn sweep_durable_output_stash(db: &djinn_db::Database) {
+    let Some(root) = crate::output_stash::durable_root_for_gc() else {
+        tracing::debug!("CoordinatorActor: output-stash GC skipped; durable root unavailable");
+        return;
+    };
+
+    let retention_days = output_stash_gc_retention_days();
+    let retention_cutoff_unix_secs = output_stash_retention_cutoff_unix_secs(
+        time::OffsetDateTime::now_utc().unix_timestamp(),
+        retention_days,
+    );
+    let sessions = match load_output_stash_gc_sessions(db).await {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                root = %root.display(),
+                retention_days,
+                "CoordinatorActor: output-stash GC failed to load sessions; will retry on next sweep"
+            );
+            return;
+        }
+    };
+
+    let gc_root = root.clone();
+    let report = match tokio::task::spawn_blocking(move || {
+        crate::output_stash::gc_durable_output_stash(
+            &gc_root,
+            retention_cutoff_unix_secs,
+            |session_id| Ok(sessions.get(session_id).cloned()),
+        )
+    })
+    .await
+    {
+        Ok(report) => report,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                root = %root.display(),
+                retention_days,
+                "CoordinatorActor: output-stash GC worker failed; will retry on next sweep"
+            );
+            return;
+        }
+    };
+
+    if report.is_success() {
+        tracing::info!(
+            root = %root.display(),
+            retention_days,
+            retention_cutoff_unix_secs,
+            pointers_scanned = report.pointers_scanned,
+            pointers_deleted = report.pointers_deleted,
+            pointers_retained = report.pointers_retained,
+            blobs_scanned = report.blobs_scanned,
+            blobs_deleted = report.blobs_deleted,
+            blobs_retained = report.blobs_retained,
+            error_count = 0_u64,
+            cleanup_outcome = "completed",
+            "CoordinatorActor: output-stash GC completed"
+        );
+    } else {
+        tracing::warn!(
+            root = %root.display(),
+            retention_days,
+            retention_cutoff_unix_secs,
+            pointers_scanned = report.pointers_scanned,
+            pointers_deleted = report.pointers_deleted,
+            pointers_retained = report.pointers_retained,
+            blobs_scanned = report.blobs_scanned,
+            blobs_deleted = report.blobs_deleted,
+            blobs_retained = report.blobs_retained,
+            error_count = report.errors.len(),
+            errors = ?report.errors,
+            cleanup_outcome = "completed_with_errors",
+            "CoordinatorActor: output-stash GC completed with errors; will retry failed work on next sweep"
+        );
+    }
+}
+
+async fn load_output_stash_gc_sessions(
+    db: &djinn_db::Database,
+) -> djinn_db::Result<HashMap<String, crate::output_stash::OutputStashGcSession>> {
+    db.ensure_initialized().await?;
+    let rows: Vec<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT id, status, ended_at FROM sessions")
+            .fetch_all(db.pool())
+            .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, status, ended_at)| {
+            let status = session_status_from_db(&status)?;
+            Some((
+                id,
+                crate::output_stash::OutputStashGcSession {
+                    status,
+                    ended_at_unix_secs: parse_session_timestamp_unix_secs(ended_at.as_deref()),
+                },
+            ))
+        })
+        .collect())
+}
+
+fn session_status_from_db(raw: &str) -> Option<djinn_core::models::SessionStatus> {
+    match raw {
+        "running" => Some(djinn_core::models::SessionStatus::Running),
+        "completed" => Some(djinn_core::models::SessionStatus::Completed),
+        "interrupted" => Some(djinn_core::models::SessionStatus::Interrupted),
+        "failed" => Some(djinn_core::models::SessionStatus::Failed),
+        "paused" => Some(djinn_core::models::SessionStatus::Paused),
+        _ => None,
+    }
+}
+
+fn parse_session_timestamp_unix_secs(raw: Option<&str>) -> Option<u64> {
+    let raw = raw?;
+    use time::format_description::well_known::{Iso8601, Rfc3339};
+    time::OffsetDateTime::parse(raw, &Iso8601::DEFAULT)
+        .or_else(|_| time::OffsetDateTime::parse(raw, &Rfc3339))
+        .ok()
+        .and_then(|ts| u64::try_from(ts.unix_timestamp()).ok())
+}
+
+fn output_stash_gc_retention_days() -> u64 {
+    std::env::var(OUTPUT_STASH_GC_RETENTION_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|days| *days > 0)
+        .unwrap_or(OUTPUT_STASH_GC_DEFAULT_RETENTION_DAYS)
+}
+
+fn output_stash_retention_cutoff_unix_secs(now_unix_secs: i64, retention_days: u64) -> u64 {
+    let retention_secs = retention_days.saturating_mul(24 * 60 * 60);
+    u64::try_from(now_unix_secs)
+        .unwrap_or(0)
+        .saturating_sub(retention_secs)
+}
+
+#[cfg(test)]
+mod output_stash_gc_tests {
+    use super::*;
+
+    #[test]
+    fn output_stash_retention_cutoff_uses_configured_day_window() {
+        let now = 1_700_000_000_i64;
+
+        assert_eq!(
+            output_stash_retention_cutoff_unix_secs(now, 7),
+            1_700_000_000_u64 - (7 * 24 * 60 * 60)
+        );
+    }
+
+    #[test]
+    fn output_stash_retention_cutoff_saturates_before_epoch() {
+        assert_eq!(output_stash_retention_cutoff_unix_secs(-1, 30), 0);
+        assert_eq!(output_stash_retention_cutoff_unix_secs(10, 30), 0);
     }
 }
 

@@ -333,6 +333,8 @@ impl SlotPool {
                 model_id,
                 task_id,
             } => {
+                let owns_task_mapping = self.task_to_slot.get(&task_id).copied() == Some(slot_id);
+
                 // On a killed lifecycle (stall-kill, interrupt_all/project,
                 // explicit Kill command) settle the session DB row to a terminal
                 // state *now*, at the moment the kill lands — not only later via
@@ -343,22 +345,31 @@ impl SlotPool {
                 // dead session still "counts"). Idempotent: a no-op if no running
                 // row exists. `Free` lifecycles settle their own row through the
                 // normal terminal path, so we only settle here on `Killed`.
-                if killed {
+                //
+                // A later lifecycle event can be stale for this task id after
+                // operator `terminate_session` has synchronously reclaimed the
+                // mapping and the task has already been re-dispatched on another
+                // slot. In that case this event still frees *its own slot*, but it
+                // must not tear down/interrupt the new session or remove the new
+                // task→slot mapping/activity entry.
+                if killed && owns_task_mapping {
                     self.teardown_taskrun_jobs_for_task(&task_id, "slot_event_killed")
                         .await;
                     self.settle_session_row(&task_id).await;
                 }
 
-                self.task_to_slot.remove(&task_id);
-                self.task_started.remove(&task_id);
-                self.task_projects.remove(&task_id);
-                // Drop the host activity entry. `touch_activity` upserts one for
-                // remote workers (the host never `register_activity`s them), and
-                // nothing else removes it — so without this the map leaks an
-                // entry per completed task and, worse, a redispatched session
-                // reusing this task_id would inherit the stale "has shown
-                // activity" state and skip the first-call stall guard.
-                self.app_state.deregister_activity(&task_id);
+                if owns_task_mapping {
+                    self.task_to_slot.remove(&task_id);
+                    self.task_started.remove(&task_id);
+                    self.task_projects.remove(&task_id);
+                    // Drop the host activity entry. `touch_activity` upserts one for
+                    // remote workers (the host never `register_activity`s them), and
+                    // nothing else removes it — so without this the map leaks an
+                    // entry per completed task and, worse, a redispatched session
+                    // reusing this task_id would inherit the stale "has shown
+                    // activity" state and skip the first-call stall guard.
+                    self.app_state.deregister_activity(&task_id);
+                }
 
                 if self.draining_slots.remove(&slot_id) {
                     self.retired_slots.insert(slot_id);

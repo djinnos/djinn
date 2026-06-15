@@ -53,6 +53,13 @@ struct StashedOutput {
     full_text: String,
 }
 
+/// Durable output-stash root used by coordinator maintenance. Exposed as a
+/// narrow integration point so GC wiring uses the same cache location as normal
+/// durable writes/reads.
+pub(crate) fn durable_root_for_gc() -> Option<PathBuf> {
+    durable_root()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DurablePointerKind {
     Version1,
@@ -1454,5 +1461,37 @@ mod tests {
         assert!(unknown.exists());
         assert!(blob_path(&root, &legacy_hash).exists());
         assert!(blob_path(&root, &unknown_hash).exists());
+    }
+
+    #[test]
+    fn gc_lookup_failure_retains_pointer_so_next_sweep_can_retry() {
+        let root = gc_root("retry-after-session-lookup-failure");
+        let hash = write_gc_blob(&root, "retryable terminal body");
+        let pointer = write_gc_pointer(
+            &root,
+            "retryable-pointer",
+            DurablePointerRecord::new_v1("shell", &hash, Some("terminal-session"), 1),
+        );
+
+        let failed_report = gc_durable_output_stash(&root, 1_000, |_| {
+            Err("temporary session repository outage".to_string())
+        });
+
+        assert!(!failed_report.is_success());
+        assert_eq!(failed_report.pointers_deleted, 0);
+        assert_eq!(failed_report.pointers_retained, 1);
+        assert!(pointer.exists(), "failed GC must not mark work complete");
+        assert!(blob_path(&root, &hash).exists());
+
+        let retry_report = gc_durable_output_stash(&root, 1_000, |_| {
+            Ok(Some(gc_session(SessionStatus::Completed, Some(999))))
+        });
+
+        assert!(
+            retry_report.is_success(),
+            "retry should succeed: {retry_report:?}"
+        );
+        assert_eq!(retry_report.pointers_deleted, 1);
+        assert!(!pointer.exists(), "next sweep retries retained failed work");
     }
 }

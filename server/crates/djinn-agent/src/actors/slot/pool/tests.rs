@@ -1568,6 +1568,21 @@ async fn terminate_session_does_not_return_non_draining_slot_to_free_list() {
         "terminate_session must not synchronously append a non-draining slot to the free list"
     );
 
+    pool.test_dispatch("task-terminate", "/tmp/project", "model-a")
+        .await
+        .expect("terminated task should be immediately redispatchable before Killed event");
+    let redispatched_slot = pool
+        .test_slot_of("task-terminate")
+        .expect("redispatched task should hold a new slot mapping");
+    assert_ne!(
+        redispatched_slot, slot_id,
+        "redispatch before Killed should allocate a different slot rather than reusing the still-killing one"
+    );
+    assert!(
+        pool.test_free_slots("model-a").is_empty(),
+        "redispatch must not reuse or duplicate the still-killing slot"
+    );
+
     pool.test_handle_slot_event(super::super::SlotEvent::Killed {
         slot_id,
         model_id: "model-a".to_string(),
@@ -1578,5 +1593,10 @@ async fn terminate_session_does_not_return_non_draining_slot_to_free_list() {
         pool.test_free_slots("model-a"),
         vec![slot_id],
         "the later lifecycle event is the single authority that frees the slot"
+    );
+    assert_eq!(
+        pool.test_slot_of("task-terminate"),
+        Some(redispatched_slot),
+        "stale Killed event from the terminated slot must not remove the redispatched task mapping"
     );
 }

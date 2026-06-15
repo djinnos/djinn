@@ -11911,6 +11911,46 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "ErrorClass": {
+          "description": "Coarse failure taxonomy for [`ToolError`].\n\nUsed by supervisors and downstream consumers to branch on failure mode\nwithout having to re-parse the message string. Every variant maps to a\ndistinct operational decision the agent can make.\n\nSee the [module-level documentation](self) for the full classification\ntable. The serialized form is the snake_case variant name (e.g.\n`\"conflict_recoverable\"`).",
+          "oneOf": [
+            {
+              "const": "not_found",
+              "description": "The targeted resource does not exist (HTTP 404).",
+              "type": "string"
+            },
+            {
+              "const": "conflict_recoverable",
+              "description": "A recoverable state conflict — the agent can take a concrete next step\n(HTTP 409, HTTP 422 with a known recovery-action substring such as\n\"already exists\"). Hints on this class MUST name the recovery action.",
+              "type": "string"
+            },
+            {
+              "const": "validation",
+              "description": "The request was malformed or invalid (HTTP 400, generic HTTP 422).",
+              "type": "string"
+            },
+            {
+              "const": "permission",
+              "description": "Credentials missing or insufficient (HTTP 401, 403).",
+              "type": "string"
+            },
+            {
+              "const": "rate_limited",
+              "description": "Upstream quota exhausted (HTTP 429).",
+              "type": "string"
+            },
+            {
+              "const": "transient",
+              "description": "A typed retryable network/upstream condition (HTTP 5xx). Only emitted\nwhen the typed source confirms a retryable signature.",
+              "type": "string"
+            },
+            {
+              "const": "internal",
+              "description": "Status-less or unknown error. Default for [`ToolError::from_untyped`]\nand any unclassified typed source. **Never** used for retryable network\nblips — those are [`ErrorClass::Transient`].",
+              "type": "string"
+            }
+          ]
+        },
         "ModelPricingOutput": {
           "properties": {
             "cache_read_per_million": {
@@ -11987,13 +12027,25 @@ expression: signatures
           "description": "Structured error envelope returned to the agent in place of (or alongside) a\nflat error string. Serializes to a JSON object; absent fields are omitted so\nthe wire shape stays compact.",
           "properties": {
             "body": {
-              "description": "Raw upstream detail (response body, provider message) when available.",
+              "description": "Bounded upstream detail (response body, provider message) when\navailable. Truncated to [`MAX_BODY_EXCERPT_BYTES`] bytes with a\n`[truncated: N bytes omitted]` marker if the raw body was longer. The\nraw body is preserved internally for `tracing::warn!` but never\nserialized into the agent-visible envelope.",
               "nullable": true,
               "type": "string"
             },
             "error": {
               "description": "Human-readable message describing what went wrong. Always present.",
               "type": "string"
+            },
+            "error_class": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ErrorClass"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "Coarse failure class. Assigned at construction time from a typed\nsource (HTTP status, provider error variant). Omitted from the wire\nwhen unknown — the legacy envelope shape (without this field) is\nstill valid."
             },
             "hint": {
               "description": "Actionable next step the agent can take to recover or disambiguate.",
