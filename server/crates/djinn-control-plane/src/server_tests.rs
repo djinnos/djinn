@@ -106,6 +106,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
 
@@ -149,6 +150,7 @@ mod tests {
                 find_text: None,
                 section: None,
                 note_type: None,
+                retrieval_anchor: None,
             }))
             .await;
 
