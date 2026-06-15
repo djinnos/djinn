@@ -11,9 +11,11 @@ use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::telemetry;
 
 use super::super::{runtime_env_diagnostics, runtime_fs_diagnostics};
-use super::budget::{SessionBudgetPolicy, soft_budget_threshold_exceeded};
+use super::budget::{
+    SessionBudgetPolicy, hard_budget_threshold_exceeded, soft_budget_threshold_exceeded,
+};
 use super::error_handling::{
-    MAX_COMPACTION_RETRIES, empty_turn_backoff, is_context_length_error,
+    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_turn_backoff, is_context_length_error,
     is_orphaned_tool_call_error, next_nudge_message, should_retry_after_tool_call_compaction,
     should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
     tool_choice_for_turn, wind_down_message,
@@ -88,6 +90,25 @@ fn loop_guard_error(condition: LoopGuardCondition, turns: u32, session_id: &str)
         turn_span: (start_turn, turns),
         session_id: session_id.to_string(),
     })
+}
+
+#[derive(Debug, Clone)]
+enum WindDownReason {
+    StepCap { max_turns: u32 },
+    Budget { details: String },
+}
+
+impl WindDownReason {
+    fn is_budget(&self) -> bool {
+        matches!(self, Self::Budget { .. })
+    }
+
+    fn details(&self) -> String {
+        match self {
+            Self::StepCap { max_turns } => format!("max turns ({max_turns}) reached"),
+            Self::Budget { details } => details.clone(),
+        }
+    }
 }
 
 fn tool_call_signature_for_result(
@@ -402,25 +423,67 @@ pub(crate) async fn run_reply_loop(
         // permitted turn we inject a one-shot directive asking the agent to
         // summarize work done + what remains, then allow EXACTLY ONE more turn
         // to capture that hand-off (instead of hard-erroring with no context).
-        // `wind_down_injected` makes the extension strictly one turn: once the
-        // wind-down turn runs, the next cap check falls through to the hard
-        // error if the agent still hasn't reached a terminal action.
+        // `wind_down_injected` makes the step-cap extension strictly one turn:
+        // once the wind-down turn runs, the next cap check falls through to the
+        // hard error if the agent still hasn't reached a terminal action.
+        // Budget-triggered wind-downs may happen far before `max_turns`, so they
+        // need their own post-injection state to re-enter the stop branch after
+        // exactly one granted provider turn even while `turns < max_turns`.
         let mut wind_down_injected = false;
+        let mut wind_down_reason: Option<WindDownReason> = None;
+        let mut budget_wind_down_final_turn_spent = false;
         // rrdr: one-shot soft-budget converge reminder flag — see
         // `maybe_inject_soft_budget_reminder` for the contract.
         let mut soft_budget_reminder_injected = false;
 
         loop {
-            if turns >= max_turns {
+            let hard_budget_exceeded = hard_budget_threshold_exceeded(
+                &session_budget,
+                total_tokens_in,
+                total_tokens_out,
+                current_context_tokens,
+            );
+            let budget_wind_down_should_stop = budget_wind_down_final_turn_spent
+                && wind_down_reason
+                    .as_ref()
+                    .is_some_and(WindDownReason::is_budget);
+            if turns >= max_turns
+                || (!wind_down_injected && hard_budget_exceeded)
+                || budget_wind_down_should_stop
+            {
                 if !wind_down_injected {
                     // One turn before the hard cap: inject the wind-down
                     // directive and grant a single extra turn for the summary.
+                    let reason = if hard_budget_exceeded && turns < max_turns {
+                        let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
+                        let hard_cap = (session_budget.max_cumulative_tokens as f64)
+                            * session_budget.hard_threshold_ratio;
+                        WindDownReason::Budget {
+                            details: format!(
+                                "hard budget threshold reached: cumulative_tokens={cumulative_spend}, hard_cap={}, max_cumulative_tokens={}, hard_threshold_ratio={}",
+                                hard_cap as u64,
+                                session_budget.max_cumulative_tokens,
+                                session_budget.hard_threshold_ratio
+                            ),
+                        }
+                    } else {
+                        WindDownReason::StepCap { max_turns }
+                    };
+                    let wind_down_reason_label = if reason.is_budget() {
+                        "budget"
+                    } else {
+                        "step_cap"
+                    };
+                    let budget_triggered = reason.is_budget();
+                    wind_down_reason = Some(reason);
                     wind_down_injected = true;
                     tracing::warn!(
                         task_id = %task_id,
                         agent_type = %role_name,
                         turns,
                         max_turns,
+                        wind_down_reason = wind_down_reason_label,
+                        budget_triggered,
                         "ReplyLoop: step cap reached — injecting wind-down summary directive \
                          (one final turn before hard stop)"
                     );
@@ -432,7 +495,30 @@ pub(crate) async fn run_reply_loop(
                     // this branch with `wind_down_injected == true` and hard-errors.
                 } else {
                     // The agent ignored the wind-down (or produced no terminal
-                    // action) — fall back to the existing hard-error behavior.
+                    // action). Production budget-triggered wind-downs become a
+                    // typed settlement outcome the supervisor parks deliberately;
+                    // test/non-budget max-turn overrides retain the historical
+                    // hard-error behavior.
+                    let reason = wind_down_reason
+                        .clone()
+                        .unwrap_or(WindDownReason::StepCap { max_turns });
+                    if reason.is_budget() {
+                        let details = format!(
+                            "{}; wind-down directive was injected but the agent did not produce a text-only summary",
+                            reason.details()
+                        );
+                        tracing::warn!(
+                            task_id = %task_id,
+                            session_id = %session_id,
+                            agent_type = %role_name,
+                            turns,
+                            max_turns,
+                            wind_down_ignored = true,
+                            wind_down_reason = "budget",
+                            "ReplyLoop: budget-triggered wind-down ignored; parking session"
+                        );
+                        return Err(BudgetWindDownIgnored { details }.into());
+                    }
                     return Err(anyhow::anyhow!(
                         "max turns ({}) exceeded without text-only response (wind-down summary \
                          directive was injected but the agent did not terminate)",
@@ -761,6 +847,38 @@ pub(crate) async fn run_reply_loop(
 
             conversation.push(assistant_msg);
 
+            // rrdr budget park: after a hard-budget wind-down directive, the
+            // single granted provider turn must be a text-only hand-off summary.
+            // Tool calls (including finalize tools) or an empty response are an
+            // ignored wind-down, not permission to keep running until the normal
+            // step cap. Mark the final turn spent and re-enter the pre-turn stop
+            // branch immediately; do not dispatch the requested tools or consume
+            // any later fallback text as a false successful summary.
+            if wind_down_injected
+                && wind_down_reason
+                    .as_ref()
+                    .is_some_and(WindDownReason::is_budget)
+            {
+                let summary = turn_text.trim();
+                if turn_tool_calls.is_empty() && !summary.is_empty() {
+                    output.budget_wind_down_summary = Some(summary.to_string());
+                    output.budget_wind_down_details =
+                        wind_down_reason.as_ref().map(WindDownReason::details);
+                    tracing::info!(
+                        task_id = %task_id,
+                        agent_type = %role_name,
+                        turns,
+                        assistant_message_count,
+                        wind_down_reason = "budget",
+                        "ReplyLoop: wind-down summary captured — session complete (graceful step-cap stop)"
+                    );
+                    break;
+                }
+
+                budget_wind_down_final_turn_spent = true;
+                continue;
+            }
+
             // ── Compaction threshold check ────────────────────────────────────
             if crate::compaction::needs_compaction(current_context_tokens, context_window) {
                 tracing::info!(
@@ -885,6 +1003,7 @@ pub(crate) async fn run_reply_loop(
                     agent_type = %role_name,
                     turns,
                     assistant_message_count,
+                    wind_down_reason = "step_cap",
                     "ReplyLoop: wind-down summary captured — session complete (graceful step-cap stop)"
                 );
                 break;
