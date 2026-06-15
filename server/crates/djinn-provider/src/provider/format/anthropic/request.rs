@@ -14,7 +14,7 @@ pub(super) struct AnthropicSystemBlock {
 
 pub struct AnthropicProvider {
     pub(super) config: ProviderConfig,
-    pub(super) client: ApiClient,
+    pub(crate) client: ApiClient,
     /// Hash of the `cache_control`-marked stable prefix from this provider
     /// instance's previous request, used by the B3 drift guard to detect a
     /// supposedly-stable prefix mutating across consecutive turns. `Mutex` because
@@ -398,7 +398,7 @@ impl AnthropicProvider {
         Some(hasher.finish())
     }
 
-    pub(super) fn build_request(
+    pub(crate) fn build_request(
         &self,
         conversation: &Conversation,
         tools: &[Value],
@@ -537,7 +537,7 @@ impl AnthropicProvider {
         *last = Some(current);
     }
 
-    pub(super) fn effective_url(&self) -> String {
+    pub(crate) fn effective_url(&self) -> String {
         // Anthropic-compatible vendors (MiniMax / GLM coding plans) publish
         // base URLs that already end in `/v1`; don't double the segment.
         let base = self.config.base_url.trim_end_matches('/');
@@ -545,8 +545,17 @@ impl AnthropicProvider {
         format!("{base}/v1/messages")
     }
 
-    pub(super) fn extra_headers(&self) -> HeaderMap {
+    pub(crate) fn extra_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
+
+        for (name, value) in &self.config.provider_headers {
+            if let (Ok(name), Ok(value)) = (
+                HeaderName::from_bytes(name.as_bytes()),
+                HeaderValue::from_str(value),
+            ) {
+                headers.insert(name, value);
+            }
+        }
 
         // Anthropic version header (always required)
         headers.insert(
