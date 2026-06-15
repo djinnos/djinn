@@ -246,6 +246,10 @@ mod tests {
             Ok(())
         }
 
+        async fn terminate_session(&self, _: &str) -> Result<(), String> {
+            Err("RecordingSlotPool::terminate_session not configured for this test".into())
+        }
+
         async fn session_for_task(&self, _: &str) -> Result<Option<RunningTaskInfo>, String> {
             Ok(None)
         }

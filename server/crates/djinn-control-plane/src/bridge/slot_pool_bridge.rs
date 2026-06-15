@@ -35,6 +35,7 @@ pub struct PoolStatus {
 pub trait SlotPoolOps: Send + Sync {
     async fn get_status(&self) -> Result<PoolStatus, String>;
     async fn kill_session(&self, task_id: &str) -> Result<(), String>;
+    async fn terminate_session(&self, task_id: &str) -> Result<(), String>;
     async fn session_for_task(&self, task_id: &str) -> Result<Option<RunningTaskInfo>, String>;
     async fn has_session(&self, task_id: &str) -> Result<bool, String>;
 }
