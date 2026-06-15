@@ -92,9 +92,9 @@ impl GitHubApiClient {
                 "create_pull_request",
             ));
         }
-        Ok(resp.json().await.map_err(|e| {
+        resp.json().await.map_err(|e| {
             GitHubApiError::transport("create_pull_request", path.clone(), e.to_string())
-        })?)
+        })
     }
 
     /// List open pull requests whose head branch matches `head`.
@@ -136,13 +136,13 @@ impl GitHubApiClient {
                 body,
             ));
         }
-        Ok(resp.json().await.map_err(|e| {
+        resp.json().await.map_err(|e| {
             GitHubApiError::transport(
                 "list_pulls_by_head",
                 format!("/repos/{owner}/{repo}/pulls"),
                 e.to_string(),
             )
-        })?)
+        })
     }
 
     /// List pull requests whose head branch matches `head`, filtering by state.
@@ -1139,9 +1139,9 @@ impl GitHubApiClient {
                 "update_pull_request_branch",
             ));
         }
-        Ok(resp.json().await.map_err(|e| {
+        resp.json().await.map_err(|e| {
             GitHubApiError::transport("update_pull_request_branch", path.clone(), e.to_string())
-        })?)
+        })
     }
 
     /// Merge a pull request via the REST API.
@@ -1195,9 +1195,9 @@ impl GitHubApiClient {
                 "merge_pull_request",
             ));
         }
-        Ok(resp.json().await.map_err(|e| {
+        resp.json().await.map_err(|e| {
             GitHubApiError::transport("merge_pull_request", path.clone(), e.to_string())
-        })?)
+        })
     }
 
     /// Mark a draft PR as ready for review (undraft it).
