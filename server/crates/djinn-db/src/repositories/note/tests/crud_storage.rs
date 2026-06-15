@@ -374,7 +374,7 @@ async fn retrieval_anchor_persists_and_legacy_null_hydrates() {
             "Anchored Note",
             "anchored body",
             "pattern",
-            r#"[\"anchor\"]"#,
+            r#"["anchor"]"#,
             Some("When a worker needs anchor persistence."),
         )
         .await
@@ -398,7 +398,7 @@ async fn retrieval_anchor_persists_and_legacy_null_hydrates() {
     );
 
     let retagged = repo
-        .update_tags(&changed_anchor.id, r#"[\"anchor\",\"retagged\"]"#)
+        .update_tags(&changed_anchor.id, r#"["anchor","retagged"]"#)
         .await
         .unwrap();
     assert_eq!(
@@ -407,7 +407,7 @@ async fn retrieval_anchor_persists_and_legacy_null_hydrates() {
     );
 
     let scoped = repo
-        .update_scope_paths(&changed_anchor.id, r#"[\"server/crates\"]"#)
+        .update_scope_paths(&changed_anchor.id, r#"["server/crates"]"#)
         .await
         .unwrap();
     assert_eq!(

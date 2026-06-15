@@ -210,19 +210,18 @@ impl NoteRepository {
     pub async fn extracted_note_audit(&self, project_id: &str) -> Result<ExtractedNoteAuditReport> {
         self.db.ensure_initialized().await?;
 
-        let notes = sqlx::query_as!(
-            Note,
+        let notes = sqlx::query_as::<_, Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                    storage, note_type, folder, tags::text AS "tags!", content,
+                    storage, note_type, folder, tags::text AS tags, content,
                     retrieval_anchor, created_at, updated_at, last_accessed,
                     access_count, confidence, abstract AS abstract_, overview,
-                    scope_paths::text AS "scope_paths!"
+                    scope_paths::text AS scope_paths
              FROM notes
              WHERE project_id = $1
                AND note_type IN ('case', 'pattern', 'pitfall')
              ORDER BY note_type, permalink"#,
-            project_id
         )
+        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
