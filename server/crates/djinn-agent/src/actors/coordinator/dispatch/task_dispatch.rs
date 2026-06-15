@@ -1404,12 +1404,93 @@ mod inflight_ledger_tests {
 
     const WND1_READY_TASK_COUNT: usize = 10;
     const WND1_STABLE_MODEL_ID: &str = "openai/gpt-5.5";
+    const WND1_DISPATCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
 
     struct Wnd1DispatchFixture {
         project_id: String,
+        project_path: String,
         created_by_user_id: String,
         model_id: String,
         task_ids: Vec<String>,
+    }
+
+    #[derive(Clone)]
+    struct Wnd1ControlledRuntime {
+        started_tx: tokio::sync::mpsc::UnboundedSender<String>,
+        releases:
+            std::sync::Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
+    }
+
+    impl Wnd1ControlledRuntime {
+        fn new() -> (Self, tokio::sync::mpsc::UnboundedReceiver<String>) {
+            let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
+            (
+                Self {
+                    started_tx,
+                    releases: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+                },
+                started_rx,
+            )
+        }
+
+        fn spawn_pool(
+            &self,
+            db: &djinn_db::Database,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> crate::actors::slot::SlotPoolHandle {
+            let started_tx = self.started_tx.clone();
+            let releases = self.releases.clone();
+            crate::actors::slot::SlotPoolHandle::spawn_with_factory(
+                crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+                cancel,
+                crate::actors::slot::SlotPoolConfig {
+                    models: vec![crate::actors::slot::ModelSlotConfig {
+                        model_id: WND1_STABLE_MODEL_ID.to_owned(),
+                        max_slots: 0,
+                        roles: ["worker".to_owned()].into_iter().collect(),
+                    }],
+                    role_priorities: HashMap::new(),
+                },
+                std::sync::Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
+                    let started_tx = started_tx.clone();
+                    let releases = releases.clone();
+                    let runner: crate::actors::slot::TestLifecycleRunner = std::sync::Arc::new(
+                        move |task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                            let started_tx = started_tx.clone();
+                            let releases = releases.clone();
+                            Box::pin(async move {
+                                let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+                                releases
+                                    .lock()
+                                    .expect("wnd1 release map mutex")
+                                    .insert(task_id.clone(), release_tx);
+                                let _ = started_tx.send(task_id.clone());
+                                tokio::select! {
+                                    _ = release_rx => {}
+                                    _ = kill.cancelled() => {}
+                                    _ = tokio::time::sleep(WND1_DISPATCH_SETTLE_TIMEOUT) => {}
+                                }
+                                Ok(())
+                            })
+                        },
+                    );
+                    crate::actors::slot::SlotHandle::spawn_with_test_runner(
+                        slot_id, model_id, event_tx, app_state, cancel, runner,
+                    )
+                }),
+            )
+        }
+
+        async fn release(&self, task_id: &str) {
+            let sender = self
+                .releases
+                .lock()
+                .expect("wnd1 release map mutex")
+                .remove(task_id);
+            if let Some(sender) = sender {
+                let _ = sender.send(());
+            }
+        }
     }
 
     async fn seed_wnd1_ready_worker_tasks(
@@ -1423,6 +1504,9 @@ mod inflight_ledger_tests {
 
         let event_bus = djinn_core::events::EventBus::noop();
         let project = crate::test_helpers::create_test_project(db).await;
+        let project_path =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        std::fs::create_dir_all(&project_path).expect("create wnd1 fixture project dir");
         let user = djinn_db::UserRepository::new(db.clone())
             .upsert_from_github(
                 985_100,
@@ -1468,9 +1552,76 @@ mod inflight_ledger_tests {
 
         Wnd1DispatchFixture {
             project_id: project.id,
+            project_path: project_path.to_string_lossy().into_owned(),
             created_by_user_id: user_id,
             model_id: WND1_STABLE_MODEL_ID.to_owned(),
             task_ids,
+        }
+    }
+
+    fn wnd1_actor_for_tests(
+        db: &djinn_db::Database,
+        events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+        controlled_runtime: &Wnd1ControlledRuntime,
+    ) -> CoordinatorActor {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        CoordinatorActor {
+            receiver: tokio::sync::mpsc::channel(1).1,
+            events: events_tx.subscribe(),
+            cancel: cancel.clone(),
+            tick: tokio::time::interval(STUCK_INTERVAL),
+            db: db.clone(),
+            events_tx: events_tx.clone(),
+            pool: controlled_runtime.spawn_pool(db, cancel),
+            catalog: CatalogService::new(),
+            health: djinn_provider::catalog::health::HealthTracker::new(),
+            role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
+            lsp: crate::lsp::LspManager::new(),
+            self_sender: tokio::sync::mpsc::channel(1).0,
+            status_tx: tokio::sync::watch::channel(SharedCoordinatorState {
+                dispatched: 0,
+                recovered: 0,
+                epic_throughput: HashMap::new(),
+                pr_errors: HashMap::new(),
+                rate_limited_until: None,
+            })
+            .0,
+            dispatch_limit: 50,
+            model_priorities: HashMap::new(),
+            pr_errors: HashMap::new(),
+            last_dispatched: HashMap::new(),
+            inflight_dispatches: HashMap::new(),
+            dispatch_cooldowns: HashMap::new(),
+            dispatch_failure_streak: HashMap::new(),
+            verification_tracker: VerificationTracker::default(),
+            auto_merge_tracker: AutoMergeTracker::default(),
+            consolidation_runner: std::sync::Arc::new(
+                crate::actors::coordinator::consolidation::DbConsolidationRunner::new(db.clone()),
+            ),
+            last_stale_sweep: StdInstant::now(),
+            last_auto_dispatch_sweep: StdInstant::now(),
+            last_proposal_review_sweep: StdInstant::now(),
+            last_graph_refresh: StdInstant::now(),
+            graph_warmer: None,
+            mirror: None,
+            runtime_ops: None,
+            rpc_registry: None,
+            prune_tick_counter: 0,
+            throughput_events: HashMap::new(),
+            escalation_counts: HashMap::new(),
+            pr_status_cache: HashMap::new(),
+            pr_draft_first_seen: HashMap::new(),
+            merge_fail_count: HashMap::new(),
+            auto_approve_attempted: HashMap::new(),
+            delegated_to_github: HashMap::new(),
+            conversations_resolved: HashMap::new(),
+            handled_dequeues: HashMap::new(),
+            stall_killed: HashSet::new(),
+            last_idle_consolidation: None,
+            idle_consolidation_cancel: None,
+            idle_consolidation_handle: None,
+            dispatched: 0,
+            recovered: 0,
         }
     }
 
@@ -1488,6 +1639,206 @@ mod inflight_ledger_tests {
             .upsert_max_sessions(user_id, &HashMap::from([(model_id.to_owned(), cap)]))
             .await
             .expect("configure wnd1 user max_sessions cap")
+    }
+
+    async fn wnd1_recv_started(
+        started_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> String {
+        tokio::time::timeout(WND1_DISPATCH_SETTLE_TIMEOUT, started_rx.recv())
+            .await
+            .expect("timed out waiting for wnd1 controlled runtime start")
+            .expect("wnd1 controlled runtime start channel closed")
+    }
+
+    async fn materialize_wnd1_running_session(
+        db: &djinn_db::Database,
+        fixture: &Wnd1DispatchFixture,
+        task_id: &str,
+    ) -> String {
+        djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .create(djinn_db::CreateSessionParams {
+                project_id: &fixture.project_id,
+                task_id: Some(task_id),
+                model: &fixture.model_id,
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+            })
+            .await
+            .expect("materialize delayed wnd1 running session row")
+            .id
+    }
+
+    async fn complete_wnd1_session(db: &djinn_db::Database, session_id: &str) {
+        djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .update(
+                session_id,
+                djinn_core::models::SessionStatus::Completed,
+                0,
+                0,
+                0,
+                0,
+                None,
+            )
+            .await
+            .expect("complete wnd1 running session row");
+    }
+
+    async fn wait_for_pool_to_forget_task(
+        pool: &crate::actors::slot::SlotPoolHandle,
+        task_id: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + WND1_DISPATCH_SETTLE_TIMEOUT;
+        loop {
+            if !pool
+                .has_session(task_id)
+                .await
+                .expect("query wnd1 pool task mapping")
+            {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for wnd1 pool to settle task {task_id}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn assert_wnd1_observed_cap(
+        cap: u32,
+        observations: &mut Vec<DispatchCapObservation>,
+        phase: &str,
+    ) {
+        observations.extend(take_dispatch_cap_observations());
+        let max_observed = observations
+            .iter()
+            .map(|obs| obs.effective_count)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_observed <= cap,
+            "wnd1 cap {cap} exceeded during {phase}: max_observed={max_observed}, observations={observations:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wnd1_dispatch_race_harness_never_exceeds_caps_1_through_5() {
+        for cap in 1..=5 {
+            let db = crate::test_helpers::create_test_db();
+            let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+            let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+            assert!(
+                std::path::Path::new(&fixture.project_path).is_dir(),
+                "wnd1 fixture project path must exist for in-process dispatch"
+            );
+            configure_wnd1_user_max_sessions(
+                &db,
+                &fixture.created_by_user_id,
+                &fixture.model_id,
+                cap,
+            )
+            .await;
+
+            let (runtime, mut started_rx) = Wnd1ControlledRuntime::new();
+            let mut actor = wnd1_actor_for_tests(&db, &events_tx, &runtime);
+            let mut observations = Vec::new();
+            let mut running_sessions: HashMap<String, String> = HashMap::new();
+            let mut active_tasks = Vec::new();
+
+            clear_dispatch_cap_observations();
+            actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+            assert_wnd1_observed_cap(cap, &mut observations, "initial cold-DB dispatch pass");
+            assert_eq!(
+                actor.dispatched,
+                u64::from(cap),
+                "cap {cap}: initial pass must fill exactly the configured in-flight cap"
+            );
+
+            for _ in 0..cap {
+                let task_id = wnd1_recv_started(&mut started_rx).await;
+                active_tasks.push(task_id.clone());
+                let session_id = materialize_wnd1_running_session(&db, &fixture, &task_id).await;
+                running_sessions.insert(task_id, session_id);
+            }
+
+            clear_dispatch_cap_observations();
+            actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+            assert_wnd1_observed_cap(
+                cap,
+                &mut observations,
+                "re-dispatch while delayed running rows overlap in-flight ledger",
+            );
+            assert_eq!(
+                actor.dispatched,
+                u64::from(cap),
+                "cap {cap}: overlapping DB+ledger count must not dispatch extra tasks"
+            );
+
+            while actor.dispatched < WND1_READY_TASK_COUNT as u64 {
+                let completed_task = active_tasks.remove(0);
+                let session_id = running_sessions
+                    .remove(&completed_task)
+                    .expect("active wnd1 task has materialized session");
+                complete_wnd1_session(&db, &session_id).await;
+
+                let before_raced_pass = actor.dispatched;
+                clear_dispatch_cap_observations();
+                actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+                assert_wnd1_observed_cap(
+                    cap,
+                    &mut observations,
+                    "dispatch pass raced against DB settlement before pool free",
+                );
+                assert_eq!(
+                    actor.dispatched, before_raced_pass,
+                    "cap {cap}: completion without pool settlement must still be held by in-flight ledger"
+                );
+
+                runtime.release(&completed_task).await;
+                wait_for_pool_to_forget_task(&actor.pool, &completed_task).await;
+
+                let before = actor.dispatched;
+                clear_dispatch_cap_observations();
+                actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+                assert_wnd1_observed_cap(
+                    cap,
+                    &mut observations,
+                    "dispatch pass after controlled completion settlement",
+                );
+                assert_eq!(
+                    actor.dispatched,
+                    before + 1,
+                    "cap {cap}: exactly one replacement dispatch should fit after one settlement"
+                );
+                let task_id = wnd1_recv_started(&mut started_rx).await;
+                active_tasks.push(task_id.clone());
+                let session_id = materialize_wnd1_running_session(&db, &fixture, &task_id).await;
+                running_sessions.insert(task_id, session_id);
+            }
+
+            for task_id in active_tasks {
+                if let Some(session_id) = running_sessions.remove(&task_id) {
+                    complete_wnd1_session(&db, &session_id).await;
+                }
+                runtime.release(&task_id).await;
+                wait_for_pool_to_forget_task(&actor.pool, &task_id).await;
+            }
+
+            assert!(
+                !observations.is_empty(),
+                "cap {cap}: harness must record cap instrumentation observations"
+            );
+            let max_observed = observations
+                .iter()
+                .map(|observation| observation.effective_count)
+                .max()
+                .unwrap_or(0);
+            assert!(
+                max_observed <= cap,
+                "cap {cap}: instantaneous effective running/in-flight count exceeded cap; observations={observations:?}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
