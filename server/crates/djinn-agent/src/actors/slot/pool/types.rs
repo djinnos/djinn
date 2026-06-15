@@ -93,6 +93,10 @@ pub enum PoolMessage {
         task_id: String,
         respond_to: Reply<()>,
     },
+    TerminateSession {
+        task_id: String,
+        respond_to: Reply<()>,
+    },
     EvictSession {
         task_id: String,
         respond_to: Reply<()>,
