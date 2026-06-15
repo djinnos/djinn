@@ -57,6 +57,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
 
@@ -74,6 +75,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
 
@@ -106,6 +108,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
 
@@ -152,6 +155,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
 
@@ -167,6 +171,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
 
@@ -230,6 +235,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
 
@@ -256,6 +262,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
 
@@ -280,6 +287,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
 
@@ -354,6 +362,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
         assert!(r1.error.is_none(), "first write failed: {:?}", r1.error);
@@ -369,6 +378,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
         assert!(r2.error.is_none(), "second write failed: {:?}", r2.error);
@@ -421,6 +431,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
         assert!(initial_brief.error.is_none(), "{:?}", initial_brief.error);
@@ -434,6 +445,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
         assert!(
@@ -465,6 +477,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
         assert!(
@@ -482,6 +495,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
         assert!(updated_brief.error.is_none(), "{:?}", updated_brief.error);
@@ -550,6 +564,7 @@ mod tests {
                 status: None,
                 tags: Some(vec!["adr-054".to_string(), "design".to_string()]),
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
 
@@ -627,6 +642,7 @@ mod tests {
                 find_text: Some("[[Cognitive Memory Scope]]".to_string()),
                 section: None,
                 note_type: None,
+                retrieval_anchor: None,
             }))
             .await;
         assert!(edited.error.is_none(), "{:?}", edited.error);
@@ -657,6 +673,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: Some(vec![]),
+                retrieval_anchor: None,
             }))
             .await;
 
@@ -690,6 +707,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: Some(vec!["crates/foo".to_string()]),
+                retrieval_anchor: None,
             }))
             .await;
 
@@ -721,6 +739,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: Some(vec!["crates/foo".to_string()]),
+                retrieval_anchor: None,
             }))
             .await;
         assert!(created.error.is_none(), "error: {:?}", created.error);
@@ -736,6 +755,7 @@ mod tests {
                 find_text: Some("quick brown fox".to_string()),
                 section: None,
                 note_type: None,
+                retrieval_anchor: None,
             }))
             .await;
 
@@ -772,6 +792,7 @@ mod tests {
                 status: None,
                 tags: None,
                 scope_paths: None,
+                retrieval_anchor: None,
             }))
             .await;
         assert!(created.error.is_none());
@@ -792,6 +813,7 @@ mod tests {
                 find_text: Some("hello".to_string()),
                 section: None,
                 note_type: None,
+                retrieval_anchor: None,
             }))
             .await;
 

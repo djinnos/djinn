@@ -165,6 +165,7 @@ pub(super) async fn call_memory_write(
                 status: p.status,
                 tags: p.tags,
                 scope_paths: p.scope_paths,
+                retrieval_anchor: p.retrieval_anchor,
             },
         ))
         .await;
@@ -192,6 +193,7 @@ pub(super) async fn call_memory_edit(
                 find_text: p.find_text,
                 section: p.section,
                 note_type: p.note_type,
+                retrieval_anchor: p.retrieval_anchor,
             },
         ))
         .await;

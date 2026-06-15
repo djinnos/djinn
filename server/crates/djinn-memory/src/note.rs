@@ -20,6 +20,9 @@ pub struct Note {
     pub folder: String,
     pub tags: String,    // JSON array string, e.g. '["rust","db"]'
     pub content: String, // Markdown body without frontmatter
+    /// Objective retrieval situation where this note applies. Stored separately
+    /// from `content` so embeddings/prompts can use it without mutating body text.
+    pub retrieval_anchor: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub last_accessed: String,
@@ -56,6 +59,7 @@ impl Note {
             "folder": self.folder,
             "tags": self.parsed_tags(),
             "content": self.content,
+            "retrieval_anchor": self.retrieval_anchor,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "last_accessed": self.last_accessed,
@@ -302,7 +306,57 @@ pub struct OrphanNote {
 
 #[cfg(test)]
 mod tests {
-    use super::{NoteAbstract, NoteOverview};
+    use super::{Note, NoteAbstract, NoteOverview};
+
+    fn sample_note(retrieval_anchor: Option<String>) -> Note {
+        Note {
+            id: "note_789".to_string(),
+            project_id: "project_123".to_string(),
+            permalink: "patterns/anchor".to_string(),
+            title: "Anchor Note".to_string(),
+            file_path: String::new(),
+            storage: "db".to_string(),
+            note_type: "pattern".to_string(),
+            folder: "patterns".to_string(),
+            tags: r#"["retrieval"]"#.to_string(),
+            content: "Body remains separate from the retrieval anchor.".to_string(),
+            retrieval_anchor,
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            updated_at: "2026-01-01T00:00:00.000Z".to_string(),
+            last_accessed: "2026-01-01T00:00:00.000Z".to_string(),
+            access_count: 0,
+            confidence: 1.0,
+            abstract_: None,
+            overview: None,
+            scope_paths: "[]".to_string(),
+        }
+    }
+
+    #[test]
+    fn note_to_value_surfaces_retrieval_anchor_without_body_duplication() {
+        let note = sample_note(Some(
+            "When retrieval needs an objective anchor.".to_string(),
+        ));
+
+        let value = note.to_value();
+
+        assert_eq!(
+            value["retrieval_anchor"],
+            "When retrieval needs an objective anchor."
+        );
+        assert!(value.get("applies_when").is_none());
+        assert_eq!(
+            value["content"],
+            "Body remains separate from the retrieval anchor."
+        );
+    }
+
+    #[test]
+    fn note_to_value_preserves_legacy_null_retrieval_anchor() {
+        let note = sample_note(None);
+
+        assert!(note.to_value()["retrieval_anchor"].is_null());
+    }
 
     #[test]
     fn note_overview_serializes_with_stable_field_names() {
