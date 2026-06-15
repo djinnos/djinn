@@ -62,6 +62,7 @@ async fn execution_kill_task_reaches_real_slot_pool_terminate_session() {
 
     harness.dispatch(&seeded.task_id).await;
     harness.wait_for_runner_started(&seeded.task_id).await;
+    harness.wait_for_pool_session(&seeded.task_id).await;
     assert!(
         harness.pool_has_session(&seeded.task_id).await,
         "dispatched task must be visible through the real pool before kill"
@@ -104,6 +105,7 @@ async fn execution_kill_task_reaches_real_slot_pool_terminate_session() {
     );
 
     harness.dispatch(&seeded.task_id).await;
+    harness.wait_for_pool_session(&seeded.task_id).await;
     assert!(
         harness.pool_has_session(&seeded.task_id).await,
         "terminated task should be redispatchable through the real pool"
@@ -289,6 +291,20 @@ impl RealPoolKillHarness {
             .has_session(task_id)
             .await
             .expect("pool has_session should succeed")
+    }
+
+    async fn wait_for_pool_session(&self, task_id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if self.pool_has_session(task_id).await {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for real pool session for {task_id}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     async fn wait_for_runner_started(&self, task_id: &str) {
