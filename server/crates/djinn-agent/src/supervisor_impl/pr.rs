@@ -18,17 +18,19 @@
 //! 4. Creates (or adopts/reopens) a GitHub PR for the squashed commit.
 
 use djinn_core::models::TransitionAction;
-use djinn_core::tool_error::{ErrorClass, ToolError};
+use djinn_core::tool_error::ErrorClass;
 use djinn_db::{ProjectRepository, TaskRepository};
 use djinn_git::GitError;
-use djinn_provider::github_api::{CreatePrParams, GitHubApiClient, PrState};
+use djinn_provider::github_api::{
+    CreatePrParams, GitHubApiClient, GitHubApiError, GitHubErrorSource, PrState,
+};
 use djinn_provider::github_app::{app_id as github_app_id, installations::get_installation_token};
 use djinn_runtime::spec::{TaskRunOutcome, TaskRunSpec};
 use djinn_workspace::MirrorManager;
 
 use super::SupervisorCallbackContext;
 use crate::actors::slot::helpers::default_target_branch;
-use crate::github_error_render::{github_write_envelope, render_github_write_error};
+use crate::github_error_render::render_github_write_error;
 use crate::task_merge::build_app_push_url;
 
 /// Open (or adopt) a GitHub PR for the completed task-run.
@@ -381,58 +383,52 @@ const TASK_OUTCOME_BODY_EXCERPT_BYTES: usize = 512;
 fn pr_open_failure_outcome(
     method: &'static str,
     path: String,
-    err: &anyhow::Error,
+    err: &GitHubApiError,
     reason_override: Option<String>,
 ) -> TaskRunOutcome {
     let reason = reason_override
         .unwrap_or_else(|| render_github_write_error("GitHub PR creation failed", err));
 
-    if let Some(envelope) = github_write_envelope(err) {
-        let detail = envelope.body.as_deref().unwrap_or(&envelope.error);
-        let detail_lower = detail.to_ascii_lowercase();
-        let already_exists = detail_lower.contains("pull request")
-            && detail_lower.contains("already exists")
-            && envelope.status.as_deref() == Some("422");
-        let error_class = if already_exists {
-            ErrorClass::ConflictRecoverable
-        } else {
-            envelope
-                .error_class
-                .unwrap_or_else(|| classify_github_write_status(envelope.status.as_deref()))
-        };
-        if let Some(body) = envelope.body.as_deref() {
-            tracing::warn!(
-                method,
-                path = %path,
-                body = %body,
-                "supervisor PR-open: GitHub PR creation failed response body"
-            );
-        }
+    tracing::warn!(
+        method,
+        path = %path,
+        body = %err.body,
+        source = ?err.source,
+        status = err.status.map(|status| status.as_u16()),
+        "supervisor PR-open: GitHub PR creation failed response body"
+    );
 
-        return TaskRunOutcome::Failed {
-            stage: "pr_open".into(),
-            provider_failure: None,
-            reason,
-            error_class: Some(error_class),
-            hint: Some(
-                if already_exists {
-                    PR_ALREADY_EXISTS_HINT
-                } else {
-                    envelope
-                        .hint
-                        .as_deref()
-                        .unwrap_or_else(|| default_pr_open_hint(error_class))
-                }
-                .to_string(),
-            ),
-            body_excerpt: envelope
-                .body
-                .as_deref()
-                .map(bounded_task_outcome_body_excerpt),
-        };
+    let already_exists = err.is_pr_already_exists();
+    let error_class = if already_exists {
+        ErrorClass::ConflictRecoverable
+    } else {
+        classify_github_write_error(err)
+    };
+
+    TaskRunOutcome::Failed {
+        stage: "pr_open".into(),
+        provider_failure: None,
+        reason,
+        error_class: Some(error_class),
+        hint: Some(
+            if already_exists {
+                PR_ALREADY_EXISTS_HINT
+            } else {
+                default_pr_open_hint(error_class)
+            }
+            .to_string(),
+        ),
+        body_excerpt: Some(bounded_task_outcome_body_excerpt(&err.body)),
     }
+}
 
-    let fallback = ToolError::new(err.to_string())
+#[cfg(test)]
+fn pr_open_untyped_failure_outcome(
+    method: &'static str,
+    path: String,
+    err: &anyhow::Error,
+) -> TaskRunOutcome {
+    let fallback = djinn_core::tool_error::ToolError::new(err.to_string())
         .with_error_class(ErrorClass::Internal)
         .with_method(method)
         .with_path(path);
@@ -446,13 +442,19 @@ fn pr_open_failure_outcome(
     }
 }
 
-fn classify_github_write_status(status: Option<&str>) -> ErrorClass {
-    match status.and_then(|s| s.parse::<u16>().ok()) {
+fn classify_github_write_error(err: &GitHubApiError) -> ErrorClass {
+    match err.source {
+        GitHubErrorSource::RateLimited => return ErrorClass::RateLimited,
+        GitHubErrorSource::Unauthenticated => return ErrorClass::Permission,
+        GitHubErrorSource::Transport | GitHubErrorSource::GraphQL => return ErrorClass::Internal,
+        GitHubErrorSource::Http => {}
+    }
+
+    match err.status.map(|status| status.as_u16()) {
         Some(404) => ErrorClass::NotFound,
         Some(401 | 403) => ErrorClass::Permission,
         Some(429) => ErrorClass::RateLimited,
         Some(code) if (500..600).contains(&code) => ErrorClass::Transient,
-        Some(code) if (400..500).contains(&code) => ErrorClass::Validation,
         _ => ErrorClass::Internal,
     }
 }
@@ -846,11 +848,12 @@ fn is_concurrent_push_race(err: &GitError) -> bool {
 mod tests {
     use super::{
         PR_ALREADY_EXISTS_HINT, TASK_OUTCOME_BODY_EXCERPT_BYTES, is_concurrent_push_race,
-        pr_open_failure_outcome,
+        pr_open_failure_outcome, pr_open_untyped_failure_outcome,
     };
     use crate::github_error_render::render_github_write_error;
     use djinn_core::tool_error::{ErrorClass, ToolError};
     use djinn_git::GitError;
+    use djinn_provider::github_api::GitHubApiError;
     use djinn_runtime::spec::TaskRunOutcome;
 
     #[test]
@@ -944,22 +947,13 @@ mod tests {
       }]
     }"#;
 
-    fn github_pr_error(status: u16, body: &str) -> anyhow::Error {
-        ToolError::new("create_pull_request failed")
-            .with_error_class(match status {
-                404 => ErrorClass::NotFound,
-                401 | 403 => ErrorClass::Permission,
-                429 => ErrorClass::RateLimited,
-                500..=599 => ErrorClass::Transient,
-                422 if body.contains("already exists") => ErrorClass::ConflictRecoverable,
-                _ => ErrorClass::Validation,
-            })
-            .with_method("POST")
-            .with_path("/repos/djinnos/server/pulls")
-            .with_http_status(status)
-            .with_body(body)
-            .with_hint("provider default hint")
-            .into()
+    fn github_pr_error(status: u16, body: &str) -> GitHubApiError {
+        GitHubApiError::http(
+            "create_pull_request",
+            "/repos/djinnos/server/pulls".to_string(),
+            reqwest::StatusCode::from_u16(status).expect("valid test status"),
+            body.to_string(),
+        )
     }
 
     fn failed_parts(
@@ -1019,6 +1013,18 @@ mod tests {
     }
 
     #[test]
+    fn pr_open_envelope_classifies_429_as_rate_limited() {
+        let err = github_pr_error(429, r#"{\"message\":\"API rate limit exceeded\"}"#);
+        let (class, _, _) = failed_parts(pr_open_failure_outcome(
+            "POST",
+            "/repos/djinnos/server/pulls".to_string(),
+            &err,
+            None,
+        ));
+        assert_eq!(class, Some(ErrorClass::RateLimited));
+    }
+
+    #[test]
     fn pr_open_envelope_classifies_5xx_as_transient() {
         let err = github_pr_error(502, r#"{"message":"Bad Gateway"}"#);
         let (class, _, _) = failed_parts(pr_open_failure_outcome(
@@ -1033,11 +1039,10 @@ mod tests {
     #[test]
     fn pr_open_envelope_classifies_untyped_as_internal_without_hint() {
         let err = anyhow::anyhow!("connection reset");
-        let (class, hint, body_excerpt) = failed_parts(pr_open_failure_outcome(
+        let (class, hint, body_excerpt) = failed_parts(pr_open_untyped_failure_outcome(
             "POST",
             "/repos/djinnos/server/pulls".to_string(),
             &err,
-            None,
         ));
         assert_eq!(class, Some(ErrorClass::Internal));
         assert!(hint.is_none());

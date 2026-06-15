@@ -341,13 +341,13 @@ pub enum TaskRunOutcome {
         #[serde(default)]
         provider_failure: Option<ProviderFailureClass>,
         /// Machine-readable class for structured tool/provider-write failures.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         error_class: Option<ErrorClass>,
         /// Actionable recovery hint for the agent/operator, when available.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         hint: Option<String>,
         /// Bounded upstream response/detail excerpt for compact rendering.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         body_excerpt: Option<String>,
     },
     Interrupted,
