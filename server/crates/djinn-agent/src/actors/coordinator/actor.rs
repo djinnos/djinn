@@ -549,88 +549,98 @@ impl CoordinatorActor {
                 //    any tasks that missed an event (e.g. needs_lead_intervention
                 //    tasks surviving a server restart).
                 _ = self.tick.tick() => {
-                    self.enforce_session_stall_timeout().await;
-                    self.reap_zombie_sessions().await;
-                    self.reap_idle_chat_sessions().await;
-                    self.detect_and_recover_stuck_filtered(None).await;
-
-                    // Check memory pressure before dispatching.
-                    let memory_throttled = if let Some(mem) = crate::resource_monitor::MemoryStatus::read() {
-                        if mem.is_critical() {
-                            tracing::error!(
-                                psi_full_avg10 = mem.psi_full_avg10,
-                                available_mb = mem.available_bytes / (1024 * 1024),
-                                "memory pressure CRITICAL — all tasks stalled; skipping dispatch"
-                            );
-                            true
-                        } else if mem.should_throttle() {
-                            tracing::warn!(
-                                psi_some_avg10 = mem.psi_some_avg10,
-                                available_mb = mem.available_bytes / (1024 * 1024),
-                                "memory pressure elevated — throttling dispatch"
-                            );
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-
-                    if !memory_throttled {
-                        self.dispatch_ready_tasks(None).await;
-                    }
-                    self.process_approved_tasks().await;
-                    self.poll_pr_statuses().await;
-                    if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
-                        let app_state = self.maintenance_context();
-                        health::sweep_stale_resources(&self.db, &app_state).await;
-                        self.last_stale_sweep = StdInstant::now();
-                    }
-                    if self.last_auto_dispatch_sweep.elapsed() >= AUTO_DISPATCH_SWEEP_INTERVAL {
-                        self.sweep_stale_auto_dispatches().await;
-                        self.last_auto_dispatch_sweep = StdInstant::now();
-                    }
-                    if self.last_proposal_review_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
-                        self.sweep_proposals_needing_review().await;
-                        self.sweep_proposals_needing_reconcile().await;
-                        self.last_proposal_review_sweep = StdInstant::now();
-                    }
-                    if self.last_graph_refresh.elapsed() >= GRAPH_REFRESH_INTERVAL {
-                        self.refresh_canonical_graphs_if_stale().await;
-                        self.last_graph_refresh = StdInstant::now();
-                    }
-                    // Run association pruning once per ~hour (120 ticks at 30s intervals)
-                    self.prune_tick_counter += 1;
-                    if self.prune_tick_counter >= 120 {
-                        self.prune_tick_counter = 0;
-                        self.prune_note_associations().await;
-                        if !self.should_skip_background_llm_work("hourly_note_consolidation") {
-                            super::consolidation::run_note_consolidation(&self.db, &self.consolidation_runner).await;
-                        }
-                        self.evict_throughput_events();
-                        if !self.should_skip_background_llm_work("hourly_prompt_amendment_evaluation") {
-                            self.evaluate_prompt_amendments().await;
-                        }
-                    }
-                    // ADR-048 §3A: idle-time memory consolidation.
-                    // Check if a previously spawned sweep has completed.
-                    if let Some(handle) = self.idle_consolidation_handle.as_ref()
-                        && handle.is_finished()
-                    {
-                        self.idle_consolidation_handle = None;
-                        self.idle_consolidation_cancel = None;
-                        self.last_idle_consolidation = Some(StdInstant::now());
-                        tracing::info!("CoordinatorActor: idle consolidation sweep completed");
-                    }
-                    // Only attempt a new sweep when no sweep is already running.
-                    if self.idle_consolidation_handle.is_none() {
-                        self.maybe_start_idle_consolidation().await;
-                    }
+                    self.run_tick().await;
                 }
             }
         }
         tracing::info!("CoordinatorActor stopped");
+    }
+
+    #[tracing::instrument(
+        name = "djinn.coordinator.tick",
+        skip(self),
+        fields(cycle_id = self.prune_tick_counter + 1, pass_kind = "tick")
+    )]
+    async fn run_tick(&mut self) {
+        self.enforce_session_stall_timeout().await;
+        self.reap_zombie_sessions().await;
+        self.reap_idle_chat_sessions().await;
+        self.detect_and_recover_stuck_filtered(None).await;
+
+        // Check memory pressure before dispatching.
+        let memory_throttled = if let Some(mem) = crate::resource_monitor::MemoryStatus::read() {
+            if mem.is_critical() {
+                tracing::error!(
+                    psi_full_avg10 = mem.psi_full_avg10,
+                    available_mb = mem.available_bytes / (1024 * 1024),
+                    "memory pressure CRITICAL — all tasks stalled; skipping dispatch"
+                );
+                true
+            } else if mem.should_throttle() {
+                tracing::warn!(
+                    psi_some_avg10 = mem.psi_some_avg10,
+                    available_mb = mem.available_bytes / (1024 * 1024),
+                    "memory pressure elevated — throttling dispatch"
+                );
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !memory_throttled {
+            self.dispatch_ready_tasks(None).await;
+        }
+        self.process_approved_tasks().await;
+        self.poll_pr_statuses().await;
+        if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
+            let app_state = self.maintenance_context();
+            health::sweep_stale_resources(&self.db, &app_state).await;
+            self.last_stale_sweep = StdInstant::now();
+        }
+        if self.last_auto_dispatch_sweep.elapsed() >= AUTO_DISPATCH_SWEEP_INTERVAL {
+            self.sweep_stale_auto_dispatches().await;
+            self.last_auto_dispatch_sweep = StdInstant::now();
+        }
+        if self.last_proposal_review_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
+            self.sweep_proposals_needing_review().await;
+            self.sweep_proposals_needing_reconcile().await;
+            self.last_proposal_review_sweep = StdInstant::now();
+        }
+        if self.last_graph_refresh.elapsed() >= GRAPH_REFRESH_INTERVAL {
+            self.refresh_canonical_graphs_if_stale().await;
+            self.last_graph_refresh = StdInstant::now();
+        }
+        // Run association pruning once per ~hour (120 ticks at 30s intervals)
+        self.prune_tick_counter += 1;
+        if self.prune_tick_counter >= 120 {
+            self.prune_tick_counter = 0;
+            self.prune_note_associations().await;
+            if !self.should_skip_background_llm_work("hourly_note_consolidation") {
+                super::consolidation::run_note_consolidation(&self.db, &self.consolidation_runner)
+                    .await;
+            }
+            self.evict_throughput_events();
+            if !self.should_skip_background_llm_work("hourly_prompt_amendment_evaluation") {
+                self.evaluate_prompt_amendments().await;
+            }
+        }
+        // ADR-048 §3A: idle-time memory consolidation.
+        // Check if a previously spawned sweep has completed.
+        if let Some(handle) = self.idle_consolidation_handle.as_ref()
+            && handle.is_finished()
+        {
+            self.idle_consolidation_handle = None;
+            self.idle_consolidation_cancel = None;
+            self.last_idle_consolidation = Some(StdInstant::now());
+            tracing::info!("CoordinatorActor: idle consolidation sweep completed");
+        }
+        // Only attempt a new sweep when no sweep is already running.
+        if self.idle_consolidation_handle.is_none() {
+            self.maybe_start_idle_consolidation().await;
+        }
     }
 
     /// Publish current state to the watch channel for lock-free status reads.

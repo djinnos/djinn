@@ -6,6 +6,10 @@ edition = "2024"
 [lib]
 doctest = false
 
+[features]
+# Exposes cluster-free slot-pool factory hooks for downstream integration tests.
+test-support = []
+
 [[bin]]
 name = "djinn-skills-manifest"
 path = "src/bin/skills_manifest.rs"
