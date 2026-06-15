@@ -308,7 +308,7 @@ pub(crate) async fn run_reply_loop(
 
     // Session-scoped stash for full tool outputs that exceed truncation limits.
     // The agent can navigate stashed outputs via `output_view` and `output_grep`.
-    let output_stash = Arc::new(Mutex::new(OutputStash::new()));
+    let output_stash = Arc::new(Mutex::new(OutputStash::with_session_id(session_id)));
 
     let mut output =
         ParsedAgentOutput::new(role_name == "reviewer" || role_name == "task_reviewer");
