@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use super::*;
 use crate::test_helpers;
 
-use super::super::{ModelSlotConfig, SlotHandle, SlotPoolConfig, SlotState};
+use super::super::{ModelSlotConfig, SlotEvent, SlotHandle, SlotPoolConfig, SlotState};
 use super::actor::SlotPool;
 use std::sync::{Arc, Mutex};
 
@@ -327,6 +327,149 @@ fn inject_stale_busy_free_slot(pool: &mut SlotPool, task_id: &str, model_id: &st
     );
     pool.test_inject_free(slot_id, model_id);
     slot_id
+}
+
+fn new_white_box_pool(slot_count: u32) -> (SlotPool, TempDir) {
+    let (app_state, cancel, temp) = test_app_state();
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", slot_count, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let (_pool_tx, pool_rx) = mpsc::channel(8);
+    let pool = SlotPool::new_with_factory(
+        pool_rx,
+        app_state,
+        cancel,
+        config,
+        // Long runtime: lifecycle ordering is driven only through the explicit
+        // white-box hooks below, never by sleeps or natural completion.
+        test_slot_factory(Duration::from_secs(3600), signal_tx),
+    );
+    (pool, temp)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LifecycleEventKind {
+    Free,
+    Killed,
+}
+
+impl LifecycleEventKind {
+    fn event(self, slot_id: usize, task_id: &str) -> SlotEvent {
+        match self {
+            Self::Free => SlotEvent::Free {
+                slot_id,
+                model_id: "model-a".to_string(),
+                task_id: task_id.to_string(),
+            },
+            Self::Killed => SlotEvent::Killed {
+                slot_id,
+                model_id: "model-a".to_string(),
+                task_id: task_id.to_string(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LifecycleStep {
+    Dispatch(&'static str),
+    Terminate(&'static str),
+    Complete(&'static str, LifecycleEventKind),
+    DuplicateComplete(&'static str, LifecycleEventKind),
+    MarkSlotFree(&'static str),
+    RetireSlot(&'static str),
+    DispatchAfterPoisonSelfHeals {
+        poisoned_task: &'static str,
+        next_task: &'static str,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LifecyclePermutation {
+    name: &'static str,
+    steps: &'static [LifecycleStep],
+}
+
+async fn run_lifecycle_permutation(case: LifecyclePermutation) {
+    let (mut pool, _temp) = new_white_box_pool(1);
+    let mut task_slots: HashMap<&'static str, usize> = HashMap::new();
+    assert_slot_pool_invariants_after(&pool, &format!("{}: initial spawn", case.name));
+
+    for (idx, step) in case.steps.iter().copied().enumerate() {
+        let label = format!("{} step {idx} {step:?}", case.name);
+        match step {
+            LifecycleStep::Dispatch(task_id) => {
+                pool.test_dispatch(task_id, "/tmp/project", "model-a")
+                    .await
+                    .unwrap_or_else(|err| panic!("{label}: dispatch {task_id} failed: {err:?}"));
+                let slot_id = pool
+                    .test_slot_of(task_id)
+                    .unwrap_or_else(|| panic!("{label}: {task_id} should hold a slot"));
+                task_slots.insert(task_id, slot_id);
+                assert_slot_pool_invariants_after(&pool, &label);
+            }
+            LifecycleStep::Terminate(task_id) => {
+                pool.test_terminate_session(task_id)
+                    .await
+                    .unwrap_or_else(|err| panic!("{label}: terminate {task_id} failed: {err:?}"));
+                assert_slot_pool_invariants_after(&pool, &label);
+            }
+            LifecycleStep::Complete(task_id, kind)
+            | LifecycleStep::DuplicateComplete(task_id, kind) => {
+                let slot_id = *task_slots
+                    .get(task_id)
+                    .unwrap_or_else(|| panic!("{label}: no recorded slot for {task_id}"));
+                pool.test_handle_slot_event(kind.event(slot_id, task_id))
+                    .await;
+                assert_slot_pool_invariants_after(&pool, &label);
+            }
+            LifecycleStep::MarkSlotFree(task_id) => {
+                let slot_id = *task_slots
+                    .get(task_id)
+                    .unwrap_or_else(|| panic!("{label}: no recorded slot for {task_id}"));
+                pool.test_mark_slot_free(slot_id, "model-a");
+                assert_slot_pool_invariants_after(&pool, &label);
+            }
+            LifecycleStep::RetireSlot(task_id) => {
+                let slot_id = *task_slots
+                    .get(task_id)
+                    .unwrap_or_else(|| panic!("{label}: no recorded slot for {task_id}"));
+                pool.test_retire(slot_id);
+                assert_slot_pool_invariants_after(&pool, &label);
+            }
+            LifecycleStep::DispatchAfterPoisonSelfHeals {
+                poisoned_task,
+                next_task,
+            } => {
+                let poisoned_slot =
+                    inject_stale_busy_free_slot(&mut pool, poisoned_task, "model-a");
+                assert!(
+                    pool.test_free_slots("model-a").contains(&poisoned_slot),
+                    "{label}: poisoned busy slot should be present on the free list before self-heal"
+                );
+                pool.test_dispatch(next_task, "/tmp/project", "model-a")
+                    .await
+                    .unwrap_or_else(|err| {
+                        panic!("{label}: dispatch {next_task} after poison failed: {err:?}")
+                    });
+                assert_slot_pool_invariants_after(&pool, &label);
+                let next_slot = pool
+                    .test_slot_of(next_task)
+                    .unwrap_or_else(|| panic!("{label}: {next_task} should hold a slot"));
+                assert_ne!(
+                    next_slot, poisoned_slot,
+                    "{label}: dispatch must not hand out the still-busy poisoned slot"
+                );
+                assert!(
+                    !pool.test_free_slots("model-a").contains(&poisoned_slot),
+                    "{label}: poisoned busy slot must be dropped from the free list"
+                );
+                task_slots.insert(next_task, next_slot);
+            }
+        }
+    }
 }
 
 async fn wait_until_no_sessions(pool: &SlotPoolHandle, task_ids: &[String]) {
@@ -1138,6 +1281,73 @@ async fn invariant_harness_accepts_stale_busy_slot_self_heal() {
         !pool.test_free_slots("model-a").contains(&stale_slot),
         "stale busy slot id {stale_slot} must be dropped instead of requeued"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_permutations_preserve_slot_pool_invariants() {
+    const CASES: &[LifecyclePermutation] = &[
+        LifecyclePermutation {
+            name: "duplicate-free-completion-is-idempotent",
+            steps: &[
+                LifecycleStep::Dispatch("task-a"),
+                LifecycleStep::Complete("task-a", LifecycleEventKind::Free),
+                LifecycleStep::DuplicateComplete("task-a", LifecycleEventKind::Free),
+                LifecycleStep::MarkSlotFree("task-a"),
+            ],
+        },
+        LifecyclePermutation {
+            name: "terminate-before-stale-free-completion",
+            steps: &[
+                LifecycleStep::Dispatch("task-a"),
+                LifecycleStep::Terminate("task-a"),
+                LifecycleStep::Complete("task-a", LifecycleEventKind::Free),
+                LifecycleStep::DuplicateComplete("task-a", LifecycleEventKind::Killed),
+            ],
+        },
+        LifecyclePermutation {
+            name: "terminate-before-stale-killed-completion",
+            steps: &[
+                LifecycleStep::Dispatch("task-a"),
+                LifecycleStep::Terminate("task-a"),
+                LifecycleStep::Complete("task-a", LifecycleEventKind::Killed),
+                LifecycleStep::DuplicateComplete("task-a", LifecycleEventKind::Killed),
+            ],
+        },
+        LifecyclePermutation {
+            name: "killed-completion-before-duplicate-free",
+            steps: &[
+                LifecycleStep::Dispatch("task-a"),
+                LifecycleStep::Complete("task-a", LifecycleEventKind::Killed),
+                LifecycleStep::DuplicateComplete("task-a", LifecycleEventKind::Free),
+                LifecycleStep::MarkSlotFree("task-a"),
+            ],
+        },
+        LifecyclePermutation {
+            name: "retired-slot-ignores-late-completions",
+            steps: &[
+                LifecycleStep::Dispatch("task-a"),
+                LifecycleStep::RetireSlot("task-a"),
+                LifecycleStep::Complete("task-a", LifecycleEventKind::Killed),
+                LifecycleStep::DuplicateComplete("task-a", LifecycleEventKind::Free),
+                LifecycleStep::MarkSlotFree("task-a"),
+                LifecycleStep::Dispatch("task-b"),
+            ],
+        },
+        LifecyclePermutation {
+            name: "v0-4-14-stale-busy-free-list-wedge-self-heals",
+            steps: &[
+                LifecycleStep::Dispatch("task-a"),
+                LifecycleStep::DispatchAfterPoisonSelfHeals {
+                    poisoned_task: "task-a",
+                    next_task: "task-b",
+                },
+            ],
+        },
+    ];
+
+    for case in CASES {
+        run_lifecycle_permutation(*case).await;
+    }
 }
 
 /// `mark_slot_free` is the single authoritative free-list append: it must never
