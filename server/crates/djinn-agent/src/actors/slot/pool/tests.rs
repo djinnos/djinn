@@ -1412,3 +1412,171 @@ async fn slot_event_killed_tears_down_taskrun_job() {
         "SlotEvent::Killed must invoke teardown exactly once (saw {count} calls)"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminate_session_synchronously_reclaims_mapping_activity_and_session_row() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(false);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let task_id = seed_running_session_with_task_run(
+        &app_state,
+        "terminate reclaim",
+        "run-terminate-reclaim",
+    )
+    .await;
+    let session_repo =
+        djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    app_state.register_activity(&task_id);
+    assert!(
+        app_state.idle_seconds(&task_id).is_some(),
+        "test should start with tracked activity"
+    );
+
+    let app_state_for_assert = app_state.clone();
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(10), signal_tx),
+    );
+
+    pool.dispatch(&task_id, "/tmp/project", "model-a")
+        .await
+        .expect("dispatch should succeed");
+    assert_eq!(running_count_for_cap(&session_repo).await, 1);
+
+    pool.terminate_session(&task_id)
+        .await
+        .expect("terminate_session should succeed");
+
+    assert!(
+        runtime
+            .calls()
+            .iter()
+            .any(|call| call == "run-terminate-reclaim"),
+        "terminate_session should attempt task-run Job teardown"
+    );
+    assert!(
+        !pool
+            .has_session(&task_id)
+            .await
+            .expect("has_session should succeed"),
+        "terminate_session should synchronously remove the task mapping"
+    );
+    assert!(
+        pool.session_for_task(&task_id)
+            .await
+            .expect("session lookup should succeed")
+            .is_none(),
+        "terminate_session should remove task_started/task_projects-backed session info"
+    );
+    assert!(
+        app_state_for_assert.idle_seconds(&task_id).is_none(),
+        "terminate_session should deregister host activity"
+    );
+    assert_eq!(
+        running_count_for_cap(&session_repo).await,
+        0,
+        "terminate_session should settle the running row before returning"
+    );
+    assert!(
+        session_repo
+            .list_active()
+            .await
+            .expect("list_active should succeed")
+            .is_empty(),
+        "no running sessions should remain after terminate_session returns"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminate_session_with_no_slot_mapping_returns_task_not_found() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(false);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(10), signal_tx),
+    );
+
+    let err = pool
+        .terminate_session("ghost-task")
+        .await
+        .expect_err("terminate_session on an unmapped task should fail truthfully");
+    assert!(
+        matches!(err, PoolError::TaskNotFound { ref task_id } if task_id == "ghost-task"),
+        "expected TaskNotFound for the requested task id, got {err:?}"
+    );
+    assert!(
+        runtime.calls().is_empty(),
+        "terminate_session on an unmapped task must not call teardown"
+    );
+
+    pool.evict_session("ghost-task")
+        .await
+        .expect("evict_session keeps leaked-session idempotent no-op semantics");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminate_session_does_not_return_non_draining_slot_to_free_list() {
+    let (app_state, cancel, _temp) = test_app_state();
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let (_pool_tx, pool_rx) = mpsc::channel(8);
+    let mut pool = SlotPool::new_with_factory(
+        pool_rx,
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(3600), signal_tx),
+    );
+
+    pool.test_dispatch("task-terminate", "/tmp/project", "model-a")
+        .await
+        .expect("dispatch should occupy slot 0");
+    let slot_id = pool
+        .test_slot_of("task-terminate")
+        .expect("task should hold a slot");
+    assert_eq!(slot_id, 0);
+    assert!(
+        pool.test_free_slots("model-a").is_empty(),
+        "busy slot should not be on the free list before termination"
+    );
+
+    pool.test_terminate_session("task-terminate")
+        .await
+        .expect("terminate_session should reclaim the task mapping");
+
+    assert_eq!(pool.test_slot_of("task-terminate"), None);
+    assert!(
+        pool.test_free_slots("model-a").is_empty(),
+        "terminate_session must not synchronously append a non-draining slot to the free list"
+    );
+
+    pool.test_handle_slot_event(super::super::SlotEvent::Killed {
+        slot_id,
+        model_id: "model-a".to_string(),
+        task_id: "task-terminate".to_string(),
+    })
+    .await;
+    assert_eq!(
+        pool.test_free_slots("model-a"),
+        vec![slot_id],
+        "the later lifecycle event is the single authority that frees the slot"
+    );
+}

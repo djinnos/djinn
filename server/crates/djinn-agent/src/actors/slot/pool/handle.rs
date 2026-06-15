@@ -79,10 +79,26 @@ impl SlotPoolHandle {
         .await
     }
 
+    /// Authoritatively terminate an operator/user-requested running session.
+    ///
+    /// Unlike [`kill_session`], this synchronously reclaims the task mapping,
+    /// activity tracker, and running session row before returning. Unlike
+    /// [`evict_session`], an unmapped task is reported truthfully as
+    /// [`PoolError::TaskNotFound`] rather than treated as an idempotent leak
+    /// cleanup no-op.
+    pub async fn terminate_session(&self, task_id: &str) -> Result<(), PoolError> {
+        self.request(|tx| PoolMessage::TerminateSession {
+            task_id: task_id.to_owned(),
+            respond_to: tx,
+        })
+        .await
+    }
+
     /// Forcibly evict a leaked task→slot mapping whose `Killed`/`Free` event
     /// never arrived (dead/evicted/OOM-killed pod, stuck RPC stream). Unlike
     /// [`kill_session`], this does not depend on the pod responding — it
-    /// reclaims the in-memory slot regardless so the task can redispatch.
+    /// reclaims the in-memory task mapping so the task can redispatch while the
+    /// slot itself rejoins rotation only after a later lifecycle event.
     pub async fn evict_session(&self, task_id: &str) -> Result<(), PoolError> {
         self.request(|tx| PoolMessage::EvictSession {
             task_id: task_id.to_owned(),
