@@ -63,7 +63,13 @@ fn parse_inline_list(value: &str) -> Vec<String> {
     }
     inner
         .split(',')
-        .map(|part| part.trim().trim_matches('"').trim_matches('\'').to_string())
+        .map(|part| {
+            part.trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim()
+                .to_string()
+        })
         .filter(|part| !part.is_empty())
         .collect()
 }
