@@ -1,8 +1,6 @@
 use super::super::*;
 use djinn_core::models::{TaskStatus, TransitionAction};
 
-use crate::supervisor_impl::disposition::LiveMoverEvidence;
-
 impl CoordinatorActor {
     async fn teardown_zombie_taskrun_job(
         &self,
@@ -568,21 +566,6 @@ impl CoordinatorActor {
             }
         };
 
-        let active_verifying_task_ids: std::collections::HashSet<String> =
-            match djinn_db::SessionRepository::new(
-                self.db.clone(),
-                crate::events::event_bus_for(&self.events_tx),
-            )
-            .list_active()
-            .await
-            {
-                Ok(sessions) => sessions.into_iter().filter_map(|s| s.task_id).collect(),
-                Err(e) => {
-                    tracing::warn!(error = %e, "CoordinatorActor: failed to load active sessions for no-mover disposition guard; assuming none");
-                    std::collections::HashSet::new()
-                }
-            };
-
         for task in verifying {
             if let Some(project_id) = project_filter
                 && task.project_id != project_id
@@ -624,23 +607,16 @@ impl CoordinatorActor {
                 continue;
             }
 
-            let evidence = LiveMoverEvidence {
-                active_session: active_verifying_task_ids.contains(&task.id),
-                queued_dispatch: false,
-                dispatch_inflight: self.inflight_dispatches.contains_key(&task.id),
-                recently_dispatched: self.last_dispatched.contains_key(&task.id),
-                open_pr: task
-                    .pr_url
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|url| !url.is_empty()),
-                pr_poller_owned: task
-                    .pr_url
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|url| !url.is_empty()),
-                review_pending_with_reviewer: false,
-                unresolved_blockers: task.unresolved_blocker_count > 0,
+            let evidence = match self.collect_live_mover_evidence(&task).await {
+                Ok(evidence) => evidence,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "CoordinatorActor: orphaned verifying no-mover disposition skipped; failed to collect live-mover evidence"
+                    );
+                    continue;
+                }
             };
             let merge_target = match ProjectRepository::new(
                 self.db.clone(),

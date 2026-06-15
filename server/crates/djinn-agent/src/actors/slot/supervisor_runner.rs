@@ -798,16 +798,10 @@ pub(crate) async fn run_supervisor_dispatch(
                                 "supervisor dispatch: failed to clear budget-park dispatch state"
                             );
                         }
-                        if let Err(e) = coordinator
-                            .route_settled_noop_without_live_mover(&task.id)
-                            .await
-                        {
-                            tracing::warn!(
-                                task_id = %task.short_id,
-                                error = %e,
-                                "supervisor dispatch: failed to enqueue no-mover disposition"
-                            );
-                        }
+                        // `ClearPlannedDispatchCompletion` routes through the
+                        // no-mover disposition call site after clearing stale
+                        // dispatch markers. Avoid sending a second message for
+                        // the same settled run.
                     }
                     None => {
                         tracing::debug!(
