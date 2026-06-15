@@ -70,7 +70,16 @@ const STATUS_COLUMNS: Array<{
 
 function taskToColumnKey(task: Task): ColumnKey | null {
   if (task.status === "closed") {
-    return task.merge_commit_sha != null ? "done" : null;
+    // A task lands in "Merged" when we have the landed merge-commit SHA. Tasks
+    // closed before the SHA was persisted (legacy rows) won't have one, so fall
+    // back to the PR-flow completion signal: a task that opened a PR (`pr_url`)
+    // and closed as `completed` genuinely merged. This deliberately excludes
+    // force-closed-without-merge (`close_reason` = "force_closed") and the
+    // review/decomposition/planning/spike tasks that never open a PR.
+    const merged =
+      task.merge_commit_sha != null ||
+      (task.pr_url != null && task.close_reason === "completed");
+    return merged ? "done" : null;
   }
   if (
     task.status === "approved" ||
