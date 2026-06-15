@@ -76,6 +76,69 @@ pub struct CapturedDataFrame {
     pub data: String,
 }
 
+/// Offline classification of whether a raw Anthropic-compatible capture
+/// surfaced model reasoning, and if so whether it used Anthropic's structured
+/// thinking stream shape or leaked inline `<think>` tags as ordinary text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicThinkingStreamClassification {
+    /// At least one frame used Anthropic's structured thinking block/delta
+    /// shape (`content_block.type = "thinking"` or
+    /// `delta.type = "thinking_delta"`).
+    StructuredThinking,
+    /// No structured thinking frame was observed, but a text delta contained
+    /// inline `<think>`/`</think>` tags.
+    InlineThinkTags,
+    /// No structured thinking or inline think-tag evidence was observed.
+    NoReasoningObserved,
+}
+
+/// Classify a sanitized raw Anthropic/MiniMax SSE capture artifact.
+///
+/// The input is the exact artifact/frame shape emitted by
+/// [`capture_anthropic_sse`] and [`dry_run_anthropic_sse_capture`]: each
+/// [`CapturedDataFrame::data`] value is a raw SSE `data:` JSON payload after
+/// redaction. This helper intentionally does not alter runtime completion
+/// behavior; it is for fixture-backed tests, runbook guidance, and future
+/// planner decisions about whether an inline think-tag fallback is required.
+pub fn classify_anthropic_thinking_stream(
+    artifact: &AnthropicSseCaptureArtifact,
+) -> AnthropicThinkingStreamClassification {
+    let mut saw_inline_think_tags = false;
+
+    for frame in &artifact.data_frames {
+        let Ok(value) = serde_json::from_str::<Value>(&frame.data) else {
+            continue;
+        };
+
+        let content_block_type = value.pointer("/content_block/type").and_then(Value::as_str);
+        let delta_type = value.pointer("/delta/type").and_then(Value::as_str);
+        if content_block_type == Some("thinking") || delta_type == Some("thinking_delta") {
+            return AnthropicThinkingStreamClassification::StructuredThinking;
+        }
+
+        if delta_type == Some("text_delta")
+            && value
+                .pointer("/delta/text")
+                .and_then(Value::as_str)
+                .is_some_and(contains_inline_think_tag)
+        {
+            saw_inline_think_tags = true;
+        }
+    }
+
+    if saw_inline_think_tags {
+        AnthropicThinkingStreamClassification::InlineThinkTags
+    } else {
+        AnthropicThinkingStreamClassification::NoReasoningObserved
+    }
+}
+
+fn contains_inline_think_tag(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("<think>") || text.contains("</think>")
+}
+
 impl AnthropicSseCaptureConfig {
     pub fn provider_config(&self) -> ProviderConfig {
         ProviderConfig {
@@ -336,6 +399,37 @@ mod tests {
         }
     }
 
+    fn fixture_artifact(data_frames: &[&str]) -> AnthropicSseCaptureArtifact {
+        AnthropicSseCaptureArtifact {
+            artifact_version: 1,
+            created_at: "2026-06-15T00:00:00Z".to_string(),
+            request: SanitizedRequestMetadata {
+                provider_format: "anthropic_messages".to_string(),
+                model: "MiniMax-M3".to_string(),
+                base_url: "https://api.minimax.io/anthropic/v1".to_string(),
+                path: "/anthropic/v1/messages".to_string(),
+                max_tokens: 4097,
+                stream: true,
+                thinking_requested: true,
+                reasoning_effort: Some(ReasoningEffort::Low),
+                thinking_budget_tokens: Some(4096),
+                auth: SanitizedAuthMetadata {
+                    kind: "bearer".to_string(),
+                    redacted: true,
+                },
+                headers: BTreeMap::from([("authorization".to_string(), REDACTED.to_string())]),
+            },
+            data_frames: data_frames
+                .iter()
+                .enumerate()
+                .map(|(index, data)| CapturedDataFrame {
+                    index,
+                    data: (*data).to_string(),
+                })
+                .collect(),
+        }
+    }
+
     fn spawn_sse_server() -> String {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .expect("bind local tcp listener");
@@ -409,6 +503,52 @@ mod tests {
         assert_eq!(
             parse_header_pair("X-Trace: abc").expect("valid header"),
             ("X-Trace".to_string(), "abc".to_string())
+        );
+    }
+
+    #[test]
+    fn classifies_structured_anthropic_thinking_delta_fixture() {
+        let artifact = fixture_artifact(&[
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":0}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Synthetic private reasoning summary."}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Final answer."}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+
+        assert_eq!(
+            classify_anthropic_thinking_stream(&artifact),
+            AnthropicThinkingStreamClassification::StructuredThinking
+        );
+    }
+
+    #[test]
+    fn classifies_inline_think_tags_in_text_delta_fixture() {
+        let artifact = fixture_artifact(&[
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":0}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<think>synthetic hidden reasoning</think> Visible answer."}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+
+        assert_eq!(
+            classify_anthropic_thinking_stream(&artifact),
+            AnthropicThinkingStreamClassification::InlineThinkTags
+        );
+    }
+
+    #[test]
+    fn classifies_plain_text_fixture_as_no_reasoning_observed() {
+        let artifact = fixture_artifact(&[
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":0}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A short ordinary answer with no reasoning markers."}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+
+        assert_eq!(
+            classify_anthropic_thinking_stream(&artifact),
+            AnthropicThinkingStreamClassification::NoReasoningObserved
         );
     }
 }
