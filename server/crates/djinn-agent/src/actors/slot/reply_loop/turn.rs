@@ -11,7 +11,7 @@ use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::telemetry;
 
 use super::super::{runtime_env_diagnostics, runtime_fs_diagnostics};
-use super::budget::SessionBudgetPolicy;
+use super::budget::{SessionBudgetPolicy, soft_budget_threshold_exceeded};
 use super::error_handling::{
     MAX_COMPACTION_RETRIES, empty_turn_backoff, is_context_length_error,
     is_orphaned_tool_call_error, next_nudge_message, should_retry_after_tool_call_compaction,
@@ -37,50 +37,6 @@ fn permission_denial_text(text: &str) -> bool {
         || lower.contains("not authorized")
         || lower.contains("unauthorized")
         || lower.contains("forbidden")
-}
-
-/// Decide whether the reply loop's in-memory usage accumulator has crossed
-/// the resolved soft-threshold for the session budget.
-///
-/// The spend signal is the in-memory `total_tokens_in + total_tokens_out` from
-/// `streaming.rs` — the same accumulator the G9 wind-down / future hard
-/// threshold logic will use. We deliberately do **not** read the throttled
-/// session-row counters (`SessionMessageRepository` / `services.flush_session_tokens`):
-/// those are observability-only and lag the live session by up to
-/// `TOKEN_FLUSH_INTERVAL_SECS`. The cache-aware `current_context_tokens` gauge
-/// is also passed in as a secondary signal when the policy reports the model
-/// context window (so a single oversized prompt can still trip the reminder
-/// even when the cumulative `input+output` spend is low) — both signals
-/// OR-combine so either crossing the threshold trips the check.
-///
-/// Returns `false` (no firing) when the policy is degenerate (zero budget or
-/// non-positive ratio) so a misconfigured env never blocks sessions.
-fn soft_budget_threshold_exceeded(
-    budget: &super::budget::ResolvedSessionBudget,
-    total_tokens_in: u32,
-    total_tokens_out: u32,
-    current_context_tokens: u32,
-) -> bool {
-    if budget.max_cumulative_tokens == 0 || budget.soft_threshold_ratio <= 0.0 {
-        return false;
-    }
-    let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
-    let soft_cap = (budget.max_cumulative_tokens as f64) * budget.soft_threshold_ratio;
-    if (cumulative_spend as f64) >= soft_cap {
-        return true;
-    }
-    // Secondary signal: per-prompt context pressure. Only meaningful when the
-    // policy actually knows the model context window — otherwise the gauge is
-    // either zero or backed by the conservative fallback, and the ratio is
-    // not a defensible signal.
-    if budget.context_window_known && budget.context_window_tokens > 0 {
-        let context_pressure =
-            (current_context_tokens as f64) / (budget.context_window_tokens as f64);
-        if context_pressure >= budget.soft_threshold_ratio {
-            return true;
-        }
-    }
-    false
 }
 
 fn push_fragment(fragments: &mut Vec<String>, value: String) {
@@ -159,6 +115,59 @@ async fn inject_loop_guard_correction(
     let msg = corrective_message_for_loop_guard(condition);
     persist_session_message(msg_repo, session_id, task_id, &msg).await;
     conversation.push(msg);
+}
+
+/// rrdr: one-shot soft-budget converge reminder. On the first crossing of
+/// the resolved soft threshold the helper persists + queues a
+/// `<system-reminder>` asking the agent to converge. The `injected` flag
+/// (owned by `run_reply_loop`) gates every subsequent call so the same
+/// reminder cannot fire again on later turns that still see the threshold
+/// exceeded.
+#[allow(clippy::too_many_arguments)]
+async fn maybe_inject_soft_budget_reminder(
+    injected: &mut bool,
+    session_budget: &super::budget::ResolvedSessionBudget,
+    msg_repo: &SessionMessageRepository,
+    session_id: &str,
+    task_id: &str,
+    role_name: &str,
+    turns: u32,
+    total_tokens_in: u32,
+    total_tokens_out: u32,
+    current_context_tokens: u32,
+    conversation: &mut Conversation,
+) -> bool {
+    if *injected
+        || !soft_budget_threshold_exceeded(
+            session_budget,
+            total_tokens_in,
+            total_tokens_out,
+            current_context_tokens,
+        )
+    {
+        return false;
+    }
+    *injected = true;
+    let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
+    let soft_cap =
+        (session_budget.max_cumulative_tokens as f64) * session_budget.soft_threshold_ratio;
+    tracing::warn!(
+        task_id = %task_id,
+        agent_type = %role_name,
+        turns,
+        total_tokens_in,
+        total_tokens_out,
+        cumulative_spend,
+        max_cumulative_tokens = session_budget.max_cumulative_tokens,
+        soft_cap = soft_cap as u64,
+        soft_threshold_ratio = session_budget.soft_threshold_ratio,
+        "ReplyLoop: soft budget threshold reached — injecting one-shot <system-reminder> \
+         converge directive"
+    );
+    let msg = soft_budget_converge_message();
+    persist_session_message(msg_repo, session_id, task_id, &msg).await;
+    conversation.push(msg);
+    true
 }
 
 pub(crate) struct ReplyLoopContext<'a> {
@@ -397,16 +406,8 @@ pub(crate) async fn run_reply_loop(
         // wind-down turn runs, the next cap check falls through to the hard
         // error if the agent still hasn't reached a terminal action.
         let mut wind_down_injected = false;
-        // rrdr: one-shot soft-budget converge reminder. When the in-memory
-        // usage accumulator (`total_tokens_in + total_tokens_out`, and
-        // optionally the cache-aware context gauge) crosses the resolved
-        // soft threshold (default ~75% of `max_cumulative_tokens`) we inject a
-        // `<system-reminder>` asking the agent to converge, commit what works,
-        // stop expanding scope, and prepare to finish. The flag makes the
-        // injection strictly one-shot so later pre-turn iterations that still
-        // see the threshold exceeded (e.g. the agent ignored the reminder and
-        // kept spending) don't re-inject the same message — analogous to
-        // `wind_down_injected` above.
+        // rrdr: one-shot soft-budget converge reminder flag — see
+        // `maybe_inject_soft_budget_reminder` for the contract.
         let mut soft_budget_reminder_injected = false;
 
         loop {
@@ -440,45 +441,24 @@ pub(crate) async fn run_reply_loop(
                 }
             }
 
-            // rrdr soft-threshold converge reminder. Evaluated at the same
-            // pre-turn branch as the G9 step-cap check so it sees the same
-            // accumulated state, but BEFORE `turns += 1` so the reminder is
-            // queued ahead of the next provider stream and counted in the
-            // upcoming turn's input. The helper reads only in-memory counters
-            // (`total_tokens_in`, `total_tokens_out`, and the cache-aware
-            // `current_context_tokens` gauge when the policy knows the model
-            // context window) — it never touches the throttled session-row
-            // counters. The one-shot flag prevents re-injection on every
-            // subsequent turn where the threshold remains exceeded.
-            if !soft_budget_reminder_injected
-                && soft_budget_threshold_exceeded(
-                    &session_budget,
-                    total_tokens_in,
-                    total_tokens_out,
-                    current_context_tokens,
-                )
-            {
-                soft_budget_reminder_injected = true;
-                let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
-                let soft_cap =
-                    (session_budget.max_cumulative_tokens as f64) * session_budget.soft_threshold_ratio;
-                tracing::warn!(
-                    task_id = %task_id,
-                    agent_type = %role_name,
-                    turns,
-                    total_tokens_in,
-                    total_tokens_out,
-                    cumulative_spend,
-                    max_cumulative_tokens = session_budget.max_cumulative_tokens,
-                    soft_cap = soft_cap as u64,
-                    soft_threshold_ratio = session_budget.soft_threshold_ratio,
-                    "ReplyLoop: soft budget threshold reached — injecting one-shot \
-                     <system-reminder> converge directive"
-                );
-                let msg = soft_budget_converge_message();
-                persist_session_message(&msg_repo, session_id, task_id, &msg).await;
-                conversation.push(msg);
-            }
+            // rrdr soft-threshold converge reminder. Runs at the same
+            // pre-turn branch as the G9 step-cap check (BEFORE `turns += 1`)
+            // so the reminder is queued ahead of the next provider stream
+            // and counted in the upcoming turn's input.
+            maybe_inject_soft_budget_reminder(
+                &mut soft_budget_reminder_injected,
+                &session_budget,
+                &msg_repo,
+                session_id,
+                task_id,
+                role_name,
+                turns,
+                total_tokens_in,
+                total_tokens_out,
+                current_context_tokens,
+                conversation,
+            )
+            .await;
             turns += 1;
 
             let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);

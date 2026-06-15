@@ -1,4 +1,10 @@
 use super::error_handling::supports_tool_choice_required;
+// djinn:allow-oversize — integration tests for the entire reply_loop module.
+// The file already exceeded the 1500-line / 51.2KB size-guard thresholds
+// before the rrdr soft-budget converge reminder tests were added; the marker
+// keeps the size guard from re-flagging the pre-existing oversize while
+// leaving the new tests in their natural location alongside the related
+// reply-loop coverage.
 use super::loop_guard::{LoopGuardError, LoopGuardKind};
 use super::persistence::serialize_llm_input;
 use super::turn::{ReplyLoopContext, run_reply_loop};
@@ -1823,12 +1829,17 @@ async fn soft_budget_below_threshold_no_injection() {
 
     // 5 tool-call turns at 30+10=40 cumulative tokens each → 200 tokens total
     // (well under 750). Then a submit_work finalize.
+    //
+    // Vary the args per call (`{"step": N}`) so each call is a *distinct*
+    // tool-call signature: the in-loop guard over repeated failing tool-call
+    // signatures would otherwise trip on the 4th identical call and preempt
+    // the soft-budget no-injection path this test is asserting.
     let provider = MockProvider::new(vec![
-        MockResponse::tool_call("a", "worker_tool", 30),
-        MockResponse::tool_call("b", "worker_tool", 30),
-        MockResponse::tool_call("c", "worker_tool", 30),
-        MockResponse::tool_call("d", "worker_tool", 30),
-        MockResponse::tool_call("e", "worker_tool", 30),
+        MockResponse::tool_call_with_input("a", "worker_tool", serde_json::json!({"step": 1}), 30),
+        MockResponse::tool_call_with_input("b", "worker_tool", serde_json::json!({"step": 2}), 30),
+        MockResponse::tool_call_with_input("c", "worker_tool", serde_json::json!({"step": 3}), 30),
+        MockResponse::tool_call_with_input("d", "worker_tool", serde_json::json!({"step": 4}), 30),
+        MockResponse::tool_call_with_input("e", "worker_tool", serde_json::json!({"step": 5}), 30),
         MockResponse {
             text: None,
             tool_calls: vec![ContentBlock::ToolUse {
