@@ -2,88 +2,18 @@
 //!
 //! Write-side GitHub helpers historically flattened upstream failures into
 //! strings such as `create_pull_request failed (422): ...`.  This module keeps
-//! the construction-time classification in one place so individual write paths
-//! can return a typed envelope with the same `error_class` taxonomy agents use
-//! for tool errors, while still offering compact text for legacy surfaces.
+//! construction-time classification in one place so individual write paths can
+//! return the shared typed [`ToolError`] envelope with the dfk7
+//! `error_class` taxonomy, while still offering compact text for legacy
+//! surfaces.
 
-use std::fmt;
-
+use djinn_core::tool_error::{ErrorClass, ToolError};
 use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
 
 const EXCERPT_LIMIT: usize = 240;
 
-/// `ToolError.error_class` taxonomy for GitHub write failures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolErrorClass {
-    ConflictRecoverable,
-    NotFound,
-    Permission,
-    Validation,
-    RateLimited,
-    Internal,
-}
-
-impl ToolErrorClass {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ConflictRecoverable => "conflict_recoverable",
-            Self::NotFound => "not_found",
-            Self::Permission => "permission",
-            Self::Validation => "validation",
-            Self::RateLimited => "rate_limited",
-            Self::Internal => "internal",
-        }
-    }
-}
-
-impl fmt::Display for ToolErrorClass {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Typed envelope for a failed GitHub write operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GitHubWriteErrorEnvelope {
-    pub error: String,
-    pub error_class: ToolErrorClass,
-    pub method: String,
-    pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-    pub hint: String,
-}
-
-impl GitHubWriteErrorEnvelope {
-    /// Compact deterministic rendering for agent/operator-facing strings.
-    pub fn compact(&self) -> String {
-        let status = self
-            .status
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "none".to_string());
-        let mut rendered = format!(
-            "GitHub write failed method={} path={} status={} error_class={} hint={}",
-            self.method, self.path, status, self.error_class, self.hint
-        );
-        if let Some(body) = &self.body {
-            rendered.push_str(" body=");
-            rendered.push_str(body);
-        }
-        rendered
-    }
-}
-
-impl fmt::Display for GitHubWriteErrorEnvelope {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.compact())
-    }
-}
-
-impl std::error::Error for GitHubWriteErrorEnvelope {}
+/// Shared typed envelope for a failed GitHub write operation.
+pub type GitHubWriteErrorEnvelope = ToolError;
 
 /// Inputs for constructing a [`GitHubWriteErrorEnvelope`].
 #[derive(Debug, Clone)]
@@ -157,79 +87,87 @@ pub fn github_write_error_envelope(input: GitHubWriteErrorInput<'_>) -> GitHubWr
         .status
         .map(|s| s.to_string())
         .unwrap_or_else(|| "status-less".to_string());
-    let body = bounded_excerpt(detail).filter(|s| !s.is_empty());
+    let body = bounded_excerpt(detail);
 
-    GitHubWriteErrorEnvelope {
-        error: format!(
-            "{operation} failed: method={} path={} status={} error_class={}",
-            input.method, input.path, status, error_class
-        ),
-        error_class,
-        method: input.method.to_string(),
-        path: input.path.to_string(),
-        status: input.status,
-        body,
-        hint,
+    let mut envelope = ToolError::new(format!(
+        "{operation} failed: method={} path={} status={} error_class={}",
+        input.method, input.path, status, error_class
+    ))
+    .with_error_class(error_class)
+    .with_method(input.method)
+    .with_path(input.path)
+    .with_hint(hint);
+
+    if let Some(status) = input.status {
+        envelope = envelope.with_http_status(status);
     }
+    if let Some(body) = body {
+        envelope = envelope.with_body(body);
+    }
+
+    envelope
 }
 
 fn classify_github_write_error(
     status: Option<u16>,
     detail: &str,
     rate_limited: bool,
-) -> ToolErrorClass {
+) -> ErrorClass {
     if rate_limited || status == Some(429) || detail_indicates_rate_limit(detail) {
-        return ToolErrorClass::RateLimited;
+        return ErrorClass::RateLimited;
     }
 
     match status {
-        Some(404) => ToolErrorClass::NotFound,
-        Some(401 | 403) => ToolErrorClass::Permission,
+        Some(404) => ErrorClass::NotFound,
+        Some(401 | 403) => ErrorClass::Permission,
         Some(422) if detail_indicates_existing_pull_request(detail) => {
-            ToolErrorClass::ConflictRecoverable
+            ErrorClass::ConflictRecoverable
         }
         Some(code) if (400..500).contains(&code) => {
             if detail_indicates_permission(detail) {
-                ToolErrorClass::Permission
+                ErrorClass::Permission
             } else {
-                ToolErrorClass::Validation
+                ErrorClass::Validation
             }
         }
         _ => {
             if detail_indicates_permission(detail) {
-                ToolErrorClass::Permission
+                ErrorClass::Permission
             } else {
-                ToolErrorClass::Internal
+                ErrorClass::Internal
             }
         }
     }
 }
 
-fn default_hint(error_class: ToolErrorClass, detail: &str) -> String {
+fn default_hint(error_class: ErrorClass, detail: &str) -> String {
     match error_class {
-        ToolErrorClass::ConflictRecoverable if detail_indicates_existing_pull_request(detail) => {
+        ErrorClass::ConflictRecoverable if detail_indicates_existing_pull_request(detail) => {
             "Adopt/use the existing pull request for this branch instead of creating a new PR."
                 .to_string()
         }
-        ToolErrorClass::ConflictRecoverable => {
+        ErrorClass::ConflictRecoverable => {
             "Use the existing GitHub resource or reconcile the conflict before retrying."
                 .to_string()
         }
-        ToolErrorClass::NotFound => {
+        ErrorClass::NotFound => {
             "Verify the repository, ref, pull request, or endpoint exists and is accessible."
                 .to_string()
         }
-        ToolErrorClass::Permission => {
+        ErrorClass::Permission => {
             "Check that the GitHub token or App installation has permission for this write."
                 .to_string()
         }
-        ToolErrorClass::Validation => {
+        ErrorClass::Validation => {
             "Fix the rejected GitHub request parameters before retrying.".to_string()
         }
-        ToolErrorClass::RateLimited => {
+        ErrorClass::RateLimited => {
             "Back off until the GitHub rate limit resets before retrying.".to_string()
         }
-        ToolErrorClass::Internal => {
+        ErrorClass::Transient => {
+            "Retry after a short delay if GitHub reports a transient upstream failure.".to_string()
+        }
+        ErrorClass::Internal => {
             "Treat as an internal/provider failure; inspect the bounded detail before retrying."
                 .to_string()
         }
@@ -306,12 +244,14 @@ mod tests {
     fn classifies_captured_422_already_exists_as_conflict_recoverable() {
         let err = envelope(Some(422), PR_ALREADY_EXISTS);
 
-        assert_eq!(err.error_class, ToolErrorClass::ConflictRecoverable);
-        assert_eq!(err.error_class.as_str(), "conflict_recoverable");
+        assert_eq!(err.error_class, Some(ErrorClass::ConflictRecoverable));
+        assert_eq!(err.error_class.unwrap().as_str(), "conflict_recoverable");
         assert!(
             err.hint
+                .as_deref()
+                .unwrap()
                 .contains("Adopt/use the existing pull request for this branch"),
-            "hint was: {}",
+            "hint was: {:?}",
             err.hint
         );
     }
@@ -320,7 +260,7 @@ mod tests {
     fn classification_matrix_for_github_write_failures() {
         assert_eq!(
             envelope(Some(404), r#"{"message":"Not Found"}"#).error_class,
-            ToolErrorClass::NotFound
+            Some(ErrorClass::NotFound)
         );
         assert_eq!(
             envelope(
@@ -328,23 +268,23 @@ mod tests {
                 r#"{"message":"Resource not accessible by integration"}"#
             )
             .error_class,
-            ToolErrorClass::Permission
+            Some(ErrorClass::Permission)
         );
         assert_eq!(
             envelope(Some(401), r#"{"message":"Bad credentials"}"#).error_class,
-            ToolErrorClass::Permission
+            Some(ErrorClass::Permission)
         );
         assert_eq!(
             envelope(Some(422), r#"{"message":"Validation Failed","errors":[]}"#).error_class,
-            ToolErrorClass::Validation
+            Some(ErrorClass::Validation)
         );
         assert_eq!(
             envelope(Some(429), r#"{"message":"API rate limit exceeded"}"#).error_class,
-            ToolErrorClass::RateLimited
+            Some(ErrorClass::RateLimited)
         );
         assert_eq!(
             envelope(None, "error sending request: connection reset by peer").error_class,
-            ToolErrorClass::Internal
+            Some(ErrorClass::Internal)
         );
     }
 
@@ -352,15 +292,15 @@ mod tests {
     fn rate_limit_body_overrides_permission_status() {
         let err = envelope(Some(403), r#"{"message":"API rate limit exceeded"}"#);
 
-        assert_eq!(err.error_class, ToolErrorClass::RateLimited);
+        assert_eq!(err.error_class, Some(ErrorClass::RateLimited));
     }
 
     #[test]
     fn statusless_unknown_is_internal_never_transient() {
         let err = envelope(None, "opaque provider failure");
 
-        assert_eq!(err.error_class.as_str(), "internal");
-        assert_ne!(err.error_class.as_str(), "transient");
+        assert_eq!(err.error_class.unwrap().as_str(), "internal");
+        assert_ne!(err.error_class.unwrap().as_str(), "transient");
         assert!(err.compact().contains("status=none"));
         assert!(err.compact().contains("error_class=internal"));
     }

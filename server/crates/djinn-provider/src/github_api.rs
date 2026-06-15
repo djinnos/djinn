@@ -51,7 +51,7 @@ pub use types::{
     PrMergeQueueState, PrRef, PrReview, PrReviewFeedback, PrState, PullRequest, ReviewComment,
 };
 pub use write_errors::{
-    GitHubWriteErrorEnvelope, GitHubWriteErrorInput, ToolErrorClass, github_write_error_envelope,
+    GitHubWriteErrorEnvelope, GitHubWriteErrorInput, github_write_error_envelope,
 };
 
 /// GitHub REST API v3 base URL.

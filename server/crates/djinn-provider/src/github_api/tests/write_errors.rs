@@ -1,4 +1,5 @@
-use crate::github_api::{GitHubWriteErrorInput, ToolErrorClass, github_write_error_envelope};
+use crate::github_api::{GitHubWriteErrorInput, github_write_error_envelope};
+use djinn_core::tool_error::ErrorClass;
 
 const CAPTURED_CREATE_PR_422_ALREADY_EXISTS: &str = r#"{
   "message": "Validation Failed",
@@ -24,12 +25,14 @@ fn envelope(status: Option<u16>, body: &str) -> crate::github_api::GitHubWriteEr
 fn captured_create_pr_422_already_exists_is_conflict_recoverable() {
     let err = envelope(Some(422), CAPTURED_CREATE_PR_422_ALREADY_EXISTS);
 
-    assert_eq!(err.error_class, ToolErrorClass::ConflictRecoverable);
-    assert_eq!(err.error_class.as_str(), "conflict_recoverable");
+    assert_eq!(err.error_class, Some(ErrorClass::ConflictRecoverable));
+    assert_eq!(err.error_class.unwrap().as_str(), "conflict_recoverable");
     assert!(
         err.hint
+            .as_deref()
+            .unwrap()
             .contains("Adopt/use the existing pull request for this branch"),
-        "hint was: {}",
+        "hint was: {:?}",
         err.hint
     );
 }
@@ -38,7 +41,7 @@ fn captured_create_pr_422_already_exists_is_conflict_recoverable() {
 fn github_write_error_classification_matrix() {
     assert_eq!(
         envelope(Some(404), r#"{"message":"Not Found"}"#).error_class,
-        ToolErrorClass::NotFound
+        Some(ErrorClass::NotFound)
     );
     assert_eq!(
         envelope(
@@ -46,23 +49,23 @@ fn github_write_error_classification_matrix() {
             r#"{"message":"Resource not accessible by integration"}"#,
         )
         .error_class,
-        ToolErrorClass::Permission
+        Some(ErrorClass::Permission)
     );
     assert_eq!(
         envelope(Some(401), r#"{"message":"Bad credentials"}"#).error_class,
-        ToolErrorClass::Permission
+        Some(ErrorClass::Permission)
     );
     assert_eq!(
         envelope(Some(422), r#"{"message":"Validation Failed","errors":[]}"#).error_class,
-        ToolErrorClass::Validation
+        Some(ErrorClass::Validation)
     );
     assert_eq!(
         envelope(Some(429), r#"{"message":"API rate limit exceeded"}"#).error_class,
-        ToolErrorClass::RateLimited
+        Some(ErrorClass::RateLimited)
     );
     assert_eq!(
         envelope(None, "error sending request: connection reset by peer").error_class,
-        ToolErrorClass::Internal
+        Some(ErrorClass::Internal)
     );
 }
 
@@ -70,15 +73,15 @@ fn github_write_error_classification_matrix() {
 fn rate_limit_response_wins_over_permission_status() {
     let err = envelope(Some(403), r#"{"message":"API rate limit exceeded"}"#);
 
-    assert_eq!(err.error_class, ToolErrorClass::RateLimited);
+    assert_eq!(err.error_class, Some(ErrorClass::RateLimited));
 }
 
 #[test]
 fn statusless_unknown_is_internal_never_transient() {
     let err = envelope(None, "opaque provider failure");
 
-    assert_eq!(err.error_class.as_str(), "internal");
-    assert_ne!(err.error_class.as_str(), "transient");
+    assert_eq!(err.error_class.unwrap().as_str(), "internal");
+    assert_ne!(err.error_class.unwrap().as_str(), "transient");
     assert!(err.compact().contains("status=none"));
     assert!(err.compact().contains("error_class=internal"));
 }
