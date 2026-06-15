@@ -88,6 +88,86 @@ impl InterventionChaosHarness {
         (handled, refreshed)
     }
 
+    async fn dispatch_same_role_reappearance_like_dispatch(
+        &mut self,
+        role: &'static str,
+        had_provider_failure: bool,
+    ) -> (bool, djinn_core::models::Task) {
+        let next_streak = self
+            .actor
+            .dispatch_failure_streak
+            .get(&self.task_id)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.seed_same_role_redispatch_state(role, next_streak)
+            .await;
+        let task = self.task().await;
+        self.actor.last_dispatched.remove(&task.id);
+
+        if should_route_cycling_intervention(role, next_streak, had_provider_failure)
+            && self
+                .actor
+                .maybe_intervene_on_cycling_task(&task, role, next_streak)
+                .await
+        {
+            self.actor.dispatch_failure_streak.remove(&task.id);
+            self.actor.dispatch_cooldowns.remove(&task.id);
+            self.actor
+                .clear_durable_dispatch_backoff_state(
+                    &task.id,
+                    Some(&task.short_id),
+                    "test_cycling_planner_intervention_handoff_clear",
+                )
+                .await;
+            return (true, self.task().await);
+        }
+
+        if !had_provider_failure && next_streak >= MAX_DISPATCH_FAILURES {
+            let reason = "repeated dispatch failures: the task could not complete after multiple \
+                          attempts. Resolve the underlying issue and reopen.";
+            self.repo
+                .transition(
+                    &task.id,
+                    djinn_core::models::TransitionAction::ForceClose,
+                    "coordinator",
+                    "system",
+                    Some(reason),
+                    None,
+                )
+                .await
+                .unwrap();
+            self.actor.dispatch_failure_streak.remove(&task.id);
+            self.actor.dispatch_cooldowns.remove(&task.id);
+            self.actor
+                .clear_durable_dispatch_backoff_state(
+                    &task.id,
+                    Some(&task.short_id),
+                    "test_same_role_terminal_close_clear",
+                )
+                .await;
+            return (true, self.task().await);
+        }
+
+        self.persist_same_role_backoff_after_reappearance(next_streak)
+            .await;
+        (false, task)
+    }
+
+    async fn dispatch_same_role_reappearances_like_dispatch(
+        &mut self,
+        role: &'static str,
+        cycles: u32,
+    ) -> (bool, djinn_core::models::Task) {
+        let mut last = (false, self.task().await);
+        for _ in 0..cycles {
+            last = self
+                .dispatch_same_role_reappearance_like_dispatch(role, false)
+                .await;
+        }
+        last
+    }
+
     async fn complete_planner_intervention_and_reset_ladder(&self) -> djinn_core::models::Task {
         self.repo
             .reset_intervention_counters(&self.task_id)
@@ -277,6 +357,61 @@ impl InterventionChaosHarness {
         assert_eq!(durable.last_dispatched_role.as_deref(), Some(role));
     }
 
+    async fn persist_same_role_backoff_after_reappearance(&self, streak: u32) {
+        let cooldown_until = rfc3339(
+            ::time::OffsetDateTime::now_utc()
+                + ::time::Duration::try_from(std::time::Duration::from_secs(300))
+                    .expect("cooldown duration fits time"),
+        );
+        DispatchStateRepository::new(self.db.clone())
+            .upsert(DispatchStateUpsert {
+                task_id: &self.task_id,
+                failure_streak: i64::from(streak),
+                cooldown_until: Some(&cooldown_until),
+                escalation_count: 0,
+                last_dispatched_at: None,
+                last_dispatched_role: None,
+                inflight_creator_user_id: None,
+                inflight_model_id: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn assert_same_role_backoff_after_reappearance(&self, expected_streak: u32) {
+        assert_eq!(
+            self.actor
+                .dispatch_failure_streak
+                .get(&self.task_id)
+                .copied(),
+            Some(expected_streak),
+            "in-memory dispatch_failure_streak"
+        );
+        assert!(
+            self.actor.dispatch_cooldowns.contains_key(&self.task_id),
+            "in-memory dispatch_cooldowns should be seeded"
+        );
+        assert!(
+            !self.actor.last_dispatched.contains_key(&self.task_id),
+            "same-role reappearance consumes last_dispatched before backing off"
+        );
+
+        let durable = self
+            .durable_dispatch_state()
+            .await
+            .expect("durable dispatch state should be seeded");
+        assert_eq!(durable.failure_streak, i64::from(expected_streak));
+        assert!(durable.cooldown_until.is_some(), "durable cooldown_until");
+        assert!(
+            durable.last_dispatched_at.is_none(),
+            "durable last_dispatched_at should be cleared after reappearance"
+        );
+        assert!(
+            durable.last_dispatched_role.is_none(),
+            "durable last_dispatched_role should be cleared after reappearance"
+        );
+    }
+
     async fn assert_task_status(&self, status: &str, close_reason_contains: Option<&str>) {
         let task = self.task().await;
         assert_eq!(task.status, status, "task status");
@@ -289,6 +424,14 @@ impl InterventionChaosHarness {
                 task.close_reason
             );
         }
+    }
+
+    async fn assert_source_task_not_ready_open(&self) {
+        let open_tasks = self.repo.list_by_status("open").await.unwrap();
+        assert!(
+            open_tasks.iter().all(|task| task.id != self.task_id),
+            "source task must not remain as a ready open task after terminal close"
+        );
     }
 
     async fn assert_dispatch_backoff_cleared(&self) {
@@ -424,6 +567,119 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
         "terminal recheck must not create another Planner review"
     );
     harness.assert_dispatch_backoff_cleared().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes() {
+    let mut harness = InterventionChaosHarness::new(0).await;
+    let role = "worker";
+
+    assert_eq!(
+        STREAK_INTERVENTION_THRESHOLD, 4,
+        "Trigger B chaos coverage is pinned to the production threshold"
+    );
+    assert!(should_route_cycling_intervention(
+        role,
+        STREAK_INTERVENTION_THRESHOLD,
+        false
+    ));
+    assert!(!should_route_cycling_intervention(
+        role,
+        STREAK_INTERVENTION_THRESHOLD,
+        true
+    ));
+    assert!(!should_route_cycling_intervention(
+        "planner",
+        STREAK_INTERVENTION_THRESHOLD,
+        false
+    ));
+
+    let (below_handled, below_threshold) = harness
+        .dispatch_same_role_reappearances_like_dispatch(role, STREAK_INTERVENTION_THRESHOLD - 1)
+        .await;
+    assert!(
+        !below_handled,
+        "same-role cycles below threshold only seed backoff"
+    );
+    assert_eq!(below_threshold.status, "open");
+    harness
+        .assert_same_role_backoff_after_reappearance(STREAK_INTERVENTION_THRESHOLD - 1)
+        .await;
+    harness.assert_planner_marker_count(0).await;
+    harness.assert_open_planner_review_count(0).await;
+
+    let (threshold_handled, first_routed) = harness
+        .dispatch_same_role_reappearance_like_dispatch(role, false)
+        .await;
+    assert!(
+        threshold_handled,
+        "threshold crossing routes to the cycling Planner intervention"
+    );
+    assert_eq!(first_routed.status, "open", "source task stays open");
+    assert_eq!(
+        first_routed.reopen_count, 0,
+        "Trigger B does not need reopen_count"
+    );
+    harness.assert_planner_marker_count(1).await;
+    harness.assert_marker_reopen_counts(&[0]).await;
+    harness.assert_open_planner_review_count(1).await;
+    harness.assert_dispatch_backoff_cleared().await;
+
+    let (suppressed_handled, suppressed) = harness
+        .dispatch_same_role_reappearances_like_dispatch(role, STREAK_INTERVENTION_THRESHOLD)
+        .await;
+    assert!(
+        !suppressed_handled,
+        "same reopen-count loop is idempotently suppressed after the first Planner handoff"
+    );
+    assert_eq!(suppressed.status, "open");
+    harness.assert_planner_marker_count(1).await;
+    harness.assert_open_planner_review_count(1).await;
+    harness
+        .assert_same_role_backoff_after_reappearance(STREAK_INTERVENTION_THRESHOLD)
+        .await;
+
+    let remaining_to_hard_cap = MAX_DISPATCH_FAILURES - STREAK_INTERVENTION_THRESHOLD;
+    let (terminal_handled, terminal) = harness
+        .dispatch_same_role_reappearances_like_dispatch(role, remaining_to_hard_cap)
+        .await;
+    assert!(
+        terminal_handled,
+        "hard cap must consume the cycle instead of redispatching indefinitely"
+    );
+    assert_eq!(terminal.status, "closed");
+    assert!(
+        terminal
+            .close_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("repeated dispatch failures")),
+        "terminal close reason should identify repeated dispatch failures; got {:?}",
+        terminal.close_reason
+    );
+    harness.assert_dispatch_backoff_cleared().await;
+    harness.assert_source_task_not_ready_open().await;
+    harness.assert_planner_marker_count(1).await;
+    harness.assert_open_planner_review_count(1).await;
+
+    let mut provider_guard = InterventionChaosHarness::new(0).await;
+    let (provider_handled, provider_task) = provider_guard
+        .dispatch_same_role_reappearances_like_dispatch(role, STREAK_INTERVENTION_THRESHOLD - 1)
+        .await;
+    assert!(!provider_handled);
+    assert_eq!(provider_task.status, "open");
+    let (provider_threshold_handled, provider_threshold_task) = provider_guard
+        .dispatch_same_role_reappearance_like_dispatch(role, true)
+        .await;
+    assert!(
+        !provider_threshold_handled,
+        "typed provider failure at threshold must stay on backoff path, not Planner intervention"
+    );
+    assert_eq!(provider_threshold_task.status, "open");
+    provider_guard.assert_planner_marker_count(0).await;
+    provider_guard.assert_open_planner_review_count(0).await;
+    provider_guard
+        .assert_same_role_backoff_after_reappearance(STREAK_INTERVENTION_THRESHOLD)
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
