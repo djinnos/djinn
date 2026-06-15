@@ -1437,6 +1437,7 @@ mod inflight_ledger_tests {
             &self,
             db: &djinn_db::Database,
             cancel: tokio_util::sync::CancellationToken,
+            max_slots: u32,
         ) -> crate::actors::slot::SlotPoolHandle {
             let started_tx = self.started_tx.clone();
             let releases = self.releases.clone();
@@ -1446,7 +1447,7 @@ mod inflight_ledger_tests {
                 crate::actors::slot::SlotPoolConfig {
                     models: vec![crate::actors::slot::ModelSlotConfig {
                         model_id: WND1_STABLE_MODEL_ID.to_owned(),
-                        max_slots: 0,
+                        max_slots,
                         roles: ["worker".to_owned()].into_iter().collect(),
                     }],
                     role_priorities: HashMap::new(),
@@ -1563,6 +1564,7 @@ mod inflight_ledger_tests {
         db: &djinn_db::Database,
         events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
         controlled_runtime: &Wnd1ControlledRuntime,
+        max_slots: u32,
     ) -> CoordinatorActor {
         let cancel = tokio_util::sync::CancellationToken::new();
         CoordinatorActor {
@@ -1572,7 +1574,7 @@ mod inflight_ledger_tests {
             tick: tokio::time::interval(STUCK_INTERVAL),
             db: db.clone(),
             events_tx: events_tx.clone(),
-            pool: controlled_runtime.spawn_pool(db, cancel),
+            pool: controlled_runtime.spawn_pool(db, cancel, max_slots),
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
@@ -1741,7 +1743,7 @@ mod inflight_ledger_tests {
             .await;
 
             let (runtime, mut started_rx) = Wnd1ControlledRuntime::new();
-            let mut actor = wnd1_actor_for_tests(&db, &events_tx, &runtime);
+            let mut actor = wnd1_actor_for_tests(&db, &events_tx, &runtime, cap);
             let mut observations = Vec::new();
             let mut running_sessions: HashMap<String, String> = HashMap::new();
             let mut active_tasks = Vec::new();
