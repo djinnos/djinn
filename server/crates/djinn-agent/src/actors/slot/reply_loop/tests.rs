@@ -1313,12 +1313,12 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
 async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
     let tools = vec![dummy_tool_schema("missing_tool")];
     let mut responses = Vec::new();
-    for step in 1..=26 {
+    for step in 1..=5 {
         responses.push(MockResponse::tool_call_with_input(
             &format!("t{step}"),
             "missing_tool",
             serde_json::json!({"step": step}),
-            75,
+            450,
         ));
     }
     responses.push(MockResponse::text_only(
@@ -1388,12 +1388,12 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
 async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
     let tools = vec![dummy_tool_schema("missing_tool")];
     let mut responses = Vec::new();
-    for step in 1..=27 {
+    for step in 1..=6 {
         responses.push(MockResponse::tool_call_with_input(
             &format!("t{step}"),
             "missing_tool",
             serde_json::json!({"step": step}),
-            75,
+            450,
         ));
     }
     let provider = MockProvider::new(responses);

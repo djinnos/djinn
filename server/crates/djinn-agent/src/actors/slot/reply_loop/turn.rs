@@ -1,3 +1,5 @@
+// djinn:allow-oversize — reply loop orchestration remains intentionally co-located
+// while rrdr budget wind-down hooks land; split-out is a separate refactor.
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -946,18 +948,26 @@ pub(crate) async fn run_reply_loop(
             // granted final turn. A text-only response IS the hand-off summary:
             // it was captured into `last_assistant_text` / `final_assistant_text`
             // and persisted above, so end the session now instead of nudging.
-            // If the agent instead kept calling tools (no terminal text and no
-            // finalize), fall through to dispatch — the next cap check then
-            // hard-errors, so the extension stays exactly one turn.
+            // If the agent instead kept calling tools, hard-error now: the
+            // single extra model turn was consumed, and dispatching ignored
+            // tool calls would let unrelated loop guards preempt this reason.
             if wind_down_injected && turn_tool_calls.is_empty() {
                 tracing::info!(
                     task_id = %task_id,
                     agent_type = %role_name,
+                    wind_down_reason = wind_down_reason
+                        .unwrap_or(WindDownReason::TurnCap)
+                        .as_str(),
                     turns,
                     assistant_message_count,
-                    "ReplyLoop: wind-down summary captured — session complete (graceful step-cap stop)"
+                    "ReplyLoop: wind-down summary captured — session complete"
                 );
                 break;
+            }
+            if wind_down_injected {
+                return Err(wind_down_reason
+                    .unwrap_or(WindDownReason::TurnCap)
+                    .hard_error(max_turns));
             }
 
             // ── Nudge loop: text-only without finalize ────────────────────────
