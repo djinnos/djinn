@@ -8,30 +8,29 @@
 //! second wave of `456f` splits the test module into the `tests/`
 //! subdirectory layout:
 //!
-//! - `streaming`    — SSE/event parser + tokio stream integration tests
-//!                    (the 6 message-level parser tests, the 2 tokio
-//!                    stream tests, the 2 streaming-SSE-adjacent tests, and
-//!                    the 3 `test_build_request_*` / `test_system_blocks_*`
-//!                    tests that live above the L437 "Empty-segment
-//!                    handling" section break).
-//! - `request`      — system-blocks, build_request, reasoning-effort tests
-//!                    (the `test_build_request_*` / `test_system_blocks_*` /
-//!                    `test_serialize_system_blocks_*` /
-//!                    `test_reasoning_effort_*` family below L437).
-//! - `e2e_request`  — end-to-end prompt assembly + cache-control cap tests
-//!                    (the 4 `e2e_*` tests + 2 `test_cache_control_*` tests).
-//!                    Owns the `build_system_message_for_test` local helper.
-//! - `cache`        — stable-prefix-hash + default-cache-policy +
-//!                    effective_url + RMCP tests (7 `test_stable_prefix_hash_*`
-//!                    + 3 `test_default_cache_policy_*` /
-//!                    `test_explicit_metadata_overrides_default_policy` + 1
-//!                    `test_effective_url_*` + 2 `test_rmcp_tools_*` /
-//!                    `test_tool_without_schema_*`). Owns the
-//!                    `drift_guard_fixture` local helper.
+//! - `streaming` — SSE/event parser + tokio stream integration tests (the 6
+//!   message-level parser tests, the 2 tokio stream tests, the 2
+//!   streaming-SSE-adjacent tests, and the 3 `test_build_request_*` /
+//!   `test_system_blocks_*` tests that live above the L437 "Empty-segment
+//!   handling" section break).
+//! - `request` — system-blocks, build_request, reasoning-effort tests (the
+//!   `test_build_request_*` / `test_system_blocks_*` /
+//!   `test_serialize_system_blocks_*` / `test_reasoning_effort_*` family below
+//!   L437).
+//! - `e2e_request` — end-to-end prompt assembly + cache-control cap tests (the
+//!   4 `e2e_*` tests + 2 `test_cache_control_*` tests). Owns the
+//!   `build_system_message_for_test` local helper.
+//! - `cache` — stable-prefix-hash + default-cache-policy + effective_url + RMCP
+//!   tests (7 `test_stable_prefix_hash_*` + 3 `test_default_cache_policy_*` /
+//!   `test_explicit_metadata_overrides_default_policy` + 1 `test_effective_url_*`
+//!   + 2 `test_rmcp_tools_*` / `test_tool_without_schema_*`). Owns the
+//!     `drift_guard_fixture` local helper.
 //!
 //! The 3 shared helpers (`spawn_sse_server`, `test_anthropic_config`,
 //! `test_provider`) are defined here and marked `pub(super)` so the 4 sibling
 //! test files can reach them via `use super::spawn_sse_server;` etc.
+
+#![allow(clippy::doc_overindented_list_items)]
 
 #[allow(unused_imports)]
 pub use super::*;

@@ -5,8 +5,25 @@ use crate::github_api::transport::handle_rate_limit;
 use crate::github_api::types::{CompareResponse, RequiredStatusChecksResponse};
 use crate::github_api::{
     AutoMergeRequest, CheckRun, CheckRunsResponse, CreatePrParams, DequeueEvent, GitHubApiClient,
-    MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrMergeQueueState, PullRequest,
+    GitHubWriteErrorInput, MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrMergeQueueState,
+    PullRequest, github_write_error_envelope,
 };
+
+fn github_pr_write_error(
+    method: &'static str,
+    path: &str,
+    status: Option<reqwest::StatusCode>,
+    body_or_detail: &str,
+    operation: &'static str,
+) -> anyhow::Error {
+    github_write_error_envelope(
+        GitHubWriteErrorInput::new(method, path)
+            .with_reqwest_status(status)
+            .with_body_or_detail(Some(body_or_detail))
+            .with_operation(Some(operation)),
+    )
+    .into()
+}
 
 impl GitHubApiClient {
     /// Create a pull request.
@@ -18,7 +35,8 @@ impl GitHubApiClient {
         repo: &str,
         params: CreatePrParams,
     ) -> Result<PullRequest> {
-        let url = format!("{}/repos/{}/{}/pulls", self.base_url, owner, repo);
+        let path = format!("/repos/{owner}/{repo}/pulls");
+        let url = format!("{}{}", self.base_url, path);
         let body = serde_json::to_value(&params)?;
 
         let resp = self
@@ -65,7 +83,13 @@ impl GitHubApiClient {
                     return Ok(pr);
                 }
             }
-            return Err(anyhow!("create_pull_request failed ({}): {}", status, body));
+            return Err(github_pr_write_error(
+                "POST",
+                &path,
+                Some(status),
+                &body,
+                "create_pull_request",
+            ));
         }
         Ok(resp.json().await?)
     }
@@ -156,10 +180,8 @@ impl GitHubApiClient {
         repo: &str,
         pull_number: u64,
     ) -> Result<PullRequest> {
-        let url = format!(
-            "{}/repos/{}/{}/pulls/{}",
-            self.base_url, owner, repo, pull_number
-        );
+        let path = format!("/repos/{owner}/{repo}/pulls/{pull_number}");
+        let url = format!("{}{}", self.base_url, path);
         let body = serde_json::json!({ "state": "open" });
 
         let resp = self
@@ -184,7 +206,13 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("reopen_pull_request failed ({}): {}", status, body));
+            return Err(github_pr_write_error(
+                "PATCH",
+                &path,
+                Some(status),
+                &body,
+                "reopen_pull_request",
+            ));
         }
         Ok(resp.json().await?)
     }
@@ -248,12 +276,24 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("enable_auto_merge failed ({}): {}", status, body));
+            return Err(github_pr_write_error(
+                "POST",
+                "/graphql",
+                Some(status),
+                &body,
+                "enable_auto_merge",
+            ));
         }
 
         let json: serde_json::Value = resp.json().await?;
         if let Some(errors) = json.get("errors") {
-            return Err(anyhow!("enable_auto_merge GraphQL error: {}", errors));
+            return Err(github_pr_write_error(
+                "POST",
+                "/graphql",
+                Some(reqwest::StatusCode::OK),
+                &errors.to_string(),
+                "enable_auto_merge",
+            ));
         }
         Ok(json)
     }
@@ -995,10 +1035,8 @@ impl GitHubApiClient {
         pull_number: u64,
         expected_head_sha: &str,
     ) -> Result<serde_json::Value> {
-        let url = format!(
-            "{}/repos/{}/{}/pulls/{}/update-branch",
-            self.base_url, owner, repo, pull_number
-        );
+        let path = format!("/repos/{owner}/{repo}/pulls/{pull_number}/update-branch");
+        let url = format!("{}{}", self.base_url, path);
         let body = serde_json::json!({
             "expected_head_sha": expected_head_sha,
         });
@@ -1025,10 +1063,12 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "update_pull_request_branch failed ({}): {}",
-                status,
-                body
+            return Err(github_pr_write_error(
+                "PUT",
+                &path,
+                Some(status),
+                &body,
+                "update_pull_request_branch",
             ));
         }
         Ok(resp.json().await.unwrap_or(serde_json::Value::Null))
@@ -1043,10 +1083,8 @@ impl GitHubApiClient {
         method: MergeMethod,
         commit_title: &str,
     ) -> Result<serde_json::Value> {
-        let url = format!(
-            "{}/repos/{}/{}/pulls/{}/merge",
-            self.base_url, owner, repo, pull_number
-        );
+        let path = format!("/repos/{owner}/{repo}/pulls/{pull_number}/merge");
+        let url = format!("{}{}", self.base_url, path);
         let merge_method_str = match method {
             MergeMethod::Squash => "squash",
             MergeMethod::Rebase => "rebase",
@@ -1079,7 +1117,13 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("merge_pull_request failed ({}): {}", status, body));
+            return Err(github_pr_write_error(
+                "PUT",
+                &path,
+                Some(status),
+                &body,
+                "merge_pull_request",
+            ));
         }
         Ok(resp.json().await?)
     }

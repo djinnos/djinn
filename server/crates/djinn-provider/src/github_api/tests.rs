@@ -9,9 +9,11 @@ use crate::github_app::installations::prime_cache_for_tests;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod checks;
+mod contents;
 mod pull_requests;
 mod reviews;
 mod transport;
+mod write_errors;
 
 /// Allocate a fresh installation id for each test and seed the in-memory
 /// installation-token cache with a predictable bearer value. Using distinct
