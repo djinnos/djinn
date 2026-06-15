@@ -171,6 +171,34 @@ async fn budget_park_governance_does_not_route_trigger_b_or_touch_breaker_state(
     );
 }
 
+#[test]
+fn budget_park_source_paths_do_not_enter_dispatch_fault_routing() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let guarded_paths = [
+        "src/actors/coordinator/dispatch/task_dispatch.rs",
+        "src/actors/coordinator/dispatch/wave_dispatch.rs",
+        "src/actors/coordinator/dispatch/session_recovery.rs",
+        "src/actors/coordinator/dispatch/retry.rs",
+    ];
+
+    let mut offenders = Vec::new();
+    for relative in guarded_paths {
+        let path = manifest_dir.join(relative);
+        let source = std::fs::read_to_string(&path).expect("read coordinator dispatch source");
+        if source.contains("TaskRunOutcome::Parked")
+            || source.contains("StageOutcome::Parked")
+            || source.contains("parked_reason")
+        {
+            offenders.push(relative);
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "budget parks are planned lifecycle endings; coordinator dispatch fault/routing paths must not special-case them as failures: {offenders:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn at_threshold_routes_to_planner_intervention() {
     let db = test_helpers::create_test_db();
