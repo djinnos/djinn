@@ -11,12 +11,12 @@ use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::telemetry;
 
 use super::super::{runtime_env_diagnostics, runtime_fs_diagnostics};
-use super::budget::SessionBudgetPolicy;
+use super::budget::{SessionBudgetPolicy, soft_budget_threshold_exceeded};
 use super::error_handling::{
     MAX_COMPACTION_RETRIES, empty_turn_backoff, is_context_length_error,
     is_orphaned_tool_call_error, next_nudge_message, should_retry_after_tool_call_compaction,
-    should_retry_empty_assistant_turn, should_retry_empty_stream, tool_choice_for_turn,
-    wind_down_message,
+    should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
+    tool_choice_for_turn, wind_down_message,
 };
 use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
@@ -115,6 +115,59 @@ async fn inject_loop_guard_correction(
     let msg = corrective_message_for_loop_guard(condition);
     persist_session_message(msg_repo, session_id, task_id, &msg).await;
     conversation.push(msg);
+}
+
+/// rrdr: one-shot soft-budget converge reminder. On the first crossing of
+/// the resolved soft threshold the helper persists + queues a
+/// `<system-reminder>` asking the agent to converge. The `injected` flag
+/// (owned by `run_reply_loop`) gates every subsequent call so the same
+/// reminder cannot fire again on later turns that still see the threshold
+/// exceeded.
+#[allow(clippy::too_many_arguments)]
+async fn maybe_inject_soft_budget_reminder(
+    injected: &mut bool,
+    session_budget: &super::budget::ResolvedSessionBudget,
+    msg_repo: &SessionMessageRepository,
+    session_id: &str,
+    task_id: &str,
+    role_name: &str,
+    turns: u32,
+    total_tokens_in: u32,
+    total_tokens_out: u32,
+    current_context_tokens: u32,
+    conversation: &mut Conversation,
+) -> bool {
+    if *injected
+        || !soft_budget_threshold_exceeded(
+            session_budget,
+            total_tokens_in,
+            total_tokens_out,
+            current_context_tokens,
+        )
+    {
+        return false;
+    }
+    *injected = true;
+    let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
+    let soft_cap =
+        (session_budget.max_cumulative_tokens as f64) * session_budget.soft_threshold_ratio;
+    tracing::warn!(
+        task_id = %task_id,
+        agent_type = %role_name,
+        turns,
+        total_tokens_in,
+        total_tokens_out,
+        cumulative_spend,
+        max_cumulative_tokens = session_budget.max_cumulative_tokens,
+        soft_cap = soft_cap as u64,
+        soft_threshold_ratio = session_budget.soft_threshold_ratio,
+        "ReplyLoop: soft budget threshold reached — injecting one-shot <system-reminder> \
+         converge directive"
+    );
+    let msg = soft_budget_converge_message();
+    persist_session_message(msg_repo, session_id, task_id, &msg).await;
+    conversation.push(msg);
+    true
 }
 
 pub(crate) struct ReplyLoopContext<'a> {
@@ -353,6 +406,9 @@ pub(crate) async fn run_reply_loop(
         // wind-down turn runs, the next cap check falls through to the hard
         // error if the agent still hasn't reached a terminal action.
         let mut wind_down_injected = false;
+        // rrdr: one-shot soft-budget converge reminder flag — see
+        // `maybe_inject_soft_budget_reminder` for the contract.
+        let mut soft_budget_reminder_injected = false;
 
         loop {
             if turns >= max_turns {
@@ -384,6 +440,25 @@ pub(crate) async fn run_reply_loop(
                     ));
                 }
             }
+
+            // rrdr soft-threshold converge reminder. Runs at the same
+            // pre-turn branch as the G9 step-cap check (BEFORE `turns += 1`)
+            // so the reminder is queued ahead of the next provider stream
+            // and counted in the upcoming turn's input.
+            maybe_inject_soft_budget_reminder(
+                &mut soft_budget_reminder_injected,
+                &session_budget,
+                &msg_repo,
+                session_id,
+                task_id,
+                role_name,
+                turns,
+                total_tokens_in,
+                total_tokens_out,
+                current_context_tokens,
+                conversation,
+            )
+            .await;
             turns += 1;
 
             let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);

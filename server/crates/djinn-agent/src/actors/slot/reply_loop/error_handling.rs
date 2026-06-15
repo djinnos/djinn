@@ -26,6 +26,36 @@ pub(super) fn wind_down_message() -> Message {
     )
 }
 
+/// Build the soft-budget converge directive injected exactly once when the
+/// reply loop's in-memory usage accumulator crosses the resolved soft threshold
+/// (default ~75% of `SessionBudgetPolicy::max_cumulative_tokens`).
+///
+/// This sits between the per-turn G9 step-cap check and the future hard-threshold
+/// wind-down. It tells the agent to *converge*: commit/keep what already works,
+/// stop expanding scope, and prepare to wrap the task up — so the eventual
+/// hard-threshold wind-down captures a useful summary instead of mid-refactor
+/// state. The body is wrapped in `<system-reminder>...</system-reminder>` so the
+/// model recognizes it as a platform directive (matches the convention used by
+/// the chat prompt layer, see `codebase_header::wrap_in_system_reminder`).
+///
+/// The caller is responsible for persisting/pushing this message exactly once
+/// per session — the `<system-reminder>` does NOT confer one-shot semantics on
+/// its own. Pair it with a boolean flag analogous to `wind_down_injected` so
+/// later pre-turn iterations that still see the threshold exceeded don't
+/// re-inject the same reminder.
+pub(super) fn soft_budget_converge_message() -> Message {
+    Message::user(
+        "<system-reminder>\n\
+         Budget for this session is mostly consumed. You should now CONVERGE on the \
+         current task: stop expanding scope, commit or keep what already works, and \
+         avoid opening new files, tools, or sub-tasks. Prepare to finish soon — if \
+         you have a final summarize / hand-off / submit step available, prefer it. \
+         If you cannot finish, leave the work in a state the next agent or human \
+         can pick up cleanly.\n\
+         </system-reminder>",
+    )
+}
+
 pub(crate) fn is_context_length_error(e: &anyhow::Error) -> bool {
     // Prefer the typed provider taxonomy when present (set at the
     // provider-crate boundary), then fall back to substring matching for
