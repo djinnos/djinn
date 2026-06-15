@@ -173,6 +173,11 @@ impl DjinnMcpServer {
     #[tool(
         description = "Search GitHub code across public repositories. Returns compact, navigable matches with snippets, file paths, URLs, and metadata suitable for browsing. Each result has a result_id for reference. Use github_fetch_file to inspect the full file of a promising result. Supports language, repo, and path filters."
     )]
+    // TODO(dfk7 / T2): migrate to `ToolError::from_untyped` once the typed
+    // GitHubApiError is available upstream — the `from_http_error` wrapper
+    // is a soft deprecation until then. The `#[allow(deprecated)]` keeps
+    // `-D warnings` green for the duration.
+    #[allow(deprecated)]
     pub async fn github_search(
         &self,
         Parameters(params): Parameters<GithubSearchParams>,
@@ -214,6 +219,11 @@ impl DjinnMcpServer {
     #[tool(
         description = "Fetch the full contents of a file from a public GitHub repository. Use after github_search to inspect a promising result. Supports optional start_line/end_line for reading specific sections of large files. Returns the file content with metadata including size, ref, and URL."
     )]
+    // TODO(dfk7 / T2): migrate to `ToolError::from_untyped` once the typed
+    // GitHubApiError is available upstream — the `from_http_error` wrapper
+    // is a soft deprecation until then. The `#[allow(deprecated)]` keeps
+    // `-D warnings` green for the duration.
+    #[allow(deprecated)]
     pub async fn github_fetch_file(
         &self,
         Parameters(params): Parameters<GithubFetchFileParams>,
