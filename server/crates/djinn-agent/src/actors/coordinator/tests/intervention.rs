@@ -1,7 +1,7 @@
 use super::*;
 use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
-use djinn_core::{events::DjinnEventEnvelope, models::SessionStatus};
 use djinn_core::run_progress::RunProgress;
+use djinn_core::{events::DjinnEventEnvelope, models::SessionStatus};
 use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
 
 #[allow(dead_code)]
@@ -54,6 +54,20 @@ impl InterventionChaosHarness {
         self.task().await
     }
 
+    async fn drive_review_failures_through_threshold(&mut self) -> djinn_core::models::Task {
+        self.drive_to_reopen_count(REOPEN_INTERVENTION_THRESHOLD)
+            .await
+    }
+
+    async fn drive_review_failures_beyond_threshold(
+        &mut self,
+        extra_cycles: i64,
+    ) -> djinn_core::models::Task {
+        assert!(extra_cycles >= 0, "extra cycle count must be non-negative");
+        self.drive_to_reopen_count(REOPEN_INTERVENTION_THRESHOLD + extra_cycles)
+            .await
+    }
+
     async fn drive_to_reopen_count(&mut self, target: i64) -> djinn_core::models::Task {
         let mut task = self.task().await;
         assert!(
@@ -84,11 +98,12 @@ impl InterventionChaosHarness {
 
     async fn seed_same_role_redispatch_state(&mut self, role: &'static str, streak: u32) {
         let cooldown = std::time::Duration::from_secs(300);
-        self.actor.dispatch_failure_streak.insert(self.task_id.clone(), streak);
-        self.actor.dispatch_cooldowns.insert(
-            self.task_id.clone(),
-            StdInstant::now() + cooldown,
-        );
+        self.actor
+            .dispatch_failure_streak
+            .insert(self.task_id.clone(), streak);
+        self.actor
+            .dispatch_cooldowns
+            .insert(self.task_id.clone(), StdInstant::now() + cooldown);
         self.actor.last_dispatched.insert(
             self.task_id.clone(),
             DispatchMarker {
@@ -117,7 +132,10 @@ impl InterventionChaosHarness {
             .unwrap();
     }
 
-    async fn advance_same_role_cycle(&mut self, role: &'static str) -> (bool, djinn_core::models::Task) {
+    async fn advance_same_role_cycle(
+        &mut self,
+        role: &'static str,
+    ) -> (bool, djinn_core::models::Task) {
         let next_streak = self
             .actor
             .dispatch_failure_streak
@@ -125,7 +143,8 @@ impl InterventionChaosHarness {
             .copied()
             .unwrap_or(0)
             .saturating_add(1);
-        self.seed_same_role_redispatch_state(role, next_streak).await;
+        self.seed_same_role_redispatch_state(role, next_streak)
+            .await;
         let task = self.task().await;
         let handled = self
             .actor
@@ -135,8 +154,46 @@ impl InterventionChaosHarness {
         (handled, refreshed)
     }
 
+    async fn advance_same_role_cycles(
+        &mut self,
+        role: &'static str,
+        cycles: u32,
+    ) -> (bool, djinn_core::models::Task) {
+        let mut last = (false, self.task().await);
+        for _ in 0..cycles {
+            last = self.advance_same_role_cycle(role).await;
+        }
+        last
+    }
+
+    async fn advance_same_role_to_streak(
+        &mut self,
+        role: &'static str,
+        target_streak: u32,
+    ) -> (bool, djinn_core::models::Task) {
+        let current = self
+            .actor
+            .dispatch_failure_streak
+            .get(&self.task_id)
+            .copied()
+            .unwrap_or(0);
+        assert!(
+            target_streak >= current,
+            "harness only advances same-role streaks deterministically"
+        );
+        self.advance_same_role_cycles(role, target_streak - current)
+            .await
+    }
+
     async fn planner_intervention_markers(&self) -> Vec<serde_json::Value> {
         planner_intervention_markers(&self.repo, &self.task_id).await
+    }
+
+    async fn durable_dispatch_state(&self) -> Option<djinn_db::DispatchStateRecord> {
+        DispatchStateRepository::new(self.db.clone())
+            .get(&self.task_id)
+            .await
+            .unwrap()
     }
 
     async fn open_planner_intervention_reviews(&self) -> Vec<djinn_core::models::Task> {
@@ -146,7 +203,9 @@ impl InterventionChaosHarness {
             .await
             .unwrap()
             .into_iter()
-            .filter(|candidate| candidate.issue_type == "review" && candidate.project_id == task.project_id)
+            .filter(|candidate| {
+                candidate.issue_type == "review" && candidate.project_id == task.project_id
+            })
             .collect()
     }
 
@@ -163,9 +222,59 @@ impl InterventionChaosHarness {
             .planner_intervention_markers()
             .await
             .iter()
-            .map(|marker| marker["reopen_count"].as_i64().expect("marker reopen_count"))
+            .map(|marker| {
+                marker["reopen_count"]
+                    .as_i64()
+                    .expect("marker reopen_count")
+            })
             .collect();
-        assert_eq!(actual, expected, "planner_intervention marker reopen counts");
+        assert_eq!(
+            actual, expected,
+            "planner_intervention marker reopen counts"
+        );
+    }
+
+    async fn assert_planner_marker_count(&self, expected: usize) {
+        assert_eq!(
+            self.planner_intervention_markers().await.len(),
+            expected,
+            "planner_intervention marker count"
+        );
+    }
+
+    async fn assert_same_role_backoff_seeded(&self, role: &str, expected_streak: u32) {
+        assert_eq!(
+            self.actor
+                .dispatch_failure_streak
+                .get(&self.task_id)
+                .copied(),
+            Some(expected_streak),
+            "in-memory dispatch_failure_streak"
+        );
+        assert!(
+            self.actor.dispatch_cooldowns.contains_key(&self.task_id),
+            "in-memory dispatch_cooldowns should be seeded"
+        );
+        assert_eq!(
+            self.actor
+                .last_dispatched
+                .get(&self.task_id)
+                .map(|marker| marker.role.as_str()),
+            Some(role),
+            "in-memory last_dispatched role"
+        );
+
+        let durable = self
+            .durable_dispatch_state()
+            .await
+            .expect("durable dispatch state should be seeded");
+        assert_eq!(durable.failure_streak, i64::from(expected_streak));
+        assert!(durable.cooldown_until.is_some(), "durable cooldown_until");
+        assert!(
+            durable.last_dispatched_at.is_some(),
+            "durable last_dispatched_at"
+        );
+        assert_eq!(durable.last_dispatched_role.as_deref(), Some(role));
     }
 
     async fn assert_task_status(&self, status: &str, close_reason_contains: Option<&str>) {
@@ -173,7 +282,9 @@ impl InterventionChaosHarness {
         assert_eq!(task.status, status, "task status");
         if let Some(needle) = close_reason_contains {
             assert!(
-                task.close_reason.as_deref().is_some_and(|reason| reason.contains(needle)),
+                task.close_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(needle)),
                 "close_reason should contain {needle:?}; got {:?}",
                 task.close_reason
             );
@@ -186,7 +297,10 @@ impl InterventionChaosHarness {
             "last_dispatched should be cleared"
         );
         assert!(
-            !self.actor.dispatch_failure_streak.contains_key(&self.task_id),
+            !self
+                .actor
+                .dispatch_failure_streak
+                .contains_key(&self.task_id),
             "dispatch_failure_streak should be cleared"
         );
         assert!(
@@ -201,8 +315,14 @@ impl InterventionChaosHarness {
         if let Some(durable) = durable {
             assert_eq!(durable.failure_streak, 0, "durable failure_streak");
             assert!(durable.cooldown_until.is_none(), "durable cooldown_until");
-            assert!(durable.last_dispatched_at.is_none(), "durable last_dispatched_at");
-            assert!(durable.last_dispatched_role.is_none(), "durable last_dispatched_role");
+            assert!(
+                durable.last_dispatched_at.is_none(),
+                "durable last_dispatched_at"
+            );
+            assert!(
+                durable.last_dispatched_role.is_none(),
+                "durable last_dispatched_role"
+            );
         }
     }
 }
