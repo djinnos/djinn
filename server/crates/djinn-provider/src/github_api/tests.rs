@@ -9,6 +9,7 @@ use crate::github_app::installations::prime_cache_for_tests;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod checks;
+mod contents;
 mod pull_requests;
 mod reviews;
 mod transport;
