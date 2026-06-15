@@ -7,7 +7,7 @@ use super::error_handling::{BudgetWindDownIgnored, supports_tool_choice_required
 // reply-loop coverage.
 use super::loop_guard::{LoopGuardError, LoopGuardKind};
 use super::persistence::serialize_llm_input;
-use super::turn::{ReplyLoopContext, run_reply_loop};
+use super::turn::{ReplyLoopContext, WindDownReason, run_reply_loop};
 use crate::output_parser::ParsedAgentOutput;
 use crate::output_stash::extract_stash_content;
 use crate::test_helpers;
@@ -1078,6 +1078,39 @@ fn role_text(conv: &Conversation, role: djinn_provider::message::Role) -> String
         .join("\n")
 }
 
+fn wind_down_directive_count(conv: &Conversation) -> usize {
+    conv.messages
+        .iter()
+        .filter(|m| {
+            m.role == Role::User
+                && m.content
+                    .iter()
+                    .filter_map(|b| b.as_text())
+                    .any(|t| t.contains("You are out of steps"))
+        })
+        .count()
+}
+
+async fn persisted_wind_down_directive_count(
+    app_state: &crate::context::AgentContext,
+    session_id: &str,
+) -> usize {
+    let repo = SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    repo.load_conversation(session_id)
+        .await
+        .expect("load persisted conversation")
+        .messages
+        .iter()
+        .filter(|m| {
+            m.role == Role::User
+                && m.content
+                    .iter()
+                    .filter_map(|b| b.as_text())
+                    .any(|t| t.contains("You are out of steps"))
+        })
+        .count()
+}
+
 /// Hitting the step cap injects the wind-down directive (NOT an immediate
 /// hard error) and grants exactly one final turn for the summary, which is
 /// captured before the loop ends gracefully (Ok).
@@ -1273,6 +1306,180 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
     assert_eq!(
         injected, 1,
         "wind-down injected exactly once, then hard-errors"
+    );
+}
+
+#[tokio::test]
+async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
+    let _env_guard = SESSION_BUDGET_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    install_session_budget_env_with_hard(1_000, 0.5, 0.92);
+
+    let tools = vec![dummy_tool_schema("missing_tool")];
+    let mut responses = Vec::new();
+    for step in 1..=2 {
+        responses.push(MockResponse::tool_call_with_input(
+            &format!("t{step}"),
+            "missing_tool",
+            serde_json::json!({"step": step}),
+            450,
+        ));
+    }
+    responses.push(MockResponse::text_only(
+        "Summary: token budget reached. (1) completed A. (2) B remains. (3) next: do B.",
+        75,
+    ));
+    let provider = MockProvider::new(responses);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    clear_session_budget_env();
+    let _ = &_env_guard;
+
+    assert!(
+        result.is_ok(),
+        "token budget should wind down gracefully, got: {:?}",
+        result
+    );
+    assert_eq!(provider.remaining(), 0, "summary turn should be consumed");
+    assert_eq!(
+        wind_down_directive_count(&conv),
+        1,
+        "token budget should inject the existing wind-down directive once"
+    );
+    assert_eq!(
+        persisted_wind_down_directive_count(&app_state, &session_id).await,
+        1,
+        "token-budget wind-down directive should be persisted"
+    );
+    let assistant_text = role_text(&conv, Role::Assistant);
+    assert!(
+        assistant_text.contains("token budget reached") && assistant_text.contains("next:"),
+        "wind-down summary should be captured, got: {assistant_text:?}"
+    );
+}
+
+#[tokio::test]
+async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
+    let _env_guard = SESSION_BUDGET_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    install_session_budget_env_with_hard(1_000, 0.5, 0.92);
+
+    let tools = vec![dummy_tool_schema("missing_tool")];
+    let mut responses = Vec::new();
+    for step in 1..=3 {
+        responses.push(MockResponse::tool_call_with_input(
+            &format!("t{step}"),
+            "missing_tool",
+            serde_json::json!({"step": step}),
+            450,
+        ));
+    }
+    let provider = MockProvider::new(responses);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    clear_session_budget_env();
+    let _ = &_env_guard;
+
+    assert!(
+        result.is_err(),
+        "ignoring token-budget wind-down should hard-error"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("hard token budget") && err.contains("wind-down"),
+        "error should distinguish token budget from turn cap, got: {err}"
+    );
+    assert_eq!(provider.remaining(), 0, "only one extra turn should run");
+    assert_eq!(
+        wind_down_directive_count(&conv),
+        1,
+        "token-budget wind-down extension is strictly one turn"
+    );
+    assert_eq!(
+        persisted_wind_down_directive_count(&app_state, &session_id).await,
+        1,
+        "ignored token-budget directive should still be persisted once"
+    );
+}
+
+#[test]
+fn wind_down_reasons_distinguish_turn_cap_from_token_budget() {
+    assert_ne!(
+        format!("{:?}", WindDownReason::StepCap { max_turns: 2 }),
+        format!(
+            "{:?}",
+            WindDownReason::Budget {
+                details: "hard token budget".to_string()
+            }
+        )
     );
 }
 
@@ -1638,6 +1845,21 @@ fn install_session_budget_env(max_cumulative_tokens: u64, soft_ratio: f64) {
         std::env::set_var(
             "DJINN_SESSION_BUDGET_WORKER_SOFT_THRESHOLD_RATIO",
             soft_ratio.to_string(),
+        );
+    }
+}
+
+fn install_session_budget_env_with_hard(
+    max_cumulative_tokens: u64,
+    soft_ratio: f64,
+    hard_ratio: f64,
+) {
+    install_session_budget_env(max_cumulative_tokens, soft_ratio);
+    // SAFETY: always called under SESSION_BUDGET_ENV_LOCK.
+    unsafe {
+        std::env::set_var(
+            "DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO",
+            hard_ratio.to_string(),
         );
     }
 }

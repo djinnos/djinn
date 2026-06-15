@@ -1,3 +1,5 @@
+// djinn:allow-oversize — reply loop orchestration remains intentionally co-located
+// while rrdr budget wind-down hooks land; split-out is a separate refactor.
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -93,7 +95,7 @@ fn loop_guard_error(condition: LoopGuardCondition, turns: u32, session_id: &str)
 }
 
 #[derive(Debug, Clone)]
-enum WindDownReason {
+pub(crate) enum WindDownReason {
     StepCap { max_turns: u32 },
     Budget { details: String },
 }
@@ -103,10 +105,34 @@ impl WindDownReason {
         matches!(self, Self::Budget { .. })
     }
 
+    fn as_str(&self) -> &'static str {
+        if self.is_budget() {
+            "token_budget"
+        } else {
+            "turn_cap"
+        }
+    }
+
     fn details(&self) -> String {
         match self {
             Self::StepCap { max_turns } => format!("max turns ({max_turns}) reached"),
             Self::Budget { details } => details.clone(),
+        }
+    }
+
+    fn hard_error(&self, max_turns: u32) -> anyhow::Error {
+        match self {
+            Self::StepCap { .. } => anyhow::anyhow!(
+                "max turns ({}) exceeded without text-only response (wind-down summary \
+                 directive was injected but the agent did not terminate)",
+                max_turns
+            ),
+            Self::Budget { details } => BudgetWindDownIgnored {
+                details: format!(
+                    "{details}; hard token budget wind-down directive was injected but the agent did not produce a text-only summary"
+                ),
+            }
+            .into(),
         }
     }
 }
@@ -460,7 +486,7 @@ pub(crate) async fn run_reply_loop(
                             * session_budget.hard_threshold_ratio;
                         WindDownReason::Budget {
                             details: format!(
-                                "hard budget threshold reached: cumulative_tokens={cumulative_spend}, hard_cap={}, max_cumulative_tokens={}, hard_threshold_ratio={}",
+                                "hard token budget threshold reached (hard budget threshold reached): cumulative_tokens={cumulative_spend}, hard_cap={}, max_cumulative_tokens={}, hard_threshold_ratio={}",
                                 hard_cap as u64,
                                 session_budget.max_cumulative_tokens,
                                 session_budget.hard_threshold_ratio
@@ -469,11 +495,7 @@ pub(crate) async fn run_reply_loop(
                     } else {
                         WindDownReason::StepCap { max_turns }
                     };
-                    let wind_down_reason_label = if reason.is_budget() {
-                        "budget"
-                    } else {
-                        "step_cap"
-                    };
+                    let wind_down_reason_label = reason.as_str();
                     let budget_triggered = reason.is_budget();
                     wind_down_reason = Some(reason);
                     wind_down_injected = true;
@@ -484,7 +506,12 @@ pub(crate) async fn run_reply_loop(
                         max_turns,
                         wind_down_reason = wind_down_reason_label,
                         budget_triggered,
-                        "ReplyLoop: step cap reached — injecting wind-down summary directive \
+                        total_tokens_in,
+                        total_tokens_out,
+                        current_context_tokens,
+                        max_cumulative_tokens = session_budget.max_cumulative_tokens,
+                        hard_threshold_ratio = session_budget.hard_threshold_ratio,
+                        "ReplyLoop: wind-down threshold reached — injecting summary directive \
                          (one final turn before hard stop)"
                     );
                     let msg = wind_down_message();
@@ -495,35 +522,21 @@ pub(crate) async fn run_reply_loop(
                     // this branch with `wind_down_injected == true` and hard-errors.
                 } else {
                     // The agent ignored the wind-down (or produced no terminal
-                    // action). Production budget-triggered wind-downs become a
-                    // typed settlement outcome the supervisor parks deliberately;
-                    // test/non-budget max-turn overrides retain the historical
-                    // hard-error behavior.
+                    // action) — fall back to the existing hard-error behavior.
                     let reason = wind_down_reason
                         .clone()
                         .unwrap_or(WindDownReason::StepCap { max_turns });
-                    if reason.is_budget() {
-                        let details = format!(
-                            "{}; wind-down directive was injected but the agent did not produce a text-only summary",
-                            reason.details()
-                        );
-                        tracing::warn!(
-                            task_id = %task_id,
-                            session_id = %session_id,
-                            agent_type = %role_name,
-                            turns,
-                            max_turns,
-                            wind_down_ignored = true,
-                            wind_down_reason = "budget",
-                            "ReplyLoop: budget-triggered wind-down ignored; parking session"
-                        );
-                        return Err(BudgetWindDownIgnored { details }.into());
-                    }
-                    return Err(anyhow::anyhow!(
-                        "max turns ({}) exceeded without text-only response (wind-down summary \
-                         directive was injected but the agent did not terminate)",
-                        max_turns
-                    ));
+                    tracing::warn!(
+                        task_id = %task_id,
+                        session_id = %session_id,
+                        agent_type = %role_name,
+                        turns,
+                        max_turns,
+                        wind_down_ignored = true,
+                        wind_down_reason = reason.as_str(),
+                        "ReplyLoop: wind-down directive ignored; stopping session"
+                    );
+                    return Err(reason.hard_error(max_turns));
                 }
             }
 
@@ -994,19 +1007,27 @@ pub(crate) async fn run_reply_loop(
             // granted final turn. A text-only response IS the hand-off summary:
             // it was captured into `last_assistant_text` / `final_assistant_text`
             // and persisted above, so end the session now instead of nudging.
-            // If the agent instead kept calling tools (no terminal text and no
-            // finalize), fall through to dispatch — the next cap check then
-            // hard-errors, so the extension stays exactly one turn.
+            // If the agent instead kept calling tools, hard-error now: the
+            // single extra model turn was consumed, and dispatching ignored
+            // tool calls would let unrelated loop guards preempt this reason.
             if wind_down_injected && turn_tool_calls.is_empty() {
+                let fallback_reason = WindDownReason::StepCap { max_turns };
+                let reason = wind_down_reason.as_ref().unwrap_or(&fallback_reason);
                 tracing::info!(
                     task_id = %task_id,
                     agent_type = %role_name,
+                    wind_down_reason = reason.as_str(),
                     turns,
                     assistant_message_count,
-                    wind_down_reason = "step_cap",
-                    "ReplyLoop: wind-down summary captured — session complete (graceful step-cap stop)"
+                    "ReplyLoop: wind-down summary captured — session complete"
                 );
                 break;
+            }
+            if wind_down_injected {
+                let reason = wind_down_reason
+                    .clone()
+                    .unwrap_or(WindDownReason::StepCap { max_turns });
+                return Err(reason.hard_error(max_turns));
             }
 
             // ── Nudge loop: text-only without finalize ────────────────────────
