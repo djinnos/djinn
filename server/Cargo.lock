@@ -1078,6 +1078,7 @@ dependencies = [
  "futures",
  "git2",
  "globset",
+ "hex",
  "insta",
  "kube",
  "landlock",
