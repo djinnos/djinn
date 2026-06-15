@@ -1508,6 +1508,7 @@ impl TaskRunSupervisor {
                         tracing::info!(
                             target: "djinn_supervisor::budget_park",
                             kind = "budget_park",
+                            parked_reason = "budget",
                             wind_down_ignored,
                             task_id = %spec.task_id,
                             session_id = %session_id,
@@ -2347,8 +2348,6 @@ mod tests {
 
         let project_id = "project-budget-park";
         let task_id = "task-budget-park";
-        let task_run_id = "run-budget-park";
-        let session_id = "session-budget-park";
         let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
         mirror
             .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
@@ -2363,7 +2362,7 @@ mod tests {
                 reason: ParkReason::Budget,
                 summary: None,
                 wind_down_ignored: true,
-                session_id: session_id.into(),
+                session_id: "session-budget-ignored".into(),
                 tokens_in: 123,
                 tokens_out: 45,
             },
@@ -2371,7 +2370,7 @@ mod tests {
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
-            task_run_id: task_run_id.into(),
+            task_run_id: "run-budget-ignored".into(),
             task_id: task_id.into(),
             project_id: project_id.into(),
             trigger: TaskRunTrigger::NewTask,
@@ -2415,19 +2414,86 @@ mod tests {
                 .expect("updated statuses mutex poisoned")
                 .as_slice(),
             &[TaskRunStatus::Completed],
-            "budget park must settle as a completed task-run"
+            "ignored budget park must settle as a completed task-run"
+        );
+
+        let summary_services: Arc<dyn SupervisorServices> = Arc::new(ScriptedLoopGuardServices {
+            cancel: CancellationToken::new(),
+            task: fixture_task(task_id, project_id),
+            outcome: StageOutcome::Parked {
+                reason: ParkReason::Budget,
+                summary: Some("handoff summary".into()),
+                wind_down_ignored: false,
+                session_id: "session-budget-summary".into(),
+                tokens_in: 222,
+                tokens_out: 33,
+            },
+            updated_statuses: std::sync::Arc::clone(&updated_statuses),
+        });
+        let summary_supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), summary_services);
+        let summary_spec = TaskRunSpec {
+            task_run_id: "run-budget-summary".into(),
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "djinn/budget-park-summary".into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+        };
+        let summary_report = summary_supervisor
+            .run(summary_spec)
+            .await
+            .expect("summary budget park supervisor run");
+        assert!(matches!(
+            summary_report.outcome,
+            TaskRunOutcome::Parked {
+                reason,
+                wind_down_ignored: false,
+                tokens_in: 222,
+                tokens_out: 33,
+                ..
+            } if reason == "budget"
+        ));
+        assert_eq!(
+            updated_statuses
+                .lock()
+                .expect("updated statuses mutex poisoned")
+                .as_slice(),
+            &[TaskRunStatus::Completed, TaskRunStatus::Completed],
+            "summary and ignored budget parks must settle as completed task-runs"
         );
 
         let captured = logs.take();
         assert!(
             captured.contains("djinn_supervisor::budget_park")
                 && captured.contains("kind=\"budget_park\"")
+                && captured.contains("parked_reason=\"budget\"")
                 && captured.contains("wind_down_ignored=true")
                 && captured.contains("task_id=task-budget-park")
-                && captured.contains("session_id=session-budget-park")
+                && captured.contains("session_id=session-budget-ignored")
                 && captured.contains("tokens_in=123")
                 && captured.contains("tokens_out=45"),
-            "expected budget_park info event with full payload, got:\n{captured}"
+            "expected ignored budget_park info event with full payload, got:\n{captured}"
+        );
+        assert!(
+            captured.contains("kind=\"budget_park\"")
+                && captured.contains("parked_reason=\"budget\"")
+                && captured.contains("wind_down_ignored=false")
+                && captured.contains("session_id=session-budget-summary")
+                && captured.contains("tokens_in=222")
+                && captured.contains("tokens_out=33"),
+            "expected summary budget_park info event with full payload, got:\n{captured}"
+        );
+        assert!(
+            !captured.contains("kind=\"provider_failure\"")
+                && !captured.contains("kind=\"loop_guard_tripped\""),
+            "budget park telemetry must not be conflated with provider failures or loop guards, got:\n{captured}"
         );
     }
 
