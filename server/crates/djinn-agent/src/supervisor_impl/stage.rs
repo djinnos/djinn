@@ -190,6 +190,20 @@ fn stage_outcome_for_reply_loop_guard_error(error: &LoopGuardError) -> StageOutc
     stage_outcome_for_runtime_loop_guard_trip(&trip)
 }
 
+fn session_settlement_for_stage_outcome(
+    stage_outcome: &StageOutcome,
+    final_result_ok: bool,
+) -> (SessionStatus, Option<String>) {
+    match stage_outcome {
+        StageOutcome::Parked {
+            reason: ParkReason::Budget,
+            ..
+        } => (SessionStatus::Completed, Some("budget".to_string())),
+        _ if final_result_ok => (SessionStatus::Completed, None),
+        _ => (SessionStatus::Failed, None),
+    }
+}
+
 /// Read-only multi-repo: resolve the epic's read-source projects to slugs/names
 /// so the prompt can flag them as specifically relevant. We no longer clone
 /// them eagerly — the agent reads any registered repo on demand via
@@ -762,14 +776,8 @@ pub(crate) async fn execute_stage(
     };
 
     // ── Finalize session ─────────────────────────────────────────────────────
-    let (session_status, parked_reason) = match &stage_outcome {
-        StageOutcome::Parked {
-            reason: ParkReason::Budget,
-            ..
-        } => (SessionStatus::Completed, Some("budget".to_string())),
-        _ if final_result_ok => (SessionStatus::Completed, None),
-        _ => (SessionStatus::Failed, None),
-    };
+    let (session_status, parked_reason) =
+        session_settlement_for_stage_outcome(&stage_outcome, final_result_ok);
     if let Err(e) = services
         .update_session_status(
             session_id.clone(),
@@ -995,6 +1003,49 @@ mod tests {
             }
             other => panic!("expected typed loop-guard stage outcome, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn budget_park_settles_completed_with_parked_reason_even_when_wind_down_ignored() {
+        let ignored_outcome = StageOutcome::Parked {
+            reason: ParkReason::Budget,
+            summary: None,
+            wind_down_ignored: true,
+        };
+
+        assert_eq!(
+            session_settlement_for_stage_outcome(&ignored_outcome, false),
+            (SessionStatus::Completed, Some("budget".to_string())),
+            "typed ignored budget wind-downs must settle as completed parks, not failures"
+        );
+
+        let summary_outcome = StageOutcome::Parked {
+            reason: ParkReason::Budget,
+            summary: Some("handoff summary".to_string()),
+            wind_down_ignored: false,
+        };
+        assert_eq!(
+            session_settlement_for_stage_outcome(&summary_outcome, true),
+            (SessionStatus::Completed, Some("budget".to_string()))
+        );
+    }
+
+    #[test]
+    fn non_budget_stage_settlement_keeps_existing_success_and_failure_statuses() {
+        assert_eq!(
+            session_settlement_for_stage_outcome(&StageOutcome::WorkerDone, true),
+            (SessionStatus::Completed, None)
+        );
+        assert_eq!(
+            session_settlement_for_stage_outcome(
+                &StageOutcome::Failed {
+                    reason: "ordinary failure".to_string(),
+                    provider_failure: None,
+                },
+                false,
+            ),
+            (SessionStatus::Failed, None)
+        );
     }
 
     #[test]
