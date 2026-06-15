@@ -30,6 +30,10 @@ pub(super) enum CoordinatorMessage {
         role: &'static str,
         reason: String,
     },
+    /// Clear same-role dispatch-failure state after a planned terminal lifecycle
+    /// ending (for example a budget park). The next continuation dispatch must
+    /// start from the disposition ladder, not from stale failure accounting.
+    ClearPlannedDispatchCompletion { task_id: String, reason: String },
     /// Increment the Lead escalation count for a task; reply with new count.
     IncrementEscalationCount {
         task_id: String,

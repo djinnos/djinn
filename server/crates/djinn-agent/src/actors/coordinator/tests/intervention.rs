@@ -1,4 +1,6 @@
 use super::*;
+use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
+use djinn_core::run_progress::RunProgress;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn below_threshold_does_not_intervene() {
@@ -111,6 +113,93 @@ async fn loop_guard_second_strike_parks_task() {
             .await
             .is_empty(),
         "second strike parks without writing a fresh marker"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn budget_park_governance_does_not_route_trigger_b_or_touch_breaker_state() {
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let task_id = "budget-parked-task".to_string();
+
+    actor
+        .dispatch_failure_streak
+        .insert(task_id.clone(), MAX_DISPATCH_FAILURES - 1);
+    actor.last_dispatched.insert(
+        task_id.clone(),
+        DispatchMarker {
+            instant: StdInstant::now(),
+            role: "worker".into(),
+        },
+    );
+    let breaker_available_before = actor.health.is_available(None, DEFAULT_MODEL_ID);
+
+    for (wind_down_ignored, continuation_count, expected) in [
+        (false, 0, RunDisposition::Nudge),
+        (true, 1, RunDisposition::Nudge),
+        (true, NUDGE_CAP, RunDisposition::Close),
+    ] {
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, continuation_count, NUDGE_CAP),
+            expected,
+            "budget park wind_down_ignored={wind_down_ignored} must stay on the continuation_count/NUDGE_CAP ladder"
+        );
+    }
+
+    actor
+        .clear_planned_dispatch_completion(&task_id, "budget_park_test_clear")
+        .await;
+
+    assert_eq!(
+        actor.dispatch_failure_streak.get(&task_id).copied(),
+        None,
+        "budget-park completion clears stale streak state rather than incrementing toward MAX_DISPATCH_FAILURES"
+    );
+    assert!(
+        !actor.last_dispatched.contains_key(&task_id),
+        "budget-park completion clears same-role failure attribution before continuation dispatch"
+    );
+    assert_eq!(
+        actor.health.is_available(None, DEFAULT_MODEL_ID),
+        breaker_available_before,
+        "budget parks must not alter model health/breaker availability"
+    );
+    assert!(
+        actor.health.take_task_provider_failure(&task_id).is_none(),
+        "budget parks must not seed provider-failure side-channel state"
+    );
+    assert!(
+        actor.dispatch_cooldowns.get(&task_id).is_none(),
+        "budget parks must not create dispatch-failure cooldown state"
+    );
+}
+
+#[test]
+fn budget_park_source_paths_do_not_enter_dispatch_fault_routing() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let guarded_paths = [
+        "src/actors/coordinator/dispatch/task_dispatch.rs",
+        "src/actors/coordinator/dispatch/wave_dispatch.rs",
+        "src/actors/coordinator/dispatch/session_recovery.rs",
+        "src/actors/coordinator/dispatch/retry.rs",
+    ];
+
+    let mut offenders = Vec::new();
+    for relative in guarded_paths {
+        let path = manifest_dir.join(relative);
+        let source = std::fs::read_to_string(&path).expect("read coordinator dispatch source");
+        if source.contains("TaskRunOutcome::Parked")
+            || source.contains("StageOutcome::Parked")
+            || source.contains("parked_reason")
+        {
+            offenders.push(relative);
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "budget parks are planned lifecycle endings; coordinator dispatch fault/routing paths must not special-case them as failures: {offenders:?}"
     );
 }
 
