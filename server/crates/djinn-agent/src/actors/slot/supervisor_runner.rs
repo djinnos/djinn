@@ -1134,7 +1134,7 @@ mod tests {
     }
 
     #[test]
-    fn loop_guard_outcome_has_no_provider_breaker_signal() {
+    fn planned_terminal_outcomes_have_no_provider_breaker_signal() {
         let guard_report = report(
             "guard-run",
             vec![RoleKind::Worker],
@@ -1152,6 +1152,41 @@ mod tests {
             None,
             "loop-guard trips must not feed the provider breaker"
         );
+
+        for (outcome, label) in [
+            (
+                TaskRunOutcome::Parked {
+                    reason: "budget".into(),
+                    wind_down_ignored: false,
+                    session_id: "session-budget-summary".into(),
+                    tokens_in: 4_096,
+                    tokens_out: 512,
+                },
+                "successful-summary budget parks",
+            ),
+            (
+                TaskRunOutcome::Parked {
+                    reason: "budget".into(),
+                    wind_down_ignored: true,
+                    session_id: "session-budget-ignored".into(),
+                    tokens_in: 4_096,
+                    tokens_out: 12,
+                },
+                "ignored-wind-down budget parks",
+            ),
+        ] {
+            let budget_report = report("budget-run", vec![RoleKind::Worker], outcome);
+            assert_eq!(
+                report_to_terminal_status(&budget_report),
+                TaskRunStatus::Completed,
+                "{label} are planned completed lifecycle endings"
+            );
+            assert_eq!(
+                provider_failure_class_for_report(&budget_report),
+                None,
+                "{label} must not feed provider breaker failure accounting"
+            );
+        }
 
         let failed_report = report(
             "failed-run",

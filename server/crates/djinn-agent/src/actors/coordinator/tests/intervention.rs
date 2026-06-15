@@ -1,4 +1,6 @@
 use super::*;
+use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
+use djinn_core::run_progress::RunProgress;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn below_threshold_does_not_intervene() {
@@ -111,6 +113,61 @@ async fn loop_guard_second_strike_parks_task() {
             .await
             .is_empty(),
         "second strike parks without writing a fresh marker"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn budget_park_governance_does_not_route_trigger_b_or_touch_breaker_state() {
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let task_id = "budget-parked-task".to_string();
+
+    actor
+        .dispatch_failure_streak
+        .insert(task_id.clone(), MAX_DISPATCH_FAILURES - 1);
+    actor.last_dispatched.insert(
+        task_id.clone(),
+        DispatchMarker {
+            instant: StdInstant::now(),
+            role: "worker".into(),
+        },
+    );
+    let breaker_available_before = actor.health.is_available(None, DEFAULT_MODEL_ID);
+
+    for (wind_down_ignored, continuation_count, expected) in [
+        (false, 0, RunDisposition::Nudge),
+        (true, 1, RunDisposition::Nudge),
+        (true, NUDGE_CAP, RunDisposition::Close),
+    ] {
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, continuation_count, NUDGE_CAP),
+            expected,
+            "budget park wind_down_ignored={wind_down_ignored} must stay on the continuation_count/NUDGE_CAP ladder"
+        );
+    }
+
+    assert_eq!(
+        actor.dispatch_failure_streak.get(&task_id).copied(),
+        Some(MAX_DISPATCH_FAILURES - 1),
+        "budget-park disposition assertions must not increment toward MAX_DISPATCH_FAILURES"
+    );
+    assert!(
+        actor.last_dispatched.contains_key(&task_id),
+        "budget-park disposition is not a same-role failure signal"
+    );
+    assert_eq!(
+        actor.health.is_available(None, DEFAULT_MODEL_ID),
+        breaker_available_before,
+        "budget parks must not alter model health/breaker availability"
+    );
+    assert!(
+        actor.health.take_task_provider_failure(&task_id).is_none(),
+        "budget parks must not seed provider-failure side-channel state"
+    );
+    assert!(
+        actor.dispatch_cooldowns.get(&task_id).is_none(),
+        "budget parks must not create dispatch-failure cooldown state"
     );
 }
 
