@@ -1,28 +1,27 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
+use crate::github_api::GitHubApiError;
 use anyhow::{Result, anyhow};
 
 use crate::github_api::transport::handle_rate_limit;
 use crate::github_api::types::{CompareResponse, RequiredStatusChecksResponse};
 use crate::github_api::{
     AutoMergeRequest, CheckRun, CheckRunsResponse, CreatePrParams, DequeueEvent, GitHubApiClient,
-    GitHubWriteErrorInput, MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrMergeQueueState,
-    PullRequest, github_write_error_envelope,
+    MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrMergeQueueState, PullRequest,
 };
 
 fn github_pr_write_error(
-    method: &'static str,
+    _method: &'static str,
     path: &str,
     status: Option<reqwest::StatusCode>,
     body_or_detail: &str,
     operation: &'static str,
-) -> anyhow::Error {
-    github_write_error_envelope(
-        GitHubWriteErrorInput::new(method, path)
-            .with_reqwest_status(status)
-            .with_body_or_detail(Some(body_or_detail))
-            .with_operation(Some(operation)),
+) -> GitHubApiError {
+    GitHubApiError::http(
+        operation,
+        path.to_string(),
+        status.unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+        body_or_detail.to_string(),
     )
-    .into()
 }
 
 impl GitHubApiClient {
@@ -34,10 +33,12 @@ impl GitHubApiClient {
         owner: &str,
         repo: &str,
         params: CreatePrParams,
-    ) -> Result<PullRequest> {
+    ) -> std::result::Result<PullRequest, GitHubApiError> {
         let path = format!("/repos/{owner}/{repo}/pulls");
         let url = format!("{}{}", self.base_url, path);
-        let body = serde_json::to_value(&params)?;
+        let body = serde_json::to_value(&params).map_err(|e| {
+            GitHubApiError::transport("create_pull_request", path.clone(), e.to_string())
+        })?;
 
         let resp = self
             .send_with_retry(|token| {
@@ -91,7 +92,9 @@ impl GitHubApiClient {
                 "create_pull_request",
             ));
         }
-        Ok(resp.json().await?)
+        resp.json().await.map_err(|e| {
+            GitHubApiError::transport("create_pull_request", path.clone(), e.to_string())
+        })
     }
 
     /// List open pull requests whose head branch matches `head`.
@@ -100,7 +103,7 @@ impl GitHubApiClient {
         owner: &str,
         repo: &str,
         head: &str,
-    ) -> Result<Vec<PullRequest>> {
+    ) -> std::result::Result<Vec<PullRequest>, GitHubApiError> {
         let url = format!(
             "{}/repos/{}/{}/pulls?state=open&head={}",
             self.base_url, owner, repo, head
@@ -126,9 +129,20 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("list_pulls_by_head failed ({}): {}", status, body));
+            return Err(GitHubApiError::http(
+                "list_pulls_by_head",
+                format!("/repos/{owner}/{repo}/pulls"),
+                status,
+                body,
+            ));
         }
-        Ok(resp.json().await?)
+        resp.json().await.map_err(|e| {
+            GitHubApiError::transport(
+                "list_pulls_by_head",
+                format!("/repos/{owner}/{repo}/pulls"),
+                e.to_string(),
+            )
+        })
     }
 
     /// List pull requests whose head branch matches `head`, filtering by state.
@@ -170,7 +184,13 @@ impl GitHubApiClient {
                 body
             ));
         }
-        Ok(resp.json().await?)
+        Ok(resp.json().await.map_err(|e| {
+            GitHubApiError::transport(
+                "list_pulls_by_head",
+                format!("/repos/{owner}/{repo}/pulls"),
+                e.to_string(),
+            )
+        })?)
     }
 
     /// Reopen a closed pull request by setting its state back to `"open"`.
@@ -212,9 +232,12 @@ impl GitHubApiClient {
                 Some(status),
                 &body,
                 "reopen_pull_request",
-            ));
+            )
+            .into());
         }
-        Ok(resp.json().await?)
+        Ok(resp.json().await.map_err(|e| {
+            GitHubApiError::transport("reopen_pull_request", path.clone(), e.to_string())
+        })?)
     }
 
     /// Enable auto-merge on an existing pull request.
@@ -226,7 +249,7 @@ impl GitHubApiClient {
         method: MergeMethod,
         node_id: &str,
         commit_headline: &str,
-    ) -> Result<serde_json::Value> {
+    ) -> std::result::Result<serde_json::Value, GitHubApiError> {
         let merge_method = match method {
             MergeMethod::Squash => "SQUASH",
             MergeMethod::Rebase => "REBASE",
@@ -285,14 +308,14 @@ impl GitHubApiClient {
             ));
         }
 
-        let json: serde_json::Value = resp.json().await?;
+        let json: serde_json::Value = resp.json().await.map_err(|e| {
+            GitHubApiError::transport("graphql", "/graphql".to_string(), e.to_string())
+        })?;
         if let Some(errors) = json.get("errors") {
-            return Err(github_pr_write_error(
-                "POST",
-                "/graphql",
-                Some(reqwest::StatusCode::OK),
-                &errors.to_string(),
+            return Err(GitHubApiError::graphql(
                 "enable_auto_merge",
+                "/graphql".to_string(),
+                errors.to_string(),
             ));
         }
         Ok(json)
@@ -307,7 +330,10 @@ impl GitHubApiClient {
     /// Best-effort: GitHub returns an error if the PR has no active
     /// auto-merge request (already merged, never enabled, etc.) which
     /// callers should treat as success.
-    pub async fn disable_auto_merge(&self, node_id: &str) -> Result<()> {
+    pub async fn disable_auto_merge(
+        &self,
+        node_id: &str,
+    ) -> std::result::Result<(), GitHubApiError> {
         let query = r#"
             mutation DisableAutoMerge($pullRequestId: ID!) {
                 disablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId }) {
@@ -343,12 +369,23 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("disable_auto_merge failed ({}): {}", status, body));
+            return Err(GitHubApiError::http(
+                "disable_auto_merge",
+                "/graphql".to_string(),
+                status,
+                body,
+            ));
         }
 
-        let json: serde_json::Value = resp.json().await?;
+        let json: serde_json::Value = resp.json().await.map_err(|e| {
+            GitHubApiError::transport("graphql", "/graphql".to_string(), e.to_string())
+        })?;
         if let Some(errors) = json.get("errors") {
-            return Err(anyhow!("disable_auto_merge GraphQL error: {}", errors));
+            return Err(GitHubApiError::graphql(
+                "disable_auto_merge",
+                "/graphql".to_string(),
+                errors.to_string(),
+            ));
         }
         Ok(())
     }
@@ -368,7 +405,7 @@ impl GitHubApiClient {
         &self,
         pull_request_node_id: &str,
         expected_head_oid: &str,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), GitHubApiError> {
         let query = r#"
             mutation EnqueuePullRequest($pullRequestId: ID!, $expectedHeadOid: GitObjectID) {
                 enqueuePullRequest(input: {
@@ -410,24 +447,22 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(github_pr_write_error(
-                "POST",
-                "/graphql",
-                Some(status),
-                &body,
+            return Err(GitHubApiError::http(
                 "enqueue_pull_request",
+                "/graphql".to_string(),
+                status,
+                body,
             ));
         }
 
-        let json: serde_json::Value = resp.json().await?;
+        let json: serde_json::Value = resp.json().await.map_err(|e| {
+            GitHubApiError::transport("graphql", "/graphql".to_string(), e.to_string())
+        })?;
         if let Some(errors) = json.get("errors") {
-            let detail = format!("GraphQL error: {errors}");
-            return Err(github_pr_write_error(
-                "POST",
-                "/graphql",
-                Some(reqwest::StatusCode::OK),
-                &detail,
+            return Err(GitHubApiError::graphql(
                 "enqueue_pull_request",
+                "/graphql".to_string(),
+                errors.to_string(),
             ));
         }
         Ok(())
@@ -482,7 +517,9 @@ impl GitHubApiClient {
             ));
         }
 
-        let json: serde_json::Value = resp.json().await?;
+        let json: serde_json::Value = resp.json().await.map_err(|e| {
+            GitHubApiError::transport("graphql", "/graphql".to_string(), e.to_string())
+        })?;
         if let Some(errors) = json.get("errors") {
             return Err(anyhow!(
                 "list_unresolved_review_thread_ids GraphQL error: {}",
@@ -507,7 +544,10 @@ impl GitHubApiClient {
     /// Companion to [`Self::list_unresolved_review_thread_ids`]. Idempotent on
     /// GitHub's side: re-resolving an already-resolved thread is a no-op and the
     /// thread simply won't reappear in the unresolved list on the next poll.
-    pub async fn resolve_review_thread(&self, thread_id: &str) -> Result<()> {
+    pub async fn resolve_review_thread(
+        &self,
+        thread_id: &str,
+    ) -> std::result::Result<(), GitHubApiError> {
         let query = r#"mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}"#;
 
         let body = serde_json::json!({
@@ -537,16 +577,23 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "resolve_review_thread failed ({}): {}",
+            return Err(GitHubApiError::http(
+                "resolve_review_thread",
+                "/graphql".to_string(),
                 status,
-                body
+                body,
             ));
         }
 
-        let json: serde_json::Value = resp.json().await?;
+        let json: serde_json::Value = resp.json().await.map_err(|e| {
+            GitHubApiError::transport("graphql", "/graphql".to_string(), e.to_string())
+        })?;
         if let Some(errors) = json.get("errors") {
-            return Err(anyhow!("resolve_review_thread GraphQL error: {}", errors));
+            return Err(GitHubApiError::graphql(
+                "resolve_review_thread",
+                "/graphql".to_string(),
+                errors.to_string(),
+            ));
         }
         Ok(())
     }
@@ -557,7 +604,10 @@ impl GitHubApiClient {
     /// [`Self::get_pr_merge_queue_state`] call. Used on task cancellation
     /// when the PR is already queued — disabling auto-merge alone won't
     /// remove the existing queue entry.
-    pub async fn dequeue_pull_request(&self, pull_request_node_id: &str) -> Result<()> {
+    pub async fn dequeue_pull_request(
+        &self,
+        pull_request_node_id: &str,
+    ) -> std::result::Result<(), GitHubApiError> {
         let query = r#"
             mutation DequeuePullRequest($id: ID!) {
                 dequeuePullRequest(input: { id: $id }) {
@@ -593,16 +643,23 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "dequeue_pull_request failed ({}): {}",
+            return Err(GitHubApiError::http(
+                "dequeue_pull_request",
+                "/graphql".to_string(),
                 status,
-                body
+                body,
             ));
         }
 
-        let json: serde_json::Value = resp.json().await?;
+        let json: serde_json::Value = resp.json().await.map_err(|e| {
+            GitHubApiError::transport("graphql", "/graphql".to_string(), e.to_string())
+        })?;
         if let Some(errors) = json.get("errors") {
-            return Err(anyhow!("dequeue_pull_request GraphQL error: {}", errors));
+            return Err(GitHubApiError::graphql(
+                "dequeue_pull_request",
+                "/graphql".to_string(),
+                errors.to_string(),
+            ));
         }
         Ok(())
     }
@@ -685,7 +742,9 @@ impl GitHubApiClient {
             ));
         }
 
-        let json: serde_json::Value = resp.json().await?;
+        let json: serde_json::Value = resp.json().await.map_err(|e| {
+            GitHubApiError::transport("graphql", "/graphql".to_string(), e.to_string())
+        })?;
         if let Some(errors) = json.get("errors") {
             return Err(anyhow!(
                 "get_pr_merge_queue_state GraphQL error: {}",
@@ -1043,7 +1102,7 @@ impl GitHubApiClient {
         repo: &str,
         pull_number: u64,
         expected_head_sha: &str,
-    ) -> Result<serde_json::Value> {
+    ) -> std::result::Result<serde_json::Value, GitHubApiError> {
         let path = format!("/repos/{owner}/{repo}/pulls/{pull_number}/update-branch");
         let url = format!("{}{}", self.base_url, path);
         let body = serde_json::json!({
@@ -1080,7 +1139,9 @@ impl GitHubApiClient {
                 "update_pull_request_branch",
             ));
         }
-        Ok(resp.json().await.unwrap_or(serde_json::Value::Null))
+        resp.json().await.map_err(|e| {
+            GitHubApiError::transport("update_pull_request_branch", path.clone(), e.to_string())
+        })
     }
 
     /// Merge a pull request via the REST API.
@@ -1091,7 +1152,7 @@ impl GitHubApiClient {
         pull_number: u64,
         method: MergeMethod,
         commit_title: &str,
-    ) -> Result<serde_json::Value> {
+    ) -> std::result::Result<serde_json::Value, GitHubApiError> {
         let path = format!("/repos/{owner}/{repo}/pulls/{pull_number}/merge");
         let url = format!("{}{}", self.base_url, path);
         let merge_method_str = match method {
@@ -1134,7 +1195,9 @@ impl GitHubApiClient {
                 "merge_pull_request",
             ));
         }
-        Ok(resp.json().await?)
+        resp.json().await.map_err(|e| {
+            GitHubApiError::transport("merge_pull_request", path.clone(), e.to_string())
+        })
     }
 
     /// Mark a draft PR as ready for review (undraft it).
@@ -1181,7 +1244,9 @@ impl GitHubApiClient {
             ));
         }
 
-        let json: serde_json::Value = resp.json().await?;
+        let json: serde_json::Value = resp.json().await.map_err(|e| {
+            GitHubApiError::transport("graphql", "/graphql".to_string(), e.to_string())
+        })?;
         if let Some(errors) = json.get("errors") {
             return Err(anyhow!(
                 "mark_pr_ready_for_review GraphQL error: {}",
@@ -1377,7 +1442,9 @@ impl GitHubApiClient {
             ));
         }
 
-        let json: serde_json::Value = resp.json().await?;
+        let json: serde_json::Value = resp.json().await.map_err(|e| {
+            GitHubApiError::transport("graphql", "/graphql".to_string(), e.to_string())
+        })?;
         if let Some(errors) = json.get("errors") {
             return Err(anyhow!(
                 "required_check_contexts_for_pr GraphQL error: {}",

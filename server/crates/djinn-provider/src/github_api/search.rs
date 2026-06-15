@@ -1,5 +1,6 @@
 //! GitHub Code Search and file content retrieval.
 
+use crate::github_api::GitHubApiError;
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
@@ -77,13 +78,23 @@ impl GitHubApiClient {
         repo: Option<&str>,
         path: Option<&str>,
         limit: Option<usize>,
-    ) -> Result<CodeSearchResult> {
+    ) -> std::result::Result<CodeSearchResult, GitHubApiError> {
         let query = query.trim();
         if query.is_empty() {
-            return Err(anyhow!("query must not be empty"));
+            return Err(GitHubApiError::http(
+                "search_code",
+                "/search/code".to_string(),
+                reqwest::StatusCode::BAD_REQUEST,
+                "query must not be empty".to_string(),
+            ));
         }
         if query.len() > 1000 {
-            return Err(anyhow!("query too long (max 1000 chars)"));
+            return Err(GitHubApiError::http(
+                "search_code",
+                "/search/code".to_string(),
+                reqwest::StatusCode::BAD_REQUEST,
+                "query too long (max 1000 chars)".to_string(),
+            ));
         }
 
         // Build the GitHub code search query string.
@@ -94,7 +105,12 @@ impl GitHubApiClient {
         if let Some(r) = repo.filter(|s| !s.trim().is_empty()) {
             let r = r.trim();
             if !r.contains('/') || r.matches('/').count() != 1 {
-                return Err(anyhow!("repo must be in 'owner/repo' format"));
+                return Err(GitHubApiError::http(
+                    "search_code",
+                    "/search/code".to_string(),
+                    reqwest::StatusCode::BAD_REQUEST,
+                    "repo must be in owner/repo format".to_string(),
+                ));
             }
             q.push_str(&format!(" repo:{r}"));
         }
@@ -129,14 +145,26 @@ impl GitHubApiClient {
         let status = resp.status();
         if status.as_u16() == 422 {
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("GitHub API rejected query (422): {body}"));
+            return Err(GitHubApiError::http(
+                "search_code",
+                "/search/code".to_string(),
+                status,
+                body,
+            ));
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("GitHub API returned {} : {}", status, body));
+            return Err(GitHubApiError::http(
+                "search_code",
+                "/search/code".to_string(),
+                status,
+                body,
+            ));
         }
 
-        let body: serde_json::Value = resp.json().await?;
+        let body: serde_json::Value = resp.json().await.map_err(|e| {
+            GitHubApiError::transport("search_code", "/search/code".to_string(), e.to_string())
+        })?;
         parse_search_response(
             query,
             language.map(|s| s.trim()),
@@ -145,6 +173,9 @@ impl GitHubApiClient {
             per_page,
             &body,
         )
+        .map_err(|e| {
+            GitHubApiError::transport("search_code", "/search/code".to_string(), e.to_string())
+        })
     }
 
     /// Fetch the contents of a file from a GitHub repository.
@@ -158,14 +189,24 @@ impl GitHubApiClient {
         git_ref: Option<&str>,
         start_line: Option<u32>,
         end_line: Option<u32>,
-    ) -> Result<FileFetchResult> {
+    ) -> std::result::Result<FileFetchResult, GitHubApiError> {
         let repo = repo.trim();
         let path = path.trim().trim_start_matches('/');
         if repo.is_empty() || !repo.contains('/') || repo.matches('/').count() != 1 {
-            return Err(anyhow!("repo must be in 'owner/repo' format"));
+            return Err(GitHubApiError::http(
+                "fetch_file",
+                format!("/repos/{repo}/contents/{path}"),
+                reqwest::StatusCode::BAD_REQUEST,
+                "repo must be in owner/repo format".to_string(),
+            ));
         }
         if path.is_empty() {
-            return Err(anyhow!("path must not be empty"));
+            return Err(GitHubApiError::http(
+                "fetch_file",
+                format!("/repos/{repo}/contents"),
+                reqwest::StatusCode::BAD_REQUEST,
+                "path must not be empty".to_string(),
+            ));
         }
 
         let mut url = format!("{}/repos/{}/contents/{}", self.base_url, repo, path);
@@ -194,10 +235,21 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("fetch_file failed ({}): {}", status, body));
+            return Err(GitHubApiError::http(
+                "fetch_file",
+                format!("/repos/{repo}/contents/{path}"),
+                status,
+                body,
+            ));
         }
 
-        let body: serde_json::Value = resp.json().await?;
+        let body: serde_json::Value = resp.json().await.map_err(|e| {
+            GitHubApiError::transport(
+                "fetch_file",
+                format!("/repos/{repo}/contents/{path}"),
+                e.to_string(),
+            )
+        })?;
 
         let size = body.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
         let file_url = body
@@ -231,7 +283,13 @@ impl GitHubApiClient {
             let download_url = body
                 .get("download_url")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("no download_url available for large file"))?;
+                .ok_or_else(|| {
+                    GitHubApiError::transport(
+                        "fetch_file",
+                        format!("/repos/{repo}/contents/{path}"),
+                        "no download_url available for large file".to_string(),
+                    )
+                })?;
 
             let resp = self
                 .send_with_retry(|token| {
@@ -243,7 +301,13 @@ impl GitHubApiClient {
                     }
                 })
                 .await?;
-            resp.text().await?
+            resp.text().await.map_err(|e| {
+                GitHubApiError::transport(
+                    "fetch_file",
+                    format!("/repos/{repo}/contents/{path}"),
+                    e.to_string(),
+                )
+            })?
         } else {
             // Decode base64 content from the contents API response.
             let encoded = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -251,7 +315,13 @@ impl GitHubApiClient {
             use base64::Engine;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&clean)
-                .map_err(|e| anyhow!("base64 decode failed: {e}"))?;
+                .map_err(|e| {
+                    GitHubApiError::transport(
+                        "fetch_file",
+                        format!("/repos/{repo}/contents/{path}"),
+                        format!("base64 decode failed: {e}"),
+                    )
+                })?;
             String::from_utf8_lossy(&bytes).into_owned()
         };
 

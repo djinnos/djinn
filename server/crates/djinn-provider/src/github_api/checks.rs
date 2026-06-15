@@ -1,10 +1,8 @@
-use anyhow::{Result, anyhow};
-
 use crate::github_api::transport::handle_rate_limit;
 use crate::github_api::types::{
     ActionsJobsResponse, CheckRunsResponse, WorkflowRun, WorkflowRunsResponse,
 };
-use crate::github_api::{ActionsJob, CheckAnnotation, GitHubApiClient};
+use crate::github_api::{ActionsJob, CheckAnnotation, GitHubApiClient, GitHubApiError};
 
 impl GitHubApiClient {
     /// List workflow runs for a repo filtered by trigger `event` (e.g.
@@ -18,7 +16,7 @@ impl GitHubApiClient {
         repo: &str,
         event: &str,
         per_page: u32,
-    ) -> Result<Vec<WorkflowRun>> {
+    ) -> std::result::Result<Vec<WorkflowRun>, GitHubApiError> {
         let url = format!(
             "{}/repos/{}/{}/actions/runs?event={}&per_page={}",
             self.base_url, owner, repo, event, per_page
@@ -44,13 +42,20 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "list_workflow_runs_for_event failed ({}): {}",
+            return Err(GitHubApiError::http(
+                "list_workflow_runs_for_event",
+                format!("/repos/{owner}/{repo}/actions/runs"),
                 status,
-                body
+                body,
             ));
         }
-        let parsed: WorkflowRunsResponse = resp.json().await?;
+        let parsed: WorkflowRunsResponse = resp.json().await.map_err(|e| {
+            GitHubApiError::transport(
+                "list_workflow_runs_for_event",
+                format!("/repos/{owner}/{repo}/actions/runs"),
+                e.to_string(),
+            )
+        })?;
         Ok(parsed.workflow_runs)
     }
 
@@ -67,7 +72,7 @@ impl GitHubApiClient {
         owner: &str,
         repo: &str,
         git_ref: &str,
-    ) -> Result<CheckRunsResponse> {
+    ) -> std::result::Result<CheckRunsResponse, GitHubApiError> {
         let url = format!(
             "{}/repos/{}/{}/commits/{}/check-runs?per_page=100",
             self.base_url, owner, repo, git_ref
@@ -93,13 +98,20 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "list_check_runs_for_ref failed ({}): {}",
+            return Err(GitHubApiError::http(
+                "list_check_runs_for_ref",
+                format!("/repos/{owner}/{repo}/commits/{git_ref}/check-runs"),
                 status,
-                body
+                body,
             ));
         }
-        Ok(resp.json().await?)
+        resp.json().await.map_err(|e| {
+            GitHubApiError::transport(
+                "list_check_runs_for_ref",
+                format!("/repos/{owner}/{repo}/commits/{git_ref}/check-runs"),
+                e.to_string(),
+            )
+        })
     }
 
     /// Fetch annotations for a check run.
@@ -108,7 +120,7 @@ impl GitHubApiClient {
         owner: &str,
         repo: &str,
         check_run_id: u64,
-    ) -> Result<Vec<CheckAnnotation>> {
+    ) -> std::result::Result<Vec<CheckAnnotation>, GitHubApiError> {
         let url = format!(
             "{}/repos/{}/{}/check-runs/{}/annotations",
             self.base_url, owner, repo, check_run_id
@@ -134,13 +146,20 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "get_check_run_annotations failed ({}): {}",
+            return Err(GitHubApiError::http(
+                "get_check_run_annotations",
+                format!("/repos/{owner}/{repo}/check-runs/{check_run_id}/annotations"),
                 status,
-                body
+                body,
             ));
         }
-        Ok(resp.json().await?)
+        resp.json().await.map_err(|e| {
+            GitHubApiError::transport(
+                "get_check_run_annotations",
+                format!("/repos/{owner}/{repo}/check-runs/{check_run_id}/annotations"),
+                e.to_string(),
+            )
+        })
     }
 
     /// List jobs for a workflow run.
@@ -149,7 +168,7 @@ impl GitHubApiClient {
         owner: &str,
         repo: &str,
         run_id: u64,
-    ) -> Result<Vec<ActionsJob>> {
+    ) -> std::result::Result<Vec<ActionsJob>, GitHubApiError> {
         let url = format!(
             "{}/repos/{}/{}/actions/runs/{}/jobs?per_page=100",
             self.base_url, owner, repo, run_id
@@ -175,14 +194,30 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("list_run_jobs failed ({}): {}", status, body));
+            return Err(GitHubApiError::http(
+                "list_run_jobs",
+                format!("/repos/{owner}/{repo}/actions/runs/{run_id}/jobs"),
+                status,
+                body,
+            ));
         }
-        let parsed: ActionsJobsResponse = resp.json().await?;
+        let parsed: ActionsJobsResponse = resp.json().await.map_err(|e| {
+            GitHubApiError::transport(
+                "list_run_jobs",
+                format!("/repos/{owner}/{repo}/actions/runs/{run_id}/jobs"),
+                e.to_string(),
+            )
+        })?;
         Ok(parsed.jobs)
     }
 
     /// Download the raw log text for a specific Actions job.
-    pub async fn get_job_logs(&self, owner: &str, repo: &str, job_id: u64) -> Result<String> {
+    pub async fn get_job_logs(
+        &self,
+        owner: &str,
+        repo: &str,
+        job_id: u64,
+    ) -> std::result::Result<String, GitHubApiError> {
         let url = format!(
             "{}/repos/{}/{}/actions/jobs/{}/logs",
             self.base_url, owner, repo, job_id
@@ -208,8 +243,19 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("get_job_logs failed ({}): {}", status, body));
+            return Err(GitHubApiError::http(
+                "get_job_logs",
+                format!("/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"),
+                status,
+                body,
+            ));
         }
-        Ok(resp.text().await?)
+        resp.text().await.map_err(|e| {
+            GitHubApiError::transport(
+                "get_job_logs",
+                format!("/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"),
+                e.to_string(),
+            )
+        })
     }
 }

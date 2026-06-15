@@ -28,6 +28,7 @@
 
 mod checks;
 mod contents;
+mod error;
 mod pull_requests;
 pub mod refresh;
 mod reviews;
@@ -43,6 +44,7 @@ use std::sync::Arc;
 use reqwest::Client;
 use tokio::sync::RwLock;
 
+pub use error::{GitHubApiError, GitHubErrorSource};
 pub use refresh::{DbBackedRefresher, NoRefresh, UserTokenRefresh};
 pub use transport::UserTokenExpired;
 pub use types::{

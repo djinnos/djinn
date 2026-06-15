@@ -301,7 +301,9 @@ impl CoordinatorActor {
         self.conversations_resolved.remove(&task.id);
     }
 }
-pub(in crate::actors::coordinator) fn is_merge_queue_405(err: &anyhow::Error) -> bool {
+pub(in crate::actors::coordinator) fn is_merge_queue_405(
+    err: &(impl crate::github_error_render::GithubWriteError + ?Sized),
+) -> bool {
     crate::github_error_render::github_write_status_is(err, 405)
         && crate::github_error_render::github_write_body_contains(err, "merge queue")
 }
@@ -310,7 +312,9 @@ pub(in crate::actors::coordinator) fn is_merge_queue_405(err: &anyhow::Error) ->
 /// "Pull request is already in the queue" — the entry we wanted already
 /// exists (GitHub merge-when-ready armed it, or a pre-restart delegation this
 /// process no longer remembers). Callers adopt the entry instead of erroring.
-pub(in crate::actors::coordinator) fn is_already_queued(err: &anyhow::Error) -> bool {
+pub(in crate::actors::coordinator) fn is_already_queued(
+    err: &(impl crate::github_error_render::GithubWriteError + ?Sized),
+) -> bool {
     crate::github_error_render::github_write_body_contains(err, "already in the queue")
 }
 
