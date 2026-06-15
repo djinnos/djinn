@@ -1,6 +1,7 @@
 use djinn_provider::message::Message;
 use djinn_provider::provider::ToolChoice;
 use djinn_provider::provider::error::ProviderError;
+use std::fmt;
 
 /// Maximum retries for empty assistant turns before treating as a hard failure.
 pub(super) const MAX_EMPTY_TURN_RETRIES: u32 = 2;
@@ -9,6 +10,23 @@ pub(super) const MAX_EMPTY_TURN_RETRIES: u32 = 2;
 pub(super) const MAX_NUDGE_ATTEMPTS: u32 = 3;
 /// Maximum reactive compaction attempts before giving up.
 pub(super) const MAX_COMPACTION_RETRIES: u32 = 2;
+
+/// Typed reply-loop outcome for a budget-triggered wind-down whose one granted
+/// final turn produced no hand-off text (typically because the model kept
+/// calling tools). Stage settlement catches this before generic failure mapping
+/// and deliberately parks the session instead of surfacing a provider/task fault.
+#[derive(Debug, Clone)]
+pub(crate) struct BudgetWindDownIgnored {
+    pub(crate) details: String,
+}
+
+impl fmt::Display for BudgetWindDownIgnored {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "budget wind-down ignored: {}", self.details)
+    }
+}
+
+impl std::error::Error for BudgetWindDownIgnored {}
 
 /// Build the wind-down directive injected on the final permitted turn when the
 /// reply loop is about to hit the step cap (`MAX_TURNS`).

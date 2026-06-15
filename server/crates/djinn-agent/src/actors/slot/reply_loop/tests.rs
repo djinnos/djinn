@@ -1,4 +1,4 @@
-use super::error_handling::supports_tool_choice_required;
+use super::error_handling::{BudgetWindDownIgnored, supports_tool_choice_required};
 // djinn:allow-oversize — integration tests for the entire reply_loop module.
 // The file already exceeded the 1500-line / 51.2KB size-guard thresholds
 // before the rrdr soft-budget converge reminder tests were added; the marker
@@ -1472,7 +1472,15 @@ async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
 
 #[test]
 fn wind_down_reasons_distinguish_turn_cap_from_token_budget() {
-    assert_ne!(WindDownReason::TurnCap, WindDownReason::TokenBudget);
+    assert_ne!(
+        format!("{:?}", WindDownReason::StepCap { max_turns: 2 }),
+        format!(
+            "{:?}",
+            WindDownReason::Budget {
+                details: "hard token budget".to_string()
+            }
+        )
+    );
 }
 
 #[tokio::test]
@@ -1887,8 +1895,9 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
     let _env_guard = SESSION_BUDGET_ENV_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    // 100 token cap × 0.5 ratio = 50-token soft cap.
-    install_session_budget_env(100, 0.5);
+    // 200 token cap × 0.25 ratio = 50-token soft cap; the default hard cap
+    // (92% = 184 tokens) stays safely above this test's 100-token spend.
+    install_session_budget_env(200, 0.25);
     // Safety net: ensure no stale overrides from a previous test leak through.
     // SAFETY: SESSION_BUDGET_ENV_LOCK held.
     unsafe {
@@ -2123,5 +2132,172 @@ async fn soft_budget_below_threshold_no_injection() {
     assert!(
         !user_text.contains("<system-reminder>"),
         "no system-reminder body should appear in user text below threshold; got: {user_text}"
+    );
+}
+
+// ── rrdr hard budget: structured wind-down reason ──────────────────────────
+
+#[tokio::test]
+async fn hard_budget_wind_down_captures_budget_summary() {
+    let _env_guard = SESSION_BUDGET_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    install_session_budget_env(100, 0.5);
+    // SAFETY: SESSION_BUDGET_ENV_LOCK held.
+    unsafe {
+        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
+        std::env::set_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO", "0.8");
+    }
+
+    let tools = vec![
+        dummy_tool_schema("submit_work"),
+        dummy_tool_schema("worker_tool"),
+    ];
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call_with_input("a", "worker_tool", serde_json::json!({"step": 1}), 40), // cumulative 50
+        MockResponse::tool_call_with_input("b", "worker_tool", serde_json::json!({"step": 2}), 30), // cumulative 90 → hard wind-down before next turn
+        MockResponse::text_only("Budget handoff: implemented A; B remains.", 5),
+    ]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    clear_session_budget_env();
+    let _ = &_env_guard;
+
+    assert!(
+        result.is_ok(),
+        "hard budget summary should park cleanly: {result:?}"
+    );
+    assert_eq!(
+        output.budget_wind_down_summary.as_deref(),
+        Some("Budget handoff: implemented A; B remains.")
+    );
+    assert!(
+        output
+            .budget_wind_down_details
+            .as_deref()
+            .is_some_and(|details| details.contains("hard budget threshold reached")),
+        "budget wind-down should preserve structured trigger details: {:?}",
+        output.budget_wind_down_details
+    );
+    assert_eq!(provider.remaining(), 0);
+    let user_text = role_text(&conv, Role::User);
+    assert!(user_text.contains("You are out of steps"));
+}
+
+#[tokio::test]
+async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
+    let _env_guard = SESSION_BUDGET_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    install_session_budget_env(100, 0.5);
+    // SAFETY: SESSION_BUDGET_ENV_LOCK held.
+    unsafe {
+        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
+        std::env::set_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO", "0.8");
+    }
+
+    let tools = vec![
+        dummy_tool_schema("submit_work"),
+        dummy_tool_schema("worker_tool"),
+    ];
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call_with_input("a", "worker_tool", serde_json::json!({"step": 1}), 40),
+        MockResponse::tool_call_with_input("b", "worker_tool", serde_json::json!({"step": 2}), 30),
+        // This is the single provider turn granted after the hard-budget
+        // wind-down directive. It ignores the directive by calling a tool.
+        MockResponse::tool_call_with_input("c", "worker_tool", serde_json::json!({"step": 3}), 5),
+        // Regression guard: the old pre-turn condition continued below the
+        // normal step cap after an ignored budget wind-down and consumed this
+        // fallback as a false successful summary.
+        MockResponse::text_only("fallback budget handoff that must never be consumed", 5),
+    ]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    clear_session_budget_env();
+    let _ = &_env_guard;
+
+    let err = result.expect_err("ignored hard-budget wind-down should return typed error");
+    assert!(
+        err.downcast_ref::<BudgetWindDownIgnored>().is_some(),
+        "ignored hard-budget wind-down must be typed for stage settlement; got: {err:?}"
+    );
+    assert!(
+        output.budget_wind_down_summary.is_none(),
+        "ignored wind-down must not synthesize a misleading summary"
+    );
+    assert!(
+        output.budget_wind_down_details.is_none(),
+        "ignored wind-down without summary must not synthesize handoff details"
+    );
+    assert_eq!(
+        provider.remaining(),
+        1,
+        "ignored budget wind-down must stop before consuming later fallback text"
     );
 }

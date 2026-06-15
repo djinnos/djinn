@@ -243,6 +243,36 @@ pub(crate) fn soft_budget_threshold_exceeded(
     false
 }
 
+/// Decide whether the reply loop's in-memory usage accumulator has crossed
+/// the resolved hard-threshold for the session budget.
+///
+/// This mirrors [`soft_budget_threshold_exceeded`] but uses the hard ratio.
+/// Callers use the positive result as the structured budget wind-down reason;
+/// ordinary step-cap wind-downs do not pass through this predicate.
+pub(crate) fn hard_budget_threshold_exceeded(
+    budget: &ResolvedSessionBudget,
+    total_tokens_in: u32,
+    total_tokens_out: u32,
+    current_context_tokens: u32,
+) -> bool {
+    if budget.max_cumulative_tokens == 0 || budget.hard_threshold_ratio <= 0.0 {
+        return false;
+    }
+    let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
+    let hard_cap = (budget.max_cumulative_tokens as f64) * budget.hard_threshold_ratio;
+    if (cumulative_spend as f64) >= hard_cap {
+        return true;
+    }
+    if budget.context_window_known && budget.context_window_tokens > 0 {
+        let context_pressure =
+            (current_context_tokens as f64) / (budget.context_window_tokens as f64);
+        if context_pressure >= budget.hard_threshold_ratio {
+            return true;
+        }
+    }
+    false
+}
+
 impl Default for SessionBudgetPolicy {
     fn default() -> Self {
         Self {

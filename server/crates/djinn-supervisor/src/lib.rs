@@ -220,6 +220,16 @@ pub enum StageOutcome {
         turn_span: (u32, u32),
         session_id: String,
     },
+    Parked {
+        reason: ParkReason,
+        summary: Option<String>,
+        wind_down_ignored: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParkReason {
+    Budget,
 }
 
 impl StageOutcome {
@@ -230,6 +240,7 @@ impl StageOutcome {
             StageOutcome::PlannerClose { .. }
                 | StageOutcome::Escalate { .. }
                 | StageOutcome::Failed { .. }
+                | StageOutcome::Parked { .. }
                 | StageOutcome::LoopGuardTripped { .. }
                 | StageOutcome::ReviewerRejected { .. }
                 | StageOutcome::VerifierFailed { .. }
@@ -1483,6 +1494,23 @@ impl TaskRunSupervisor {
                         });
                         break;
                     }
+                    StageOutcome::Parked {
+                        reason: ParkReason::Budget,
+                        summary: _,
+                        wind_down_ignored,
+                    } => {
+                        tracing::warn!(
+                            target: "djinn_supervisor::budget_park",
+                            kind = "budget_park",
+                            task_id = %spec.task_id,
+                            task_run_id = %run_id,
+                            stage = role_kind.as_str(),
+                            wind_down_ignored,
+                            "budget_park"
+                        );
+                        result = Some(self.services.open_pr(&spec, &task).await);
+                        break;
+                    }
                     StageOutcome::LoopGuardTripped {
                         kind,
                         offending_signature,
@@ -2104,6 +2132,14 @@ mod tests {
             .is_terminal()
         );
         assert!(StageOutcome::VerifierFailed { reason: "x".into() }.is_terminal());
+        assert!(
+            StageOutcome::Parked {
+                reason: ParkReason::Budget,
+                summary: Some("handoff".into()),
+                wind_down_ignored: false,
+            }
+            .is_terminal()
+        );
         assert!(!StageOutcome::WorkerDone.is_terminal());
         assert!(!StageOutcome::PlannerExecute.is_terminal());
         assert!(!StageOutcome::ReviewerApproved.is_terminal());

@@ -15,6 +15,16 @@ pub(crate) struct ParsedAgentOutput {
     /// Name of the finalize tool that was actually called (e.g. `"submit_work"`,
     /// `"request_lead"`). Set alongside `finalize_payload`.
     pub finalize_tool_name: Option<String>,
+    /// Text-only handoff captured after a budget-triggered wind-down directive.
+    /// This is intentionally separate from normal assistant text so settlement
+    /// can park the run and persist an extractor-compatible `work_submitted`
+    /// activity without treating every text-only stop as a budget park.
+    pub budget_wind_down_summary: Option<String>,
+    /// Structured details describing why the budget wind-down was triggered.
+    /// Paired with `budget_wind_down_summary` so the handoff activity can record
+    /// `remaining_concerns: "budget-parked: <details>"` instead of a generic
+    /// placeholder.
+    pub budget_wind_down_details: Option<String>,
 }
 
 impl Default for ParsedAgentOutput {
@@ -31,6 +41,8 @@ impl ParsedAgentOutput {
             reviewer_feedback: None,
             finalize_payload: None,
             finalize_tool_name: None,
+            budget_wind_down_summary: None,
+            budget_wind_down_details: None,
         }
     }
 
