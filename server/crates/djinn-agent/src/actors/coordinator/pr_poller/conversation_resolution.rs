@@ -42,14 +42,16 @@ impl CoordinatorActor {
     }
 }
 pub(in crate::actors::coordinator) fn is_conversation_resolution_block(
-    err: &(impl std::fmt::Display + ?Sized),
+    err: &(impl crate::github_error_render::GithubWriteError + ?Sized),
 ) -> bool {
-    let msg = format!("{err}").to_lowercase();
-    if !msg.contains("405") {
-        return false;
-    }
-    msg.contains("conversation must be resolved")
-        || (msg.contains("repository rule violations") && msg.contains("conversation"))
+    crate::github_error_render::github_write_status_is(err, 405)
+        && (crate::github_error_render::github_write_body_contains(
+            err,
+            "conversation must be resolved",
+        ) || (crate::github_error_render::github_write_body_contains(
+            err,
+            "repository rule violations",
+        ) && crate::github_error_render::github_write_body_contains(err, "conversation")))
 }
 
 /// Gate for proactively resolving review conversations on the GitHub-managed

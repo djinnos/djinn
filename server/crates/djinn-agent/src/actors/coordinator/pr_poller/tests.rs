@@ -6,6 +6,7 @@ use super::{
     is_racing_unmerged_status, parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
     should_auto_resolve_conversations,
 };
+use djinn_core::tool_error::{ErrorClass, ToolError};
 use djinn_provider::github_api::{
     ActionsJob, ActionsJobStep, CheckRun, DequeueEvent, GitHubUser, PrReview,
 };
@@ -391,75 +392,193 @@ fn blocking_filter_heuristic_drops_only_advisory() {
     assert!(blocking.is_empty());
 }
 
+fn github_write_error(
+    method: &str,
+    path: &str,
+    status: u16,
+    body: &str,
+    class: ErrorClass,
+) -> anyhow::Error {
+    ToolError::new("GitHub write failed")
+        .with_error_class(class)
+        .with_method(method)
+        .with_path(path)
+        .with_http_status(status)
+        .with_body(body)
+        .with_hint("Inspect the structured GitHub write envelope before retrying.")
+        .into()
+}
+
 #[test]
 fn is_merge_queue_405_matches_real_payload() {
-    let err = anyhow::anyhow!(
-        r#"merge_pull_request failed (405 Method Not Allowed): {{"message":"Pull Request is in the merge queue.","status":"405"}}"#
+    let err = github_write_error(
+        "PUT",
+        "/repos/djinnos/djinn/pulls/7/merge",
+        405,
+        r#"{\"message\":\"Pull Request is in the merge queue.\",\"status\":\"405\"}"#,
+        ErrorClass::Validation,
     );
     assert!(is_merge_queue_405(&err));
+    let rendered =
+        crate::github_error_render::render_github_write_error("GitHub PR merge failed", &err);
+    assert!(rendered.contains("\"error_class\":\"validation\""));
+    assert!(rendered.contains("\"method\":\"PUT\""));
+    assert!(rendered.contains("\"path\":\"/repos/djinnos/djinn/pulls/7/merge\""));
+    assert!(rendered.contains("\"status\":\"405\""));
+    assert!(rendered.contains("merge queue"));
 }
 
 #[test]
 fn is_merge_queue_405_ignores_unrelated_405s() {
-    let err = anyhow::anyhow!("merge_pull_request failed (405): {{\"message\":\"locked\"}}");
+    let err = github_write_error(
+        "PUT",
+        "/repos/djinnos/djinn/pulls/7/merge",
+        405,
+        r#"{\"message\":\"locked\"}"#,
+        ErrorClass::Validation,
+    );
     assert!(!is_merge_queue_405(&err));
 }
 
 #[test]
 fn is_already_queued_matches_real_enqueue_rejection() {
-    // The exact production payload seen when re-delegating after a restart
-    // while GitHub still holds the queue entry.
-    let err = anyhow::anyhow!(
-        r#"enqueue_pull_request GraphQL error: [{{"type":"UNPROCESSABLE","path":["enqueuePullRequest"],"message":"Pull request is already in the queue"}}]"#
+    let err = github_write_error(
+        "POST",
+        "/graphql",
+        200,
+        r#"[{\"type\":\"UNPROCESSABLE\",\"path\":[\"enqueuePullRequest\"],\"message\":\"Pull request is already in the queue\"}]"#,
+        ErrorClass::Validation,
     );
     assert!(super::is_already_queued(&err));
-    // Other UNPROCESSABLE rejections (not ready, missing approval) must not
-    // be adopted as queue entries.
-    let other = anyhow::anyhow!(
-        r#"enqueue_pull_request GraphQL error: [{{"type":"UNPROCESSABLE","message":"Pull request is not mergeable"}}]"#
+    let rendered =
+        crate::github_error_render::render_github_write_error("GitHub enqueue PR failed", &err);
+    assert!(rendered.contains("\"error_class\":\"validation\""));
+    assert!(rendered.contains("\"method\":\"POST\""));
+    assert!(rendered.contains("\"path\":\"/graphql\""));
+
+    let other = github_write_error(
+        "POST",
+        "/graphql",
+        200,
+        r#"[{\"type\":\"UNPROCESSABLE\",\"message\":\"Pull request is not mergeable\"}]"#,
+        ErrorClass::Validation,
     );
     assert!(!super::is_already_queued(&other));
 }
 
 #[test]
+fn auto_merge_best_effort_failure_rendering_exposes_envelope() {
+    let err = github_write_error(
+        "POST",
+        "/graphql",
+        200,
+        r#"[{\"type\":\"UNPROCESSABLE\",\"message\":\"Pull request Auto merge is not allowed on this repository\"}]"#,
+        ErrorClass::Validation,
+    );
+
+    let rendered = crate::github_error_render::render_github_write_error(
+        "GitHub auto-merge enable failed",
+        &err,
+    );
+
+    assert!(rendered.contains("GitHub auto-merge enable failed"));
+    assert!(rendered.contains("\"error_class\":\"validation\""));
+    assert!(rendered.contains("\"method\":\"POST\""));
+    assert!(rendered.contains("\"path\":\"/graphql\""));
+    assert!(rendered.contains("Auto merge is not allowed"));
+}
+
+#[test]
+fn update_branch_failure_rendering_exposes_bounded_envelope() {
+    let long_body = format!(
+        "Expected head SHA did not match current branch head. {}",
+        "retrying this stale update branch request would keep failing. ".repeat(10)
+    );
+    let err = github_write_error(
+        "PUT",
+        "/repos/djinnos/djinn/pulls/7/update-branch",
+        422,
+        &long_body,
+        ErrorClass::Validation,
+    );
+
+    let rendered =
+        crate::github_error_render::render_github_write_error("GitHub update-branch failed", &err);
+
+    assert!(rendered.contains("GitHub update-branch failed"));
+    assert!(rendered.contains("\"error_class\":\"validation\""));
+    assert!(rendered.contains("\"method\":\"PUT\""));
+    assert!(rendered.contains("\"path\":\"/repos/djinnos/djinn/pulls/7/update-branch\""));
+    assert!(rendered.contains("\"status\":\"422\""));
+    assert!(rendered.contains("Expected head SHA did not match"));
+    assert!(rendered.contains('…'));
+    assert!(
+        !rendered
+            .contains(&"retrying this stale update branch request would keep failing. ".repeat(6)),
+        "update-branch envelope body must be compact: {rendered}"
+    );
+}
+
+#[test]
 fn is_merge_queue_405_ignores_other_status_codes() {
-    let err =
-        anyhow::anyhow!("merge_pull_request failed (422): Pull Request is in the merge queue.");
-    // Not a 405 — must not match.
+    let err = github_write_error(
+        "PUT",
+        "/repos/djinnos/djinn/pulls/7/merge",
+        422,
+        "Pull Request is in the merge queue.",
+        ErrorClass::Validation,
+    );
     assert!(!is_merge_queue_405(&err));
 }
 
 #[test]
 fn is_conversation_resolution_block_matches_real_payload() {
-    // The exact production payload: a 405 whose body carries the repo-rule
-    // "conversation must be resolved" violation.
-    let err = anyhow::anyhow!(
-        "merge_pull_request failed (405 Method Not Allowed): {{\"message\":\"Repository rule violations found\\n\\nA conversation must be resolved before this pull request can be merged.\\n\\n\",\"status\":\"405\"}}"
+    let err = github_write_error(
+        "PUT",
+        "/repos/djinnos/djinn/pulls/7/merge",
+        405,
+        "{\"message\":\"Repository rule violations found\\n\\nA conversation must be resolved before this pull request can be merged.\\n\\n\",\"status\":\"405\"}",
+        ErrorClass::Validation,
     );
     assert!(is_conversation_resolution_block(&err));
+    let rendered =
+        crate::github_error_render::render_github_write_error("GitHub PR merge failed", &err);
+    assert!(rendered.contains("\"error_class\":\"validation\""));
+    assert!(rendered.contains("conversation must be resolved"));
 }
 
 #[test]
 fn is_conversation_resolution_block_ignores_merge_queue_405() {
-    // The merge-queue 405 is a different 405 and must NOT be treated as a
-    // conversation-resolution block (it has its own handler).
-    let err = anyhow::anyhow!(
-        r#"merge_pull_request failed (405 Method Not Allowed): {{"message":"Pull Request is in the merge queue.","status":"405"}}"#
+    let err = github_write_error(
+        "PUT",
+        "/repos/djinnos/djinn/pulls/7/merge",
+        405,
+        r#"{\"message\":\"Pull Request is in the merge queue.\",\"status\":\"405\"}"#,
+        ErrorClass::Validation,
     );
     assert!(!is_conversation_resolution_block(&err));
 }
 
 #[test]
 fn is_conversation_resolution_block_ignores_generic_405() {
-    let err = anyhow::anyhow!("merge_pull_request failed (405): {{\"message\":\"locked\"}}");
+    let err = github_write_error(
+        "PUT",
+        "/repos/djinnos/djinn/pulls/7/merge",
+        405,
+        r#"{\"message\":\"locked\"}"#,
+        ErrorClass::Validation,
+    );
     assert!(!is_conversation_resolution_block(&err));
 }
 
 #[test]
 fn is_conversation_resolution_block_ignores_other_status_codes() {
-    // Same wording but not a 405 → not our case.
-    let err = anyhow::anyhow!(
-        "merge_pull_request failed (409): A conversation must be resolved before this pull request can be merged."
+    let err = github_write_error(
+        "PUT",
+        "/repos/djinnos/djinn/pulls/7/merge",
+        409,
+        "A conversation must be resolved before this pull request can be merged.",
+        ErrorClass::Validation,
     );
     assert!(!is_conversation_resolution_block(&err));
 }

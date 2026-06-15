@@ -701,12 +701,13 @@ pub(in crate::actors::coordinator) async fn enable_auto_merge_best_effort(
             );
         }
         Err(e) => {
+            let github_error = render_github_write_error("GitHub auto-merge enable failed", &e);
             // Already enabled (re-undraft) is harmless; other errors mean
             // the repo can't auto-merge and we'll fall back to manual.
             tracing::info!(
                 task_id = %task_short_id,
                 pr = pull_number,
-                error = %e,
+                error = %github_error,
                 "PR poller: auto-merge not enabled (will use legacy merge path)"
             );
         }
