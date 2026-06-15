@@ -421,11 +421,12 @@ impl GitHubApiClient {
 
         let json: serde_json::Value = resp.json().await?;
         if let Some(errors) = json.get("errors") {
+            let detail = format!("GraphQL error: {errors}");
             return Err(github_pr_write_error(
                 "POST",
                 "/graphql",
                 Some(reqwest::StatusCode::OK),
-                &errors.to_string(),
+                &detail,
                 "enqueue_pull_request",
             ));
         }
