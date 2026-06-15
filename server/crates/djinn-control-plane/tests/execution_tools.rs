@@ -76,6 +76,7 @@ async fn execution_kill_task_reaches_real_slot_pool_terminate_session() {
     assert_eq!(response["ok"], true);
     assert_eq!(response["task_id"], seeded.task_id);
     assert_eq!(response["error"], serde_json::Value::Null);
+    harness.wait_for_runner_killed(&seeded.task_id).await;
     assert!(
         !harness.pool_has_session(&seeded.task_id).await,
         "tool must confirm the real pool mapping was reclaimed"
@@ -302,6 +303,22 @@ impl RealPoolKillHarness {
                 Ok(Some(_)) => continue,
                 Ok(None) => panic!("runner signal channel closed"),
                 Err(_) => panic!("timed out waiting for runner start for {task_id}"),
+            }
+        }
+    }
+
+    async fn wait_for_runner_killed(&self, task_id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut rx = self.signal_rx.lock().await;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| panic!("timed out waiting for runner kill for {task_id}"));
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Some(RunnerSignal::Killed(seen))) if seen == task_id => return,
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("runner signal channel closed"),
+                Err(_) => panic!("timed out waiting for runner kill for {task_id}"),
             }
         }
     }
