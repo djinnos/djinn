@@ -1,0 +1,2 @@
+ALTER TABLE notes
+    ADD COLUMN IF NOT EXISTS retrieval_anchor TEXT NULL;

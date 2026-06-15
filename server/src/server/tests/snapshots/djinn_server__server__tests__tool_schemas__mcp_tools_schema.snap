@@ -5515,6 +5515,10 @@ expression: signatures
             "project_id": {
               "type": "string"
             },
+            "retrieval_anchor": {
+              "nullable": true,
+              "type": "string"
+            },
             "tags": {
               "items": {
                 "type": "string"
@@ -5869,6 +5873,12 @@ expression: signatures
         "project": {
           "type": "string"
         },
+        "retrieval_anchor": {
+          "default": null,
+          "description": "Replace the note's retrieval anchor without modifying the note body.\nAlso accepted as `applies_when`.",
+          "nullable": true,
+          "type": "string"
+        },
         "section": {
           "description": "Required for replace_section: heading text identifying the section.",
           "nullable": true,
@@ -5932,6 +5942,10 @@ expression: signatures
           "type": "string"
         },
         "project_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "retrieval_anchor": {
           "nullable": true,
           "type": "string"
         },
@@ -6522,6 +6536,10 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "retrieval_anchor": {
+          "nullable": true,
+          "type": "string"
+        },
         "tags": {
           "items": {
             "type": "string"
@@ -6688,6 +6706,10 @@ expression: signatures
           "type": "string"
         },
         "project_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "retrieval_anchor": {
           "nullable": true,
           "type": "string"
         },
@@ -7101,6 +7123,12 @@ expression: signatures
           "description": "Absolute path to the project directory.",
           "type": "string"
         },
+        "retrieval_anchor": {
+          "default": null,
+          "description": "Objective situation where this note should be retrieved. Also accepted as\n`applies_when` for prompt/API language compatibility.",
+          "nullable": true,
+          "type": "string"
+        },
         "scope_paths": {
           "description": "Crate/module path prefixes this note applies to. Empty array means global.",
           "items": {
@@ -7181,6 +7209,10 @@ expression: signatures
           "type": "string"
         },
         "project_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "retrieval_anchor": {
           "nullable": true,
           "type": "string"
         },

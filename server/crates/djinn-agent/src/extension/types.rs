@@ -229,6 +229,8 @@ pub(super) struct MemoryWriteParams {
     pub status: Option<String>,
     pub tags: Option<Vec<String>>,
     pub scope_paths: Option<Vec<String>>,
+    #[serde(default, alias = "applies_when")]
+    pub retrieval_anchor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -248,6 +250,8 @@ pub(super) struct MemoryEditParams {
     pub section: Option<String>,
     #[serde(rename = "type")]
     pub note_type: Option<String>,
+    #[serde(default, alias = "applies_when")]
+    pub retrieval_anchor: Option<String>,
 }
 
 #[derive(Deserialize)]

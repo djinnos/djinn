@@ -600,7 +600,7 @@ impl NoteRepository {
         let sql = format!(
             "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path,
                     n.storage, n.note_type, n.folder, n.tags::text AS tags, n.content,
-                    n.created_at, n.updated_at, n.last_accessed,
+                    n.retrieval_anchor, n.created_at, n.updated_at, n.last_accessed,
                     n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
                     n.scope_paths::text AS scope_paths
              FROM notes n
@@ -668,7 +668,7 @@ impl NoteRepository {
         let sql = format!(
             "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path,
                     n.storage, n.note_type, n.folder, n.tags::text AS tags, n.content,
-                    n.created_at, n.updated_at, n.last_accessed,
+                    n.retrieval_anchor, n.created_at, n.updated_at, n.last_accessed,
                     n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
                     n.scope_paths::text AS scope_paths
              FROM notes n
