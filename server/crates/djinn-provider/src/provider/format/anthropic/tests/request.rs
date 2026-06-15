@@ -164,6 +164,36 @@ fn test_reasoning_effort_budget_clamped_below_max_tokens() {
 }
 
 #[test]
+fn test_default_policy_enables_minimax_anthropic_thinking() {
+    use crate::provider::{FormatFamily, ProviderCapabilities, default_reasoning_effort_for_model};
+
+    let mut config = test_anthropic_config();
+    config.model_id = "MiniMax-M2.5".to_string();
+    config.capabilities = ProviderCapabilities {
+        streaming: true,
+        max_tokens_default: Some(2_000),
+    };
+    config.reasoning_effort =
+        default_reasoning_effort_for_model(true, FormatFamily::Anthropic, &config.model_id);
+
+    let provider = AnthropicProvider::new(config);
+    let mut conv = Conversation::default();
+    conv.push(crate::message::Message::user("hello"));
+    let req = provider.build_request(&conv, &[], None);
+
+    assert_eq!(req["thinking"]["type"], "enabled");
+    let budget = req["thinking"]["budget_tokens"]
+        .as_u64()
+        .expect("budget_tokens is numeric");
+    let max_tokens = req["max_tokens"].as_u64().expect("max_tokens is numeric");
+    assert!(
+        budget < max_tokens,
+        "Anthropic-compatible MiniMax thinking budget must stay below max_tokens"
+    );
+    assert_eq!(budget, 1_999);
+}
+
+#[test]
 fn test_reasoning_effort_enabled_skips_forced_tool_choice() {
     use crate::provider::ReasoningEffort;
     let mut config = test_anthropic_config();
