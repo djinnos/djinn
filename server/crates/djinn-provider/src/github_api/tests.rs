@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod checks;
 mod contents;
+mod error;
 mod pull_requests;
 mod reviews;
 mod transport;

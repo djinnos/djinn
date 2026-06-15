@@ -1,5 +1,6 @@
 use anyhow::Error;
 use djinn_core::tool_error::ToolError;
+use djinn_provider::github_api::GitHubApiError;
 use serde_json::Value;
 
 const ENVELOPE_DETAIL_LIMIT: usize = 240;
@@ -10,10 +11,59 @@ const ENVELOPE_DETAIL_LIMIT: usize = 240;
 /// adapter preserves the operation-specific prefix owned by the caller while
 /// exposing the structured fields agents need instead of flattening the error
 /// into an opaque string.
-pub(crate) fn render_github_write_error(prefix: &str, err: &Error) -> String {
-    match github_write_envelope(err) {
+pub(crate) fn render_github_write_error(
+    prefix: &str,
+    err: &(impl GithubWriteError + ?Sized),
+) -> String {
+    match err.github_write_envelope() {
         Some(envelope) => format!("{prefix}: {}", compact_json_like_envelope(envelope)),
-        None => format!("{prefix}: {err}"),
+        None => format!("{prefix}: {}", err.display_string()),
+    }
+}
+
+pub(crate) trait GithubWriteError {
+    fn github_write_envelope(&self) -> Option<&ToolError>;
+    fn github_write_body(&self) -> Option<&str>;
+    fn github_write_status(&self) -> Option<u16>;
+    fn display_string(&self) -> String;
+}
+
+impl GithubWriteError for Error {
+    fn github_write_envelope(&self) -> Option<&ToolError> {
+        self.downcast_ref::<ToolError>()
+    }
+
+    fn github_write_body(&self) -> Option<&str> {
+        self.github_write_envelope()
+            .map(|envelope| envelope.body.as_deref().unwrap_or(&envelope.error))
+    }
+
+    fn github_write_status(&self) -> Option<u16> {
+        self.github_write_envelope()
+            .and_then(|envelope| envelope.status.as_deref())
+            .and_then(|status| status.parse().ok())
+    }
+
+    fn display_string(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl GithubWriteError for GitHubApiError {
+    fn github_write_envelope(&self) -> Option<&ToolError> {
+        None
+    }
+
+    fn github_write_body(&self) -> Option<&str> {
+        Some(&self.body)
+    }
+
+    fn github_write_status(&self) -> Option<u16> {
+        self.status.map(|status| status.as_u16())
+    }
+
+    fn display_string(&self) -> String {
+        self.to_string()
     }
 }
 
@@ -27,10 +77,6 @@ fn bounded_excerpt(detail: &str) -> String {
         out.push('…');
     }
     out
-}
-
-pub(crate) fn github_write_envelope(err: &Error) -> Option<&ToolError> {
-    err.downcast_ref::<ToolError>()
 }
 
 pub(crate) fn compact_json_like_envelope(envelope: &ToolError) -> String {
@@ -66,23 +112,20 @@ pub(crate) fn compact_json_like_envelope(envelope: &ToolError) -> String {
     Value::Object(value).to_string()
 }
 
-pub(crate) fn github_write_body_contains(err: &Error, needle: &str) -> bool {
-    let Some(envelope) = github_write_envelope(err) else {
+pub(crate) fn github_write_body_contains(
+    err: &(impl GithubWriteError + ?Sized),
+    needle: &str,
+) -> bool {
+    let Some(body) = err.github_write_body() else {
         return false;
     };
     let needle = needle.to_ascii_lowercase();
-    envelope
-        .body
-        .as_deref()
-        .unwrap_or(&envelope.error)
-        .to_ascii_lowercase()
-        .contains(&needle)
+    body.to_ascii_lowercase().contains(&needle)
 }
 
-pub(crate) fn github_write_status_is(err: &Error, status: u16) -> bool {
-    github_write_envelope(err)
-        .and_then(|envelope| envelope.status.as_deref())
-        .is_some_and(|actual| actual == status.to_string())
+pub(crate) fn github_write_status_is(err: &(impl GithubWriteError + ?Sized), status: u16) -> bool {
+    err.github_write_status()
+        .is_some_and(|actual| actual == status)
 }
 
 #[cfg(test)]

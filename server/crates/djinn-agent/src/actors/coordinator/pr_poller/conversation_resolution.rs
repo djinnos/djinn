@@ -42,7 +42,7 @@ impl CoordinatorActor {
     }
 }
 pub(in crate::actors::coordinator) fn is_conversation_resolution_block(
-    err: &anyhow::Error,
+    err: &(impl crate::github_error_render::GithubWriteError + ?Sized),
 ) -> bool {
     crate::github_error_render::github_write_status_is(err, 405)
         && (crate::github_error_render::github_write_body_contains(
