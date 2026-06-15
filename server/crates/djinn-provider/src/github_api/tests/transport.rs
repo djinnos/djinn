@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use crate::github_api::{GitHubApiClient, UserTokenExpired, UserTokenRefresh};
+use crate::github_api::{GitHubApiClient, GitHubApiError, GitHubErrorSource, UserTokenRefresh};
 
 use super::seed_installation_token;
 
@@ -165,10 +165,10 @@ async fn user_token_401_refresh_failure_surfaces_expired() {
         .get_ref("djinnos", "server", "heads/main")
         .await
         .expect_err("expected refresh failure to bubble UserTokenExpired");
-    assert!(
-        err.downcast_ref::<UserTokenExpired>().is_some(),
-        "expected UserTokenExpired downcast, got: {err:?}"
-    );
+    let typed = err
+        .downcast_ref::<GitHubApiError>()
+        .expect("expected GitHubApiError downcast");
+    assert_eq!(typed.source, GitHubErrorSource::Unauthenticated);
     assert_eq!(refresher.calls.load(Ordering::SeqCst), 1);
 }
 
@@ -190,8 +190,8 @@ async fn user_token_401_surfaces_typed_expired_error() {
         .await
         .expect_err("expected 401 to fail");
 
-    assert!(
-        err.downcast_ref::<UserTokenExpired>().is_some(),
-        "expected UserTokenExpired downcast, got: {err:?}"
-    );
+    let typed = err
+        .downcast_ref::<GitHubApiError>()
+        .expect("expected GitHubApiError downcast");
+    assert_eq!(typed.source, GitHubErrorSource::Unauthenticated);
 }

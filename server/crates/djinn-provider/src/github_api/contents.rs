@@ -1,17 +1,6 @@
 //! GitHub Contents + Git Refs helpers — the minimal surface needed to
 //! commit a single file on a fresh branch and open a PR from the server
 //! without a local worktree.
-//!
-//! # Operations
-//! - [`GitHubApiClient::get_ref`] — resolve a ref to its target commit SHA
-//! - [`GitHubApiClient::create_ref`] — create a branch/tag pointing at a SHA
-//!   (treats `422 Reference already exists` as a no-op so the caller can
-//!   be idempotent)
-//! - [`GitHubApiClient::get_file_sha`] — fetch the blob SHA for a file on a
-//!   branch, or `None` when the file does not exist yet
-//! - [`GitHubApiClient::put_file`] — create or update a single file via
-//!   `PUT /repos/{owner}/{repo}/contents/{path}`, commit attributed to the
-//!   authenticated principal (installation App → `djinn-bot[bot]`)
 
 use anyhow::{Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -19,7 +8,7 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 
 use crate::github_api::transport::handle_rate_limit;
-use crate::github_api::{GitHubApiClient, GitHubWriteErrorInput, github_write_error_envelope};
+use crate::github_api::{GitHubApiClient, GitHubApiError};
 
 #[derive(Deserialize)]
 struct RefObject {
@@ -37,15 +26,11 @@ struct ContentFile {
 }
 
 impl GitHubApiClient {
-    /// Resolve `ref_name` (e.g. `"heads/main"`) to the SHA it points at.
-    /// Returns `Ok(None)` on `404 Not Found` so callers can branch on
-    /// ref absence without catching error strings.
     pub async fn get_ref(&self, owner: &str, repo: &str, ref_name: &str) -> Result<Option<String>> {
         let url = format!(
             "{}/repos/{}/{}/git/ref/{}",
             self.base_url, owner, repo, ref_name
         );
-
         let resp = self
             .send_with_retry(|token| {
                 let url = url.clone();
@@ -62,7 +47,6 @@ impl GitHubApiClient {
                 }
             })
             .await?;
-
         if resp.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -75,20 +59,16 @@ impl GitHubApiClient {
         Ok(Some(parsed.object.sha))
     }
 
-    /// Create a ref `ref_name` (full form, e.g. `"refs/heads/djinn/setup"`)
-    /// pointing at `sha`. Treats `422 Reference already exists` as success
-    /// so this is safe to call in a retry loop.
     pub async fn create_ref(
         &self,
         owner: &str,
         repo: &str,
         ref_name: &str,
         sha: &str,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), GitHubApiError> {
         let url = format!("{}/repos/{}/{}/git/refs", self.base_url, owner, repo);
         let api_path = format!("/repos/{owner}/{repo}/git/refs");
         let body = serde_json::json!({ "ref": ref_name, "sha": sha });
-
         let resp = self
             .send_with_retry(|token| {
                 let url = url.clone();
@@ -106,47 +86,27 @@ impl GitHubApiClient {
                     handle_rate_limit(resp).await
                 }
             })
-            .await
-            .map_err(|err| {
-                let detail = err.to_string();
-                anyhow::Error::new(github_write_error_envelope(
-                    GitHubWriteErrorInput::new("POST", &api_path)
-                        .with_body_or_detail(Some(detail.as_str()))
-                        .with_operation(Some("create_ref")),
-                ))
-            })?;
-
+            .await?;
         if resp.status().is_success() {
             return Ok(());
         }
         if resp.status() == StatusCode::UNPROCESSABLE_ENTITY {
-            // "Reference already exists" — caller is driving an idempotent
-            // branch-create path, so swallow and let them proceed.
             let body = resp.text().await.unwrap_or_default();
             if body.contains("already exists") {
                 return Ok(());
             }
-            return Err(anyhow::Error::new(github_write_error_envelope(
-                GitHubWriteErrorInput::new("POST", &api_path)
-                    .with_reqwest_status(Some(StatusCode::UNPROCESSABLE_ENTITY))
-                    .with_body_or_detail(Some(body.as_str()))
-                    .with_operation(Some("create_ref")),
-            )));
+            return Err(GitHubApiError::http(
+                "create_ref",
+                api_path,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                body,
+            ));
         }
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        Err(anyhow::Error::new(github_write_error_envelope(
-            GitHubWriteErrorInput::new("POST", &api_path)
-                .with_reqwest_status(Some(status))
-                .with_body_or_detail(Some(body.as_str()))
-                .with_operation(Some("create_ref")),
-        )))
+        Err(GitHubApiError::http("create_ref", api_path, status, body))
     }
 
-    /// Fetch the blob SHA for `path` on `ref_or_branch`, or `Ok(None)` if
-    /// the file does not exist on that ref. Callers thread the returned
-    /// SHA into [`put_file`] when updating (GitHub requires it for
-    /// non-create writes).
     pub async fn get_file_sha(
         &self,
         owner: &str,
@@ -158,7 +118,6 @@ impl GitHubApiClient {
             "{}/repos/{}/{}/contents/{}?ref={}",
             self.base_url, owner, repo, path, ref_or_branch
         );
-
         let resp = self
             .send_with_retry(|token| {
                 let url = url.clone();
@@ -175,7 +134,6 @@ impl GitHubApiClient {
                 }
             })
             .await?;
-
         if resp.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -188,8 +146,6 @@ impl GitHubApiClient {
         Ok(Some(parsed.sha))
     }
 
-    /// Create or update a single file on `branch` via the Contents API.
-    /// Pass `prev_sha = None` for a create and `Some(sha)` for an update.
     #[allow(clippy::too_many_arguments)]
     pub async fn put_file(
         &self,
@@ -200,23 +156,19 @@ impl GitHubApiClient {
         message: &str,
         content: &[u8],
         prev_sha: Option<&str>,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), GitHubApiError> {
         let url = format!(
             "{}/repos/{}/{}/contents/{}",
             self.base_url, owner, repo, path
         );
         let encoded = BASE64.encode(content);
-        let mut body = serde_json::json!({
-            "message": message,
-            "content": encoded,
-            "branch": branch,
-        });
+        let mut body =
+            serde_json::json!({ "message": message, "content": encoded, "branch": branch });
         if let Some(sha) = prev_sha
             && let Some(map) = body.as_object_mut()
         {
             map.insert("sha".into(), serde_json::Value::String(sha.to_string()));
         }
-
         let resp = self
             .send_with_retry(|token| {
                 let url = url.clone();
@@ -235,11 +187,15 @@ impl GitHubApiClient {
                 }
             })
             .await?;
-
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("put_file failed ({}): {}", status, body));
+            return Err(GitHubApiError::http(
+                "put_file",
+                format!("/repos/{owner}/{repo}/contents/{path}"),
+                status,
+                body,
+            ));
         }
         Ok(())
     }

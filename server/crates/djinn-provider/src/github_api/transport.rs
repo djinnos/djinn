@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use reqwest::{Response, StatusCode};
 use thiserror::Error;
 
-use crate::github_api::{AuthMode, GitHubApiClient};
+use crate::github_api::{AuthMode, GitHubApiClient, GitHubApiError};
 
 /// Returned by [`GitHubApiClient::send_with_retry`] when a `UserToken`
 /// auth mode receives a 401. Callers can downcast via
@@ -55,21 +55,31 @@ impl GitHubApiClient {
     /// a refreshed token on 401 for installation-scoped clients; for user
     /// tokens, consults the attached
     /// [`crate::github_api::UserTokenRefresh`] before giving up.
-    pub(super) async fn send_with_retry<F, Fut>(&self, build_request: F) -> Result<Response>
+    pub(super) async fn send_with_retry<F, Fut>(
+        &self,
+        build_request: F,
+    ) -> std::result::Result<Response, GitHubApiError>
     where
         F: Fn(String) -> Fut,
         Fut: std::future::Future<Output = Result<Response>>,
     {
-        let token = self.bearer_token().await?;
-        let resp = build_request(token).await?;
+        let token = self.bearer_token().await.map_err(|e| {
+            GitHubApiError::transport("send_with_retry", "<auth>".to_string(), e.to_string())
+        })?;
+        let resp = build_request(token)
+            .await
+            .map_err(classify_transport_error)?;
 
         if resp.status() != StatusCode::UNAUTHORIZED {
             return Ok(resp);
         }
 
         match &self.auth {
-            AuthMode::SessionUser => Err(anyhow!(
+            AuthMode::SessionUser => Err(GitHubApiError::unauthenticated(
+                "send_with_retry",
+                "<request>".to_string(),
                 "GitHub API returned 401 — token may have been revoked, please re-authenticate"
+                    .to_string(),
             )),
             AuthMode::Installation { installation_id } => {
                 tracing::warn!(
@@ -77,8 +87,14 @@ impl GitHubApiClient {
                     "github-api: 401 — refreshing installation token and retrying"
                 );
                 self.invalidate_cached_token();
-                let token = self.bearer_token().await?;
-                build_request(token).await
+                let token = self.bearer_token().await.map_err(|e| {
+                    GitHubApiError::transport(
+                        "send_with_retry",
+                        "<auth>".to_string(),
+                        e.to_string(),
+                    )
+                })?;
+                build_request(token).await.map_err(classify_transport_error)
             }
             AuthMode::UserToken { current, refresher } => {
                 tracing::warn!("github-api: 401 on user token — attempting refresh");
@@ -88,14 +104,20 @@ impl GitHubApiClient {
                         // client (and any clones sharing the Arc) pick up
                         // the rotated token without another DB round-trip.
                         *current.write().await = new_token.clone();
-                        build_request(new_token).await
+                        build_request(new_token)
+                            .await
+                            .map_err(classify_transport_error)
                     }
                     Err(e) => {
                         tracing::info!(
                             error = %e,
                             "github-api: user-token refresh failed → surfacing UserTokenExpired"
                         );
-                        Err(anyhow::Error::new(UserTokenExpired))
+                        Err(GitHubApiError::unauthenticated(
+                            "send_with_retry",
+                            "<request>".to_string(),
+                            UserTokenExpired.to_string(),
+                        ))
                     }
                 }
             }
@@ -136,10 +158,16 @@ pub(super) async fn handle_rate_limit(resp: Response) -> Result<Response> {
             sleep_secs
         );
         tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
-        return Err(anyhow!(
-            "GitHub rate limit exhausted — retry after {}s",
-            sleep_secs
-        ));
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow::Error::new(GitHubApiError::rate_limited(
+            "handle_rate_limit",
+            "<request>".to_string(),
+            if body.is_empty() {
+                format!("GitHub rate limit exhausted — retry after {sleep_secs}s")
+            } else {
+                body
+            },
+        )));
     }
 
     if status == StatusCode::TOO_MANY_REQUESTS && remaining.is_none() {
@@ -154,14 +182,29 @@ pub(super) async fn handle_rate_limit(resp: Response) -> Result<Response> {
             tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
             attempts += 1;
             if attempts >= MAX_REFRESH_RETRIES || delay >= BACKOFF_MAX_SECS {
-                return Err(anyhow!(
-                    "GitHub API returned 429 after {} retries",
-                    attempts
-                ));
+                let body = resp.text().await.unwrap_or_default();
+                return Err(anyhow::Error::new(GitHubApiError::transport(
+                    "handle_rate_limit",
+                    "<request>".to_string(),
+                    if body.is_empty() {
+                        format!("GitHub API returned 429 after {attempts} retries")
+                    } else {
+                        body
+                    },
+                )));
             }
             delay = (delay * 2).min(BACKOFF_MAX_SECS);
         }
     }
 
     Ok(resp)
+}
+
+fn classify_transport_error(err: anyhow::Error) -> GitHubApiError {
+    match err.downcast::<GitHubApiError>() {
+        Ok(typed) => typed,
+        Err(err) => {
+            GitHubApiError::transport("send_with_retry", "<request>".to_string(), err.to_string())
+        }
+    }
 }
