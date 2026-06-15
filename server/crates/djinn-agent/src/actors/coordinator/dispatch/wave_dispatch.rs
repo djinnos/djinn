@@ -5,6 +5,11 @@ use djinn_core::models::TransitionAction;
 use djinn_core::models::task::IssueType;
 
 impl CoordinatorActor {
+    #[tracing::instrument(
+        name = "djinn.coordinator.approved_pass",
+        skip(self),
+        fields(pass_kind = "approved")
+    )]
     pub(in crate::actors::coordinator) async fn process_approved_tasks(&mut self) {
         let repo = self.task_repo();
         let tasks = match repo.list_by_status("approved").await {

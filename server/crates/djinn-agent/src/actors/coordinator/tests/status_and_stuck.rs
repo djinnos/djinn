@@ -24,6 +24,8 @@ async fn trigger_dispatch_increments_counter_for_ready_task() {
     let outcome = actor
         .try_dispatch_to_pool(
             "T1",
+            "worker",
+            0,
             None,
             &[DEFAULT_MODEL_ID.to_owned()],
             |_pool, _model_id| async move { Ok::<(), PoolError>(()) },
@@ -47,6 +49,8 @@ async fn trigger_dispatch_increments_counter_for_review_tasks() {
     let outcome = actor
         .try_dispatch_to_pool(
             "Review me",
+            "reviewer",
+            0,
             None,
             &[DEFAULT_MODEL_ID.to_owned()],
             |_pool, _model_id| async move { Ok::<(), PoolError>(()) },
