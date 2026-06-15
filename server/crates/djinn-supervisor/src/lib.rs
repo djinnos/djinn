@@ -221,12 +221,18 @@ pub enum StageOutcome {
         session_id: String,
     },
     Parked {
-        reason: String,
+        reason: ParkReason,
+        summary: Option<String>,
         wind_down_ignored: bool,
         session_id: String,
         tokens_in: i64,
         tokens_out: i64,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParkReason {
+    Budget,
 }
 
 impl StageOutcome {
@@ -237,8 +243,8 @@ impl StageOutcome {
             StageOutcome::PlannerClose { .. }
                 | StageOutcome::Escalate { .. }
                 | StageOutcome::Failed { .. }
-                | StageOutcome::LoopGuardTripped { .. }
                 | StageOutcome::Parked { .. }
+                | StageOutcome::LoopGuardTripped { .. }
                 | StageOutcome::ReviewerRejected { .. }
                 | StageOutcome::VerifierFailed { .. }
                 // Lead decisions that fire their own terminal board transition
@@ -1491,6 +1497,33 @@ impl TaskRunSupervisor {
                         });
                         break;
                     }
+                    StageOutcome::Parked {
+                        reason: ParkReason::Budget,
+                        summary: _,
+                        wind_down_ignored,
+                        session_id,
+                        tokens_in,
+                        tokens_out,
+                    } => {
+                        tracing::info!(
+                            target: "djinn_supervisor::budget_park",
+                            kind = "budget_park",
+                            wind_down_ignored,
+                            task_id = %spec.task_id,
+                            session_id = %session_id,
+                            tokens_in,
+                            tokens_out,
+                            "budget_park"
+                        );
+                        result = Some(TaskRunOutcome::Parked {
+                            reason: "budget".to_string(),
+                            wind_down_ignored,
+                            session_id,
+                            tokens_in,
+                            tokens_out,
+                        });
+                        break;
+                    }
                     StageOutcome::LoopGuardTripped {
                         kind,
                         offending_signature,
@@ -1520,32 +1553,6 @@ impl TaskRunSupervisor {
                             observed,
                             turn_span,
                             session_id,
-                        });
-                        break;
-                    }
-                    StageOutcome::Parked {
-                        reason,
-                        wind_down_ignored,
-                        session_id,
-                        tokens_in,
-                        tokens_out,
-                    } => {
-                        tracing::info!(
-                            target: "djinn_supervisor::budget_park",
-                            kind = "budget_park",
-                            wind_down_ignored,
-                            task_id = %spec.task_id,
-                            session_id = %session_id,
-                            tokens_in,
-                            tokens_out,
-                            "budget_park"
-                        );
-                        result = Some(TaskRunOutcome::Parked {
-                            reason,
-                            wind_down_ignored,
-                            session_id,
-                            tokens_in,
-                            tokens_out,
                         });
                         break;
                     }
@@ -2134,7 +2141,8 @@ mod tests {
         );
         assert!(
             StageOutcome::Parked {
-                reason: "budget".into(),
+                reason: ParkReason::Budget,
+                summary: None,
                 wind_down_ignored: false,
                 session_id: "session-budget".into(),
                 tokens_in: 10,
@@ -2149,6 +2157,17 @@ mod tests {
             .is_terminal()
         );
         assert!(StageOutcome::VerifierFailed { reason: "x".into() }.is_terminal());
+        assert!(
+            StageOutcome::Parked {
+                reason: ParkReason::Budget,
+                summary: Some("handoff".into()),
+                wind_down_ignored: false,
+                session_id: "session-budget-summary".into(),
+                tokens_in: 10,
+                tokens_out: 5,
+            }
+            .is_terminal()
+        );
         assert!(!StageOutcome::WorkerDone.is_terminal());
         assert!(!StageOutcome::PlannerExecute.is_terminal());
         assert!(!StageOutcome::ReviewerApproved.is_terminal());
@@ -2341,7 +2360,8 @@ mod tests {
             cancel: CancellationToken::new(),
             task: fixture_task(task_id, project_id),
             outcome: StageOutcome::Parked {
-                reason: "budget".into(),
+                reason: ParkReason::Budget,
+                summary: None,
                 wind_down_ignored: true,
                 session_id: session_id.into(),
                 tokens_in: 123,

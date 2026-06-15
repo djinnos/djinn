@@ -168,6 +168,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn budget_park_noop_reuses_nudge_cap_ladder() {
+        // A terminal budget park with no commits reaches the same no-op
+        // disposition fork as any other empty completed run. There is no new
+        // disposition variant: continuation_count 0 and 1 nudge, 2+ closes.
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 0, NUDGE_CAP),
+            RunDisposition::Nudge
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 1, NUDGE_CAP),
+            RunDisposition::Nudge
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 2, NUDGE_CAP),
+            RunDisposition::Close
+        );
+    }
+
     // ── Inconclusive is never auto-nudged ───────────────────────────────────
 
     #[test]

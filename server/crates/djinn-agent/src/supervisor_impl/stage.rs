@@ -66,7 +66,7 @@ use std::sync::Arc;
 use djinn_core::models::{SessionStatus, Task};
 use djinn_db::ProjectRepository;
 use djinn_runtime::spec::{RoleKind, TaskRunSpec};
-use djinn_supervisor::{StageError, StageOutcome, SupervisorServices};
+use djinn_supervisor::{ParkReason, StageError, StageOutcome, SupervisorServices};
 use djinn_workspace::Workspace;
 
 use crate::AgentType;
@@ -88,6 +88,7 @@ use crate::actors::slot::lifecycle::setup::{
     SetupAndVerificationContext, SetupError, resolve_setup_and_verification_context,
 };
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
+use crate::actors::slot::reply_loop::error_handling::BudgetWindDownIgnored;
 use crate::actors::slot::reply_loop::loop_guard::{
     LoopGuardError, LoopGuardKind as ReplyLoopGuardKind,
 };
@@ -189,23 +190,18 @@ fn stage_outcome_for_reply_loop_guard_error(error: &LoopGuardError) -> StageOutc
     stage_outcome_for_runtime_loop_guard_trip(&trip)
 }
 
-fn remaining_concerns_starts_budget_parked(payload: &Option<serde_json::Value>) -> bool {
-    let Some(value) = payload
-        .as_ref()
-        .and_then(|payload| payload.get("remaining_concerns"))
-    else {
-        return false;
-    };
-
-    value
-        .as_str()
-        .is_some_and(|s| s.starts_with("budget-parked:"))
-        || value.as_array().is_some_and(|items| {
-            items.iter().any(|item| {
-                item.as_str()
-                    .is_some_and(|s| s.starts_with("budget-parked:"))
-            })
-        })
+fn session_settlement_for_stage_outcome(
+    stage_outcome: &StageOutcome,
+    final_result_ok: bool,
+) -> (SessionStatus, Option<String>) {
+    match stage_outcome {
+        StageOutcome::Parked {
+            reason: ParkReason::Budget,
+            ..
+        } => (SessionStatus::Completed, Some("budget".to_string())),
+        _ if final_result_ok => (SessionStatus::Completed, None),
+        _ => (SessionStatus::Failed, None),
+    }
 }
 
 /// Read-only multi-repo: resolve the epic's read-source projects to slugs/names
@@ -570,49 +566,15 @@ pub(crate) async fn execute_stage(
             .scope(task.created_by_user_id.clone(), reply_loop_fut)
             .await;
 
-    // ── Finalize session ─────────────────────────────────────────────────────
-    let budget_summary_parked = reply_result.is_ok()
-        && final_output.finalize_tool_name.as_deref() == Some("submit_work")
-        && remaining_concerns_starts_budget_parked(&final_output.finalize_payload);
-    let wind_down_ignored_park = reply_result.as_ref().err().is_some_and(|e| {
-        e.to_string()
-            .contains("wind-down summary directive was injected")
-    });
-    let parked_reason =
-        (budget_summary_parked || wind_down_ignored_park).then(|| "budget".to_string());
-
-    let session_status = if reply_result.is_ok() || wind_down_ignored_park {
-        SessionStatus::Completed
-    } else {
-        SessionStatus::Failed
-    };
-    if let Err(e) = services
-        .update_session_status(
-            session_id.clone(),
-            session_status,
-            tokens_in,
-            tokens_out,
-            cache_read,
-            cache_write,
-            parked_reason,
-        )
-        .await
-    {
-        tracing::warn!(
-            session_id = %session_id,
-            error = %e,
-            "Supervisor stage: failed to update session record"
-        );
-    }
-
     // ── Map the reply-loop outcome to StageOutcome ───────────────────────────
     let final_result_ok = reply_result.is_ok();
     let final_error = reply_result.as_ref().err().map(|e| e.to_string());
     let stage_outcome = match reply_result {
         Err(e) => {
-            if wind_down_ignored_park {
+            if e.downcast_ref::<BudgetWindDownIgnored>().is_some() {
                 StageOutcome::Parked {
-                    reason: "budget".to_string(),
+                    reason: ParkReason::Budget,
+                    summary: None,
                     wind_down_ignored: true,
                     session_id: session_id.clone(),
                     tokens_in,
@@ -632,185 +594,233 @@ pub(crate) async fn execute_stage(
             }
         }
         Ok(()) => {
-            let finalize_name = final_output.finalize_tool_name.as_deref().unwrap_or("");
-            match role_kind {
-                RoleKind::Worker => match finalize_name {
-                    "submit_work" if budget_summary_parked => StageOutcome::Parked {
-                        reason: "budget".to_string(),
-                        wind_down_ignored: false,
-                        session_id: session_id.clone(),
-                        tokens_in,
-                        tokens_out,
+            if let Some(summary) = final_output.budget_wind_down_summary.clone() {
+                StageOutcome::Parked {
+                    reason: ParkReason::Budget,
+                    summary: Some(summary),
+                    wind_down_ignored: false,
+                    session_id: session_id.clone(),
+                    tokens_in,
+                    tokens_out,
+                }
+            } else {
+                let finalize_name = final_output.finalize_tool_name.as_deref().unwrap_or("");
+                match role_kind {
+                    RoleKind::Worker => match finalize_name {
+                        "submit_work" => StageOutcome::WorkerDone,
+                        "request_lead" => StageOutcome::Escalate {
+                            reason: extract_reason(&final_output.finalize_payload)
+                                .unwrap_or_else(|| "worker requested lead escalation".into()),
+                        },
+                        "" => StageOutcome::WorkerDone,
+                        other => StageOutcome::Failed {
+                            reason: format!("worker finalized via unexpected tool '{other}'"),
+                            provider_failure: None,
+                        },
                     },
-                    "submit_work" => StageOutcome::WorkerDone,
-                    "request_lead" => StageOutcome::Escalate {
-                        reason: extract_reason(&final_output.finalize_payload)
-                            .unwrap_or_else(|| "worker requested lead escalation".into()),
-                    },
-                    "" => StageOutcome::WorkerDone,
-                    other => StageOutcome::Failed {
-                        reason: format!("worker finalized via unexpected tool '{other}'"),
-                        provider_failure: None,
-                    },
-                },
-                RoleKind::Planner => match finalize_name {
-                    "submit_grooming" => {
-                        let decision = final_output
-                            .finalize_payload
-                            .as_ref()
-                            .and_then(|p| p.get("decision"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        match decision {
-                            // Empty (LLM omitted the field) and "execute" both
-                            // mean "wave was created or board work continues" —
-                            // mapping empty → Failed here looped every planner
-                            // task whose prompt drifted off the decision field.
-                            "" | "execute" => StageOutcome::PlannerExecute,
-                            "close" => StageOutcome::PlannerClose {
-                                reason: extract_reason(&final_output.finalize_payload)
-                                    .unwrap_or_else(|| "planner closed task".into()),
-                            },
-                            "escalate" => StageOutcome::Escalate {
-                                reason: extract_reason(&final_output.finalize_payload)
-                                    .unwrap_or_else(|| "planner escalated".into()),
-                            },
-                            other => StageOutcome::Failed {
-                                reason: format!("planner submitted unknown decision '{other}'"),
-                                provider_failure: None,
-                            },
+                    RoleKind::Planner => match finalize_name {
+                        "submit_grooming" => {
+                            let decision = final_output
+                                .finalize_payload
+                                .as_ref()
+                                .and_then(|p| p.get("decision"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            match decision {
+                                // Empty (LLM omitted the field) and "execute" both
+                                // mean "wave was created or board work continues" —
+                                // mapping empty → Failed here looped every planner
+                                // task whose prompt drifted off the decision field.
+                                "" | "execute" => StageOutcome::PlannerExecute,
+                                "close" => StageOutcome::PlannerClose {
+                                    reason: extract_reason(&final_output.finalize_payload)
+                                        .unwrap_or_else(|| "planner closed task".into()),
+                                },
+                                "escalate" => StageOutcome::Escalate {
+                                    reason: extract_reason(&final_output.finalize_payload)
+                                        .unwrap_or_else(|| "planner escalated".into()),
+                                },
+                                other => StageOutcome::Failed {
+                                    reason: format!("planner submitted unknown decision '{other}'"),
+                                    provider_failure: None,
+                                },
+                            }
                         }
-                    }
-                    other => StageOutcome::Failed {
-                        reason: format!("planner finalized via unexpected tool '{other}'"),
-                        provider_failure: None,
+                        other => StageOutcome::Failed {
+                            reason: format!("planner finalized via unexpected tool '{other}'"),
+                            provider_failure: None,
+                        },
                     },
-                },
-                RoleKind::Reviewer => match finalize_name {
-                    "submit_review" => {
-                        let verdict = final_output
-                            .finalize_payload
-                            .as_ref()
-                            .and_then(|p| p.get("verdict"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        // Accept both present-tense ("approve"/"reject") and
-                        // past-tense ("approved"/"rejected") forms — gpt-5.x
-                        // consistently emits past-tense in the submit_review
-                        // payload, which previously fell through to the "Failed"
-                        // arm and broke open_pr for every review.
-                        match verdict {
-                            "approve" | "approved" => StageOutcome::ReviewerApproved,
-                            "reject" | "rejected" => StageOutcome::ReviewerRejected {
-                                feedback: final_output
-                                    .finalize_payload
-                                    .as_ref()
-                                    .and_then(|p| p.get("feedback"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                            },
-                            other => StageOutcome::Failed {
-                                reason: format!("reviewer submitted unknown verdict '{other}'"),
-                                provider_failure: None,
-                            },
+                    RoleKind::Reviewer => match finalize_name {
+                        "submit_review" => {
+                            let verdict = final_output
+                                .finalize_payload
+                                .as_ref()
+                                .and_then(|p| p.get("verdict"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            // Accept both present-tense ("approve"/"reject") and
+                            // past-tense ("approved"/"rejected") forms — gpt-5.x
+                            // consistently emits past-tense in the submit_review
+                            // payload, which previously fell through to the "Failed"
+                            // arm and broke open_pr for every review.
+                            match verdict {
+                                "approve" | "approved" => StageOutcome::ReviewerApproved,
+                                "reject" | "rejected" => StageOutcome::ReviewerRejected {
+                                    feedback: final_output
+                                        .finalize_payload
+                                        .as_ref()
+                                        .and_then(|p| p.get("feedback"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                },
+                                other => StageOutcome::Failed {
+                                    reason: format!("reviewer submitted unknown verdict '{other}'"),
+                                    provider_failure: None,
+                                },
+                            }
                         }
-                    }
-                    // Reviewer session ended naturally without calling
-                    // submit_review (LLM stopped emitting before invoking the
-                    // finalize tool). Treat as a hard rejection so the task
-                    // re-dispatches a fresh reviewer instead of silently
-                    // approving unreviewed code.
-                    "" => {
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            task_run_id = %task_run_id,
-                            "Reviewer session ended without calling submit_review; treating as rejection so a fresh reviewer runs"
-                        );
-                        StageOutcome::ReviewerRejected {
-                            feedback: "Reviewer session ended without calling submit_review — \
+                        // Reviewer session ended naturally without calling
+                        // submit_review (LLM stopped emitting before invoking the
+                        // finalize tool). Treat as a hard rejection so the task
+                        // re-dispatches a fresh reviewer instead of silently
+                        // approving unreviewed code.
+                        "" => {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                task_run_id = %task_run_id,
+                                "Reviewer session ended without calling submit_review; treating as rejection so a fresh reviewer runs"
+                            );
+                            StageOutcome::ReviewerRejected {
+                                feedback: "Reviewer session ended without calling submit_review — \
                                        you MUST call submit_review with verdict=\"approve\" \
                                        or verdict=\"reject\" before ending your session."
-                                .to_string(),
+                                    .to_string(),
+                            }
                         }
-                    }
-                    "request_lead" => StageOutcome::Escalate {
-                        reason: extract_reason(&final_output.finalize_payload)
-                            .unwrap_or_else(|| "reviewer escalated to lead".into()),
+                        "request_lead" => StageOutcome::Escalate {
+                            reason: extract_reason(&final_output.finalize_payload)
+                                .unwrap_or_else(|| "reviewer escalated to lead".into()),
+                        },
+                        other => StageOutcome::Failed {
+                            reason: format!("reviewer finalized via unexpected tool '{other}'"),
+                            provider_failure: None,
+                        },
                     },
-                    other => StageOutcome::Failed {
-                        reason: format!("reviewer finalized via unexpected tool '{other}'"),
+                    RoleKind::Verifier => StageOutcome::Failed {
+                        reason: "verifier stage not yet wired in supervisor".into(),
                         provider_failure: None,
                     },
-                },
-                RoleKind::Verifier => StageOutcome::Failed {
-                    reason: "verifier stage not yet wired in supervisor".into(),
-                    provider_failure: None,
-                },
-                RoleKind::Architect => match finalize_name {
-                    "submit_work" => StageOutcome::ArchitectDone,
-                    other => StageOutcome::Failed {
-                        reason: format!("architect finalized via unexpected tool '{other}'"),
-                        provider_failure: None,
+                    RoleKind::Architect => match finalize_name {
+                        "submit_work" => StageOutcome::ArchitectDone,
+                        other => StageOutcome::Failed {
+                            reason: format!("architect finalized via unexpected tool '{other}'"),
+                            provider_failure: None,
+                        },
                     },
-                },
-                RoleKind::Lead => match finalize_name {
-                    "submit_decision" => {
-                        let decision = final_output
-                            .finalize_payload
-                            .as_ref()
-                            .and_then(|p| p.get("decision"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let reason = extract_reason(&final_output.finalize_payload);
-                        match decision {
-                            // Work is complete + correct; reviewer/worker just
-                            // couldn't certify. Reconnects the existing
-                            // lead_approve DB transition (the incident fix).
-                            "approve" | "approved" => StageOutcome::LeadApproved,
-                            "approve_conflict" => StageOutcome::LeadApproveConflict {
-                                reason: reason
-                                    .unwrap_or_else(|| "lead approved with merge conflict".into()),
-                            },
-                            // Rescope / guide / block-on-deps: the Lead made the
-                            // edits and sends the task back for a fresh worker.
-                            "reopen" => StageOutcome::LeadReopen {
-                                reason: reason.unwrap_or_else(|| "lead reopened task".into()),
-                            },
-                            // decompose: replacement subtasks already created by
-                            // the Lead via MCP; force_close: redundant /
-                            // already-landed work. Both terminally close the
-                            // original task.
-                            "decompose" | "force_close" => StageOutcome::LeadClose {
-                                reason: reason
-                                    .unwrap_or_else(|| format!("lead closed task ({decision})")),
-                            },
-                            "escalate" => StageOutcome::LeadEscalate {
-                                reason: reason
-                                    .unwrap_or_else(|| "lead escalated for board review".into()),
-                            },
-                            other => StageOutcome::Failed {
-                                reason: format!("lead submitted unknown decision '{other}'"),
-                                provider_failure: None,
-                            },
+                    RoleKind::Lead => match finalize_name {
+                        "submit_decision" => {
+                            let decision = final_output
+                                .finalize_payload
+                                .as_ref()
+                                .and_then(|p| p.get("decision"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let reason = extract_reason(&final_output.finalize_payload);
+                            match decision {
+                                // Work is complete + correct; reviewer/worker just
+                                // couldn't certify. Reconnects the existing
+                                // lead_approve DB transition (the incident fix).
+                                "approve" | "approved" => StageOutcome::LeadApproved,
+                                "approve_conflict" => StageOutcome::LeadApproveConflict {
+                                    reason: reason.unwrap_or_else(|| {
+                                        "lead approved with merge conflict".into()
+                                    }),
+                                },
+                                // Rescope / guide / block-on-deps: the Lead made the
+                                // edits and sends the task back for a fresh worker.
+                                "reopen" => StageOutcome::LeadReopen {
+                                    reason: reason.unwrap_or_else(|| "lead reopened task".into()),
+                                },
+                                // decompose: replacement subtasks already created by
+                                // the Lead via MCP; force_close: redundant /
+                                // already-landed work. Both terminally close the
+                                // original task.
+                                "decompose" | "force_close" => StageOutcome::LeadClose {
+                                    reason: reason.unwrap_or_else(|| {
+                                        format!("lead closed task ({decision})")
+                                    }),
+                                },
+                                "escalate" => StageOutcome::LeadEscalate {
+                                    reason: reason.unwrap_or_else(|| {
+                                        "lead escalated for board review".into()
+                                    }),
+                                },
+                                other => StageOutcome::Failed {
+                                    reason: format!("lead submitted unknown decision '{other}'"),
+                                    provider_failure: None,
+                                },
+                            }
                         }
-                    }
-                    // The Lead ended without calling submit_decision. Releasing
-                    // the task back to the lead queue (it stays
-                    // in_lead_intervention → redispatch a fresh Lead) is safer
-                    // than guessing a board transition.
-                    "" => StageOutcome::Failed {
-                        reason: "lead session ended without calling submit_decision".into(),
-                        provider_failure: None,
+                        // The Lead ended without calling submit_decision. Releasing
+                        // the task back to the lead queue (it stays
+                        // in_lead_intervention → redispatch a fresh Lead) is safer
+                        // than guessing a board transition.
+                        "" => StageOutcome::Failed {
+                            reason: "lead session ended without calling submit_decision".into(),
+                            provider_failure: None,
+                        },
+                        other => StageOutcome::Failed {
+                            reason: format!("lead finalized via unexpected tool '{other}'"),
+                            provider_failure: None,
+                        },
                     },
-                    other => StageOutcome::Failed {
-                        reason: format!("lead finalized via unexpected tool '{other}'"),
-                        provider_failure: None,
-                    },
-                },
+                }
             }
         }
     };
+
+    // ── Finalize session ─────────────────────────────────────────────────────
+    let (session_status, parked_reason) =
+        session_settlement_for_stage_outcome(&stage_outcome, final_result_ok);
+    if let Err(e) = services
+        .update_session_status(
+            session_id.clone(),
+            session_status,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+            parked_reason,
+        )
+        .await
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %e,
+            "Supervisor stage: failed to update session record"
+        );
+    }
+
+    if let StageOutcome::Parked {
+        reason: ParkReason::Budget,
+        summary: Some(summary),
+        wind_down_ignored: false,
+        ..
+    } = &stage_outcome
+    {
+        crate::actors::slot::finalize_handlers::handle_budget_park(
+            summary,
+            final_output
+                .budget_wind_down_details
+                .as_deref()
+                .unwrap_or("budget-triggered wind-down summary captured"),
+            &task.id,
+            agent_context,
+        )
+        .await;
+    }
 
     // ── Dispatch post-session work ───────────────────────────────────────────
     let project_path =
@@ -818,14 +828,18 @@ pub(crate) async fn execute_stage(
             .await
             .unwrap_or_else(|| worktree_path.display().to_string());
 
+    let parked = matches!(stage_outcome, StageOutcome::Parked { .. });
+    let post_session_result_ok = final_result_ok || parked;
+    let post_session_error = if parked { None } else { final_error };
+
     spawn_post_session_work(PostSessionParams {
         task_id: task.id.clone(),
         project_path,
         role: role.clone(),
         app_state: agent_context.clone(),
         final_output,
-        final_result_ok,
-        final_error,
+        final_result_ok: post_session_result_ok,
+        final_error: post_session_error,
         tokens_in,
         tokens_out,
     });
@@ -996,6 +1010,55 @@ mod tests {
             }
             other => panic!("expected typed loop-guard stage outcome, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn budget_park_settles_completed_with_parked_reason_even_when_wind_down_ignored() {
+        let ignored_outcome = StageOutcome::Parked {
+            reason: ParkReason::Budget,
+            summary: None,
+            wind_down_ignored: true,
+            session_id: "session-budget-ignored".to_string(),
+            tokens_in: 10,
+            tokens_out: 5,
+        };
+
+        assert_eq!(
+            session_settlement_for_stage_outcome(&ignored_outcome, false),
+            (SessionStatus::Completed, Some("budget".to_string())),
+            "typed ignored budget wind-downs must settle as completed parks, not failures"
+        );
+
+        let summary_outcome = StageOutcome::Parked {
+            reason: ParkReason::Budget,
+            summary: Some("handoff summary".to_string()),
+            wind_down_ignored: false,
+            session_id: "session-budget-summary".to_string(),
+            tokens_in: 10,
+            tokens_out: 5,
+        };
+        assert_eq!(
+            session_settlement_for_stage_outcome(&summary_outcome, true),
+            (SessionStatus::Completed, Some("budget".to_string()))
+        );
+    }
+
+    #[test]
+    fn non_budget_stage_settlement_keeps_existing_success_and_failure_statuses() {
+        assert_eq!(
+            session_settlement_for_stage_outcome(&StageOutcome::WorkerDone, true),
+            (SessionStatus::Completed, None)
+        );
+        assert_eq!(
+            session_settlement_for_stage_outcome(
+                &StageOutcome::Failed {
+                    reason: "ordinary failure".to_string(),
+                    provider_failure: None,
+                },
+                false,
+            ),
+            (SessionStatus::Failed, None)
+        );
     }
 
     #[test]
