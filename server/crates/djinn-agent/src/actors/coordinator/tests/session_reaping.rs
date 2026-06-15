@@ -27,14 +27,21 @@ async fn stalled_model_is_skipped_and_dispatch_fails_over_to_next() {
     let attempted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let attempted_cl = attempted.clone();
     let outcome = actor
-        .try_dispatch_to_pool("failover-test", None, &model_ids, |_pool, model_id| {
-            let attempted = attempted_cl.clone();
-            let model_id = model_id.to_owned();
-            async move {
-                attempted.lock().unwrap().push(model_id);
-                Ok::<(), PoolError>(())
-            }
-        })
+        .try_dispatch_to_pool(
+            "failover-test",
+            "worker",
+            0,
+            None,
+            &model_ids,
+            |_pool, model_id| {
+                let attempted = attempted_cl.clone();
+                let model_id = model_id.to_owned();
+                async move {
+                    attempted.lock().unwrap().push(model_id);
+                    Ok::<(), PoolError>(())
+                }
+            },
+        )
         .await;
 
     assert!(matches!(outcome, DispatchOutcome::Dispatched));
@@ -67,6 +74,8 @@ async fn stalled_model_recovers_after_cooldown_expires() {
     let outcome = actor
         .try_dispatch_to_pool(
             "recover-test",
+            "worker",
+            0,
             None,
             &model_ids,
             |_pool, _model_id| async move { Ok::<(), PoolError>(()) },

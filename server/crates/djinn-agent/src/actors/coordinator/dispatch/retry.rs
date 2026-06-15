@@ -323,6 +323,11 @@ impl CoordinatorActor {
     /// re-dispatching a Planner on every tick. The marker is keyed by the
     /// CURRENT reopen count, so a later genuine reopen (count bumps again past
     /// the threshold) re-arms one fresh intervention.
+    #[tracing::instrument(
+        name = "djinn.dispatch.intervention.trigger",
+        skip(self, task),
+        fields(task_id = %task.short_id, role = "worker", attempt = task.reopen_count, pass_kind = "trigger_a")
+    )]
     pub(in crate::actors::coordinator) async fn maybe_intervene_on_stuck_task(
         &mut self,
         task: &djinn_core::models::Task,
@@ -364,6 +369,11 @@ impl CoordinatorActor {
     /// reopen-count-keyed idempotency marker (stable across a review-cycle
     /// loop, so one intervention per loop), backoff-state clearing — via
     /// [`Self::route_planner_intervention`].
+    #[tracing::instrument(
+        name = "djinn.dispatch.intervention.trigger",
+        skip(self, task),
+        fields(task_id = %task.short_id, role = %role, attempt = streak, pass_kind = "trigger_b")
+    )]
     pub(in crate::actors::coordinator) async fn maybe_intervene_on_cycling_task(
         &mut self,
         task: &djinn_core::models::Task,
@@ -387,6 +397,11 @@ impl CoordinatorActor {
     /// reply-loop guard saw repeated identical behavior. This is not a provider
     /// fault and not a dispatch failure; route it directly to the same Planner
     /// intervention / second-strike park machinery used by triggers A and B.
+    #[tracing::instrument(
+        name = "djinn.dispatch.intervention",
+        skip(self, reason),
+        fields(task_id = %task_id, role = %role, pass_kind = "loop_guard")
+    )]
     pub(in crate::actors::coordinator) async fn route_loop_guard_planner_intervention(
         &mut self,
         task_id: &str,
@@ -420,6 +435,11 @@ impl CoordinatorActor {
     /// `reopen_count`, backoff-state clearing, and the Planner escalation
     /// dispatch. Returns `true` when the task was routed (or terminally
     /// parked) — the caller skips its dispatch this pass.
+    #[tracing::instrument(
+        name = "djinn.dispatch.intervention",
+        skip(self, task, reason),
+        fields(task_id = %task.short_id, role = %role, attempt = task.reopen_count, pass_kind = "planner_intervention")
+    )]
     pub(in crate::actors::coordinator) async fn route_planner_intervention(
         &mut self,
         task: &djinn_core::models::Task,
@@ -705,6 +725,8 @@ impl CoordinatorActor {
         let outcome = self
             .try_dispatch_to_pool(
                 &review_task.short_id,
+                "planner",
+                review_task.reopen_count.max(0) as u32,
                 review_task.created_by_user_id.as_deref(),
                 &model_ids,
                 |pool, model_id| {
@@ -719,6 +741,7 @@ impl CoordinatorActor {
 
         match outcome {
             DispatchOutcome::Dispatched => {
+                tracing::info!(outcome = "ok", task_id = %review_task.short_id, role = "planner");
                 tracing::info!(
                     review_task_id = %review_task.short_id,
                     review_task_uuid = %review_task.id,
@@ -737,6 +760,7 @@ impl CoordinatorActor {
                 self.publish_status();
             }
             DispatchOutcome::AtCapacity => {
+                tracing::debug!(outcome = "cap", task_id = %review_task.short_id, role = "planner");
                 tracing::debug!(
                     "CoordinatorActor: planner escalation — Planner model at capacity, will retry next cycle"
                 );
@@ -745,6 +769,7 @@ impl CoordinatorActor {
                 tracing::error!("CoordinatorActor: planner escalation — slot pool actor dead");
             }
             DispatchOutcome::Failed => {
+                tracing::debug!(outcome = "error", task_id = %review_task.short_id, role = "planner");
                 tracing::debug!(
                     "CoordinatorActor: planner escalation — no model could accept Planner dispatch"
                 );

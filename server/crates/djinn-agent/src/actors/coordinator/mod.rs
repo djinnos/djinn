@@ -35,6 +35,7 @@ use djinn_provider::catalog::CatalogService;
 mod actor;
 mod consolidation;
 mod dispatch;
+mod evidence;
 mod handle;
 mod health;
 mod messages;

@@ -325,9 +325,23 @@ impl CoordinatorActor {
         Ok(next_count)
     }
 
+    #[tracing::instrument(
+        name = "djinn.dispatch",
+        skip(self, model_ids, dispatch_fn),
+        fields(
+            task_id = %label,
+            model_id = tracing::field::Empty,
+            role = %role,
+            attempt = %attempt,
+            pass_kind = "pool",
+            outcome = tracing::field::Empty
+        )
+    )]
     pub(in crate::actors::coordinator) async fn try_dispatch_to_pool<F, Fut>(
         &self,
         label: &str,
+        role: &str,
+        attempt: u32,
         // Owning user the breaker is keyed on (`tasks.created_by_user_id`);
         // `None` = system/unowned work on the org-shared credential. Health is
         // per-`(scope, model)` so one user's throttled account can't disable a
@@ -343,7 +357,10 @@ impl CoordinatorActor {
         let mut any_at_capacity = false;
 
         for model_id in model_ids {
+            tracing::Span::current().record("model_id", tracing::field::display(model_id));
             if !self.health.is_available(scope, model_id) {
+                tracing::Span::current().record("outcome", "breaker");
+                tracing::debug!(outcome = "breaker", model_id = %model_id, label);
                 tracing::debug!(
                     model_id = %model_id,
                     scope = ?scope,
@@ -354,9 +371,15 @@ impl CoordinatorActor {
             }
 
             match dispatch_fn(&self.pool, model_id).await {
-                Ok(()) => return DispatchOutcome::Dispatched,
+                Ok(()) => {
+                    tracing::Span::current().record("outcome", "ok");
+                    tracing::info!(outcome = "ok", model_id = %model_id, label);
+                    return DispatchOutcome::Dispatched;
+                }
                 Err(PoolError::AtCapacity { .. }) => {
                     any_at_capacity = true;
+                    tracing::Span::current().record("outcome", "cap");
+                    tracing::debug!(outcome = "cap", model_id = %model_id, label);
                     tracing::debug!(
                         model_id = %model_id,
                         label,
@@ -364,10 +387,14 @@ impl CoordinatorActor {
                     );
                 }
                 Err(PoolError::ActorDead) => {
+                    tracing::Span::current().record("outcome", "error");
+                    tracing::debug!(outcome = "error", model_id = %model_id, label);
                     tracing::error!("CoordinatorActor: slot pool actor dead, aborting dispatch");
                     return DispatchOutcome::PoolDead;
                 }
                 Err(e) => {
+                    tracing::Span::current().record("outcome", "error");
+                    tracing::debug!(outcome = "error", model_id = %model_id, label);
                     tracing::warn!(
                         model_id = %model_id,
                         label,
@@ -380,8 +407,10 @@ impl CoordinatorActor {
         }
 
         if any_at_capacity {
+            tracing::Span::current().record("outcome", "cap");
             DispatchOutcome::AtCapacity
         } else {
+            tracing::Span::current().record("outcome", "error");
             DispatchOutcome::Failed
         }
     }
@@ -454,6 +483,11 @@ impl CoordinatorActor {
 
     /// Find all ready tasks (open, no unresolved blockers, non-epic) and dispatch
     /// those that don't already have an active session.
+    #[tracing::instrument(
+        name = "djinn.coordinator.ready_pass",
+        skip(self),
+        fields(pass_kind = "ready", project_filter = ?project_filter)
+    )]
     pub(in crate::actors::coordinator) async fn dispatch_ready_tasks(
         &mut self,
         project_filter: Option<&str>,
@@ -798,6 +832,7 @@ impl CoordinatorActor {
             }
             // Skip tasks still inside an active dispatch cooldown.
             if self.dispatch_cooldowns.contains_key(&task.id) {
+                tracing::debug!(outcome = "cooldown", task_id = %task.short_id, task_uuid = %task.id);
                 tracing::debug!(
                     task_id = %task.short_id,
                     "CoordinatorActor: task in dispatch cooldown, skipping"
@@ -1110,6 +1145,7 @@ impl CoordinatorActor {
                     used < caps.get(m).copied().unwrap_or(1)
                 });
                 if model_ids.is_empty() {
+                    tracing::debug!(outcome = "cap", task_id = %task.short_id, role);
                     tracing::debug!(
                         task_id = %task.short_id,
                         role,
@@ -1165,6 +1201,8 @@ impl CoordinatorActor {
             let outcome = self
                 .try_dispatch_to_pool(
                     &task.short_id,
+                    role,
+                    task.reopen_count.max(0) as u32,
                     creator.as_deref(),
                     model_ids,
                     |pool, model_id| {
@@ -1179,6 +1217,7 @@ impl CoordinatorActor {
 
             match outcome {
                 DispatchOutcome::Dispatched => {
+                    tracing::info!(outcome = "ok", task_id = %task.short_id, role);
                     tracing::info!(
                         task_id = %task.short_id,
                         task_uuid = %task.id,
@@ -1252,6 +1291,7 @@ impl CoordinatorActor {
                     }
                 }
                 DispatchOutcome::AtCapacity => {
+                    tracing::debug!(outcome = "cap", task_id = %task.short_id, role);
                     tracing::debug!(
                         task_id = %task.short_id,
                         task_uuid = %task.id,
@@ -1265,6 +1305,7 @@ impl CoordinatorActor {
                 }
                 DispatchOutcome::PoolDead => return,
                 DispatchOutcome::Failed => {
+                    tracing::debug!(outcome = "error", task_id = %task.short_id, role);
                     tracing::debug!(
                         task_id = %task.short_id,
                         task_uuid = %task.id,
