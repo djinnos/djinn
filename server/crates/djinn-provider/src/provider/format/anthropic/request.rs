@@ -451,6 +451,10 @@ impl AnthropicProvider {
         // requires `temperature` to be unset/1, so we never set temperature on
         // this path (we don't today), and the tool_choice block below skips
         // emitting a forcing `tool_choice` while thinking is on.
+        // design/aiu0-roadmap: until live MiniMax captures prove inline
+        // `<think>` leakage, this wave intentionally relies on Anthropic's
+        // structured `thinking` channel and existing parser rather than adding
+        // a fallback extractor.
         if let Some(tier) = self.config.reasoning_effort {
             let budget = tier
                 .thinking_budget()
