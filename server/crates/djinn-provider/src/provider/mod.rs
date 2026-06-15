@@ -191,6 +191,29 @@ impl ReasoningEffort {
     }
 }
 
+/// Default reasoning-effort policy for capability-driven provider resolution.
+///
+/// Catalog metadata (`Model::reasoning`) is the capability source of truth. For
+/// Anthropic/Google wire formats, `None` disables explicit thinking controls, so
+/// reasoning-capable models opt in at the shared default tier. OpenAI chat has
+/// no request-side reasoning knob here, and OpenAI Responses already preserves
+/// its legacy medium default when `ProviderConfig::reasoning_effort` is `None`,
+/// so those formats intentionally stay `None` to avoid changing their wire
+/// behavior.
+pub fn default_reasoning_effort(
+    model_supports_reasoning: bool,
+    format_family: FormatFamily,
+) -> Option<ReasoningEffort> {
+    if !model_supports_reasoning {
+        return None;
+    }
+
+    match format_family {
+        FormatFamily::Anthropic | FormatFamily::Google => Some(ReasoningEffort::Medium),
+        FormatFamily::OpenAI | FormatFamily::OpenAIResponses => None,
+    }
+}
+
 // ─── Provider configuration ───────────────────────────────────────────────────
 
 /// Configuration for a single provider instance.
