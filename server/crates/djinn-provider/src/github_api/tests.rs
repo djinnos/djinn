@@ -12,6 +12,7 @@ mod checks;
 mod pull_requests;
 mod reviews;
 mod transport;
+mod write_errors;
 
 /// Allocate a fresh installation id for each test and seed the in-memory
 /// installation-token cache with a predictable bearer value. Using distinct

@@ -1219,6 +1219,34 @@ mod tests {
     }
 
     #[test]
+    fn test_default_policy_preserves_openai_responses_request_bytes() {
+        use crate::provider::default_reasoning_effort_for_model;
+
+        let mut conv = Conversation::new();
+        conv.push(Message::system("You are helpful."));
+        conv.push(Message::user("Hello"));
+
+        let mut baseline_config = test_provider().config.clone();
+        baseline_config.model_id = "gpt-5.1-codex".to_string();
+        baseline_config.reasoning_effort = None;
+        let baseline =
+            OpenAIResponsesProvider::new(baseline_config.clone()).build_request(&conv, &[], None);
+
+        let mut policy_config = baseline_config;
+        policy_config.reasoning_effort = default_reasoning_effort_for_model(
+            true,
+            FormatFamily::OpenAIResponses,
+            &policy_config.model_id,
+        );
+        let with_policy =
+            OpenAIResponsesProvider::new(policy_config).build_request(&conv, &[], None);
+
+        assert_eq!(with_policy, baseline);
+        assert_eq!(with_policy["reasoning"]["effort"], "medium");
+        assert_eq!(with_policy["reasoning"]["summary"], "detailed");
+    }
+
+    #[test]
     fn test_reasoning_effort_high_maps_effort() {
         use crate::provider::ReasoningEffort;
         let mut config = test_provider().config.clone();

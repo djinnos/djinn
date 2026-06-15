@@ -174,6 +174,12 @@ impl SlotPool {
             } => {
                 let _ = respond_to.send(self.kill_session(&task_id).await);
             }
+            PoolMessage::TerminateSession {
+                task_id,
+                respond_to,
+            } => {
+                let _ = respond_to.send(self.terminate_session(&task_id).await);
+            }
             PoolMessage::EvictSession {
                 task_id,
                 respond_to,
@@ -389,6 +395,15 @@ impl SlotPool {
         Ok(())
     }
 
+    /// Authoritatively terminate an operator/user-requested running session.
+    /// This uses the same synchronous reclaim path as leaked-session eviction,
+    /// but is truthful: if no active task→slot mapping exists, the requested
+    /// task is not currently running and the caller gets `TaskNotFound`.
+    async fn terminate_session(&mut self, task_id: &str) -> Result<(), PoolError> {
+        self.reclaim_session(task_id, "terminate_session", true)
+            .await
+    }
+
     /// Forcibly reclaim a leaked task→slot mapping. The normal lifecycle frees a
     /// slot only when the worker emits `SlotEvent::Free`/`Killed`; a pod that
     /// dies without that event (eviction, OOM, stuck RPC stream) leaves
@@ -396,24 +411,39 @@ impl SlotPool {
     /// task can never redispatch (`dispatch` rejects with `SessionAlreadyActive`).
     /// This synthesizes the `Killed` cleanup that never arrived: it nudges the
     /// slot to die (best-effort — the pod is presumed unresponsive) and then
-    /// removes the mapping and returns the slot to the free pool regardless.
-    /// Idempotent: a task with no mapping is a no-op.
+    /// removes the mapping/activity synchronously. Idempotent: a task with no
+    /// mapping is a no-op.
     async fn evict_session(&mut self, task_id: &str) -> Result<(), PoolError> {
+        self.reclaim_session(task_id, "evict_session", false).await
+    }
+
+    async fn reclaim_session(
+        &mut self,
+        task_id: &str,
+        reason: &str,
+        require_mapping: bool,
+    ) -> Result<(), PoolError> {
         let Some(slot_id) = self.task_to_slot.get(task_id).copied() else {
+            if require_mapping {
+                return Err(PoolError::TaskNotFound {
+                    task_id: task_id.to_string(),
+                });
+            }
             return Ok(());
         };
-        self.teardown_taskrun_jobs_for_task(task_id, "evict_session")
-            .await;
+        self.teardown_taskrun_jobs_for_task(task_id, reason).await;
         // Best-effort terminate; ignore errors — the point of eviction is that
-        // this slot is unresponsive and its normal teardown never completed.
+        // this reclaim path must not be blocked by an unresponsive slot. For
+        // operator termination the later `SlotEvent::Killed` remains the only
+        // authority that can return a non-draining slot to the free list.
         if let Ok(slot) = self.slot(slot_id) {
             let _ = slot.kill().await;
         }
-        // A leaked/evicted pod never emits `SlotEvent::Killed`, so its session
-        // row is settled here at eviction (idempotent) rather than in
-        // `handle_slot_event`. Without this, the orphaned `running` row keeps
-        // over-counting the per-user concurrency cap even after the slot is
-        // reclaimed.
+        // A leaked/evicted pod may never emit `SlotEvent::Killed`, and operator
+        // termination must be truthful before returning, so settle here
+        // (idempotent) rather than depending on `handle_slot_event`. Without
+        // this, the orphaned `running` row keeps over-counting the per-user
+        // concurrency cap even after the task mapping is reclaimed.
         self.settle_session_row(task_id).await;
         self.task_to_slot.remove(task_id);
         self.task_started.remove(task_id);
@@ -787,6 +817,10 @@ impl SlotPool {
             model_id.to_string(),
         )
         .await
+    }
+
+    pub(super) async fn test_terminate_session(&mut self, task_id: &str) -> Result<(), PoolError> {
+        self.terminate_session(task_id).await
     }
 
     pub(super) fn test_slot_of(&self, task_id: &str) -> Option<usize> {
