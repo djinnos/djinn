@@ -17,7 +17,7 @@ struct InterventionChaosHarness {
 #[allow(dead_code)]
 impl InterventionChaosHarness {
     async fn new(initial_reopen_count: i64) -> Self {
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, rx) = broadcast::channel(256);
         let actor = coordinator_actor_for_tests(&db, &tx);
         let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
@@ -325,6 +325,105 @@ impl InterventionChaosHarness {
             );
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
+    let mut harness = InterventionChaosHarness::new(0).await;
+
+    // Trigger A is keyed to the configured reopen threshold. The first climb
+    // asserts escalation at the production threshold; the post-Planner climb
+    // intentionally runs one cycle beyond it so the same task experiences 4+
+    // consecutive review/CI-style failures before the terminal second strike.
+    assert!(
+        REOPEN_INTERVENTION_THRESHOLD + 1 >= 4,
+        "threshold-plus-one should exercise 4+ reopen cycles"
+    );
+
+    let first_threshold = harness.drive_review_failures_through_threshold().await;
+    assert_eq!(first_threshold.reopen_count, REOPEN_INTERVENTION_THRESHOLD);
+    assert_eq!(first_threshold.intervention_count, 0);
+
+    let (handled, first_routed) = harness.route_reopen_intervention().await;
+    assert!(handled, "first threshold crossing routes to Planner");
+    assert_eq!(first_routed.status, "open", "source task stays open");
+    harness
+        .assert_marker_reopen_counts(&[REOPEN_INTERVENTION_THRESHOLD])
+        .await;
+    harness.assert_open_planner_review_count(1).await;
+
+    let (handled_again, unchanged_after_repeat) = harness.route_reopen_intervention().await;
+    assert!(
+        !handled_again,
+        "same reopen-count check is suppressed by the intervention marker"
+    );
+    assert_eq!(
+        unchanged_after_repeat.reopen_count,
+        REOPEN_INTERVENTION_THRESHOLD
+    );
+    harness
+        .assert_marker_reopen_counts(&[REOPEN_INTERVENTION_THRESHOLD])
+        .await;
+    harness.assert_open_planner_review_count(1).await;
+
+    let reset = harness
+        .complete_planner_intervention_and_reset_ladder()
+        .await;
+    assert_eq!(reset.reopen_count, 0, "Planner completion resets ladder");
+    assert_eq!(
+        reset.intervention_count, MAX_PLANNER_INTERVENTIONS,
+        "Planner completion records the first strike"
+    );
+
+    harness.drive_review_failures_beyond_threshold(1).await;
+    let second_threshold = harness.task().await;
+    assert_eq!(
+        second_threshold.reopen_count,
+        REOPEN_INTERVENTION_THRESHOLD + 1
+    );
+    assert_eq!(
+        second_threshold.intervention_count,
+        MAX_PLANNER_INTERVENTIONS
+    );
+
+    harness.seed_same_role_redispatch_state("worker", 2).await;
+    harness.assert_same_role_backoff_seeded("worker", 2).await;
+
+    let (second_handled, parked) = harness.route_reopen_intervention().await;
+    assert!(
+        second_handled,
+        "second strike is handled terminally instead of redispatching"
+    );
+    assert_eq!(parked.reopen_count, REOPEN_INTERVENTION_THRESHOLD + 1);
+    harness
+        .assert_task_status("closed", Some("planner intervention"))
+        .await;
+    harness.assert_dispatch_backoff_cleared().await;
+    harness
+        .assert_marker_reopen_counts(&[REOPEN_INTERVENTION_THRESHOLD])
+        .await;
+    harness.assert_open_planner_review_count(1).await;
+
+    let marker_count_after_park = harness.planner_intervention_markers().await.len();
+    let review_count_after_park = harness.open_planner_intervention_reviews().await.len();
+
+    let (terminal_recheck_handled, terminal_recheck) = harness.route_reopen_intervention().await;
+    assert!(
+        terminal_recheck_handled,
+        "terminal second-strike recheck is consumed rather than redispatched"
+    );
+    assert_eq!(terminal_recheck.status, "closed");
+    assert_eq!(
+        harness.planner_intervention_markers().await.len(),
+        marker_count_after_park,
+        "terminal recheck must not write another Planner marker"
+    );
+    assert_eq!(
+        harness.open_planner_intervention_reviews().await.len(),
+        review_count_after_park,
+        "terminal recheck must not create another Planner review"
+    );
+    harness.assert_dispatch_backoff_cleared().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
