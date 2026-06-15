@@ -733,6 +733,33 @@ mod tests {
 
     #[test]
     #[allow(deprecated)]
+    fn deprecated_from_http_error_populates_error_class_when_status_found() {
+        for (raw, expected) in [
+            ("fetch_file failed (404): Not Found", ErrorClass::NotFound),
+            (
+                "GitHub API rejected query (422): invalid syntax",
+                ErrorClass::Validation,
+            ),
+            (
+                "upstream returned (503): Service Unavailable",
+                ErrorClass::Transient,
+            ),
+        ] {
+            let err = ToolError::from_http_error("legacy_tool", "owner/repo", raw);
+            assert_eq!(
+                err.error_class,
+                Some(expected),
+                "deprecated wrapper should classify status-bearing raw error: {raw}"
+            );
+            assert!(
+                err.status.is_some(),
+                "status-bearing raw error should retain a status: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(deprecated)]
     fn from_http_error_falls_back_to_internal_not_network() {
         // No HTTP status in the message → untyped path → error_class = Internal,
         // status = None, hint does NOT suggest retry (AC4).
