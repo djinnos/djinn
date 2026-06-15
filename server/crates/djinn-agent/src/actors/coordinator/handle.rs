@@ -185,6 +185,21 @@ impl CoordinatorHandle {
         .await
     }
 
+    /// Clear stale dispatch-failure/cooldown markers for a task whose previous
+    /// run ended deliberately (for example a budget park) rather than as a
+    /// dispatch/provider fault.
+    pub async fn clear_planned_dispatch_completion(
+        &self,
+        task_id: &str,
+        reason: &str,
+    ) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::ClearPlannedDispatchCompletion {
+            task_id: task_id.to_owned(),
+            reason: reason.to_owned(),
+        })
+        .await
+    }
+
     /// Increment the Lead escalation count for a task and return the new count.
     ///
     /// When the count reaches ≥ 2, the caller should route to Planner instead of Lead

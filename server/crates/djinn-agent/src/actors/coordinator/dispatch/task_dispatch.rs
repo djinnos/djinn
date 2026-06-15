@@ -181,6 +181,18 @@ impl CoordinatorActor {
         .await;
     }
 
+    pub(in crate::actors::coordinator) async fn clear_planned_dispatch_completion(
+        &mut self,
+        task_id: &str,
+        reason: &str,
+    ) {
+        self.dispatch_failure_streak.remove(task_id);
+        self.dispatch_cooldowns.remove(task_id);
+        self.last_dispatched.remove(task_id);
+        self.clear_durable_dispatch_backoff_state(task_id, None, reason)
+            .await;
+    }
+
     pub(in crate::actors::coordinator) async fn increment_durable_escalation_count(
         &self,
         task_id: &str,
