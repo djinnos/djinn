@@ -642,14 +642,22 @@ impl CoordinatorActor {
                 review_pending_with_reviewer: false,
                 unresolved_blockers: task.unresolved_blocker_count > 0,
             };
-            let callbacks = crate::supervisor_impl::SupervisorCallbackContext {
-                agent_context: self.maintenance_context(),
-                cancel: tokio_util::sync::CancellationToken::new(),
-                provider_override: None,
+            let merge_target = match ProjectRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            )
+            .get_config(&task.project_id)
+            .await
+            {
+                Ok(Some(config)) => config.target_branch,
+                _ => "main".to_owned(),
             };
             if let Some(outcome) =
                 crate::supervisor_impl::pr::handle_settled_noop_without_live_mover(
-                    &task, &callbacks, &evidence,
+                    &task,
+                    &repo,
+                    &merge_target,
+                    &evidence,
                 )
                 .await
             {

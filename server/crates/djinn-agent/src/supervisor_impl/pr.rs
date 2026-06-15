@@ -550,7 +550,7 @@ fn count_met_acceptance_criteria(acceptance_criteria_json: &str) -> u32 {
 ///   If any AC is met on a no-diff run the classifier returns `Inconclusive`
 ///   (evidence/bookkeeping disagree) and we conservatively close rather than
 ///   nudge.
-async fn handle_noop_disposition(
+pub(crate) async fn handle_noop_disposition(
     task: &djinn_core::models::Task,
     task_repo: &TaskRepository,
     merge_target: &str,
@@ -691,7 +691,8 @@ async fn handle_noop_disposition(
 /// and terminal no-op close semantics stay shared with the original fork.
 pub(crate) async fn handle_settled_noop_without_live_mover(
     task: &djinn_core::models::Task,
-    callbacks: &SupervisorCallbackContext,
+    task_repo: &TaskRepository,
+    merge_target: &str,
     evidence: &LiveMoverEvidence,
 ) -> Option<TaskRunOutcome> {
     if !should_route_settled_noop_without_live_mover(task, evidence) {
@@ -703,42 +704,21 @@ pub(crate) async fn handle_settled_noop_without_live_mover(
         return None;
     }
 
-    let app_state = &callbacks.agent_context;
-    let merge_target = default_target_branch(&task.project_id, app_state).await;
-    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
     tracing::info!(
         task_id = %task.id,
         status = %task.status,
         "supervisor no-mover disposition: settled task has no live mover; routing through no-op disposition"
     );
-    Some(handle_noop_disposition(task, &task_repo, &merge_target).await)
+    Some(handle_noop_disposition(task, task_repo, merge_target).await)
 }
 
 fn should_route_settled_noop_without_live_mover(
-    task: &djinn_core::models::Task,
+    _task: &djinn_core::models::Task,
     evidence: &LiveMoverEvidence,
 ) -> bool {
     use super::disposition::has_live_mover;
 
-    if has_live_mover(evidence) {
-        return false;
-    }
-
-    // If a PR already exists, the PR poller owns forward progress.  The
-    // live-mover evidence should normally carry this as `open_pr` /
-    // `pr_poller_owned`; keep this direct guard as a non-semantic safety belt so
-    // a stale or incomplete evidence collector cannot close a PR-backed task.
-    if task
-        .pr_url
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|url| !url.is_empty())
-    {
-        return false;
-    }
-
-    true
+    !has_live_mover(evidence)
 }
 
 /// The historical no-commits terminal close: transition the task to closed
@@ -1062,7 +1042,10 @@ mod tests {
 
         assert!(!should_route_settled_noop_without_live_mover(
             &task,
-            &LiveMoverEvidence::default()
+            &LiveMoverEvidence {
+                open_pr: true,
+                ..Default::default()
+            }
         ));
     }
 

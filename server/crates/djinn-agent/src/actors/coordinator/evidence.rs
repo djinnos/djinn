@@ -34,6 +34,58 @@ impl CoordinatorActor {
             unresolved_blockers,
         ))
     }
+
+    /// Predicate-driven no-mover disposition call site for settled/orphaned
+    /// tasks that did not take the PR-open zero-commit fork.
+    pub(in crate::actors::coordinator) async fn route_settled_noop_without_live_mover(
+        &self,
+        task_id: &str,
+    ) {
+        let task_repo = self.task_repo();
+        let task = match task_repo.get(task_id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "CoordinatorActor: no-mover disposition skipped; failed to load task"
+                );
+                return;
+            }
+        };
+
+        let evidence = match self.collect_live_mover_evidence(&task).await {
+            Ok(evidence) => evidence,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "CoordinatorActor: no-mover disposition skipped; failed to collect live-mover evidence"
+                );
+                return;
+            }
+        };
+
+        let merge_target = match ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        )
+        .get_config(&task.project_id)
+        .await
+        {
+            Ok(Some(config)) => config.target_branch,
+            _ => "main".to_owned(),
+        };
+
+        let _ = crate::supervisor_impl::pr::handle_settled_noop_without_live_mover(
+            &task,
+            &task_repo,
+            &merge_target,
+            &evidence,
+        )
+        .await;
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
