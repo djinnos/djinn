@@ -2,7 +2,29 @@ import { describe, expect, it } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import { SessionThread } from '@/components/SessionThread';
 import { mapBudgetParkActivity, mapLoopGuardActivity } from '@/hooks/useSessionMessages';
+import type { SessionListOutput, SessionShowOutput } from '@/api/generated/mcp-tools.gen';
 import type { TimelineEntry } from '@/hooks/useSessionMessages';
+
+const generatedSessionShowBindingKeepsParkedReason: SessionShowOutput = {
+  id: 'session-budget',
+  status: 'completed',
+  parked_reason: 'budget',
+};
+
+const generatedSessionListBindingKeepsParkedReason: SessionListOutput = {
+  sessions: [{
+    id: 'session-budget',
+    agent_type: 'worker',
+    model_id: 'claude-test',
+    started_at: '2026-01-01T00:00:00Z',
+    status: 'completed',
+    tokens_in: 1,
+    tokens_out: 2,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    parked_reason: 'budget',
+  }],
+};
 
 function makeMessage(overrides: Partial<Extract<TimelineEntry, { kind: 'message' }>> = {}): Extract<TimelineEntry, { kind: 'message' }> {
   return {
@@ -16,6 +38,11 @@ function makeMessage(overrides: Partial<Extract<TimelineEntry, { kind: 'message'
 }
 
 describe('SessionThread', () => {
+  it('keeps parked_reason in generated session list/show bindings', () => {
+    expect(generatedSessionShowBindingKeepsParkedReason.parked_reason).toBe('budget');
+    expect(generatedSessionListBindingKeepsParkedReason.sessions?.[0]?.parked_reason).toBe('budget');
+  });
+
   it('renders assistant messages and hides user messages', () => {
     const timeline: TimelineEntry[] = [
       makeMessage({
@@ -182,6 +209,55 @@ describe('SessionThread', () => {
       new Map()
     )).toBeNull();
 
+    expect(mapBudgetParkActivity(
+      {
+        event_type: 'work_submitted',
+        timestamp: '2026-01-01T00:04:00Z',
+        payload: {
+          session_id: 'session-completed',
+          summary: 'ordinary submit',
+          remaining_concerns: 'none',
+        },
+      },
+      new Map([['session-completed', { id: 'session-completed', status: 'completed' }]])
+    )).toBeNull();
+    expect(mapBudgetParkActivity(
+      {
+        event_type: 'work_submitted',
+        timestamp: '2026-01-01T00:04:00Z',
+        payload: {
+          session_id: 'session-paused',
+          summary: 'pause handoff',
+          remaining_concerns: 'budget-parked: should not map without budget reason',
+        },
+      },
+      new Map([['session-paused', { id: 'session-paused', status: 'paused', parked_reason: 'operator_pause' }]])
+    )).toBeNull();
+    expect(mapBudgetParkActivity(
+      {
+        event_type: 'failed',
+        kind: 'provider_failure',
+        timestamp: '2026-01-01T00:04:00Z',
+        payload: {
+          session_id: 'session-budget',
+          remaining_concerns: 'budget-parked: provider failures are not work_submitted handoffs',
+        },
+      },
+      new Map([['session-budget', { id: 'session-budget', parked_reason: 'budget' }]])
+    )).toBeNull();
+    expect(mapBudgetParkActivity(
+      {
+        event_type: 'loop_guard_tripped',
+        kind: 'loop_guard_tripped',
+        timestamp: '2026-01-01T00:04:00Z',
+        payload: {
+          session_id: 'session-budget',
+          remaining_concerns: 'budget-parked: loop guards are rendered separately',
+        },
+      },
+      new Map([['session-budget', { id: 'session-budget', parked_reason: 'budget' }]])
+    )).toBeNull();
+
     if (!budgetParkEntry) throw new Error('expected budget park timeline entry');
 
     render(
@@ -199,6 +275,8 @@ describe('SessionThread', () => {
     expect(screen.getByText('Implemented the safe subset before budget ran out.')).toBeInTheDocument();
     expect(screen.getByText('budget-parked: finish the UI snapshot update')).toBeInTheDocument();
     expect(screen.queryByText('Work Submitted')).not.toBeInTheDocument();
+    expect(screen.queryByText('Loop guard tripped')).not.toBeInTheDocument();
+    expect(screen.queryByText('Provider failure')).not.toBeInTheDocument();
   });
 
   it('shows loading state when loading and no timeline yet', () => {

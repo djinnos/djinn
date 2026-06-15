@@ -41,7 +41,7 @@ export function mapBudgetParkActivity(
   const parkedReason = sessionId
     ? asString(sessionsById.get(sessionId)?.parked_reason)
     : onlyParkedReason(sessionsById);
-  if (!parkedReason) return null;
+  if (parkedReason !== "budget") return null;
 
   return {
     kind: "budget_park",
