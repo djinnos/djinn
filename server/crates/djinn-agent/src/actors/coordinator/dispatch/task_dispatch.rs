@@ -1402,6 +1402,162 @@ mod inflight_ledger_tests {
         (creator.to_string(), model.to_string())
     }
 
+    const WND1_READY_TASK_COUNT: usize = 10;
+    const WND1_STABLE_MODEL_ID: &str = "openai/gpt-5.5";
+
+    struct Wnd1DispatchFixture {
+        project_id: String,
+        created_by_user_id: String,
+        model_id: String,
+        task_ids: Vec<String>,
+    }
+
+    async fn seed_wnd1_ready_worker_tasks(
+        db: &djinn_db::Database,
+        count: usize,
+    ) -> Wnd1DispatchFixture {
+        assert!(
+            count >= WND1_READY_TASK_COUNT,
+            "wnd1 dispatch fixtures must seed at least {WND1_READY_TASK_COUNT} ready tasks"
+        );
+
+        let event_bus = djinn_core::events::EventBus::noop();
+        let project = crate::test_helpers::create_test_project(db).await;
+        let user = djinn_db::UserRepository::new(db.clone())
+            .upsert_from_github(
+                985_100,
+                "wnd1-cap-fixture-user",
+                Some("wnd1 cap fixture user"),
+                None,
+            )
+            .await
+            .expect("create wnd1 fixture user");
+        let user_id = user.id.clone();
+
+        let settings = djinn_db::UserSettingsRepository::new(db.clone());
+        settings
+            .upsert_models(&user_id, &[WND1_STABLE_MODEL_ID.to_owned()])
+            .await
+            .expect("configure wnd1 fixture selected model");
+
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), event_bus);
+        let task_ids = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                let mut ids = Vec::with_capacity(count);
+                for i in 0..count {
+                    let task = task_repo
+                        .create_in_project(
+                            &project.id,
+                            None,
+                            &format!("wnd1 dispatch race fixture task {i}"),
+                            "Ready worker task for wnd1 per-user cap race tests.",
+                            "",
+                            "task",
+                            i64::try_from(i).expect("fixture task index fits i64"),
+                            "worker",
+                            Some("open"),
+                            Some("[]"),
+                        )
+                        .await
+                        .expect("seed wnd1 ready worker task");
+                    ids.push(task.id);
+                }
+                ids
+            })
+            .await;
+
+        Wnd1DispatchFixture {
+            project_id: project.id,
+            created_by_user_id: user_id,
+            model_id: WND1_STABLE_MODEL_ID.to_owned(),
+            task_ids,
+        }
+    }
+
+    async fn configure_wnd1_user_max_sessions(
+        db: &djinn_db::Database,
+        user_id: &str,
+        model_id: &str,
+        cap: u32,
+    ) -> djinn_core::models::UserSettings {
+        assert!(
+            (1..=5).contains(&cap),
+            "wnd1 fixture caps intentionally cover the 1..=5 stress range"
+        );
+        djinn_db::UserSettingsRepository::new(db.clone())
+            .upsert_max_sessions(user_id, &HashMap::from([(model_id.to_owned(), cap)]))
+            .await
+            .expect("configure wnd1 user max_sessions cap")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wnd1_ready_queue_fixture_is_visible_to_dispatch_selection_and_reads_caps() {
+        let db = crate::test_helpers::create_test_db();
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        assert_eq!(fixture.task_ids.len(), WND1_READY_TASK_COUNT);
+
+        let ready = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .list_ready(djinn_db::ReadyQuery {
+                project_id: Some(fixture.project_id.clone()),
+                limit: 25,
+                ..Default::default()
+            })
+            .await
+            .expect("dispatch ready selection query should see fixture tasks");
+        let fixture_ready: Vec<_> = ready
+            .iter()
+            .filter(|task| fixture.task_ids.contains(&task.id))
+            .collect();
+
+        assert_eq!(
+            fixture_ready.len(),
+            WND1_READY_TASK_COUNT,
+            "all wnd1 fixture tasks must be visible to the same list_ready path dispatch uses"
+        );
+        assert!(fixture_ready.iter().all(|task| {
+            task.status == "open"
+                && task.issue_type == "task"
+                && task.created_by_user_id.as_deref() == Some(fixture.created_by_user_id.as_str())
+                && crate::roles::RoleRegistry::new()
+                    .role_for_task(task, &crate::roles::DispatchContext)
+                    == Some("worker")
+        }));
+
+        for cap in 1..=5 {
+            configure_wnd1_user_max_sessions(
+                &db,
+                &fixture.created_by_user_id,
+                &fixture.model_id,
+                cap,
+            )
+            .await;
+            let settings = djinn_db::UserSettingsRepository::new(db.clone())
+                .get(&fixture.created_by_user_id)
+                .await
+                .expect("read wnd1 user settings")
+                .expect("wnd1 user settings row exists");
+            assert_eq!(
+                settings
+                    .max_sessions
+                    .as_ref()
+                    .and_then(|caps| caps.get(&fixture.model_id))
+                    .copied(),
+                Some(cap),
+                "configured cap {cap} should round-trip for the stable wnd1 model"
+            );
+        }
+
+        let running_counts =
+            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+                .count_active_by_user_and_model()
+                .await
+                .expect("dispatch cap count query should work against fixture database");
+        assert!(
+            running_counts.is_empty(),
+            "ready-task fixture should not require pre-existing running sessions"
+        );
+    }
+
     #[test]
     fn dispatch_wall_clock_timestamps_are_millisecond_precision() {
         let ts = ::time::OffsetDateTime::parse(
