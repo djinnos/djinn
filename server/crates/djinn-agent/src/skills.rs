@@ -63,12 +63,7 @@ fn parse_inline_list(value: &str) -> Vec<String> {
     }
     inner
         .split(',')
-        .map(|part| {
-            part.trim()
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string()
-        })
+        .map(|part| part.trim().trim_matches('"').trim_matches('\'').to_string())
         .filter(|part| !part.is_empty())
         .collect()
 }
@@ -793,7 +788,8 @@ mod tests {
 
     #[test]
     fn parse_skill_metadata_drops_empty_list_entries() {
-        let content = "---\ndescription: Empty tags\ntags: [\"\", alpha, \"  \", beta]\n---\n\nBody.\n";
+        let content =
+            "---\ndescription: Empty tags\ntags: [\"\", alpha, \"  \", beta]\n---\n\nBody.\n";
         let skill = parse_skill_file("fallback", content, None).expect("skill should parse");
         assert_eq!(skill.tags, vec!["alpha", "beta"]);
     }
@@ -817,8 +813,7 @@ mod tests {
             "---\ndescription: Has path\n---\n\nBody.\n",
         );
 
-        let resolved =
-            load_skills_with_sources(tmp.path(), &["with-path".to_string()]);
+        let resolved = load_skills_with_sources(tmp.path(), &["with-path".to_string()]);
         assert_eq!(resolved.len(), 1);
         let (skill, path) = &resolved[0];
         assert_eq!(skill.name, "with-path");

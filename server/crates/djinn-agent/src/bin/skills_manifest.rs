@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use djinn_agent::skills_manifest::{generate_manifest, to_pretty_json, DEFAULT_MANIFEST_PATH};
+use djinn_agent::skills_manifest::{DEFAULT_MANIFEST_PATH, generate_manifest, to_pretty_json};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -55,7 +55,10 @@ fn main() -> ExitCode {
     let manifest = match generate_manifest(&root, None) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("failed to generate manifest under `{}`: {e}", root.display());
+            eprintln!(
+                "failed to generate manifest under `{}`: {e}",
+                root.display()
+            );
             return ExitCode::FAILURE;
         }
     };

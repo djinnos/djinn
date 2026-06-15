@@ -63,9 +63,6 @@ pub struct SkillsManifest {
     pub schema_version: u32,
     /// Generator identifier, e.g. `"djinn-agent skills manifest generator"`.
     pub generated_by: String,
-    /// When the manifest was generated. Not used for verification (file
-    /// content is the source of truth) but useful for humans reading the diff.
-    pub generated_at: String,
     /// All skills discovered under the canonical directories, sorted by `id`.
     pub skills: Vec<ManifestSkill>,
 }
@@ -150,7 +147,9 @@ pub enum ManifestError {
         source: std::io::Error,
     },
     /// The on-disk file's sha256 did not match the manifest entry.
-    #[error("source file `{path}` for skill `{skill}` has hash `{actual}` but manifest records `{expected}`")]
+    #[error(
+        "source file `{path}` for skill `{skill}` has hash `{actual}` but manifest records `{expected}`"
+    )]
     SourceHashMismatch {
         skill: String,
         path: String,
@@ -189,10 +188,7 @@ pub fn generate_manifest(
     names: Option<&[String]>,
 ) -> std::io::Result<SkillsManifest> {
     let resolved: Vec<(String, ResolvedSkill, PathBuf)> = match names {
-        Some(requested) => load_skills_with_sources(project_root, requested)
-            .into_iter()
-            .map(|(skill, path)| (skill.name.clone(), skill, path))
-            .collect(),
+        Some(requested) => resolve_named_skills(project_root, requested),
         None => discover_all_skills(project_root)?,
     };
 
@@ -209,7 +205,6 @@ pub fn generate_manifest(
     Ok(SkillsManifest {
         schema_version: MANIFEST_SCHEMA_VERSION,
         generated_by: MANIFEST_GENERATED_BY.to_string(),
-        generated_at: now_iso8601_utc(),
         skills: manifest_skills,
     })
 }
@@ -269,9 +264,8 @@ pub fn verify_manifest(
     for entry in &manifest.skills {
         // Re-resolve by id (== requested name) so we pick the same file the
         // generator picked, even if the frontmatter `name:` is different.
-        let path = skill_path(project_root, &entry.id).ok_or_else(|| {
-            ManifestError::SkillMissing(entry.id.clone())
-        })?;
+        let path = skill_path(project_root, &entry.id)
+            .ok_or_else(|| ManifestError::SkillMissing(entry.id.clone()))?;
         let resolved = load_skills_with_sources(project_root, std::slice::from_ref(&entry.id))
             .into_iter()
             .next()
@@ -304,11 +298,13 @@ pub fn verify_manifest(
             .iter()
             .map(|sf| sf.path.as_str())
             .collect();
-        let mut actual_paths: Vec<String> = vec![relative_posix_path(project_root, &path)
-            .map_err(|e| ManifestError::SourceUnreadable {
-                skill: entry.id.clone(),
-                path: entry.id.clone(),
-                source: e,
+        let mut actual_paths: Vec<String> =
+            vec![relative_posix_path(project_root, &path).map_err(|e| {
+                ManifestError::SourceUnreadable {
+                    skill: entry.id.clone(),
+                    path: entry.id.clone(),
+                    source: e,
+                }
             })?];
         if let Some(refs) = reference_files_sorted(project_root, &path) {
             for (relative, _) in refs {
@@ -327,7 +323,8 @@ pub fn verify_manifest(
         }
 
         for source in &entry.source_files {
-            let absolute = project_root.join(source.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let absolute =
+                project_root.join(source.path.replace('/', std::path::MAIN_SEPARATOR_STR));
             if !absolute.is_file() {
                 return Err(ManifestError::ReferenceMissing {
                     skill: entry.id.clone(),
@@ -375,13 +372,25 @@ fn discover_all_skills(
     names.sort();
     names.dedup();
 
-    let resolved = load_skills_with_sources(project_root, &names);
-    let mut entries: Vec<(String, ResolvedSkill, PathBuf)> = resolved
-        .into_iter()
-        .map(|(skill, path)| (skill.name.clone(), skill, path))
-        .collect();
+    let mut entries = resolve_named_skills(project_root, &names);
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(entries)
+}
+
+fn resolve_named_skills(
+    project_root: &Path,
+    requested_names: &[String],
+) -> Vec<(String, ResolvedSkill, PathBuf)> {
+    requested_names
+        .iter()
+        .filter_map(|requested_name| {
+            let (skill, path) =
+                load_skills_with_sources(project_root, std::slice::from_ref(requested_name))
+                    .into_iter()
+                    .next()?;
+            Some((requested_name.clone(), skill, path))
+        })
+        .collect()
 }
 
 fn collect_skill_names(dir: &Path, names: &mut Vec<String>) -> std::io::Result<()> {
@@ -483,44 +492,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn sha256_file(path: &Path) -> std::io::Result<String> {
     let bytes = fs::read(path)?;
     Ok(sha256_hex(&bytes))
-}
-
-fn now_iso8601_utc() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
-    // Coarse UTC formatter — avoids pulling in the `time` crate for a single
-    // human-readable stamp. The manifest verifier ignores this field, so the
-    // exact format is not load-bearing.
-    let (year, month, day, hour, minute, second) = unix_to_civil(secs);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
-    )
-}
-
-/// Howard Hinnant's date-conversion algorithm. Returns
-/// `(year, month, day, hour, minute, second)` for a Unix timestamp in UTC.
-fn unix_to_civil(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
-    let days = (secs / 86_400) as i64;
-    let time_of_day = secs % 86_400;
-    let hour = (time_of_day / 3600) as u32;
-    let minute = ((time_of_day % 3600) / 60) as u32;
-    let second = (time_of_day % 60) as u32;
-
-    // 1970-01-01 is a Thursday (epoch day 0 = Thursday).
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64; // [0, 146_096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let y = if m <= 2 { y + 1 } else { y };
-    (y as i32, m as u32, d as u32, hour, minute, second)
 }
 
 #[cfg(test)]
@@ -657,11 +628,7 @@ mod tests {
             &skills_dir,
             "ordered-skill",
             "---\ndescription: Sort test\n---\n\nPrimary.\n",
-            &[
-                ("z.md", "Z\n"),
-                ("a.md", "A\n"),
-                ("nested/b.md", "B\n"),
-            ],
+            &[("z.md", "Z\n"), ("a.md", "A\n"), ("nested/b.md", "B\n")],
         );
 
         let manifest = generate_manifest(tmp.path(), None).unwrap();
@@ -685,11 +652,13 @@ mod tests {
 
         // First entry is the top-level skill, the rest are references.
         assert_eq!(skill.source_files[0].role, ManifestSourceRole::Skill);
-        assert!(skill
-            .source_files
-            .iter()
-            .skip(1)
-            .all(|sf| sf.role == ManifestSourceRole::Reference));
+        assert!(
+            skill
+                .source_files
+                .iter()
+                .skip(1)
+                .all(|sf| sf.role == ManifestSourceRole::Reference)
+        );
 
         // Each sha256 is the hex of the file bytes.
         for entry in &skill.source_files {
@@ -783,8 +752,8 @@ mod tests {
             "---\ndescription: Original\n---\n\nModified body.\n",
         )
         .unwrap();
-        let err = verify_manifest(tmp.path(), &manifest)
-            .expect_err("verify must fail on tampered file");
+        let err =
+            verify_manifest(tmp.path(), &manifest).expect_err("verify must fail on tampered file");
         assert!(
             matches!(err, ManifestError::ContentHashMismatch { .. }),
             "expected ContentHashMismatch, got {err:?}"
@@ -807,14 +776,21 @@ mod tests {
 
         // Tamper with the reference file directly.
         fs::write(
-            skills_dir.join("ref-tamper").join("references").join("a.md"),
+            skills_dir
+                .join("ref-tamper")
+                .join("references")
+                .join("a.md"),
             "Modified\n",
         )
         .unwrap();
         let err = verify_manifest(tmp.path(), &manifest)
             .expect_err("verify must fail on tampered reference file");
         assert!(
-            matches!(err, ManifestError::SourceHashMismatch { .. } | ManifestError::ContentHashMismatch { .. }),
+            matches!(
+                err,
+                ManifestError::SourceHashMismatch { .. }
+                    | ManifestError::ContentHashMismatch { .. }
+            ),
             "expected per-file or content hash mismatch, got {err:?}"
         );
     }
