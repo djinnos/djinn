@@ -329,6 +329,57 @@ async fn get_pull_request_success() {
     assert_eq!(checks.check_runs[0].conclusion.as_deref(), Some("success"));
 }
 
+/// A merged PR exposes the landed `merge_commit_sha` so the PR poller can
+/// persist it on the task (the board's Merged column gates on it). Regression
+/// for the field silently never being read — closed tasks then never showed as
+/// merged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_pull_request_exposes_merge_commit_sha_when_merged() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("GET"))
+        .and(path("/repos/djinnos/server/pulls/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "number": 42,
+            "title": "feat: add feature",
+            "state": "closed",
+            "merged": true,
+            "merge_commit_sha": "0123456789abcdef0123456789abcdef01234567",
+            "html_url": "https://github.com/djinnos/server/pull/42",
+            "head": { "ref": "feature-branch", "sha": "abc123" },
+            "base": { "ref": "main", "sha": "def456" },
+            "auto_merge": null,
+            "node_id": "PR_abc123"
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"/repos/djinnos/server/commits/abc123/check-runs",
+        ))
+        .and(query_param("per_page", "100"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "total_count": 0,
+            "check_runs": []
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let (pr, _checks): (_, CheckRunsResponse) = client
+        .get_pull_request("djinnos", "server", 42)
+        .await
+        .unwrap();
+
+    assert_eq!(pr.merged, Some(true));
+    assert_eq!(
+        pr.merge_commit_sha.as_deref(),
+        Some("0123456789abcdef0123456789abcdef01234567")
+    );
+}
+
 /// A PR with more than one page of check runs must be fully aggregated:
 /// the client requests `per_page=100` and pages through `page=1`, `page=2`,
 /// ... until a short page signals the end — instead of silently dropping

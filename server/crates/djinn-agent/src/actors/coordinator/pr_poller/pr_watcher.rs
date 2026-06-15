@@ -104,7 +104,7 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: PR merged → closing task"
                 );
-                self.apply_pr_transition(&task.id, TransitionAction::PrMerge, None)
+                self.apply_pr_merge(&task.id, pr.merge_commit_sha.as_deref())
                     .await;
                 self.pr_status_cache.remove(&task.id);
                 self.pr_draft_first_seen.remove(&task.id);
