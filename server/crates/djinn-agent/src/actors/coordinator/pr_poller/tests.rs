@@ -489,6 +489,37 @@ fn auto_merge_best_effort_failure_rendering_exposes_envelope() {
 }
 
 #[test]
+fn update_branch_failure_rendering_exposes_bounded_envelope() {
+    let long_body = format!(
+        "Expected head SHA did not match current branch head. {}",
+        "retrying this stale update branch request would keep failing. ".repeat(10)
+    );
+    let err = github_write_error(
+        "PUT",
+        "/repos/djinnos/djinn/pulls/7/update-branch",
+        422,
+        &long_body,
+        ErrorClass::Validation,
+    );
+
+    let rendered =
+        crate::github_error_render::render_github_write_error("GitHub update-branch failed", &err);
+
+    assert!(rendered.contains("GitHub update-branch failed"));
+    assert!(rendered.contains("\"error_class\":\"validation\""));
+    assert!(rendered.contains("\"method\":\"PUT\""));
+    assert!(rendered.contains("\"path\":\"/repos/djinnos/djinn/pulls/7/update-branch\""));
+    assert!(rendered.contains("\"status\":\"422\""));
+    assert!(rendered.contains("Expected head SHA did not match"));
+    assert!(rendered.contains('…'));
+    assert!(
+        !rendered
+            .contains(&"retrying this stale update branch request would keep failing. ".repeat(6)),
+        "update-branch envelope body must be compact: {rendered}"
+    );
+}
+
+#[test]
 fn is_merge_queue_405_ignores_other_status_codes() {
     let err = github_write_error(
         "PUT",
