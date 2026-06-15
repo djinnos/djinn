@@ -64,6 +64,10 @@ fn github_write_error_classification_matrix() {
         Some(ErrorClass::RateLimited)
     );
     assert_eq!(
+        envelope(Some(502), r#"{"message":"Bad Gateway"}"#).error_class,
+        Some(ErrorClass::Transient)
+    );
+    assert_eq!(
         envelope(None, "error sending request: connection reset by peer").error_class,
         Some(ErrorClass::Internal)
     );

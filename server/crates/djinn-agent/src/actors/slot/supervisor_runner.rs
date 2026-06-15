@@ -1248,6 +1248,9 @@ mod tests {
                 stage: "worker".into(),
                 reason: "provider rejected request".into(),
                 provider_failure: Some(ProviderFailureClass::Failure),
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             },
         );
         assert_eq!(
