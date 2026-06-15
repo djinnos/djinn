@@ -15,10 +15,11 @@
 //! is unchanged and always wins; the disk fallback only runs on a miss and
 //! degrades gracefully (best-effort writes, clear errors on read failure).
 
-use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use djinn_core::models::SessionStatus;
 use sha2::{Digest, Sha256};
 
 /// Maximum number of stashed entries.
@@ -50,6 +51,13 @@ struct StashedOutput {
     tool_use_id: String,
     tool_name: String,
     full_text: String,
+}
+
+/// Durable output-stash root used by coordinator maintenance. Exposed as a
+/// narrow integration point so GC wiring uses the same cache location as normal
+/// durable writes/reads.
+pub(crate) fn durable_root_for_gc() -> Option<PathBuf> {
+    durable_root()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +223,218 @@ fn blob_path(root: &std::path::Path, content_hash: &str) -> PathBuf {
 /// entry is gone.
 fn id_pointer_path(root: &std::path::Path, tool_use_id: &str) -> PathBuf {
     root.join("ids").join(sha256_hex(tool_use_id.as_bytes()))
+}
+
+/// Session state needed by durable output-stash GC.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputStashGcSession {
+    pub status: SessionStatus,
+    /// Terminal timestamp as Unix seconds. `None` is treated conservatively.
+    pub ended_at_unix_secs: Option<u64>,
+}
+
+/// Best-effort GC statistics suitable for maintenance logs/metrics.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutputStashGcReport {
+    pub pointers_scanned: usize,
+    pub pointers_deleted: usize,
+    pub pointers_retained: usize,
+    pub blobs_scanned: usize,
+    pub blobs_deleted: usize,
+    pub blobs_retained: usize,
+    pub errors: Vec<String>,
+}
+
+impl OutputStashGcReport {
+    pub fn is_success(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
+fn is_terminal_session_status(status: SessionStatus) -> bool {
+    matches!(
+        status,
+        SessionStatus::Completed | SessionStatus::Interrupted | SessionStatus::Failed
+    )
+}
+
+fn file_modified_unix_secs(path: &Path) -> Result<u64, String> {
+    let modified = std::fs::metadata(path)
+        .map_err(|e| format!("metadata {}: {e}", path.display()))?
+        .modified()
+        .map_err(|e| format!("modified time {}: {e}", path.display()))?;
+    Ok(modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0))
+}
+
+/// Garbage-collect durable output-stash id-pointers and content-addressed blobs.
+///
+/// `retention_cutoff_unix_secs` is the precomputed cutoff timestamp: terminal
+/// session pointers are removed when their `ended_at` is at or before this
+/// value, and unreferenced blobs are removed when their file mtime is at or
+/// before it. The supplied lookup keeps this engine reusable and easy to unit
+/// test; coordinator wiring can adapt it to the session repository later.
+pub fn gc_durable_output_stash<F>(
+    root: &Path,
+    retention_cutoff_unix_secs: u64,
+    mut lookup_session: F,
+) -> OutputStashGcReport
+where
+    F: FnMut(&str) -> Result<Option<OutputStashGcSession>, String>,
+{
+    let mut report = OutputStashGcReport::default();
+    let ids_dir = root.join("ids");
+    let blobs_dir = root.join("blobs");
+
+    let mut retained_hashes: HashSet<String> = HashSet::new();
+
+    match std::fs::read_dir(&ids_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        report.errors.push(format!("read pointer entry: {e}"));
+                        continue;
+                    }
+                };
+                let pointer_path = entry.path();
+                if !pointer_path.is_file() {
+                    continue;
+                }
+                report.pointers_scanned += 1;
+
+                let raw = match std::fs::read_to_string(&pointer_path) {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        report
+                            .errors
+                            .push(format!("read pointer {}: {e}", pointer_path.display()));
+                        report.pointers_retained += 1;
+                        continue;
+                    }
+                };
+                let record = match parse_durable_pointer(&raw) {
+                    Ok(record) => record,
+                    Err(e) => {
+                        report
+                            .errors
+                            .push(format!("parse pointer {}: {e}", pointer_path.display()));
+                        report.pointers_retained += 1;
+                        continue;
+                    }
+                };
+
+                if !blob_path(root, &record.content_hash).is_file() {
+                    match std::fs::remove_file(&pointer_path) {
+                        Ok(()) => report.pointers_deleted += 1,
+                        Err(e) => {
+                            report.errors.push(format!(
+                                "delete missing-blob pointer {}: {e}",
+                                pointer_path.display()
+                            ));
+                            report.pointers_retained += 1;
+                        }
+                    }
+                    continue;
+                }
+
+                let should_delete = if record.kind == DurablePointerKind::Legacy {
+                    false
+                } else if let Some(session_id) = record.session_id.as_deref() {
+                    match lookup_session(session_id) {
+                        Ok(Some(session)) if is_terminal_session_status(session.status) => session
+                            .ended_at_unix_secs
+                            .is_some_and(|ended_at| ended_at <= retention_cutoff_unix_secs),
+                        Ok(Some(_live_or_paused)) => false,
+                        Ok(None) => false,
+                        Err(e) => {
+                            report
+                                .errors
+                                .push(format!("lookup session {session_id}: {e}"));
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+
+                if should_delete {
+                    match std::fs::remove_file(&pointer_path) {
+                        Ok(()) => report.pointers_deleted += 1,
+                        Err(e) => {
+                            report.errors.push(format!(
+                                "delete expired pointer {}: {e}",
+                                pointer_path.display()
+                            ));
+                            report.pointers_retained += 1;
+                            retained_hashes.insert(record.content_hash);
+                        }
+                    }
+                } else {
+                    report.pointers_retained += 1;
+                    retained_hashes.insert(record.content_hash);
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => report
+            .errors
+            .push(format!("read ids dir {}: {e}", ids_dir.display())),
+    }
+
+    match std::fs::read_dir(&blobs_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        report.errors.push(format!("read blob entry: {e}"));
+                        continue;
+                    }
+                };
+                let blob = entry.path();
+                if !blob.is_file() {
+                    continue;
+                }
+                report.blobs_scanned += 1;
+                let Some(name) = blob.file_name().and_then(|n| n.to_str()) else {
+                    report.blobs_retained += 1;
+                    continue;
+                };
+                if retained_hashes.contains(name) {
+                    report.blobs_retained += 1;
+                    continue;
+                }
+                match file_modified_unix_secs(&blob) {
+                    Ok(modified_at) if modified_at <= retention_cutoff_unix_secs => {
+                        match std::fs::remove_file(&blob) {
+                            Ok(()) => report.blobs_deleted += 1,
+                            Err(e) => {
+                                report
+                                    .errors
+                                    .push(format!("delete blob {}: {e}", blob.display()));
+                                report.blobs_retained += 1;
+                            }
+                        }
+                    }
+                    Ok(_) => report.blobs_retained += 1,
+                    Err(e) => {
+                        report.errors.push(e);
+                        report.blobs_retained += 1;
+                    }
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => report
+            .errors
+            .push(format!("read blobs dir {}: {e}", blobs_dir.display())),
+    }
+
+    report
 }
 
 /// Persist a stashed blob durably. Best-effort: any IO error is swallowed so a
@@ -1022,5 +1242,256 @@ mod tests {
                 .unwrap_err()
                 .contains("blob missing")
         );
+    }
+
+    // ─── Durable output-stash GC ──────────────────────────────────────────────
+
+    fn gc_root(name: &str) -> PathBuf {
+        let root = crate::test_helpers::test_persistent_dir("djinn-output-stash-gc-").join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("ids")).unwrap();
+        std::fs::create_dir_all(root.join("blobs")).unwrap();
+        root
+    }
+
+    fn write_gc_blob(root: &Path, body: &str) -> String {
+        let hash = sha256_hex(body.as_bytes());
+        let blobs_dir = root.join("blobs");
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+        atomic_write(&blobs_dir, &blob_path(root, &hash), body.as_bytes()).unwrap();
+        hash
+    }
+
+    fn write_gc_pointer(root: &Path, pointer_name: &str, record: DurablePointerRecord) -> PathBuf {
+        let ids_dir = root.join("ids");
+        std::fs::create_dir_all(&ids_dir).unwrap();
+        let path = ids_dir.join(pointer_name);
+        atomic_write(&ids_dir, &path, record.serialize().as_bytes()).unwrap();
+        path
+    }
+
+    fn write_legacy_gc_pointer(
+        root: &Path,
+        pointer_name: &str,
+        tool_name: &str,
+        content_hash: &str,
+    ) -> PathBuf {
+        let ids_dir = root.join("ids");
+        std::fs::create_dir_all(&ids_dir).unwrap();
+        let path = ids_dir.join(pointer_name);
+        atomic_write(
+            &ids_dir,
+            &path,
+            format!("{tool_name}\t{content_hash}").as_bytes(),
+        )
+        .unwrap();
+        path
+    }
+
+    fn gc_session(status: SessionStatus, ended_at_unix_secs: Option<u64>) -> OutputStashGcSession {
+        OutputStashGcSession {
+            status,
+            ended_at_unix_secs,
+        }
+    }
+
+    #[test]
+    fn gc_deletes_expired_terminal_pointers_and_retains_live_or_recent_sessions() {
+        let root = gc_root("terminal-cutoff");
+        let expired_hash = write_gc_blob(&root, "expired terminal body");
+        let recent_hash = write_gc_blob(&root, "recent terminal body");
+        let running_hash = write_gc_blob(&root, "running body");
+        let paused_hash = write_gc_blob(&root, "paused body");
+
+        let expired = write_gc_pointer(
+            &root,
+            "expired",
+            DurablePointerRecord::new_v1("shell", &expired_hash, Some("expired-session"), 1),
+        );
+        let recent = write_gc_pointer(
+            &root,
+            "recent",
+            DurablePointerRecord::new_v1("shell", &recent_hash, Some("recent-session"), 1),
+        );
+        let running = write_gc_pointer(
+            &root,
+            "running",
+            DurablePointerRecord::new_v1("shell", &running_hash, Some("running-session"), 1),
+        );
+        let paused = write_gc_pointer(
+            &root,
+            "paused",
+            DurablePointerRecord::new_v1("shell", &paused_hash, Some("paused-session"), 1),
+        );
+
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(
+            "expired-session",
+            gc_session(SessionStatus::Completed, Some(999)),
+        );
+        sessions.insert(
+            "recent-session",
+            gc_session(SessionStatus::Failed, Some(1_001)),
+        );
+        sessions.insert("running-session", gc_session(SessionStatus::Running, None));
+        sessions.insert("paused-session", gc_session(SessionStatus::Paused, None));
+
+        let report = gc_durable_output_stash(&root, 1_000, |id| Ok(sessions.get(id).cloned()));
+
+        assert!(report.is_success(), "unexpected GC errors: {report:?}");
+        assert_eq!(report.pointers_scanned, 4);
+        assert_eq!(report.pointers_deleted, 1);
+        assert!(!expired.exists());
+        assert!(recent.exists());
+        assert!(running.exists());
+        assert!(paused.exists());
+    }
+
+    #[test]
+    fn gc_keeps_blob_referenced_by_retained_pointer_after_shared_expired_pointer_removed() {
+        let root = gc_root("shared-hash");
+        let hash = write_gc_blob(&root, "same shared content");
+        let expired = write_gc_pointer(
+            &root,
+            "expired-shared",
+            DurablePointerRecord::new_v1("shell", &hash, Some("expired-session"), 1),
+        );
+        let live = write_gc_pointer(
+            &root,
+            "live-shared",
+            DurablePointerRecord::new_v1("shell", &hash, Some("live-session"), 1),
+        );
+
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(
+            "expired-session",
+            gc_session(SessionStatus::Interrupted, Some(10)),
+        );
+        sessions.insert("live-session", gc_session(SessionStatus::Running, None));
+
+        let report = gc_durable_output_stash(&root, unix_time_secs() + 1_000, |id| {
+            Ok(sessions.get(id).cloned())
+        });
+
+        assert!(report.is_success(), "unexpected GC errors: {report:?}");
+        assert_eq!(report.pointers_deleted, 1);
+        assert!(!expired.exists());
+        assert!(live.exists());
+        assert!(blob_path(&root, &hash).exists());
+    }
+
+    #[test]
+    fn gc_deletes_pointers_whose_blobs_are_missing() {
+        let root = gc_root("missing-blob-pointer");
+        let missing_hash = sha256_hex(b"not written");
+        let orphan_pointer = write_gc_pointer(
+            &root,
+            "orphan-pointer",
+            DurablePointerRecord::new_v1("shell", &missing_hash, Some("live-session"), 1),
+        );
+
+        let report = gc_durable_output_stash(&root, 0, |_| {
+            Ok(Some(gc_session(SessionStatus::Running, None)))
+        });
+
+        assert!(report.is_success(), "unexpected GC errors: {report:?}");
+        assert_eq!(report.pointers_deleted, 1);
+        assert!(!orphan_pointer.exists());
+    }
+
+    #[test]
+    fn gc_deletes_unreferenced_blobs_older_than_cutoff() {
+        let root = gc_root("unreferenced-blob");
+        let recent_hash = write_gc_blob(&root, "recent unreferenced content");
+
+        let recent_report = gc_durable_output_stash(&root, 0, |_| Ok(None));
+        assert!(
+            recent_report.is_success(),
+            "unexpected GC errors: {recent_report:?}"
+        );
+        assert_eq!(recent_report.blobs_deleted, 0);
+        assert!(blob_path(&root, &recent_hash).exists());
+
+        let old_hash = write_gc_blob(&root, "old unreferenced content");
+        let old_report = gc_durable_output_stash(&root, unix_time_secs() + 1_000, |_| Ok(None));
+        assert!(
+            old_report.is_success(),
+            "unexpected GC errors: {old_report:?}"
+        );
+        assert_eq!(old_report.blobs_deleted, 2);
+        assert!(!blob_path(&root, &old_hash).exists());
+        assert!(!blob_path(&root, &recent_hash).exists());
+
+        let protected_hash = write_gc_blob(&root, "protected content");
+        write_gc_pointer(
+            &root,
+            "protected-pointer",
+            DurablePointerRecord::new_v1("shell", &protected_hash, Some("live-session"), 1),
+        );
+        let protected_report = gc_durable_output_stash(&root, unix_time_secs() + 1_000, |_| {
+            Ok(Some(gc_session(SessionStatus::Running, None)))
+        });
+        assert!(
+            protected_report.is_success(),
+            "unexpected GC errors: {protected_report:?}"
+        );
+        assert_eq!(protected_report.blobs_deleted, 0);
+        assert!(blob_path(&root, &protected_hash).exists());
+    }
+
+    #[test]
+    fn gc_retains_legacy_and_unknown_owner_pointers_conservatively() {
+        let root = gc_root("legacy-unknown-owner");
+        let legacy_hash = write_gc_blob(&root, "legacy body");
+        let unknown_hash = write_gc_blob(&root, "unknown v1 owner body");
+        let legacy = write_legacy_gc_pointer(&root, "legacy", "shell", &legacy_hash);
+        let unknown = write_gc_pointer(
+            &root,
+            "unknown-owner",
+            DurablePointerRecord::new_v1("shell", &unknown_hash, None, 1),
+        );
+
+        let report = gc_durable_output_stash(&root, unix_time_secs() + 1_000, |_| {
+            panic!("legacy/unknown-owner pointers must not consult session lookup")
+        });
+
+        assert!(report.is_success(), "unexpected GC errors: {report:?}");
+        assert_eq!(report.pointers_deleted, 0);
+        assert!(legacy.exists());
+        assert!(unknown.exists());
+        assert!(blob_path(&root, &legacy_hash).exists());
+        assert!(blob_path(&root, &unknown_hash).exists());
+    }
+
+    #[test]
+    fn gc_lookup_failure_retains_pointer_so_next_sweep_can_retry() {
+        let root = gc_root("retry-after-session-lookup-failure");
+        let hash = write_gc_blob(&root, "retryable terminal body");
+        let pointer = write_gc_pointer(
+            &root,
+            "retryable-pointer",
+            DurablePointerRecord::new_v1("shell", &hash, Some("terminal-session"), 1),
+        );
+
+        let failed_report = gc_durable_output_stash(&root, 1_000, |_| {
+            Err("temporary session repository outage".to_string())
+        });
+
+        assert!(!failed_report.is_success());
+        assert_eq!(failed_report.pointers_deleted, 0);
+        assert_eq!(failed_report.pointers_retained, 1);
+        assert!(pointer.exists(), "failed GC must not mark work complete");
+        assert!(blob_path(&root, &hash).exists());
+
+        let retry_report = gc_durable_output_stash(&root, 1_000, |_| {
+            Ok(Some(gc_session(SessionStatus::Completed, Some(999))))
+        });
+
+        assert!(
+            retry_report.is_success(),
+            "retry should succeed: {retry_report:?}"
+        );
+        assert_eq!(retry_report.pointers_deleted, 1);
+        assert!(!pointer.exists(), "next sweep retries retained failed work");
     }
 }
