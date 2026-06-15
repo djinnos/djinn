@@ -453,6 +453,8 @@ fn classify_github_write_error(err: &GitHubApiError) -> ErrorClass {
     match err.status.map(|status| status.as_u16()) {
         Some(404) => ErrorClass::NotFound,
         Some(401 | 403) => ErrorClass::Permission,
+        Some(422) if err.is_pr_already_exists() => ErrorClass::ConflictRecoverable,
+        Some(422) => ErrorClass::Validation,
         Some(429) => ErrorClass::RateLimited,
         Some(code) if (500..600).contains(&code) => ErrorClass::Transient,
         _ => ErrorClass::Internal,
@@ -851,10 +853,11 @@ mod tests {
         pr_open_failure_outcome, pr_open_untyped_failure_outcome,
     };
     use crate::github_error_render::render_github_write_error;
-    use djinn_core::tool_error::{ErrorClass, ToolError};
+    use djinn_core::tool_error::ErrorClass;
     use djinn_git::GitError;
     use djinn_provider::github_api::GitHubApiError;
     use djinn_runtime::spec::TaskRunOutcome;
+    use reqwest::StatusCode;
 
     #[test]
     fn detects_real_github_lock_rejection() {
@@ -880,18 +883,15 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_pr_creation_failure_renders_github_write_envelope() {
-        let err: anyhow::Error = ToolError::new("create_pull_request failed")
-            .with_error_class(ErrorClass::ConflictRecoverable)
-            .with_method("POST")
-            .with_path("/repos/djinnos/djinn/pulls")
-            .with_http_status(422)
-            .with_body("A pull request already exists for djinnos:task/demo")
-            .with_hint(
-                "Adopt/use the existing pull request for this branch instead of creating a new PR.",
-            )
-            .into();
+    fn supervisor_pr_creation_failure_renders_direct_github_api_already_exists_envelope() {
+        let err = GitHubApiError::http(
+            "POST",
+            "/repos/djinnos/djinn/pulls".to_string(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "A pull request already exists for djinnos:task/demo".to_string(),
+        );
 
+        assert!(err.is_pr_already_exists());
         let rendered = render_github_write_error("GitHub PR creation failed", &err);
 
         assert!(rendered.starts_with("GitHub PR creation failed: {"));
@@ -900,27 +900,24 @@ mod tests {
         assert!(rendered.contains("\"path\":\"/repos/djinnos/djinn/pulls\""));
         assert!(rendered.contains("\"status\":\"422\""));
         assert!(rendered.contains("pull request already exists"));
-        assert!(rendered.contains("Adopt/use the existing pull request"));
+        assert!(rendered.contains("Find and reuse the existing pull request"));
+        assert!(!rendered.contains("github POST /repos/djinnos/djinn/pulls failed:"));
     }
 
     #[test]
-    fn supervisor_pr_reopen_then_creation_failure_preserves_both_envelopes() {
-        let reopen_err: anyhow::Error = ToolError::new("reopen_pull_request failed")
-            .with_error_class(ErrorClass::Permission)
-            .with_method("PATCH")
-            .with_path("/repos/djinnos/djinn/pulls/7")
-            .with_http_status(403)
-            .with_body("Resource not accessible by integration")
-            .with_hint("Check that the GitHub App installation can edit pull requests.")
-            .into();
-        let create_err: anyhow::Error = ToolError::new("create_pull_request failed")
-            .with_error_class(ErrorClass::Validation)
-            .with_method("POST")
-            .with_path("/repos/djinnos/djinn/pulls")
-            .with_http_status(422)
-            .with_body("Validation Failed: No commits between main and task/demo")
-            .with_hint("Push commits to the head branch before creating a PR.")
-            .into();
+    fn supervisor_pr_reopen_then_creation_failure_preserves_direct_github_api_envelopes() {
+        let reopen_err = GitHubApiError::http(
+            "PATCH",
+            "/repos/djinnos/djinn/pulls/7".to_string(),
+            StatusCode::FORBIDDEN,
+            "Resource not accessible by integration".to_string(),
+        );
+        let create_err = GitHubApiError::http(
+            "POST",
+            "/repos/djinnos/djinn/pulls".to_string(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Validation Failed: No commits between main and task/demo".to_string(),
+        );
 
         let rendered = format!(
             "{}; prior {}",
@@ -936,6 +933,51 @@ mod tests {
         assert!(rendered.contains("\"method\":\"PATCH\""));
         assert!(rendered.contains("No commits between main and task/demo"));
         assert!(rendered.contains("Resource not accessible by integration"));
+        assert!(rendered.contains("Fix the rejected GitHub write inputs"));
+        assert!(rendered.contains("Check GitHub authentication"));
+        assert!(!rendered.contains("github POST /repos/djinnos/djinn/pulls failed:"));
+        assert!(!rendered.contains("github PATCH /repos/djinnos/djinn/pulls/7 failed:"));
+    }
+
+    #[test]
+    fn supervisor_pr_rendering_covers_direct_auth_rate_limit_and_long_body_envelopes() {
+        let unauthenticated = GitHubApiError::unauthenticated(
+            "POST",
+            "/repos/djinnos/djinn/pulls".to_string(),
+            r#"{"message":"Bad credentials"}"#.to_string(),
+        );
+        let rate_limited = GitHubApiError::rate_limited(
+            "PATCH",
+            "/repos/djinnos/djinn/pulls/7".to_string(),
+            r#"{"message":"API rate limit exceeded"}"#.to_string(),
+        );
+        let long_body = GitHubApiError::http(
+            "POST",
+            "/repos/djinnos/djinn/pulls".to_string(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Validation Failed: {}", "x".repeat(500)),
+        );
+
+        let auth_rendered =
+            render_github_write_error("GitHub PR creation failed", &unauthenticated);
+        assert!(auth_rendered.contains("\"error_class\":\"permission\""));
+        assert!(auth_rendered.contains("\"status\":\"401\""));
+        assert!(auth_rendered.contains("Check GitHub authentication"));
+
+        let rate_rendered = render_github_write_error("GitHub PR reopen failed", &rate_limited);
+        assert!(rate_rendered.contains("\"error_class\":\"rate_limited\""));
+        assert!(rate_rendered.contains("\"status\":\"429\""));
+        assert!(rate_rendered.contains("Back off until GitHub rate limits reset"));
+
+        let long_rendered = render_github_write_error("GitHub PR creation failed", &long_body);
+        assert!(long_rendered.contains("\"error_class\":\"validation\""));
+        assert!(long_rendered.contains("\"status\":\"422\""));
+        assert!(long_rendered.contains('…'));
+        assert!(!long_rendered.contains(&"x".repeat(300)));
+        assert!(
+            long_rendered.len() < 600,
+            "rendered body must remain bounded: {long_rendered}"
+        );
     }
 
     const CAPTURED_CREATE_PR_422_ALREADY_EXISTS: &str = r#"{
@@ -986,6 +1028,29 @@ mod tests {
         let body_excerpt = body_excerpt.expect("body excerpt");
         assert!(body_excerpt.contains("Validation Failed"));
         assert!(body_excerpt.len() <= TASK_OUTCOME_BODY_EXCERPT_BYTES + 40);
+    }
+
+    #[test]
+    fn pr_open_envelope_classifies_generic_422_as_validation() {
+        let err = github_pr_error(
+            422,
+            r#"{"message":"Validation Failed","errors":[{"message":"No commits between main and task/demo"}]}"#,
+        );
+        let (class, hint, body_excerpt) = failed_parts(pr_open_failure_outcome(
+            "POST",
+            "/repos/djinnos/server/pulls".to_string(),
+            &err,
+            None,
+        ));
+
+        assert_eq!(class, Some(ErrorClass::Validation));
+        assert_eq!(
+            hint.as_deref(),
+            Some("fix the rejected GitHub pull-request parameters before retrying")
+        );
+        let body_excerpt = body_excerpt.expect("body excerpt");
+        assert!(body_excerpt.contains("Validation Failed"));
+        assert!(!body_excerpt.contains("[truncated:"));
     }
 
     #[test]
