@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use djinn_core::models::TaskRunTrigger;
+use djinn_core::tool_error::ErrorClass;
 use serde::{Deserialize, Serialize};
 
 /// Which role executes at each stage of a task-run.
@@ -335,10 +336,24 @@ pub enum TaskRunOutcome {
         /// Set when the failure was a typed provider error the host breaker
         /// should act on (see [`ProviderFailureClass`]). `None` for non-LLM
         /// failures (git push, PR open) and for provider errors the breaker
-        /// deliberately ignores. `#[serde(default)]` keeps any older frame that
-        /// predates this field decoding as `None`.
+        /// deliberately ignores. `#[serde(default)]` keeps serde formats that can
+        /// omit fields decoding this as `None`.
         #[serde(default)]
         provider_failure: Option<ProviderFailureClass>,
+        /// Machine-readable class for structured tool/provider-write failures.
+        ///
+        /// Keep these additive fields serialized even when `None`: the
+        /// worker→host report wire uses bincode, whose struct fields are
+        /// positional rather than self-describing. `skip_serializing_if` would
+        /// omit `None` bytes and make same-version bincode decoding hit EOF.
+        #[serde(default)]
+        error_class: Option<ErrorClass>,
+        /// Actionable recovery hint for the agent/operator, when available.
+        #[serde(default)]
+        hint: Option<String>,
+        /// Bounded upstream response/detail excerpt for compact rendering.
+        #[serde(default)]
+        body_excerpt: Option<String>,
     },
     Interrupted,
     /// The worker stage completed and the supervisor fired `submit_verification`
@@ -534,6 +549,9 @@ mod tests {
                 provider_failure: Some(ProviderFailureClass::Throttle {
                     retry_after_ms: Some(5 * 60 * 60 * 1000),
                 }),
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             },
             stages_completed: vec![RoleKind::Worker],
         };
@@ -546,6 +564,7 @@ mod tests {
                 stage,
                 reason,
                 provider_failure,
+                ..
             } => {
                 assert_eq!(stage, "worker");
                 assert_eq!(reason, "rate limited");
@@ -572,6 +591,9 @@ mod tests {
                 provider_failure: Some(ProviderFailureClass::Throttle {
                     retry_after_ms: None,
                 }),
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             },
             stages_completed: vec![RoleKind::Worker],
         };
@@ -659,6 +681,9 @@ mod tests {
                 stage: "worker".to_string(),
                 reason: "boom".to_string(),
                 provider_failure: None,
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             },
             TaskRunOutcome::Interrupted,
             TaskRunOutcome::WorkerSubmitted,

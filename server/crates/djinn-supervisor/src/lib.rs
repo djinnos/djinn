@@ -1032,6 +1032,9 @@ impl TaskRunSupervisor {
                                             "merge-parent enforcement failed: could not record a two-parent merge of {merge_target_sha} (the resolution would leave the PR conflicting): {e}"
                                         ),
                                         provider_failure: None,
+                                        error_class: None,
+                                        hint: None,
+                                        body_excerpt: None,
                                     });
                                     break;
                                 }
@@ -1435,6 +1438,9 @@ impl TaskRunSupervisor {
                             stage: "reviewer".into(),
                             reason: format!("review rejected: {feedback}"),
                             provider_failure: None,
+                            error_class: None,
+                            hint: None,
+                            body_excerpt: None,
                         });
                         break;
                     }
@@ -1443,6 +1449,9 @@ impl TaskRunSupervisor {
                             stage: "verifier".into(),
                             reason,
                             provider_failure: None,
+                            error_class: None,
+                            hint: None,
+                            body_excerpt: None,
                         });
                         break;
                     }
@@ -1494,6 +1503,9 @@ impl TaskRunSupervisor {
                             // reply loop produced through to the host report so
                             // the host breaker can act on it.
                             provider_failure,
+                            error_class: None,
+                            hint: None,
+                            body_excerpt: None,
                         });
                         break;
                     }

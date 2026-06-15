@@ -18,9 +18,12 @@
 //! 4. Creates (or adopts/reopens) a GitHub PR for the squashed commit.
 
 use djinn_core::models::TransitionAction;
+use djinn_core::tool_error::ErrorClass;
 use djinn_db::{ProjectRepository, TaskRepository};
 use djinn_git::GitError;
-use djinn_provider::github_api::{CreatePrParams, GitHubApiClient, PrState};
+use djinn_provider::github_api::{
+    CreatePrParams, GitHubApiClient, GitHubApiError, GitHubErrorSource, PrState,
+};
 use djinn_provider::github_app::{app_id as github_app_id, installations::get_installation_token};
 use djinn_runtime::spec::{TaskRunOutcome, TaskRunSpec};
 use djinn_workspace::MirrorManager;
@@ -34,7 +37,7 @@ use crate::task_merge::build_app_push_url;
 ///
 /// Returns:
 /// - `TaskRunOutcome::PrOpened { url, sha }` on success.
-/// - `TaskRunOutcome::Failed { stage: "pr_open", reason }` for any failure.
+/// - `TaskRunOutcome::Failed { stage: "pr_open", reason, .. }` for any failure.
 pub(crate) async fn supervisor_pr_open(
     spec: &TaskRunSpec,
     task: &djinn_core::models::Task,
@@ -47,6 +50,9 @@ pub(crate) async fn supervisor_pr_open(
             reason: "GitHub App is not configured on this deployment — \
                      supervisor PR-open requires the App"
                 .into(),
+            error_class: None,
+            hint: None,
+            body_excerpt: None,
         };
     }
 
@@ -59,6 +65,9 @@ pub(crate) async fn supervisor_pr_open(
                 provider_failure: None,
                 reason: "supervisor PR-open requires MirrorManager but AgentContext has none"
                     .into(),
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             };
         }
     };
@@ -75,6 +84,9 @@ pub(crate) async fn supervisor_pr_open(
                     "project {} has no github_owner/github_repo persisted",
                     spec.project_id
                 ),
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             };
         }
         Err(e) => {
@@ -85,6 +97,9 @@ pub(crate) async fn supervisor_pr_open(
                     "failed to read github coords for project {}: {e}",
                     spec.project_id
                 ),
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             };
         }
     };
@@ -99,6 +114,9 @@ pub(crate) async fn supervisor_pr_open(
                     "project {} ({}/{}) has no cached installation_id",
                     spec.project_id, owner, repo_name
                 ),
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             };
         }
         Err(e) => {
@@ -109,6 +127,9 @@ pub(crate) async fn supervisor_pr_open(
                     "failed to read installation_id for project {}: {e}",
                     spec.project_id
                 ),
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             };
         }
     };
@@ -120,6 +141,9 @@ pub(crate) async fn supervisor_pr_open(
                 stage: "pr_open".into(),
                 provider_failure: None,
                 reason: format!("could not mint installation token: {e}"),
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             };
         }
     };
@@ -196,6 +220,9 @@ pub(crate) async fn supervisor_pr_open(
                 stage: "pr_open".into(),
                 provider_failure: None,
                 reason: format!("push task_branch to GitHub failed: {e}"),
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             };
         }
     };
@@ -265,11 +292,12 @@ pub(crate) async fn supervisor_pr_open(
                             let reopen_error =
                                 render_github_write_error("GitHub PR reopen failed", &reopen_err);
                             let reason = format!("{create_error}; prior {reopen_error}");
-                            return TaskRunOutcome::Failed {
-                                stage: "pr_open".into(),
-                                provider_failure: None,
-                                reason,
-                            };
+                            return pr_open_failure_outcome(
+                                "POST",
+                                format!("/repos/{owner}/{repo_name}/pulls"),
+                                &e,
+                                Some(reason),
+                            );
                         }
                     }
                 }
@@ -293,12 +321,12 @@ pub(crate) async fn supervisor_pr_open(
         {
             Ok(pr) => pr,
             Err(e) => {
-                let reason = render_github_write_error("GitHub PR creation failed", &e);
-                return TaskRunOutcome::Failed {
-                    stage: "pr_open".into(),
-                    provider_failure: None,
-                    reason,
-                };
+                return pr_open_failure_outcome(
+                    "POST",
+                    format!("/repos/{owner}/{repo_name}/pulls"),
+                    &e,
+                    None,
+                );
             }
         }
     };
@@ -346,6 +374,129 @@ pub(crate) async fn supervisor_pr_open(
         url: pr.html_url,
         sha: merge_result_commit_sha,
     }
+}
+
+const PR_ALREADY_EXISTS_HINT: &str =
+    "a PR for this branch already exists — adopt it via the existing PR URL";
+const TASK_OUTCOME_BODY_EXCERPT_BYTES: usize = 512;
+
+fn pr_open_failure_outcome(
+    method: &'static str,
+    path: String,
+    err: &GitHubApiError,
+    reason_override: Option<String>,
+) -> TaskRunOutcome {
+    let reason = reason_override
+        .unwrap_or_else(|| render_github_write_error("GitHub PR creation failed", err));
+
+    tracing::warn!(
+        method,
+        path = %path,
+        body = %err.body,
+        source = ?err.source,
+        status = err.status.map(|status| status.as_u16()),
+        "supervisor PR-open: GitHub PR creation failed response body"
+    );
+
+    let already_exists = err.is_pr_already_exists();
+    let error_class = if already_exists {
+        ErrorClass::ConflictRecoverable
+    } else {
+        classify_github_write_error(err)
+    };
+
+    TaskRunOutcome::Failed {
+        stage: "pr_open".into(),
+        provider_failure: None,
+        reason,
+        error_class: Some(error_class),
+        hint: Some(
+            if already_exists {
+                PR_ALREADY_EXISTS_HINT
+            } else {
+                default_pr_open_hint(error_class)
+            }
+            .to_string(),
+        ),
+        body_excerpt: Some(bounded_task_outcome_body_excerpt(&err.body)),
+    }
+}
+
+#[cfg(test)]
+fn pr_open_untyped_failure_outcome(
+    method: &'static str,
+    path: String,
+    err: &anyhow::Error,
+) -> TaskRunOutcome {
+    let fallback = djinn_core::tool_error::ToolError::new(err.to_string())
+        .with_error_class(ErrorClass::Internal)
+        .with_method(method)
+        .with_path(path);
+    TaskRunOutcome::Failed {
+        stage: "pr_open".into(),
+        provider_failure: None,
+        reason: fallback.error,
+        error_class: Some(ErrorClass::Internal),
+        hint: None,
+        body_excerpt: None,
+    }
+}
+
+fn classify_github_write_error(err: &GitHubApiError) -> ErrorClass {
+    match err.source {
+        GitHubErrorSource::RateLimited => return ErrorClass::RateLimited,
+        GitHubErrorSource::Unauthenticated => return ErrorClass::Permission,
+        GitHubErrorSource::Transport | GitHubErrorSource::GraphQL => return ErrorClass::Internal,
+        GitHubErrorSource::Http => {}
+    }
+
+    match err.status.map(|status| status.as_u16()) {
+        Some(404) => ErrorClass::NotFound,
+        Some(401 | 403) => ErrorClass::Permission,
+        Some(429) => ErrorClass::RateLimited,
+        Some(code) if (500..600).contains(&code) => ErrorClass::Transient,
+        _ => ErrorClass::Internal,
+    }
+}
+
+fn default_pr_open_hint(error_class: ErrorClass) -> &'static str {
+    match error_class {
+        ErrorClass::NotFound => {
+            "verify the repository, branch, and base ref exist and are accessible"
+        }
+        ErrorClass::Permission => {
+            "check that the GitHub App installation has permission to create pull requests"
+        }
+        ErrorClass::RateLimited => "back off until the GitHub rate limit resets before retrying",
+        ErrorClass::Transient => {
+            "retry after a short delay; GitHub reported a transient upstream failure"
+        }
+        ErrorClass::Validation => "fix the rejected GitHub pull-request parameters before retrying",
+        ErrorClass::ConflictRecoverable => PR_ALREADY_EXISTS_HINT,
+        ErrorClass::Internal => "inspect supervisor logs for the unclassified GitHub write failure",
+    }
+}
+
+fn bounded_task_outcome_body_excerpt(body: &str) -> String {
+    let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.len() <= TASK_OUTCOME_BODY_EXCERPT_BYTES {
+        return normalized;
+    }
+
+    let mut end = 0;
+    for (idx, ch) in normalized.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > TASK_OUTCOME_BODY_EXCERPT_BYTES {
+            break;
+        }
+        end = next;
+    }
+    let omitted = normalized.len().saturating_sub(end);
+    format!(
+        "{}[truncated: {} bytes omitted]",
+        &normalized[..end],
+        omitted
+    )
 }
 
 /// Count acceptance criteria already marked `met` on a task's AC JSON.
@@ -695,10 +846,15 @@ fn is_concurrent_push_race(err: &GitError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_concurrent_push_race;
+    use super::{
+        PR_ALREADY_EXISTS_HINT, TASK_OUTCOME_BODY_EXCERPT_BYTES, is_concurrent_push_race,
+        pr_open_failure_outcome, pr_open_untyped_failure_outcome,
+    };
     use crate::github_error_render::render_github_write_error;
     use djinn_core::tool_error::{ErrorClass, ToolError};
     use djinn_git::GitError;
+    use djinn_provider::github_api::GitHubApiError;
+    use djinn_runtime::spec::TaskRunOutcome;
 
     #[test]
     fn detects_real_github_lock_rejection() {
@@ -780,6 +936,117 @@ mod tests {
         assert!(rendered.contains("\"method\":\"PATCH\""));
         assert!(rendered.contains("No commits between main and task/demo"));
         assert!(rendered.contains("Resource not accessible by integration"));
+    }
+
+    const CAPTURED_CREATE_PR_422_ALREADY_EXISTS: &str = r#"{
+      "message": "Validation Failed",
+      "errors": [{
+        "resource": "PullRequest",
+        "code": "custom",
+        "message": "A pull request already exists for djinnos:feature-branch."
+      }]
+    }"#;
+
+    fn github_pr_error(status: u16, body: &str) -> GitHubApiError {
+        GitHubApiError::http(
+            "create_pull_request",
+            "/repos/djinnos/server/pulls".to_string(),
+            reqwest::StatusCode::from_u16(status).expect("valid test status"),
+            body.to_string(),
+        )
+    }
+
+    fn failed_parts(
+        outcome: TaskRunOutcome,
+    ) -> (Option<ErrorClass>, Option<String>, Option<String>) {
+        match outcome {
+            TaskRunOutcome::Failed {
+                error_class,
+                hint,
+                body_excerpt,
+                ..
+            } => (error_class, hint, body_excerpt),
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pr_open_envelope_classifies_422_already_exists_as_conflict_recoverable() {
+        let err = github_pr_error(422, CAPTURED_CREATE_PR_422_ALREADY_EXISTS);
+        let (class, hint, body_excerpt) = failed_parts(pr_open_failure_outcome(
+            "POST",
+            "/repos/djinnos/server/pulls".to_string(),
+            &err,
+            None,
+        ));
+
+        assert_eq!(class, Some(ErrorClass::ConflictRecoverable));
+        assert_eq!(hint.as_deref(), Some(PR_ALREADY_EXISTS_HINT));
+        assert!(hint.unwrap().contains("adopt it"));
+        let body_excerpt = body_excerpt.expect("body excerpt");
+        assert!(body_excerpt.contains("Validation Failed"));
+        assert!(body_excerpt.len() <= TASK_OUTCOME_BODY_EXCERPT_BYTES + 40);
+    }
+
+    #[test]
+    fn pr_open_envelope_classifies_404_as_not_found() {
+        let err = github_pr_error(404, r#"{"message":"Not Found"}"#);
+        let (class, _, _) = failed_parts(pr_open_failure_outcome(
+            "POST",
+            "/repos/djinnos/server/pulls".to_string(),
+            &err,
+            None,
+        ));
+        assert_eq!(class, Some(ErrorClass::NotFound));
+    }
+
+    #[test]
+    fn pr_open_envelope_classifies_401_as_permission() {
+        let err = github_pr_error(401, r#"{"message":"Bad credentials"}"#);
+        let (class, _, _) = failed_parts(pr_open_failure_outcome(
+            "POST",
+            "/repos/djinnos/server/pulls".to_string(),
+            &err,
+            None,
+        ));
+        assert_eq!(class, Some(ErrorClass::Permission));
+    }
+
+    #[test]
+    fn pr_open_envelope_classifies_429_as_rate_limited() {
+        let err = github_pr_error(429, r#"{\"message\":\"API rate limit exceeded\"}"#);
+        let (class, _, _) = failed_parts(pr_open_failure_outcome(
+            "POST",
+            "/repos/djinnos/server/pulls".to_string(),
+            &err,
+            None,
+        ));
+        assert_eq!(class, Some(ErrorClass::RateLimited));
+    }
+
+    #[test]
+    fn pr_open_envelope_classifies_5xx_as_transient() {
+        let err = github_pr_error(502, r#"{"message":"Bad Gateway"}"#);
+        let (class, _, _) = failed_parts(pr_open_failure_outcome(
+            "POST",
+            "/repos/djinnos/server/pulls".to_string(),
+            &err,
+            None,
+        ));
+        assert_eq!(class, Some(ErrorClass::Transient));
+    }
+
+    #[test]
+    fn pr_open_envelope_classifies_untyped_as_internal_without_hint() {
+        let err = anyhow::anyhow!("connection reset");
+        let (class, hint, body_excerpt) = failed_parts(pr_open_untyped_failure_outcome(
+            "POST",
+            "/repos/djinnos/server/pulls".to_string(),
+            &err,
+        ));
+        assert_eq!(class, Some(ErrorClass::Internal));
+        assert!(hint.is_none());
+        assert!(body_excerpt.is_none());
     }
 
     // ── count_met_acceptance_criteria (D3b evidence sourcing) ───────────────

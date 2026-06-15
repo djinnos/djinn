@@ -435,16 +435,25 @@ impl SupervisorServices for RpcServices {
                 stage: "open_pr".into(),
                 provider_failure: None,
                 reason: format!("rpc transport: {e}"),
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             },
             Ok(other) => TaskRunOutcome::Failed {
                 stage: "open_pr".into(),
                 provider_failure: None,
                 reason: format!("rpc protocol: unexpected reply {other:?}"),
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             },
             Err(e) => TaskRunOutcome::Failed {
                 stage: "open_pr".into(),
                 provider_failure: None,
                 reason: e,
+                error_class: None,
+                hint: None,
+                body_excerpt: None,
             },
         }
     }

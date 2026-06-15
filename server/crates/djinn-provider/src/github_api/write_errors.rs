@@ -123,6 +123,7 @@ fn classify_github_write_error(
         Some(422) if detail_indicates_existing_pull_request(detail) => {
             ErrorClass::ConflictRecoverable
         }
+        Some(code) if (500..600).contains(&code) => ErrorClass::Transient,
         Some(code) if (400..500).contains(&code) => {
             if detail_indicates_permission(detail) {
                 ErrorClass::Permission

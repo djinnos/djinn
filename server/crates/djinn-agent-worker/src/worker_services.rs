@@ -310,6 +310,9 @@ impl SupervisorServices for WorkerSupervisorServices {
                                 "worker failed to push task_branch '{}' to mirror: {e}",
                                 spec.task_branch
                             ),
+                            error_class: None,
+                            hint: None,
+                            body_excerpt: None,
                         };
                     }
                 }
@@ -328,6 +331,9 @@ impl SupervisorServices for WorkerSupervisorServices {
                             path.display(),
                             spec.task_branch
                         ),
+                        error_class: None,
+                        hint: None,
+                        body_excerpt: None,
                     };
                 }
             },
