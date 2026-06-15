@@ -167,7 +167,13 @@ fn classify_graphql_github_error(err: &GitHubApiError) -> ErrorClass {
     if is_already_queued(err) || is_retryable_branch_conflict(err) {
         return ErrorClass::ConflictRecoverable;
     }
-    if github_api_body_contains(err, "unprocessable") || github_api_body_contains(err, "validation")
+    if github_api_body_contains(err, "not found") {
+        return ErrorClass::NotFound;
+    }
+    if github_api_body_contains(err, "unprocessable")
+        || github_api_body_contains(err, "validation")
+        || github_api_body_contains(err, "auto merge is not allowed")
+        || github_api_body_contains(err, "not mergeable")
     {
         return ErrorClass::Validation;
     }
@@ -244,6 +250,7 @@ fn is_conversation_resolution_block(err: &GitHubApiError) -> bool {
 fn is_rate_limit_body(err: &GitHubApiError) -> bool {
     github_api_body_contains(err, "rate limit")
         || github_api_body_contains(err, "rate_limit")
+        || github_api_body_contains(err, "ratelimit")
         || github_api_body_contains(err, "x-ratelimit-remaining: 0")
 }
 
