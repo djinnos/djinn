@@ -47,6 +47,10 @@ jobs:
         with:
           filters: |
             server:
+              - '.djinn/skills.json'
+              - '.claude/skills/**'
+              - '.opencode/skills/**'
+              - '.djinn/skills/**'
               - 'server/Cargo.toml'
               - 'server/Cargo.lock'
               - 'server/rust-toolchain.toml'
@@ -221,6 +225,9 @@ jobs:
             echo "::error::workspace-hack is out of date. Run 'cargo hakari generate && cargo hakari manage-deps' locally."
             exit 1
           }
+
+      - name: Verify skills manifest is up to date
+        run: cargo run -p djinn-agent --bin djinn-skills-manifest -- check --root ..
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings

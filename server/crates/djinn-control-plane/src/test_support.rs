@@ -620,6 +620,16 @@ impl McpTestHarness {
         Self { state, db, server }
     }
 
+    /// Build a harness from a caller-assembled MCP state.  This is the opt-in
+    /// escape hatch for integration tests that keep the normal MCP/tool dispatch
+    /// path but swap one strict stub for a real actor-backed bridge (for example
+    /// a real `SlotPoolHandle` in execution-control tests).
+    pub fn from_state(state: McpState) -> Self {
+        let db = state.db().clone();
+        let server = DjinnMcpServer::new(state.clone());
+        Self { state, db, server }
+    }
+
     pub fn db(&self) -> &Database {
         &self.db
     }
