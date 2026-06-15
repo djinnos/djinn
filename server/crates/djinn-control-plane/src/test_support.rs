@@ -92,6 +92,9 @@ impl SlotPoolOps for StubSlotPool {
     async fn kill_session(&self, _task_id: &str) -> std::result::Result<(), String> {
         Err("stub: SlotPoolOps::kill_session not implemented".into())
     }
+    async fn terminate_session(&self, _task_id: &str) -> std::result::Result<(), String> {
+        Err("stub: SlotPoolOps::terminate_session not implemented".into())
+    }
     async fn session_for_task(
         &self,
         _task_id: &str,
