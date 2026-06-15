@@ -1,7 +1,211 @@
 use super::*;
 use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
-use djinn_core::models::SessionStatus;
+use djinn_core::{events::DjinnEventEnvelope, models::SessionStatus};
 use djinn_core::run_progress::RunProgress;
+use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
+
+#[allow(dead_code)]
+struct InterventionChaosHarness {
+    db: Database,
+    tx: broadcast::Sender<DjinnEventEnvelope>,
+    _rx: broadcast::Receiver<DjinnEventEnvelope>,
+    actor: CoordinatorActor,
+    repo: TaskRepository,
+    task_id: String,
+}
+
+#[allow(dead_code)]
+impl InterventionChaosHarness {
+    async fn new(initial_reopen_count: i64) -> Self {
+        let db = test_helpers::create_test_db();
+        let (tx, rx) = broadcast::channel(256);
+        let actor = coordinator_actor_for_tests(&db, &tx);
+        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let task = make_task_with_reopen_count(&db, &tx, initial_reopen_count).await;
+
+        Self {
+            db,
+            tx,
+            _rx: rx,
+            actor,
+            repo,
+            task_id: task.id,
+        }
+    }
+
+    async fn task(&self) -> djinn_core::models::Task {
+        self.repo
+            .get(&self.task_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("seed task {} should exist", self.task_id))
+    }
+
+    async fn drive_review_failure_cycle(&mut self) -> djinn_core::models::Task {
+        self.repo.set_status(&self.task_id, "closed").await.unwrap();
+        self.repo.set_status(&self.task_id, "open").await.unwrap()
+    }
+
+    async fn drive_review_failure_cycles(&mut self, cycles: i64) -> djinn_core::models::Task {
+        assert!(cycles >= 0, "cycle count must be non-negative");
+        for _ in 0..cycles {
+            self.drive_review_failure_cycle().await;
+        }
+        self.task().await
+    }
+
+    async fn drive_to_reopen_count(&mut self, target: i64) -> djinn_core::models::Task {
+        let mut task = self.task().await;
+        assert!(
+            target >= task.reopen_count,
+            "harness only advances reopen_count deterministically"
+        );
+        while task.reopen_count < target {
+            task = self.drive_review_failure_cycle().await;
+        }
+        assert_eq!(task.reopen_count, target, "harness reopen_count target");
+        task
+    }
+
+    async fn route_reopen_intervention(&mut self) -> (bool, djinn_core::models::Task) {
+        let task = self.task().await;
+        let handled = self.actor.maybe_intervene_on_stuck_task(&task).await;
+        let refreshed = self.task().await;
+        (handled, refreshed)
+    }
+
+    async fn complete_planner_intervention_and_reset_ladder(&self) -> djinn_core::models::Task {
+        self.repo
+            .reset_intervention_counters(&self.task_id)
+            .await
+            .unwrap();
+        self.task().await
+    }
+
+    async fn seed_same_role_redispatch_state(&mut self, role: &'static str, streak: u32) {
+        let cooldown = std::time::Duration::from_secs(300);
+        self.actor.dispatch_failure_streak.insert(self.task_id.clone(), streak);
+        self.actor.dispatch_cooldowns.insert(
+            self.task_id.clone(),
+            StdInstant::now() + cooldown,
+        );
+        self.actor.last_dispatched.insert(
+            self.task_id.clone(),
+            DispatchMarker {
+                instant: StdInstant::now(),
+                role: role.to_owned(),
+            },
+        );
+
+        let last_dispatched_at = rfc3339(::time::OffsetDateTime::now_utc());
+        let cooldown_until = rfc3339(
+            ::time::OffsetDateTime::now_utc()
+                + ::time::Duration::try_from(cooldown).expect("cooldown duration fits time"),
+        );
+        DispatchStateRepository::new(self.db.clone())
+            .upsert(DispatchStateUpsert {
+                task_id: &self.task_id,
+                failure_streak: i64::from(streak),
+                cooldown_until: Some(&cooldown_until),
+                escalation_count: 0,
+                last_dispatched_at: Some(&last_dispatched_at),
+                last_dispatched_role: Some(role),
+                inflight_creator_user_id: None,
+                inflight_model_id: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn advance_same_role_cycle(&mut self, role: &'static str) -> (bool, djinn_core::models::Task) {
+        let next_streak = self
+            .actor
+            .dispatch_failure_streak
+            .get(&self.task_id)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.seed_same_role_redispatch_state(role, next_streak).await;
+        let task = self.task().await;
+        let handled = self
+            .actor
+            .maybe_intervene_on_cycling_task(&task, role, next_streak)
+            .await;
+        let refreshed = self.task().await;
+        (handled, refreshed)
+    }
+
+    async fn planner_intervention_markers(&self) -> Vec<serde_json::Value> {
+        planner_intervention_markers(&self.repo, &self.task_id).await
+    }
+
+    async fn open_planner_intervention_reviews(&self) -> Vec<djinn_core::models::Task> {
+        let task = self.task().await;
+        self.repo
+            .list_by_status("open")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|candidate| candidate.issue_type == "review" && candidate.project_id == task.project_id)
+            .collect()
+    }
+
+    async fn assert_open_planner_review_count(&self, expected: usize) {
+        assert_eq!(
+            self.open_planner_intervention_reviews().await.len(),
+            expected,
+            "open Planner intervention review count"
+        );
+    }
+
+    async fn assert_marker_reopen_counts(&self, expected: &[i64]) {
+        let actual: Vec<i64> = self
+            .planner_intervention_markers()
+            .await
+            .iter()
+            .map(|marker| marker["reopen_count"].as_i64().expect("marker reopen_count"))
+            .collect();
+        assert_eq!(actual, expected, "planner_intervention marker reopen counts");
+    }
+
+    async fn assert_task_status(&self, status: &str, close_reason_contains: Option<&str>) {
+        let task = self.task().await;
+        assert_eq!(task.status, status, "task status");
+        if let Some(needle) = close_reason_contains {
+            assert!(
+                task.close_reason.as_deref().is_some_and(|reason| reason.contains(needle)),
+                "close_reason should contain {needle:?}; got {:?}",
+                task.close_reason
+            );
+        }
+    }
+
+    async fn assert_dispatch_backoff_cleared(&self) {
+        assert!(
+            !self.actor.last_dispatched.contains_key(&self.task_id),
+            "last_dispatched should be cleared"
+        );
+        assert!(
+            !self.actor.dispatch_failure_streak.contains_key(&self.task_id),
+            "dispatch_failure_streak should be cleared"
+        );
+        assert!(
+            !self.actor.dispatch_cooldowns.contains_key(&self.task_id),
+            "dispatch_cooldowns should be cleared"
+        );
+
+        let durable = DispatchStateRepository::new(self.db.clone())
+            .get(&self.task_id)
+            .await
+            .unwrap();
+        if let Some(durable) = durable {
+            assert_eq!(durable.failure_streak, 0, "durable failure_streak");
+            assert!(durable.cooldown_until.is_none(), "durable cooldown_until");
+            assert!(durable.last_dispatched_at.is_none(), "durable last_dispatched_at");
+            assert!(durable.last_dispatched_role.is_none(), "durable last_dispatched_role");
+        }
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn below_threshold_does_not_intervene() {
