@@ -35,6 +35,7 @@ import type {
   ContentBlock,
   VerificationBlock,
   LoopGuardTrippedBlock,
+  BudgetParkBlock,
 } from "@/hooks/useSessionMessages";
 
 // ── Chat bubble wrapper with RPG avatar ─────────────────────────────────────
@@ -592,6 +593,49 @@ function formatTurnSpan(turnSpan: LoopGuardTrippedBlock["turnSpan"]): string {
   return "unknown";
 }
 
+// ── Budget park card (deliberate budget hand-off) ────────────────────────────
+
+function BudgetParkCard({ entry }: { entry: BudgetParkBlock }) {
+  return (
+    <div className="my-3 overflow-hidden rounded-lg border border-sky-500/35 bg-sky-500/5">
+      <div className="flex items-center gap-2.5 border-b border-sky-500/20 px-4 py-2.5">
+        <div className="flex h-6 w-6 items-center justify-center rounded-full bg-sky-500/20 text-sm font-bold text-sky-300">
+          ⏸
+        </div>
+        <div>
+          <div className="flex items-center gap-2 text-sm font-semibold text-sky-300">
+            Budget park
+            <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] uppercase tracking-wider text-sky-200">
+              parked_reason: {entry.parkedReason}
+            </span>
+          </div>
+          <div className="text-xs text-sky-100/70">Budget park — summary</div>
+        </div>
+      </div>
+      <div className="space-y-3 px-4 py-3 text-sm">
+        <div>
+          <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Summary</div>
+          <div className="prose prose-sm max-w-none dark:prose-invert prose-p:my-1">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.summary}</ReactMarkdown>
+          </div>
+        </div>
+        {entry.remainingConcerns && (
+          <div>
+            <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Remaining concerns</div>
+            <div className="break-words font-mono text-xs text-foreground">{entry.remainingConcerns}</div>
+          </div>
+        )}
+        {entry.sessionId && (
+          <div>
+            <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Session</div>
+            <div className="break-all font-mono text-xs text-foreground">{entry.sessionId}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Streaming thinking indicator ─────────────────────────────────────────────
 
 function StreamingThinkingBubble({ text, agentType }: { text: string; agentType?: string }) {
@@ -725,6 +769,8 @@ export function SessionThread({
             return <CommentCard key={idx} entry={entry} />;
           case "loop_guard_tripped":
             return <LoopGuardCard key={idx} entry={entry} />;
+          case "budget_park":
+            return <BudgetParkCard key={idx} entry={entry} />;
           default:
             return null;
         }

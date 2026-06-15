@@ -224,6 +224,9 @@ pub enum StageOutcome {
         reason: ParkReason,
         summary: Option<String>,
         wind_down_ignored: bool,
+        session_id: String,
+        tokens_in: i64,
+        tokens_out: i64,
     },
 }
 
@@ -1498,17 +1501,27 @@ impl TaskRunSupervisor {
                         reason: ParkReason::Budget,
                         summary: _,
                         wind_down_ignored,
+                        session_id,
+                        tokens_in,
+                        tokens_out,
                     } => {
-                        tracing::warn!(
+                        tracing::info!(
                             target: "djinn_supervisor::budget_park",
                             kind = "budget_park",
-                            task_id = %spec.task_id,
-                            task_run_id = %run_id,
-                            stage = role_kind.as_str(),
                             wind_down_ignored,
+                            task_id = %spec.task_id,
+                            session_id = %session_id,
+                            tokens_in,
+                            tokens_out,
                             "budget_park"
                         );
-                        result = Some(self.services.open_pr(&spec, &task).await);
+                        result = Some(TaskRunOutcome::Parked {
+                            reason: "budget".to_string(),
+                            wind_down_ignored,
+                            session_id,
+                            tokens_in,
+                            tokens_out,
+                        });
                         break;
                     }
                     StageOutcome::LoopGuardTripped {
@@ -1676,6 +1689,7 @@ impl TaskRunSupervisor {
             // verification pipeline; the task-run itself completed cleanly.
             TaskRunOutcome::WorkerSubmitted => TaskRunStatus::Completed,
             TaskRunOutcome::Escalated { .. } => TaskRunStatus::Completed,
+            TaskRunOutcome::Parked { .. } => TaskRunStatus::Completed,
             TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::LoopGuardTripped { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
@@ -2126,6 +2140,17 @@ mod tests {
             .is_terminal()
         );
         assert!(
+            StageOutcome::Parked {
+                reason: ParkReason::Budget,
+                summary: None,
+                wind_down_ignored: false,
+                session_id: "session-budget".into(),
+                tokens_in: 10,
+                tokens_out: 5,
+            }
+            .is_terminal()
+        );
+        assert!(
             StageOutcome::ReviewerRejected {
                 feedback: "x".into()
             }
@@ -2137,6 +2162,9 @@ mod tests {
                 reason: ParkReason::Budget,
                 summary: Some("handoff".into()),
                 wind_down_ignored: false,
+                session_id: "session-budget-summary".into(),
+                tokens_in: 10,
+                tokens_out: 5,
             }
             .is_terminal()
         );
@@ -2307,6 +2335,99 @@ mod tests {
         assert!(
             !captured.contains("kind=\"budget_park\""),
             "loop guard and provider failure telemetry must remain distinct from budget parks, got:\n{captured}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_budget_park_run_emits_distinct_telemetry() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "project-budget-park";
+        let task_id = "task-budget-park";
+        let task_run_id = "run-budget-park";
+        let session_id = "session-budget-park";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let updated_statuses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let services: Arc<dyn SupervisorServices> = Arc::new(ScriptedLoopGuardServices {
+            cancel: CancellationToken::new(),
+            task: fixture_task(task_id, project_id),
+            outcome: StageOutcome::Parked {
+                reason: ParkReason::Budget,
+                summary: None,
+                wind_down_ignored: true,
+                session_id: session_id.into(),
+                tokens_in: 123,
+                tokens_out: 45,
+            },
+            updated_statuses: std::sync::Arc::clone(&updated_statuses),
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = TaskRunSpec {
+            task_run_id: task_run_id.into(),
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "djinn/budget-park".into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+        };
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(true)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+        assert!(matches!(
+            report.outcome,
+            TaskRunOutcome::Parked {
+                reason,
+                wind_down_ignored: true,
+                tokens_in: 123,
+                tokens_out: 45,
+                ..
+            } if reason == "budget"
+        ));
+        assert_eq!(
+            updated_statuses
+                .lock()
+                .expect("updated statuses mutex poisoned")
+                .as_slice(),
+            &[TaskRunStatus::Completed],
+            "budget park must settle as a completed task-run"
+        );
+
+        let captured = logs.take();
+        assert!(
+            captured.contains("djinn_supervisor::budget_park")
+                && captured.contains("kind=\"budget_park\"")
+                && captured.contains("wind_down_ignored=true")
+                && captured.contains("task_id=task-budget-park")
+                && captured.contains("session_id=session-budget-park")
+                && captured.contains("tokens_in=123")
+                && captured.contains("tokens_out=45"),
+            "expected budget_park info event with full payload, got:\n{captured}"
         );
     }
 

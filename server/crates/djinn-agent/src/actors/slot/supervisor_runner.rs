@@ -1019,6 +1019,7 @@ fn report_to_terminal_status(report: &TaskRunReport) -> TaskRunStatus {
         // task-run completed cleanly (the verification pipeline runs as a
         // separate slot-free job on the host).
         | TaskRunOutcome::WorkerSubmitted
+        | TaskRunOutcome::Parked { .. }
         | TaskRunOutcome::Escalated { .. } => TaskRunStatus::Completed,
         TaskRunOutcome::Failed { .. } | TaskRunOutcome::LoopGuardTripped { .. } => {
             TaskRunStatus::Failed

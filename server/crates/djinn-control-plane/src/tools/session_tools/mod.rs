@@ -78,6 +78,8 @@ pub struct SessionToolSession {
     /// Running totals of prompt-cache reads (hits) and writes (creation).
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
+    /// Optional deliberate-park reason for terminal sessions, e.g. `budget`.
+    pub parked_reason: Option<String>,
     /// Authoritative workspace path for the session, sourced from the
     /// attached `task_run` (via `sessions.task_run_id`). `None` when the
     /// session is not attached to a task run or the run has no recorded
@@ -102,6 +104,7 @@ impl From<SessionRecord> for SessionToolSession {
             tokens_out: value.tokens_out,
             cache_read_tokens: value.cache_read_tokens,
             cache_write_tokens: value.cache_write_tokens,
+            parked_reason: value.parked_reason,
             workspace_path: None,
         }
     }
@@ -136,6 +139,7 @@ impl SessionToolSession {
             tokens_out: value.tokens_out,
             cache_read_tokens: value.cache_read_tokens,
             cache_write_tokens: value.cache_write_tokens,
+            parked_reason: value.parked_reason,
             workspace_path,
         }
     }

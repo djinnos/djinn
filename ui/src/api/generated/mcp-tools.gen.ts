@@ -5927,6 +5927,10 @@ export namespace SessionActiveOutputSchema {
    * other agent type. See `SessionRecord::project_id`.
    */
   project_id?: string
+  /**
+   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
+   */
+  parked_reason?: string
   started_at: string
   status: string
   task_id?: string
@@ -6015,6 +6019,10 @@ export namespace SessionListOutputSchema {
    * other agent type. See `SessionRecord::project_id`.
    */
   project_id?: string
+  /**
+   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
+   */
+  parked_reason?: string
   started_at: string
   status: string
   task_id?: string
@@ -6093,6 +6101,10 @@ export namespace SessionShowOutputSchema {
   error?: string
   id?: string
   model_id?: string
+  /**
+   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
+   */
+  parked_reason?: string
   /**
    * `None` for chat sessions (global, user-scoped); `Some(_)` for every
    * other agent type. See `SessionRecord::project_id`.
@@ -6729,6 +6741,10 @@ export namespace TaskTimelineOutputSchema {
    * other agent type. See `SessionRecord::project_id`.
    */
   project_id?: string
+  /**
+   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
+   */
+  parked_reason?: string
   started_at: string
   status: string
   task_id?: string

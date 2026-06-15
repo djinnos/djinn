@@ -12850,6 +12850,11 @@ expression: signatures
             "model_id": {
               "type": "string"
             },
+            "parked_reason": {
+              "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
+              "nullable": true,
+              "type": "string"
+            },
             "project_id": {
               "description": "`None` for chat sessions (global, user-scoped); `Some(_)` for every\nother agent type. See `SessionRecord::project_id`.",
               "nullable": true,
@@ -13041,6 +13046,11 @@ expression: signatures
               "type": "string"
             },
             "model_id": {
+              "type": "string"
+            },
+            "parked_reason": {
+              "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
+              "nullable": true,
               "type": "string"
             },
             "project_id": {
@@ -13239,6 +13249,11 @@ expression: signatures
           "type": "string"
         },
         "model_id": {
+          "type": "string"
+        },
+        "parked_reason": {
+          "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
+          "nullable": true,
           "type": "string"
         },
         "project_id": {
@@ -14401,6 +14416,11 @@ expression: signatures
               "type": "string"
             },
             "model_id": {
+              "type": "string"
+            },
+            "parked_reason": {
+              "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
+              "nullable": true,
               "type": "string"
             },
             "project_id": {

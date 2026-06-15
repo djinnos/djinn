@@ -576,6 +576,9 @@ pub(crate) async fn execute_stage(
                     reason: ParkReason::Budget,
                     summary: None,
                     wind_down_ignored: true,
+                    session_id: session_id.clone(),
+                    tokens_in,
+                    tokens_out,
                 }
             } else if let Some(trip) = e.downcast_ref::<LoopGuardTrip>() {
                 stage_outcome_for_runtime_loop_guard_trip(trip)
@@ -596,6 +599,9 @@ pub(crate) async fn execute_stage(
                     reason: ParkReason::Budget,
                     summary: Some(summary),
                     wind_down_ignored: false,
+                    session_id: session_id.clone(),
+                    tokens_in,
+                    tokens_out,
                 }
             } else {
                 let finalize_name = final_output.finalize_tool_name.as_deref().unwrap_or("");
@@ -801,6 +807,7 @@ pub(crate) async fn execute_stage(
         reason: ParkReason::Budget,
         summary: Some(summary),
         wind_down_ignored: false,
+        ..
     } = &stage_outcome
     {
         crate::actors::slot::finalize_handlers::handle_budget_park(
@@ -1011,6 +1018,9 @@ mod tests {
             reason: ParkReason::Budget,
             summary: None,
             wind_down_ignored: true,
+            session_id: "session-budget-ignored".to_string(),
+            tokens_in: 10,
+            tokens_out: 5,
         };
 
         assert_eq!(
@@ -1023,6 +1033,9 @@ mod tests {
             reason: ParkReason::Budget,
             summary: Some("handoff summary".to_string()),
             wind_down_ignored: false,
+            session_id: "session-budget-summary".to_string(),
+            tokens_in: 10,
+            tokens_out: 5,
         };
         assert_eq!(
             session_settlement_for_stage_outcome(&summary_outcome, true),

@@ -463,6 +463,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn budget_park_submit_work_activity_surfaces_unchanged() {
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(
+            db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+
+        let payload = Some(serde_json::json!({
+            "task_id": task.short_id,
+            "commit_title": "park budget summary",
+            "summary": "finished the safe subset before parking",
+            "files_changed": ["src/lib.rs"],
+            "remaining_concerns": ["budget-parked: finish the follow-up UI snapshot"]
+        }));
+
+        process_finalize_payload(&payload, "submit_work", &task.id, &ctx).await;
+
+        let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
+        let entries = repo.list_activity(&task.id).await.unwrap();
+        let work_entry = entries
+            .iter()
+            .find(|entry| entry.event_type == "work_submitted")
+            .expect("expected budget-park work_submitted activity entry");
+        let body: serde_json::Value = serde_json::from_str(&work_entry.payload).unwrap();
+        assert_eq!(body["summary"], "finished the safe subset before parking");
+        assert_eq!(
+            body["remaining_concerns"][0],
+            "budget-parked: finish the follow-up UI snapshot"
+        );
+    }
+
+    #[tokio::test]
     async fn submit_work_malformed_payload_does_not_crash() {
         let db = test_helpers::create_test_db();
         let ctx = test_helpers::agent_context_from_db(
