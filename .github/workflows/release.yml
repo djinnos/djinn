@@ -323,3 +323,28 @@ jobs:
             BASE_IMAGE=${{ env.REGISTRY }}/${{ env.OWNER }}/djinn-agent-runtime-base:${{ needs.runtime-base.outputs.sha_tag }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  # ── Changelog / GitHub Release (tag pushes only) ──────────────────────
+  # Publishes a GitHub Release for the tag with notes auto-generated from the
+  # PRs merged since the previous tag. Gated on the server + runtime image
+  # jobs so a published Release always corresponds to images that shipped.
+  # Categories + exclusions come from `.github/release.yml`.
+  release-notes:
+    name: GitHub Release + changelog
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [server, runtime]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Publish GitHub Release with generated notes
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
