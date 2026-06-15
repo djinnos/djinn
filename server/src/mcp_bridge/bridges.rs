@@ -80,6 +80,13 @@ impl SlotPoolOps for SlotPoolBridge {
             .map_err(|e| e.to_string())
     }
 
+    async fn terminate_session(&self, task_id: &str) -> Result<(), String> {
+        self.0
+            .terminate_session(task_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn session_for_task(&self, task_id: &str) -> Result<Option<RunningTaskInfo>, String> {
         let result = self
             .0

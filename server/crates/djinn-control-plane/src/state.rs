@@ -286,6 +286,9 @@ pub mod stubs {
         async fn kill_session(&self, _: &str) -> Result<(), String> {
             Err("slot pool not initialized".into())
         }
+        async fn terminate_session(&self, _: &str) -> Result<(), String> {
+            Err("slot pool not initialized".into())
+        }
         async fn session_for_task(&self, _: &str) -> Result<Option<RunningTaskInfo>, String> {
             Err("slot pool not initialized".into())
         }
