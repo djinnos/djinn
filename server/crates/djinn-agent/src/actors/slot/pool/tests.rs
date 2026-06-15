@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use super::*;
 use crate::test_helpers;
@@ -241,6 +241,42 @@ fn test_slot_factory(
                         }
                         _ = pause.cancelled() => {
                             let _ = signal_tx.send(RunnerSignal::Paused(task_id));
+                        }
+                    }
+                    Ok(())
+                })
+            },
+        );
+
+        SlotHandle::spawn_with_test_runner(slot_id, model_id, event_tx, app_state, cancel, runner)
+    })
+}
+
+fn blocking_cancel_slot_factory(
+    runtime: Duration,
+    signal_tx: mpsc::UnboundedSender<RunnerSignal>,
+    release_after_cancel: Arc<Notify>,
+) -> SlotFactory {
+    Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
+        let signal_tx = signal_tx.clone();
+        let release_after_cancel = release_after_cancel.clone();
+        let runner: super::super::actor::TestLifecycleRunner = Arc::new(
+            move |task_id, _project_path, _model_id, _app_state, kill, pause| {
+                let signal_tx = signal_tx.clone();
+                let release_after_cancel = release_after_cancel.clone();
+                Box::pin(async move {
+                    let _ = signal_tx.send(RunnerSignal::Started(task_id.clone()));
+                    tokio::select! {
+                        _ = tokio::time::sleep(runtime) => {
+                            let _ = signal_tx.send(RunnerSignal::Completed(task_id));
+                        }
+                        _ = kill.cancelled() => {
+                            let _ = signal_tx.send(RunnerSignal::Killed(task_id));
+                            release_after_cancel.notified().await;
+                        }
+                        _ = pause.cancelled() => {
+                            let _ = signal_tx.send(RunnerSignal::Paused(task_id));
+                            release_after_cancel.notified().await;
                         }
                     }
                     Ok(())
@@ -495,6 +531,65 @@ async fn wait_until_no_sessions(pool: &SlotPoolHandle, task_ids: &[String]) {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+async fn wait_for_signal(
+    signal_rx: &mut mpsc::UnboundedReceiver<RunnerSignal>,
+    description: &str,
+    predicate: impl Fn(&RunnerSignal) -> bool,
+) -> RunnerSignal {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for runner signal: {description}"
+        );
+        let signal = tokio::time::timeout(remaining, signal_rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for runner signal: {description}"))
+            .unwrap_or_else(|| {
+                panic!("runner signal channel closed while waiting for {description}")
+            });
+        if predicate(&signal) {
+            return signal;
+        }
+    }
+}
+
+async fn assert_actor_pool_status(
+    pool: &SlotPoolHandle,
+    label: &str,
+    total: u32,
+    active: u32,
+    free: u32,
+    running_tasks: usize,
+) {
+    let status = pool
+        .get_status()
+        .await
+        .unwrap_or_else(|err| panic!("{label}: get_status failed: {err:?}"));
+    let model_status = status
+        .per_model
+        .get("model-a")
+        .unwrap_or_else(|| panic!("{label}: model-a should be present in status: {status:?}"));
+    assert_eq!(status.total_slots, total as usize, "{label}: total slots");
+    assert_eq!(
+        status.active_slots, active as usize,
+        "{label}: active slots"
+    );
+    assert_eq!(model_status.total, total, "{label}: model total");
+    assert_eq!(model_status.active, active, "{label}: model active");
+    assert_eq!(model_status.free, free, "{label}: model free");
+    assert_eq!(
+        status.running_tasks.len(),
+        running_tasks,
+        "{label}: running task mappings"
+    );
+    assert!(
+        model_status.free <= model_status.total.saturating_sub(model_status.active),
+        "{label}: get_status must not report duplicate free capacity: {model_status:?}"
+    );
 }
 
 async fn dispatch_for_role(
@@ -1155,6 +1250,133 @@ async fn evict_session_tears_down_taskrun_job_before_reclaiming_slot() {
             .expect("has_session should succeed"),
         "evict_session should still reclaim the task mapping"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(true);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let task_id = seed_running_session_with_task_run(
+        &app_state,
+        "actor evict lifecycle race",
+        "run-actor-evict-race",
+    )
+    .await;
+    let release_after_cancel = Arc::new(Notify::new());
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel,
+        config,
+        blocking_cancel_slot_factory(
+            Duration::from_secs(3600),
+            signal_tx,
+            release_after_cancel.clone(),
+        ),
+    );
+
+    pool.dispatch(&task_id, "/tmp/project", "model-a")
+        .await
+        .expect("initial dispatch should succeed");
+    wait_for_signal(
+        &mut signal_rx,
+        "initial task started",
+        |signal| matches!(signal, RunnerSignal::Started(started) if started == &task_id),
+    )
+    .await;
+    let original_slot = pool
+        .session_for_task(&task_id)
+        .await
+        .expect("session lookup should succeed")
+        .expect("initial task should have an active session")
+        .slot_id;
+    assert_actor_pool_status(&pool, "initial dispatch", 1, 1, 0, 1).await;
+
+    pool.evict_session(&task_id)
+        .await
+        .expect("evict_session should reclaim the mapping even when teardown fails");
+    wait_for_signal(
+        &mut signal_rx,
+        "evicted task observed kill",
+        |signal| matches!(signal, RunnerSignal::Killed(killed) if killed == &task_id),
+    )
+    .await;
+    assert!(
+        runtime
+            .calls()
+            .iter()
+            .any(|call| call == "run-actor-evict-race"),
+        "evict_session must attempt task-run Job teardown before reclaim"
+    );
+    assert!(
+        !pool
+            .has_session(&task_id)
+            .await
+            .expect("has_session should succeed"),
+        "evict_session must synchronously remove the stale task mapping"
+    );
+    assert!(
+        pool.session_for_task(&task_id)
+            .await
+            .expect("session lookup should succeed")
+            .is_none(),
+        "evict_session must remove stale session_for_task state"
+    );
+    assert_actor_pool_status(&pool, "after evict before lifecycle Killed", 1, 1, 0, 0).await;
+
+    pool.dispatch(&task_id, "/tmp/project", "model-a")
+        .await
+        .expect("reclaimed task should redispatch before the old Killed event arrives");
+    wait_for_signal(
+        &mut signal_rx,
+        "redispatched task started",
+        |signal| matches!(signal, RunnerSignal::Started(started) if started == &task_id),
+    )
+    .await;
+    let redispatched_slot = pool
+        .session_for_task(&task_id)
+        .await
+        .expect("session lookup should succeed")
+        .expect("redispatched task should have an active session")
+        .slot_id;
+    assert_ne!(
+        redispatched_slot, original_slot,
+        "redispatch before the old Killed event must not reuse the still-killing slot"
+    );
+    assert_actor_pool_status(&pool, "redispatch before lifecycle Killed", 2, 2, 0, 1).await;
+
+    release_after_cancel.notify_waiters();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let status = pool.get_status().await.expect("status should succeed");
+        let model_status = status
+            .per_model
+            .get("model-a")
+            .expect("model-a should be present");
+        if model_status.free == 1 && model_status.active == 1 && status.running_tasks.len() == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for late Killed event to free exactly one old slot; status={status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        pool.session_for_task(&task_id)
+            .await
+            .expect("session lookup should succeed")
+            .expect("redispatched task mapping must survive stale Killed event")
+            .slot_id,
+        redispatched_slot,
+        "late Killed event for the reclaimed slot must not remove the redispatched mapping"
+    );
+    assert_actor_pool_status(&pool, "after late Killed event", 2, 1, 1, 1).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

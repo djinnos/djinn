@@ -10,6 +10,11 @@ doctest = false
 # Exposes cluster-free slot-pool factory hooks for downstream integration tests.
 test-support = []
 
+[[bin]]
+name = "djinn-skills-manifest"
+path = "src/bin/skills_manifest.rs"
+required-features = []
+
 [dependencies]
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
@@ -43,6 +48,7 @@ libc = "0.2"
 wait-timeout = "0.2"
 base64 = "0.22"
 sha2 = "0.10"
+hex = "0.4"
 globset = "0.4"
 ring = "0.17"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }

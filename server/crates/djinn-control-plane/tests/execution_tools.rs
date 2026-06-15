@@ -67,6 +67,11 @@ async fn execution_kill_task_reaches_real_slot_pool_terminate_session() {
         harness.pool_has_session(&seeded.task_id).await,
         "dispatched task must be visible through the real pool before kill"
     );
+    assert_eq!(
+        harness.running_task_ids().await,
+        vec![seeded.task_id.clone()],
+        "real-pool bridge status should expose the dispatched task before kill"
+    );
     assert_eq!(harness.running_count_for_cap().await, 1);
 
     let response = harness
@@ -291,6 +296,20 @@ impl RealPoolKillHarness {
             .has_session(task_id)
             .await
             .expect("pool has_session should succeed")
+    }
+
+    async fn running_task_ids(&self) -> Vec<String> {
+        let mut task_ids: Vec<_> = self
+            .pool
+            .get_status()
+            .await
+            .expect("pool status should succeed")
+            .running_tasks
+            .into_iter()
+            .map(|task| task.task_id)
+            .collect();
+        task_ids.sort();
+        task_ids
     }
 
     async fn wait_for_pool_session(&self, task_id: &str) {
