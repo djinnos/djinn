@@ -11,12 +11,12 @@ use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::telemetry;
 
 use super::super::{runtime_env_diagnostics, runtime_fs_diagnostics};
-use super::budget::SessionBudgetPolicy;
+use super::budget::{SessionBudgetPolicy, soft_budget_threshold_exceeded};
 use super::error_handling::{
     MAX_COMPACTION_RETRIES, empty_turn_backoff, is_context_length_error,
     is_orphaned_tool_call_error, next_nudge_message, should_retry_after_tool_call_compaction,
-    should_retry_empty_assistant_turn, should_retry_empty_stream, tool_choice_for_turn,
-    wind_down_message,
+    should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
+    tool_choice_for_turn, wind_down_message,
 };
 use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
@@ -153,10 +153,63 @@ fn cumulative_budget_tokens(input_tokens: u64, output_tokens: u64, reasoning_tok
 }
 
 fn hard_token_budget_reached(consumed_tokens: u64, max_tokens: u64, hard_ratio: f64) -> bool {
-    if max_tokens == 0 {
+    if max_tokens == 0 || hard_ratio <= 0.0 {
         return false;
     }
     consumed_tokens as f64 / max_tokens as f64 >= hard_ratio
+}
+
+/// rrdr: one-shot soft-budget converge reminder. On the first crossing of
+/// the resolved soft threshold the helper persists + queues a
+/// `<system-reminder>` asking the agent to converge. The `injected` flag
+/// (owned by `run_reply_loop`) gates every subsequent call so the same
+/// reminder cannot fire again on later turns that still see the threshold
+/// exceeded.
+#[allow(clippy::too_many_arguments)]
+async fn maybe_inject_soft_budget_reminder(
+    injected: &mut bool,
+    session_budget: &super::budget::ResolvedSessionBudget,
+    msg_repo: &SessionMessageRepository,
+    session_id: &str,
+    task_id: &str,
+    role_name: &str,
+    turns: u32,
+    total_tokens_in: u32,
+    total_tokens_out: u32,
+    current_context_tokens: u32,
+    conversation: &mut Conversation,
+) -> bool {
+    if *injected
+        || !soft_budget_threshold_exceeded(
+            session_budget,
+            total_tokens_in,
+            total_tokens_out,
+            current_context_tokens,
+        )
+    {
+        return false;
+    }
+    *injected = true;
+    let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
+    let soft_cap =
+        (session_budget.max_cumulative_tokens as f64) * session_budget.soft_threshold_ratio;
+    tracing::warn!(
+        task_id = %task_id,
+        agent_type = %role_name,
+        turns,
+        total_tokens_in,
+        total_tokens_out,
+        cumulative_spend,
+        max_cumulative_tokens = session_budget.max_cumulative_tokens,
+        soft_cap = soft_cap as u64,
+        soft_threshold_ratio = session_budget.soft_threshold_ratio,
+        "ReplyLoop: soft budget threshold reached — injecting one-shot <system-reminder> \
+         converge directive"
+    );
+    let msg = soft_budget_converge_message();
+    persist_session_message(msg_repo, session_id, task_id, &msg).await;
+    conversation.push(msg);
+    true
 }
 
 pub(crate) struct ReplyLoopContext<'a> {
@@ -399,6 +452,9 @@ pub(crate) async fn run_reply_loop(
         let mut budget_tokens_in: u64 = 0;
         let mut budget_tokens_out: u64 = 0;
         let mut budget_reasoning_tokens: u64 = 0;
+        // rrdr: one-shot soft-budget converge reminder flag — see
+        // `maybe_inject_soft_budget_reminder` for the contract.
+        let mut soft_budget_reminder_injected = false;
 
         loop {
             let budget_tokens_consumed = cumulative_budget_tokens(
@@ -450,6 +506,25 @@ pub(crate) async fn run_reply_loop(
                     return Err(wind_down_reason.unwrap_or(trigger_reason).hard_error(max_turns));
                 }
             }
+
+            // rrdr soft-threshold converge reminder. Runs at the same
+            // pre-turn branch as the G9 step-cap check (BEFORE `turns += 1`)
+            // so the reminder is queued ahead of the next provider stream
+            // and counted in the upcoming turn's input.
+            maybe_inject_soft_budget_reminder(
+                &mut soft_budget_reminder_injected,
+                &session_budget,
+                &msg_repo,
+                session_id,
+                task_id,
+                role_name,
+                turns,
+                total_tokens_in,
+                total_tokens_out,
+                current_context_tokens,
+                conversation,
+            )
+            .await;
             turns += 1;
 
             let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);

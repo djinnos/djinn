@@ -203,6 +203,46 @@ impl SessionBudgetPolicy {
     }
 }
 
+/// Decide whether the reply loop's in-memory usage accumulator has crossed
+/// the resolved soft-threshold for the session budget.
+///
+/// The spend signal is the in-memory `total_tokens_in + total_tokens_out`
+/// from `streaming.rs` — the same accumulator the G9 wind-down / hard
+/// threshold logic also consults. We deliberately do **not** read the
+/// throttled session-row counters (those are observability-only and lag the
+/// live session by up to `TOKEN_FLUSH_INTERVAL_SECS`). The cache-aware
+/// `current_context_tokens` gauge is also accepted as a secondary signal
+/// when the policy reports the model context window (so a single oversized
+/// prompt can still trip the reminder even when the cumulative `input+output`
+/// spend is low) — both signals OR-combine so either crossing the threshold
+/// trips the check.
+///
+/// Returns `false` (no firing) when the policy is degenerate (zero budget or
+/// non-positive ratio) so a misconfigured env never blocks sessions.
+pub(crate) fn soft_budget_threshold_exceeded(
+    budget: &ResolvedSessionBudget,
+    total_tokens_in: u32,
+    total_tokens_out: u32,
+    current_context_tokens: u32,
+) -> bool {
+    if budget.max_cumulative_tokens == 0 || budget.soft_threshold_ratio <= 0.0 {
+        return false;
+    }
+    let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
+    let soft_cap = (budget.max_cumulative_tokens as f64) * budget.soft_threshold_ratio;
+    if (cumulative_spend as f64) >= soft_cap {
+        return true;
+    }
+    if budget.context_window_known && budget.context_window_tokens > 0 {
+        let context_pressure =
+            (current_context_tokens as f64) / (budget.context_window_tokens as f64);
+        if context_pressure >= budget.soft_threshold_ratio {
+            return true;
+        }
+    }
+    false
+}
+
 impl Default for SessionBudgetPolicy {
     fn default() -> Self {
         Self {
