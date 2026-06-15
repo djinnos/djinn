@@ -54,7 +54,7 @@ pub struct SessionForTaskResponse {
 impl DjinnMcpServer {
     /// Kill the active agent session for a task.
     #[tool(
-        description = "Kill the active agent session for a task. Aborts the session, commits WIP, releases worktree and session slot. Safe to call on non-running tasks (no-op)."
+        description = "Kill the active agent session for a task. Aborts the session, commits WIP, releases worktree and session slot. Returns ok:true only after confirming no active pool session remains."
     )]
     pub async fn execution_kill_task(
         &self,
@@ -77,12 +77,35 @@ impl DjinnMcpServer {
             });
         };
 
-        if let Err(e) = pool.kill_session(&p.task_id).await {
+        if let Err(e) = pool.terminate_session(&p.task_id).await {
             return Json(ExecutionKillTaskResponse {
                 ok: false,
                 task_id: Some(p.task_id),
                 error: Some(e.to_string()),
             });
+        }
+
+        match pool.has_session(&p.task_id).await {
+            Ok(false) => {}
+            Ok(true) => {
+                return Json(ExecutionKillTaskResponse {
+                    ok: false,
+                    task_id: Some(p.task_id),
+                    error: Some(
+                        "termination confirmation failed: task still has an active slot pool session"
+                            .to_string(),
+                    ),
+                });
+            }
+            Err(e) => {
+                return Json(ExecutionKillTaskResponse {
+                    ok: false,
+                    task_id: Some(p.task_id),
+                    error: Some(format!(
+                        "termination confirmation failed while checking active session: {e}"
+                    )),
+                });
+            }
         }
 
         Json(ExecutionKillTaskResponse {
@@ -216,14 +239,57 @@ mod tests {
     use crate::bridge::{PoolStatus, RunningTaskInfo, SlotPoolOps};
     use crate::state::McpState;
 
-    #[derive(Default)]
     struct RecordingSlotPool {
         killed: Mutex<Vec<String>>,
+        terminated: Mutex<Vec<String>>,
+        confirmations: Mutex<Vec<String>>,
+        terminate_result: Mutex<Result<(), String>>,
+        has_session_result: Mutex<Result<bool, String>>,
+    }
+
+    impl Default for RecordingSlotPool {
+        fn default() -> Self {
+            Self {
+                killed: Mutex::new(Vec::new()),
+                terminated: Mutex::new(Vec::new()),
+                confirmations: Mutex::new(Vec::new()),
+                terminate_result: Mutex::new(Ok(())),
+                has_session_result: Mutex::new(Ok(false)),
+            }
+        }
     }
 
     impl RecordingSlotPool {
         fn killed(&self) -> Vec<String> {
             self.killed.lock().expect("recording pool mutex").clone()
+        }
+
+        fn terminated(&self) -> Vec<String> {
+            self.terminated
+                .lock()
+                .expect("recording pool mutex")
+                .clone()
+        }
+
+        fn confirmations(&self) -> Vec<String> {
+            self.confirmations
+                .lock()
+                .expect("recording pool mutex")
+                .clone()
+        }
+
+        fn with_terminate_error(message: &str) -> Self {
+            Self {
+                terminate_result: Mutex::new(Err(message.to_string())),
+                ..Self::default()
+            }
+        }
+
+        fn with_has_session_result(result: Result<bool, String>) -> Self {
+            Self {
+                has_session_result: Mutex::new(result),
+                ..Self::default()
+            }
         }
     }
 
@@ -246,22 +312,34 @@ mod tests {
             Ok(())
         }
 
-        async fn terminate_session(&self, _: &str) -> Result<(), String> {
-            Err("RecordingSlotPool::terminate_session not configured for this test".into())
+        async fn terminate_session(&self, task_id: &str) -> Result<(), String> {
+            self.terminated
+                .lock()
+                .expect("recording pool mutex")
+                .push(task_id.to_string());
+            self.terminate_result
+                .lock()
+                .expect("recording pool mutex")
+                .clone()
         }
 
         async fn session_for_task(&self, _: &str) -> Result<Option<RunningTaskInfo>, String> {
             Ok(None)
         }
 
-        async fn has_session(&self, _: &str) -> Result<bool, String> {
-            Ok(false)
+        async fn has_session(&self, task_id: &str) -> Result<bool, String> {
+            self.confirmations
+                .lock()
+                .expect("recording pool mutex")
+                .push(task_id.to_string());
+            self.has_session_result
+                .lock()
+                .expect("recording pool mutex")
+                .clone()
         }
     }
 
-    #[tokio::test]
-    async fn execution_kill_task_routes_through_slot_pool_kill_session() {
-        let pool = Arc::new(RecordingSlotPool::default());
+    fn server_with_pool(pool: Arc<RecordingSlotPool>) -> DjinnMcpServer {
         let state = McpState::new(
             djinn_db::Database::open_in_memory().expect("open in-memory test database"),
             djinn_core::events::EventBus::noop(),
@@ -276,7 +354,13 @@ mod tests {
             Arc::new(crate::state::stubs::StubGitOps),
             Arc::new(crate::state::stubs::StubRepoGraphOps),
         );
-        let server = DjinnMcpServer::new(state);
+        DjinnMcpServer::new(state)
+    }
+
+    #[tokio::test]
+    async fn execution_kill_task_routes_through_terminate_and_confirms_absence() {
+        let pool = Arc::new(RecordingSlotPool::default());
+        let server = server_with_pool(pool.clone());
 
         let Json(response) = server
             .execution_kill_task(Parameters(ExecutionKillTaskParams {
@@ -287,6 +371,82 @@ mod tests {
 
         assert!(response.ok);
         assert_eq!(response.task_id.as_deref(), Some("task-to-kill"));
-        assert_eq!(pool.killed(), vec!["task-to-kill".to_string()]);
+        assert_eq!(response.error, None);
+        assert_eq!(pool.killed(), Vec::<String>::new());
+        assert_eq!(pool.terminated(), vec!["task-to-kill".to_string()]);
+        assert_eq!(pool.confirmations(), vec!["task-to-kill".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn execution_kill_task_returns_false_when_terminate_errors() {
+        let pool = Arc::new(RecordingSlotPool::with_terminate_error(
+            "operator termination failed",
+        ));
+        let server = server_with_pool(pool.clone());
+
+        let Json(response) = server
+            .execution_kill_task(Parameters(ExecutionKillTaskParams {
+                task_id: "task-to-kill".to_string(),
+                project: None,
+            }))
+            .await;
+
+        assert!(!response.ok);
+        assert_eq!(response.task_id.as_deref(), Some("task-to-kill"));
+        assert_eq!(
+            response.error.as_deref(),
+            Some("operator termination failed")
+        );
+        assert_eq!(pool.killed(), Vec::<String>::new());
+        assert_eq!(pool.terminated(), vec!["task-to-kill".to_string()]);
+        assert_eq!(pool.confirmations(), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn execution_kill_task_returns_false_when_confirmation_reports_active_session() {
+        let pool = Arc::new(RecordingSlotPool::with_has_session_result(Ok(true)));
+        let server = server_with_pool(pool.clone());
+
+        let Json(response) = server
+            .execution_kill_task(Parameters(ExecutionKillTaskParams {
+                task_id: "task-to-kill".to_string(),
+                project: None,
+            }))
+            .await;
+
+        assert!(!response.ok);
+        assert_eq!(response.task_id.as_deref(), Some("task-to-kill"));
+        assert_eq!(
+            response.error.as_deref(),
+            Some("termination confirmation failed: task still has an active slot pool session")
+        );
+        assert_eq!(pool.terminated(), vec!["task-to-kill".to_string()]);
+        assert_eq!(pool.confirmations(), vec!["task-to-kill".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn execution_kill_task_returns_false_when_confirmation_errors() {
+        let pool = Arc::new(RecordingSlotPool::with_has_session_result(Err(
+            "bridge unavailable".to_string(),
+        )));
+        let server = server_with_pool(pool.clone());
+
+        let Json(response) = server
+            .execution_kill_task(Parameters(ExecutionKillTaskParams {
+                task_id: "task-to-kill".to_string(),
+                project: None,
+            }))
+            .await;
+
+        assert!(!response.ok);
+        assert_eq!(response.task_id.as_deref(), Some("task-to-kill"));
+        assert_eq!(
+            response.error.as_deref(),
+            Some(
+                "termination confirmation failed while checking active session: bridge unavailable"
+            )
+        );
+        assert_eq!(pool.terminated(), vec!["task-to-kill".to_string()]);
+        assert_eq!(pool.confirmations(), vec!["task-to-kill".to_string()]);
     }
 }

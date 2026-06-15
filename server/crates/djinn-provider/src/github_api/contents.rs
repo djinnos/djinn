@@ -18,8 +18,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::github_api::GitHubApiClient;
 use crate::github_api::transport::handle_rate_limit;
+use crate::github_api::{GitHubApiClient, GitHubWriteErrorInput, github_write_error_envelope};
 
 #[derive(Deserialize)]
 struct RefObject {
@@ -86,6 +86,7 @@ impl GitHubApiClient {
         sha: &str,
     ) -> Result<()> {
         let url = format!("{}/repos/{}/{}/git/refs", self.base_url, owner, repo);
+        let api_path = format!("/repos/{owner}/{repo}/git/refs");
         let body = serde_json::json!({ "ref": ref_name, "sha": sha });
 
         let resp = self
@@ -105,7 +106,15 @@ impl GitHubApiClient {
                     handle_rate_limit(resp).await
                 }
             })
-            .await?;
+            .await
+            .map_err(|err| {
+                let detail = err.to_string();
+                anyhow::Error::new(github_write_error_envelope(
+                    GitHubWriteErrorInput::new("POST", &api_path)
+                        .with_body_or_detail(Some(detail.as_str()))
+                        .with_operation(Some("create_ref")),
+                ))
+            })?;
 
         if resp.status().is_success() {
             return Ok(());
@@ -117,11 +126,21 @@ impl GitHubApiClient {
             if body.contains("already exists") {
                 return Ok(());
             }
-            return Err(anyhow!("create_ref failed (422): {}", body));
+            return Err(anyhow::Error::new(github_write_error_envelope(
+                GitHubWriteErrorInput::new("POST", &api_path)
+                    .with_reqwest_status(Some(StatusCode::UNPROCESSABLE_ENTITY))
+                    .with_body_or_detail(Some(body.as_str()))
+                    .with_operation(Some("create_ref")),
+            )));
         }
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        Err(anyhow!("create_ref failed ({}): {}", status, body))
+        Err(anyhow::Error::new(github_write_error_envelope(
+            GitHubWriteErrorInput::new("POST", &api_path)
+                .with_reqwest_status(Some(status))
+                .with_body_or_detail(Some(body.as_str()))
+                .with_operation(Some("create_ref")),
+        )))
     }
 
     /// Fetch the blob SHA for `path` on `ref_or_branch`, or `Ok(None)` if
