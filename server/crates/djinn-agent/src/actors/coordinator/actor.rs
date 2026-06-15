@@ -736,6 +736,10 @@ impl CoordinatorActor {
                 self.route_loop_guard_planner_intervention(&source_task_id, role, &reason)
                     .await;
             }
+            CoordinatorMessage::ClearPlannedDispatchCompletion { task_id, reason } => {
+                self.clear_planned_dispatch_completion(&task_id, &reason)
+                    .await;
+            }
             CoordinatorMessage::IncrementEscalationCount { task_id, reply } => {
                 match self.increment_durable_escalation_count(&task_id).await {
                     Ok(count) => {

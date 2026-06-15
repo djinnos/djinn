@@ -147,14 +147,18 @@ async fn budget_park_governance_does_not_route_trigger_b_or_touch_breaker_state(
         );
     }
 
+    actor
+        .clear_planned_dispatch_completion(&task_id, "budget_park_test_clear")
+        .await;
+
     assert_eq!(
         actor.dispatch_failure_streak.get(&task_id).copied(),
-        Some(MAX_DISPATCH_FAILURES - 1),
-        "budget-park disposition assertions must not increment toward MAX_DISPATCH_FAILURES"
+        None,
+        "budget-park completion clears stale streak state rather than incrementing toward MAX_DISPATCH_FAILURES"
     );
     assert!(
-        actor.last_dispatched.contains_key(&task_id),
-        "budget-park disposition is not a same-role failure signal"
+        !actor.last_dispatched.contains_key(&task_id),
+        "budget-park completion clears same-role failure attribution before continuation dispatch"
     );
     assert_eq!(
         actor.health.is_available(None, DEFAULT_MODEL_ID),

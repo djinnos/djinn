@@ -697,9 +697,7 @@ pub(crate) async fn run_supervisor_dispatch(
             // and would re-select), matching what `record_stall`/`record_failure`
             // trip on the stall path. We deliberately do NOT reset on
             // Interrupted/Failed/empty runs (those aren't evidence of recovery).
-            if !report.stages_completed.is_empty()
-                && matches!(report_to_terminal_status(&report), TaskRunStatus::Completed)
-            {
+            if terminal_report_feeds_model_success(&report) {
                 app_state
                     .health_tracker
                     .record_success(creator_scope.as_deref(), &model_id);
@@ -782,6 +780,32 @@ pub(crate) async fn run_supervisor_dispatch(
                         retry_after_ms,
                     },
                 );
+            }
+
+            if is_budget_park_report(&report) {
+                match app_state.coordinator().await {
+                    Some(coordinator) => {
+                        if let Err(e) = coordinator
+                            .clear_planned_dispatch_completion(
+                                &task.id,
+                                "budget_park_planned_completion_clear",
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                error = %e,
+                                "supervisor dispatch: failed to clear budget-park dispatch state"
+                            );
+                        }
+                    }
+                    None => {
+                        tracing::debug!(
+                            task_id = %task.short_id,
+                            "supervisor dispatch: no coordinator handle; budget-park dispatch state clear skipped"
+                        );
+                    }
+                }
             }
 
             if let TaskRunOutcome::LoopGuardTripped {
@@ -911,6 +935,19 @@ fn provider_failure_class_for_report(report: &TaskRunReport) -> Option<ProviderF
         } => Some(*class),
         _ => None,
     }
+}
+
+fn is_budget_park_report(report: &TaskRunReport) -> bool {
+    matches!(
+        &report.outcome,
+        TaskRunOutcome::Parked { reason, .. } if reason == "budget"
+    )
+}
+
+fn terminal_report_feeds_model_success(report: &TaskRunReport) -> bool {
+    !report.stages_completed.is_empty()
+        && matches!(report_to_terminal_status(report), TaskRunStatus::Completed)
+        && !is_budget_park_report(report)
 }
 
 async fn persist_loop_guard_activity(
@@ -1153,6 +1190,18 @@ mod tests {
             "loop-guard trips must not feed the provider breaker"
         );
 
+        let ordinary_completed = report(
+            "closed-run",
+            vec![RoleKind::Worker],
+            TaskRunOutcome::Closed {
+                reason: "done".into(),
+            },
+        );
+        assert!(
+            terminal_report_feeds_model_success(&ordinary_completed),
+            "ordinary completed runs still record model-health success"
+        );
+
         for (outcome, label) in [
             (
                 TaskRunOutcome::Parked {
@@ -1185,6 +1234,10 @@ mod tests {
                 provider_failure_class_for_report(&budget_report),
                 None,
                 "{label} must not feed provider breaker failure accounting"
+            );
+            assert!(
+                !terminal_report_feeds_model_success(&budget_report),
+                "{label} must not feed model-health success accounting either"
             );
         }
 
