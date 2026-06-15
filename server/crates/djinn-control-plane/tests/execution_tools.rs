@@ -1,8 +1,9 @@
 //! Contract tests for `execution_*` MCP tools.
 //!
 //! `execution_kill_task` with a nonexistent task routes through the stub
-//! `SlotPoolOps::kill_session`, which returns an error — producing the exact
-//! `ok: false, error: Some(_)` envelope the test asserts. No real pool needed.
+//! `SlotPoolOps::terminate_session`, which returns an error — producing the
+//! exact `ok: false, error: Some(_)` envelope the test asserts. No real pool
+//! needed.
 
 use djinn_control_plane::test_support::McpTestHarness;
 use serde_json::json;
