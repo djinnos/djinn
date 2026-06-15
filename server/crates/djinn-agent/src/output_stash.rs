@@ -449,6 +449,16 @@ fn durable_write(
     let Some(root) = durable_root() else {
         return;
     };
+    durable_write_at(&root, tool_use_id, tool_name, owner_session_id, full_text);
+}
+
+fn durable_write_at(
+    root: &Path,
+    tool_use_id: &str,
+    tool_name: &str,
+    owner_session_id: Option<&str>,
+    full_text: &str,
+) {
     let content_hash = sha256_hex(full_text.as_bytes());
 
     let blobs_dir = root.join("blobs");
@@ -459,13 +469,13 @@ fn durable_write(
 
     // Content-addressed blob: write once (skip if it already exists — identical
     // content hashes to the same name).
-    let blob = blob_path(&root, &content_hash);
+    let blob = blob_path(root, &content_hash);
     if !blob.exists() {
         let _ = atomic_write(&blobs_dir, &blob, full_text.as_bytes());
     }
 
     // Id pointer: versioned metadata + content hash.
-    let pointer = id_pointer_path(&root, tool_use_id);
+    let pointer = id_pointer_path(root, tool_use_id);
     let record =
         DurablePointerRecord::new_v1(tool_name, &content_hash, owner_session_id, unix_time_secs());
     let line = record.serialize();
@@ -508,11 +518,15 @@ fn atomic_write(
 /// human-readable message — never a panic.
 fn durable_read(tool_use_id: &str) -> Result<(String, String), String> {
     let root = durable_root().ok_or("durable stash unavailable (no cache dir)")?;
-    let pointer = id_pointer_path(&root, tool_use_id);
+    durable_read_at(&root, tool_use_id)
+}
+
+fn durable_read_at(root: &Path, tool_use_id: &str) -> Result<(String, String), String> {
+    let pointer = id_pointer_path(root, tool_use_id);
     let raw = std::fs::read_to_string(&pointer)
         .map_err(|_| format!("no durable stash for tool_use_id \"{tool_use_id}\""))?;
     let record = parse_durable_pointer(&raw)?;
-    let blob = blob_path(&root, &record.content_hash);
+    let blob = blob_path(root, &record.content_hash);
     let full_text = std::fs::read_to_string(&blob)
         .map_err(|_| "durable stash blob missing or unreadable".to_string())?;
     Ok((record.tool_name, full_text))
@@ -522,6 +536,8 @@ pub struct OutputStash {
     entries: VecDeque<StashedOutput>,
     total_bytes: usize,
     owner_session_id: Option<String>,
+    #[cfg(test)]
+    durable_root_override: Option<PathBuf>,
 }
 
 impl OutputStash {
@@ -530,6 +546,8 @@ impl OutputStash {
             entries: VecDeque::new(),
             total_bytes: 0,
             owner_session_id: None,
+            #[cfg(test)]
+            durable_root_override: None,
         }
     }
 
@@ -538,6 +556,21 @@ impl OutputStash {
             entries: VecDeque::new(),
             total_bytes: 0,
             owner_session_id: Some(session_id.into()),
+            #[cfg(test)]
+            durable_root_override: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_session_id_and_durable_root(
+        session_id: impl Into<String>,
+        durable_root: PathBuf,
+    ) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            total_bytes: 0,
+            owner_session_id: Some(session_id.into()),
+            durable_root_override: Some(durable_root),
         }
     }
 
@@ -545,6 +578,25 @@ impl OutputStash {
     /// exceeded. The blob is also persisted durably (content-addressed) so the
     /// navigation tools survive an in-memory eviction, `clear`, or restart.
     pub fn insert(&mut self, tool_use_id: String, tool_name: String, full_text: String) {
+        #[cfg(test)]
+        if let Some(root) = self.durable_root_override.as_deref() {
+            durable_write_at(
+                root,
+                &tool_use_id,
+                &tool_name,
+                self.owner_session_id.as_deref(),
+                &full_text,
+            );
+        } else {
+            durable_write(
+                &tool_use_id,
+                &tool_name,
+                self.owner_session_id.as_deref(),
+                &full_text,
+            );
+        }
+
+        #[cfg(not(test))]
         durable_write(
             &tool_use_id,
             &tool_name,
@@ -580,7 +632,16 @@ impl OutputStash {
         }
         // In-memory miss: try the durable store, but surface the familiar
         // not-found message if disk has nothing either.
-        durable_read(tool_use_id).map_err(|_| {
+        #[cfg(test)]
+        let durable = if let Some(root) = self.durable_root_override.as_deref() {
+            durable_read_at(root, tool_use_id)
+        } else {
+            durable_read(tool_use_id)
+        };
+        #[cfg(not(test))]
+        let durable = durable_read(tool_use_id);
+
+        durable.map_err(|_| {
             format!(
                 "No stashed output for tool_use_id \"{tool_use_id}\". \
                  Stashed outputs are cleared after context compaction and \
@@ -1493,5 +1554,190 @@ mod tests {
         );
         assert_eq!(retry_report.pointers_deleted, 1);
         assert!(!pointer.exists(), "next sweep retries retained failed work");
+    }
+
+    #[test]
+    fn output_view_and_grep_read_through_survives_gc_for_active_session() {
+        let root = gc_root("active-read-through-regression");
+        let mut stash = OutputStash::with_session_id_and_durable_root(
+            "gc-active-read-through-session",
+            root.clone(),
+        );
+        let body = "alpha before gc\nneedle stays searchable\nomega after gc\n";
+        stash.insert(
+            "gc-active-read-through-tool".into(),
+            "shell".into(),
+            body.into(),
+        );
+
+        let pointer_path = id_pointer_path(&root, "gc-active-read-through-tool");
+        let record = parse_durable_pointer(
+            &std::fs::read_to_string(&pointer_path).expect("durable pointer written"),
+        )
+        .expect("durable pointer parses");
+        let blob = blob_path(&root, &record.content_hash);
+        assert!(pointer_path.exists());
+        assert!(blob.exists());
+
+        stash.clear();
+        let before_gc = stash
+            .view("gc-active-read-through-tool", 0, 10)
+            .expect("durable view resolves before GC");
+        assert!(before_gc.contains("needle stays searchable"));
+
+        let report = gc_durable_output_stash(&root, unix_time_secs() + 1_000, |session_id| {
+            if session_id == "gc-active-read-through-session" {
+                Ok(Some(gc_session(SessionStatus::Running, None)))
+            } else {
+                Ok(None)
+            }
+        });
+
+        assert!(report.is_success(), "unexpected GC errors: {report:?}");
+        assert!(pointer_path.exists(), "active session pointer is retained");
+        assert!(blob.exists(), "active session blob is retained");
+
+        let after_gc = stash
+            .view("gc-active-read-through-tool", 0, 10)
+            .expect("durable view resolves after GC");
+        assert_eq!(before_gc, after_gc);
+
+        let grepped = stash
+            .grep("gc-active-read-through-tool", "needle", 1)
+            .expect("durable grep resolves after GC");
+        assert!(grepped.contains("needle stays searchable"));
+        assert!(grepped.contains("alpha before gc"));
+        assert!(grepped.contains("omega after gc"));
+    }
+
+    #[test]
+    fn gc_retains_recent_terminal_output_but_prunes_expired_terminal_read_through() {
+        let root = gc_root("terminal-retention-read-through-regression");
+
+        let mut recent_stash = OutputStash::with_session_id_and_durable_root(
+            "gc-recent-terminal-session",
+            root.clone(),
+        );
+        recent_stash.insert(
+            "gc-recent-terminal-tool".into(),
+            "shell".into(),
+            "recent terminal output\nretained by retention window\n".into(),
+        );
+        recent_stash.clear();
+
+        let mut expired_stash = OutputStash::with_session_id_and_durable_root(
+            "gc-expired-terminal-session",
+            root.clone(),
+        );
+        expired_stash.insert(
+            "gc-expired-terminal-tool".into(),
+            "shell".into(),
+            "expired terminal output\nshould be pruned\n".into(),
+        );
+        expired_stash.clear();
+
+        let recent_pointer = id_pointer_path(&root, "gc-recent-terminal-tool");
+        let recent_record = parse_durable_pointer(
+            &std::fs::read_to_string(&recent_pointer).expect("recent pointer written"),
+        )
+        .expect("recent pointer parses");
+        let recent_blob = blob_path(&root, &recent_record.content_hash);
+        let expired_pointer = id_pointer_path(&root, "gc-expired-terminal-tool");
+        let expired_record = parse_durable_pointer(
+            &std::fs::read_to_string(&expired_pointer).expect("expired pointer written"),
+        )
+        .expect("expired pointer parses");
+        let expired_blob = blob_path(&root, &expired_record.content_hash);
+
+        assert!(
+            recent_stash
+                .view("gc-recent-terminal-tool", 0, 10)
+                .unwrap()
+                .contains("retained by retention window")
+        );
+        assert!(
+            expired_stash
+                .view("gc-expired-terminal-tool", 0, 10)
+                .unwrap()
+                .contains("should be pruned")
+        );
+
+        let cutoff = unix_time_secs() + 1_000;
+        let report = gc_durable_output_stash(&root, cutoff, |session_id| match session_id {
+            "gc-recent-terminal-session" => Ok(Some(gc_session(
+                SessionStatus::Completed,
+                Some(cutoff.saturating_add(1)),
+            ))),
+            "gc-expired-terminal-session" => Ok(Some(gc_session(
+                SessionStatus::Failed,
+                Some(cutoff.saturating_sub(1)),
+            ))),
+            _ => Ok(None),
+        });
+
+        assert!(report.is_success(), "unexpected GC errors: {report:?}");
+        assert!(
+            recent_pointer.exists(),
+            "recent terminal pointer is retained"
+        );
+        assert!(recent_blob.exists(), "recent terminal blob is retained");
+        assert!(
+            recent_stash
+                .grep("gc-recent-terminal-tool", "retained", 0)
+                .expect("retained terminal grep still resolves")
+                .contains("retained by retention window")
+        );
+
+        assert!(
+            !expired_pointer.exists(),
+            "expired terminal pointer is pruned"
+        );
+        assert!(!expired_blob.exists(), "expired terminal blob is pruned");
+        assert!(
+            expired_stash
+                .view("gc-expired-terminal-tool", 0, 10)
+                .unwrap_err()
+                .contains("No stashed output")
+        );
+    }
+
+    #[test]
+    fn in_memory_output_still_wins_when_durable_pointer_is_stale() {
+        let root = gc_root("in-memory-first-regression");
+        let mut stash =
+            OutputStash::with_session_id_and_durable_root("gc-memory-first-session", root.clone());
+        stash.insert(
+            "gc-memory-first-tool".into(),
+            "shell".into(),
+            "fresh in-memory output\n".into(),
+        );
+
+        let stale_hash = write_gc_blob(&root, "stale durable output\n");
+        let pointer_path = id_pointer_path(&root, "gc-memory-first-tool");
+        atomic_write(
+            &root.join("ids"),
+            &pointer_path,
+            DurablePointerRecord::new_v1(
+                "shell",
+                &stale_hash,
+                Some("gc-memory-first-session"),
+                unix_time_secs(),
+            )
+            .serialize()
+            .as_bytes(),
+        )
+        .unwrap();
+
+        let fast_path = stash
+            .view("gc-memory-first-tool", 0, 10)
+            .expect("in-memory view resolves");
+        assert!(fast_path.contains("fresh in-memory output"));
+        assert!(!fast_path.contains("stale durable output"));
+
+        stash.clear();
+        let durable_path = stash
+            .view("gc-memory-first-tool", 0, 10)
+            .expect("durable fallback resolves after clear");
+        assert!(durable_path.contains("stale durable output"));
     }
 }
