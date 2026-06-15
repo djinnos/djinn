@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::acting_user;
-use crate::tools::tool_error::ToolError;
+use crate::tools::tool_error::{ErrorClass, ToolError};
 use djinn_core::models::{Model, Provider};
 use djinn_provider::catalog::builtin;
 use djinn_provider::catalog::health::ModelHealth;
@@ -992,6 +992,7 @@ impl DjinnMcpServer {
                 // failure and act on the hint instead of retrying the same id.
                 let error = ToolError::new(format!("model '{model_id}' not found in catalog"))
                     .with_http_status(404)
+                    .with_error_class(ErrorClass::NotFound)
                     .with_method("provider_model_lookup")
                     .with_path(model_id.clone())
                     .with_hint(
