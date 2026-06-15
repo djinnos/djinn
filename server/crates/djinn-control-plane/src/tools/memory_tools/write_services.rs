@@ -32,6 +32,17 @@ pub(super) async fn maybe_update_singleton_note(
                 .await
             {
                 Ok(note) => {
+                    let note = match params.retrieval_anchor.as_deref() {
+                        Some(anchor) => {
+                            match repo.update_retrieval_anchor(&note.id, Some(anchor)).await {
+                                Ok(note) => note,
+                                Err(error) => {
+                                    return Some(MemoryNoteResponse::error(error.to_string()));
+                                }
+                            }
+                        }
+                        None => note,
+                    };
                     schedule_summary_regeneration(server, &note.id);
                     // No on-disk file anymore — file_path is the empty string.
                     MemoryNoteResponse::from_note(&note)
@@ -58,7 +69,7 @@ pub(super) async fn create_note(
         .unwrap_or_else(|| "[]".to_string());
 
     let create_result = if params.scope_paths.is_some() {
-        repo.create_with_scope(
+        repo.create_with_scope_and_retrieval_anchor(
             project_id,
             &params.title,
             &params.content,
@@ -66,16 +77,18 @@ pub(super) async fn create_note(
             params.status.as_deref(),
             tags_json,
             &scope_paths_json,
+            params.retrieval_anchor.as_deref(),
         )
         .await
     } else {
-        repo.create_with_status(
+        repo.create_with_status_and_retrieval_anchor(
             project_id,
             &params.title,
             &params.content,
             &params.note_type,
             params.status.as_deref(),
             tags_json,
+            params.retrieval_anchor.as_deref(),
         )
         .await
     };
