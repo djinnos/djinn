@@ -12850,13 +12850,13 @@ expression: signatures
             "model_id": {
               "type": "string"
             },
-            "project_id": {
-              "description": "`None` for chat sessions (global, user-scoped); `Some(_)` for every\nother agent type. See `SessionRecord::project_id`.",
+            "parked_reason": {
+              "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
               "nullable": true,
               "type": "string"
             },
-            "parked_reason": {
-              "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
+            "project_id": {
+              "description": "`None` for chat sessions (global, user-scoped); `Some(_)` for every\nother agent type. See `SessionRecord::project_id`.",
               "nullable": true,
               "type": "string"
             },
@@ -13048,13 +13048,13 @@ expression: signatures
             "model_id": {
               "type": "string"
             },
-            "project_id": {
-              "description": "`None` for chat sessions (global, user-scoped); `Some(_)` for every\nother agent type. See `SessionRecord::project_id`.",
+            "parked_reason": {
+              "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
               "nullable": true,
               "type": "string"
             },
-            "parked_reason": {
-              "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
+            "project_id": {
+              "description": "`None` for chat sessions (global, user-scoped); `Some(_)` for every\nother agent type. See `SessionRecord::project_id`.",
               "nullable": true,
               "type": "string"
             },
@@ -13249,6 +13249,11 @@ expression: signatures
           "type": "string"
         },
         "model_id": {
+          "type": "string"
+        },
+        "parked_reason": {
+          "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
+          "nullable": true,
           "type": "string"
         },
         "project_id": {
@@ -14413,13 +14418,13 @@ expression: signatures
             "model_id": {
               "type": "string"
             },
-            "project_id": {
-              "description": "`None` for chat sessions (global, user-scoped); `Some(_)` for every\nother agent type. See `SessionRecord::project_id`.",
+            "parked_reason": {
+              "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
               "nullable": true,
               "type": "string"
             },
-            "parked_reason": {
-              "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
+            "project_id": {
+              "description": "`None` for chat sessions (global, user-scoped); `Some(_)` for every\nother agent type. See `SessionRecord::project_id`.",
               "nullable": true,
               "type": "string"
             },
