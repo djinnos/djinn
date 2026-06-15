@@ -235,6 +235,41 @@ describe("KanbanBoard", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("treats legacy PR-completed tasks (no merge SHA) as merged, but not force-closed ones", () => {
+    const tasks: Task[] = [
+      makeTask({
+        id: "t-legacy-merged",
+        title: "Legacy merged task",
+        status: "closed",
+        issue_type: "task",
+        epic_id: epicA.id,
+        pr_url: "https://github.com/example/repo/pull/7",
+        close_reason: "completed",
+        // No merge_commit_sha — closed before the SHA was persisted.
+      }),
+      makeTask({
+        id: "t-force-closed",
+        title: "Force closed unmerged task",
+        status: "closed",
+        issue_type: "task",
+        epic_id: epicA.id,
+        pr_url: "https://github.com/example/repo/pull/8",
+        close_reason: "force_closed",
+      }),
+    ];
+
+    render(
+      <KanbanBoard tasks={tasks} epics={new Map([[epicA.id, epicA]])} />,
+    );
+
+    const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
+    expect(doneCol).toHaveTextContent("1");
+    expect(screen.getByText("Legacy merged task")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Force closed unmerged task"),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows empty board state when no tasks", () => {
     render(<KanbanBoard tasks={[]} epics={new Map()} />);
 

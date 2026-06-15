@@ -842,6 +842,22 @@ impl SlotPool {
         self.free_slots.get(model_id).cloned().unwrap_or_default()
     }
 
+    pub(super) fn test_free_slots_by_model(&self) -> HashMap<String, Vec<usize>> {
+        self.free_slots.clone()
+    }
+
+    pub(super) fn test_retired_slots(&self) -> HashSet<usize> {
+        self.retired_slots.clone()
+    }
+
+    pub(super) fn test_slot_states(&self) -> HashMap<usize, SlotState> {
+        self.slot_states.clone()
+    }
+
+    pub(super) fn test_task_slots(&self) -> HashMap<String, usize> {
+        self.task_to_slot.clone()
+    }
+
     /// Raw push onto the free list, bypassing `mark_slot_free` — used to inject
     /// the exact desync (`evict_session`'s old "push regardless" + the Killed
     /// event pushing again) that produced a duplicate/stale entry.
