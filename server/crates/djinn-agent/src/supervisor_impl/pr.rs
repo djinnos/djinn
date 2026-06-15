@@ -236,11 +236,11 @@ pub(crate) async fn supervisor_pr_open(
                 .await
             {
                 Ok(reopened) => reopened,
-                Err(e) => {
+                Err(reopen_err) => {
                     tracing::warn!(
                         task_id = %task.id,
                         pr_number = existing.number,
-                        error = %e,
+                        error = %render_github_write_error("GitHub PR reopen failed", &reopen_err),
                         "supervisor PR-open: failed to reopen closed PR; creating a new one"
                     );
                     match github_client
@@ -260,7 +260,11 @@ pub(crate) async fn supervisor_pr_open(
                     {
                         Ok(pr) => pr,
                         Err(e) => {
-                            let reason = render_github_write_error("GitHub PR creation failed", &e);
+                            let create_error =
+                                render_github_write_error("GitHub PR creation failed", &e);
+                            let reopen_error =
+                                render_github_write_error("GitHub PR reopen failed", &reopen_err);
+                            let reason = format!("{create_error}; prior {reopen_error}");
                             return TaskRunOutcome::Failed {
                                 stage: "pr_open".into(),
                                 provider_failure: None,
@@ -741,6 +745,41 @@ mod tests {
         assert!(rendered.contains("\"status\":\"422\""));
         assert!(rendered.contains("pull request already exists"));
         assert!(rendered.contains("Adopt/use the existing pull request"));
+    }
+
+    #[test]
+    fn supervisor_pr_reopen_then_creation_failure_preserves_both_envelopes() {
+        let reopen_err: anyhow::Error = ToolError::new("reopen_pull_request failed")
+            .with_error_class(ErrorClass::Permission)
+            .with_method("PATCH")
+            .with_path("/repos/djinnos/djinn/pulls/7")
+            .with_http_status(403)
+            .with_body("Resource not accessible by integration")
+            .with_hint("Check that the GitHub App installation can edit pull requests.")
+            .into();
+        let create_err: anyhow::Error = ToolError::new("create_pull_request failed")
+            .with_error_class(ErrorClass::Validation)
+            .with_method("POST")
+            .with_path("/repos/djinnos/djinn/pulls")
+            .with_http_status(422)
+            .with_body("Validation Failed: No commits between main and task/demo")
+            .with_hint("Push commits to the head branch before creating a PR.")
+            .into();
+
+        let rendered = format!(
+            "{}; prior {}",
+            render_github_write_error("GitHub PR creation failed", &create_err),
+            render_github_write_error("GitHub PR reopen failed", &reopen_err),
+        );
+
+        assert!(rendered.contains("GitHub PR creation failed"));
+        assert!(rendered.contains("GitHub PR reopen failed"));
+        assert!(rendered.contains("\"error_class\":\"validation\""));
+        assert!(rendered.contains("\"error_class\":\"permission\""));
+        assert!(rendered.contains("\"method\":\"POST\""));
+        assert!(rendered.contains("\"method\":\"PATCH\""));
+        assert!(rendered.contains("No commits between main and task/demo"));
+        assert!(rendered.contains("Resource not accessible by integration"));
     }
 
     // ── count_met_acceptance_criteria (D3b evidence sourcing) ───────────────

@@ -2,6 +2,8 @@ use anyhow::Error;
 use djinn_core::tool_error::ToolError;
 use serde_json::Value;
 
+const ENVELOPE_DETAIL_LIMIT: usize = 240;
+
 /// Render typed GitHub write envelopes for agent/operator-facing text.
 ///
 /// Provider write paths return [`ToolError`] envelopes via `anyhow`.  This
@@ -13,6 +15,18 @@ pub(crate) fn render_github_write_error(prefix: &str, err: &Error) -> String {
         Some(envelope) => format!("{prefix}: {}", compact_json_like_envelope(envelope)),
         None => format!("{prefix}: {err}"),
     }
+}
+
+fn bounded_excerpt(detail: &str) -> String {
+    let normalized = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::new();
+    for ch in normalized.chars().take(ENVELOPE_DETAIL_LIMIT) {
+        out.push(ch);
+    }
+    if normalized.chars().count() > ENVELOPE_DETAIL_LIMIT {
+        out.push('…');
+    }
+    out
 }
 
 pub(crate) fn github_write_envelope(err: &Error) -> Option<&ToolError> {
@@ -35,8 +49,16 @@ pub(crate) fn compact_json_like_envelope(envelope: &ToolError) -> String {
     if let Some(status) = &envelope.status {
         value.insert("status".to_string(), Value::String(status.clone()));
     }
-    if let Some(body) = &envelope.body {
-        value.insert("body".to_string(), Value::String(body.clone()));
+    match envelope.body.as_deref() {
+        Some(body) => {
+            value.insert("body".to_string(), Value::String(bounded_excerpt(body)));
+        }
+        None => {
+            value.insert(
+                "detail".to_string(),
+                Value::String(bounded_excerpt(&envelope.error)),
+            );
+        }
     }
     if let Some(hint) = &envelope.hint {
         value.insert("hint".to_string(), Value::String(hint.clone()));
@@ -88,5 +110,43 @@ mod tests {
         assert!(rendered.contains(r#"status":"405"#));
         assert!(rendered.contains("conversation must be resolved"));
         assert!(rendered.contains("Resolve review conversations"));
+    }
+
+    #[test]
+    fn rendering_bounds_body_excerpt_even_when_envelope_body_is_raw() {
+        let raw = "x".repeat(400);
+        let err: anyhow::Error = ToolError::new("create_pull_request failed")
+            .with_error_class(ErrorClass::Validation)
+            .with_method("POST")
+            .with_path("/repos/o/r/pulls")
+            .with_http_status(422)
+            .with_body(raw)
+            .into();
+
+        let rendered = render_github_write_error("GitHub PR creation failed", &err);
+
+        assert!(rendered.contains(r#"error_class":"validation"#));
+        assert!(rendered.contains(r#"body":"#));
+        assert!(rendered.contains('…'));
+        assert!(
+            !rendered.contains(&"x".repeat(300)),
+            "agent-facing envelope body must stay compact"
+        );
+    }
+
+    #[test]
+    fn rendering_uses_detail_excerpt_when_body_is_absent() {
+        let err: anyhow::Error = ToolError::new("status-less GitHub transport failure")
+            .with_error_class(ErrorClass::Internal)
+            .with_method("POST")
+            .with_path("/graphql")
+            .with_hint("Inspect transport logs before retrying.")
+            .into();
+
+        let rendered = render_github_write_error("GitHub auto-merge enable failed", &err);
+
+        assert!(rendered.contains(r#"error_class":"internal"#));
+        assert!(rendered.contains(r#"detail":"status-less GitHub transport failure"#));
+        assert!(rendered.contains("Inspect transport logs"));
     }
 }
