@@ -1,6 +1,6 @@
 use anyhow::Error;
-use djinn_core::tool_error::ToolError;
-use djinn_provider::github_api::GitHubApiError;
+use djinn_core::tool_error::{ErrorClass, ToolError};
+use djinn_provider::github_api::{GitHubApiError, GitHubErrorSource};
 use serde_json::Value;
 
 const ENVELOPE_DETAIL_LIMIT: usize = 240;
@@ -16,32 +16,44 @@ pub(crate) fn render_github_write_error(
     err: &(impl GithubWriteError + ?Sized),
 ) -> String {
     match err.github_write_envelope() {
-        Some(envelope) => format!("{prefix}: {}", compact_json_like_envelope(envelope)),
+        Some(envelope) => format!("{prefix}: {}", compact_json_like_envelope(&envelope)),
         None => format!("{prefix}: {}", err.display_string()),
     }
 }
 
 pub(crate) trait GithubWriteError {
-    fn github_write_envelope(&self) -> Option<&ToolError>;
+    fn github_write_envelope(&self) -> Option<ToolError>;
     fn github_write_body(&self) -> Option<&str>;
     fn github_write_status(&self) -> Option<u16>;
     fn display_string(&self) -> String;
 }
 
 impl GithubWriteError for Error {
-    fn github_write_envelope(&self) -> Option<&ToolError> {
-        self.downcast_ref::<ToolError>()
+    fn github_write_envelope(&self) -> Option<ToolError> {
+        if let Some(envelope) = self.downcast_ref::<ToolError>() {
+            return Some(envelope.clone());
+        }
+        self.downcast_ref::<GitHubApiError>()
+            .map(github_api_error_envelope)
     }
 
     fn github_write_body(&self) -> Option<&str> {
-        self.github_write_envelope()
-            .map(|envelope| envelope.body.as_deref().unwrap_or(&envelope.error))
+        if let Some(envelope) = self.downcast_ref::<ToolError>() {
+            return Some(envelope.body.as_deref().unwrap_or(&envelope.error));
+        }
+        self.downcast_ref::<GitHubApiError>()
+            .map(|err| err.body.as_str())
     }
 
     fn github_write_status(&self) -> Option<u16> {
-        self.github_write_envelope()
-            .and_then(|envelope| envelope.status.as_deref())
-            .and_then(|status| status.parse().ok())
+        if let Some(envelope) = self.downcast_ref::<ToolError>() {
+            return envelope
+                .status
+                .as_deref()
+                .and_then(|status| status.parse().ok());
+        }
+        self.downcast_ref::<GitHubApiError>()
+            .and_then(|err| err.status.map(|status| status.as_u16()))
     }
 
     fn display_string(&self) -> String {
@@ -50,8 +62,8 @@ impl GithubWriteError for Error {
 }
 
 impl GithubWriteError for GitHubApiError {
-    fn github_write_envelope(&self) -> Option<&ToolError> {
-        None
+    fn github_write_envelope(&self) -> Option<ToolError> {
+        Some(github_api_error_envelope(self))
     }
 
     fn github_write_body(&self) -> Option<&str> {
@@ -64,6 +76,85 @@ impl GithubWriteError for GitHubApiError {
 
     fn display_string(&self) -> String {
         self.to_string()
+    }
+}
+
+fn github_api_error_envelope(err: &GitHubApiError) -> ToolError {
+    let mut envelope = ToolError::new(format!("{} failed", err.method))
+        .with_error_class(classify_github_api_error(err))
+        .with_method(err.method)
+        .with_path(err.path.clone())
+        .with_body(err.body.clone())
+        .with_hint(github_api_error_hint(err));
+    if let Some(status) = err.status {
+        envelope = envelope.with_http_status(status.as_u16());
+    }
+    envelope
+}
+
+fn classify_github_api_error(err: &GitHubApiError) -> ErrorClass {
+    match err.source {
+        GitHubErrorSource::Unauthenticated => return ErrorClass::Permission,
+        GitHubErrorSource::RateLimited => return ErrorClass::RateLimited,
+        GitHubErrorSource::Transport if is_rate_limit_body(err) => return ErrorClass::RateLimited,
+        GitHubErrorSource::Transport => return ErrorClass::Internal,
+        GitHubErrorSource::GraphQL => return classify_graphql_github_error(err),
+        GitHubErrorSource::Http => {}
+    }
+
+    match err.status.map(|status| status.as_u16()) {
+        Some(400 | 405 | 422) => ErrorClass::Validation,
+        Some(401 | 403) => ErrorClass::Permission,
+        Some(404) => ErrorClass::NotFound,
+        Some(409) => ErrorClass::ConflictRecoverable,
+        Some(429) => ErrorClass::RateLimited,
+        Some(500..=599) => ErrorClass::Transient,
+        _ => ErrorClass::Internal,
+    }
+}
+
+fn classify_graphql_github_error(err: &GitHubApiError) -> ErrorClass {
+    let body = err.body.to_ascii_lowercase();
+    if body.contains("rate limit") || body.contains("ratelimit") {
+        ErrorClass::RateLimited
+    } else if body.contains("forbidden") || body.contains("unauthorized") {
+        ErrorClass::Permission
+    } else if body.contains("not found") {
+        ErrorClass::NotFound
+    } else if body.contains("unprocessable")
+        || body.contains("already in the queue")
+        || body.contains("auto merge is not allowed")
+        || body.contains("not mergeable")
+    {
+        ErrorClass::Validation
+    } else {
+        ErrorClass::Internal
+    }
+}
+
+fn is_rate_limit_body(err: &GitHubApiError) -> bool {
+    let body = err.body.to_ascii_lowercase();
+    body.contains("rate limit") || body.contains("ratelimit") || body.contains("x-ratelimit")
+}
+
+fn github_api_error_hint(err: &GitHubApiError) -> &'static str {
+    let error_class = classify_github_api_error(err);
+    if is_rate_limit_body(err) || error_class == ErrorClass::RateLimited {
+        return "Wait for the GitHub rate limit window before retrying.";
+    }
+    let body = err.body.to_ascii_lowercase();
+    if body.contains("merge queue") || body.contains("already in the queue") {
+        "The PR appears to be delegated to GitHub's merge queue; adopt the queue state instead of retrying the write."
+    } else if body.contains("conversation") && body.contains("resolved") {
+        "Resolve outstanding review conversations before retrying the merge."
+    } else if err.status.map(|status| status.as_u16()) == Some(409) {
+        "Refresh the PR state and retry only after the branch or merge conflict changes."
+    } else if error_class == ErrorClass::Permission {
+        "Check GitHub installation permissions or refresh authentication before retrying."
+    } else if error_class == ErrorClass::Transient {
+        "Retry after the transient GitHub service failure clears."
+    } else {
+        "Inspect the structured GitHub write envelope before retrying."
     }
 }
 
