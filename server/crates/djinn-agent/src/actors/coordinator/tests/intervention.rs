@@ -171,7 +171,7 @@ async fn budget_park_governance_does_not_route_trigger_b_or_touch_breaker_state(
         "budget parks must not seed provider-failure side-channel state"
     );
     assert!(
-        actor.dispatch_cooldowns.get(&task_id).is_none(),
+        !actor.dispatch_cooldowns.contains_key(&task_id),
         "budget parks must not create dispatch-failure cooldown state"
     );
 }
