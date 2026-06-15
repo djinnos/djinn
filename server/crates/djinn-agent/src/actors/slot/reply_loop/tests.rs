@@ -1,4 +1,10 @@
-use super::error_handling::supports_tool_choice_required;
+use super::error_handling::{BudgetWindDownIgnored, supports_tool_choice_required};
+// djinn:allow-oversize — integration tests for the entire reply_loop module.
+// The file already exceeded the 1500-line / 51.2KB size-guard thresholds
+// before the rrdr soft-budget converge reminder tests were added; the marker
+// keeps the size guard from re-flagging the pre-existing oversize while
+// leaving the new tests in their natural location alongside the related
+// reply-loop coverage.
 use super::loop_guard::{LoopGuardError, LoopGuardKind};
 use super::persistence::serialize_llm_input;
 use super::turn::{ReplyLoopContext, run_reply_loop};
@@ -16,6 +22,39 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
+
+/// Process-wide mutex that serializes the soft-budget tests' mutations of
+/// `DJINN_SESSION_BUDGET_*` env vars. The reply loop reads its
+/// `SessionBudgetPolicy` via `SessionBudgetPolicy::from_env()` at the start of
+/// `run_reply_loop`, and Rust tests run in parallel by default — so without
+/// serialization a concurrent test could observe our env override (or vice
+/// versa). The lock is held across the `.await` on `run_reply_loop` on
+/// purpose: env mutations are synchronous, the lock is uncontended in spirit
+/// (we don't yield inside the critical section), and the existing
+/// `AUTO_CODE_CONTEXT_ENV_LOCK` pattern in `helpers/tests.rs` follows the
+/// same shape. SAFETY: env mutation always happens with this lock held.
+static SESSION_BUDGET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Clear every `DJINN_SESSION_BUDGET_*` env var that `SessionBudgetPolicy::from_env`
+/// consults. Called by soft-budget tests (under the env lock) at teardown so
+/// the test doesn't leak a tiny budget into a sibling test that doesn't
+/// expect it.
+fn clear_session_budget_env() {
+    // SAFETY: always called under SESSION_BUDGET_ENV_LOCK.
+    unsafe {
+        for role in ["WORKER", "PLANNER", "ARCHITECT", "OTHER"] {
+            for suffix in [
+                "_MAX_TURNS",
+                "_MAX_CUMULATIVE_TOKENS",
+                "_SOFT_THRESHOLD_RATIO",
+                "_HARD_THRESHOLD_RATIO",
+            ] {
+                let var = format!("DJINN_SESSION_BUDGET_{role}{suffix}");
+                std::env::remove_var(var);
+            }
+        }
+    }
+}
 
 // ── MockLlmProvider ───────────────────────────────────────────────────────
 
@@ -1564,4 +1603,456 @@ async fn mixed_successful_tool_batch_resets_consecutive_failure_pressure() {
     );
     assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
     assert_eq!(provider.remaining(), 0);
+}
+
+// ── rrdr soft budget: one-shot converge reminder ──────────────────────────
+
+/// Helper: count user messages whose text body contains a `<system-reminder>`
+/// tag. Matches both opening and closing tags so the count is robust against
+/// either side of the wrapper ever being split into a separate content block.
+fn count_system_reminder_messages(conv: &Conversation) -> usize {
+    conv.messages
+        .iter()
+        .filter(|m| {
+            m.role == Role::User
+                && m.content
+                    .iter()
+                    .filter_map(|b| b.as_text())
+                    .any(|t| t.contains("<system-reminder>"))
+        })
+        .count()
+}
+
+/// Apply a `SessionBudgetPolicy` override to the env so the next
+/// `SessionBudgetPolicy::from_env()` inside `run_reply_loop` resolves a small
+/// cumulative-token cap with a low soft threshold. Always called under
+/// `SESSION_BUDGET_ENV_LOCK` and followed by `clear_session_budget_env()` at
+/// test teardown.
+fn install_session_budget_env(max_cumulative_tokens: u64, soft_ratio: f64) {
+    // SAFETY: always called under SESSION_BUDGET_ENV_LOCK.
+    unsafe {
+        std::env::set_var(
+            "DJINN_SESSION_BUDGET_WORKER_MAX_CUMULATIVE_TOKENS",
+            max_cumulative_tokens.to_string(),
+        );
+        std::env::set_var(
+            "DJINN_SESSION_BUDGET_WORKER_SOFT_THRESHOLD_RATIO",
+            soft_ratio.to_string(),
+        );
+    }
+}
+
+/// Crossing the soft threshold exactly once — the reply loop persists and
+/// pushes a `<system-reminder>` converge directive, and the one-shot flag
+/// prevents the same reminder from being injected again on later turns
+/// where the threshold remains exceeded.
+///
+/// Scenario:
+///   - `max_cumulative_tokens = 100`, `soft_threshold_ratio = 0.5`
+///     → soft cap = 50 tokens (`total_tokens_in + total_tokens_out >= 50`).
+///   - Turn 1: tool call, `input=20, output=10` → cumulative=30 (below cap).
+///   - Turn 2: tool call, `input=30, output=10` → cumulative=70 (above cap).
+///     The pre-turn check for turn 3 sees cumulative=70 and injects the
+///     reminder (one-shot) just before turn 3's stream runs.
+///   - Turn 3: tool call, `input=20, output=10` → cumulative=100 (still above).
+///     The pre-turn check for turn 4 sees the flag set and does NOT re-inject.
+///   - Turn 4: `submit_work` tool call → session ends.
+///
+/// (`MockResponse::tool_call` defaults to `output_tokens = 10`; the comments
+/// on each response below match the actual `input` / `output` per turn.)
+///
+/// Verifies: exactly one `<system-reminder>` injection, exactly one tool call
+/// whose ToolResult flows back into the conversation, and the assistant
+/// stream never produces the reminder (only the reply loop does).
+#[tokio::test]
+async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
+    // Recover from a poisoned mutex so a prior test that panicked mid-env-mutation
+    // doesn't cascade its failure here. The lock still serializes; we just
+    // ignore the poison marker since the protected state is process env (which
+    // gets reset by the test's own setup/teardown anyway).
+    let _env_guard = SESSION_BUDGET_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    // 200 token cap × 0.25 ratio = 50-token soft cap; the default hard cap
+    // (92% = 184 tokens) stays safely above this test's 100-token spend.
+    install_session_budget_env(200, 0.25);
+    // Safety net: ensure no stale overrides from a previous test leak through.
+    // SAFETY: SESSION_BUDGET_ENV_LOCK held.
+    unsafe {
+        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
+        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO");
+    }
+
+    let tools = vec![
+        dummy_tool_schema("submit_work"),
+        dummy_tool_schema("worker_tool"),
+    ];
+
+    // Each turn is a distinct tool call (different tool name and id) so the
+    // in-loop guard over repeated failing tool-call signatures never trips
+    // before the soft-budget injection has had a chance to fire.
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call("tool1-a", "worker_tool", 20), // turn 1: 20+10=30
+        MockResponse::tool_call("tool2-b", "worker_tool", 30), // turn 2: cumulative=70 → fires pre-turn-3
+        MockResponse::tool_call("tool3-c", "worker_tool", 20), // turn 3: cumulative=100 → still above, no re-inject
+        MockResponse {
+            text: None,
+            tool_calls: vec![ContentBlock::ToolUse {
+                id: "fin".to_string(),
+                name: "submit_work".to_string(),
+                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+            }],
+            input_tokens: 10,
+            output_tokens: 5,
+        },
+    ]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            // Large context window so the context-pressure secondary signal
+            // (`current_context_tokens / context_window`) never trips on its
+            // own — the test exercises the cumulative `input+output` spend
+            // path only. We need `max_cumulative_tokens` (set via env) to be
+            // the dominant signal, and a 10k-token window with <100 tokens of
+            // usage keeps that ratio tiny.
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            // Drive production turn-cap path (we don't want max_turns to be
+            // the limiter; the budget cap is the test target).
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    // SAFETY: SESSION_BUDGET_ENV_LOCK held; restore baseline before asserting.
+    clear_session_budget_env();
+    // Avoid the `_env_guard` "field never read" warning while still proving
+    // the guard was held for the duration of `run_reply_loop`.
+    let _ = &_env_guard;
+
+    assert!(
+        result.is_ok(),
+        "soft-budget reminder should not fail the session; got: {:?}",
+        result
+    );
+    assert_eq!(
+        provider.remaining(),
+        0,
+        "all scripted turns (4) should be consumed: 3 tool calls + 1 finalize"
+    );
+
+    // Exactly ONE `<system-reminder>` was injected, even though the threshold
+    // remained exceeded for the remainder of the session.
+    let reminder_count = count_system_reminder_messages(&conv);
+    assert_eq!(
+        reminder_count, 1,
+        "soft-budget reminder must be injected exactly once across multiple \
+         subsequent turns that still exceed the threshold; conv has {reminder_count} \
+         <system-reminder> user messages, full conversation:\n{:#?}",
+        conv.messages
+    );
+
+    // The reminder text should match the converge directive contract.
+    let reminder_text = role_text(&conv, Role::User);
+    assert!(
+        reminder_text.contains("Budget for this session is mostly consumed")
+            && reminder_text.contains("CONVERGE")
+            && reminder_text.contains("stop expanding scope")
+            && reminder_text.contains("commit"),
+        "reminder must convey the converge/keep/commit message; got: {reminder_text}"
+    );
+
+    // The reminder is also persisted durably alongside the assistant/tool
+    // transcript, not just pushed into the in-memory conversation.
+    let repo = SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let persisted = repo
+        .load_conversation(&session_id)
+        .await
+        .expect("load persisted conversation");
+    let persisted_reminder_count = count_system_reminder_messages(&persisted);
+    assert_eq!(
+        persisted_reminder_count, 1,
+        "soft-budget reminder must be persisted with the session transcript"
+    );
+}
+
+/// Below the soft threshold the reply loop must not inject any
+/// `<system-reminder>` converge directive. Even if the session runs for
+/// many turns and the cumulative spend grows, as long as the
+/// `total_tokens_in + total_tokens_out` total stays under
+/// `max_cumulative_tokens * soft_threshold_ratio` no injection happens.
+#[tokio::test]
+async fn soft_budget_below_threshold_no_injection() {
+    // Recover from a poisoned mutex so a prior test that panicked mid-env-mutation
+    // doesn't cascade its failure here. See the matching comment in
+    // `soft_budget_threshold_triggers_one_shot_converge_reminder`.
+    let _env_guard = SESSION_BUDGET_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    // 1000 token cap × 0.75 = 750-token soft cap. We'll spend a fraction of
+    // that across many turns and verify no reminder fires.
+    install_session_budget_env(1_000, 0.75);
+    // SAFETY: SESSION_BUDGET_ENV_LOCK held.
+    unsafe {
+        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
+        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO");
+    }
+
+    let tools = vec![
+        dummy_tool_schema("submit_work"),
+        dummy_tool_schema("worker_tool"),
+    ];
+
+    // 5 tool-call turns at 30+10=40 cumulative tokens each → 200 tokens total
+    // (well under 750). Then a submit_work finalize.
+    //
+    // Vary the args per call (`{"step": N}`) so each call is a *distinct*
+    // tool-call signature: the in-loop guard over repeated failing tool-call
+    // signatures would otherwise trip on the 4th identical call and preempt
+    // the soft-budget no-injection path this test is asserting.
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call_with_input("a", "worker_tool", serde_json::json!({"step": 1}), 30),
+        MockResponse::tool_call_with_input("b", "worker_tool", serde_json::json!({"step": 2}), 30),
+        MockResponse::tool_call_with_input("c", "worker_tool", serde_json::json!({"step": 3}), 30),
+        MockResponse::tool_call_with_input("d", "worker_tool", serde_json::json!({"step": 4}), 30),
+        MockResponse::tool_call_with_input("e", "worker_tool", serde_json::json!({"step": 5}), 30),
+        MockResponse {
+            text: None,
+            tool_calls: vec![ContentBlock::ToolUse {
+                id: "fin".to_string(),
+                name: "submit_work".to_string(),
+                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+            }],
+            input_tokens: 5,
+            output_tokens: 5,
+        },
+    ]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    // SAFETY: SESSION_BUDGET_ENV_LOCK held; restore baseline before asserting.
+    clear_session_budget_env();
+    let _ = &_env_guard;
+
+    assert!(
+        result.is_ok(),
+        "session should complete normally below the soft threshold; got: {:?}",
+        result
+    );
+    assert_eq!(provider.remaining(), 0, "all 6 scripted turns consumed");
+
+    let reminder_count = count_system_reminder_messages(&conv);
+    assert_eq!(
+        reminder_count, 0,
+        "no <system-reminder> converge directive should be injected while \
+         cumulative spend is below the soft threshold; got {reminder_count}, full \
+         conversation:\n{:#?}",
+        conv.messages
+    );
+    let user_text = role_text(&conv, Role::User);
+    assert!(
+        !user_text.contains("<system-reminder>"),
+        "no system-reminder body should appear in user text below threshold; got: {user_text}"
+    );
+}
+
+// ── rrdr hard budget: structured wind-down reason ──────────────────────────
+
+#[tokio::test]
+async fn hard_budget_wind_down_captures_budget_summary() {
+    let _env_guard = SESSION_BUDGET_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    install_session_budget_env(100, 0.5);
+    // SAFETY: SESSION_BUDGET_ENV_LOCK held.
+    unsafe {
+        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
+        std::env::set_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO", "0.8");
+    }
+
+    let tools = vec![
+        dummy_tool_schema("submit_work"),
+        dummy_tool_schema("worker_tool"),
+    ];
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call_with_input("a", "worker_tool", serde_json::json!({"step": 1}), 40), // cumulative 50
+        MockResponse::tool_call_with_input("b", "worker_tool", serde_json::json!({"step": 2}), 30), // cumulative 90 → hard wind-down before next turn
+        MockResponse::text_only("Budget handoff: implemented A; B remains.", 5),
+    ]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    clear_session_budget_env();
+    let _ = &_env_guard;
+
+    assert!(
+        result.is_ok(),
+        "hard budget summary should park cleanly: {result:?}"
+    );
+    assert_eq!(
+        output.budget_wind_down_summary.as_deref(),
+        Some("Budget handoff: implemented A; B remains.")
+    );
+    assert_eq!(provider.remaining(), 0);
+    let user_text = role_text(&conv, Role::User);
+    assert!(user_text.contains("You are out of steps"));
+}
+
+#[tokio::test]
+async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
+    let _env_guard = SESSION_BUDGET_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    install_session_budget_env(100, 0.5);
+    // SAFETY: SESSION_BUDGET_ENV_LOCK held.
+    unsafe {
+        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
+        std::env::set_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO", "0.8");
+    }
+
+    let tools = vec![
+        dummy_tool_schema("submit_work"),
+        dummy_tool_schema("worker_tool"),
+    ];
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call_with_input("a", "worker_tool", serde_json::json!({"step": 1}), 40),
+        MockResponse::tool_call_with_input("b", "worker_tool", serde_json::json!({"step": 2}), 30),
+        MockResponse::tool_call_with_input("c", "worker_tool", serde_json::json!({"step": 3}), 5),
+    ]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    clear_session_budget_env();
+    let _ = &_env_guard;
+
+    let err = result.expect_err("ignored hard-budget wind-down should return typed error");
+    assert!(
+        err.downcast_ref::<BudgetWindDownIgnored>().is_some(),
+        "ignored hard-budget wind-down must be typed for stage settlement; got: {err:?}"
+    );
+    assert!(
+        output.budget_wind_down_summary.is_none(),
+        "ignored wind-down must not synthesize a misleading summary"
+    );
 }

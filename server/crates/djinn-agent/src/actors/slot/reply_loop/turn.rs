@@ -11,12 +11,14 @@ use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::telemetry;
 
 use super::super::{runtime_env_diagnostics, runtime_fs_diagnostics};
-use super::budget::SessionBudgetPolicy;
+use super::budget::{
+    SessionBudgetPolicy, hard_budget_threshold_exceeded, soft_budget_threshold_exceeded,
+};
 use super::error_handling::{
     BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_turn_backoff, is_context_length_error,
     is_orphaned_tool_call_error, next_nudge_message, should_retry_after_tool_call_compaction,
-    should_retry_empty_assistant_turn, should_retry_empty_stream, tool_choice_for_turn,
-    wind_down_message,
+    should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
+    tool_choice_for_turn, wind_down_message,
 };
 use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
@@ -90,6 +92,25 @@ fn loop_guard_error(condition: LoopGuardCondition, turns: u32, session_id: &str)
     })
 }
 
+#[derive(Debug, Clone)]
+enum WindDownReason {
+    StepCap { max_turns: u32 },
+    Budget { details: String },
+}
+
+impl WindDownReason {
+    fn is_budget(&self) -> bool {
+        matches!(self, Self::Budget { .. })
+    }
+
+    fn details(&self) -> String {
+        match self {
+            Self::StepCap { max_turns } => format!("max turns ({max_turns}) reached"),
+            Self::Budget { details } => details.clone(),
+        }
+    }
+}
+
 fn tool_call_signature_for_result(
     result_index: usize,
     tool_use_id: &str,
@@ -115,6 +136,59 @@ async fn inject_loop_guard_correction(
     let msg = corrective_message_for_loop_guard(condition);
     persist_session_message(msg_repo, session_id, task_id, &msg).await;
     conversation.push(msg);
+}
+
+/// rrdr: one-shot soft-budget converge reminder. On the first crossing of
+/// the resolved soft threshold the helper persists + queues a
+/// `<system-reminder>` asking the agent to converge. The `injected` flag
+/// (owned by `run_reply_loop`) gates every subsequent call so the same
+/// reminder cannot fire again on later turns that still see the threshold
+/// exceeded.
+#[allow(clippy::too_many_arguments)]
+async fn maybe_inject_soft_budget_reminder(
+    injected: &mut bool,
+    session_budget: &super::budget::ResolvedSessionBudget,
+    msg_repo: &SessionMessageRepository,
+    session_id: &str,
+    task_id: &str,
+    role_name: &str,
+    turns: u32,
+    total_tokens_in: u32,
+    total_tokens_out: u32,
+    current_context_tokens: u32,
+    conversation: &mut Conversation,
+) -> bool {
+    if *injected
+        || !soft_budget_threshold_exceeded(
+            session_budget,
+            total_tokens_in,
+            total_tokens_out,
+            current_context_tokens,
+        )
+    {
+        return false;
+    }
+    *injected = true;
+    let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
+    let soft_cap =
+        (session_budget.max_cumulative_tokens as f64) * session_budget.soft_threshold_ratio;
+    tracing::warn!(
+        task_id = %task_id,
+        agent_type = %role_name,
+        turns,
+        total_tokens_in,
+        total_tokens_out,
+        cumulative_spend,
+        max_cumulative_tokens = session_budget.max_cumulative_tokens,
+        soft_cap = soft_cap as u64,
+        soft_threshold_ratio = session_budget.soft_threshold_ratio,
+        "ReplyLoop: soft budget threshold reached — injecting one-shot <system-reminder> \
+         converge directive"
+    );
+    let msg = soft_budget_converge_message();
+    persist_session_message(msg_repo, session_id, task_id, &msg).await;
+    conversation.push(msg);
+    true
 }
 
 pub(crate) struct ReplyLoopContext<'a> {
@@ -353,19 +427,52 @@ pub(crate) async fn run_reply_loop(
         // wind-down turn runs, the next cap check falls through to the hard
         // error if the agent still hasn't reached a terminal action.
         let mut wind_down_injected = false;
-        let budget_triggered_wind_down = max_turns_override.is_none();
+        let mut wind_down_reason: Option<WindDownReason> = None;
+        // rrdr: one-shot soft-budget converge reminder flag — see
+        // `maybe_inject_soft_budget_reminder` for the contract.
+        let mut soft_budget_reminder_injected = false;
 
         loop {
-            if turns >= max_turns {
+            let hard_budget_exceeded = hard_budget_threshold_exceeded(
+                &session_budget,
+                total_tokens_in,
+                total_tokens_out,
+                current_context_tokens,
+            );
+            if turns >= max_turns || (!wind_down_injected && hard_budget_exceeded) {
                 if !wind_down_injected {
                     // One turn before the hard cap: inject the wind-down
                     // directive and grant a single extra turn for the summary.
+                    let reason = if hard_budget_exceeded && turns < max_turns {
+                        let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
+                        let hard_cap = (session_budget.max_cumulative_tokens as f64)
+                            * session_budget.hard_threshold_ratio;
+                        WindDownReason::Budget {
+                            details: format!(
+                                "hard budget threshold reached: cumulative_tokens={cumulative_spend}, hard_cap={}, max_cumulative_tokens={}, hard_threshold_ratio={}",
+                                hard_cap as u64,
+                                session_budget.max_cumulative_tokens,
+                                session_budget.hard_threshold_ratio
+                            ),
+                        }
+                    } else {
+                        WindDownReason::StepCap { max_turns }
+                    };
+                    let wind_down_reason_label = if reason.is_budget() {
+                        "budget"
+                    } else {
+                        "step_cap"
+                    };
+                    let budget_triggered = reason.is_budget();
+                    wind_down_reason = Some(reason);
                     wind_down_injected = true;
                     tracing::warn!(
                         task_id = %task_id,
                         agent_type = %role_name,
                         turns,
                         max_turns,
+                        wind_down_reason = wind_down_reason_label,
+                        budget_triggered,
                         "ReplyLoop: step cap reached — injecting wind-down summary directive \
                          (one final turn before hard stop)"
                     );
@@ -381,9 +488,13 @@ pub(crate) async fn run_reply_loop(
                     // typed settlement outcome the supervisor parks deliberately;
                     // test/non-budget max-turn overrides retain the historical
                     // hard-error behavior.
-                    if budget_triggered_wind_down {
+                    let reason = wind_down_reason
+                        .clone()
+                        .unwrap_or(WindDownReason::StepCap { max_turns });
+                    if reason.is_budget() {
                         let details = format!(
-                            "max turns ({max_turns}) reached; wind-down directive was injected but the agent did not produce a text-only summary"
+                            "{}; wind-down directive was injected but the agent did not produce a text-only summary",
+                            reason.details()
                         );
                         tracing::warn!(
                             task_id = %task_id,
@@ -392,6 +503,7 @@ pub(crate) async fn run_reply_loop(
                             turns,
                             max_turns,
                             wind_down_ignored = true,
+                            wind_down_reason = "budget",
                             "ReplyLoop: budget-triggered wind-down ignored; parking session"
                         );
                         return Err(BudgetWindDownIgnored { details }.into());
@@ -403,6 +515,25 @@ pub(crate) async fn run_reply_loop(
                     ));
                 }
             }
+
+            // rrdr soft-threshold converge reminder. Runs at the same
+            // pre-turn branch as the G9 step-cap check (BEFORE `turns += 1`)
+            // so the reminder is queued ahead of the next provider stream
+            // and counted in the upcoming turn's input.
+            maybe_inject_soft_budget_reminder(
+                &mut soft_budget_reminder_injected,
+                &session_budget,
+                &msg_repo,
+                session_id,
+                task_id,
+                role_name,
+                turns,
+                total_tokens_in,
+                total_tokens_out,
+                current_context_tokens,
+                conversation,
+            )
+            .await;
             turns += 1;
 
             let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);
@@ -824,7 +955,10 @@ pub(crate) async fn run_reply_loop(
             // finalize), fall through to dispatch — the next cap check then
             // hard-errors, so the extension stays exactly one turn.
             if wind_down_injected && turn_tool_calls.is_empty() {
-                if budget_triggered_wind_down {
+                let budget_wind_down = wind_down_reason
+                    .as_ref()
+                    .is_some_and(WindDownReason::is_budget);
+                if budget_wind_down {
                     let summary = turn_text.trim();
                     if !summary.is_empty() {
                         output.budget_wind_down_summary = Some(summary.to_string());
@@ -835,6 +969,7 @@ pub(crate) async fn run_reply_loop(
                     agent_type = %role_name,
                     turns,
                     assistant_message_count,
+                    wind_down_reason = if budget_wind_down { "budget" } else { "step_cap" },
                     "ReplyLoop: wind-down summary captured — session complete (graceful step-cap stop)"
                 );
                 break;
