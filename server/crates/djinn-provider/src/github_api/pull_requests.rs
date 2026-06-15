@@ -410,16 +410,24 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "enqueue_pull_request failed ({}): {}",
-                status,
-                body
+            return Err(github_pr_write_error(
+                "POST",
+                "/graphql",
+                Some(status),
+                &body,
+                "enqueue_pull_request",
             ));
         }
 
         let json: serde_json::Value = resp.json().await?;
         if let Some(errors) = json.get("errors") {
-            return Err(anyhow!("enqueue_pull_request GraphQL error: {}", errors));
+            return Err(github_pr_write_error(
+                "POST",
+                "/graphql",
+                Some(reqwest::StatusCode::OK),
+                &errors.to_string(),
+                "enqueue_pull_request",
+            ));
         }
         Ok(())
     }

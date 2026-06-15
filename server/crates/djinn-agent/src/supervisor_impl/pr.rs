@@ -27,6 +27,7 @@ use djinn_workspace::MirrorManager;
 
 use super::SupervisorCallbackContext;
 use crate::actors::slot::helpers::default_target_branch;
+use crate::github_error_render::render_github_write_error;
 use crate::task_merge::build_app_push_url;
 
 /// Open (or adopt) a GitHub PR for the completed task-run.
@@ -259,10 +260,11 @@ pub(crate) async fn supervisor_pr_open(
                     {
                         Ok(pr) => pr,
                         Err(e) => {
+                            let reason = render_github_write_error("GitHub PR creation failed", &e);
                             return TaskRunOutcome::Failed {
                                 stage: "pr_open".into(),
                                 provider_failure: None,
-                                reason: format!("GitHub PR creation failed: {e}"),
+                                reason,
                             };
                         }
                     }
@@ -287,10 +289,11 @@ pub(crate) async fn supervisor_pr_open(
         {
             Ok(pr) => pr,
             Err(e) => {
+                let reason = render_github_write_error("GitHub PR creation failed", &e);
                 return TaskRunOutcome::Failed {
                     stage: "pr_open".into(),
                     provider_failure: None,
-                    reason: format!("GitHub PR creation failed: {e}"),
+                    reason,
                 };
             }
         }
@@ -689,6 +692,8 @@ fn is_concurrent_push_race(err: &GitError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::is_concurrent_push_race;
+    use crate::github_error_render::render_github_write_error;
+    use djinn_core::tool_error::{ErrorClass, ToolError};
     use djinn_git::GitError;
 
     #[test]
@@ -712,6 +717,30 @@ mod tests {
         // "reference already exists" qualifier is a different problem.
         let err = GitError::Other(anyhow::anyhow!("cannot lock ref 'foo': corrupted"));
         assert!(!is_concurrent_push_race(&err));
+    }
+
+    #[test]
+    fn supervisor_pr_creation_failure_renders_github_write_envelope() {
+        let err: anyhow::Error = ToolError::new("create_pull_request failed")
+            .with_error_class(ErrorClass::ConflictRecoverable)
+            .with_method("POST")
+            .with_path("/repos/djinnos/djinn/pulls")
+            .with_http_status(422)
+            .with_body("A pull request already exists for djinnos:task/demo")
+            .with_hint(
+                "Adopt/use the existing pull request for this branch instead of creating a new PR.",
+            )
+            .into();
+
+        let rendered = render_github_write_error("GitHub PR creation failed", &err);
+
+        assert!(rendered.starts_with("GitHub PR creation failed: {"));
+        assert!(rendered.contains("\"error_class\":\"conflict_recoverable\""));
+        assert!(rendered.contains("\"method\":\"POST\""));
+        assert!(rendered.contains("\"path\":\"/repos/djinnos/djinn/pulls\""));
+        assert!(rendered.contains("\"status\":\"422\""));
+        assert!(rendered.contains("pull request already exists"));
+        assert!(rendered.contains("Adopt/use the existing pull request"));
     }
 
     // ── count_met_acceptance_criteria (D3b evidence sourcing) ───────────────

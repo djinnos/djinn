@@ -68,6 +68,7 @@ mod state;
 #[cfg(test)]
 mod tests;
 
+use crate::github_error_render::render_github_write_error;
 use ci_helpers::{
     advisory_checks_section, blocking_failed_checks, build_ci_failure_sections, is_already_queued,
     is_merge_queue_405, parse_actions_run_id,
