@@ -6,6 +6,10 @@ edition = "2024"
 [lib]
 doctest = false
 
+[features]
+# Exposes cluster-free slot-pool factory hooks for downstream integration tests.
+test-support = []
+
 [dependencies]
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
