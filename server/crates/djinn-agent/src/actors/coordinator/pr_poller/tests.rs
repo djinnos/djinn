@@ -442,7 +442,7 @@ fn is_merge_queue_405_matches_real_payload() {
         "PUT",
         "/repos/djinnos/djinn/pulls/7/merge",
     );
-    assert!(rendered.contains("\"error_class\":\"validation\""));
+    assert!(rendered.contains("\"error_class\":\"conflict_recoverable\""));
     assert!(rendered.contains("\"status\":\"405\""));
     assert!(rendered.contains("merge queue"));
 }
@@ -468,7 +468,7 @@ fn is_already_queued_matches_real_enqueue_rejection() {
     let rendered =
         crate::github_error_render::render_github_write_error("GitHub enqueue PR failed", &err);
     assert_structured_rendered_error(&rendered, "GitHub enqueue PR failed", "POST", "/graphql");
-    assert!(rendered.contains("\"error_class\":\"validation\""));
+    assert!(rendered.contains("\"error_class\":\"conflict_recoverable\""));
 
     let other = github_graphql_error(
         "POST",
@@ -523,7 +523,7 @@ fn update_branch_failure_rendering_exposes_bounded_envelope() {
         "PUT",
         "/repos/djinnos/djinn/pulls/7/update-branch",
     );
-    assert!(rendered.contains("\"error_class\":\"validation\""));
+    assert!(rendered.contains("\"error_class\":\"conflict_recoverable\""));
     assert!(rendered.contains("\"status\":\"422\""));
     assert!(rendered.contains("Expected head SHA did not match"));
     assert!(rendered.contains('…'));
