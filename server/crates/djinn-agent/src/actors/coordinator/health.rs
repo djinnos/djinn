@@ -264,6 +264,27 @@ fn output_stash_retention_cutoff_unix_secs(now_unix_secs: i64, retention_days: u
         .saturating_sub(retention_secs)
 }
 
+#[cfg(test)]
+mod output_stash_gc_tests {
+    use super::*;
+
+    #[test]
+    fn output_stash_retention_cutoff_uses_configured_day_window() {
+        let now = 1_700_000_000_i64;
+
+        assert_eq!(
+            output_stash_retention_cutoff_unix_secs(now, 7),
+            1_700_000_000_u64 - (7 * 24 * 60 * 60)
+        );
+    }
+
+    #[test]
+    fn output_stash_retention_cutoff_saturates_before_epoch() {
+        assert_eq!(output_stash_retention_cutoff_unix_secs(-1, 30), 0);
+        assert_eq!(output_stash_retention_cutoff_unix_secs(10, 30), 0);
+    }
+}
+
 // ─── Cargo target run-dir GC ────────────────────────────────────────────────
 
 #[derive(Default)]

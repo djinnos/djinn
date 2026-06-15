@@ -1,9 +1,55 @@
+use djinn_core::tool_error::{ErrorClass, ToolError};
 use wiremock::matchers::{header, method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::github_api::{CheckRunsResponse, CreatePrParams, GitHubApiClient, MergeMethod, PrState};
 
 use super::seed_installation_token;
+
+fn github_write_envelope(err: &anyhow::Error) -> &ToolError {
+    err.downcast_ref::<ToolError>()
+        .unwrap_or_else(|| panic!("expected typed GitHub write envelope, got: {err:?}"))
+}
+
+fn assert_github_write_envelope(
+    err: &anyhow::Error,
+    method: &str,
+    path: &str,
+    status: &str,
+    error_class: ErrorClass,
+    body_contains: &str,
+) {
+    let envelope = github_write_envelope(err);
+    assert_eq!(envelope.method.as_deref(), Some(method));
+    assert_eq!(envelope.path.as_deref(), Some(path));
+    assert_eq!(envelope.status.as_deref(), Some(status));
+    assert_eq!(envelope.error_class, Some(error_class));
+    assert!(
+        envelope
+            .body
+            .as_deref()
+            .unwrap_or_default()
+            .contains(body_contains),
+        "body excerpt should contain {body_contains:?}: {:?}",
+        envelope.body
+    );
+    assert!(
+        envelope
+            .body
+            .as_ref()
+            .is_none_or(|body| body.chars().count() <= 241),
+        "body excerpt should be bounded: {:?}",
+        envelope.body
+    );
+    let rendered = envelope.compact();
+    assert!(rendered.contains(&format!("method={method}")), "{rendered}");
+    assert!(rendered.contains(&format!("path={path}")), "{rendered}");
+    assert!(rendered.contains(&format!("status={status}")), "{rendered}");
+    assert!(
+        rendered.contains(&format!("error_class={}", error_class.as_str())),
+        "{rendered}"
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_pull_request_success() {
@@ -429,9 +475,156 @@ async fn create_pr_returns_error_on_422() {
         )
         .await;
 
-    assert!(result.is_err());
-    let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("422"), "expected 422 in error: {}", msg);
+    let err = result.expect_err("unadopted 422 should return typed envelope");
+    assert_github_write_envelope(
+        &err,
+        "POST",
+        "/repos/djinnos/server/pulls",
+        "422",
+        ErrorClass::ConflictRecoverable,
+        "already exists",
+    );
+    let envelope = github_write_envelope(&err);
+    assert!(
+        envelope
+            .hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Adopt/use the existing pull request for this branch"),
+        "expected adopt-existing-PR hint: {:?}",
+        envelope.hint
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopen_pull_request_failure_returns_typed_envelope_with_captured_404_body() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("PATCH"))
+        .and(path("/repos/djinnos/server/pulls/404"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "message": "Not Found",
+            "documentation_url": "https://docs.github.com/rest/pulls/pulls#update-a-pull-request"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let err = client
+        .reopen_pull_request("djinnos", "server", 404)
+        .await
+        .expect_err("404 should return typed envelope");
+
+    assert_github_write_envelope(
+        &err,
+        "PATCH",
+        "/repos/djinnos/server/pulls/404",
+        "404",
+        ErrorClass::NotFound,
+        "Not Found",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enable_auto_merge_failure_returns_typed_envelope() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+            "message": "Resource not accessible by integration"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let err = client
+        .enable_auto_merge(
+            "djinnos",
+            "server",
+            42,
+            MergeMethod::Squash,
+            "PR_node123",
+            "feat: merge when ready",
+        )
+        .await
+        .expect_err("403 should return typed envelope");
+
+    assert_github_write_envelope(
+        &err,
+        "POST",
+        "/graphql",
+        "403",
+        ErrorClass::Permission,
+        "Resource not accessible",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_pull_request_branch_failure_returns_typed_bounded_envelope() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+    let long_tail = "x".repeat(500);
+
+    Mock::given(method("PUT"))
+        .and(path("/repos/djinnos/server/pulls/42/update-branch"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+            "message": format!("Validation Failed: expected_head_sha does not match {long_tail}")
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let err = client
+        .update_pull_request_branch("djinnos", "server", 42, "abc123")
+        .await
+        .expect_err("422 should return typed envelope");
+
+    assert_github_write_envelope(
+        &err,
+        "PUT",
+        "/repos/djinnos/server/pulls/42/update-branch",
+        "422",
+        ErrorClass::Validation,
+        "expected_head_sha",
+    );
+    assert!(
+        !github_write_envelope(&err)
+            .compact()
+            .contains(&"x".repeat(300)),
+        "long body tail should be bounded"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn merge_pull_request_failure_returns_typed_envelope_for_repository_rules() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("PUT"))
+        .and(path("/repos/djinnos/server/pulls/42/merge"))
+        .respond_with(ResponseTemplate::new(405).set_body_json(serde_json::json!({
+            "message": "Pull Request is not mergeable: repository rules require merge queue"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let err = client
+        .merge_pull_request("djinnos", "server", 42, MergeMethod::Squash, "feat: merge")
+        .await
+        .expect_err("405 should return typed envelope");
+
+    assert_github_write_envelope(
+        &err,
+        "PUT",
+        "/repos/djinnos/server/pulls/42/merge",
+        "405",
+        ErrorClass::Validation,
+        "repository rules require merge queue",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
