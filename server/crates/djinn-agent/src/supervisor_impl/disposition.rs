@@ -54,6 +54,96 @@ pub(crate) enum RunDisposition {
     Close,
 }
 
+/// Explicit supervisor evidence that a task still has something live that can
+/// move it forward.
+///
+/// This model is deliberately a bag of already-collected facts. It performs no
+/// database, repository, GitHub, or LLM/text judgement itself; callers populate
+/// the fields from their own hard evidence sources and then use
+/// [`has_live_mover`] or [`live_mover_reasons`] as a pure predicate.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LiveMoverEvidence {
+    /// A worker/reviewer session is currently active for the task.
+    pub active_session: bool,
+    /// The task is queued for dispatch but the dispatch has not started yet.
+    pub queued_dispatch: bool,
+    /// A dispatch for the task is currently being started or handed off.
+    pub dispatch_inflight: bool,
+    /// The coordinator remembers a recent dispatch marker for the task.
+    pub recently_dispatched: bool,
+    /// The task has an open PR capable of receiving review or CI movement.
+    pub open_pr: bool,
+    /// A PR poller owns/watches the task's PR lifecycle.
+    pub pr_poller_owned: bool,
+    /// The task is waiting on a human/system reviewer rather than abandoned.
+    pub review_pending_with_reviewer: bool,
+    /// The task is blocked by unresolved blocker edges that can still clear.
+    pub unresolved_blockers: bool,
+}
+
+/// One explicit fact explaining why [`has_live_mover`] returned true.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveMoverReason {
+    ActiveSession,
+    QueuedDispatch,
+    DispatchInflight,
+    RecentlyDispatched,
+    OpenPr,
+    PrPollerOwned,
+    ReviewPendingWithReviewer,
+    UnresolvedBlockers,
+}
+
+/// Return every explicit evidence class that says this task still has a live
+/// mover. The order is stable and follows the field order of
+/// [`LiveMoverEvidence`] so callers can present deterministic explanations.
+#[allow(dead_code)]
+pub(crate) fn live_mover_reasons(evidence: &LiveMoverEvidence) -> Vec<LiveMoverReason> {
+    let mut reasons = Vec::new();
+
+    if evidence.active_session {
+        reasons.push(LiveMoverReason::ActiveSession);
+    }
+    if evidence.queued_dispatch {
+        reasons.push(LiveMoverReason::QueuedDispatch);
+    }
+    if evidence.dispatch_inflight {
+        reasons.push(LiveMoverReason::DispatchInflight);
+    }
+    if evidence.recently_dispatched {
+        reasons.push(LiveMoverReason::RecentlyDispatched);
+    }
+    if evidence.open_pr {
+        reasons.push(LiveMoverReason::OpenPr);
+    }
+    if evidence.pr_poller_owned {
+        reasons.push(LiveMoverReason::PrPollerOwned);
+    }
+    if evidence.review_pending_with_reviewer {
+        reasons.push(LiveMoverReason::ReviewPendingWithReviewer);
+    }
+    if evidence.unresolved_blockers {
+        reasons.push(LiveMoverReason::UnresolvedBlockers);
+    }
+
+    reasons
+}
+
+/// Pure predicate: true when any explicit live-mover evidence is present.
+#[allow(dead_code)]
+pub(crate) fn has_live_mover(evidence: &LiveMoverEvidence) -> bool {
+    evidence.active_session
+        || evidence.queued_dispatch
+        || evidence.dispatch_inflight
+        || evidence.recently_dispatched
+        || evidence.open_pr
+        || evidence.pr_poller_owned
+        || evidence.review_pending_with_reviewer
+        || evidence.unresolved_blockers
+}
+
 /// Decide the disposition of a finished run from its classified progress and
 /// how many nudges it has already consumed.
 ///
@@ -86,6 +176,134 @@ pub(crate) fn decide_run_disposition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_single_live_mover_reason(
+        evidence: LiveMoverEvidence,
+        expected_reason: LiveMoverReason,
+    ) {
+        assert!(has_live_mover(&evidence));
+        assert_eq!(live_mover_reasons(&evidence), vec![expected_reason]);
+    }
+
+    // ── Live mover evidence: pure hard-fact predicate ───────────────────────
+
+    #[test]
+    fn active_session_is_live_mover() {
+        assert_single_live_mover_reason(
+            LiveMoverEvidence {
+                active_session: true,
+                ..Default::default()
+            },
+            LiveMoverReason::ActiveSession,
+        );
+    }
+
+    #[test]
+    fn queued_dispatch_is_live_mover() {
+        assert_single_live_mover_reason(
+            LiveMoverEvidence {
+                queued_dispatch: true,
+                ..Default::default()
+            },
+            LiveMoverReason::QueuedDispatch,
+        );
+    }
+
+    #[test]
+    fn dispatch_inflight_is_live_mover() {
+        assert_single_live_mover_reason(
+            LiveMoverEvidence {
+                dispatch_inflight: true,
+                ..Default::default()
+            },
+            LiveMoverReason::DispatchInflight,
+        );
+    }
+
+    #[test]
+    fn remembered_recent_dispatch_is_live_mover() {
+        assert_single_live_mover_reason(
+            LiveMoverEvidence {
+                recently_dispatched: true,
+                ..Default::default()
+            },
+            LiveMoverReason::RecentlyDispatched,
+        );
+    }
+
+    #[test]
+    fn open_pr_is_live_mover() {
+        assert_single_live_mover_reason(
+            LiveMoverEvidence {
+                open_pr: true,
+                ..Default::default()
+            },
+            LiveMoverReason::OpenPr,
+        );
+    }
+
+    #[test]
+    fn pr_poller_ownership_is_live_mover() {
+        assert_single_live_mover_reason(
+            LiveMoverEvidence {
+                pr_poller_owned: true,
+                ..Default::default()
+            },
+            LiveMoverReason::PrPollerOwned,
+        );
+    }
+
+    #[test]
+    fn review_pending_with_reviewer_is_live_mover() {
+        assert_single_live_mover_reason(
+            LiveMoverEvidence {
+                review_pending_with_reviewer: true,
+                ..Default::default()
+            },
+            LiveMoverReason::ReviewPendingWithReviewer,
+        );
+    }
+
+    #[test]
+    fn unresolved_blocker_edges_are_live_mover() {
+        assert_single_live_mover_reason(
+            LiveMoverEvidence {
+                unresolved_blockers: true,
+                ..Default::default()
+            },
+            LiveMoverReason::UnresolvedBlockers,
+        );
+    }
+
+    #[test]
+    fn no_evidence_has_no_live_mover() {
+        let evidence = LiveMoverEvidence::default();
+
+        assert!(!has_live_mover(&evidence));
+        assert!(live_mover_reasons(&evidence).is_empty());
+    }
+
+    #[test]
+    fn multiple_evidence_classes_return_stable_reason_list() {
+        let evidence = LiveMoverEvidence {
+            active_session: true,
+            dispatch_inflight: true,
+            open_pr: true,
+            unresolved_blockers: true,
+            ..Default::default()
+        };
+
+        assert!(has_live_mover(&evidence));
+        assert_eq!(
+            live_mover_reasons(&evidence),
+            vec![
+                LiveMoverReason::ActiveSession,
+                LiveMoverReason::DispatchInflight,
+                LiveMoverReason::OpenPr,
+                LiveMoverReason::UnresolvedBlockers,
+            ]
+        );
+    }
 
     // ── Productive always proceeds, regardless of count ─────────────────────
 
