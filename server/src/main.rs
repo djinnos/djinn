@@ -64,6 +64,9 @@ fn main() {
 
 async fn async_main() {
     let _log_guards = init_logging();
+    if let Err(e) = djinn_telemetry::init() {
+        tracing::warn!(error = %e, "failed to initialize Prometheus telemetry");
+    }
 
     let cli = Cli::parse();
 
