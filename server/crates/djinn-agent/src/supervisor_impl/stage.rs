@@ -204,6 +204,14 @@ fn session_settlement_for_stage_outcome(
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_session_settlement_for_stage_outcome(
+    stage_outcome: &StageOutcome,
+    final_result_ok: bool,
+) -> (SessionStatus, Option<String>) {
+    session_settlement_for_stage_outcome(stage_outcome, final_result_ok)
+}
+
 /// Read-only multi-repo: resolve the epic's read-source projects to slugs/names
 /// so the prompt can flag them as specifically relevant. We no longer clone
 /// them eagerly — the agent reads any registered repo on demand via

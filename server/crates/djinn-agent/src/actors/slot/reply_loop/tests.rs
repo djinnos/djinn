@@ -8,15 +8,20 @@ use super::error_handling::{BudgetWindDownIgnored, supports_tool_choice_required
 use super::loop_guard::{LoopGuardError, LoopGuardKind};
 use super::persistence::serialize_llm_input;
 use super::turn::{ReplyLoopContext, WindDownReason, run_reply_loop};
+use crate::actors::slot::finalize_handlers::handle_budget_park;
+use crate::actors::slot::helpers::extract_worker_context;
 use crate::output_parser::ParsedAgentOutput;
 use crate::output_stash::extract_stash_content;
+use crate::supervisor_impl::stage::test_session_settlement_for_stage_outcome;
 use crate::test_helpers;
 use djinn_core::message::Role;
+use djinn_core::models::SessionStatus;
 use djinn_db::repositories::session::CreateSessionParams;
-use djinn_db::{SessionMessageRepository, SessionRepository};
+use djinn_db::{SessionMessageRepository, SessionRepository, TaskRepository};
 use djinn_provider::message::{ContentBlock, Conversation, Message};
 use djinn_provider::provider::ToolChoice;
 use djinn_provider::provider::{LlmProvider, StreamEvent, TokenUsage};
+use djinn_supervisor::{ParkReason, StageOutcome};
 use futures::stream;
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -2166,7 +2171,7 @@ async fn hard_budget_wind_down_captures_budget_summary() {
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
 
-    let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+    let (result, output, tokens_in, tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
             tools: &tools,
@@ -2213,8 +2218,78 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         output.budget_wind_down_details
     );
     assert_eq!(provider.remaining(), 0);
+    assert!(
+        tokens_in < 1000,
+        "hard budget should park well below the legacy worker max-turn blast radius"
+    );
     let user_text = role_text(&conv, Role::User);
     assert!(user_text.contains("You are out of steps"));
+
+    let stage_outcome = StageOutcome::Parked {
+        reason: ParkReason::Budget,
+        summary: output.budget_wind_down_summary.clone(),
+        wind_down_ignored: false,
+        session_id: session_id.clone(),
+        tokens_in,
+        tokens_out,
+    };
+    assert_eq!(
+        test_session_settlement_for_stage_outcome(&stage_outcome, true),
+        (SessionStatus::Completed, Some("budget".to_string())),
+        "successful budget wind-downs settle as completed budget parks"
+    );
+
+    handle_budget_park(
+        output
+            .budget_wind_down_summary
+            .as_deref()
+            .expect("summary captured above"),
+        output
+            .budget_wind_down_details
+            .as_deref()
+            .expect("budget details captured above"),
+        &task_id,
+        &app_state,
+    )
+    .await;
+
+    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let entries = repo.list_activity(&task_id).await.unwrap();
+    let work_entries: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.event_type == "work_submitted")
+        .collect();
+    assert_eq!(
+        work_entries.len(),
+        1,
+        "budget summary should be persisted exactly once as normal work_submitted activity"
+    );
+
+    let payload: serde_json::Value = serde_json::from_str(&work_entries[0].payload).unwrap();
+    assert_eq!(
+        payload["summary"],
+        "Budget handoff: implemented A; B remains."
+    );
+    let remaining_concerns = payload["remaining_concerns"].as_str().unwrap();
+    assert!(
+        remaining_concerns.starts_with("budget-parked:"),
+        "remaining concerns should carry the budget-park prefix: {remaining_concerns}"
+    );
+
+    let (worker_summary, worker_concerns, verification_failure) =
+        extract_worker_context(&Some(entries));
+    assert_eq!(
+        worker_summary.as_deref(),
+        Some("Budget handoff: implemented A; B remains."),
+        "subsequent dispatch context should receive the budget handoff via the existing extractor"
+    );
+    assert!(
+        worker_concerns
+            .as_deref()
+            .is_some_and(|concerns| concerns.contains("budget-parked:")),
+        "budget-park concern should surface through work_submitted extraction: {worker_concerns:?}"
+    );
+    assert!(verification_failure.is_none());
 }
 
 #[tokio::test]
@@ -2252,7 +2327,7 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
 
-    let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+    let (result, output, tokens_in, tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
             tools: &tools,
@@ -2299,5 +2374,37 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
         provider.remaining(),
         1,
         "ignored budget wind-down must stop before consuming later fallback text"
+    );
+
+    let stage_outcome = StageOutcome::Parked {
+        reason: ParkReason::Budget,
+        summary: None,
+        wind_down_ignored: true,
+        session_id: session_id.clone(),
+        tokens_in,
+        tokens_out,
+    };
+    assert_eq!(
+        test_session_settlement_for_stage_outcome(&stage_outcome, false),
+        (SessionStatus::Completed, Some("budget".to_string())),
+        "ignored budget wind-downs still settle as completed budget parks"
+    );
+    match stage_outcome {
+        StageOutcome::Parked {
+            wind_down_ignored, ..
+        } => assert!(
+            wind_down_ignored,
+            "ignored flag must be recorded structurally"
+        ),
+        other => panic!("expected parked outcome, got {other:?}"),
+    }
+
+    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let entries = repo.list_activity(&task_id).await.unwrap();
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.event_type != "work_submitted"),
+        "ignored wind-down must not write a misleading summary activity: {entries:?}"
     );
 }
