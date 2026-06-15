@@ -33,6 +33,8 @@
 //! `test_provider`) are defined here and marked `pub(super)` so the 4 sibling
 //! test files can reach them via `use super::spawn_sse_server;` etc.
 
+#![allow(clippy::doc_overindented_list_items)]
+
 #[allow(unused_imports)]
 pub use super::*;
 use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
