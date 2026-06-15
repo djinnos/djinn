@@ -2014,7 +2014,13 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
     let provider = MockProvider::new(vec![
         MockResponse::tool_call_with_input("a", "worker_tool", serde_json::json!({"step": 1}), 40),
         MockResponse::tool_call_with_input("b", "worker_tool", serde_json::json!({"step": 2}), 30),
+        // This is the single provider turn granted after the hard-budget
+        // wind-down directive. It ignores the directive by calling a tool.
         MockResponse::tool_call_with_input("c", "worker_tool", serde_json::json!({"step": 3}), 5),
+        // Regression guard: the old pre-turn condition continued below the
+        // normal step cap after an ignored budget wind-down and consumed this
+        // fallback as a false successful summary.
+        MockResponse::text_only("fallback budget handoff that must never be consumed", 5),
     ]);
 
     let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
@@ -2066,5 +2072,10 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
     assert!(
         output.budget_wind_down_details.is_none(),
         "ignored wind-down without summary must not synthesize handoff details"
+    );
+    assert_eq!(
+        provider.remaining(),
+        1,
+        "ignored budget wind-down must stop before consuming later fallback text"
     );
 }

@@ -423,11 +423,15 @@ pub(crate) async fn run_reply_loop(
         // permitted turn we inject a one-shot directive asking the agent to
         // summarize work done + what remains, then allow EXACTLY ONE more turn
         // to capture that hand-off (instead of hard-erroring with no context).
-        // `wind_down_injected` makes the extension strictly one turn: once the
-        // wind-down turn runs, the next cap check falls through to the hard
-        // error if the agent still hasn't reached a terminal action.
+        // `wind_down_injected` makes the step-cap extension strictly one turn:
+        // once the wind-down turn runs, the next cap check falls through to the
+        // hard error if the agent still hasn't reached a terminal action.
+        // Budget-triggered wind-downs may happen far before `max_turns`, so they
+        // need their own post-injection state to re-enter the stop branch after
+        // exactly one granted provider turn even while `turns < max_turns`.
         let mut wind_down_injected = false;
         let mut wind_down_reason: Option<WindDownReason> = None;
+        let mut budget_wind_down_final_turn_spent = false;
         // rrdr: one-shot soft-budget converge reminder flag — see
         // `maybe_inject_soft_budget_reminder` for the contract.
         let mut soft_budget_reminder_injected = false;
@@ -439,7 +443,14 @@ pub(crate) async fn run_reply_loop(
                 total_tokens_out,
                 current_context_tokens,
             );
-            if turns >= max_turns || (!wind_down_injected && hard_budget_exceeded) {
+            let budget_wind_down_should_stop = budget_wind_down_final_turn_spent
+                && wind_down_reason
+                    .as_ref()
+                    .is_some_and(WindDownReason::is_budget);
+            if turns >= max_turns
+                || (!wind_down_injected && hard_budget_exceeded)
+                || budget_wind_down_should_stop
+            {
                 if !wind_down_injected {
                     // One turn before the hard cap: inject the wind-down
                     // directive and grant a single extra turn for the summary.
@@ -836,6 +847,38 @@ pub(crate) async fn run_reply_loop(
 
             conversation.push(assistant_msg);
 
+            // rrdr budget park: after a hard-budget wind-down directive, the
+            // single granted provider turn must be a text-only hand-off summary.
+            // Tool calls (including finalize tools) or an empty response are an
+            // ignored wind-down, not permission to keep running until the normal
+            // step cap. Mark the final turn spent and re-enter the pre-turn stop
+            // branch immediately; do not dispatch the requested tools or consume
+            // any later fallback text as a false successful summary.
+            if wind_down_injected
+                && wind_down_reason
+                    .as_ref()
+                    .is_some_and(WindDownReason::is_budget)
+            {
+                let summary = turn_text.trim();
+                if turn_tool_calls.is_empty() && !summary.is_empty() {
+                    output.budget_wind_down_summary = Some(summary.to_string());
+                    output.budget_wind_down_details =
+                        wind_down_reason.as_ref().map(WindDownReason::details);
+                    tracing::info!(
+                        task_id = %task_id,
+                        agent_type = %role_name,
+                        turns,
+                        assistant_message_count,
+                        wind_down_reason = "budget",
+                        "ReplyLoop: wind-down summary captured — session complete (graceful step-cap stop)"
+                    );
+                    break;
+                }
+
+                budget_wind_down_final_turn_spent = true;
+                continue;
+            }
+
             // ── Compaction threshold check ────────────────────────────────────
             if crate::compaction::needs_compaction(current_context_tokens, context_window) {
                 tracing::info!(
@@ -955,24 +998,12 @@ pub(crate) async fn run_reply_loop(
             // finalize), fall through to dispatch — the next cap check then
             // hard-errors, so the extension stays exactly one turn.
             if wind_down_injected && turn_tool_calls.is_empty() {
-                let budget_wind_down = wind_down_reason
-                    .as_ref()
-                    .is_some_and(WindDownReason::is_budget);
-                if budget_wind_down {
-                    let summary = turn_text.trim();
-                    if !summary.is_empty() {
-                        output.budget_wind_down_summary = Some(summary.to_string());
-                        output.budget_wind_down_details = wind_down_reason
-                            .as_ref()
-                            .map(WindDownReason::details);
-                    }
-                }
                 tracing::info!(
                     task_id = %task_id,
                     agent_type = %role_name,
                     turns,
                     assistant_message_count,
-                    wind_down_reason = if budget_wind_down { "budget" } else { "step_cap" },
+                    wind_down_reason = "step_cap",
                     "ReplyLoop: wind-down summary captured — session complete (graceful step-cap stop)"
                 );
                 break;
