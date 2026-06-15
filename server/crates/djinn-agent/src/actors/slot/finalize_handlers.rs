@@ -35,6 +35,44 @@ pub(crate) async fn process_finalize_payload(
     }
 }
 
+/// Persist a budget-park handoff summary using the same payload shape as
+/// `submit_work`, so `extract_worker_context` can surface it unchanged.
+pub(crate) async fn handle_budget_park(
+    summary: &str,
+    details: &str,
+    task_id: &str,
+    app_state: &AgentContext,
+) {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return;
+    }
+
+    let activity_payload = serde_json::json!({
+        "summary": summary,
+        "remaining_concerns": format!("budget-parked: {details}"),
+    })
+    .to_string();
+
+    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    if let Err(e) = repo
+        .log_activity(
+            Some(task_id),
+            "agent-supervisor",
+            "worker",
+            "work_submitted",
+            &activity_payload,
+        )
+        .await
+    {
+        tracing::warn!(
+            task_id = %task_id,
+            error = %e,
+            "finalize_handlers: failed to log budget-park work_submitted activity"
+        );
+    }
+}
+
 /// Log structured work-submission activity for a worker session.
 async fn handle_submit_work(payload: &serde_json::Value, task_id: &str, app_state: &AgentContext) {
     let work = match serde_json::from_value::<SubmitWork>(payload.clone()) {
@@ -335,6 +373,59 @@ mod tests {
     }
 
     // ── process_finalize_payload: submit_work ────────────────────────────────
+
+    #[tokio::test]
+    async fn budget_park_logs_extractor_compatible_work_submitted() {
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(
+            db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+
+        handle_budget_park(
+            "completed A; B remains",
+            "budget-triggered wind-down summary captured",
+            &task.id,
+            &ctx,
+        )
+        .await;
+
+        let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
+        let entries = repo.list_activity(&task.id).await.unwrap();
+        let work_entries: Vec<_> = entries
+            .iter()
+            .filter(|e| e.event_type == "work_submitted")
+            .collect();
+        assert_eq!(work_entries.len(), 1);
+
+        let body: serde_json::Value = serde_json::from_str(&work_entries[0].payload).unwrap();
+        assert_eq!(body["summary"], "completed A; B remains");
+        assert_eq!(
+            body["remaining_concerns"],
+            "budget-parked: budget-triggered wind-down summary captured"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_park_empty_summary_skips_activity() {
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(
+            db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+
+        handle_budget_park("   ", "ignored", &task.id, &ctx).await;
+
+        let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
+        let entries = repo.list_activity(&task.id).await.unwrap();
+        assert!(entries.iter().all(|e| e.event_type != "work_submitted"));
+    }
 
     #[tokio::test]
     async fn submit_work_logs_activity_with_summary_and_files() {

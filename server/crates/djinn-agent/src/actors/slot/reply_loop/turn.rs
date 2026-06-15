@@ -13,7 +13,7 @@ use djinn_provider::provider::telemetry;
 use super::super::{runtime_env_diagnostics, runtime_fs_diagnostics};
 use super::budget::SessionBudgetPolicy;
 use super::error_handling::{
-    MAX_COMPACTION_RETRIES, empty_turn_backoff, is_context_length_error,
+    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_turn_backoff, is_context_length_error,
     is_orphaned_tool_call_error, next_nudge_message, should_retry_after_tool_call_compaction,
     should_retry_empty_assistant_turn, should_retry_empty_stream, tool_choice_for_turn,
     wind_down_message,
@@ -353,6 +353,7 @@ pub(crate) async fn run_reply_loop(
         // wind-down turn runs, the next cap check falls through to the hard
         // error if the agent still hasn't reached a terminal action.
         let mut wind_down_injected = false;
+        let budget_triggered_wind_down = max_turns_override.is_none();
 
         loop {
             if turns >= max_turns {
@@ -376,7 +377,25 @@ pub(crate) async fn run_reply_loop(
                     // this branch with `wind_down_injected == true` and hard-errors.
                 } else {
                     // The agent ignored the wind-down (or produced no terminal
-                    // action) — fall back to the existing hard-error behavior.
+                    // action). Production budget-triggered wind-downs become a
+                    // typed settlement outcome the supervisor parks deliberately;
+                    // test/non-budget max-turn overrides retain the historical
+                    // hard-error behavior.
+                    if budget_triggered_wind_down {
+                        let details = format!(
+                            "max turns ({max_turns}) reached; wind-down directive was injected but the agent did not produce a text-only summary"
+                        );
+                        tracing::warn!(
+                            task_id = %task_id,
+                            session_id = %session_id,
+                            agent_type = %role_name,
+                            turns,
+                            max_turns,
+                            wind_down_ignored = true,
+                            "ReplyLoop: budget-triggered wind-down ignored; parking session"
+                        );
+                        return Err(BudgetWindDownIgnored { details }.into());
+                    }
                     return Err(anyhow::anyhow!(
                         "max turns ({}) exceeded without text-only response (wind-down summary \
                          directive was injected but the agent did not terminate)",
@@ -805,6 +824,12 @@ pub(crate) async fn run_reply_loop(
             // finalize), fall through to dispatch — the next cap check then
             // hard-errors, so the extension stays exactly one turn.
             if wind_down_injected && turn_tool_calls.is_empty() {
+                if budget_triggered_wind_down {
+                    let summary = turn_text.trim();
+                    if !summary.is_empty() {
+                        output.budget_wind_down_summary = Some(summary.to_string());
+                    }
+                }
                 tracing::info!(
                     task_id = %task_id,
                     agent_type = %role_name,
