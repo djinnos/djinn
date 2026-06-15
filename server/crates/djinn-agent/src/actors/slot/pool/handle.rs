@@ -5,7 +5,7 @@ use crate::context::AgentContext;
 
 use super::super::SlotPoolConfig;
 use super::actor::SlotPool;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::types::SlotFactory;
 use super::types::{PoolError, PoolMessage, PoolStatus, Reply, RunningTaskInfo};
 
@@ -25,8 +25,8 @@ impl SlotPoolHandle {
         Self { sender }
     }
 
-    #[cfg(test)]
-    pub(crate) fn spawn_with_factory(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn spawn_with_factory(
         app_state: AgentContext,
         cancel: CancellationToken,
         config: SlotPoolConfig,

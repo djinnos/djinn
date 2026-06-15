@@ -1,4 +1,84 @@
 use super::*;
+use std::collections::HashMap as StdHashMap;
+use std::sync::{Arc as StdArc, Mutex as StdMutex};
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{Layer, registry::LookupSpan};
+
+#[derive(Clone, Debug, Default)]
+struct RecordedSpan {
+    name: String,
+    fields: StdHashMap<String, String>,
+}
+
+#[derive(Clone, Default)]
+struct RecordingLayer {
+    spans: StdArc<StdMutex<Vec<RecordedSpan>>>,
+}
+
+impl RecordingLayer {
+    fn spans(&self) -> Vec<RecordedSpan> {
+        self.spans.lock().expect("recorded spans mutex").clone()
+    }
+}
+
+#[derive(Default)]
+struct FieldRecorder {
+    fields: StdHashMap<String, String>,
+}
+
+impl Visit for FieldRecorder {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.fields.insert(
+            field.name().to_owned(),
+            format!("{value:?}").trim_matches('"').to_owned(),
+        );
+    }
+}
+
+impl<S> Layer<S> for RecordingLayer
+where
+    S: tracing::Subscriber,
+    S: for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::Id,
+        ctx: Context<'_, S>,
+    ) {
+        let mut recorder = FieldRecorder::default();
+        attrs.record(&mut recorder);
+        if let Some(span) = ctx.span(id) {
+            span.extensions_mut().insert(RecordedSpan {
+                name: attrs.metadata().name().to_owned(),
+                fields: recorder.fields,
+            });
+        }
+    }
+
+    fn on_record(&self, id: &tracing::Id, values: &tracing::span::Record<'_>, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(id) {
+            let mut recorder = FieldRecorder::default();
+            values.record(&mut recorder);
+            if let Some(recorded) = span.extensions_mut().get_mut::<RecordedSpan>() {
+                recorded.fields.extend(recorder.fields);
+            }
+        }
+    }
+
+    fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(&id)
+            && let Some(recorded) = span.extensions().get::<RecordedSpan>()
+        {
+            self.spans
+                .lock()
+                .expect("recorded spans mutex")
+                .push(recorded.clone());
+        }
+    }
+}
 
 fn test_dispatch_pause(reason: &str) -> djinn_core::models::DispatchPause {
     djinn_core::models::DispatchPause {
@@ -63,6 +143,43 @@ async fn assert_task_status(
         .unwrap()
         .unwrap();
     assert_eq!(updated.status, expected, "task {} status", task.short_id);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_span_records_task_and_model_fields() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+    let model_ids = vec!["test-provider/test-model".to_owned()];
+    let layer = RecordingLayer::default();
+    let subscriber = tracing_subscriber::registry().with(layer.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let outcome = actor
+        .try_dispatch_to_pool(
+            "span-task",
+            "worker",
+            7,
+            None,
+            &model_ids,
+            |_pool, _model_id| async move { Ok::<(), PoolError>(()) },
+        )
+        .await;
+
+    assert!(matches!(outcome, DispatchOutcome::Dispatched));
+    let dispatch_span = layer
+        .spans()
+        .into_iter()
+        .find(|span| span.name == "djinn.dispatch")
+        .expect("djinn.dispatch span recorded");
+    assert_eq!(
+        dispatch_span.fields.get("task_id").map(String::as_str),
+        Some("span-task")
+    );
+    assert_eq!(
+        dispatch_span.fields.get("model_id").map(String::as_str),
+        Some("test-provider/test-model")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

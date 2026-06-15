@@ -27,12 +27,18 @@
 //! preserved in declaration order. Re-running the generator on an unchanged
 //! tree produces identical bytes, which is what the CI drift check relies on.
 //!
-//! ## Verification
+//! ## Drift checking
+//!
+//! [`check_manifest_drift`] regenerates the complete manifest JSON and compares
+//! those bytes against the checked artifact. This is the local/CI guard for
+//! stale manifests: run `make skills-manifest-check` to verify, or
+//! `make skills-manifest-generate` to update `.djinn/skills.json` after editing
+//! a skill or reference file.
 //!
 //! [`verify_manifest`] re-loads skills and recomputes hashes from disk, then
-//! compares them against the manifest. It returns the first mismatch it
-//! finds (or `Ok(())` if everything matches). The runtime worker task
-//! (T3 in the ihl1 wave) wraps this to fail closed on tamper/drift.
+//! compares them against the manifest. It returns the first mismatch it finds
+//! (or `Ok(())` if everything matches). The runtime worker task (T3 in the ihl1
+//! wave) wraps this to fail closed on tamper/drift.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -65,6 +71,65 @@ pub struct SkillsManifest {
     pub generated_by: String,
     /// All skills discovered under the canonical directories, sorted by `id`.
     pub skills: Vec<ManifestSkill>,
+}
+
+/// Regenerate the manifest and compare it byte-for-byte with the checked file.
+///
+/// This catches every drift class the manifest covers, including added or
+/// removed skills that a per-entry verifier cannot see. The returned error is
+/// intentionally actionable for contributors and CI logs: it points at the
+/// exact generation command instead of only exposing a raw diff.
+pub fn check_manifest_drift(
+    project_root: &Path,
+    manifest_path: &Path,
+) -> Result<(), ManifestDriftError> {
+    let generated =
+        generate_manifest(project_root, None).map_err(|source| ManifestDriftError::Io {
+            path: manifest_path.display().to_string(),
+            source,
+        })?;
+    let generated_json = to_pretty_json(&generated)?;
+    let checked_json =
+        fs::read_to_string(manifest_path).map_err(|source| ManifestDriftError::Io {
+            path: manifest_path.display().to_string(),
+            source,
+        })?;
+
+    if checked_json == generated_json {
+        return Ok(());
+    }
+
+    Err(ManifestDriftError::Drift {
+        manifest_path: manifest_path.display().to_string(),
+        update_command: "make skills-manifest-generate".to_string(),
+        checked_len: checked_json.len(),
+        generated_len: generated_json.len(),
+    })
+}
+
+/// Errors from the CI/local byte-for-byte drift check.
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestDriftError {
+    /// Could not regenerate or read the checked manifest artifact.
+    #[error("failed to read or generate skills manifest `{path}`: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Generated manifest serialization failed.
+    #[error("failed to serialize regenerated skills manifest: {0}")]
+    Serialize(#[from] serde_json::Error),
+    /// The checked artifact does not match freshly generated output.
+    #[error(
+        "skills manifest drift detected at `{manifest_path}`. Run `{update_command}` from the repository root and commit the updated manifest."
+    )]
+    Drift {
+        manifest_path: String,
+        update_command: String,
+        checked_len: usize,
+        generated_len: usize,
+    },
 }
 
 /// Per-skill manifest entry. Fields mirror the ihl1-roadmap schema sketch.
@@ -138,6 +203,23 @@ pub enum ManifestError {
     /// disk. Treated as a hard failure during verification.
     #[error("skill `{0}` could not be reloaded from disk")]
     SkillMissing(String),
+    /// A loaded skill was not present in the checked manifest. This is a hard
+    /// runtime failure when a manifest exists because otherwise new/tampered
+    /// materialized skills could be served without a content hash.
+    #[error(
+        "skill `{0}` is not present in the checked skills manifest; run `make skills-manifest-generate` from the repository root and commit .djinn/skills.json"
+    )]
+    SkillNotInManifest(String),
+    /// A manifest entry's disclosure fields no longer match the loaded skill.
+    #[error(
+        "skill `{skill}` manifest {field} is `{expected}` but loaded skill has `{actual}`; run `make skills-manifest-generate` if this change is intentional"
+    )]
+    MetadataMismatch {
+        skill: String,
+        field: &'static str,
+        expected: String,
+        actual: String,
+    },
     /// A `source_files` entry in the manifest had an unreadable file.
     #[error("source file `{path}` for skill `{skill}` could not be hashed: {source}")]
     SourceUnreadable {
@@ -173,6 +255,117 @@ pub enum ManifestError {
         expected: String,
         actual: String,
     },
+}
+
+/// Runtime errors produced while loading skills under manifest verification.
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeSkillManifestError {
+    /// The checked manifest exists but could not be read.
+    #[error("failed to read checked skills manifest `{path}`: {source}")]
+    ManifestRead {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The checked manifest exists but is not valid JSON for the schema.
+    #[error("failed to parse checked skills manifest `{path}`: {source}")]
+    ManifestParse {
+        path: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    /// A loaded skill did not match the checked manifest.
+    #[error("skills manifest verification failed: {0}")]
+    Verification(#[from] ManifestError),
+}
+
+/// Load the requested skills and, when `.djinn/skills.json` exists, verify the
+/// resolved summaries, served bodies, and contributing source files against it.
+///
+/// Missing manifests are accepted for legacy projects. Existing manifests fail
+/// closed: stale/tampered loaded skills are rejected with actionable errors
+/// rather than being silently materialized into prompts or returned by
+/// `skill_read`.
+pub fn load_verified_skills(
+    project_root: &Path,
+    names: &[String],
+) -> Result<Vec<ResolvedSkill>, RuntimeSkillManifestError> {
+    let loaded = load_verified_skills_with_sources(project_root, names)?;
+    Ok(loaded.into_iter().map(|(_, skill, _)| skill).collect())
+}
+
+pub(crate) fn load_verified_skills_with_sources(
+    project_root: &Path,
+    names: &[String],
+) -> Result<Vec<(String, ResolvedSkill, PathBuf)>, RuntimeSkillManifestError> {
+    let loaded: Vec<(String, ResolvedSkill, PathBuf)> = names
+        .iter()
+        .filter_map(|requested_name| {
+            let (skill, path) =
+                load_skills_with_sources(project_root, std::slice::from_ref(requested_name))
+                    .into_iter()
+                    .next()?;
+            Some((requested_name.clone(), skill, path))
+        })
+        .collect();
+
+    if let Some(manifest) = read_manifest_if_present(project_root)? {
+        verify_loaded_skills(project_root, &manifest, names, &loaded)?;
+    }
+
+    Ok(loaded)
+}
+
+fn read_manifest_if_present(
+    project_root: &Path,
+) -> Result<Option<SkillsManifest>, RuntimeSkillManifestError> {
+    let manifest_path = project_root.join(DEFAULT_MANIFEST_PATH);
+    let json = match fs::read_to_string(&manifest_path) {
+        Ok(json) => json,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(RuntimeSkillManifestError::ManifestRead {
+                path: manifest_path.display().to_string(),
+                source,
+            });
+        }
+    };
+
+    serde_json::from_str(&json).map(Some).map_err(|source| {
+        RuntimeSkillManifestError::ManifestParse {
+            path: manifest_path.display().to_string(),
+            source,
+        }
+    })
+}
+
+fn verify_loaded_skills(
+    project_root: &Path,
+    manifest: &SkillsManifest,
+    requested_names: &[String],
+    loaded: &[(String, ResolvedSkill, PathBuf)],
+) -> Result<(), ManifestError> {
+    for requested_name in requested_names {
+        if manifest
+            .skills
+            .iter()
+            .any(|entry| entry.id == *requested_name)
+            && !loaded.iter().any(|(id, _, _)| id == requested_name)
+        {
+            return Err(ManifestError::SkillMissing(requested_name.clone()));
+        }
+    }
+
+    for (id, skill, source_path) in loaded {
+        let entry = manifest
+            .skills
+            .iter()
+            .find(|entry| entry.id == *id)
+            .ok_or_else(|| ManifestError::SkillNotInManifest(id.clone()))?;
+        verify_manifest_entry(project_root, entry, skill, source_path)?;
+    }
+
+    Ok(())
 }
 
 /// Build a manifest for a project by walking its canonical skill directories.
@@ -271,81 +464,115 @@ pub fn verify_manifest(
             .next()
             .ok_or_else(|| ManifestError::SkillMissing(entry.id.clone()))?;
         let (skill, _resolved_path) = resolved;
+        verify_manifest_entry(project_root, entry, &skill, &path)?;
+    }
+    Ok(())
+}
 
-        let actual_summary = sha256_prefixed(summary_bytes(&skill).as_bytes());
-        if actual_summary != entry.summary_hash {
-            return Err(ManifestError::SummaryHashMismatch {
-                skill: entry.id.clone(),
-                expected: entry.summary_hash.clone(),
-                actual: actual_summary,
-            });
-        }
+fn verify_manifest_entry(
+    project_root: &Path,
+    entry: &ManifestSkill,
+    skill: &ResolvedSkill,
+    path: &Path,
+) -> Result<(), ManifestError> {
+    if entry.name != skill.name {
+        return Err(ManifestError::MetadataMismatch {
+            skill: entry.id.clone(),
+            field: "name",
+            expected: entry.name.clone(),
+            actual: skill.name.clone(),
+        });
+    }
+    if entry.description != skill.description {
+        return Err(ManifestError::MetadataMismatch {
+            skill: entry.id.clone(),
+            field: "description",
+            expected: entry.description.clone(),
+            actual: skill.description.clone(),
+        });
+    }
+    if entry.required != skill.required {
+        return Err(ManifestError::MetadataMismatch {
+            skill: entry.id.clone(),
+            field: "required",
+            expected: entry.required.to_string(),
+            actual: skill.required.to_string(),
+        });
+    }
 
-        let actual_content = sha256_prefixed(skill.content.as_bytes());
-        if actual_content != entry.content_hash {
-            return Err(ManifestError::ContentHashMismatch {
-                skill: entry.id.clone(),
-                expected: entry.content_hash.clone(),
-                actual: actual_content,
-            });
-        }
+    let actual_summary = sha256_prefixed(summary_bytes(skill).as_bytes());
+    if actual_summary != entry.summary_hash {
+        return Err(ManifestError::SummaryHashMismatch {
+            skill: entry.id.clone(),
+            expected: entry.summary_hash.clone(),
+            actual: actual_summary,
+        });
+    }
 
-        // Compare source files. The generator emits them in a stable sorted
-        // order, so we can match positionally. Any divergence is a drift
-        // signal even if the hashes happen to coincide.
-        let expected_paths: Vec<&str> = entry
-            .source_files
-            .iter()
-            .map(|sf| sf.path.as_str())
-            .collect();
-        let mut actual_paths: Vec<String> =
-            vec![relative_posix_path(project_root, &path).map_err(|e| {
-                ManifestError::SourceUnreadable {
-                    skill: entry.id.clone(),
-                    path: entry.id.clone(),
-                    source: e,
-                }
-            })?];
-        if let Some(refs) = reference_files_sorted(project_root, &path) {
-            for (relative, _) in refs {
-                actual_paths.push(relative);
-            }
-        }
-        if actual_paths != expected_paths {
-            return Err(ManifestError::ReferenceMissing {
-                skill: entry.id.clone(),
-                path: expected_paths
-                    .iter()
-                    .find(|p| !actual_paths.iter().any(|a| a == *p))
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| actual_paths[0].clone()),
-            });
-        }
+    let actual_content = sha256_prefixed(skill.content.as_bytes());
+    if actual_content != entry.content_hash {
+        return Err(ManifestError::ContentHashMismatch {
+            skill: entry.id.clone(),
+            expected: entry.content_hash.clone(),
+            actual: actual_content,
+        });
+    }
 
-        for source in &entry.source_files {
-            let absolute =
-                project_root.join(source.path.replace('/', std::path::MAIN_SEPARATOR_STR));
-            if !absolute.is_file() {
-                return Err(ManifestError::ReferenceMissing {
-                    skill: entry.id.clone(),
-                    path: source.path.clone(),
-                });
-            }
-            let actual = sha256_file(&absolute).map_err(|e| ManifestError::SourceUnreadable {
+    // Compare source files. The generator emits them in a stable sorted order,
+    // so we can match positionally. Any divergence is a drift signal even if
+    // the hashes happen to coincide.
+    let expected_paths: Vec<&str> = entry
+        .source_files
+        .iter()
+        .map(|sf| sf.path.as_str())
+        .collect();
+    let mut actual_paths: Vec<String> =
+        vec![relative_posix_path(project_root, path).map_err(|e| {
+            ManifestError::SourceUnreadable {
                 skill: entry.id.clone(),
-                path: source.path.clone(),
+                path: entry.id.clone(),
                 source: e,
-            })?;
-            if actual != source.sha256 {
-                return Err(ManifestError::SourceHashMismatch {
-                    skill: entry.id.clone(),
-                    path: source.path.clone(),
-                    expected: source.sha256.clone(),
-                    actual,
-                });
             }
+        })?];
+    if let Some(refs) = reference_files_sorted(project_root, path) {
+        for (relative, _) in refs {
+            actual_paths.push(relative);
         }
     }
+    if actual_paths != expected_paths {
+        return Err(ManifestError::ReferenceMissing {
+            skill: entry.id.clone(),
+            path: expected_paths
+                .iter()
+                .find(|p| !actual_paths.iter().any(|a| a == *p))
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| actual_paths[0].clone()),
+        });
+    }
+
+    for source in &entry.source_files {
+        let absolute = project_root.join(source.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if !absolute.is_file() {
+            return Err(ManifestError::ReferenceMissing {
+                skill: entry.id.clone(),
+                path: source.path.clone(),
+            });
+        }
+        let actual = sha256_file(&absolute).map_err(|e| ManifestError::SourceUnreadable {
+            skill: entry.id.clone(),
+            path: source.path.clone(),
+            source: e,
+        })?;
+        if actual != source.sha256 {
+            return Err(ManifestError::SourceHashMismatch {
+                skill: entry.id.clone(),
+                path: source.path.clone(),
+                expected: source.sha256.clone(),
+                actual,
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -532,6 +759,13 @@ mod tests {
             }
             fs::write(target, content).unwrap();
         }
+    }
+
+    fn write_checked_manifest(project_root: &Path) {
+        let manifest_path = project_root.join(DEFAULT_MANIFEST_PATH);
+        fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        let manifest = generate_manifest(project_root, None).unwrap();
+        fs::write(&manifest_path, to_pretty_json(&manifest).unwrap()).unwrap();
     }
 
     #[test]
@@ -820,9 +1054,137 @@ mod tests {
         let err = verify_manifest(tmp.path(), &manifest)
             .expect_err("verify must fail when required flag flips");
         assert!(
-            matches!(err, ManifestError::SummaryHashMismatch { .. }),
-            "expected SummaryHashMismatch, got {err:?}"
+            matches!(
+                err,
+                ManifestError::MetadataMismatch {
+                    field: "required",
+                    ..
+                }
+            ),
+            "expected required MetadataMismatch, got {err:?}"
         );
+    }
+
+    #[test]
+    fn load_verified_skills_allows_missing_manifest_for_legacy_projects() {
+        let tmp = test_tempdir("djinn-skills-runtime-missing-manifest-");
+        let skills_dir = djinn_skills_dir(tmp.path());
+        write_flat_skill(
+            &skills_dir,
+            "legacy",
+            "---\ndescription: No manifest\n---\n\nBody.\n",
+        );
+
+        let loaded = load_verified_skills(tmp.path(), &["legacy".to_string()])
+            .expect("missing manifest is accepted for legacy projects");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].content, "Body.");
+    }
+
+    #[test]
+    fn load_verified_skills_rejects_tampered_served_body_when_manifest_exists() {
+        let tmp = test_tempdir("djinn-skills-runtime-tamper-");
+        let skills_dir = djinn_skills_dir(tmp.path());
+        write_flat_skill(
+            &skills_dir,
+            "tamper",
+            "---\ndescription: Runtime tamper\n---\n\nOriginal body.\n",
+        );
+        write_checked_manifest(tmp.path());
+
+        write_flat_skill(
+            &skills_dir,
+            "tamper",
+            "---\ndescription: Runtime tamper\n---\n\nModified body.\n",
+        );
+
+        let err = load_verified_skills(tmp.path(), &["tamper".to_string()])
+            .expect_err("runtime verification must reject stale/tampered body");
+        let message = err.to_string();
+        assert!(message.contains("skills manifest verification failed"));
+        assert!(message.contains("content_hash"), "got: {message}");
+    }
+
+    #[test]
+    fn load_verified_skills_rejects_loaded_skill_not_in_manifest() {
+        let tmp = test_tempdir("djinn-skills-runtime-unlisted-");
+        let skills_dir = djinn_skills_dir(tmp.path());
+        write_flat_skill(
+            &skills_dir,
+            "manifested",
+            "---\ndescription: Manifested\n---\n\nBody.\n",
+        );
+        write_checked_manifest(tmp.path());
+        write_flat_skill(
+            &skills_dir,
+            "unlisted",
+            "---\ndescription: Unlisted\n---\n\nBody.\n",
+        );
+
+        let err = load_verified_skills(tmp.path(), &["unlisted".to_string()])
+            .expect_err("manifested projects must not silently serve unlisted skills");
+        assert!(
+            err.to_string()
+                .contains("not present in the checked skills manifest"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_manifest_drift_detects_skill_file_changed_without_regeneration() {
+        let tmp = test_tempdir("djinn-skills-drift-skill-");
+        let skills_dir = djinn_skills_dir(tmp.path());
+        write_flat_skill(
+            &skills_dir,
+            "drifty",
+            "---\ndescription: Drift check\n---\n\nOriginal body.\n",
+        );
+        let manifest_path = tmp.path().join(DEFAULT_MANIFEST_PATH);
+        fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        let manifest = generate_manifest(tmp.path(), None).unwrap();
+        fs::write(&manifest_path, to_pretty_json(&manifest).unwrap()).unwrap();
+
+        check_manifest_drift(tmp.path(), &manifest_path).expect("fresh manifest should pass");
+
+        write_flat_skill(
+            &skills_dir,
+            "drifty",
+            "---\ndescription: Drift check\n---\n\nModified body.\n",
+        );
+        let err = check_manifest_drift(tmp.path(), &manifest_path)
+            .expect_err("changed skill without regenerate must fail");
+        let message = err.to_string();
+        assert!(message.contains("skills manifest drift detected"));
+        assert!(message.contains("make skills-manifest-generate"));
+    }
+
+    #[test]
+    fn check_manifest_drift_detects_reference_file_changed_without_regeneration() {
+        let tmp = test_tempdir("djinn-skills-drift-reference-");
+        let skills_dir = djinn_skills_dir(tmp.path());
+        write_with_references(
+            &skills_dir,
+            "ref-drifty",
+            "---\ndescription: Reference drift check\n---\n\nPrimary.\n",
+            &[("a.md", "Original reference\n")],
+        );
+        let manifest_path = tmp.path().join(DEFAULT_MANIFEST_PATH);
+        fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        let manifest = generate_manifest(tmp.path(), None).unwrap();
+        fs::write(&manifest_path, to_pretty_json(&manifest).unwrap()).unwrap();
+
+        fs::write(
+            skills_dir
+                .join("ref-drifty")
+                .join("references")
+                .join("a.md"),
+            "Modified reference\n",
+        )
+        .unwrap();
+
+        let err = check_manifest_drift(tmp.path(), &manifest_path)
+            .expect_err("changed reference without regenerate must fail");
+        assert!(err.to_string().contains("make skills-manifest-generate"));
     }
 
     #[test]

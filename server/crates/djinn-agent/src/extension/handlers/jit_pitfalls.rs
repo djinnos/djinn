@@ -162,6 +162,7 @@ mod tests {
             folder: String::new(),
             tags: "[]".into(),
             content: format!("body of {title}"),
+            retrieval_anchor: None,
             created_at: String::new(),
             updated_at: String::new(),
             last_accessed: String::new(),

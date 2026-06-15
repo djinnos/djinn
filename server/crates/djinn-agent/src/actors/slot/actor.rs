@@ -24,8 +24,8 @@ type LifecycleRunner = Arc<
         + Sync,
 >;
 
-#[cfg(test)]
-pub(crate) type TestLifecycleRunner = LifecycleRunner;
+#[cfg(any(test, feature = "test-support"))]
+pub type TestLifecycleRunner = LifecycleRunner;
 
 struct ActiveLifecycle {
     task_id: String,
@@ -232,8 +232,8 @@ impl SlotHandle {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn spawn_with_test_runner(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn spawn_with_test_runner(
         id: usize,
         model_id: String,
         event_tx: mpsc::Sender<SlotEvent>,

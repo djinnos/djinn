@@ -318,7 +318,8 @@ async fn call_skill_read(
     // directories and returns at most one entry for a single requested name
     // (frontmatter may override the display name, so match on the single
     // resolved entry rather than the requested string).
-    let skill = crate::skills::load_skills(worktree_root, &[name.to_string()])
+    let skill = crate::skills_manifest::load_verified_skills(worktree_root, &[name.to_string()])
+        .map_err(|err| format!("skill_read refused to serve `{name}`: {err}"))?
         .into_iter()
         .next()
         .ok_or_else(|| format!("unknown skill `{name}`: not an assigned skill for this session"))?;
