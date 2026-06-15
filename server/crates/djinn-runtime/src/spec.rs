@@ -336,18 +336,23 @@ pub enum TaskRunOutcome {
         /// Set when the failure was a typed provider error the host breaker
         /// should act on (see [`ProviderFailureClass`]). `None` for non-LLM
         /// failures (git push, PR open) and for provider errors the breaker
-        /// deliberately ignores. `#[serde(default)]` keeps any older frame that
-        /// predates this field decoding as `None`.
+        /// deliberately ignores. `#[serde(default)]` keeps serde formats that can
+        /// omit fields decoding this as `None`.
         #[serde(default)]
         provider_failure: Option<ProviderFailureClass>,
         /// Machine-readable class for structured tool/provider-write failures.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ///
+        /// Keep these additive fields serialized even when `None`: the
+        /// worker→host report wire uses bincode, whose struct fields are
+        /// positional rather than self-describing. `skip_serializing_if` would
+        /// omit `None` bytes and make same-version bincode decoding hit EOF.
+        #[serde(default)]
         error_class: Option<ErrorClass>,
         /// Actionable recovery hint for the agent/operator, when available.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         hint: Option<String>,
         /// Bounded upstream response/detail excerpt for compact rendering.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         body_excerpt: Option<String>,
     },
     Interrupted,
