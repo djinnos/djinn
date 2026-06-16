@@ -66,6 +66,25 @@ is only the git/chart tag). Four images make up a release: `djinn-server`,
 `image.server` + `image.runtime` for production; the buildkitd/builder refs
 default to `:latest` and can be pinned via `imagePipeline.*`.
 
+## Dispatch-state debug endpoint
+
+Operators investigating a wedged dispatcher can inspect the admin-gated JSON
+snapshot without scraping logs:
+
+```bash
+# Admin session cookie required; returns JSON with cooldowns, slot pool,
+# breaker table, inflight ledger, pause state, and totals.
+curl --cookie 'djinn_session=<admin-cookie>' \
+  http://localhost:<port>/debug/dispatch-state
+
+# If a runbook stores only the raw session token, pass it under the server's
+# cookie name: `djinn_session=<admin-cookie>`.
+
+# Missing/invalid session is rejected by the same admin gate as other admin APIs.
+curl -i http://localhost:<port>/debug/dispatch-state
+# HTTP/1.1 401 Unauthorized
+```
+
 ## Node prerequisites
 
 The image pipeline runs BuildKit **rootless** via user namespaces. Every node
