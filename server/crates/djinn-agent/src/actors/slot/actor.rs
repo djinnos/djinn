@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::context::AgentContext;
 
@@ -32,6 +33,7 @@ struct ActiveLifecycle {
     join: tokio::task::JoinHandle<anyhow::Result<()>>,
     kill: CancellationToken,
     pause: CancellationToken,
+    span: tracing::Span,
     killed: bool,
 }
 
@@ -86,6 +88,20 @@ impl SlotActor {
                                 active = Some(running);
                             }
                             Some(SlotCommand::Kill) => {
+                                let span = tracing::info_span!(
+                                    "djinn.slot.kill",
+                                    slot_id = self.id,
+                                    model_id = %self.model_id,
+                                    task_id = %running.task_id,
+                                );
+                                span.in_scope(|| {
+                                    tracing::info!(
+                                        event = "slot.kill_requested",
+                                        slot_id = self.id,
+                                        model_id = %self.model_id,
+                                        task_id = %running.task_id,
+                                    );
+                                });
                                 running.killed = true;
                                 running.kill.cancel();
                                 active = Some(running);
@@ -116,6 +132,12 @@ impl SlotActor {
                             Some(SlotCommand::RunTask { task_id, project_path, respond_to }) => {
                                 let kill = CancellationToken::new();
                                 let pause = CancellationToken::new();
+                                let span = tracing::info_span!(
+                                    "djinn.slot.run_task",
+                                    slot_id = self.id,
+                                    model_id = %self.model_id,
+                                    task_id = %task_id,
+                                );
                                 let run = (self.runner)(
                                     task_id.clone(),
                                     project_path,
@@ -125,13 +147,14 @@ impl SlotActor {
                                     pause.clone(),
                                 );
 
-                                let join = tokio::spawn(run);
+                                let join = tokio::spawn(run.instrument(span.clone()));
                                 let _ = respond_to.send(Ok(()));
                                 active = Some(ActiveLifecycle {
                                     task_id,
                                     join,
                                     kill,
                                     pause,
+                                    span,
                                     killed: false,
                                 });
                             }
@@ -150,12 +173,28 @@ impl SlotActor {
 
     async fn emit_completion_event(&self, running: &ActiveLifecycle) {
         let event = if running.killed {
+            running.span.in_scope(|| {
+                tracing::info!(
+                    event = "slot.killed",
+                    slot_id = self.id,
+                    model_id = %self.model_id,
+                    task_id = %running.task_id,
+                );
+            });
             SlotEvent::Killed {
                 slot_id: self.id,
                 model_id: self.model_id.clone(),
                 task_id: running.task_id.clone(),
             }
         } else {
+            running.span.in_scope(|| {
+                tracing::info!(
+                    event = "slot.free",
+                    slot_id = self.id,
+                    model_id = %self.model_id,
+                    task_id = %running.task_id,
+                );
+            });
             SlotEvent::Free {
                 slot_id: self.id,
                 model_id: self.model_id.clone(),
@@ -252,6 +291,11 @@ impl SlotHandle {
         &self.model_id
     }
 
+    #[tracing::instrument(
+        name = "djinn.slot.run_task",
+        skip(self, project_path),
+        fields(slot_id = self.id, model_id = %self.model_id, task_id = %task_id)
+    )]
     pub async fn run_task(&self, task_id: String, project_path: String) -> Result<(), SlotError> {
         let (tx, rx) = oneshot::channel();
         self.sender
@@ -266,6 +310,11 @@ impl SlotHandle {
             .map_err(|_| SlotError::SessionFailed("slot actor did not ack dispatch".to_string()))?
     }
 
+    #[tracing::instrument(
+        name = "djinn.slot.kill",
+        skip(self),
+        fields(slot_id = self.id, model_id = %self.model_id)
+    )]
     pub async fn kill(&self) -> Result<(), SlotError> {
         self.sender
             .send(SlotCommand::Kill)
@@ -290,12 +339,123 @@ impl SlotHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
     use tempfile::TempDir;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::{Layer, registry::LookupSpan};
 
     use super::*;
     use crate::test_helpers;
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordedSpan {
+        name: String,
+        fields: HashMap<String, String>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordedEvent {
+        fields: HashMap<String, String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingLayer {
+        spans: Arc<Mutex<Vec<RecordedSpan>>>,
+        events: Arc<Mutex<Vec<RecordedEvent>>>,
+    }
+
+    impl RecordingLayer {
+        fn spans(&self) -> Vec<RecordedSpan> {
+            self.spans.lock().expect("recorded spans mutex").clone()
+        }
+
+        fn events(&self) -> Vec<RecordedEvent> {
+            self.events.lock().expect("recorded events mutex").clone()
+        }
+    }
+
+    #[derive(Default)]
+    struct FieldRecorder {
+        fields: HashMap<String, String>,
+    }
+
+    impl Visit for FieldRecorder {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields.insert(
+                field.name().to_owned(),
+                format!("{value:?}").trim_matches('"').to_owned(),
+            );
+        }
+    }
+
+    impl<S> Layer<S> for RecordingLayer
+    where
+        S: tracing::Subscriber,
+        S: for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            id: &tracing::Id,
+            ctx: Context<'_, S>,
+        ) {
+            let mut recorder = FieldRecorder::default();
+            attrs.record(&mut recorder);
+            if let Some(span) = ctx.span(id) {
+                span.extensions_mut().insert(RecordedSpan {
+                    name: attrs.metadata().name().to_owned(),
+                    fields: recorder.fields,
+                });
+            }
+        }
+
+        fn on_record(
+            &self,
+            id: &tracing::Id,
+            values: &tracing::span::Record<'_>,
+            ctx: Context<'_, S>,
+        ) {
+            if let Some(span) = ctx.span(id) {
+                let mut recorder = FieldRecorder::default();
+                values.record(&mut recorder);
+                if let Some(recorded) = span.extensions_mut().get_mut::<RecordedSpan>() {
+                    recorded.fields.extend(recorder.fields);
+                }
+            }
+        }
+
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut recorder = FieldRecorder::default();
+            event.record(&mut recorder);
+            self.events
+                .lock()
+                .expect("recorded events mutex")
+                .push(RecordedEvent {
+                    fields: recorder.fields,
+                });
+        }
+
+        fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
+            if let Some(span) = ctx.span(&id)
+                && let Some(recorded) = span.extensions().get::<RecordedSpan>()
+            {
+                self.spans
+                    .lock()
+                    .expect("recorded spans mutex")
+                    .push(recorded.clone());
+            }
+        }
+    }
+
+    fn tracing_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     fn test_app_state() -> (AgentContext, CancellationToken, TempDir) {
         let db = test_helpers::create_test_db();
@@ -308,8 +468,12 @@ mod tests {
         )
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test(flavor = "current_thread")]
     async fn run_task_completes_and_emits_free_event() {
+        let _tracing_guard = tracing_lock();
+        let layer = RecordingLayer::default();
+        let subscriber = tracing_subscriber::registry().with(layer.clone());
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
         let (app_state, cancel, _temp) = test_app_state();
         let (event_tx, mut event_rx) = mpsc::channel(4);
 
@@ -352,5 +516,100 @@ mod tests {
             }
             other => panic!("expected SlotEvent::Free, got {other:?}"),
         }
+
+        let run_span = layer
+            .spans()
+            .into_iter()
+            .find(|span| {
+                span.name == "djinn.slot.run_task"
+                    && span.fields.get("task_id").map(String::as_str) == Some("task-123")
+            })
+            .expect("djinn.slot.run_task span recorded");
+        assert_eq!(
+            run_span.fields.get("slot_id").map(String::as_str),
+            Some("7")
+        );
+        assert_eq!(
+            run_span.fields.get("model_id").map(String::as_str),
+            Some("test/mock")
+        );
+
+        let free_event = layer
+            .events()
+            .into_iter()
+            .find(|event| event.fields.get("event").map(String::as_str) == Some("slot.free"))
+            .expect("slot.free child event recorded");
+        assert_eq!(
+            free_event.fields.get("task_id").map(String::as_str),
+            Some("task-123")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn kill_emits_killed_event_and_kill_span_with_task_id() {
+        let _tracing_guard = tracing_lock();
+        let layer = RecordingLayer::default();
+        let subscriber = tracing_subscriber::registry().with(layer.clone());
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let (app_state, cancel, _temp) = test_app_state();
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+
+        let runner: LifecycleRunner = Arc::new(
+            |_task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                Box::pin(async move {
+                    kill.cancelled().await;
+                    Ok(())
+                })
+            },
+        );
+
+        let slot = SlotHandle::spawn_with_runner(
+            9,
+            "test/kill-model".to_string(),
+            event_tx,
+            app_state,
+            cancel,
+            runner,
+        );
+
+        slot.run_task("task-kill".to_string(), "/tmp/project".to_string())
+            .await
+            .expect("dispatch should be accepted");
+        slot.kill().await.expect("kill should be accepted");
+
+        let evt = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("event should arrive")
+            .expect("event channel should stay open");
+
+        match evt {
+            SlotEvent::Killed {
+                slot_id,
+                model_id,
+                task_id,
+            } => {
+                assert_eq!(slot_id, 9);
+                assert_eq!(model_id, "test/kill-model");
+                assert_eq!(task_id, "task-kill");
+            }
+            other => panic!("expected SlotEvent::Killed, got {other:?}"),
+        }
+
+        let kill_span = layer
+            .spans()
+            .into_iter()
+            .find(|span| {
+                span.name == "djinn.slot.kill"
+                    && span.fields.get("task_id").map(String::as_str) == Some("task-kill")
+            })
+            .expect("djinn.slot.kill span recorded with task_id");
+        assert_eq!(
+            kill_span.fields.get("slot_id").map(String::as_str),
+            Some("9")
+        );
+        assert_eq!(
+            kill_span.fields.get("model_id").map(String::as_str),
+            Some("test/kill-model")
+        );
     }
 }

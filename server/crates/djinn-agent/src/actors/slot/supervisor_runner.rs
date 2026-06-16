@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
 use djinn_db::repositories::task_run::TaskRunRepository;
@@ -462,11 +463,27 @@ pub(crate) async fn run_supervisor_dispatch(
     // Kill token fires cancel through the runtime.
     let cancel_runtime = runtime.clone();
     let cancel_handle = handle.clone();
+    let cancel_task_id = task.id.clone();
+    let cancel_model_id = model_id.clone();
     let cancel_task = tokio::spawn({
         let kill = kill.clone();
         async move {
             kill.cancelled().await;
-            let _ = cancel_runtime.cancel(&cancel_handle).await;
+            let span = tracing::info_span!(
+                "djinn.slot.kill",
+                task_id = %cancel_task_id,
+                model_id = %cancel_model_id,
+            );
+            async move {
+                tracing::info!(
+                    event = "slot.runtime_cancel",
+                    task_id = %cancel_task_id,
+                    model_id = %cancel_model_id,
+                );
+                let _ = cancel_runtime.cancel(&cancel_handle).await;
+            }
+            .instrument(span)
+            .await;
         }
     });
 
