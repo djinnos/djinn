@@ -645,8 +645,7 @@ impl CoordinatorActor {
 
     /// Publish current state to the watch channel for lock-free status reads.
     pub(super) fn publish_status(&self) {
-        djinn_telemetry::dispatch::set_cooldowns_active(self.dispatch_cooldowns.len());
-        djinn_telemetry::dispatch::set_inflight_ledger_size(self.inflight_dispatches.len());
+        self.record_live_metrics();
         let _ = self.status_tx.send(SharedCoordinatorState {
             dispatched: self.dispatched,
             recovered: self.recovered,
@@ -654,6 +653,16 @@ impl CoordinatorActor {
             pr_errors: self.pr_errors.clone(),
             rate_limited_until: self.current_rate_limited_until(),
         });
+    }
+
+    /// Publish aggregate coordinator live-state gauges from actor-owned maps.
+    ///
+    /// This helper is deliberately synchronous: `/metrics` can request a fresh
+    /// actor snapshot before rendering without any lock guard crossing an await,
+    /// and the storage remains O(1) with no per-task metric labels.
+    pub(super) fn record_live_metrics(&self) {
+        djinn_telemetry::dispatch::set_cooldowns_active(self.dispatch_cooldowns.len());
+        djinn_telemetry::dispatch::set_inflight_ledger_size(self.inflight_dispatches.len());
     }
 
     pub(super) fn maintenance_context(&self) -> crate::context::AgentContext {
@@ -755,6 +764,10 @@ impl CoordinatorActor {
             }
             CoordinatorMessage::RouteSettledNoopWithoutLiveMover { task_id } => {
                 self.route_settled_noop_without_live_mover(&task_id).await;
+            }
+            CoordinatorMessage::RecordLiveMetrics { reply } => {
+                self.record_live_metrics();
+                let _ = reply.send(());
             }
             CoordinatorMessage::CheckLiveMover { task_id, reply } => {
                 let result = match self.task_repo().get(&task_id).await {
