@@ -500,13 +500,13 @@ mod tests {
     fn metric_facade_helpers_are_synchronous_unit_functions() {
         let _guard = test_guard();
 
-        fn assert_sync_unit<F: FnOnce() -> ()>(f: F) {
+        fn assert_sync_unit<F: FnOnce()>(f: F) {
             f();
         }
 
         init().unwrap();
         assert_sync_unit(|| dispatch::increment_attempt(dispatch::OUTCOME_ERROR));
-        assert_sync_unit(|| dispatch::record_last_success_now());
+        assert_sync_unit(dispatch::record_last_success_now);
         assert_sync_unit(|| dispatch::set_cooldowns_active(0));
         assert_sync_unit(|| dispatch::set_inflight_ledger_size(0));
         assert_sync_unit(|| dispatch::set_user_cap_utilization("user-sync", "model-sync", 0, 1));
@@ -514,13 +514,13 @@ mod tests {
         assert_sync_unit(|| {
             jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_ELIGIBLE_SEARCH);
         });
-        assert_sync_unit(|| task::increment_reopen());
-        assert_sync_unit(|| task::increment_parked());
+        assert_sync_unit(task::increment_reopen);
+        assert_sync_unit(task::increment_parked);
         assert_sync_unit(|| pr_poller::set_tracked(0));
-        assert_sync_unit(|| pr_poller::increment_merge_failure());
-        assert_sync_unit(|| breaker::increment_trip());
+        assert_sync_unit(pr_poller::increment_merge_failure);
+        assert_sync_unit(breaker::increment_trip);
         assert_sync_unit(|| zombie::increment_reap(zombie::KIND_STALL));
-        assert_sync_unit(|| lead::increment_escalation());
+        assert_sync_unit(lead::increment_escalation);
         assert_sync_unit(|| doctor::set_findings("sample.shared_resolver", 1));
         assert_sync_unit(|| doctor::set_run_duration_seconds("sample.shared_resolver", 0.25));
         assert_sync_unit(|| {
