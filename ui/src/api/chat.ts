@@ -35,6 +35,20 @@ function messageToContent(
   return blocks;
 }
 
+/** Shape of a `tool_result` SSE event forwarded to the caller. */
+export interface ChatToolResult {
+  id: string;
+  /**
+   * Tool name. The server's `ToolResultPayload` does not include `name`, so it
+   * is resolved from the prior `tool_call` event's id→name map. Falls back to
+   * `undefined` when no matching call was seen on this stream.
+   */
+  name?: string;
+  output: string;
+  success: boolean;
+  message?: string | null;
+}
+
 export interface SendChatMessageOptions {
   signal?: AbortSignal;
   systemPrompt?: string;
@@ -45,6 +59,13 @@ export interface SendChatMessageOptions {
    * now — the client no longer does a follow-up completion call.
    */
   onSessionTitle?: (title: string) => void;
+  /**
+   * Fires for every `tool_result` SSE event the server emits (one per tool
+   * call). The payload is parsed from the server's `ToolResultPayload`
+   * (`{id, output, elapsed_ms, success, message}`); `elapsed_ms` is dropped and
+   * `name` is resolved from the prior `tool_call` event.
+   */
+  onToolResult?: (result: ChatToolResult) => void;
   /**
    * Scopes this chat to a proposal ("Address with djinn"). The server seeds the
    * system prompt with the proposal spec + unresolved feedback and grants the
@@ -108,6 +129,11 @@ export async function sendChatMessage(
     const reader = response.body.getReader();
     let buffer = "";
 
+    // tool_call events carry {name, id}; tool_result events only carry {id}.
+    // Keep an id→name map so we can forward the resolved name alongside each
+    // tool_result payload.
+    const toolNameById = new Map<string, string>();
+
     const handleEvent = (chunk: string): void => {
       const trimmed = chunk.trim();
       if (!trimmed) return;
@@ -148,11 +174,24 @@ export async function sendChatMessage(
         case "tool_call": {
           const name = typeof payload.name === "string" ? payload.name : "tool";
           const input = "input" in payload ? payload.input : undefined;
+          if (typeof payload.id === "string") {
+            toolNameById.set(payload.id, name);
+          }
           onToolCall(name, input);
           break;
         }
-        case "tool_result":
+        case "tool_result": {
+          if (options?.onToolResult) {
+            const id = typeof payload.id === "string" ? payload.id : "";
+            const output = typeof payload.output === "string" ? payload.output : "";
+            const success = payload.success !== false;
+            const message =
+              typeof payload.message === "string" ? payload.message : null;
+            const name = id ? toolNameById.get(id) : undefined;
+            options.onToolResult({ id, name, output, success, message });
+          }
           break;
+        }
         case "session_title": {
           const title = typeof payload.title === "string" ? payload.title : "";
           if (title && options?.onSessionTitle) {
