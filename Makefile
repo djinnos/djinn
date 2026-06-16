@@ -93,11 +93,12 @@ test: ## Run djinn-db tests (env routes to :5433 via .cargo/config.toml)
 
 # Postgres + tmpfs handles the full workspace concurrently without the
 # OOM cascade that Dolt's caching exhibited, so we can run the workspace
-# in one shot via nextest.
-test-all: ## Run every workspace crate's tests in one nextest invocation
+# in one shot via nextest. Keep this aligned with the merge-queue server-test
+# job; it is the local entrypoint for vjs6 lifecycle/concurrency regressions.
+test-all: ## Run the merge-queue/full-suite nextest command with template Postgres
 	@$(MAKE) --no-print-directory test-vault
 	@$(MAKE) --no-print-directory test-db-reset
-	cd $(SERVER_DIR) && cargo nextest run --workspace
+	cd $(SERVER_DIR) && cargo nextest run --workspace --all-targets --all-features --profile ci
 
 validate-taskrun-backstop: ## Run epic 8451 full Postgres-backed validation
 	./scripts/validate-taskrun-backstop.sh

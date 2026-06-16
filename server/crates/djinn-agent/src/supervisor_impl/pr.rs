@@ -19,7 +19,7 @@
 
 use djinn_core::models::TransitionAction;
 use djinn_core::tool_error::ErrorClass;
-use djinn_db::{ProjectRepository, TaskRepository};
+use djinn_db::{ActivityQuery, ProjectRepository, TaskRepository};
 use djinn_git::GitError;
 use djinn_provider::github_api::{
     CreatePrParams, GitHubApiClient, GitHubApiError, GitHubErrorSource, PrState,
@@ -33,7 +33,7 @@ use crate::actors::slot::helpers::default_target_branch;
 use crate::github_error_render::render_github_write_error;
 use crate::task_merge::build_app_push_url;
 
-use super::disposition::LiveMoverEvidence;
+use super::disposition::{LiveMoverEvidence, NudgeHintEvidence, resolve_corrective_nudge_hint};
 
 /// Open (or adopt) a GitHub PR for the completed task-run.
 ///
@@ -520,6 +520,118 @@ fn count_met_acceptance_criteria(acceptance_criteria_json: &str) -> u32 {
         .unwrap_or(0)
 }
 
+fn unmet_acceptance_criteria(acceptance_criteria_json: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(acceptance_criteria_json)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .map(|arr| {
+            arr.iter()
+                .filter(|criterion| {
+                    !criterion
+                        .get("met")
+                        .and_then(|met| met.as_bool())
+                        .unwrap_or(false)
+                })
+                .filter_map(acceptance_criterion_label)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn acceptance_criterion_label(criterion: &serde_json::Value) -> Option<String> {
+    ["description", "criterion", "title", "name"]
+        .iter()
+        .filter_map(|key| criterion.get(*key).and_then(|value| value.as_str()))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+async fn build_corrective_nudge_evidence(
+    task: &djinn_core::models::Task,
+    task_repo: &TaskRepository,
+) -> NudgeHintEvidence {
+    let activity = task_repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            limit: 50,
+            ..Default::default()
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                task_id = %task.id,
+                error = %e,
+                "supervisor PR-open: unable to read activity for corrective nudge hint"
+            );
+            Vec::new()
+        });
+
+    NudgeHintEvidence {
+        wind_down_summary: activity.iter().find_map(wind_down_or_finalize_summary),
+        last_error_signature: activity.iter().find_map(last_error_signature),
+        ac_unmet: unmet_acceptance_criteria(&task.acceptance_criteria),
+        task_description: task.description.clone(),
+    }
+}
+
+fn wind_down_or_finalize_summary(entry: &djinn_core::models::ActivityEntry) -> Option<String> {
+    if entry.event_type != "work_submitted" {
+        return None;
+    }
+
+    let payload: serde_json::Value = serde_json::from_str(&entry.payload).ok()?;
+    payload
+        .get("summary")
+        .and_then(|summary| summary.as_str())
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .map(ToString::to_string)
+}
+
+fn last_error_signature(entry: &djinn_core::models::ActivityEntry) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(&entry.payload).ok()?;
+    match entry.event_type.as_str() {
+        "runtime_error" | "session_error" => stable_error_signature(&payload, &entry.event_type),
+        "comment" if entry.actor_role == "system" || entry.actor_id.contains("supervisor") => {
+            supervisor_error_comment_signature(&payload)
+        }
+        _ => None,
+    }
+}
+
+fn supervisor_error_comment_signature(payload: &serde_json::Value) -> Option<String> {
+    let body = payload.get("body").and_then(|body| body.as_str())?;
+    let first_line = first_non_empty_line(body)?;
+    if !first_line.to_ascii_lowercase().contains("error") {
+        return None;
+    }
+    Some(format!("supervisor: {first_line}"))
+}
+
+fn stable_error_signature(payload: &serde_json::Value, fallback_tool_name: &str) -> Option<String> {
+    let tool_name = payload
+        .get("tool_name")
+        .or_else(|| payload.get("tool"))
+        .or_else(|| payload.get("agent_type"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_tool_name);
+
+    let error = payload
+        .get("error")
+        .or_else(|| payload.get("message"))
+        .or_else(|| payload.get("body"))
+        .and_then(|value| value.as_str())?;
+    let first_line = first_non_empty_line(error)?;
+    Some(format!("{tool_name}: {first_line}"))
+}
+
+fn first_non_empty_line(value: &str) -> Option<&str> {
+    value.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
 /// D3b/D3c: dispose of a finished run that reached the PR-open guard with a
 /// **zero-commits-ahead** task branch (the canonical "succeeded but did
 /// nothing" case).
@@ -582,10 +694,8 @@ pub(crate) async fn handle_noop_disposition(
 
     if nudge {
         let release_action = release_action.expect("nudge implies a release action");
-        // Carry the prior next-action context into the hint: the task's own
-        // description is the most reliable "what was this run supposed to do"
-        // signal available here without reaching into the in-pod transcript.
-        let next_action_hint = task.description.trim();
+        let evidence = build_corrective_nudge_evidence(task, task_repo).await;
+        let next_action_hint = resolve_corrective_nudge_hint(&evidence);
         let attempt = task.continuation_count + 1;
         let body = if next_action_hint.is_empty() {
             format!(
@@ -613,7 +723,7 @@ pub(crate) async fn handle_noop_disposition(
                 "supervisor PR-open: D3c nudge increment_continuation_count failed; \
                  falling back to terminal close"
             );
-            return close_noop(task, task_repo).await;
+            return close_noop(task, task_repo, true, &signals).await;
         }
 
         if let Err(e) = task_repo
@@ -656,7 +766,7 @@ pub(crate) async fn handle_noop_disposition(
                 "supervisor PR-open: D3c nudge release transition failed; \
                  closing as a no-op instead"
             );
-            return close_noop(task, task_repo).await;
+            return close_noop(task, task_repo, true, &signals).await;
         }
 
         tracing::info!(
@@ -676,7 +786,7 @@ pub(crate) async fn handle_noop_disposition(
         "supervisor PR-open: task_branch has no commits ahead of base and the no-op \
          budget is exhausted (or signal is inconclusive) — closing the task as completed"
     );
-    close_noop(task, task_repo).await
+    close_noop(task, task_repo, true, &signals).await
 }
 
 /// Predicate-driven orphan/no-mover entry point for already-settled runs that
@@ -736,7 +846,34 @@ pub(crate) const NOOP_CLOSE_REASON: &str = "no code changes were produced, so th
 /// budget-exhausted and the nudge-fallback paths share one definition, and so
 /// the close transition is awaited (preserving the original synchronous
 /// "transition then return" ordering of the no-commits guard).
-async fn close_noop(task: &djinn_core::models::Task, task_repo: &TaskRepository) -> TaskRunOutcome {
+fn should_close_noop(
+    predicate_says_no_mover: bool,
+    signals: &djinn_core::run_progress::RunProgressSignals,
+    _task: &djinn_core::models::Task,
+) -> bool {
+    predicate_says_no_mover && signals.commits_ahead == 0 && signals.files_changed == 0
+}
+
+async fn close_noop(
+    task: &djinn_core::models::Task,
+    task_repo: &TaskRepository,
+    predicate_says_no_mover: bool,
+    signals: &djinn_core::run_progress::RunProgressSignals,
+) -> TaskRunOutcome {
+    if !should_close_noop(predicate_says_no_mover, signals, task) {
+        let reason =
+            "no-op close skipped because the live-mover/progress predicate did not allow closure"
+                .to_string();
+        tracing::info!(
+            task_id = %task.id,
+            predicate_says_no_mover,
+            commits_ahead = signals.commits_ahead,
+            files_changed = signals.files_changed,
+            "supervisor PR-open: no-op close skipped by predicate"
+        );
+        return TaskRunOutcome::Escalated { reason };
+    }
+
     let reason = NOOP_CLOSE_REASON;
     // `Close` is valid from any non-closed status — covers both the supervisor
     // body's in_progress/verifying caller and the coordinator's approved
@@ -903,20 +1040,124 @@ fn is_concurrent_push_race(err: &GitError) -> bool {
 mod tests {
     use super::{
         NOOP_CLOSE_REASON, PR_ALREADY_EXISTS_HINT, TASK_OUTCOME_BODY_EXCERPT_BYTES,
-        is_concurrent_push_race, pr_open_failure_outcome, pr_open_untyped_failure_outcome,
+        handle_noop_disposition, is_concurrent_push_race, pr_open_failure_outcome,
+        pr_open_untyped_failure_outcome, should_close_noop,
         should_route_settled_noop_without_live_mover,
     };
     use crate::github_error_render::render_github_write_error;
     use crate::supervisor_impl::disposition::{
         LiveMoverEvidence, NUDGE_CAP, RunDisposition, decide_run_disposition, has_live_mover,
     };
+    use crate::test_helpers;
     use djinn_core::models::Task;
+    use djinn_core::models::TransitionAction;
     use djinn_core::run_progress::{RunProgress, RunProgressSignals, classify_run_progress};
     use djinn_core::tool_error::ErrorClass;
+    use djinn_db::TaskRepository;
     use djinn_git::GitError;
     use djinn_provider::github_api::GitHubApiError;
     use djinn_runtime::spec::TaskRunOutcome;
     use reqwest::StatusCode;
+
+    async fn no_op_nudge_fixture() -> (TaskRepository, Task) {
+        let db = test_helpers::create_test_db();
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let repo = TaskRepository::new(db.clone(), test_helpers::test_events());
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let in_progress = repo
+            .transition(
+                &task.id,
+                TransitionAction::Start,
+                "worker-1",
+                "worker",
+                None,
+                None,
+            )
+            .await
+            .expect("start task");
+        (repo, in_progress)
+    }
+
+    async fn latest_nudge_comment_body(repo: &TaskRepository, task_id: &str) -> String {
+        let entries = repo.list_activity(task_id).await.expect("activity");
+        entries
+            .iter()
+            .rev()
+            .filter(|entry| entry.event_type == "comment")
+            .filter_map(|entry| serde_json::from_str::<serde_json::Value>(&entry.payload).ok())
+            .filter_map(|payload| {
+                payload
+                    .get("body")
+                    .and_then(|body| body.as_str())
+                    .map(ToString::to_string)
+            })
+            .next()
+            .expect("nudge comment body")
+    }
+
+    #[tokio::test]
+    async fn no_op_nudge_comment_uses_wind_down_summary_hint() {
+        let (repo, task) = no_op_nudge_fixture().await;
+        repo.log_activity(
+            Some(&task.id),
+            "agent-supervisor",
+            "worker",
+            "work_submitted",
+            &serde_json::json!({
+                "summary": "resume by implementing the evidence resolver",
+                "remaining_concerns": "budget-parked: follow up",
+            })
+            .to_string(),
+        )
+        .await
+        .expect("log wind-down summary");
+
+        let outcome = handle_noop_disposition(&task, &repo, "main").await;
+        assert!(matches!(outcome, TaskRunOutcome::Escalated { .. }));
+
+        let body = latest_nudge_comment_body(&repo, &task.id).await;
+        assert!(body.contains("Prior intent: resume by implementing the evidence resolver"));
+        assert!(!body.contains("Prior intent: test task description"));
+    }
+
+    #[tokio::test]
+    async fn no_op_nudge_comment_uses_last_error_signature_hint() {
+        let (repo, task) = no_op_nudge_fixture().await;
+        repo.log_activity(
+            Some(&task.id),
+            "agent-supervisor",
+            "system",
+            "runtime_error",
+            &serde_json::json!({
+                "tool_name": "shell",
+                "error": "cargo test failed\nstack trace omitted",
+            })
+            .to_string(),
+        )
+        .await
+        .expect("log runtime error");
+
+        let outcome = handle_noop_disposition(&task, &repo, "main").await;
+        assert!(matches!(outcome, TaskRunOutcome::Escalated { .. }));
+
+        let body = latest_nudge_comment_body(&repo, &task.id).await;
+        assert!(body.contains("Prior intent: shell: cargo test failed"));
+        assert!(!body.contains("Prior intent: test task description"));
+    }
+
+    #[tokio::test]
+    async fn no_op_nudge_comment_uses_ac_delta_hint() {
+        let (repo, task) = no_op_nudge_fixture().await;
+
+        let outcome = handle_noop_disposition(&task, &repo, "main").await;
+        assert!(matches!(outcome, TaskRunOutcome::Escalated { .. }));
+
+        let body = latest_nudge_comment_body(&repo, &task.id).await;
+        assert!(body.contains("Prior intent: Unmet acceptance criteria:"));
+        assert!(body.contains("- default test criterion"));
+        assert!(!body.contains("Prior intent: test task description"));
+    }
 
     fn settled_noop_task() -> Task {
         Task {
@@ -1147,6 +1388,10 @@ mod tests {
             decide_run_disposition(RunProgress::NoOp, NUDGE_CAP, NUDGE_CAP),
             RunDisposition::Close,
             "count at cap must close — this is the path that invokes close_noop"
+        );
+        assert!(
+            should_close_noop(true, &signals, &settled_noop_task()),
+            "no-mover + zero-diff is the only predicate-backed close path"
         );
     }
 

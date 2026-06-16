@@ -39,6 +39,56 @@ use djinn_core::run_progress::RunProgress;
 /// stuck task can't loop forever.
 pub(crate) const NUDGE_CAP: i64 = 2;
 
+/// Evidence used to choose the next-action hint embedded in a corrective
+/// no-op nudge.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct NudgeHintEvidence {
+    pub wind_down_summary: Option<String>,
+    pub last_error_signature: Option<String>,
+    pub ac_unmet: Vec<String>,
+    pub task_description: String,
+}
+
+/// Stable fallback used when no richer prior-run evidence and no task
+/// description are available.
+pub(crate) const DEFAULT_NUDGE_HINT: &str =
+    "make the concrete change the task asks for and commit it before finalizing";
+
+/// Resolve the corrective nudge hint by descending evidence strength.
+///
+/// Preference order:
+/// 1. Most recent wind-down / finalize summary.
+/// 2. Last runtime/tool error signature.
+/// 3. Currently-unmet acceptance criteria.
+/// 4. Task description.
+/// 5. Concrete-change fallback when even the description is empty.
+pub(crate) fn resolve_corrective_nudge_hint(evidence: &NudgeHintEvidence) -> String {
+    if let Some(summary) = non_empty_trimmed(evidence.wind_down_summary.as_deref()) {
+        return summary.to_string();
+    }
+
+    if let Some(signature) = non_empty_trimmed(evidence.last_error_signature.as_deref()) {
+        return signature.to_string();
+    }
+
+    let unmet: Vec<&str> = evidence
+        .ac_unmet
+        .iter()
+        .filter_map(|criterion| non_empty_trimmed(Some(criterion)))
+        .collect();
+    if !unmet.is_empty() {
+        return format!("Unmet acceptance criteria:\n- {}", unmet.join("\n- "));
+    }
+
+    non_empty_trimmed(Some(&evidence.task_description))
+        .unwrap_or(DEFAULT_NUDGE_HINT)
+        .to_string()
+}
+
+fn non_empty_trimmed(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
 /// What the caller should do with a finished run at the no-op disposition fork.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunDisposition {
@@ -252,6 +302,99 @@ pub(crate) fn decide_run_disposition(
 mod tests {
     use super::*;
 
+    fn fixture_evidence(
+        wind_down_summary: Option<&str>,
+        last_error_signature: Option<&str>,
+        ac_unmet: Vec<&str>,
+        task_description: &str,
+    ) -> NudgeHintEvidence {
+        NudgeHintEvidence {
+            wind_down_summary: wind_down_summary.map(ToString::to_string),
+            last_error_signature: last_error_signature.map(ToString::to_string),
+            ac_unmet: ac_unmet.into_iter().map(ToString::to_string).collect(),
+            task_description: task_description.to_string(),
+        }
+    }
+
+    // ── Corrective nudge hint evidence preference ───────────────────────────
+
+    #[test]
+    fn nudge_hint_prefers_wind_down_summary_only() {
+        let evidence = fixture_evidence(
+            Some("finish wiring the resolver and add DB coverage"),
+            None,
+            vec![],
+            "bare task description",
+        );
+
+        assert_eq!(
+            resolve_corrective_nudge_hint(&evidence),
+            "finish wiring the resolver and add DB coverage"
+        );
+    }
+
+    #[test]
+    fn nudge_hint_uses_last_error_when_no_wind_down() {
+        let evidence = fixture_evidence(
+            None,
+            Some("shell: cargo test failed"),
+            vec![],
+            "bare task description",
+        );
+
+        assert_eq!(
+            resolve_corrective_nudge_hint(&evidence),
+            "shell: cargo test failed"
+        );
+    }
+
+    #[test]
+    fn nudge_hint_uses_ac_delta_when_no_prior_run_summary_or_error() {
+        let evidence = fixture_evidence(
+            None,
+            None,
+            vec!["write resolver tests", "persist enriched nudge comment"],
+            "bare task description",
+        );
+
+        assert_eq!(
+            resolve_corrective_nudge_hint(&evidence),
+            "Unmet acceptance criteria:\n- write resolver tests\n- persist enriched nudge comment"
+        );
+    }
+
+    #[test]
+    fn nudge_hint_prefers_wind_down_when_all_evidence_present() {
+        let evidence = fixture_evidence(
+            Some("resume from the captured handoff summary"),
+            Some("shell: ignored because summary wins"),
+            vec!["ignored AC"],
+            "ignored description",
+        );
+
+        assert_eq!(
+            resolve_corrective_nudge_hint(&evidence),
+            "resume from the captured handoff summary"
+        );
+    }
+
+    #[test]
+    fn nudge_hint_falls_back_to_task_description_when_evidence_absent() {
+        let evidence = fixture_evidence(None, None, vec![], "implement the requested feature");
+
+        assert_eq!(
+            resolve_corrective_nudge_hint(&evidence),
+            "implement the requested feature"
+        );
+    }
+
+    #[test]
+    fn nudge_hint_empty_task_description_uses_concrete_change_fallback() {
+        let evidence = fixture_evidence(None, None, vec![], "   ");
+
+        assert_eq!(resolve_corrective_nudge_hint(&evidence), DEFAULT_NUDGE_HINT);
+    }
+
     fn assert_single_live_mover_reason(
         evidence: LiveMoverEvidence,
         expected_reason: LiveMoverReason,
@@ -403,9 +546,45 @@ mod tests {
 
     #[test]
     fn noop_first_time_nudges() {
+        assert_eq!(NUDGE_CAP, 2, "the production no-op nudge cap is locked");
         assert_eq!(
             decide_run_disposition(RunProgress::NoOp, 0, NUDGE_CAP),
             RunDisposition::Nudge
+        );
+    }
+
+    #[test]
+    fn noop_disposition_semantics_are_locked() {
+        assert_eq!(NUDGE_CAP, 2, "do not change the no-op nudge budget");
+        assert_eq!(
+            decide_run_disposition(RunProgress::Productive, 0, NUDGE_CAP),
+            RunDisposition::Proceed,
+            "productive runs must continue to proceed"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 0, NUDGE_CAP),
+            RunDisposition::Nudge,
+            "first no-op still nudges"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 1, NUDGE_CAP),
+            RunDisposition::Nudge,
+            "second no-op still nudges"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 2, NUDGE_CAP),
+            RunDisposition::Close,
+            "at the cap, no-op closes"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 3, NUDGE_CAP),
+            RunDisposition::Close,
+            "over the cap, no-op closes"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::Inconclusive, 0, NUDGE_CAP),
+            RunDisposition::Close,
+            "inconclusive remains a conservative close"
         );
     }
 

@@ -107,11 +107,10 @@ fn main() -> ExitCode {
 
     if let Some(parent) = manifest_path.parent()
         && !parent.as_os_str().is_empty()
+        && let Err(e) = std::fs::create_dir_all(parent)
     {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("failed to create parent dir `{}`: {e}", parent.display());
-            return ExitCode::FAILURE;
-        }
+        eprintln!("failed to create parent dir `{}`: {e}", parent.display());
+        return ExitCode::FAILURE;
     }
 
     if let Err(e) = std::fs::write(&manifest_path, &json) {
