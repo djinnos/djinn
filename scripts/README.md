@@ -67,6 +67,35 @@ Set `DRY_RUN=1` to emit the same bundle shape with the action placeholder only â
 
 See `docs/TASKRUN_BACKSTOP_VERIFICATION.md` (Wave 3 operator evidence runner section) and `docs/TASKRUN_BACKSTOP_E2E_EVIDENCE.md` (Wave 3 paste points) for the exact usage and paste location.
 
+## JIT pitfall effectiveness readout bundle
+
+`jit-pitfall-readout-bundle.sh` emits a local, operator-fillable Markdown bundle for the JIT pitfall cohort effectiveness read in `docs/JIT_PITFALL_EFFECTIVENESS_READ.md`. It is a template helper only: default mode (`DRY_RUN=1`) does not connect to production, query telemetry, or read raw logs. Operators fill the generated placeholders from safe, already-redacted telemetry summaries.
+
+```sh
+./scripts/jit-pitfall-readout-bundle.sh | tee jit-pitfall-readout.md
+
+# Optional safe scalar/reference metadata can pre-fill a few rows:
+READOUT_ID="2026-06-cohort-a" \
+  ENVIRONMENT="staging/djinn" \
+  COHORT_RULE="staging namespace cohort" \
+  ROLLOUT_WINDOW_UTC="2026-06-16T00:00:00Z/2026-06-17T00:00:00Z" \
+  TELEMETRY_COUNTERS_REF="redacted/jit-counter-summary.md" \
+  EFFECTIVENESS_REF="redacted/jit-effectiveness-summary.md" \
+  NOISE_SAMPLE_REF="redacted/jit-noise-summary.md" \
+  PROMPT_BUDGET_REF="redacted/jit-prompt-budget-summary.md" \
+  ./scripts/jit-pitfall-readout-bundle.sh | tee jit-pitfall-readout.md
+```
+
+The bundle mirrors the readout sections that must be completed before a planner may consider a default-on flip: rollout record, telemetry counter outcomes, injected-vs-control outcome comparison, empty/error/disabled checks, false-positive/noise sampling, prompt-budget evidence, and the positive-read recommendation/default-on gate.
+
+Safety boundary: do **not** pass or paste raw prompt text, patch/source contents, source file contents, raw prompt logs, or full rendered JIT hint bodies (including `<relevant-pitfalls>...</relevant-pitfalls>`). Accepted inputs are limited to safe counts, rates, operational identifiers, rollout metadata, note ids/permalinks/types/ranks/confidence buckets, bounded path summaries, short operator classifications, and paths/links to already-redacted summaries.
+
+Minimal local check:
+
+```sh
+./scripts/jit-pitfall-readout-bundle.sh --self-test
+```
+
 ## Rust size guard
 
 Lightweight guard for Rust source files under `server/crates/**` and `server/src/**`. A file fails when it exceeds either size threshold.
