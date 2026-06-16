@@ -1476,7 +1476,7 @@ mod inflight_ledger_tests {
     }
 
     const WND1_READY_TASK_COUNT: usize = 10;
-    const WND1_STABLE_MODEL_ID: &str = "openai/gpt-5.5";
+    const WND1_STABLE_MODEL_ID: &str = "test/mock";
     const WND1_DISPATCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
     const WND1_CONTROLLED_RUNTIME_GUARD: Duration = Duration::from_secs(60);
 
