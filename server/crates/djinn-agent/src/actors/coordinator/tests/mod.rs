@@ -517,8 +517,8 @@ fn rfc3339(dt: ::time::OffsetDateTime) -> String {
         .unwrap()
 }
 
-#[test]
-fn dispatch_state_snapshot_filters_clones_and_does_not_mutate() {
+#[tokio::test]
+async fn dispatch_state_snapshot_filters_clones_and_does_not_mutate() {
     let db = Database::open_in_memory().unwrap();
     let (tx, _) = broadcast::channel(16);
     let mut actor = coordinator_actor_for_tests(&db, &tx);

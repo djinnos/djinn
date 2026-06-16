@@ -386,8 +386,8 @@ fn new_white_box_pool(slot_count: u32) -> (SlotPool, TempDir) {
     (pool, temp)
 }
 
-#[test]
-fn snapshot_reports_free_busy_and_draining_slots() {
+#[tokio::test]
+async fn snapshot_reports_free_busy_and_draining_slots() {
     let (mut pool, _temp) = new_white_box_pool(3);
     pool.test_set_slot_model(0, "model-a");
     pool.test_set_slot_model(1, "model-a");
