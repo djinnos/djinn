@@ -80,20 +80,25 @@ pub(in crate::actors::coordinator) enum DispatchCapObservationStage {
 }
 
 #[cfg(test)]
-std::thread_local! {
-    static DISPATCH_CAP_OBSERVATIONS: std::cell::RefCell<Vec<DispatchCapObservation>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
+static DISPATCH_CAP_OBSERVATIONS: std::sync::Mutex<Vec<DispatchCapObservation>> =
+    std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
 pub(in crate::actors::coordinator) fn clear_dispatch_cap_observations() {
-    DISPATCH_CAP_OBSERVATIONS.with(|observations| observations.borrow_mut().clear());
+    DISPATCH_CAP_OBSERVATIONS
+        .lock()
+        .expect("dispatch cap observations mutex poisoned")
+        .clear();
 }
 
 #[cfg(test)]
 pub(in crate::actors::coordinator) fn take_dispatch_cap_observations() -> Vec<DispatchCapObservation>
 {
-    DISPATCH_CAP_OBSERVATIONS.with(|observations| std::mem::take(&mut *observations.borrow_mut()))
+    std::mem::take(
+        &mut *DISPATCH_CAP_OBSERVATIONS
+            .lock()
+            .expect("dispatch cap observations mutex poisoned"),
+    )
 }
 
 #[cfg(test)]
@@ -103,14 +108,15 @@ fn observe_dispatch_cap_count(
     model: &str,
     effective_count: u32,
 ) {
-    DISPATCH_CAP_OBSERVATIONS.with(|observations| {
-        observations.borrow_mut().push(DispatchCapObservation {
+    DISPATCH_CAP_OBSERVATIONS
+        .lock()
+        .expect("dispatch cap observations mutex poisoned")
+        .push(DispatchCapObservation {
             creator_user_id: creator_user_id.to_owned(),
             model: model.to_owned(),
             effective_count,
             stage,
         });
-    });
 }
 
 #[cfg(test)]
@@ -1340,7 +1346,12 @@ impl CoordinatorActor {
 #[cfg(test)]
 mod inflight_ledger_tests {
     use super::*;
+    use crate::actors::slot::{ModelSlotConfig, SlotHandle, SlotPoolConfig, SlotPoolHandle};
     use djinn_core::models::{DispatchPause, DispatchPauseState, Task};
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+    use std::time::{Duration, Instant};
+    use tokio::sync::broadcast;
+    use tokio_util::sync::CancellationToken;
 
     fn pause() -> DispatchPause {
         DispatchPause {
@@ -1529,6 +1540,288 @@ mod inflight_ledger_tests {
             .upsert_max_sessions(user_id, &HashMap::from([(model_id.to_owned(), cap)]))
             .await
             .expect("configure wnd1 user max_sessions cap")
+    }
+
+    fn wnd1_stress_actor_for_tests(
+        db: &djinn_db::Database,
+        tx: &broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+        model_id: &str,
+        lifecycle_delay: Duration,
+    ) -> CoordinatorActor {
+        let cancel = CancellationToken::new();
+        CoordinatorActor {
+            receiver: tokio::sync::mpsc::channel(1).1,
+            events: tx.subscribe(),
+            cancel: cancel.clone(),
+            tick: tokio::time::interval(STUCK_INTERVAL),
+            db: db.clone(),
+            events_tx: tx.clone(),
+            pool: SlotPoolHandle::spawn_with_factory(
+                crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+                cancel,
+                SlotPoolConfig {
+                    models: vec![ModelSlotConfig {
+                        model_id: model_id.to_owned(),
+                        max_slots: 1,
+                        roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+                    }],
+                    role_priorities: HashMap::from([(
+                        "worker".to_owned(),
+                        vec![model_id.to_owned()],
+                    )]),
+                },
+                StdArc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
+                    let runner: crate::actors::slot::TestLifecycleRunner = StdArc::new(
+                        move |_task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                            Box::pin(async move {
+                                tokio::select! {
+                                    _ = kill.cancelled() => {}
+                                    _ = tokio::time::sleep(lifecycle_delay) => {}
+                                }
+                                Ok(())
+                            })
+                        },
+                    );
+                    SlotHandle::spawn_with_test_runner(
+                        slot_id, model_id, event_tx, app_state, cancel, runner,
+                    )
+                }),
+            ),
+            catalog: djinn_provider::catalog::CatalogService::new(),
+            health: djinn_provider::catalog::health::HealthTracker::new(),
+            role_registry: StdArc::new(crate::roles::RoleRegistry::new()),
+            lsp: crate::lsp::LspManager::new(),
+            self_sender: tokio::sync::mpsc::channel(1).0,
+            status_tx: tokio::sync::watch::channel(SharedCoordinatorState {
+                dispatched: 0,
+                recovered: 0,
+                epic_throughput: HashMap::new(),
+                pr_errors: HashMap::new(),
+                rate_limited_until: None,
+            })
+            .0,
+            dispatch_limit: 50,
+            model_priorities: HashMap::new(),
+            pr_errors: HashMap::new(),
+            last_dispatched: HashMap::new(),
+            inflight_dispatches: HashMap::new(),
+            dispatch_cooldowns: HashMap::new(),
+            dispatch_failure_streak: HashMap::new(),
+            verification_tracker: VerificationTracker::default(),
+            auto_merge_tracker: AutoMergeTracker::default(),
+            consolidation_runner: StdArc::new(consolidation::DbConsolidationRunner::new(
+                db.clone(),
+            )),
+            last_stale_sweep: StdInstant::now(),
+            last_auto_dispatch_sweep: StdInstant::now(),
+            last_proposal_review_sweep: StdInstant::now(),
+            last_graph_refresh: StdInstant::now(),
+            graph_warmer: None,
+            mirror: None,
+            runtime_ops: None,
+            rpc_registry: None,
+            prune_tick_counter: 0,
+            throughput_events: HashMap::new(),
+            escalation_counts: HashMap::new(),
+            pr_status_cache: HashMap::new(),
+            pr_draft_first_seen: HashMap::new(),
+            merge_fail_count: HashMap::new(),
+            auto_approve_attempted: HashMap::new(),
+            delegated_to_github: HashMap::new(),
+            conversations_resolved: HashMap::new(),
+            handled_dequeues: HashMap::new(),
+            stall_killed: HashSet::new(),
+            last_idle_consolidation: None,
+            idle_consolidation_cancel: None,
+            idle_consolidation_handle: None,
+            dispatched: 0,
+            recovered: 0,
+        }
+    }
+
+    async fn wnd1_active_count(
+        session_repo: &djinn_db::SessionRepository,
+        creator: &str,
+        model: &str,
+    ) -> i64 {
+        session_repo
+            .count_active_by_user_and_model()
+            .await
+            .expect("count active sessions for wnd1 cap")
+            .into_iter()
+            .filter(|(c, m, _)| c.as_deref() == Some(creator) && m == model)
+            .map(|(_, _, count)| count)
+            .sum()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wnd1_concurrent_dispatch_never_exceeds_per_user_cap_and_drains() {
+        for cap in 1..=5 {
+            clear_dispatch_cap_observations();
+            let db = crate::test_helpers::create_test_db();
+            let (tx, _rx) = broadcast::channel(256);
+            let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT + 2).await;
+            configure_wnd1_user_max_sessions(
+                &db,
+                &fixture.created_by_user_id,
+                &fixture.model_id,
+                cap,
+            )
+            .await;
+
+            let actor = wnd1_stress_actor_for_tests(
+                &db,
+                &tx,
+                &fixture.model_id,
+                Duration::from_millis(250),
+            );
+            let pool = actor.pool.clone();
+            let actor = StdArc::new(tokio::sync::Mutex::new(actor));
+            let dispatch_done = StdArc::new(std::sync::atomic::AtomicBool::new(false));
+            let seen_sessions: StdArc<StdMutex<HashMap<String, Instant>>> =
+                StdArc::new(StdMutex::new(HashMap::new()));
+
+            let session_repo =
+                djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+            let settler_repo =
+                djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+            let settler_project_id = fixture.project_id.clone();
+            let settler_model_id = fixture.model_id.clone();
+            let settler_pool = pool.clone();
+            let settler_done = dispatch_done.clone();
+            let settler_seen = seen_sessions.clone();
+            let settler = tokio::spawn(async move {
+                loop {
+                    let status = settler_pool
+                        .get_status()
+                        .await
+                        .expect("pool status during wnd1 settlement");
+                    let running: Vec<String> = status
+                        .running_tasks
+                        .into_iter()
+                        .map(|task| task.task_id)
+                        .collect();
+                    for task_id in &running {
+                        let should_create = {
+                            let mut seen = settler_seen.lock().expect("settler seen mutex");
+                            !seen.contains_key(task_id) && {
+                                seen.insert(task_id.clone(), Instant::now());
+                                true
+                            }
+                        };
+                        if should_create {
+                            settler_repo
+                                .create(djinn_db::CreateSessionParams {
+                                    project_id: &settler_project_id,
+                                    task_id: Some(task_id),
+                                    model: &settler_model_id,
+                                    agent_type: "worker",
+                                    metadata_json: None,
+                                    task_run_id: None,
+                                })
+                                .await
+                                .expect("materialize lagged wnd1 running session row");
+                        }
+
+                        let old_enough = settler_seen
+                            .lock()
+                            .expect("settler seen mutex")
+                            .get(task_id)
+                            .is_some_and(|started| started.elapsed() >= Duration::from_millis(15));
+                        if old_enough {
+                            let _ = settler_pool.kill_session(task_id).await;
+                            settler_repo
+                                .interrupt_running_for_task(task_id)
+                                .await
+                                .expect("settle wnd1 running session row");
+                        }
+                    }
+
+                    if settler_done.load(std::sync::atomic::Ordering::SeqCst) && running.is_empty()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            });
+
+            let mut dispatchers = Vec::new();
+            for _ in 0..4 {
+                let actor = actor.clone();
+                dispatchers.push(tokio::spawn(async move {
+                    for _ in 0..8 {
+                        actor.lock().await.dispatch_ready_tasks(None).await;
+                        tokio::task::yield_now().await;
+                    }
+                }));
+            }
+            for dispatcher in dispatchers {
+                dispatcher
+                    .await
+                    .expect("wnd1 dispatcher task should not panic");
+            }
+            dispatch_done.store(true, std::sync::atomic::Ordering::SeqCst);
+
+            let task_repo =
+                djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+            for task_id in &fixture.task_ids {
+                task_repo
+                    .set_status(task_id, "closed")
+                    .await
+                    .expect("close wnd1 fixture task for quiescence");
+                let _ = pool.kill_session(task_id).await;
+                session_repo
+                    .interrupt_running_for_task(task_id)
+                    .await
+                    .expect("settle wnd1 fixture task for quiescence");
+            }
+            settler.await.expect("wnd1 settler task should not panic");
+            actor.lock().await.dispatch_ready_tasks(None).await;
+
+            let observations = take_dispatch_cap_observations();
+            assert!(
+                observations.iter().any(|obs| {
+                    obs.stage == DispatchCapObservationStage::InflightIncremented
+                        && obs.creator_user_id == fixture.created_by_user_id
+                        && obs.model == fixture.model_id
+                }),
+                "cap {cap}: stress run must exercise real dispatch admissions, not only the pure ledger helper"
+            );
+            assert!(
+                observations.iter().any(|obs| {
+                    obs.stage == DispatchCapObservationStage::LedgerOverlay
+                        && obs.creator_user_id == fixture.created_by_user_id
+                        && obs.model == fixture.model_id
+                }),
+                "cap {cap}: stress run must observe the lag-window ledger overlay"
+            );
+            for obs in observations.iter().filter(|obs| {
+                obs.creator_user_id == fixture.created_by_user_id && obs.model == fixture.model_id
+            }) {
+                assert!(
+                    obs.effective_count <= cap,
+                    "cap {cap}: observed instantaneous {:?} count {} above cap",
+                    obs.stage,
+                    obs.effective_count
+                );
+            }
+
+            assert_eq!(
+                actor.lock().await.inflight_dispatches.len(),
+                0,
+                "cap {cap}: in-flight dispatch ledger must drain after quiescence"
+            );
+            assert_eq!(
+                wnd1_active_count(
+                    &session_repo,
+                    &fixture.created_by_user_id,
+                    &fixture.model_id
+                )
+                .await,
+                0,
+                "cap {cap}: DB active-session count must converge to zero after quiescence"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
