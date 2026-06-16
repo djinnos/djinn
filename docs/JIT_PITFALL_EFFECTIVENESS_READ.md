@@ -2,7 +2,7 @@
 
 Use this operator artifact before creating any task that flips just-in-time (JIT) pitfall hints default-on. The goal is a real/cohort traffic read, not a unit-test proof. Local tests only prove the gate, telemetry labels, and transient response behavior; they do **not** prove production effectiveness.
 
-Fill this document (or a copied dated instance) with evidence from a staging/cohort rollout window and leave the positive-read gate complete for the planner that will decide whether to create the default-on flip task.
+Fill this document (or a copied dated instance) with evidence from a staging/cohort rollout window and leave the positive-read gate complete for the planner that will decide whether to create the default-on flip task. To reduce copy/paste drift, operators may start from the local template emitted by `./scripts/jit-pitfall-readout-bundle.sh`; the helper only emits placeholders/safe references and does not collect production telemetry.
 
 ## Scope and safety rules
 
