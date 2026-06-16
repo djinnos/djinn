@@ -286,7 +286,9 @@ make test-all                        # whole workspace (cargo nextest)
 make sqlx-check                      # fail if the offline sqlx cache is stale
 ```
 
-The workspace `.cargo/config.toml` defaults `DATABASE_URL` to the `:5433` instance, so plain `cargo test`/`cargo build` just work. See the `Makefile` for the full target list.
+The workspace `.cargo/config.toml` defaults `DATABASE_URL` and `DJINN_TEST_DATABASE_URL` to the `:5433` instance. `make test-all` rebuilds the `djinn_test_template` database and then mirrors the merge-queue/full-suite nextest command: `cd server && cargo nextest run --workspace --all-targets --all-features --profile ci`. The PR-time fast gate is intentionally cheaper (`cargo nextest ... --no-run` plus clippy); DB-backed test execution runs in the merge queue/manual workflow.
+
+The lifecycle/concurrency regressions for the vjs6 incidents (dispatch-cap races, slot-pool lifecycle event races, `execution_kill_task` kill/cancel settlement, and reopen/intervention chaos) are part of that unfiltered `profile ci` full-suite path and must remain enabled. They use in-process TestRuntime/template-Postgres or in-memory helpers, not kind/k8s; stripped-down worker pods without Postgres/template setup may be unable to run them locally. See [`docs/LIFECYCLE_CONCURRENCY_TEST_INVENTORY.md`](docs/LIFECYCLE_CONCURRENCY_TEST_INVENTORY.md) for the focused filters and rationale.
 
 ## Community
 
