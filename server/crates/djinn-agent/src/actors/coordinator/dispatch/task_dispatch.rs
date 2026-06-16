@@ -1346,12 +1346,9 @@ impl CoordinatorActor {
 #[cfg(test)]
 mod inflight_ledger_tests {
     use super::*;
-    use crate::actors::slot::{ModelSlotConfig, SlotHandle, SlotPoolConfig, SlotPoolHandle};
     use djinn_core::models::{DispatchPause, DispatchPauseState, Task};
     use std::sync::{Arc as StdArc, Mutex as StdMutex};
-    use std::time::{Duration, Instant};
-    use tokio::sync::broadcast;
-    use tokio_util::sync::CancellationToken;
+    use std::time::Duration;
 
     fn pause() -> DispatchPause {
         DispatchPause {
@@ -1456,12 +1453,95 @@ mod inflight_ledger_tests {
 
     const WND1_READY_TASK_COUNT: usize = 10;
     const WND1_STABLE_MODEL_ID: &str = "openai/gpt-5.5";
+    const WND1_DISPATCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+    const WND1_CONTROLLED_RUNTIME_GUARD: Duration = Duration::from_secs(60);
 
     struct Wnd1DispatchFixture {
         project_id: String,
+        project_path: String,
         created_by_user_id: String,
         model_id: String,
         task_ids: Vec<String>,
+    }
+
+    #[derive(Clone)]
+    struct Wnd1ControlledRuntime {
+        started_tx: tokio::sync::mpsc::UnboundedSender<String>,
+        releases:
+            std::sync::Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
+    }
+
+    impl Wnd1ControlledRuntime {
+        fn new() -> (Self, tokio::sync::mpsc::UnboundedReceiver<String>) {
+            let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
+            (
+                Self {
+                    started_tx,
+                    releases: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+                },
+                started_rx,
+            )
+        }
+
+        fn spawn_pool(
+            &self,
+            db: &djinn_db::Database,
+            cancel: tokio_util::sync::CancellationToken,
+            max_slots: u32,
+        ) -> crate::actors::slot::SlotPoolHandle {
+            let started_tx = self.started_tx.clone();
+            let releases = self.releases.clone();
+            crate::actors::slot::SlotPoolHandle::spawn_with_factory(
+                crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+                cancel,
+                crate::actors::slot::SlotPoolConfig {
+                    models: vec![crate::actors::slot::ModelSlotConfig {
+                        model_id: WND1_STABLE_MODEL_ID.to_owned(),
+                        max_slots,
+                        roles: ["worker".to_owned()].into_iter().collect(),
+                    }],
+                    role_priorities: HashMap::new(),
+                },
+                std::sync::Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
+                    let started_tx = started_tx.clone();
+                    let releases = releases.clone();
+                    let runner: crate::actors::slot::TestLifecycleRunner = std::sync::Arc::new(
+                        move |task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                            let started_tx = started_tx.clone();
+                            let releases = releases.clone();
+                            Box::pin(async move {
+                                let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+                                releases
+                                    .lock()
+                                    .expect("wnd1 release map mutex")
+                                    .insert(task_id.clone(), release_tx);
+                                let _ = started_tx.send(task_id.clone());
+                                tokio::select! {
+                                    _ = release_rx => {}
+                                    _ = kill.cancelled() => {}
+                                    _ = tokio::time::sleep(WND1_CONTROLLED_RUNTIME_GUARD) => {}
+                                }
+                                Ok(())
+                            })
+                        },
+                    );
+                    crate::actors::slot::SlotHandle::spawn_with_test_runner(
+                        slot_id, model_id, event_tx, app_state, cancel, runner,
+                    )
+                }),
+            )
+        }
+
+        async fn release(&self, task_id: &str) {
+            let sender = self
+                .releases
+                .lock()
+                .expect("wnd1 release map mutex")
+                .remove(task_id);
+            if let Some(sender) = sender {
+                let _ = sender.send(());
+            }
+        }
     }
 
     async fn seed_wnd1_ready_worker_tasks(
@@ -1475,6 +1555,9 @@ mod inflight_ledger_tests {
 
         let event_bus = djinn_core::events::EventBus::noop();
         let project = crate::test_helpers::create_test_project(db).await;
+        let project_path =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        std::fs::create_dir_all(&project_path).expect("create wnd1 fixture project dir");
         let user = djinn_db::UserRepository::new(db.clone())
             .upsert_from_github(
                 985_100,
@@ -1520,81 +1603,31 @@ mod inflight_ledger_tests {
 
         Wnd1DispatchFixture {
             project_id: project.id,
+            project_path: project_path.to_string_lossy().into_owned(),
             created_by_user_id: user_id,
             model_id: WND1_STABLE_MODEL_ID.to_owned(),
             task_ids,
         }
     }
 
-    async fn configure_wnd1_user_max_sessions(
+    fn wnd1_actor_for_tests(
         db: &djinn_db::Database,
-        user_id: &str,
-        model_id: &str,
-        cap: u32,
-    ) -> djinn_core::models::UserSettings {
-        assert!(
-            (1..=5).contains(&cap),
-            "wnd1 fixture caps intentionally cover the 1..=5 stress range"
-        );
-        djinn_db::UserSettingsRepository::new(db.clone())
-            .upsert_max_sessions(user_id, &HashMap::from([(model_id.to_owned(), cap)]))
-            .await
-            .expect("configure wnd1 user max_sessions cap")
-    }
-
-    fn wnd1_stress_actor_for_tests(
-        db: &djinn_db::Database,
-        tx: &broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
-        model_id: &str,
-        lifecycle_delay: Duration,
+        events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+        controlled_runtime: &Wnd1ControlledRuntime,
+        max_slots: u32,
     ) -> CoordinatorActor {
-        let cancel = CancellationToken::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
         CoordinatorActor {
             receiver: tokio::sync::mpsc::channel(1).1,
-            events: tx.subscribe(),
+            events: events_tx.subscribe(),
             cancel: cancel.clone(),
             tick: tokio::time::interval(STUCK_INTERVAL),
             db: db.clone(),
-            events_tx: tx.clone(),
-            pool: SlotPoolHandle::spawn_with_factory(
-                crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
-                cancel,
-                SlotPoolConfig {
-                    models: vec![ModelSlotConfig {
-                        model_id: model_id.to_owned(),
-                        // Keep the pool ceiling above every 1..=5 per-user cap
-                        // exercised below so the stress test proves the
-                        // coordinator's cap admission path, not a single-slot
-                        // bottleneck in the test pool.
-                        max_slots: u32::try_from(WND1_READY_TASK_COUNT)
-                            .expect("wnd1 fixture slot ceiling fits u32"),
-                        roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
-                    }],
-                    role_priorities: HashMap::from([(
-                        "worker".to_owned(),
-                        vec![model_id.to_owned()],
-                    )]),
-                },
-                StdArc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
-                    let runner: crate::actors::slot::TestLifecycleRunner = StdArc::new(
-                        move |_task_id, _project_path, _model_id, _app_state, kill, _pause| {
-                            Box::pin(async move {
-                                tokio::select! {
-                                    _ = kill.cancelled() => {}
-                                    _ = tokio::time::sleep(lifecycle_delay) => {}
-                                }
-                                Ok(())
-                            })
-                        },
-                    );
-                    SlotHandle::spawn_with_test_runner(
-                        slot_id, model_id, event_tx, app_state, cancel, runner,
-                    )
-                }),
-            ),
-            catalog: djinn_provider::catalog::CatalogService::new(),
+            events_tx: events_tx.clone(),
+            pool: controlled_runtime.spawn_pool(db, cancel, max_slots),
+            catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
-            role_registry: StdArc::new(crate::roles::RoleRegistry::new()),
+            role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
             lsp: crate::lsp::LspManager::new(),
             self_sender: tokio::sync::mpsc::channel(1).0,
             status_tx: tokio::sync::watch::channel(SharedCoordinatorState {
@@ -1614,9 +1647,9 @@ mod inflight_ledger_tests {
             dispatch_failure_streak: HashMap::new(),
             verification_tracker: VerificationTracker::default(),
             auto_merge_tracker: AutoMergeTracker::default(),
-            consolidation_runner: StdArc::new(consolidation::DbConsolidationRunner::new(
-                db.clone(),
-            )),
+            consolidation_runner: std::sync::Arc::new(
+                crate::actors::coordinator::consolidation::DbConsolidationRunner::new(db.clone()),
+            ),
             last_stale_sweep: StdInstant::now(),
             last_auto_dispatch_sweep: StdInstant::now(),
             last_proposal_review_sweep: StdInstant::now(),
@@ -1644,6 +1677,56 @@ mod inflight_ledger_tests {
         }
     }
 
+    async fn configure_wnd1_user_max_sessions(
+        db: &djinn_db::Database,
+        user_id: &str,
+        model_id: &str,
+        cap: u32,
+    ) -> djinn_core::models::UserSettings {
+        assert!(
+            (1..=5).contains(&cap),
+            "wnd1 fixture caps intentionally cover the 1..=5 stress range"
+        );
+        djinn_db::UserSettingsRepository::new(db.clone())
+            .upsert_max_sessions(user_id, &HashMap::from([(model_id.to_owned(), cap)]))
+            .await
+            .expect("configure wnd1 user max_sessions cap")
+    }
+
+    async fn materialize_wnd1_running_session(
+        db: &djinn_db::Database,
+        fixture: &Wnd1DispatchFixture,
+        task_id: &str,
+    ) -> String {
+        djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .create(djinn_db::CreateSessionParams {
+                project_id: &fixture.project_id,
+                task_id: Some(task_id),
+                model: &fixture.model_id,
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+            })
+            .await
+            .expect("materialize delayed wnd1 running session row")
+            .id
+    }
+
+    async fn complete_wnd1_session(db: &djinn_db::Database, session_id: &str) {
+        djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .update(
+                session_id,
+                djinn_core::models::SessionStatus::Completed,
+                0,
+                0,
+                0,
+                0,
+                None,
+            )
+            .await
+            .expect("complete wnd1 running session row");
+    }
+
     async fn wnd1_active_count(
         session_repo: &djinn_db::SessionRepository,
         creator: &str,
@@ -1659,13 +1742,55 @@ mod inflight_ledger_tests {
             .sum()
     }
 
+    async fn wait_for_pool_to_forget_task(
+        pool: &crate::actors::slot::SlotPoolHandle,
+        task_id: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + WND1_DISPATCH_SETTLE_TIMEOUT;
+        loop {
+            if !pool
+                .has_session(task_id)
+                .await
+                .expect("query wnd1 pool task mapping")
+            {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for wnd1 pool to settle task {task_id}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn assert_wnd1_observed_cap(
+        cap: u32,
+        observations: &mut Vec<DispatchCapObservation>,
+        phase: &str,
+    ) {
+        observations.extend(take_dispatch_cap_observations());
+        let max_observed = observations
+            .iter()
+            .map(|obs| obs.effective_count)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_observed <= cap,
+            "wnd1 cap {cap} exceeded during {phase}: max_observed={max_observed}, observations={observations:?}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn wnd1_concurrent_dispatch_never_exceeds_per_user_cap_and_drains() {
+    async fn wnd1_dispatch_race_harness_never_exceeds_caps_1_through_5() {
         for cap in 1..=5 {
             clear_dispatch_cap_observations();
             let db = crate::test_helpers::create_test_db();
-            let (tx, _rx) = broadcast::channel(256);
+            let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
             let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT + 2).await;
+            assert!(
+                std::path::Path::new(&fixture.project_path).is_dir(),
+                "wnd1 fixture project path must exist for in-process dispatch"
+            );
             configure_wnd1_user_max_sessions(
                 &db,
                 &fixture.created_by_user_id,
@@ -1674,88 +1799,102 @@ mod inflight_ledger_tests {
             )
             .await;
 
-            let actor = wnd1_stress_actor_for_tests(
+            let (runtime, mut started_rx) = Wnd1ControlledRuntime::new();
+            let actor = wnd1_actor_for_tests(
                 &db,
-                &tx,
-                &fixture.model_id,
-                Duration::from_millis(250),
+                &events_tx,
+                &runtime,
+                u32::try_from(WND1_READY_TASK_COUNT).expect("wnd1 slot count fits u32"),
             );
             let pool = actor.pool.clone();
             let actor = StdArc::new(tokio::sync::Mutex::new(actor));
+            let observations = StdArc::new(StdMutex::new(Vec::<DispatchCapObservation>::new()));
             let dispatch_done = StdArc::new(std::sync::atomic::AtomicBool::new(false));
-            let seen_sessions: StdArc<StdMutex<HashMap<String, Instant>>> =
-                StdArc::new(StdMutex::new(HashMap::new()));
 
-            let session_repo =
-                djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-            let settler_repo =
-                djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-            let settler_project_id = fixture.project_id.clone();
-            let settler_model_id = fixture.model_id.clone();
+            let settler_db = db.clone();
+            let settler_fixture = Wnd1DispatchFixture {
+                project_id: fixture.project_id.clone(),
+                project_path: fixture.project_path.clone(),
+                created_by_user_id: fixture.created_by_user_id.clone(),
+                model_id: fixture.model_id.clone(),
+                task_ids: fixture.task_ids.clone(),
+            };
+            let settler_runtime = runtime.clone();
             let settler_pool = pool.clone();
             let settler_done = dispatch_done.clone();
-            let settler_seen = seen_sessions.clone();
             let settler = tokio::spawn(async move {
+                let mut active: Vec<(String, String)> = Vec::new();
+                let mut observed_starts = 0usize;
                 loop {
-                    let status = settler_pool
-                        .get_status()
-                        .await
-                        .expect("pool status during wnd1 settlement");
-                    let running: Vec<String> = status
-                        .running_tasks
-                        .into_iter()
-                        .map(|task| task.task_id)
-                        .collect();
-                    for task_id in &running {
-                        let should_create = {
-                            let mut seen = settler_seen.lock().expect("settler seen mutex");
-                            !seen.contains_key(task_id) && {
-                                seen.insert(task_id.clone(), Instant::now());
-                                true
+                    tokio::select! {
+                        maybe_task_id = started_rx.recv() => {
+                            if let Some(task_id) = maybe_task_id {
+                                // Simulate the pod/session-row lag window: the local
+                                // in-flight ledger is already populated by dispatch,
+                                // while the DB row becomes visible shortly after.
+                                tokio::task::yield_now().await;
+                                tokio::time::sleep(Duration::from_millis(1)).await;
+                                let session_id = materialize_wnd1_running_session(
+                                    &settler_db,
+                                    &settler_fixture,
+                                    &task_id,
+                                ).await;
+                                observed_starts += 1;
+                                active.push((task_id, session_id));
                             }
-                        };
-                        if should_create {
-                            settler_repo
-                                .create(djinn_db::CreateSessionParams {
-                                    project_id: &settler_project_id,
-                                    task_id: Some(task_id),
-                                    model: &settler_model_id,
-                                    agent_type: "worker",
-                                    metadata_json: None,
-                                    task_run_id: None,
-                                })
-                                .await
-                                .expect("materialize lagged wnd1 running session row");
                         }
-
-                        let old_enough = settler_seen
-                            .lock()
-                            .expect("settler seen mutex")
-                            .get(task_id)
-                            .is_some_and(|started| started.elapsed() >= Duration::from_millis(15));
-                        if old_enough {
-                            let _ = settler_pool.kill_session(task_id).await;
-                            settler_repo
-                                .interrupt_running_for_task(task_id)
-                                .await
-                                .expect("settle wnd1 running session row");
-                        }
+                        _ = tokio::time::sleep(Duration::from_millis(2)) => {}
                     }
 
-                    if settler_done.load(std::sync::atomic::Ordering::SeqCst) && running.is_empty()
+                    if active.len() >= cap as usize
+                        || (settler_done.load(std::sync::atomic::Ordering::SeqCst)
+                            && !active.is_empty())
+                    {
+                        let (task_id, session_id) = active.remove(0);
+                        complete_wnd1_session(&settler_db, &session_id).await;
+                        settler_runtime.release(&task_id).await;
+                        wait_for_pool_to_forget_task(&settler_pool, &task_id).await;
+                    }
+
+                    if settler_done.load(std::sync::atomic::Ordering::SeqCst)
+                        && active.is_empty()
+                        && observed_starts >= WND1_READY_TASK_COUNT
                     {
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             });
 
             let mut dispatchers = Vec::new();
             for _ in 0..4 {
                 let actor = actor.clone();
+                let observations = observations.clone();
+                let project_id = fixture.project_id.clone();
                 dispatchers.push(tokio::spawn(async move {
-                    for _ in 0..8 {
-                        actor.lock().await.dispatch_ready_tasks(None).await;
+                    let deadline = tokio::time::Instant::now() + WND1_DISPATCH_SETTLE_TIMEOUT;
+                    loop {
+                        let dispatched = {
+                            let mut actor = actor.lock().await;
+                            clear_dispatch_cap_observations();
+                            actor.dispatch_ready_tasks(Some(&project_id)).await;
+                            let dispatched = actor.dispatched;
+                            let mut observations = observations
+                                .lock()
+                                .expect("wnd1 observations mutex poisoned");
+                            assert_wnd1_observed_cap(
+                                cap,
+                                &mut observations,
+                                "concurrent repeated dispatch passes",
+                            );
+                            dispatched
+                        };
+                        if dispatched >= WND1_READY_TASK_COUNT as u64 {
+                            break;
+                        }
+                        assert!(
+                            tokio::time::Instant::now() < deadline,
+                            "cap {cap}: concurrent dispatch stress did not make bounded progress"
+                        );
                         tokio::task::yield_now().await;
                     }
                 }));
@@ -1766,6 +1905,7 @@ mod inflight_ledger_tests {
                     .expect("wnd1 dispatcher task should not panic");
             }
             dispatch_done.store(true, std::sync::atomic::Ordering::SeqCst);
+            settler.await.expect("wnd1 settler task should not panic");
 
             let task_repo =
                 djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
@@ -1775,15 +1915,25 @@ mod inflight_ledger_tests {
                     .await
                     .expect("close wnd1 fixture task for quiescence");
                 let _ = pool.kill_session(task_id).await;
-                session_repo
+                djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
                     .interrupt_running_for_task(task_id)
                     .await
                     .expect("settle wnd1 fixture task for quiescence");
             }
-            settler.await.expect("wnd1 settler task should not panic");
-            actor.lock().await.dispatch_ready_tasks(None).await;
+            {
+                let mut actor = actor.lock().await;
+                clear_dispatch_cap_observations();
+                actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
+                let mut observations = observations
+                    .lock()
+                    .expect("wnd1 observations mutex poisoned");
+                assert_wnd1_observed_cap(cap, &mut observations, "quiescence reconciliation");
+            }
 
-            let observations = take_dispatch_cap_observations();
+            let observations = observations
+                .lock()
+                .expect("wnd1 observations mutex poisoned")
+                .clone();
             assert!(
                 observations.iter().any(|obs| {
                     obs.stage == DispatchCapObservationStage::InflightIncremented
@@ -1824,16 +1974,19 @@ mod inflight_ledger_tests {
                 "cap {cap}: stress run should make the per-user cap, not the test pool, the limiting factor"
             );
 
+            let actor = actor.lock().await;
             assert_eq!(
-                actor.lock().await.inflight_dispatches.len(),
+                actor.inflight_dispatches.len(),
                 0,
                 "cap {cap}: in-flight dispatch ledger must drain after quiescence"
             );
+            let session_repo =
+                djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
             assert_eq!(
                 wnd1_active_count(
                     &session_repo,
                     &fixture.created_by_user_id,
-                    &fixture.model_id
+                    &fixture.model_id,
                 )
                 .await,
                 0,

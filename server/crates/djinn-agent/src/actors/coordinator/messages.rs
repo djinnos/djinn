@@ -34,6 +34,9 @@ pub(super) enum CoordinatorMessage {
     /// ending (for example a budget park). The next continuation dispatch must
     /// start from the disposition ladder, not from stale failure accounting.
     ClearPlannedDispatchCompletion { task_id: String, reason: String },
+    /// Route a settled task that has no live mover through the shared no-op
+    /// disposition ladder (if the live-mover predicate says it is orphaned).
+    RouteSettledNoopWithoutLiveMover { task_id: String },
     /// Increment the Lead escalation count for a task; reply with new count.
     IncrementEscalationCount {
         task_id: String,
