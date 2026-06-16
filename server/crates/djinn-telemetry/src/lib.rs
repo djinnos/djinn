@@ -21,6 +21,15 @@ const TASKS_PARKED_TOTAL: &str = "djinn_tasks_parked_total";
 const PR_POLLER_TRACKED: &str = "djinn_pr_poller_tracked";
 const MERGE_FAILURES_TOTAL: &str = "djinn_merge_failures_total";
 const SLOT_POOL_STATES: [&str; 2] = ["free", "busy"];
+const JIT_PITFALL_HINTS_TOTAL: &str = "djinn_jit_pitfall_hints_total";
+const JIT_PITFALL_OUTCOMES: [&str; 6] = [
+    "disabled",
+    "non_first_modification",
+    "eligible_search",
+    "injected",
+    "empty",
+    "error",
+];
 
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
@@ -60,6 +69,24 @@ pub mod lead {
     /// Increment the Lead-escalation counter. Synchronous and non-async by design.
     pub fn increment_escalation() {
         metrics::counter!(super::LEAD_ESCALATIONS_TOTAL).increment(1);
+    }
+}
+
+pub mod jit_pitfalls {
+    pub const OUTCOME_DISABLED: &str = "disabled";
+    pub const OUTCOME_NON_FIRST_MODIFICATION: &str = "non_first_modification";
+    pub const OUTCOME_ELIGIBLE_SEARCH: &str = "eligible_search";
+    pub const OUTCOME_INJECTED: &str = "injected";
+    pub const OUTCOME_EMPTY: &str = "empty";
+    pub const OUTCOME_ERROR: &str = "error";
+
+    /// Increment the JIT-pitfall hint counter for one stable outcome label.
+    ///
+    /// This intentionally accepts only `'static` labels so hot-path callers keep
+    /// metric cardinality bounded. Rich metadata belongs in structured tracing
+    /// fields emitted next to this counter.
+    pub fn increment_outcome(outcome: &'static str) {
+        metrics::counter!(super::JIT_PITFALL_HINTS_TOTAL, "outcome" => outcome).increment(1);
     }
 }
 
@@ -199,30 +226,20 @@ fn register_metrics() {
         "PR merge failures that fall back to task reopen/rework."
     );
     metrics::counter!(MERGE_FAILURES_TOTAL).absolute(0);
-    metrics::describe_gauge!(
-        DISPATCH_COOLDOWNS_ACTIVE,
-        "Active dispatch cooldown entries."
-    );
-    metrics::gauge!(DISPATCH_COOLDOWNS_ACTIVE).set(0.0);
-    metrics::describe_gauge!(
-        DISPATCH_LAST_SUCCESS_TIMESTAMP,
-        "Unix timestamp of the last successful dispatch."
-    );
-    metrics::gauge!(DISPATCH_LAST_SUCCESS_TIMESTAMP).set(0.0);
-    metrics::describe_gauge!(SLOT_POOL, "Slot-pool slots by state and model.");
     for state in SLOT_POOL_STATES {
         metrics::gauge!(SLOT_POOL, "state" => state, "model" => "").set(0.0);
     }
-    metrics::describe_gauge!(
-        INFLIGHT_LEDGER_SIZE,
-        "Number of coordinator in-flight dispatch ledger entries."
-    );
+    metrics::gauge!(DISPATCH_COOLDOWNS_ACTIVE).set(0.0);
+    metrics::gauge!(DISPATCH_LAST_SUCCESS_TIMESTAMP).set(0.0);
     metrics::gauge!(INFLIGHT_LEDGER_SIZE).set(0.0);
-    metrics::describe_gauge!(
-        USER_CAP_UTILIZATION,
-        "Per-user/per-model running utilization against dispatch caps."
-    );
     metrics::gauge!(USER_CAP_UTILIZATION, "user" => "", "model" => "").set(0.0);
+    metrics::describe_counter!(
+        JIT_PITFALL_HINTS_TOTAL,
+        "JIT pitfall hint path observations partitioned by safe outcome labels."
+    );
+    for outcome in JIT_PITFALL_OUTCOMES {
+        metrics::counter!(JIT_PITFALL_HINTS_TOTAL, "outcome" => outcome).absolute(0);
+    }
 }
 
 pub mod dispatch {
@@ -354,6 +371,14 @@ mod tests {
                 "missing dispatch outcome label {outcome} in:\n{rendered}"
             );
         }
+        for outcome in JIT_PITFALL_OUTCOMES {
+            assert!(
+                rendered.contains(&format!(
+                    "djinn_jit_pitfall_hints_total{{outcome=\"{outcome}\"}}"
+                )),
+                "missing JIT pitfall outcome label {outcome} in:\n{rendered}"
+            );
+        }
     }
 
     #[test]
@@ -422,6 +447,9 @@ mod tests {
         assert_sync_unit(|| dispatch::set_inflight_ledger_size(0));
         assert_sync_unit(|| dispatch::set_user_cap_utilization("user-sync", "model-sync", 0, 1));
         assert_sync_unit(|| slot_pool::set_slots(slot_pool::STATE_FREE, "model-sync", 0));
+        assert_sync_unit(|| {
+            jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_ELIGIBLE_SEARCH);
+        });
         assert_sync_unit(|| task::increment_reopen());
         assert_sync_unit(|| task::increment_parked());
         assert_sync_unit(|| pr_poller::set_tracked(0));
@@ -454,12 +482,14 @@ mod tests {
         zombie::increment_reap(zombie::KIND_PERIODIC);
         zombie::increment_reap(zombie::KIND_STALL);
         lead::increment_escalation();
+        jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_INJECTED);
 
         let rendered = render().unwrap();
         for kind in ZOMBIE_REAP_KINDS {
             assert!(rendered.contains(&format!("djinn_zombie_reaps_total{{kind=\"{kind}\"}}")));
         }
         assert!(rendered.contains("djinn_lead_escalations_total"));
+        assert!(rendered.contains("djinn_jit_pitfall_hints_total{outcome=\"injected\"}"));
     }
 
     #[test]
