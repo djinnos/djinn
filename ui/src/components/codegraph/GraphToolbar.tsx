@@ -22,6 +22,7 @@ import {
   SYMBOL_KIND_FILTERS,
   useCodeGraphStore,
   type ColorMode,
+  type SemanticZoomMode,
 } from "@/stores/codeGraphStore";
 import { cn } from "@/lib/utils";
 
@@ -45,6 +46,7 @@ const NODE_KIND_LABEL: Record<string, string> = {
   folder: "Folders",
   file: "Files",
   symbol: "Symbols",
+  community: "Communities",
 };
 
 const SYMBOL_KIND_LABEL: Record<string, string> = {
@@ -86,6 +88,10 @@ export function GraphToolbar({ className }: GraphToolbarProps) {
   const colorMode = useCodeGraphStore((s) => s.colorMode);
   const setColorMode = useCodeGraphStore((s) => s.setColorMode);
   const complexityAvailable = useCodeGraphStore((s) => s.complexityAvailable);
+  const semanticZoomMode = useCodeGraphStore((s) => s.semanticZoomMode);
+  const setSemanticZoomMode = useCodeGraphStore(
+    (s) => s.setSemanticZoomMode,
+  );
 
   const handleDepthChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -169,6 +175,10 @@ export function GraphToolbar({ className }: GraphToolbarProps) {
       </FilterGroup>
 
       <div className="ml-auto flex items-center gap-3">
+        <SemanticZoomToggle
+          mode={semanticZoomMode}
+          onChange={setSemanticZoomMode}
+        />
         <ColorModeToggle
           mode={colorMode}
           onChange={setColorMode}
@@ -339,6 +349,89 @@ function ColorModeButton({
           ? "bg-zinc-800/80 text-zinc-100"
           : "text-zinc-400 hover:text-zinc-200",
         disabled && "cursor-not-allowed hover:text-zinc-400",
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
+interface SemanticZoomToggleProps {
+  mode: SemanticZoomMode;
+  onChange: (mode: SemanticZoomMode) => void;
+}
+
+/**
+ * Segmented control for semantic zoom: Auto (let the canvas pick the
+ * level based on node count), Symbol (force individual symbol nodes),
+ * or Community (force collapsed community blobs). This only sets state;
+ * the canvas reads it when deciding the fetch level.
+ */
+function SemanticZoomToggle({ mode, onChange }: SemanticZoomToggleProps) {
+  return (
+    <div className="flex items-center gap-1.5" data-testid="semantic-zoom-toggle">
+      <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+        Zoom
+      </span>
+      <div
+        role="radiogroup"
+        aria-label="Semantic zoom"
+        className="flex items-center rounded-md border border-zinc-800 bg-[#0a0a10]/40 p-0.5"
+      >
+        <ZoomModeButton
+          active={mode === "auto"}
+          onClick={() => onChange("auto")}
+          testId="semantic-zoom-auto"
+          label="Auto"
+          tooltip="Let the canvas choose symbol vs community based on graph size"
+        />
+        <ZoomModeButton
+          active={mode === "symbol"}
+          onClick={() => onChange("symbol")}
+          testId="semantic-zoom-symbol"
+          label="Symbol"
+          tooltip="Force individual symbol-level nodes"
+        />
+        <ZoomModeButton
+          active={mode === "community"}
+          onClick={() => onChange("community")}
+          testId="semantic-zoom-community"
+          label="Community"
+          tooltip="Force collapsed community-level blobs"
+        />
+      </div>
+    </div>
+  );
+}
+
+interface ZoomModeButtonProps {
+  active: boolean;
+  onClick: () => void;
+  testId: string;
+  label: string;
+  tooltip: string;
+}
+
+function ZoomModeButton({
+  active,
+  onClick,
+  testId,
+  label,
+  tooltip,
+}: ZoomModeButtonProps) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      data-testid={testId}
+      onClick={onClick}
+      title={tooltip}
+      className={cn(
+        "rounded px-2 py-0.5 text-[11px] font-medium transition-colors",
+        active
+          ? "bg-zinc-800/80 text-zinc-100"
+          : "text-zinc-400 hover:text-zinc-200",
       )}
     >
       {label}

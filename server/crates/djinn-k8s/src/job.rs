@@ -486,14 +486,14 @@ fn build_task_run_env(
 ///   cache) — common crates download once. (Image default /usr/local/cargo is
 ///   an image layer that loses runtime-downloaded crates when the Pod dies.)
 /// - CARGO_TARGET_DIR: compiled artifacts are workspace-specific. The shared
-///   warm/verification base is namespaced per project; warm jobs write it with
-///   `CARGO_INCREMENTAL=0` so it does not accumulate incremental compiler state.
-///   Task-runs get a deterministic private dir under
-///   `/cache/cargo-target-runs/<task_run_id>` so they never write the shared base
-///   directly or contend on Cargo's shared build-dir lock. The worker may seed
-///   that private run dir from the warm base before cargo starts, then cargo is
-///   free to mutate only the run-local target. (Default is <workspace>/target
-///   inside the ephemeral clone — also lost.)
+///   warm base is namespaced per project; the warm job pre-compiles main into it
+///   with `CARGO_INCREMENTAL=1` so it carries a clean, incremental-enabled
+///   main-based cache (CI-style, like Swatinem/rust-cache). Task-runs AND
+///   verification get a deterministic private dir (under
+///   `/cache/cargo-target-runs/<id>`) seeded from that warm base, so they never
+///   write the shared base directly or contend on Cargo's shared build-dir lock,
+///   and recompile only their delta incrementally. (Default is
+///   <workspace>/target inside the ephemeral clone — lost when the Pod dies.)
 /// - SCCACHE_DIR: repos routinely pin `rustc-wrapper = "sccache"` in
 ///   .cargo/config.toml (e.g. the platform repo, which also sets
 ///   CARGO_INCREMENTAL=0 as sccache requires), so cargo invokes sccache
@@ -508,16 +508,18 @@ fn build_task_run_env(
 fn common_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     vec![
         env_var("CARGO_HOME", &format!("{CACHE_MOUNT_DIR}/cargo")),
-        // Route rustc through sccache so Rust compiles are cached across runs.
-        // The design above assumes repos pin `rustc-wrapper = "sccache"` in
-        // .cargo/config.toml, but many (incl. djinn) don't — leaving rustc
-        // uncached (sccache showed 0% Rust hits), so every verification/warm/
-        // task-run recompiled the workspace cold (~20min clippy). Set it in the
-        // pod env (NOT .cargo/config.toml, which would break local/CI hosts
-        // lacking sccache); the catalog/runtime images all ship sccache on PATH.
-        // CARGO_INCREMENTAL=0 (set below / by repos) is required for sccache.
-        env_var("RUSTC_WRAPPER", "sccache"),
-        env_var("CARGO_INCREMENTAL", "0"),
+        // NOTE: we deliberately do NOT force `RUSTC_WRAPPER=sccache` or
+        // `CARGO_INCREMENTAL=0` here. The fast path is incremental compilation
+        // over a warm, main-based per-project target base (CI-style, like
+        // Swatinem/rust-cache): the warm job pre-compiles the workspace into the
+        // base with `CARGO_INCREMENTAL=1`, task-run/verification pods seed a
+        // private run target dir from that base and recompile only their delta
+        // incrementally. Forcing sccache (which requires CARGO_INCREMENTAL=0)
+        // disables incremental and was the wrong lever — it made every
+        // verification cold-build (~14-29min clippy). SCCACHE_DIR is left set
+        // below so a repo that *itself* pins `rustc-wrapper = "sccache"` in its
+        // .cargo/config.toml still gets a writable, Landlock-allowed cache dir;
+        // we just don't impose the wrapper on repos that don't ask for it.
         env_var(
             "SCCACHE_DIR",
             &format!("{CACHE_MOUNT_DIR}/sccache/{project_id}"),
@@ -535,8 +537,10 @@ fn common_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     ]
 }
 
-/// Cache env vars for warm/verification Pods that own the shared per-project
-/// target base.
+/// Base cache env vars routing CARGO_TARGET_DIR at the shared per-project warm
+/// base. Warm/verification-test Pods write this base directly; verification Pods
+/// use it only as the seed source + fallback (the worker overrides
+/// CARGO_TARGET_DIR to a private run dir).
 pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     let mut env = common_cache_env_vars(project_id);
     env.push(env_var(
@@ -546,11 +550,28 @@ pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     env
 }
 
-/// Cache env vars for warm Pods that intentionally populate the shared
-/// per-project cargo target base. Incremental compilation is disabled because
-/// the base is the durable single-writer cache seed, not a per-process scratch
-/// directory for incremental compiler state.
+/// Cache env vars for warm Pods that populate the shared per-project cargo
+/// target base. `CARGO_INCREMENTAL=0` — repos that pin `rustc-wrapper = sccache`
+/// in `.cargo/config.toml` (djinn does) crash with "incremental compilation is
+/// prohibited" under `CARGO_INCREMENTAL=1`. Reuse here is sccache (cross-run
+/// rustc cache) PLUS cargo freshness: the warm compiles `main` (with
+/// `normalize_mtimes`) into the base + sccache, then verification seeds the base
+/// and — with matching commit-time mtimes — cargo marks unchanged crates Fresh
+/// and SKIPS them; the rest hit sccache. Freshness does not require incremental.
 pub(crate) fn warm_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
+    let mut env = cache_env_vars(project_id);
+    env.push(env_var("CARGO_INCREMENTAL", "0"));
+    env
+}
+
+/// Cache env vars for verification Pods. Verification reuses the warm
+/// per-project base as a read-only SEED: the worker (`run_verify_task`) seeds a
+/// private run target dir from the warm base and overrides `CARGO_TARGET_DIR`
+/// to point there before running `verify_commit`, so it never writes the shared
+/// base or contends on Cargo's build-dir lock. `CARGO_INCREMENTAL=0` (sccache
+/// requires it — see `warm_cache_env_vars`); reuse is cargo freshness over the
+/// seeded base (unchanged crates Fresh→skipped) + sccache for what compiles.
+pub(crate) fn verify_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     let mut env = cache_env_vars(project_id);
     env.push(env_var("CARGO_INCREMENTAL", "0"));
     env

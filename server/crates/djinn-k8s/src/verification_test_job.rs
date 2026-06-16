@@ -102,10 +102,11 @@ exec {bin} verify-test "{test_id}"
         env.push(env_var("DJINN_DATABASE_URL", url));
     }
     // Route the Rust toolchain caches to the /cache PVC. Verification-test Pods
-    // intentionally write the same shared per-project target base as warm Pods
-    // with incremental compilation disabled; task-run Pods use private run
-    // target dirs but keep the same shared CARGO_HOME/SCCACHE settings.
-    // Single-sourced in job.rs; needs the cache volume below.
+    // write the same shared per-project target base as warm Pods, now with
+    // incremental compilation ENABLED so the base carries reusable incremental
+    // state; task-run/verification Pods use private run target dirs seeded from
+    // it but keep the same shared CARGO_HOME/SCCACHE settings. Single-sourced in
+    // job.rs; needs the cache volume below.
     env.extend(crate::job::warm_cache_env_vars(project_id));
 
     let container = Container {
@@ -307,7 +308,7 @@ mod tests {
         assert_eq!(
             envs.get("CARGO_INCREMENTAL").copied(),
             Some("0"),
-            "shared base writers must not persist incremental compiler state"
+            "warm/verify base uses sccache (incremental=0); reuse is cargo freshness + sccache"
         );
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),

@@ -363,11 +363,14 @@ impl GraphWarmerService for K8sGraphWarmer {
     ) -> Result<(), WarmerError> {
         // Verification runs in the project's image (that's where the toolchain
         // lives) — so the image must be built + ready first.
-        let image_tag = self.resolve_project_image_tag(project_id).await.ok_or_else(|| {
-            WarmerError::Backend(format!(
-                "project {project_id} has no ready image — build the image before verifying"
-            ))
-        })?;
+        let image_tag = self
+            .resolve_project_image_tag(project_id)
+            .await
+            .ok_or_else(|| {
+                WarmerError::Backend(format!(
+                    "project {project_id} has no ready image — build the image before verifying"
+                ))
+            })?;
         let job = crate::verification_job::build_verification_job(
             &self.config,
             project_id,
