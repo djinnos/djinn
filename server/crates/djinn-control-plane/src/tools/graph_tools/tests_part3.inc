@@ -781,6 +781,8 @@
             community_id: None,
             cognitive: None,
             is_test: false,
+            x: 0.0,
+            y: 0.0,
         });
         response.snapshot.edges.push(crate::bridge::SnapshotEdge {
             from: "file:src/main.rs".to_string(),
@@ -823,12 +825,23 @@
             .and_then(|arr| arr.first())
             .and_then(|v| v.as_object())
             .expect("first node object");
-        for required in ["id", "kind", "label", "workspace", "pagerank"] {
+        for required in ["id", "kind", "label", "workspace", "pagerank", "x", "y"] {
             assert!(
                 node.contains_key(required),
                 "node missing `{required}`: {node:?}"
             );
         }
+        // 7e6o: coordinates serialize as explicit numeric fields.
+        assert_eq!(
+            node.get("x").and_then(|v| v.as_f64()),
+            Some(0.0),
+            "x should serialize as a number: {node:?}"
+        );
+        assert_eq!(
+            node.get("y").and_then(|v| v.as_f64()),
+            Some(0.0),
+            "y should serialize as a number: {node:?}"
+        );
         assert_eq!(
             node.get("workspace").and_then(|v| v.as_str()),
             Some("server"),
@@ -889,6 +902,8 @@
             community_id: None,
             cognitive: None,
             is_test: false,
+            x: 0.0,
+            y: 0.0,
         };
         let json = serde_json::to_value(node).expect("serialize node");
         assert!(

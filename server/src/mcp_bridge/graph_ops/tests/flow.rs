@@ -100,6 +100,7 @@ fn flow_fixture_graph() -> RepoDependencyGraph {
             steps: vec![1, 2, 3],
         }],
         route_exclusion_config: Default::default(),
+        layout_positions: std::collections::BTreeMap::new(),
     };
     RepoDependencyGraph::from_artifact(&artifact)
 }

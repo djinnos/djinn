@@ -197,6 +197,7 @@ impl RepoDependencyGraph {
             communities: self.communities.clone(),
             processes: processes_out,
             route_exclusion_config: self.route_exclusion_config.clone(),
+            layout_positions: self.layout_positions.clone(),
         }
     }
 
@@ -307,12 +308,21 @@ impl RepoDependencyGraph {
             // `RepoGraphArtifactV10WithoutRouteExclusionConfig` in
             // `artifact.rs` for the deserialization compat path.
             route_exclusion_config: artifact.route_exclusion_config.clone(),
+            layout_positions: if artifact.layout_positions.is_empty() && !artifact.nodes.is_empty()
+            {
+                BTreeMap::new()
+            } else {
+                artifact.layout_positions.clone()
+            },
         };
         // PR F3: rehydrate the community sidecar verbatim — node
         // positions in the artifact match `NodeIndex` 0..n thanks to the
         // ordered `add_node` loop above.
         if !artifact.communities.is_empty() {
             out.install_communities(artifact.communities.clone());
+        }
+        if out.layout_positions.is_empty() && out.node_count() > 0 {
+            out.layout_positions = crate::layout::derive_layout_positions(&out);
         }
         out
     }
@@ -427,6 +437,7 @@ impl RepoDependencyGraph {
             // Processes are likewise recomputed by the post-build pass.
             processes: Vec::new(),
             route_exclusion_config: artifact.route_exclusion_config,
+            layout_positions: BTreeMap::new(),
         };
 
         // Step 2: Rebuild the base graph from the filtered artifact.
