@@ -508,6 +508,16 @@ fn build_task_run_env(
 fn common_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     vec![
         env_var("CARGO_HOME", &format!("{CACHE_MOUNT_DIR}/cargo")),
+        // Route rustc through sccache so Rust compiles are cached across runs.
+        // The design above assumes repos pin `rustc-wrapper = "sccache"` in
+        // .cargo/config.toml, but many (incl. djinn) don't — leaving rustc
+        // uncached (sccache showed 0% Rust hits), so every verification/warm/
+        // task-run recompiled the workspace cold (~20min clippy). Set it in the
+        // pod env (NOT .cargo/config.toml, which would break local/CI hosts
+        // lacking sccache); the catalog/runtime images all ship sccache on PATH.
+        // CARGO_INCREMENTAL=0 (set below / by repos) is required for sccache.
+        env_var("RUSTC_WRAPPER", "sccache"),
+        env_var("CARGO_INCREMENTAL", "0"),
         env_var(
             "SCCACHE_DIR",
             &format!("{CACHE_MOUNT_DIR}/sccache/{project_id}"),
