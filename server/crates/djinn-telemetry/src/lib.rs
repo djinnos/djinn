@@ -20,12 +20,7 @@ const TASK_REOPENS_TOTAL: &str = "djinn_task_reopens_total";
 const TASKS_PARKED_TOTAL: &str = "djinn_tasks_parked_total";
 const PR_POLLER_TRACKED: &str = "djinn_pr_poller_tracked";
 const MERGE_FAILURES_TOTAL: &str = "djinn_merge_failures_total";
-const DISPATCH_COOLDOWNS_ACTIVE: &str = "djinn_dispatch_cooldowns_active";
-const DISPATCH_LAST_SUCCESS_TIMESTAMP: &str = "djinn_dispatch_last_success_timestamp";
-const SLOT_POOL: &str = "djinn_slot_pool";
 const SLOT_POOL_STATES: [&str; 2] = ["free", "busy"];
-const INFLIGHT_LEDGER_SIZE: &str = "djinn_inflight_ledger_size";
-const USER_CAP_UTILIZATION: &str = "djinn_user_cap_utilization";
 
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
@@ -429,6 +424,7 @@ mod tests {
 
     #[test]
     fn task_and_pr_poller_metrics_render() {
+        let _guard = test_guard();
         init().unwrap();
 
         task::increment_reopen();
