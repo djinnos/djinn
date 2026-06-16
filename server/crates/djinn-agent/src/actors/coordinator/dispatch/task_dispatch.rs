@@ -171,6 +171,44 @@ fn dispatch_wall_clock_now() -> Option<String> {
 }
 
 impl CoordinatorActor {
+    async fn reconcile_inflight_dispatch_ledger(&mut self) {
+        match self.pool.get_status().await {
+            Ok(status) => {
+                let live: std::collections::HashSet<String> = status
+                    .running_tasks
+                    .into_iter()
+                    .map(|t| t.task_id)
+                    .collect();
+                let stale_inflight_task_ids: Vec<String> = self
+                    .inflight_dispatches
+                    .keys()
+                    .filter(|task_id| !live.contains(*task_id))
+                    .cloned()
+                    .collect();
+                self.inflight_dispatches
+                    .retain(|task_id, _| live.contains(task_id));
+                for task_id in stale_inflight_task_ids {
+                    self.persist_durable_dispatch_state_update(
+                        &task_id,
+                        None,
+                        "inflight_ledger_reconcile_clear",
+                        DurableDispatchStateUpdate {
+                            inflight: Some(None),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                }
+            }
+            // On a pool query error, keep the ledger as-is rather than dropping
+            // it — a stale-but-present ledger is conservative (may briefly defer
+            // a task), whereas dropping it would re-open the overshoot window.
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: pool get_status failed during cap seed; keeping in-flight ledger as-is");
+            }
+        }
+    }
+
     async fn persist_durable_dispatch_state_update(
         &self,
         task_id: &str,
@@ -702,41 +740,7 @@ impl CoordinatorActor {
         // (not sum) avoids double-counting a task present in both, and keeps the
         // DB as a durable floor that survives a server restart (the in-memory
         // ledger resets, but old `running` rows still gate until reaped).
-        match self.pool.get_status().await {
-            Ok(status) => {
-                let live: std::collections::HashSet<String> = status
-                    .running_tasks
-                    .into_iter()
-                    .map(|t| t.task_id)
-                    .collect();
-                let stale_inflight_task_ids: Vec<String> = self
-                    .inflight_dispatches
-                    .keys()
-                    .filter(|task_id| !live.contains(*task_id))
-                    .cloned()
-                    .collect();
-                self.inflight_dispatches
-                    .retain(|task_id, _| live.contains(task_id));
-                for task_id in stale_inflight_task_ids {
-                    self.persist_durable_dispatch_state_update(
-                        &task_id,
-                        None,
-                        "inflight_ledger_reconcile_clear",
-                        DurableDispatchStateUpdate {
-                            inflight: Some(None),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-                }
-            }
-            // On a pool query error, keep the ledger as-is rather than dropping
-            // it — a stale-but-present ledger is conservative (may briefly defer
-            // a task), whereas dropping it would re-open the overshoot window.
-            Err(e) => {
-                tracing::warn!(error = %e, "CoordinatorActor: pool get_status failed during cap seed; keeping in-flight ledger as-is");
-            }
-        }
+        self.reconcile_inflight_dispatch_ledger().await;
         overlay_inflight_ledger(&mut running_by_user_model, &self.inflight_dispatches);
 
         // Memoized per-creator cap maps (model_id → max concurrent) for this pass.
@@ -1800,6 +1804,77 @@ mod inflight_ledger_tests {
         );
     }
 
+    async fn wnd1_running_count_for_fixture(
+        db: &djinn_db::Database,
+        fixture: &Wnd1DispatchFixture,
+    ) -> u32 {
+        djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .count_active_by_user_and_model()
+            .await
+            .expect("count wnd1 active sessions by creator/model")
+            .into_iter()
+            .find_map(|(creator, model, count)| {
+                (creator.as_deref() == Some(fixture.created_by_user_id.as_str())
+                    && model == fixture.model_id)
+                    .then(|| u32::try_from(count).expect("wnd1 running count fits u32"))
+            })
+            .unwrap_or(0)
+    }
+
+    async fn assert_wnd1_post_settlement_convergence(
+        cap: u32,
+        db: &djinn_db::Database,
+        actor: &mut CoordinatorActor,
+        fixture: &Wnd1DispatchFixture,
+    ) {
+        actor.reconcile_inflight_dispatch_ledger().await;
+
+        assert!(
+            actor.inflight_dispatches.is_empty(),
+            "cap {cap}: in-flight dispatch ledger retained stale entries after all controlled tasks settled: {:?}",
+            actor.inflight_dispatches
+        );
+
+        let dispatch_rows = djinn_db::DispatchStateRepository::new(db.clone())
+            .list_all()
+            .await
+            .expect("list wnd1 durable dispatch state rows");
+        let stale_durable_inflight: Vec<_> = dispatch_rows
+            .iter()
+            .filter(|row| {
+                fixture.task_ids.contains(&row.task_id)
+                    && (row.inflight_creator_user_id.is_some() || row.inflight_model_id.is_some())
+            })
+            .collect();
+        assert!(
+            stale_durable_inflight.is_empty(),
+            "cap {cap}: durable dispatch_state retained stale in-flight entries after settlement: {stale_durable_inflight:?}"
+        );
+
+        let persisted_running = wnd1_running_count_for_fixture(db, fixture).await;
+        let mut effective_counts = HashMap::from([(
+            (fixture.created_by_user_id.clone(), fixture.model_id.clone()),
+            persisted_running,
+        )]);
+        overlay_inflight_ledger(&mut effective_counts, &actor.inflight_dispatches);
+        let effective_after_overlay = effective_counts
+            .get(&(fixture.created_by_user_id.clone(), fixture.model_id.clone()))
+            .copied()
+            .unwrap_or(0);
+
+        assert_eq!(
+            persisted_running, 0,
+            "cap {cap}: completed wnd1 sessions left phantom running rows that would continue consuming the per-user cap"
+        );
+        assert_eq!(
+            effective_after_overlay, persisted_running,
+            "cap {cap}: coordinator effective cap accounting drifted from persisted session state after settlement"
+        );
+    }
+
+    // Normal Rust/nextest-discoverable test: it uses only TestRuntime/template
+    // Postgres (no kind/k8s) and covers the historical v0.4.15 per-user cap
+    // overshoot when session rows lagged behind newly-dispatched worker tasks.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn wnd1_dispatch_race_harness_never_exceeds_caps_1_through_5() {
         for cap in 1..=5 {
@@ -1950,6 +2025,10 @@ mod inflight_ledger_tests {
                 assert_wnd1_observed_cap(cap, &mut observations, "quiescence reconciliation");
             }
 
+            {
+                let mut actor = actor.lock().await;
+                assert_wnd1_post_settlement_convergence(cap, &db, &mut actor, &fixture).await;
+            }
             let observations = observations
                 .lock()
                 .expect("wnd1 observations mutex poisoned")

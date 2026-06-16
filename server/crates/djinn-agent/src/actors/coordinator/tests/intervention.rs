@@ -500,10 +500,12 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
     // asserts escalation at the production threshold; the post-Planner climb
     // intentionally runs one cycle beyond it so the same task experiences 4+
     // consecutive review/CI-style failures before the terminal second strike.
-    assert!(
-        REOPEN_INTERVENTION_THRESHOLD + 1 >= 4,
-        "threshold-plus-one should exercise 4+ reopen cycles"
-    );
+    const {
+        assert!(
+            REOPEN_INTERVENTION_THRESHOLD + 1 >= 4,
+            "threshold-plus-one should exercise 4+ reopen cycles"
+        );
+    }
 
     let first_threshold = harness.drive_review_failures_through_threshold().await;
     assert_eq!(first_threshold.reopen_count, REOPEN_INTERVENTION_THRESHOLD);
