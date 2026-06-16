@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::supervisor_impl::LiveMoverSummary;
 
-use super::types::CoordinatorError;
+use super::types::{CoordinatorDebugSnapshot, CoordinatorError};
 
 // ─── Messages (≤15 variants — AGENT-11) ──────────────────────────────────────
 
@@ -52,5 +52,9 @@ pub(super) enum CoordinatorMessage {
     IncrementEscalationCount {
         task_id: String,
         reply: tokio::sync::oneshot::Sender<u32>,
+    },
+    /// Return a read-only debug snapshot of coordinator dispatch state.
+    DebugSnapshot {
+        reply: tokio::sync::oneshot::Sender<CoordinatorDebugSnapshot>,
     },
 }

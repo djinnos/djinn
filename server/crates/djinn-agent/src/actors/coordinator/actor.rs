@@ -304,6 +304,28 @@ fn instant_for_persisted_wall_clock(
     instant_now.checked_sub(elapsed).unwrap_or(instant_now)
 }
 
+fn format_rfc3339(ts: ::time::OffsetDateTime) -> String {
+    ts.format(&::time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| ts.to_string())
+}
+
+fn format_instant_relative(
+    instant: StdInstant,
+    instant_now: StdInstant,
+    wall_now: ::time::OffsetDateTime,
+) -> String {
+    let wall = if instant >= instant_now {
+        wall_now + (instant - instant_now)
+    } else {
+        wall_now - instant_now.duration_since(instant)
+    };
+    format_rfc3339(wall)
+}
+
+fn debug_short_id(task_id: &str) -> String {
+    task_id.chars().take(8).collect()
+}
+
 impl CoordinatorActor {
     pub(super) fn new(
         deps: CoordinatorDeps,
@@ -495,6 +517,61 @@ impl CoordinatorActor {
         }
 
         summary
+    }
+
+    pub fn dispatch_state_snapshot(&self) -> CoordinatorDebugSnapshot {
+        let instant_now = StdInstant::now();
+        let wall_now = ::time::OffsetDateTime::now_utc();
+
+        let mut cooldowns: Vec<_> = self
+            .dispatch_cooldowns
+            .iter()
+            .filter(|(_, expires_at)| **expires_at > instant_now)
+            .map(|(task_id, expires_at)| DebugCooldown {
+                task_id: task_id.clone(),
+                short_id: debug_short_id(task_id),
+                expires_at: format_instant_relative(*expires_at, instant_now, wall_now),
+                // Dispatch cooldowns are currently keyed only by task_id; no
+                // per-entry scope is tracked, so expose the conservative task scope.
+                scope: "task".to_owned(),
+            })
+            .collect();
+        cooldowns.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+
+        let mut failure_streaks: Vec<_> = self
+            .dispatch_failure_streak
+            .iter()
+            .filter(|(_, streak)| **streak > 0)
+            .map(|(task_id, streak)| DebugFailureStreak {
+                task_id: task_id.clone(),
+                short_id: debug_short_id(task_id),
+                streak: *streak,
+            })
+            .collect();
+        failure_streaks.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+
+        let mut inflight_ledger: Vec<_> = self
+            .inflight_dispatches
+            .iter()
+            .map(|(task_id, (creator, model))| DebugInflightEntry {
+                task_id: task_id.clone(),
+                short_id: debug_short_id(task_id),
+                creator: creator.clone(),
+                model: model.clone(),
+                started_at: self
+                    .last_dispatched
+                    .get(task_id)
+                    .map(|marker| format_instant_relative(marker.instant, instant_now, wall_now))
+                    .unwrap_or_else(|| format_rfc3339(wall_now)),
+            })
+            .collect();
+        inflight_ledger.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+
+        CoordinatorDebugSnapshot {
+            cooldowns,
+            failure_streaks,
+            inflight_ledger,
+        }
     }
 
     pub(super) async fn run(mut self) {
@@ -785,6 +862,9 @@ impl CoordinatorActor {
                         let _ = reply.send(u32::MAX);
                     }
                 }
+            }
+            CoordinatorMessage::DebugSnapshot { reply } => {
+                let _ = reply.send(self.dispatch_state_snapshot());
             }
         }
     }

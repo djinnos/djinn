@@ -2,6 +2,8 @@ use djinn_core::events::EventBus;
 use djinn_core::models::{DispatchPause, DispatchPauseState, Task};
 use djinn_db::{Database, DispatchPauseRepository};
 
+use crate::actors::coordinator::DispatchPauseView;
+
 pub(crate) fn parse_dispatch_pause_wall_clock_ts(raw: &str) -> Option<::time::OffsetDateTime> {
     use ::time::format_description::well_known::{Iso8601, Rfc3339};
 
@@ -29,6 +31,18 @@ pub(crate) fn active_global_dispatch_pause(
         .global
         .as_ref()
         .filter(|pause| dispatch_pause_is_active(pause))
+}
+
+pub fn debug_view(state: &DispatchPauseState) -> DispatchPauseView {
+    let mut projects: Vec<_> = state.projects.keys().cloned().collect();
+    projects.sort();
+    let mut users: Vec<_> = state.users.keys().cloned().collect();
+    users.sort();
+    DispatchPauseView {
+        global: active_global_dispatch_pause(state).is_some(),
+        projects,
+        users,
+    }
 }
 
 pub(crate) fn matching_task_dispatch_pause<'a>(
@@ -141,5 +155,24 @@ mod tests {
         );
         assert!(matching_task_dispatch_pause(&state, &task("project-b", Some("user-b"))).is_none());
         assert!(matching_task_dispatch_pause(&state, &task("project-b", None)).is_none());
+    }
+
+    #[test]
+    fn debug_view_honors_expired_global_pause() {
+        let mut expired_global = pause();
+        expired_global.expires_at = Some("2000-01-01T00:00:00Z".to_owned());
+        let mut state = DispatchPauseState {
+            global: Some(expired_global),
+            ..Default::default()
+        };
+        state.projects.insert("project-b".to_owned(), pause());
+        state.projects.insert("project-a".to_owned(), pause());
+        state.users.insert("user-b".to_owned(), pause());
+        state.users.insert("user-a".to_owned(), pause());
+
+        let view = debug_view(&state);
+        assert!(!view.global);
+        assert_eq!(view.projects, vec!["project-a", "project-b"]);
+        assert_eq!(view.users, vec!["user-a", "user-b"]);
     }
 }

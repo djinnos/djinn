@@ -250,6 +250,16 @@ impl CoordinatorHandle {
             .map_err(|_| CoordinatorError::ActorDead)?;
         rx.await.map_err(|_| CoordinatorError::NoResponse)
     }
+
+    /// Return a read-only debug snapshot of coordinator dispatch state.
+    pub async fn debug_dispatch_state(&self) -> Result<CoordinatorDebugSnapshot, CoordinatorError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(CoordinatorMessage::DebugSnapshot { reply: tx })
+            .await
+            .map_err(|_| CoordinatorError::ActorDead)?;
+        rx.await.map_err(|_| CoordinatorError::NoResponse)
+    }
 }
 
 fn should_log_try_trigger_dispatch_failure(last_log_secs: &AtomicU64) -> bool {

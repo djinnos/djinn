@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use serde_json::json;
 use tokio::process::Command;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::consolidation;
@@ -401,7 +401,7 @@ fn coordinator_actor_for_tests(
     tx: &broadcast::Sender<DjinnEventEnvelope>,
 ) -> CoordinatorActor {
     CoordinatorActor {
-        receiver: tokio::sync::mpsc::channel(1).1,
+        receiver: mpsc::channel(1).1,
         events: tx.subscribe(),
         cancel: CancellationToken::new(),
         tick: tokio::time::interval(STUCK_INTERVAL),
@@ -436,8 +436,8 @@ fn coordinator_actor_for_tests(
         health: HealthTracker::new(),
         role_registry: Arc::new(RoleRegistry::new()),
         lsp: crate::lsp::LspManager::new(),
-        self_sender: tokio::sync::mpsc::channel(1).0,
-        status_tx: tokio::sync::watch::channel(SharedCoordinatorState {
+        self_sender: mpsc::channel(1).0,
+        status_tx: watch::channel(SharedCoordinatorState {
             dispatched: 0,
             recovered: 0,
             epic_throughput: HashMap::new(),
@@ -503,6 +503,71 @@ fn dispatch_state_record(
 fn rfc3339(dt: ::time::OffsetDateTime) -> String {
     dt.format(&::time::format_description::well_known::Rfc3339)
         .unwrap()
+}
+
+#[test]
+fn dispatch_state_snapshot_filters_clones_and_does_not_mutate() {
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _) = broadcast::channel(16);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let now = StdInstant::now();
+    actor.dispatch_cooldowns.insert(
+        "task-active-1234".to_owned(),
+        now + std::time::Duration::from_secs(60),
+    );
+    actor.dispatch_cooldowns.insert(
+        "task-expired-1234".to_owned(),
+        now - std::time::Duration::from_secs(1),
+    );
+    actor
+        .dispatch_failure_streak
+        .insert("task-active-1234".to_owned(), 2);
+    actor
+        .dispatch_failure_streak
+        .insert("task-zero-1234".to_owned(), 0);
+    actor.inflight_dispatches.insert(
+        "task-inflight-1234".to_owned(),
+        (Some("user-1".to_owned()), "model-a".to_owned()),
+    );
+    actor.last_dispatched.insert(
+        "task-inflight-1234".to_owned(),
+        DispatchMarker {
+            instant: now - std::time::Duration::from_secs(5),
+            role: "worker".to_owned(),
+        },
+    );
+
+    let before_cooldowns = actor.dispatch_cooldowns.clone();
+    let before_streaks = actor.dispatch_failure_streak.clone();
+    let before_inflight = actor.inflight_dispatches.clone();
+    let first = actor.dispatch_state_snapshot();
+    let second = actor.dispatch_state_snapshot();
+
+    assert_eq!(actor.dispatch_cooldowns, before_cooldowns);
+    assert_eq!(actor.dispatch_failure_streak, before_streaks);
+    assert_eq!(actor.inflight_dispatches, before_inflight);
+    assert_eq!(first.cooldowns.len(), 1);
+    assert_eq!(first.cooldowns[0].task_id, "task-active-1234");
+    assert_eq!(first.cooldowns[0].scope, "task");
+    assert_eq!(first.failure_streaks.len(), 1);
+    assert_eq!(first.failure_streaks[0].streak, 2);
+    assert_eq!(first.inflight_ledger.len(), 1);
+    assert_eq!(first.inflight_ledger[0].creator.as_deref(), Some("user-1"));
+    assert_eq!(first.inflight_ledger[0].model, "model-a");
+    assert_eq!(first.cooldowns.len(), second.cooldowns.len());
+    assert_eq!(first.failure_streaks, second.failure_streaks);
+    assert_eq!(first.inflight_ledger.len(), second.inflight_ledger.len());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coordinator_handle_debug_dispatch_state_round_trips() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(16);
+    let handle = spawn_coordinator(&db, &tx);
+    let snapshot = handle.debug_dispatch_state().await.unwrap();
+    assert!(snapshot.cooldowns.is_empty());
+    assert!(snapshot.failure_streaks.is_empty());
+    assert!(snapshot.inflight_ledger.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

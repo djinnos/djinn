@@ -42,10 +42,19 @@ const STALL_MIN_COOLDOWN: Duration = MAX_COOLDOWN;
 /// once per distinct user that hits it (rather than once globally) — slightly
 /// slower to converge, but each bucket still self-heals on cooldown, and a
 /// truly-bad model is demoted independently for everyone who touches it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize)]
 pub struct HealthKey {
     pub scope: Option<String>,
     pub model_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BreakerDebugEntry {
+    pub scope: Option<String>,
+    pub model: String,
+    pub state: String,
+    pub until: Option<String>,
+    pub consecutive_failures: u32,
 }
 
 impl HealthKey {
@@ -312,6 +321,57 @@ impl HealthTracker {
         health
     }
 
+    pub fn debug_snapshot(&self) -> Vec<BreakerDebugEntry> {
+        let entries: Vec<_> = {
+            let map = self.inner.lock().unwrap();
+            map.iter()
+                .map(|(key, state)| {
+                    (
+                        key.clone(),
+                        state.auto_disabled,
+                        state.cooldown_until,
+                        state.consecutive_failures,
+                    )
+                })
+                .collect()
+        };
+
+        let now = Instant::now();
+        let wall_now = ::time::OffsetDateTime::now_utc();
+        let mut snapshot: Vec<_> = entries
+            .into_iter()
+            .filter_map(
+                |(key, auto_disabled, cooldown_until, consecutive_failures)| {
+                    let state = if !auto_disabled {
+                        return None;
+                    } else if cooldown_until.is_some_and(|until| now >= until) {
+                        "half_open"
+                    } else {
+                        "open"
+                    };
+                    let until = cooldown_until.map(|deadline| {
+                        let wall = if deadline >= now {
+                            wall_now + (deadline - now)
+                        } else {
+                            wall_now - now.duration_since(deadline)
+                        };
+                        wall.format(&::time::format_description::well_known::Rfc3339)
+                            .unwrap_or_else(|_| wall.to_string())
+                    });
+                    Some(BreakerDebugEntry {
+                        scope: key.scope,
+                        model: key.model_id,
+                        state: state.to_owned(),
+                        until,
+                        consecutive_failures,
+                    })
+                },
+            )
+            .collect();
+        snapshot.sort_by(|a, b| a.scope.cmp(&b.scope).then_with(|| a.model.cmp(&b.model)));
+        snapshot
+    }
+
     /// Replace all tracked health state with a persisted snapshot.
     pub fn restore_all(&self, snapshot: Vec<ModelHealth>) {
         let mut map = self.inner.lock().unwrap();
@@ -456,6 +516,61 @@ mod tests {
             ht.record_failure(S, model_id);
         }
         ht.model_health(S, model_id)
+    }
+
+    #[test]
+    fn debug_snapshot_returns_only_non_closed_entries() {
+        let ht = HealthTracker::new();
+        {
+            let mut map = ht.inner.lock().unwrap();
+            map.insert(
+                HealthKey::new(Some("user-open"), "open-model"),
+                ModelState {
+                    auto_disabled: true,
+                    cooldown_until: Some(Instant::now() + Duration::from_secs(60)),
+                    consecutive_failures: 3,
+                    total_failures: 3,
+                    total_successes: 0,
+                    disable_ttl_trips: 1,
+                },
+            );
+            map.insert(
+                HealthKey::new(Some("user-half"), "half-model"),
+                ModelState {
+                    auto_disabled: true,
+                    cooldown_until: Some(Instant::now() - Duration::from_secs(1)),
+                    consecutive_failures: 4,
+                    total_failures: 4,
+                    total_successes: 0,
+                    disable_ttl_trips: 1,
+                },
+            );
+            map.insert(
+                HealthKey::new(Some("user-closed"), "closed-model"),
+                ModelState {
+                    auto_disabled: false,
+                    cooldown_until: None,
+                    consecutive_failures: 0,
+                    total_failures: 0,
+                    total_successes: 1,
+                    disable_ttl_trips: 0,
+                },
+            );
+        }
+
+        let snapshot = ht.debug_snapshot();
+        assert_eq!(snapshot.len(), 2);
+        assert!(
+            snapshot
+                .iter()
+                .any(|entry| entry.model == "open-model" && entry.state == "open")
+        );
+        assert!(
+            snapshot
+                .iter()
+                .any(|entry| entry.model == "half-model" && entry.state == "half_open")
+        );
+        assert!(!snapshot.iter().any(|entry| entry.model == "closed-model"));
     }
 
     #[test]

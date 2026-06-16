@@ -53,6 +53,11 @@ pub mod resource_monitor;
 
 pub mod actors;
 
+pub use actors::coordinator::{
+    BreakerDebugEntry, CoordinatorDebugSnapshot, DebugCooldown, DebugDispatchState,
+    DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
+};
+
 /// One-shot recovery sweep that backfills post-session knowledge extraction
 /// over completed-but-unextracted task-runs. Triggered from the server boot
 /// path behind an env flag — see `run_extraction_backfill` for the policy.
