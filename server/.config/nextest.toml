@@ -10,7 +10,16 @@ fail-fast = true
 final-status-level = "fail"
 
 [profile.ci]
-# CI: retry flaky tests, detect slow tests, report flakes.
+# Merge-queue/full-suite CI: retry flaky tests, detect slow tests, report flakes.
+# Keep this profile unfiltered. The vjs6/ir2i lifecycle-concurrency inventory in
+# docs/LIFECYCLE_CONCURRENCY_TEST_INVENTORY.md classifies the dispatch-cap,
+# slot-pool lifecycle-race, execution_kill_task settlement, and
+# reopen/intervention chaos regressions as deterministic TestRuntime/template-
+# Postgres coverage that must remain discoverable by:
+#   cargo nextest run --workspace --all-targets --all-features --profile ci
+# If a future lifecycle stress test truly needs a slower bucket, add an explicit
+# profile/filter here and wire it into the merge-queue/manual server-test job
+# instead of excluding the regression from CI or weakening its assertions.
 retries = { backoff = "exponential", count = 2, delay = "1s", jitter = true }
 slow-timeout = { period = "30s", terminate-after = 3 }
 fail-fast = false
