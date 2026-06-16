@@ -565,6 +565,7 @@ fn empty_artifact_round_trip() {
         communities: Vec::new(),
         processes: vec![],
         route_exclusion_config: RouteExclusionConfig::default(),
+        layout_positions: BTreeMap::new(),
     };
     let json = serde_json::to_string(&empty).expect("serialize empty");
     let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize empty");
@@ -601,6 +602,7 @@ fn from_artifact_round_trips_route_exclusion_config() {
         communities: Vec::new(),
         processes: vec![],
         route_exclusion_config: config.clone(),
+        layout_positions: BTreeMap::new(),
     };
     let graph = RepoDependencyGraph::from_artifact(&artifact);
     assert_eq!(graph.route_exclusion_config(), &config);
@@ -947,6 +949,66 @@ fn route_exclusion_config_persists_through_graph_artifact_sidecar() {
 
     assert_eq!(decoded.route_exclusion_config, config);
     assert_eq!(restored.route_exclusion_config(), &config);
+}
+
+#[test]
+fn layout_positions_persist_through_graph_artifact_sidecar() {
+    let mut graph = RepoDependencyGraph::build(&[fixture_index()]);
+    let layout_positions = crate::layout::derive_layout_positions(&graph);
+    graph.set_layout_positions(layout_positions.clone());
+
+    let artifact = graph.to_artifact();
+    assert_eq!(artifact.layout_positions, layout_positions);
+
+    let encoded = bincode::serialize(&artifact).expect("serialize artifact with layout");
+    let decoded = deserialize_repo_graph_artifact_bincode(&encoded)
+        .expect("deserialize artifact with layout");
+    let restored = RepoDependencyGraph::from_artifact(&decoded);
+
+    assert_eq!(decoded.layout_positions, layout_positions);
+    assert_eq!(restored.layout_positions(), &layout_positions);
+}
+
+#[test]
+fn current_bincode_artifact_without_layout_positions_backfills_on_load() {
+    #[derive(Serialize)]
+    struct V10RepoGraphArtifactWithoutLayoutPositions {
+        version: u32,
+        nodes: Vec<RepoGraphNode>,
+        edges: Vec<RepoGraphArtifactEdge>,
+        symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
+        communities: Vec<crate::communities::Community>,
+        processes: Vec<RepoGraphArtifactProcess>,
+        route_exclusion_config: RouteExclusionConfig,
+    }
+
+    let graph = RepoDependencyGraph::build(&[fixture_index()]);
+    let artifact = graph.to_artifact();
+    let old_artifact = V10RepoGraphArtifactWithoutLayoutPositions {
+        version: artifact.version,
+        nodes: artifact.nodes.clone(),
+        edges: artifact.edges.clone(),
+        symbol_ranges: artifact.symbol_ranges.clone(),
+        communities: artifact.communities.clone(),
+        processes: artifact.processes.clone(),
+        route_exclusion_config: artifact.route_exclusion_config.clone(),
+    };
+
+    let encoded =
+        bincode::serialize(&old_artifact).expect("serialize artifact without layout positions");
+    let decoded = deserialize_repo_graph_artifact_bincode(&encoded)
+        .expect("deserialize artifact without layout positions");
+    assert!(decoded.layout_positions.is_empty());
+
+    let restored = RepoDependencyGraph::from_artifact(&decoded);
+    assert_eq!(restored.layout_positions().len(), restored.node_count());
+    for node in restored.graph().node_weights() {
+        let position = restored
+            .layout_position_by_uid(&node.stable_uid())
+            .expect("legacy artifact layout position backfilled");
+        assert!(position.x.is_finite());
+        assert!(position.y.is_finite());
+    }
 }
 
 #[test]

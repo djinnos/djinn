@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::complexity::ComplexityMetrics;
+use crate::layout::GraphLayoutPosition;
 use crate::scip_parser::{ScipSymbolKind, ScipVisibility};
 
 use super::edge::RepoGraphEdgeKind;
@@ -103,6 +104,24 @@ pub struct RepoGraphArtifact {
     /// Config sidecar for inferred route/consumer-edge exclusions.
     #[serde(default)]
     pub route_exclusion_config: RouteExclusionConfig,
+    /// Deterministic warm-time layout positions keyed by stable node UID.
+    #[serde(default)]
+    pub layout_positions: BTreeMap<String, GraphLayoutPosition>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoGraphArtifactV10WithoutLayoutPositions {
+    version: u32,
+    nodes: Vec<RepoGraphNode>,
+    edges: Vec<RepoGraphArtifactEdge>,
+    #[serde(default)]
+    symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
+    #[serde(default)]
+    communities: Vec<crate::communities::Community>,
+    #[serde(default)]
+    processes: Vec<RepoGraphArtifactProcess>,
+    #[serde(default)]
+    route_exclusion_config: RouteExclusionConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,6 +213,21 @@ struct RepoGraphNodeV10WithoutWorkspace {
     complexity: Option<ComplexityMetrics>,
 }
 
+impl From<RepoGraphArtifactV10WithoutLayoutPositions> for RepoGraphArtifact {
+    fn from(old: RepoGraphArtifactV10WithoutLayoutPositions) -> Self {
+        Self {
+            version: old.version,
+            nodes: old.nodes,
+            edges: old.edges,
+            symbol_ranges: old.symbol_ranges,
+            communities: old.communities,
+            processes: old.processes,
+            route_exclusion_config: old.route_exclusion_config,
+            layout_positions: BTreeMap::new(),
+        }
+    }
+}
+
 impl From<RepoGraphArtifactV10WithoutWorkspace> for RepoGraphArtifact {
     fn from(old: RepoGraphArtifactV10WithoutWorkspace) -> Self {
         Self {
@@ -204,6 +238,7 @@ impl From<RepoGraphArtifactV10WithoutWorkspace> for RepoGraphArtifact {
             communities: old.communities,
             processes: old.processes,
             route_exclusion_config: RouteExclusionConfig::default(),
+            layout_positions: BTreeMap::new(),
         }
     }
 }
@@ -218,6 +253,7 @@ impl From<RepoGraphArtifactV10WithoutRouteExclusionConfig> for RepoGraphArtifact
             communities: old.communities,
             processes: old.processes,
             route_exclusion_config: RouteExclusionConfig::default(),
+            layout_positions: BTreeMap::new(),
         }
     }
 }
@@ -232,6 +268,7 @@ impl From<RepoGraphArtifactV10WithoutRouteMetadata> for RepoGraphArtifact {
             communities: old.communities,
             processes: old.processes,
             route_exclusion_config: RouteExclusionConfig::default(),
+            layout_positions: BTreeMap::new(),
         }
     }
 }
@@ -302,18 +339,31 @@ pub fn deserialize_repo_graph_artifact_bincode(blob: &[u8]) -> Result<RepoGraphA
     match bincode::deserialize::<RepoGraphArtifact>(blob) {
         Ok(artifact) => Ok(artifact),
         Err(current_err) => {
-            match bincode::deserialize::<RepoGraphArtifactV10WithoutRouteExclusionConfig>(blob) {
+            match bincode::deserialize::<RepoGraphArtifactV10WithoutLayoutPositions>(blob) {
                 Ok(artifact) => Ok(RepoGraphArtifact::from(artifact)),
-                Err(config_compat_err) => {
-                    match bincode::deserialize::<RepoGraphArtifactV10WithoutRouteMetadata>(blob) {
+                Err(layout_compat_err) => {
+                    match bincode::deserialize::<RepoGraphArtifactV10WithoutRouteExclusionConfig>(
+                        blob,
+                    ) {
                         Ok(artifact) => Ok(RepoGraphArtifact::from(artifact)),
-                        Err(route_compat_err) => bincode::deserialize::<RepoGraphArtifactV10WithoutWorkspace>(blob)
-                            .map(RepoGraphArtifact::from)
-                            .map_err(|workspace_compat_err| {
-                                format!(
-                                    "deserialize graph: {current_err}; v10 pre-route-exclusion-config fallback also failed: {config_compat_err}; v10 pre-route-metadata fallback also failed: {route_compat_err}; v10 pre-workspace fallback also failed: {workspace_compat_err}"
-                                )
-                            }),
+                        Err(config_compat_err) => {
+                            match bincode::deserialize::<RepoGraphArtifactV10WithoutRouteMetadata>(
+                                blob,
+                            ) {
+                                Ok(artifact) => Ok(RepoGraphArtifact::from(artifact)),
+                                Err(route_compat_err) => {
+                                    bincode::deserialize::<RepoGraphArtifactV10WithoutWorkspace>(
+                                        blob,
+                                    )
+                                    .map(RepoGraphArtifact::from)
+                                    .map_err(|workspace_compat_err| {
+                                        format!(
+                                            "deserialize graph: {current_err}; v10 pre-layout fallback also failed: {layout_compat_err}; v10 pre-route-exclusion-config fallback also failed: {config_compat_err}; v10 pre-route-metadata fallback also failed: {route_compat_err}; v10 pre-workspace fallback also failed: {workspace_compat_err}"
+                                        )
+                                    })
+                                }
+                            }
+                        }
                     }
                 }
             }
