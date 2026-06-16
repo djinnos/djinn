@@ -654,7 +654,7 @@ impl CoordinatorActor {
         });
     }
 
-    fn maintenance_context(&self) -> crate::context::AgentContext {
+    pub(super) fn maintenance_context(&self) -> crate::context::AgentContext {
         crate::context::AgentContext {
             db: self.db.clone(),
             event_bus: crate::events::event_bus_for(&self.events_tx),
@@ -749,6 +749,10 @@ impl CoordinatorActor {
             CoordinatorMessage::ClearPlannedDispatchCompletion { task_id, reason } => {
                 self.clear_planned_dispatch_completion(&task_id, &reason)
                     .await;
+                self.route_settled_noop_without_live_mover(&task_id).await;
+            }
+            CoordinatorMessage::RouteSettledNoopWithoutLiveMover { task_id } => {
+                self.route_settled_noop_without_live_mover(&task_id).await;
             }
             CoordinatorMessage::IncrementEscalationCount { task_id, reply } => {
                 match self.increment_durable_escalation_count(&task_id).await {
