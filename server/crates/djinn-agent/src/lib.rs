@@ -7,7 +7,7 @@
 #![recursion_limit = "256"]
 
 pub(crate) mod commands;
-pub(crate) mod dispatch_pause;
+pub mod dispatch_pause;
 pub(crate) mod events;
 pub(crate) mod process;
 
@@ -52,6 +52,11 @@ pub mod resource_monitor;
 // ─── Actors (was src/actors/) ────────────────────────────────────────────────
 
 pub mod actors;
+
+pub use actors::coordinator::{
+    BreakerDebugEntry, CoordinatorDebugSnapshot, DebugCooldown, DebugDispatchState,
+    DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
+};
 
 /// One-shot recovery sweep that backfills post-session knowledge extraction
 /// over completed-but-unextracted task-runs. Triggered from the server boot

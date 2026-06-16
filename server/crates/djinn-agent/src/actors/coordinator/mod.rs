@@ -49,7 +49,9 @@ mod wave;
 // Re-export public types so the external API is unchanged.
 pub use handle::CoordinatorHandle;
 pub use types::{
-    AutoMergeTracker, CoordinatorDeps, CoordinatorError, CoordinatorStatus, VerificationTracker,
+    AutoMergeTracker, BreakerDebugEntry, CoordinatorDebugSnapshot, CoordinatorDeps,
+    CoordinatorError, CoordinatorStatus, DebugCooldown, DebugDispatchState, DebugFailureStreak,
+    DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView, VerificationTracker,
 };
 
 // Re-export internal types for sibling submodules that use `use super::*;`.

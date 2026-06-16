@@ -235,6 +235,21 @@ impl CoordinatorHandle {
         .await
     }
 
+    /// Ask the coordinator actor to publish its scrape-time live-state gauges.
+    ///
+    /// The actor owns the in-flight ledger and cooldown maps, so this request
+    /// snapshots their aggregate sizes on the actor thread and emits only scalar
+    /// gauges. No per-task labels are created and no caller holds an application
+    /// lock while awaiting the actor response.
+    pub async fn record_live_metrics(&self) -> Result<(), CoordinatorError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(CoordinatorMessage::RecordLiveMetrics { reply: tx })
+            .await
+            .map_err(|_| CoordinatorError::ActorDead)?;
+        rx.await.map_err(|_| CoordinatorError::NoResponse)
+    }
+
     /// Increment the Lead escalation count for a task and return the new count.
     ///
     /// When the count reaches ≥ 2, the caller should route to Planner instead of Lead
@@ -247,6 +262,16 @@ impl CoordinatorHandle {
                 task_id: task_id.to_owned(),
                 reply: tx,
             })
+            .await
+            .map_err(|_| CoordinatorError::ActorDead)?;
+        rx.await.map_err(|_| CoordinatorError::NoResponse)
+    }
+
+    /// Return a read-only debug snapshot of coordinator dispatch state.
+    pub async fn debug_dispatch_state(&self) -> Result<CoordinatorDebugSnapshot, CoordinatorError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(CoordinatorMessage::DebugSnapshot { reply: tx })
             .await
             .map_err(|_| CoordinatorError::ActorDead)?;
         rx.await.map_err(|_| CoordinatorError::NoResponse)
