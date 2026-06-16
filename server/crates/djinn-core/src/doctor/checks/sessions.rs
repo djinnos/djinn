@@ -502,9 +502,9 @@ mod tests {
             "resolver snapshot must be reproducible from snapshot.inputs"
         );
         assert_eq!(snapshot_inputs.candidate_session_id, "sess-zombie");
-        assert_eq!(snapshot_inputs.is_connected, false);
-        assert_eq!(snapshot_inputs.pod_present, false);
-        assert_eq!(snapshot_inputs.slot_present, false);
+        assert!(!snapshot_inputs.is_connected);
+        assert!(!snapshot_inputs.pod_present);
+        assert!(!snapshot_inputs.slot_present);
     }
 
     #[test]
