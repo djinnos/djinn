@@ -1003,6 +1003,36 @@ impl AppState {
     }
 
     #[cfg(test)]
+    pub(crate) async fn initialize_agent_handles_for_tests(&self) {
+        if self.pool().await.is_some() {
+            return;
+        }
+
+        let pool = SlotPoolHandle::spawn(
+            self.agent_context(),
+            self.cancel().clone(),
+            SlotPoolConfig {
+                models: Vec::new(),
+                role_priorities: std::collections::HashMap::new(),
+            },
+        );
+        let coordinator =
+            CoordinatorHandle::spawn(djinn_agent::actors::coordinator::CoordinatorDeps::new(
+                self.events().clone(),
+                self.cancel().clone(),
+                self.db().clone(),
+                pool.clone(),
+                self.catalog().clone(),
+                self.health_tracker().clone(),
+                self.inner.role_registry.clone(),
+                self.inner.verifying_tasks.clone(),
+                self.inner.lsp.clone(),
+            ));
+
+        self.set_agent_handles_for_tests(pool, coordinator).await;
+    }
+
+    #[cfg(test)]
     pub(crate) async fn set_agent_handles_for_tests(
         &self,
         pool: SlotPoolHandle,

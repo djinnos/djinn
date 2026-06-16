@@ -4,6 +4,8 @@ mod contracts;
 mod debug;
 #[path = "tests/helpers.rs"]
 mod helpers;
+#[path = "tests/metrics_debug_dispatch.rs"]
+mod metrics_debug_dispatch;
 #[path = "tests/misc.rs"]
 mod misc;
 #[path = "tests/oauth.rs"]
