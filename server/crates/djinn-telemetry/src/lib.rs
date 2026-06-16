@@ -161,6 +161,18 @@ pub mod slot_pool {
 mod tests {
     use super::*;
 
+    fn rendered_sample<'a>(rendered: &'a str, metric: &str, labels: &[(&str, &str)]) -> &'a str {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with(metric)
+                    && labels
+                        .iter()
+                        .all(|(key, value)| line.contains(&format!("{key}=\"{value}\"")))
+            })
+            .unwrap_or_else(|| panic!("missing sample {metric}{labels:?} in:\n{rendered}"))
+    }
+
     #[test]
     fn init_is_idempotent_and_registers_dispatch_labels() {
         init().unwrap();
@@ -198,13 +210,46 @@ mod tests {
         let rendered = render().unwrap();
         assert!(rendered.contains("djinn_dispatch_cooldowns_active 2"));
         assert!(rendered.contains("djinn_inflight_ledger_size 3"));
-        assert!(rendered.contains("djinn_user_cap_utilization"));
-        assert!(rendered.contains("model=\"model-a\""));
-        assert!(rendered.contains("user=\"user-a\""));
-        assert!(rendered.contains(" 0.5"));
-        assert!(rendered.contains("djinn_slot_pool"));
-        assert!(rendered.contains("state=\"free\""));
-        assert!(rendered.contains("state=\"busy\""));
+        assert!(
+            rendered_sample(
+                &rendered,
+                "djinn_user_cap_utilization",
+                &[("user", "user-a"), ("model", "model-a")]
+            )
+            .ends_with(" 0.5"),
+            "user-cap gauge must use the documented used/cap ratio convention:\n{rendered}"
+        );
+        assert!(
+            rendered_sample(
+                &rendered,
+                "djinn_slot_pool",
+                &[("state", "free"), ("model", "model-a")]
+            )
+            .ends_with(" 4")
+        );
+        assert!(
+            rendered_sample(
+                &rendered,
+                "djinn_slot_pool",
+                &[("state", "busy"), ("model", "model-a")]
+            )
+            .ends_with(" 5")
+        );
         assert!(!rendered.contains("slot_id="));
+    }
+
+    #[test]
+    fn metric_facade_helpers_are_synchronous_unit_functions() {
+        fn assert_sync_unit<F: FnOnce() -> ()>(f: F) {
+            f();
+        }
+
+        init().unwrap();
+        assert_sync_unit(|| dispatch::increment_attempt(dispatch::OUTCOME_ERROR));
+        assert_sync_unit(|| dispatch::record_last_success_now());
+        assert_sync_unit(|| dispatch::set_cooldowns_active(0));
+        assert_sync_unit(|| dispatch::set_inflight_ledger_size(0));
+        assert_sync_unit(|| dispatch::set_user_cap_utilization("user-sync", "model-sync", 0, 1));
+        assert_sync_unit(|| slot_pool::set_slots(slot_pool::STATE_FREE, "model-sync", 0));
     }
 }

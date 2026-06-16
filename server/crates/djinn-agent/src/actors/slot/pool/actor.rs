@@ -153,7 +153,11 @@ impl SlotPool {
             }
         }
 
-        for model_id in free_by_model.keys().chain(busy_by_model.keys()) {
+        let mut model_ids: HashSet<&str> = HashSet::new();
+        model_ids.extend(free_by_model.keys().map(String::as_str));
+        model_ids.extend(busy_by_model.keys().map(String::as_str));
+
+        for model_id in model_ids {
             djinn_telemetry::slot_pool::set_slots(
                 djinn_telemetry::slot_pool::STATE_FREE,
                 model_id,
