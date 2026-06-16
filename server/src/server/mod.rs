@@ -1,5 +1,7 @@
 use axum::Router;
 use axum::extract::State;
+use axum::http::header::CONTENT_TYPE;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 
 use serde::Serialize;
@@ -32,6 +34,10 @@ pub use state::AppState;
 pub fn router(state: AppState, serve_ui: bool) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
+        // Cluster-internal trust boundary: /metrics is intentionally unauthenticated
+        // for Prometheus scraping. Deployments should restrict it with a
+        // NetworkPolicy that only allows the monitoring namespace to reach it.
+        .route("/metrics", get(metrics))
         .route("/events", get(sse::events_handler))
         .route("/db-info", get(sse::db_info_handler))
         .route("/api/chat/completions", post(chat::completions_handler))
@@ -49,6 +55,20 @@ pub fn router(state: AppState, serve_ui: bool) -> Router {
         router = router.fallback(static_ui::serve_static);
     }
     router.layer(cors_layer()).with_state(state)
+}
+
+async fn metrics() -> Response {
+    match djinn_telemetry::render() {
+        Ok(body) => (
+            [(CONTENT_TYPE, djinn_telemetry::PROMETHEUS_TEXT_CONTENT_TYPE)],
+            body,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to render Prometheus metrics");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 /// CORS layer that allows any origin but — crucially — **reflects** the

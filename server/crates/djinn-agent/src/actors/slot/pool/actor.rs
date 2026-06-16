@@ -219,6 +219,11 @@ impl SlotPool {
         }
     }
 
+    #[tracing::instrument(
+        name = "djinn.slot.run_task",
+        skip(self, project_path),
+        fields(slot_id = tracing::field::Empty, model_id = %model_id, task_id = %task_id)
+    )]
     async fn dispatch(
         &mut self,
         task_id: String,
@@ -259,6 +264,7 @@ impl SlotPool {
                         })?
                 }
             };
+            tracing::Span::current().record("slot_id", slot_id);
 
             let slot = self.slot(slot_id)?;
             match slot.run_task(task_id.clone(), project_path.clone()).await {
@@ -333,6 +339,12 @@ impl SlotPool {
                 model_id,
                 task_id,
             } => {
+                tracing::info!(
+                    event = if killed { "slot.event.killed" } else { "slot.event.free" },
+                    slot_id,
+                    model_id = %model_id,
+                    task_id = %task_id,
+                );
                 let owns_task_mapping = self.task_to_slot.get(&task_id).copied() == Some(slot_id);
 
                 // On a killed lifecycle (stall-kill, interrupt_all/project,
@@ -387,6 +399,11 @@ impl SlotPool {
         self.task_to_slot.contains_key(task_id)
     }
 
+    #[tracing::instrument(
+        name = "djinn.slot.kill",
+        skip(self),
+        fields(slot_id = tracing::field::Empty, model_id = tracing::field::Empty, task_id = %task_id)
+    )]
     async fn kill_session(&self, task_id: &str) -> Result<(), PoolError> {
         let slot_id =
             self.task_to_slot
@@ -395,6 +412,10 @@ impl SlotPool {
                 .ok_or_else(|| PoolError::TaskNotFound {
                     task_id: task_id.to_string(),
                 })?;
+        tracing::Span::current().record("slot_id", slot_id);
+        if let Some(model_id) = self.slot_models.get(&slot_id) {
+            tracing::Span::current().record("model_id", tracing::field::display(model_id));
+        }
         self.teardown_taskrun_jobs_for_task(task_id, "kill_session")
             .await;
         // `SlotEvent::Killed` also performs best-effort cleanup for kill paths
@@ -428,6 +449,11 @@ impl SlotPool {
         self.reclaim_session(task_id, "evict_session", false).await
     }
 
+    #[tracing::instrument(
+        name = "djinn.slot.kill",
+        skip(self),
+        fields(slot_id = tracing::field::Empty, model_id = tracing::field::Empty, task_id = %task_id, reason = %reason)
+    )]
     async fn reclaim_session(
         &mut self,
         task_id: &str,
@@ -442,6 +468,10 @@ impl SlotPool {
             }
             return Ok(());
         };
+        tracing::Span::current().record("slot_id", slot_id);
+        if let Some(model_id) = self.slot_models.get(&slot_id) {
+            tracing::Span::current().record("model_id", tracing::field::display(model_id));
+        }
         self.teardown_taskrun_jobs_for_task(task_id, reason).await;
         // Best-effort terminate; ignore errors — the point of eviction is that
         // this reclaim path must not be blocked by an unresponsive slot. For
@@ -544,6 +574,11 @@ impl SlotPool {
         }
     }
 
+    #[tracing::instrument(
+        name = "djinn.slot.cancel",
+        skip(self),
+        fields(slot_id = tracing::field::Empty, model_id = tracing::field::Empty, task_id = %task_id)
+    )]
     async fn pause_session(&self, task_id: &str) -> Result<(), PoolError> {
         let slot_id =
             self.task_to_slot
@@ -552,6 +587,10 @@ impl SlotPool {
                 .ok_or_else(|| PoolError::TaskNotFound {
                     task_id: task_id.to_string(),
                 })?;
+        tracing::Span::current().record("slot_id", slot_id);
+        if let Some(model_id) = self.slot_models.get(&slot_id) {
+            tracing::Span::current().record("model_id", tracing::field::display(model_id));
+        }
         self.slot(slot_id)?.pause().await?;
         Ok(())
     }
