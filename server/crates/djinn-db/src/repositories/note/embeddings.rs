@@ -270,12 +270,45 @@ fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-pub fn embedding_document_text(title: &str, note_type: &str, tags: &str, content: &str) -> String {
+pub fn legacy_embedding_document_text(
+    title: &str,
+    note_type: &str,
+    tags: &str,
+    content: &str,
+) -> String {
     format!("title: {title}\ntype: {note_type}\ntags: {tags}\n\n{content}")
 }
 
-pub fn embedding_content_hash(title: &str, note_type: &str, tags: &str, content: &str) -> String {
-    crate::note_hash::note_content_hash(&embedding_document_text(title, note_type, tags, content))
+pub fn embedding_document_text(
+    title: &str,
+    note_type: &str,
+    tags: &str,
+    content: &str,
+    retrieval_anchor: Option<&str>,
+) -> String {
+    match retrieval_anchor
+        .map(str::trim)
+        .filter(|anchor| !anchor.is_empty())
+    {
+        Some(anchor) => format!("title: {title}\nretrieval_anchor: {anchor}"),
+        None => legacy_embedding_document_text(title, note_type, tags, content),
+    }
+}
+
+pub fn embedding_content_hash(
+    title: &str,
+    note_type: &str,
+    tags: &str,
+    content: &str,
+    retrieval_anchor: Option<&str>,
+) -> String {
+    crate::note_hash::note_content_hash(&embedding_document_text(
+        title,
+        note_type,
+        tags,
+        content,
+        retrieval_anchor,
+    ))
 }
 
 async fn upsert_embedding_metadata(
@@ -770,13 +803,16 @@ impl NoteRepository {
         note_type: &str,
         tags: &str,
         content: &str,
+        retrieval_anchor: Option<&str>,
     ) {
         let Some(provider) = self.embedding_provider() else {
             return;
         };
 
-        let semantic_text = embedding_document_text(title, note_type, tags, content);
-        let content_hash = embedding_content_hash(title, note_type, tags, content);
+        let semantic_text =
+            embedding_document_text(title, note_type, tags, content, retrieval_anchor);
+        let content_hash =
+            embedding_content_hash(title, note_type, tags, content, retrieval_anchor);
 
         match provider.embed_note(&semantic_text).await {
             Ok(embedded) => {
@@ -810,13 +846,16 @@ impl NoteRepository {
         note_type: &str,
         tags: &str,
         content: &str,
+        retrieval_anchor: Option<&str>,
     ) -> std::result::Result<NoteEmbeddingRecord, String> {
         let provider = self
             .embedding_provider()
             .ok_or_else(|| "embedding provider not configured".to_string())?;
 
-        let semantic_text = embedding_document_text(title, note_type, tags, content);
-        let content_hash = embedding_content_hash(title, note_type, tags, content);
+        let semantic_text =
+            embedding_document_text(title, note_type, tags, content, retrieval_anchor);
+        let content_hash =
+            embedding_content_hash(title, note_type, tags, content, retrieval_anchor);
         let embedded = provider.embed_note(&semantic_text).await?;
         self.upsert_embedding(UpsertNoteEmbedding {
             note_id,
@@ -932,32 +971,19 @@ impl NoteRepository {
         project_id: &str,
     ) -> Result<Vec<NoteRepairEmbeddingRow>> {
         self.db.ensure_initialized().await?;
-        let rows = sqlx::query!(
-            r#"SELECT n.id, n.title, n.note_type, n.tags::text AS "tags!", n.content,
-                      m.content_hash AS "content_hash?",
-                      m.model_version AS "model_version?",
-                      m.extension_state AS "extension_state?"
+        Ok(sqlx::query_as::<_, NoteRepairEmbeddingRow>(
+            r#"SELECT n.id, n.title, n.note_type, n.tags::text AS tags, n.content,
+                      n.retrieval_anchor,
+                      m.content_hash,
+                      m.model_version,
+                      m.extension_state
                  FROM notes n
             LEFT JOIN note_embedding_meta m ON m.note_id = n.id
                 WHERE n.project_id = $1"#,
-            project_id
         )
+        .bind(project_id)
         .fetch_all(self.db.pool())
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| NoteRepairEmbeddingRow {
-                id: r.id,
-                title: r.title,
-                note_type: r.note_type,
-                tags: r.tags,
-                content: r.content,
-                content_hash: r.content_hash,
-                model_version: r.model_version,
-                extension_state: r.extension_state,
-            })
-            .collect())
+        .await?)
     }
 }
 
@@ -969,13 +995,14 @@ impl NoteRepository {
 /// because the qdrant call failed — the latter must be treated as stale
 /// even if the content_hash still matches, since the vector store does
 /// not actually have a point for the note.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct NoteRepairEmbeddingRow {
     pub id: String,
     pub title: String,
     pub note_type: String,
     pub tags: String,
     pub content: String,
+    pub retrieval_anchor: Option<String>,
     pub content_hash: Option<String>,
     pub model_version: Option<String>,
     pub extension_state: Option<String>,
