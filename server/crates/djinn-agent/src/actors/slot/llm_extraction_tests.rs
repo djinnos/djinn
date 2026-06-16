@@ -1072,3 +1072,153 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
         assert!(note.content.contains(&fixture.session_id));
     }
 }
+
+// ─── AC7: applies_when anchor is persisted on durable extracted notes ─────────
+
+fn anchor_extraction_provider() -> Arc<FakeProvider> {
+    let json = serde_json::json!({
+        "cases": [{
+            "title": "Anchored Case",
+            "content": "## Situation\nA case must persist with a one-sentence retrieval anchor distinct from the body.\n## Constraint\nFuture tasks need an objective hook to decide when this case is the right recall.\n## Approach taken\nAdd an applies_when field and persist it into retrieval_anchor.\n## Result\nThe durable case keeps its body and gains an anchor.\n## Why it worked / failed\nThe separate field gives retrieval a focused sentence without replacing the ADR-054 body.\n## Reusable lesson\nDurable notes should be reachable by an objective situation.\n## Related\n- retrieval anchor\n- embedding",
+            "applies_when": "When you need an objective situation sentence for a case note."
+        }],
+        "patterns": [{
+            "title": "Anchored Pattern",
+            "content": "## Context\nA pattern is most useful when retrieval hooks onto a situation rather than free text. ## Problem shape\nNoisy embeddings over full content make retrieval brittle. ## Recommended approach\nPersist a separate applies_when sentence. ## Why it works\nThe short anchor dominates the embedding signal. ## Tradeoffs / limits\nThe body still carries the durable lesson. ## When to use\nUse when durable knowledge is hard to find. ## When not to use\nDo not use when the body already is the retrieval target. ## Related\n- retrieval anchor",
+            "applies_when": "When durable knowledge is hard to retrieve by full content."
+        }],
+        "pitfalls": [{
+            "title": "Anchored Pitfall",
+            "content": "## Trigger / smell\nA pitfall becomes unrecoverable when its trigger is buried inside a long body. ## Failure mode\nEmbedding drift hides the trigger. ## Observable symptoms\nThe pitfall is never recalled. ## Prevention\nPersist a separate applies_when trigger sentence. ## Recovery\nRe-anchor and re-embed. ## Related\n- retrieval anchor",
+            "applies_when": "When a pitfall is buried inside a long body and not recalled."
+        }]
+    })
+    .to_string();
+    Arc::new(FakeProvider::text(&json))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn llm_extraction_persists_applies_when_as_retrieval_anchor() {
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 2,
+        errors: 1,
+        tools_used: 4,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    let provider = anchor_extraction_provider();
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let all_notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+
+    let by_type: std::collections::HashMap<_, _> = all_notes
+        .iter()
+        .map(|n| (n.note_type.as_str(), n))
+        .collect();
+
+    let case = by_type.get("case").expect("case note written");
+    let pattern = by_type.get("pattern").expect("pattern note written");
+    let pitfall = by_type.get("pitfall").expect("pitfall note written");
+
+    assert_eq!(
+        case.retrieval_anchor.as_deref(),
+        Some("When you need an objective situation sentence for a case note.")
+    );
+    assert_eq!(
+        pattern.retrieval_anchor.as_deref(),
+        Some("When durable knowledge is hard to retrieve by full content.")
+    );
+    assert_eq!(
+        pitfall.retrieval_anchor.as_deref(),
+        Some("When a pitfall is buried inside a long body and not recalled.")
+    );
+
+    // The anchor is distinct from the body — the body still has all ADR-054
+    // sections, and the anchor is a separate persisted field.
+    for note in [case, pattern, pitfall] {
+        assert!(
+            !note.content.contains("When you need"),
+            "anchor must not be duplicated into the body"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn llm_extraction_persists_note_without_anchor_when_model_omits_applies_when() {
+    // Backward compatibility: a model that does NOT emit applies_when still
+    // produces durable notes, just with a null anchor.
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy::default();
+    // Use the existing fake_extraction_provider (no anchor field on any note).
+    let provider = fake_extraction_provider();
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+
+    assert_eq!(notes.len(), 3);
+    for note in &notes {
+        assert!(
+            note.retrieval_anchor.is_none(),
+            "missing anchor must persist as null; got {:?} on note {}",
+            note.retrieval_anchor,
+            note.title
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn llm_extraction_treats_empty_anchor_as_missing() {
+    // An applies_when that is whitespace-only or empty must not break extraction
+    // and must be persisted as null (treated as missing).
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 2,
+        errors: 1,
+        tools_used: 4,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+    let json = serde_json::json!({
+        "cases": [{
+            "title": "Whitespace Anchor Case",
+            "content": "## Situation\nA case that emits a whitespace-only anchor must still be persisted under a deterministic constraint. The constraint is that the durable lesson must remain visible across future tasks. The approach taken is to ignore the blank anchor and treat it as missing. The result is the note persists with a null anchor. The reusable lesson is that empty retrieval hooks should not break the write path. ## Related\n- anchor normalization",
+            "applies_when": "   \n  "
+        }],
+        "patterns": [],
+        "pitfalls": []
+    })
+    .to_string();
+    let provider = Arc::new(FakeProvider::text(&json));
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].retrieval_anchor.is_none(),
+        "whitespace-only anchor must persist as null, not empty string"
+    );
+}
