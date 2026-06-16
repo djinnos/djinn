@@ -20,6 +20,18 @@ use djinn_db::{
 };
 use djinn_provider::catalog::health::HealthTracker;
 
+fn rendered_counter_value(metric: &str) -> f64 {
+    djinn_telemetry::init().unwrap();
+    let rendered = djinn_telemetry::render().unwrap();
+    rendered
+        .lines()
+        .find_map(|line| {
+            let value = line.strip_prefix(metric)?.trim();
+            value.parse::<f64>().ok()
+        })
+        .unwrap_or(0.0)
+}
+
 #[derive(Clone)]
 struct RecordingRuntimeOps {
     calls: Arc<Mutex<Vec<String>>>,
@@ -760,6 +772,10 @@ async fn restart_rehydrated_escalation_count_increments_from_persisted_n() {
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.rehydrate_durable_dispatch_state().await;
     assert_eq!(actor.escalation_counts[&task.id], 7);
+
+    let before_metric = rendered_counter_value("djinn_lead_escalations_total");
+    djinn_telemetry::lead::increment_escalation();
+    assert!(rendered_counter_value("djinn_lead_escalations_total") - before_metric >= 1.0);
 
     let next = actor
         .increment_durable_escalation_count(&task.id)

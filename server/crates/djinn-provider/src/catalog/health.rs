@@ -57,6 +57,39 @@ pub struct BreakerDebugEntry {
     pub consecutive_failures: u32,
 }
 
+/// Circuit-breaker state used by metrics snapshots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum BreakerState {
+    Closed,
+    HalfOpen,
+    Open,
+}
+
+impl BreakerState {
+    /// Numeric Prometheus gauge value for `djinn_breaker_state{scope,model}`.
+    ///
+    /// `HalfOpen` is emitted as `0.5`: the original metrics proposal only named
+    /// the closed/open endpoints (`0`/`1`), and the midpoint preserves that
+    /// ordering while making cooldown-expired trial buckets distinguishable.
+    pub fn metric_value(self) -> f64 {
+        match self {
+            Self::Closed => 0.0,
+            Self::HalfOpen => 0.5,
+            Self::Open => 1.0,
+        }
+    }
+}
+
+/// Owned, non-async breaker snapshot suitable for scrape-time metrics emission.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BreakerMetricSnapshot {
+    /// Metrics label; `None`/shared health buckets are rendered as `shared`.
+    pub scope: String,
+    pub model: String,
+    pub state: BreakerState,
+    pub value: f64,
+}
+
 impl HealthKey {
     pub fn new(scope: Option<&str>, model_id: &str) -> Self {
         Self {
@@ -243,6 +276,7 @@ impl HealthTracker {
             state.auto_disabled = true;
             state.cooldown_until = Some(Instant::now() + cooldown);
             state.disable_ttl_trips += 1;
+            djinn_telemetry::breaker::increment_trip();
             tracing::warn!(
                 model_id = %key.model_id,
                 scope = ?key.scope,
@@ -292,6 +326,7 @@ impl HealthTracker {
         state.auto_disabled = true;
         state.cooldown_until = Some(Instant::now() + cooldown);
         state.disable_ttl_trips += 1;
+        djinn_telemetry::breaker::increment_trip();
         tracing::warn!(
             model_id = %key.model_id,
             scope = ?key.scope,
@@ -370,6 +405,44 @@ impl HealthTracker {
             .collect();
         snapshot.sort_by(|a, b| a.scope.cmp(&b.scope).then_with(|| a.model.cmp(&b.model)));
         snapshot
+    }
+
+    /// Return owned breaker metric snapshots for all tracked buckets.
+    ///
+    /// This method is synchronous/non-async and does not expose the internal
+    /// mutex guard, so callers can safely collect a snapshot before rendering
+    /// metrics without holding locks across `.await` points. State maps to the
+    /// `djinn_breaker_state{scope,model}` gauge as Closed=`0.0`, HalfOpen=`0.5`,
+    /// Open=`1.0`.
+    pub fn breaker_metric_snapshot(&self) -> Vec<BreakerMetricSnapshot> {
+        let map = self.inner.lock().unwrap();
+        let mut snapshot: Vec<_> = map
+            .iter()
+            .map(|(key, state)| {
+                let breaker_state = if !state.auto_disabled {
+                    BreakerState::Closed
+                } else if state.is_available() {
+                    BreakerState::HalfOpen
+                } else {
+                    BreakerState::Open
+                };
+                BreakerMetricSnapshot {
+                    scope: key.scope.clone().unwrap_or_else(|| "shared".to_owned()),
+                    model: key.model_id.clone(),
+                    state: breaker_state,
+                    value: breaker_state.metric_value(),
+                }
+            })
+            .collect();
+        snapshot.sort_by(|a, b| a.scope.cmp(&b.scope).then_with(|| a.model.cmp(&b.model)));
+        snapshot
+    }
+
+    /// Emit scrape-time breaker-state gauges from a lock-free owned snapshot.
+    pub fn record_breaker_metrics(&self) {
+        for bucket in self.breaker_metric_snapshot() {
+            djinn_telemetry::breaker::set_state(&bucket.scope, &bucket.model, bucket.value);
+        }
     }
 
     /// Replace all tracked health state with a persisted snapshot.
@@ -1003,6 +1076,62 @@ mod tests {
         // task-b is untouched by reads/writes of task-a.
         let b = ht.take_task_provider_failure("task-b").unwrap();
         assert!(!b.throttle);
+    }
+
+    #[test]
+    fn breaker_metric_snapshot_covers_closed_half_open_and_open() {
+        let ht = HealthTracker::new();
+        ht.record_success(Some("user-closed"), "closed-model");
+        ht.record_stall(Some("user-half"), "half-model");
+        expire_cooldown(&ht, Some("user-half"), "half-model");
+        ht.record_stall(None, "open-model");
+
+        let snapshot = ht.breaker_metric_snapshot();
+        assert_eq!(snapshot.len(), 3);
+        assert_eq!(snapshot[0].scope, "shared");
+        assert_eq!(snapshot[0].model, "open-model");
+        assert_eq!(snapshot[0].state, BreakerState::Open);
+        assert_eq!(snapshot[0].value, 1.0);
+        assert_eq!(snapshot[1].scope, "user-closed");
+        assert_eq!(snapshot[1].state, BreakerState::Closed);
+        assert_eq!(snapshot[1].value, 0.0);
+        assert_eq!(snapshot[2].scope, "user-half");
+        assert_eq!(snapshot[2].state, BreakerState::HalfOpen);
+        assert_eq!(snapshot[2].value, 0.5);
+    }
+
+    #[test]
+    fn breaker_trip_metric_increments_only_on_trip_transition() {
+        djinn_telemetry::init().unwrap();
+        let before = rendered_counter_value("djinn_breaker_trips_total");
+        let ht = HealthTracker::new();
+
+        for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
+            ht.record_failure(Some("trip-metric-user"), "trip-metric-model");
+        }
+        ht.record_failure(Some("trip-metric-user"), "trip-metric-model");
+        ht.record_stall(Some("trip-metric-user"), "trip-metric-model");
+
+        assert_eq!(
+            ht.model_health(Some("trip-metric-user"), "trip-metric-model")
+                .disable_ttl_trips,
+            1
+        );
+        assert!(
+            rendered_counter_value("djinn_breaker_trips_total") - before >= 1.0,
+            "the authoritative closed-to-open transition should increment the breaker-trip counter"
+        );
+    }
+
+    fn rendered_counter_value(metric: &str) -> f64 {
+        let rendered = djinn_telemetry::render().unwrap();
+        rendered
+            .lines()
+            .find_map(|line| {
+                let value = line.strip_prefix(metric)?.trim();
+                value.parse::<f64>().ok()
+            })
+            .unwrap_or(0.0)
     }
 
     #[test]

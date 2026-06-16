@@ -240,6 +240,7 @@ impl CoordinatorHandle {
     /// When the count reaches ≥ 2, the caller should route to Planner instead of Lead
     /// (per ADR-051 §8).
     pub async fn increment_escalation_count(&self, task_id: &str) -> Result<u32, CoordinatorError> {
+        djinn_telemetry::lead::increment_escalation();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.sender
             .send(CoordinatorMessage::IncrementEscalationCount {
@@ -274,4 +275,42 @@ fn should_log_try_trigger_dispatch_failure(last_log_secs: &AtomicU64) -> bool {
     last_log_secs
         .compare_exchange(last_secs, now_secs, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn increment_escalation_count_records_metric_synchronously() {
+        djinn_telemetry::init().unwrap();
+        let before = rendered_counter_value("djinn_lead_escalations_total");
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let (_status_tx, status_rx) = watch::channel(SharedCoordinatorState {
+            dispatched: 0,
+            recovered: 0,
+            epic_throughput: HashMap::new(),
+            pr_errors: HashMap::new(),
+            rate_limited_until: None,
+        });
+        let handle = CoordinatorHandle { sender, status_rx };
+
+        assert!(matches!(
+            handle.increment_escalation_count("task-metric").await,
+            Err(CoordinatorError::ActorDead)
+        ));
+        assert!(rendered_counter_value("djinn_lead_escalations_total") - before >= 1.0);
+    }
+
+    fn rendered_counter_value(metric: &str) -> f64 {
+        let rendered = djinn_telemetry::render().unwrap();
+        rendered
+            .lines()
+            .find_map(|line| {
+                let value = line.strip_prefix(metric)?.trim();
+                value.parse::<f64>().ok()
+            })
+            .unwrap_or(0.0)
+    }
 }
