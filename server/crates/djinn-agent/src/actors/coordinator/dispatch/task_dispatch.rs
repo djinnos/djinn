@@ -5,6 +5,10 @@ use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pa
 use crate::roles::DispatchContext;
 use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
 
+fn record_dispatch_attempt(outcome: &'static str) {
+    djinn_telemetry::dispatch::increment_attempt(outcome);
+}
+
 /// Env flag allowing operators (and the in-process TestRuntime path) to
 /// bypass the devcontainer-image + graph-warm readiness gate. Default is
 /// "on" (fail-closed). Set to `0`/`false`/`no` to dispatch as soon as a
@@ -836,6 +840,7 @@ impl CoordinatorActor {
             }
             // Skip tasks still inside an active dispatch cooldown.
             if self.dispatch_cooldowns.contains_key(&task.id) {
+                record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_COOLDOWN);
                 tracing::debug!(outcome = "cooldown", task_id = %task.short_id, task_uuid = %task.id);
                 tracing::debug!(
                     task_id = %task.short_id,
@@ -1149,6 +1154,7 @@ impl CoordinatorActor {
                     used < caps.get(m).copied().unwrap_or(1)
                 });
                 if model_ids.is_empty() {
+                    record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_CAP);
                     tracing::debug!(outcome = "cap", task_id = %task.short_id, role);
                     tracing::debug!(
                         task_id = %task.short_id,
@@ -1221,6 +1227,7 @@ impl CoordinatorActor {
 
             match outcome {
                 DispatchOutcome::Dispatched => {
+                    record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_OK);
                     tracing::info!(outcome = "ok", task_id = %task.short_id, role);
                     tracing::info!(
                         task_id = %task.short_id,
@@ -1295,6 +1302,7 @@ impl CoordinatorActor {
                     }
                 }
                 DispatchOutcome::AtCapacity => {
+                    record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_CAP);
                     tracing::debug!(outcome = "cap", task_id = %task.short_id, role);
                     tracing::debug!(
                         task_id = %task.short_id,
@@ -1307,9 +1315,21 @@ impl CoordinatorActor {
                     );
                     exhausted_roles.insert(role);
                 }
-                DispatchOutcome::PoolDead => return,
+                DispatchOutcome::PoolDead => {
+                    record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_ERROR);
+                    return;
+                }
                 DispatchOutcome::Failed => {
-                    tracing::debug!(outcome = "error", task_id = %task.short_id, role);
+                    let breaker_open_for_all_candidates = model_ids
+                        .iter()
+                        .all(|model_id| !self.health.is_available(creator.as_deref(), model_id));
+                    if breaker_open_for_all_candidates {
+                        record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_BREAKER);
+                        tracing::debug!(outcome = "breaker", task_id = %task.short_id, role);
+                    } else {
+                        record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_ERROR);
+                        tracing::debug!(outcome = "error", task_id = %task.short_id, role);
+                    }
                     tracing::debug!(
                         task_id = %task.short_id,
                         task_uuid = %task.id,
@@ -2227,6 +2247,31 @@ mod inflight_ledger_tests {
             }],
             "observer must capture the count after dispatch increments local in-flight state"
         );
+    }
+
+    #[test]
+    fn dispatch_attempt_metrics_cover_all_outcome_labels() {
+        djinn_telemetry::init().unwrap();
+
+        for outcome in [
+            djinn_telemetry::dispatch::OUTCOME_OK,
+            djinn_telemetry::dispatch::OUTCOME_COOLDOWN,
+            djinn_telemetry::dispatch::OUTCOME_CAP,
+            djinn_telemetry::dispatch::OUTCOME_BREAKER,
+            djinn_telemetry::dispatch::OUTCOME_ERROR,
+        ] {
+            record_dispatch_attempt(outcome);
+        }
+
+        let rendered = djinn_telemetry::render().unwrap();
+        for outcome in ["ok", "cooldown", "cap", "breaker", "error"] {
+            assert!(
+                rendered.contains(&format!(
+                    "djinn_dispatch_attempts_total{{outcome=\"{outcome}\"}}"
+                )),
+                "missing dispatch metric label {outcome} in:\n{rendered}"
+            );
+        }
     }
 
     /// Creator-less (legacy system) dispatches are ungated by the per-user cap,

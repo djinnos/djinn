@@ -42,6 +42,30 @@ async fn health_returns_ok() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_returns_prometheus_text_without_auth() {
+    let app = test_helpers::create_test_app();
+
+    let req = axum::http::Request::builder()
+        .uri("/metrics")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some(djinn_telemetry::PROMETHEUS_TEXT_CONTENT_TYPE)
+    );
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.contains("# HELP djinn_dispatch_attempts_total"));
+    assert!(text.contains("djinn_dispatch_attempts_total{outcome=\"ok\"}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_reports_memory_mount_runtime_status_details() {
     let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
     state

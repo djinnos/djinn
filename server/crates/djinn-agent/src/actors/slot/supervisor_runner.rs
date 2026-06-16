@@ -798,6 +798,10 @@ pub(crate) async fn run_supervisor_dispatch(
                                 "supervisor dispatch: failed to clear budget-park dispatch state"
                             );
                         }
+                        // `ClearPlannedDispatchCompletion` routes through the
+                        // no-mover disposition call site after clearing stale
+                        // dispatch markers. Avoid sending a second message for
+                        // the same settled run.
                     }
                     None => {
                         tracing::debug!(

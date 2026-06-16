@@ -718,6 +718,45 @@ impl CoordinatorActor {
                 continue;
             }
 
+            let evidence = match self.collect_live_mover_evidence(&task).await {
+                Ok(evidence) => evidence,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "CoordinatorActor: orphaned verifying no-mover disposition skipped; failed to collect live-mover evidence"
+                    );
+                    continue;
+                }
+            };
+            let merge_target = match ProjectRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            )
+            .get_config(&task.project_id)
+            .await
+            {
+                Ok(Some(config)) => config.target_branch,
+                _ => "main".to_owned(),
+            };
+            if let Some(outcome) =
+                crate::supervisor_impl::pr::handle_settled_noop_without_live_mover(
+                    &task,
+                    &repo,
+                    &merge_target,
+                    &evidence,
+                )
+                .await
+            {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    outcome = ?outcome,
+                    "CoordinatorActor: orphaned verifying task routed through no-mover no-op disposition"
+                );
+                affected += 1;
+                continue;
+            }
+
             match repo
                 .transition(
                     &task.id,
