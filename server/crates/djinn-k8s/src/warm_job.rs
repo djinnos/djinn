@@ -463,9 +463,9 @@ mod tests {
             envs.get("CARGO_TARGET_DIR").copied(),
             Some("/cache/cargo-target/proj-xyz"),
         );
-        // Warm base is now incremental-enabled so it carries main's incremental
-        // compiler state for verification/task-run pods to reuse.
-        assert_eq!(envs.get("CARGO_INCREMENTAL").copied(), Some("1"));
+        // CARGO_INCREMENTAL=0: the repo pins rustc-wrapper=sccache, which forbids
+        // incremental. Reuse is cargo freshness over the warm base + sccache.
+        assert_eq!(envs.get("CARGO_INCREMENTAL").copied(), Some("0"));
         // We no longer force the sccache wrapper (it requires CARGO_INCREMENTAL=0
         // and disabled the incremental fast path).
         assert!(
