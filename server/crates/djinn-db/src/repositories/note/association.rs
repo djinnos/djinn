@@ -12,6 +12,47 @@ pub struct NoteAssociationEntry {
     pub last_co_access: String,
 }
 
+/// The typed-edge kinds that can be written via
+/// [`NoteRepository::upsert_typed_association`].
+///
+/// These are the values the F5 `note_associations.kind` substrate accepts for
+/// semantic / provenance edges. The LLM enrichment pass (diei) writes these
+/// directly; the consolidation pipeline writes `DerivedFrom` as a provenance
+/// edge when a canonical note is synthesized from source notes.
+///
+/// `co_access` is intentionally **not** a member of this enum — implicit
+/// Hebbian co-access upserts stay on [`NoteRepository::upsert_association`],
+/// which uses multiplicative weight growth and a distinct event model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NoteAssociationKind {
+    /// A note that builds on the related note (additive dependency).
+    BuildsOn,
+    /// A note that contradicts the related note (warning, not score boost).
+    Contradicts,
+    /// A note that supersedes the related note (asymmetric: prefer newer).
+    Supersedes,
+    /// A note that exemplifies the related note (concrete instance of a pattern).
+    Exemplifies,
+    /// A note that was derived from the related note (provenance).
+    DerivedFrom,
+}
+
+impl NoteAssociationKind {
+    /// Returns the string literal stored in `note_associations.kind`.
+    ///
+    /// This is the canonical wire format the F5 migration allows; values match
+    /// the per-kind multipliers documented in the vrn9 / diei designs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NoteAssociationKind::BuildsOn => "builds_on",
+            NoteAssociationKind::Contradicts => "contradicts",
+            NoteAssociationKind::Supersedes => "supersedes",
+            NoteAssociationKind::Exemplifies => "exemplifies",
+            NoteAssociationKind::DerivedFrom => "derived_from",
+        }
+    }
+}
+
 impl NoteRepository {
     /// Upsert a co-access association between two notes.
     ///
@@ -140,23 +181,74 @@ impl NoteRepository {
         target_note_id: &str,
         weight: f64,
     ) -> Result<()> {
+        self.upsert_typed_association(
+            source_note_id,
+            target_note_id,
+            NoteAssociationKind::DerivedFrom,
+            weight,
+        )
+        .await
+    }
+
+    /// Upsert a typed semantic association between two notes.
+    ///
+    /// Supports the typed kinds surfaced by the F5 substrate (`note_associations.kind`
+    /// `VARCHAR(32)`, widened by Epic 3/vrn9 to accept): `builds_on`,
+    /// `contradicts`, `supersedes`, `exemplifies`, and `derived_from`. These
+    /// are the values the diei (LLM enrichment pass) writes for implicit edges
+    /// detected in note prose; `derived_from` is also reused by the consolidation
+    /// pipeline as a provenance edge.
+    ///
+    /// **Idempotent / max-weight merge**: when an edge between the same `(a, b)`
+    /// pair already exists, the `GREATEST(old.weight, new.weight)` is kept and
+    /// `kind` is set to the explicitly supplied kind. The stronger weight wins,
+    /// and the most-recently-asserted typed kind is recorded so callers can
+    /// distinguish a freshly-classified enrichment edge from a stale implicit
+    /// `co_access` one. `co_access` is never written by this helper — implicit
+    /// Hebbian upserts remain on [`Self::upsert_association`].
+    ///
+    /// `weight` is clamped to `[0.0, 1.0]`. The note IDs are canonicalized
+    /// internally (`min < max`) to satisfy the `note_a_id < note_b_id` CHECK
+    /// constraint, so this writes an undirected typed edge between the two notes.
+    ///
+    /// Implemented with a runtime (non-macro) query: the widened `kind` value
+    /// set accepted by this helper was added after the offline `.sqlx` cache
+    /// was generated, so a compile-checked `query!` would fail under
+    /// `SQLX_OFFLINE=true`. The query string lists the allowed kinds via a
+    /// runtime-format helper rather than baking them into a macro.
+    pub async fn upsert_typed_association(
+        &self,
+        note_a_id: &str,
+        note_b_id: &str,
+        kind: NoteAssociationKind,
+        weight: f64,
+    ) -> Result<()> {
         self.db.ensure_initialized().await?;
 
-        let (a_id, b_id) = canonical_pair(source_note_id, target_note_id);
+        let (a_id, b_id) = canonical_pair(note_a_id, note_b_id);
         let weight = weight.clamp(0.0, 1.0);
+        let kind_str = kind.as_str();
 
+        // Runtime (non-macro) query for the same offline-cache reason as
+        // `record_derived_from` and `get_association_kind` below: the typed
+        // kind widening (vrn9) accepts values beyond the offline `.sqlx`
+        // cache's compile-checked projection. The `kind` column is bound
+        // rather than interpolated so this stays safe even if a future
+        // `NoteAssociationKind` variant is added without touching this
+        // function.
         sqlx::query(
             r#"INSERT INTO note_associations
-             (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind)
-             VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'derived_from')
-             ON CONFLICT (note_a_id, note_b_id) DO UPDATE SET
-                 weight = GREATEST(note_associations.weight, EXCLUDED.weight),
-                 kind = 'derived_from',
-                 last_co_access = EXCLUDED.last_co_access"#,
+                 (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind)
+               VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), $4)
+               ON CONFLICT (note_a_id, note_b_id) DO UPDATE SET
+                   weight = GREATEST(note_associations.weight, EXCLUDED.weight),
+                   kind = EXCLUDED.kind,
+                   last_co_access = EXCLUDED.last_co_access"#,
         )
         .bind(a_id)
         .bind(b_id)
         .bind(weight)
+        .bind(kind_str)
         .execute(self.db.pool())
         .await?;
 
@@ -916,5 +1008,295 @@ mod tests {
             .expect("edge present");
         assert_eq!(kind, "derived_from");
         assert!((weight - 0.5).abs() < 1e-12, "got {weight}");
+    }
+
+    // ── Typed-association helper tests (diei persistence substrate) ──────────
+    //
+    // The following tests cover the persistence primitives introduced for the
+    // LLM enrichment pass (diei): `upsert_typed_association` accepts every
+    // value in the widened `note_associations.kind` set, clamps `weight` to
+    // `[0.0, 1.0]`, and is idempotent under repeated writes for the same
+    // `(a, b, kind)` triple.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upsert_typed_association_writes_each_widened_kind() {
+        // Verify every kind in the widened F5 substrate (vrn9 + diei) is
+        // accepted by `upsert_typed_association` and round-trips through
+        // `get_association_kind`. Each kind is written on a distinct pair so
+        // we can read each kind back independently.
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let cases = [
+            (NoteAssociationKind::BuildsOn, "builds_on", 0.8_f64),
+            (NoteAssociationKind::Contradicts, "contradicts", 0.9),
+            (NoteAssociationKind::Supersedes, "supersedes", 0.95),
+            (NoteAssociationKind::Exemplifies, "exemplifies", 0.7),
+            (NoteAssociationKind::DerivedFrom, "derived_from", 0.6),
+        ];
+
+        for (kind, expected_kind_str, weight) in cases.iter() {
+            let a = make_note(&repo, &project, &tmp, &format!("Source {kind:?}")).await;
+            let b = make_note(&repo, &project, &tmp, &format!("Target {kind:?}")).await;
+
+            repo.upsert_typed_association(&a, &b, *kind, *weight)
+                .await
+                .unwrap();
+
+            let (got_weight, got_kind) = repo
+                .get_association_kind(&a, &b)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| {
+                    panic!("expected {kind_str} edge", kind_str = expected_kind_str)
+                });
+            assert_eq!(got_kind, *expected_kind_str, "kind mismatch for {kind:?}");
+            assert!(
+                (got_weight - *weight).abs() < 1e-12,
+                "weight mismatch for {kind:?}: got {got_weight}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upsert_typed_association_clamps_weight_to_unit_interval() {
+        // Out-of-band weights (negative or > 1.0) must be clamped to the
+        // documented `[0.0, 1.0]` interval before they hit the row so a
+        // downstream graph-scoring layer can rely on the invariant.
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let a = make_note(&repo, &project, &tmp, "Clamp low").await;
+        let b = make_note(&repo, &project, &tmp, "Clamp high").await;
+
+        // Below zero -> 0.0.
+        repo.upsert_typed_association(&a, &b, NoteAssociationKind::BuildsOn, -0.5)
+            .await
+            .unwrap();
+        let (w, _) = repo
+            .get_association_kind(&a, &b)
+            .await
+            .unwrap()
+            .expect("low-clamp edge present");
+        assert_eq!(w, 0.0, "negative weight must clamp to 0.0, got {w}");
+
+        // Above one -> 1.0.
+        repo.upsert_typed_association(&a, &b, NoteAssociationKind::BuildsOn, 7.5)
+            .await
+            .unwrap();
+        let (w, _) = repo
+            .get_association_kind(&a, &b)
+            .await
+            .unwrap()
+            .expect("high-clamp edge present");
+        assert_eq!(w, 1.0, "weight > 1.0 must clamp to 1.0, got {w}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upsert_typed_association_is_idempotent_and_keeps_max_weight() {
+        // Repeated writes for the same (a, b, kind) must NOT create duplicate
+        // rows, must preserve the strongest observed weight, and must leave the
+        // canonical pair ordering untouched.
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let note_a = make_note(&repo, &project, &tmp, "Idempotent A").await;
+        let note_b = make_note(&repo, &project, &tmp, "Idempotent B").await;
+        let (expected_a, expected_b) = canonical_pair(&note_a, &note_b);
+
+        // First write — moderate confidence.
+        repo.upsert_typed_association(&note_a, &note_b, NoteAssociationKind::Supersedes, 0.6)
+            .await
+            .unwrap();
+        // Second write — lower confidence. MAX must win.
+        repo.upsert_typed_association(&note_b, &note_a, NoteAssociationKind::Supersedes, 0.3)
+            .await
+            .unwrap();
+
+        // No duplicate row — exactly one entry exists for this pair.
+        let row_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM note_associations
+             WHERE note_a_id = $1 AND note_b_id = $2",
+        )
+        .bind(expected_a)
+        .bind(expected_b)
+        .fetch_one(repo.db.pool())
+        .await
+        .unwrap();
+        assert_eq!(row_count, 1, "duplicate typed edge was inserted");
+
+        // Weight and kind both match the first (stronger) write.
+        let (weight, kind) = repo
+            .get_association_kind(&note_a, &note_b)
+            .await
+            .unwrap()
+            .expect("edge present");
+        assert_eq!(kind, "supersedes");
+        assert!(
+            (weight - 0.6).abs() < 1e-12,
+            "second weaker write must not overwrite weight; got {weight}"
+        );
+
+        // A stronger subsequent write raises the floor.
+        repo.upsert_typed_association(&note_a, &note_b, NoteAssociationKind::Supersedes, 0.85)
+            .await
+            .unwrap();
+        let (weight, _) = repo
+            .get_association_kind(&note_a, &note_b)
+            .await
+            .unwrap()
+            .expect("edge present");
+        assert!(
+            (weight - 0.85).abs() < 1e-12,
+            "stronger reupsert must lift weight; got {weight}"
+        );
+
+        // Still no duplicate after three writes.
+        let row_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM note_associations
+             WHERE note_a_id = $1 AND note_b_id = $2",
+        )
+        .bind(expected_a)
+        .bind(expected_b)
+        .fetch_one(repo.db.pool())
+        .await
+        .unwrap();
+        assert_eq!(row_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upsert_typed_association_is_canonical_order_agnostic() {
+        // The CHECK constraint `note_a_id < note_b_id` means writes must be
+        // direction-agnostic — calling with the pair in either order yields a
+        // single edge at the canonical slot.
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let note_a = make_note(&repo, &project, &tmp, "Canonical A").await;
+        let note_b = make_note(&repo, &project, &tmp, "Canonical B").await;
+        let (canon_a, canon_b) = canonical_pair(&note_a, &note_b);
+
+        repo.upsert_typed_association(&note_a, &note_b, NoteAssociationKind::Contradicts, 0.7)
+            .await
+            .unwrap();
+
+        // Reading back via either direction yields the same row.
+        let (w1, k1) = repo
+            .get_association_kind(&note_a, &note_b)
+            .await
+            .unwrap()
+            .expect("forward read present");
+        let (w2, k2) = repo
+            .get_association_kind(&note_b, &note_a)
+            .await
+            .unwrap()
+            .expect("reverse read present");
+        assert_eq!(w1, w2);
+        assert_eq!(k1, k2);
+        assert_eq!(k1, "contradicts");
+        assert!((w1 - 0.7).abs() < 1e-12);
+
+        // Exactly one row at the canonical slot.
+        let row_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM note_associations
+             WHERE note_a_id = $1 AND note_b_id = $2",
+        )
+        .bind(canon_a)
+        .bind(canon_b)
+        .fetch_one(repo.db.pool())
+        .await
+        .unwrap();
+        assert_eq!(row_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upsert_typed_association_promotes_co_access_edge() {
+        // When a pre-existing implicit co_access edge is reclassified with a
+        // typed kind, the typed kind takes over and the existing max-weight is
+        // preserved (or raised, if the typed write is stronger). This mirrors
+        // the `record_derived_from_upgrades_co_access_edge` guarantee for the
+        // broader helper.
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let a = make_note(&repo, &project, &tmp, "Promote A").await;
+        let b = make_note(&repo, &project, &tmp, "Promote B").await;
+
+        // Seed an implicit co_access edge (default kind, weight 0.01).
+        repo.upsert_association(&a, &b, 1).await.unwrap();
+        let (_w0, k0) = repo
+            .get_association_kind(&a, &b)
+            .await
+            .unwrap()
+            .expect("co_access edge seeded");
+        assert_eq!(k0, "co_access");
+
+        // Typed supersedes write (0.6 > 0.01) must promote the edge and lift
+        // the weight to 0.6.
+        repo.upsert_typed_association(&a, &b, NoteAssociationKind::Supersedes, 0.6)
+            .await
+            .unwrap();
+        let (w, k) = repo
+            .get_association_kind(&a, &b)
+            .await
+            .unwrap()
+            .expect("edge present");
+        assert_eq!(k, "supersedes");
+        assert!((w - 0.6).abs() < 1e-12, "weight not lifted on promote: {w}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn record_derived_from_uses_typed_helper() {
+        // The thin wrapper around `upsert_typed_association(DerivedFrom, _)`
+        // must produce a row indistinguishable from one written directly by
+        // the typed helper with `NoteAssociationKind::DerivedFrom`.
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let a = make_note(&repo, &project, &tmp, "Wrapper A").await;
+        let b = make_note(&repo, &project, &tmp, "Wrapper B").await;
+
+        repo.record_derived_from(&a, &b, 0.65).await.unwrap();
+
+        let (w, k) = repo
+            .get_association_kind(&a, &b)
+            .await
+            .unwrap()
+            .expect("derived_from edge present");
+        assert_eq!(k, "derived_from");
+        assert!((w - 0.65).abs() < 1e-12, "got {w}");
+
+        // A second (weaker) write via the typed helper must NOT lower the
+        // weight — proving both helpers share the same max-merge semantics.
+        repo.upsert_typed_association(&a, &b, NoteAssociationKind::DerivedFrom, 0.1)
+            .await
+            .unwrap();
+        let (w, _) = repo
+            .get_association_kind(&a, &b)
+            .await
+            .unwrap()
+            .expect("edge present");
+        assert!(
+            (w - 0.65).abs() < 1e-12,
+            "record_derived_from and upsert_typed_association must share max-merge: got {w}"
+        );
     }
 }
