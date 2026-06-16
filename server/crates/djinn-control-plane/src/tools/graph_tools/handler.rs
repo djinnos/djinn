@@ -188,13 +188,8 @@ impl DjinnMcpServer {
         // than erroring. This never blocks or triggers re-warming.
         if let Ok(mut response) = result {
             if let Some(ref head) = caller_head {
-                attach_graph_staleness(
-                    self.state.repo_graph().as_ref(),
-                    ctx,
-                    head,
-                    &mut response,
-                )
-                .await;
+                attach_graph_staleness(self.state.repo_graph().as_ref(), ctx, head, &mut response)
+                    .await;
             }
             Ok(response)
         } else {

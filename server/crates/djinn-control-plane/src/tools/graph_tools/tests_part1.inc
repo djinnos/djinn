@@ -1658,6 +1658,10 @@
         hint: Option<Vec<String>>,
         ranked_nodes: Vec<RankedNode>,
         impact_result: ImpactResult,
+        /// jc47: the `pinned_commit` returned by `status`. `None`
+        /// mimics an un-warmed graph cache; `Some(sha)` mimics a
+        /// warmed graph pinned at that commit.
+        pinned_commit: Option<String>,
     }
 
     impl WorkspaceFixtureOps {
@@ -1667,6 +1671,7 @@
                 hint,
                 ranked_nodes: Vec::new(),
                 impact_result: ImpactResult::Detailed(Vec::new()),
+                pinned_commit: None,
             }
         }
 
@@ -1680,7 +1685,15 @@
                 hint,
                 ranked_nodes,
                 impact_result,
+                pinned_commit: None,
             }
+        }
+
+        /// jc47: set the `pinned_commit` that `status` reports,
+        /// simulating a warmed graph cache.
+        fn with_pinned_commit(mut self, commit: impl Into<String>) -> Self {
+            self.pinned_commit = Some(commit.into());
+            self
         }
 
         fn record_workspace(&self, workspace: Option<&str>) {
@@ -1853,7 +1866,7 @@
                 project_id: "p".to_string(),
                 warmed: false,
                 last_warm_at: None,
-                pinned_commit: None,
+                pinned_commit: self.pinned_commit.clone(),
                 commits_since_pin: None,
             route_parity_enabled: true,
             route_exclusion_config: serde_json::json!({}),

@@ -910,3 +910,204 @@
             "workspace should be omitted when absent: {json}"
         );
     }
+
+    // ── jc47: per-query staleness metadata tests ─────────────────────────────
+
+    /// Extract `graph_staleness` from any `CodeGraphResponse` variant.
+    fn graph_staleness_of(response: &CodeGraphResponse) -> Option<&GraphStaleness> {
+        graph_staleness_slot_const(response).as_ref()
+    }
+
+    // Const-access mirror of `graph_staleness_slot` for read-only tests.
+    fn graph_staleness_slot_const(response: &CodeGraphResponse) -> &Option<GraphStaleness> {
+        match response {
+            CodeGraphResponse::Neighbors(r) => &r.graph_staleness,
+            CodeGraphResponse::Ranked(r) => &r.graph_staleness,
+            CodeGraphResponse::Implementations(r) => &r.graph_staleness,
+            CodeGraphResponse::Impact(r) => &r.graph_staleness,
+            CodeGraphResponse::Search(r) => &r.graph_staleness,
+            CodeGraphResponse::Cycles(r) => &r.graph_staleness,
+            CodeGraphResponse::Orphans(r) => &r.graph_staleness,
+            CodeGraphResponse::Path(r) => &r.graph_staleness,
+            CodeGraphResponse::Edges(r) => &r.graph_staleness,
+            CodeGraphResponse::Describe(r) => &r.graph_staleness,
+            CodeGraphResponse::Context(r) => &r.graph_staleness,
+            CodeGraphResponse::Status(r) => &r.graph_staleness,
+            CodeGraphResponse::Workspaces(r) => &r.graph_staleness,
+            CodeGraphResponse::SymbolsAt(r) => &r.graph_staleness,
+            CodeGraphResponse::DiffTouches(r) => &r.graph_staleness,
+            CodeGraphResponse::ApiSurface(r) => &r.graph_staleness,
+            CodeGraphResponse::BoundaryCheck(r) => &r.graph_staleness,
+            CodeGraphResponse::Hotspots(r) => &r.graph_staleness,
+            CodeGraphResponse::Complexity(r) => &r.graph_staleness,
+            CodeGraphResponse::RefactorCandidates(r) => &r.graph_staleness,
+            CodeGraphResponse::MetricsAt(r) => &r.graph_staleness,
+            CodeGraphResponse::DeadSymbols(r) => &r.graph_staleness,
+            CodeGraphResponse::DeprecatedCallers(r) => &r.graph_staleness,
+            CodeGraphResponse::TouchesHotPath(r) => &r.graph_staleness,
+            CodeGraphResponse::Coupling(r) => &r.graph_staleness,
+            CodeGraphResponse::Churn(r) => &r.graph_staleness,
+            CodeGraphResponse::CouplingHotspots(r) => &r.graph_staleness,
+            CodeGraphResponse::CouplingHubs(r) => &r.graph_staleness,
+            CodeGraphResponse::Ambiguous(r) => &r.graph_staleness,
+            CodeGraphResponse::NotFound(r) => &r.graph_staleness,
+            CodeGraphResponse::DetectedChanges(r) => &r.graph_staleness,
+            CodeGraphResponse::Snapshot(r) => &r.graph_staleness,
+            CodeGraphResponse::QuerySubgraph(r) => &r.graph_staleness,
+            CodeGraphResponse::RouteMap(r) => &r.graph_staleness,
+            CodeGraphResponse::ShapeCheck(r) => &r.graph_staleness,
+            CodeGraphResponse::ApiImpact(r) => &r.graph_staleness,
+            CodeGraphResponse::Flow(r) => &r.graph_staleness,
+        }
+    }
+
+    /// AC#1+AC#3: when no caller commit is supplied, the response has
+    /// **no** `graph_staleness` field — existing clients see an
+    /// unchanged shape.
+    #[tokio::test]
+    async fn code_graph_staleness_absent_when_no_caller_commit() {
+        let ops = WorkspaceFixtureOps::new(None).with_pinned_commit("abc123");
+        let (server, _) = fixture_server(ops);
+        let ctx = fixture_ctx(None);
+        let mut params = test_params("ranked");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        // current_head is None by default via test_params
+
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("ranked dispatch succeeds");
+
+        assert!(
+            graph_staleness_of(&response).is_none(),
+            "graph_staleness must be absent when no caller commit is supplied"
+        );
+    }
+
+    /// AC#2: matching caller commit → `is_stale=false`, cached_commit
+    /// echoes the graph cache's pinned commit.
+    #[tokio::test]
+    async fn code_graph_staleness_false_for_matching_commit() {
+        let ops = WorkspaceFixtureOps::new(None).with_pinned_commit("abc123");
+        let (server, _) = fixture_server(ops);
+        let ctx = fixture_ctx(None);
+        let mut params = test_params("ranked");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.current_head = Some("abc123".to_string());
+
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("ranked dispatch succeeds");
+
+        let staleness = graph_staleness_of(&response)
+            .expect("graph_staleness must be present when caller supplies a commit");
+        assert!(
+            !staleness.is_stale,
+            "is_stale must be false when commits match"
+        );
+        assert_eq!(
+            staleness.cached_commit.as_deref(),
+            Some("abc123"),
+            "cached_commit must echo the graph cache's pinned commit"
+        );
+        assert_eq!(
+            staleness.caller_commit, "abc123",
+            "caller_commit must echo the trimmed caller value"
+        );
+    }
+
+    /// AC#2: differing caller commit → `is_stale=true`.
+    #[tokio::test]
+    async fn code_graph_staleness_true_for_differing_commit() {
+        let ops = WorkspaceFixtureOps::new(None).with_pinned_commit("abc123");
+        let (server, _) = fixture_server(ops);
+        let ctx = fixture_ctx(None);
+        let mut params = test_params("ranked");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.current_head = Some("def456".to_string());
+
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("ranked dispatch succeeds");
+
+        let staleness = graph_staleness_of(&response)
+            .expect("graph_staleness must be present when caller supplies a commit");
+        assert!(
+            staleness.is_stale,
+            "is_stale must be true when commits differ"
+        );
+        assert_eq!(
+            staleness.cached_commit.as_deref(),
+            Some("abc123"),
+            "cached_commit must echo the graph cache's pinned commit"
+        );
+        assert_eq!(
+            staleness.caller_commit, "def456",
+            "caller_commit must echo the trimmed caller value"
+        );
+    }
+
+    /// AC#3: when caller supplies a commit but the cache has no pinned
+    /// commit (un-warmed graph), `graph_staleness` is still populated
+    /// with `is_stale=false` (non-stale-safe) and `cached_commit=None`.
+    #[tokio::test]
+    async fn code_graph_staleness_non_stale_when_cache_unwarmed() {
+        let ops = WorkspaceFixtureOps::new(None); // pinned_commit: None
+        let (server, _) = fixture_server(ops);
+        let ctx = fixture_ctx(None);
+        let mut params = test_params("ranked");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.current_head = Some("abc123".to_string());
+
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("ranked dispatch succeeds");
+
+        let staleness = graph_staleness_of(&response)
+            .expect("graph_staleness must be present when caller supplies a commit");
+        assert!(
+            !staleness.is_stale,
+            "is_stale must be false (non-stale-safe) when cached commit is missing"
+        );
+        assert!(
+            staleness.cached_commit.is_none(),
+            "cached_commit must be None when graph cache has no pinned commit"
+        );
+        assert_eq!(staleness.caller_commit, "abc123");
+    }
+
+    /// AC#1: `current_head` accepts aliases `caller_commit` and
+    /// `currentHead`.
+    #[test]
+    fn code_graph_params_current_head_accepts_aliases() {
+        let json = serde_json::json!({"operation":"ranked","project":"o/r","caller_commit":"deadbeef"});
+        let params: CodeGraphParams = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(params.current_head.as_deref(), Some("deadbeef"));
+
+        let json = serde_json::json!({"operation":"ranked","project":"o/r","currentHead":"cafef00d"});
+        let params: CodeGraphParams = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(params.current_head.as_deref(), Some("cafef00d"));
+    }
+
+    /// AC#1: blank `current_head` is normalized to `None` by `normalize()`.
+    #[test]
+    fn code_graph_params_current_head_blank_normalized_to_none() {
+        let mut params = CodeGraphParams {
+            operation: "ranked".to_string(),
+            project: "o/r".to_string(),
+            current_head: Some(String::new()),
+            ..test_params("ranked")
+        };
+        params.normalize();
+        assert!(
+            params.current_head.is_none(),
+            "empty current_head must normalize to None"
+        );
+    }
