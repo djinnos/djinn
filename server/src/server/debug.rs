@@ -7,9 +7,7 @@ use djinn_agent::actors::coordinator::{DebugDispatchState, DebugTotals};
 
 use crate::server::{AppState, auth};
 
-#[allow(unreachable_pub)]
-pub fn router(state: AppState) -> Router<AppState> {
-    let _ = state;
+pub(super) fn router() -> Router<AppState> {
     Router::new().route("/debug/dispatch-state", get(debug_dispatch_state))
 }
 

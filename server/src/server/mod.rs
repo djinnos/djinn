@@ -46,7 +46,7 @@ pub fn router(state: AppState, serve_ui: bool) -> Router {
         .route("/mcp", post(mcp_handler::mcp_handler))
         .merge(agents::router())
         .merge(auth::router())
-        .merge(debug::router(state.clone()))
+        .merge(debug::router())
         .merge(oauth::router())
         .merge(github_install::router())
         .merge(crate::mirror_fetcher::router())
