@@ -225,6 +225,42 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         streaming: true,
         max_tokens_default: Some(64_000),
     },
+    // OpenAI-compatible. Present in models.dev (`opencode`, "OpenCode Zen") with
+    // base_url https://opencode.ai/zen/v1 + model list (including the rotating
+    // `*-free` models); listed here so the env-var bootstrap upserts
+    // OPENCODE_API_KEY into the vault. Zen requires opencode-cli identity headers
+    // to escape the anonymous rate-limit tier — injected per-request in
+    // `provider_resolution::provider_headers_for`.
+    BuiltinProvider {
+        id: "opencode",
+        display_name: "OpenCode Zen",
+        required_env_vars: &["OPENCODE_API_KEY"],
+        oauth_keys: &[],
+        docs_url: "https://opencode.ai/docs/zen/",
+        merge_into: None,
+        auth_only: false,
+        format_rule: FormatRule::Fixed(FormatFamily::OpenAI),
+        auth_shape: AuthShape::Bearer,
+        streaming: true,
+        max_tokens_default: None,
+    },
+    // OpenAI-compatible. Present in models.dev (`zai-coding-plan`, "Z.AI Coding
+    // Plan") with base_url https://api.z.ai/api/coding/paas/v4 + GLM model list;
+    // listed here so the env-var bootstrap upserts ZHIPU_API_KEY into the vault.
+    // The coding-plan subscription key authenticates via Authorization: Bearer.
+    BuiltinProvider {
+        id: "zai-coding-plan",
+        display_name: "Z.AI Coding Plan",
+        required_env_vars: &["ZHIPU_API_KEY"],
+        oauth_keys: &[],
+        docs_url: "https://docs.z.ai/devpack/overview",
+        merge_into: None,
+        auth_only: false,
+        format_rule: FormatRule::Fixed(FormatFamily::OpenAI),
+        auth_shape: AuthShape::Bearer,
+        streaming: true,
+        max_tokens_default: None,
+    },
     // OAuth-only provider whose capabilities are folded into "openai" in the
     // catalog.  Internally still a distinct provider for dispatch & models.
     BuiltinProvider {
