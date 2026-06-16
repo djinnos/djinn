@@ -822,7 +822,7 @@ pub(crate) async fn handle_settled_noop_without_live_mover(
     Some(handle_noop_disposition(task, task_repo, merge_target).await)
 }
 
-fn should_route_settled_noop_without_live_mover(
+pub(super) fn should_route_settled_noop_without_live_mover(
     _task: &djinn_core::models::Task,
     evidence: &LiveMoverEvidence,
 ) -> bool {
@@ -846,7 +846,7 @@ pub(crate) const NOOP_CLOSE_REASON: &str = "no code changes were produced, so th
 /// budget-exhausted and the nudge-fallback paths share one definition, and so
 /// the close transition is awaited (preserving the original synchronous
 /// "transition then return" ordering of the no-commits guard).
-fn should_close_noop(
+pub(super) fn should_close_noop(
     predicate_says_no_mover: bool,
     signals: &djinn_core::run_progress::RunProgressSignals,
     _task: &djinn_core::models::Task,
@@ -854,7 +854,7 @@ fn should_close_noop(
     predicate_says_no_mover && signals.commits_ahead == 0 && signals.files_changed == 0
 }
 
-async fn close_noop(
+pub(super) async fn close_noop(
     task: &djinn_core::models::Task,
     task_repo: &TaskRepository,
     predicate_says_no_mover: bool,
