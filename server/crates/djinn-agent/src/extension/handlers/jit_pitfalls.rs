@@ -8,8 +8,13 @@
 //! session — transiently, appended to that one tool result, never persisted.
 //!
 //! ## Config gate
-//! Entirely gated behind the env var `DJINN_JIT_PITFALLS=1` (default OFF). When
-//! OFF the hot path records a structured disabled outcome but behaviour remains
+//! Controlled by `DJINN_JIT_PITFALLS_ROLLOUT` (default OFF for this pre-read
+//! wave). Supported values are `off`/unset (default-off), `enabled`/`on`/`1`
+//! (operator opt-in), `cohort`/`staging` (controlled rollout traffic), and
+//! `disabled`/`kill_switch`/`0` (explicit operator kill switch). The legacy
+//! `DJINN_JIT_PITFALLS=1` env var is still accepted as a migration opt-in only
+//! when the rollout env var is unset. When disabled the hot path records a
+//! structured default-off or kill-switch outcome but behaviour remains
 //! byte-identical to the pre-F2 output: no DB search and no hint.
 //!
 //! ## Once-per-session
@@ -33,7 +38,8 @@ const TELEMETRY_TARGET: &str = "djinn_agent::jit_pitfalls";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JitPitfallOutcome {
-    Disabled,
+    DisabledDefaultOff,
+    DisabledKillSwitch,
     NonFirstModification,
     EligibleSearch,
     Injected,
@@ -46,7 +52,8 @@ impl JitPitfallOutcome {
         use djinn_telemetry::jit_pitfalls as telemetry;
 
         match self {
-            Self::Disabled => telemetry::OUTCOME_DISABLED,
+            Self::DisabledDefaultOff => telemetry::OUTCOME_DISABLED_DEFAULT_OFF,
+            Self::DisabledKillSwitch => telemetry::OUTCOME_DISABLED_KILL_SWITCH,
             Self::NonFirstModification => telemetry::OUTCOME_NON_FIRST_MODIFICATION,
             Self::EligibleSearch => telemetry::OUTCOME_ELIGIBLE_SEARCH,
             Self::Injected => telemetry::OUTCOME_INJECTED,
@@ -55,6 +62,41 @@ impl JitPitfallOutcome {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JitPitfallRolloutMode {
+    DefaultOff,
+    Enabled,
+    Cohort,
+    KillSwitch,
+    LegacyOptIn,
+}
+
+impl JitPitfallRolloutMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::DefaultOff => "default_off",
+            Self::Enabled => "enabled",
+            Self::Cohort => "cohort",
+            Self::KillSwitch => "kill_switch",
+            Self::LegacyOptIn => "legacy_opt_in",
+        }
+    }
+
+    fn enabled(self) -> bool {
+        matches!(self, Self::Enabled | Self::Cohort | Self::LegacyOptIn)
+    }
+
+    fn disabled_outcome(self) -> JitPitfallOutcome {
+        match self {
+            Self::KillSwitch => JitPitfallOutcome::DisabledKillSwitch,
+            _ => JitPitfallOutcome::DisabledDefaultOff,
+        }
+    }
+}
+
+const ROLLOUT_ENV: &str = "DJINN_JIT_PITFALLS_ROLLOUT";
+const LEGACY_ENV: &str = "DJINN_JIT_PITFALLS";
 
 #[derive(Debug, PartialEq)]
 struct SafeNoteTelemetry {
@@ -65,11 +107,34 @@ struct SafeNoteTelemetry {
     confidence: f64,
 }
 
-/// Env-gate for F2. Default OFF: only `DJINN_JIT_PITFALLS=1` enables it.
-fn enabled() -> bool {
-    std::env::var("DJINN_JIT_PITFALLS")
-        .map(|v| v.trim() == "1")
-        .unwrap_or(false)
+/// Resolve the F2 controlled rollout mode from env.
+///
+/// `DJINN_JIT_PITFALLS_ROLLOUT` is the primary operator surface. Its explicit
+/// disable/kill-switch values override every other input. The legacy
+/// `DJINN_JIT_PITFALLS=1` one-bit opt-in remains as migration compatibility only
+/// when the primary rollout env var is unset.
+fn rollout_mode_from_env() -> JitPitfallRolloutMode {
+    let rollout = std::env::var(ROLLOUT_ENV).ok();
+    let legacy = std::env::var(LEGACY_ENV).ok();
+    rollout_mode_from_values(rollout.as_deref(), legacy.as_deref())
+}
+
+fn rollout_mode_from_values(rollout: Option<&str>, legacy: Option<&str>) -> JitPitfallRolloutMode {
+    if let Some(value) = rollout.map(str::trim).filter(|value| !value.is_empty()) {
+        match value.to_ascii_lowercase().replace('-', "_").as_str() {
+            "enabled" | "enable" | "on" | "true" | "1" => JitPitfallRolloutMode::Enabled,
+            "cohort" | "staging" | "rollout" | "controlled" => JitPitfallRolloutMode::Cohort,
+            "off" => JitPitfallRolloutMode::DefaultOff,
+            "disabled" | "disable" | "kill_switch" | "killswitch" | "false" | "0" => {
+                JitPitfallRolloutMode::KillSwitch
+            }
+            _ => JitPitfallRolloutMode::DefaultOff,
+        }
+    } else if legacy.map(str::trim) == Some("1") {
+        JitPitfallRolloutMode::LegacyOptIn
+    } else {
+        JitPitfallRolloutMode::DefaultOff
+    }
 }
 
 /// Process-wide set of session ids that have already had their first
@@ -146,6 +211,7 @@ fn elapsed_millis(started: Instant) -> u64 {
 
 fn record_outcome(
     outcome: JitPitfallOutcome,
+    rollout_mode: JitPitfallRolloutMode,
     session_id: &str,
     project_id: Option<&str>,
     touched_paths: &[String],
@@ -154,6 +220,7 @@ fn record_outcome(
     tracing::info!(
         target: TELEMETRY_TARGET,
         outcome = outcome.label(),
+        rollout_mode = rollout_mode.label(),
         session_id = %session_id,
         project_id = project_id.unwrap_or(""),
         touched_path_count = touched_paths.len(),
@@ -179,9 +246,11 @@ pub(super) async fn maybe_pitfall_hint(
 ) -> Option<String> {
     // Gate first — when OFF this is the only work done, keeping the hot path
     // byte-identical to pre-F2.
-    if !enabled() {
+    let rollout_mode = rollout_mode_from_env();
+    if !rollout_mode.enabled() {
         record_outcome(
-            JitPitfallOutcome::Disabled,
+            rollout_mode.disabled_outcome(),
+            rollout_mode,
             session_id,
             project_id,
             touched_paths,
@@ -192,13 +261,20 @@ pub(super) async fn maybe_pitfall_hint(
     let project_id = match project_id {
         Some(project_id) => project_id,
         None => {
-            record_outcome(JitPitfallOutcome::Error, session_id, None, touched_paths);
+            record_outcome(
+                JitPitfallOutcome::Error,
+                rollout_mode,
+                session_id,
+                None,
+                touched_paths,
+            );
             return None;
         }
     };
     if touched_paths.is_empty() {
         record_outcome(
             JitPitfallOutcome::Error,
+            rollout_mode,
             session_id,
             Some(project_id),
             touched_paths,
@@ -214,6 +290,7 @@ pub(super) async fn maybe_pitfall_hint(
     if !claim_first_modification(session_id) {
         record_outcome(
             JitPitfallOutcome::NonFirstModification,
+            rollout_mode,
             session_id,
             Some(project_id),
             touched_paths,
@@ -225,6 +302,7 @@ pub(super) async fn maybe_pitfall_hint(
 
     record_outcome(
         JitPitfallOutcome::EligibleSearch,
+        rollout_mode,
         session_id,
         Some(project_id),
         touched_paths,
@@ -252,6 +330,7 @@ pub(super) async fn maybe_pitfall_hint(
             tracing::info!(
                 target: TELEMETRY_TARGET,
                 outcome = JitPitfallOutcome::Empty.label(),
+                rollout_mode = rollout_mode.label(),
                 session_id = %session_id,
                 project_id = %project_id,
                 touched_path_count = touched_paths.len(),
@@ -269,6 +348,7 @@ pub(super) async fn maybe_pitfall_hint(
             tracing::info!(
                 target: TELEMETRY_TARGET,
                 outcome = JitPitfallOutcome::Error.label(),
+                rollout_mode = rollout_mode.label(),
                 session_id = %session_id,
                 project_id = %project_id,
                 touched_path_count = touched_paths.len(),
@@ -290,6 +370,7 @@ pub(super) async fn maybe_pitfall_hint(
     tracing::info!(
         target: TELEMETRY_TARGET,
         outcome = JitPitfallOutcome::Injected.label(),
+        rollout_mode = rollout_mode.label(),
         session_id = %session_id,
         project_id = %project_id,
         touched_path_count = touched_paths.len(),
@@ -383,7 +464,14 @@ mod tests {
 
     #[test]
     fn telemetry_outcome_labels_cover_rollout_taxonomy() {
-        assert_eq!(JitPitfallOutcome::Disabled.label(), "disabled");
+        assert_eq!(
+            JitPitfallOutcome::DisabledDefaultOff.label(),
+            "disabled_default_off"
+        );
+        assert_eq!(
+            JitPitfallOutcome::DisabledKillSwitch.label(),
+            "disabled_kill_switch"
+        );
         assert_eq!(
             JitPitfallOutcome::NonFirstModification.label(),
             "non_first_modification"
@@ -435,10 +523,38 @@ mod tests {
 
     #[test]
     fn disabled_by_default() {
-        // Note: this reads the ambient env. In the default test environment
-        // the var is unset → disabled.
-        if std::env::var("DJINN_JIT_PITFALLS").is_err() {
-            assert!(!enabled());
-        }
+        assert_eq!(
+            rollout_mode_from_values(None, None),
+            JitPitfallRolloutMode::DefaultOff
+        );
+        assert!(!rollout_mode_from_values(None, None).enabled());
+    }
+
+    #[test]
+    fn rollout_parser_supports_enable_cohort_kill_switch_and_legacy() {
+        assert_eq!(
+            rollout_mode_from_values(Some("enabled"), None),
+            JitPitfallRolloutMode::Enabled
+        );
+        assert_eq!(
+            rollout_mode_from_values(Some("cohort"), None),
+            JitPitfallRolloutMode::Cohort
+        );
+        assert_eq!(
+            rollout_mode_from_values(Some("staging"), None),
+            JitPitfallRolloutMode::Cohort
+        );
+        assert_eq!(
+            rollout_mode_from_values(Some("kill-switch"), Some("1")),
+            JitPitfallRolloutMode::KillSwitch
+        );
+        assert_eq!(
+            rollout_mode_from_values(None, Some("1")),
+            JitPitfallRolloutMode::LegacyOptIn
+        );
+        assert_eq!(
+            rollout_mode_from_values(Some("unknown"), Some("1")),
+            JitPitfallRolloutMode::DefaultOff
+        );
     }
 }

@@ -796,7 +796,7 @@ async fn read_detects_binary_file() {
 
 // ─── F2: just-in-time pitfall retrieval on first write (gated) ────────────
 
-/// Env-lock for the `DJINN_JIT_PITFALLS` gate. Held across `.await` on
+/// Env-lock for the `DJINN_JIT_PITFALLS_ROLLOUT` rollout gate. Held across `.await` on
 /// purpose: the flag is process-global, so concurrent JIT tests must not
 /// observe each other's env mutation. Same pattern as the auto-code-context
 /// env tests in `helpers.rs`.
@@ -832,6 +832,7 @@ async fn jit_pitfalls_off_by_default_no_hint() {
     let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
     // SAFETY: single-threaded section guarded by the env-lock mutex.
     unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
         std::env::remove_var("DJINN_JIT_PITFALLS");
     }
 
@@ -864,6 +865,51 @@ async fn jit_pitfalls_off_by_default_no_hint() {
     );
 }
 
+/// An explicit rollout kill switch must suppress hints even if the legacy
+/// one-bit opt-in remains set during migration.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_kill_switch_overrides_legacy_opt_in() {
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    // SAFETY: single-threaded section guarded by the env-lock mutex.
+    unsafe {
+        std::env::set_var("DJINN_JIT_PITFALLS", "1");
+        std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "kill-switch");
+    }
+
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let pid = project.id.as_str();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-kill-");
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+
+    seed_pitfall(&db, pid, "Killed Pitfall", "would have rendered", "src").await;
+
+    let args = Some(
+        serde_json::json!({ "path": "src/a.rs", "content": "// x\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let response = call_write(&state, &args, worktree.path(), Some(pid))
+        .await
+        .expect("write");
+
+    assert_eq!(response.get("ok").and_then(|v| v.as_bool()), Some(true));
+    assert!(
+        response.get("jit_pitfalls").is_none(),
+        "kill switch must not append jit_pitfalls, got {response:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+    }
+}
+
 /// With the gate ON: the FIRST write to a session runs the scoped search and
 /// appends the top-2 pitfalls as a `<relevant-pitfalls>` block; a SECOND write
 /// in the same session does NOT re-append (once-per-session).
@@ -873,7 +919,8 @@ async fn jit_pitfalls_on_first_write_appends_then_not_again() {
     let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
     // SAFETY: single-threaded section guarded by the env-lock mutex.
     unsafe {
-        std::env::set_var("DJINN_JIT_PITFALLS", "1");
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+        std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "cohort");
     }
 
     let db = create_test_db();
@@ -928,6 +975,7 @@ async fn jit_pitfalls_on_first_write_appends_then_not_again() {
     );
 
     unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
         std::env::remove_var("DJINN_JIT_PITFALLS");
     }
 }
@@ -941,7 +989,8 @@ async fn jit_pitfalls_on_miss_leaves_write_succeeding() {
     let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
     // SAFETY: single-threaded section guarded by the env-lock mutex.
     unsafe {
-        std::env::set_var("DJINN_JIT_PITFALLS", "1");
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+        std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "enabled");
     }
 
     let db = create_test_db();
@@ -971,6 +1020,7 @@ async fn jit_pitfalls_on_miss_leaves_write_succeeding() {
     );
 
     unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
         std::env::remove_var("DJINN_JIT_PITFALLS");
     }
 }
@@ -984,7 +1034,8 @@ async fn jit_pitfalls_on_missing_project_id_leaves_write_succeeding() {
     let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
     // SAFETY: single-threaded section guarded by the env-lock mutex.
     unsafe {
-        std::env::set_var("DJINN_JIT_PITFALLS", "1");
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+        std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "enabled");
     }
 
     let db = create_test_db();
@@ -1011,6 +1062,7 @@ async fn jit_pitfalls_on_missing_project_id_leaves_write_succeeding() {
     );
 
     unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
         std::env::remove_var("DJINN_JIT_PITFALLS");
     }
 }
@@ -1023,7 +1075,8 @@ async fn jit_pitfalls_on_edit_first_modification_appends() {
     let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
     // SAFETY: single-threaded section guarded by the env-lock mutex.
     unsafe {
-        std::env::set_var("DJINN_JIT_PITFALLS", "1");
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+        std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "enabled");
     }
 
     let db = create_test_db();
@@ -1072,6 +1125,7 @@ async fn jit_pitfalls_on_edit_first_modification_appends() {
     assert!(hint.contains("Edit Pitfall"), "got: {hint}");
 
     unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
         std::env::remove_var("DJINN_JIT_PITFALLS");
     }
 }

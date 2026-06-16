@@ -22,8 +22,9 @@ const PR_POLLER_TRACKED: &str = "djinn_pr_poller_tracked";
 const MERGE_FAILURES_TOTAL: &str = "djinn_merge_failures_total";
 const SLOT_POOL_STATES: [&str; 2] = ["free", "busy"];
 const JIT_PITFALL_HINTS_TOTAL: &str = "djinn_jit_pitfall_hints_total";
-const JIT_PITFALL_OUTCOMES: [&str; 6] = [
-    "disabled",
+const JIT_PITFALL_OUTCOMES: [&str; 7] = [
+    "disabled_default_off",
+    "disabled_kill_switch",
     "non_first_modification",
     "eligible_search",
     "injected",
@@ -73,7 +74,8 @@ pub mod lead {
 }
 
 pub mod jit_pitfalls {
-    pub const OUTCOME_DISABLED: &str = "disabled";
+    pub const OUTCOME_DISABLED_DEFAULT_OFF: &str = "disabled_default_off";
+    pub const OUTCOME_DISABLED_KILL_SWITCH: &str = "disabled_kill_switch";
     pub const OUTCOME_NON_FIRST_MODIFICATION: &str = "non_first_modification";
     pub const OUTCOME_ELIGIBLE_SEARCH: &str = "eligible_search";
     pub const OUTCOME_INJECTED: &str = "injected";
@@ -389,6 +391,30 @@ mod tests {
 
         let rendered = render().unwrap();
         assert!(rendered.contains("djinn_dispatch_attempts_total{outcome=\"ok\"}"));
+    }
+
+    #[test]
+    fn jit_pitfall_rollout_decision_outcomes_render_separately() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_DISABLED_DEFAULT_OFF);
+        jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_DISABLED_KILL_SWITCH);
+        jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_ELIGIBLE_SEARCH);
+
+        let rendered = render().unwrap();
+        for outcome in [
+            jit_pitfalls::OUTCOME_DISABLED_DEFAULT_OFF,
+            jit_pitfalls::OUTCOME_DISABLED_KILL_SWITCH,
+            jit_pitfalls::OUTCOME_ELIGIBLE_SEARCH,
+        ] {
+            assert!(
+                rendered.contains(&format!(
+                    "djinn_jit_pitfall_hints_total{{outcome=\"{outcome}\"}}"
+                )),
+                "missing distinct JIT rollout outcome label {outcome} in:\n{rendered}"
+            );
+        }
     }
 
     #[test]
