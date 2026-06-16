@@ -1315,9 +1315,12 @@ mod tests {
         }
     }
 
-    fn tracing_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| StdMutex::new(())).lock().unwrap()
+    async fn tracing_lock() -> tokio::sync::OwnedMutexGuard<()> {
+        static LOCK: OnceLock<StdArc<tokio::sync::Mutex<()>>> = OnceLock::new();
+        LOCK.get_or_init(|| StdArc::new(tokio::sync::Mutex::new(())))
+            .clone()
+            .lock_owned()
+            .await
     }
 
     fn report(id: &str, stages: Vec<RoleKind>, outcome: TaskRunOutcome) -> TaskRunReport {
@@ -1554,7 +1557,7 @@ mod tests {
 
     #[tokio::test]
     async fn supervisor_rpc_terminal_report_span_records_fields() {
-        let _tracing_guard = tracing_lock();
+        let _tracing_guard = tracing_lock().await;
         let layer = RecordingLayer::default();
         let subscriber = tracing_subscriber::registry().with(layer.clone());
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
@@ -1634,7 +1637,7 @@ mod tests {
 
     #[tokio::test]
     async fn supervisor_rpc_kill_span_records_fields() {
-        let _tracing_guard = tracing_lock();
+        let _tracing_guard = tracing_lock().await;
         let layer = RecordingLayer::default();
         let subscriber = tracing_subscriber::registry().with(layer.clone());
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);

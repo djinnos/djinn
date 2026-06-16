@@ -2,7 +2,7 @@ use super::*;
 use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
 use djinn_core::run_progress::RunProgress;
 use djinn_core::{events::DjinnEventEnvelope, models::SessionStatus};
-use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
+use djinn_db::{DispatchStateRepository, DispatchStateUpsert, UserRepository};
 
 #[allow(dead_code)]
 struct InterventionChaosHarness {
@@ -12,6 +12,13 @@ struct InterventionChaosHarness {
     actor: CoordinatorActor,
     repo: TaskRepository,
     task_id: String,
+    /// Stable `users.id` for the synthetic capacity-bearer that backs the
+    /// `seed_running_capacity_occupancy` flow. Seeded via
+    /// `UserRepository::upsert_from_github` so the FK from
+    /// `sessions.created_by_user_id` is satisfied; the test only needs this
+    /// id to round-trip through `count_active_by_user_and_model()` and the
+    /// in-memory `inflight_dispatches` ledger.
+    capacity_user_id: String,
 }
 
 #[allow(dead_code)]
@@ -21,6 +28,22 @@ impl InterventionChaosHarness {
         let (tx, rx) = broadcast::channel(256);
         let actor = coordinator_actor_for_tests(&db, &tx);
         let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        // Seed a real user row so the FK from `sessions.created_by_user_id`
+        // to `users.id` is satisfied when `seed_running_capacity_occupancy`
+        // scopes `SESSION_USER_ID` to the harness's capacity bearer.
+        // The actual id minted here is opaque to the assertions; the
+        // harness only uses it to round-trip the in-memory inflight
+        // ledger and the `count_active_by_user_and_model` lookup.
+        let capacity_user_id = UserRepository::new(db.clone())
+            .upsert_from_github(
+                9_001_001,
+                "chaos-capacity-bearer",
+                Some("Chaos Capacity Bearer"),
+                None,
+            )
+            .await
+            .unwrap()
+            .id;
         let task = make_task_with_reopen_count(&db, &tx, initial_reopen_count).await;
 
         Self {
@@ -30,6 +53,7 @@ impl InterventionChaosHarness {
             actor,
             repo,
             task_id: task.id,
+            capacity_user_id,
         }
     }
 
@@ -113,6 +137,7 @@ impl InterventionChaosHarness {
         {
             self.actor.dispatch_failure_streak.remove(&task.id);
             self.actor.dispatch_cooldowns.remove(&task.id);
+            self.actor.inflight_dispatches.remove(&task.id);
             self.actor
                 .clear_durable_dispatch_backoff_state(
                     &task.id,
@@ -139,6 +164,11 @@ impl InterventionChaosHarness {
                 .unwrap();
             self.actor.dispatch_failure_streak.remove(&task.id);
             self.actor.dispatch_cooldowns.remove(&task.id);
+            self.actor.inflight_dispatches.remove(&task.id);
+            SessionRepository::new(self.db.clone(), crate::events::event_bus_for(&self.tx))
+                .interrupt_running_for_task(&task.id)
+                .await
+                .unwrap();
             self.actor
                 .clear_durable_dispatch_backoff_state(
                     &task.id,
@@ -274,6 +304,118 @@ impl InterventionChaosHarness {
             .get(&self.task_id)
             .await
             .unwrap()
+    }
+
+    async fn seed_running_capacity_occupancy(&mut self) {
+        let task = self.task().await;
+        let session_repo =
+            SessionRepository::new(self.db.clone(), crate::events::event_bus_for(&self.tx));
+        let capacity_user_id = self.capacity_user_id.clone();
+        djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(capacity_user_id.clone()), async {
+                session_repo
+                    .create(CreateSessionParams {
+                        project_id: &task.project_id,
+                        task_id: Some(&task.id),
+                        model: DEFAULT_MODEL_ID,
+                        agent_type: "worker",
+                        metadata_json: None,
+                        task_run_id: None,
+                    })
+                    .await
+                    .unwrap()
+            })
+            .await;
+
+        self.actor.inflight_dispatches.insert(
+            self.task_id.clone(),
+            (Some(capacity_user_id.clone()), DEFAULT_MODEL_ID.to_owned()),
+        );
+
+        let existing = self.durable_dispatch_state().await;
+        DispatchStateRepository::new(self.db.clone())
+            .upsert(DispatchStateUpsert {
+                task_id: &self.task_id,
+                failure_streak: existing.as_ref().map_or(0, |record| record.failure_streak),
+                cooldown_until: existing
+                    .as_ref()
+                    .and_then(|record| record.cooldown_until.as_deref()),
+                escalation_count: existing
+                    .as_ref()
+                    .map_or(0, |record| record.escalation_count),
+                last_dispatched_at: existing
+                    .as_ref()
+                    .and_then(|record| record.last_dispatched_at.as_deref()),
+                last_dispatched_role: existing
+                    .as_ref()
+                    .and_then(|record| record.last_dispatched_role.as_deref()),
+                inflight_creator_user_id: Some(&capacity_user_id),
+                inflight_model_id: Some(DEFAULT_MODEL_ID),
+            })
+            .await
+            .unwrap();
+
+        self.assert_capacity_occupied().await;
+    }
+
+    async fn active_capacity_count(&self) -> i64 {
+        SessionRepository::new(self.db.clone(), crate::events::event_bus_for(&self.tx))
+            .count_active_by_user_and_model()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|(creator, model, _)| {
+                creator.as_deref() == Some(self.capacity_user_id.as_str())
+                    && model == DEFAULT_MODEL_ID
+            })
+            .map_or(0, |(_, _, count)| count)
+    }
+
+    async fn assert_capacity_occupied(&self) {
+        assert_eq!(
+            self.active_capacity_count().await,
+            1,
+            "seeded running session should occupy the user/model capacity signal dispatch reads"
+        );
+        assert_eq!(
+            self.actor.inflight_dispatches.get(&self.task_id),
+            Some(&(
+                Some(self.capacity_user_id.clone()),
+                DEFAULT_MODEL_ID.to_owned()
+            )),
+            "in-memory in-flight capacity ledger should be seeded"
+        );
+        let durable = self
+            .durable_dispatch_state()
+            .await
+            .expect("durable dispatch state should be seeded");
+        assert_eq!(
+            durable.inflight_creator_user_id.as_deref(),
+            Some(self.capacity_user_id.as_str())
+        );
+        assert_eq!(durable.inflight_model_id.as_deref(), Some(DEFAULT_MODEL_ID));
+    }
+
+    async fn assert_capacity_released(&self) {
+        assert_eq!(
+            self.active_capacity_count().await,
+            0,
+            "terminal path should interrupt the running session so dispatch capacity is released"
+        );
+        assert!(
+            !self.actor.inflight_dispatches.contains_key(&self.task_id),
+            "terminal path should clear the in-memory in-flight dispatch ledger"
+        );
+        if let Some(durable) = self.durable_dispatch_state().await {
+            assert!(
+                durable.inflight_creator_user_id.is_none(),
+                "durable in-flight creator should be cleared"
+            );
+            assert!(
+                durable.inflight_model_id.is_none(),
+                "durable in-flight model should be cleared"
+            );
+        }
     }
 
     async fn open_planner_intervention_reviews(&self) -> Vec<djinn_core::models::Task> {
@@ -472,6 +614,10 @@ impl InterventionChaosHarness {
             !self.actor.dispatch_cooldowns.contains_key(&self.task_id),
             "dispatch_cooldowns should be cleared"
         );
+        assert!(
+            !self.actor.inflight_dispatches.contains_key(&self.task_id),
+            "inflight_dispatches should be cleared"
+        );
 
         let durable = DispatchStateRepository::new(self.db.clone())
             .get(&self.task_id)
@@ -487,6 +633,14 @@ impl InterventionChaosHarness {
             assert!(
                 durable.last_dispatched_role.is_none(),
                 "durable last_dispatched_role"
+            );
+            assert!(
+                durable.inflight_creator_user_id.is_none(),
+                "durable inflight_creator_user_id"
+            );
+            assert!(
+                durable.inflight_model_id.is_none(),
+                "durable inflight_model_id"
             );
         }
     }
@@ -555,6 +709,7 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
 
     harness.seed_same_role_redispatch_state("worker", 2).await;
     harness.assert_same_role_backoff_seeded("worker", 2).await;
+    harness.seed_running_capacity_occupancy().await;
 
     let (second_handled, parked) = harness.route_reopen_intervention().await;
     assert!(
@@ -566,6 +721,7 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
         .assert_task_status("closed", Some("planner intervention"))
         .await;
     harness.assert_dispatch_backoff_cleared().await;
+    harness.assert_capacity_released().await;
     harness
         .assert_marker_reopen_counts(&[REOPEN_INTERVENTION_THRESHOLD])
         .await;
@@ -591,6 +747,7 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
         "terminal recheck must not create another Planner review"
     );
     harness.assert_dispatch_backoff_cleared().await;
+    harness.assert_capacity_released().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -663,9 +820,22 @@ async fn same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes() {
         .assert_same_role_backoff_after_reappearance(STREAK_INTERVENTION_THRESHOLD)
         .await;
 
-    let remaining_to_hard_cap = MAX_DISPATCH_FAILURES - STREAK_INTERVENTION_THRESHOLD;
+    let remaining_before_hard_cap = MAX_DISPATCH_FAILURES - STREAK_INTERVENTION_THRESHOLD - 1;
+    let (pre_terminal_handled, pre_terminal) = harness
+        .dispatch_same_role_reappearances_like_dispatch(role, remaining_before_hard_cap)
+        .await;
+    assert!(
+        !pre_terminal_handled,
+        "cycles up to one below the hard cap should only refresh backoff"
+    );
+    assert_eq!(pre_terminal.status, "open");
+    harness
+        .assert_same_role_backoff_after_reappearance(MAX_DISPATCH_FAILURES - 1)
+        .await;
+    harness.seed_running_capacity_occupancy().await;
+
     let (terminal_handled, terminal) = harness
-        .dispatch_same_role_reappearances_like_dispatch(role, remaining_to_hard_cap)
+        .dispatch_same_role_reappearance_like_dispatch(role, false)
         .await;
     assert!(
         terminal_handled,
@@ -681,6 +851,7 @@ async fn same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes() {
         .assert_latest_status_change_reason_contains("repeated dispatch failures")
         .await;
     harness.assert_dispatch_backoff_cleared().await;
+    harness.assert_capacity_released().await;
     harness.assert_source_task_not_ready_open().await;
     harness.assert_planner_marker_count(1).await;
     harness.assert_open_planner_review_count(1).await;

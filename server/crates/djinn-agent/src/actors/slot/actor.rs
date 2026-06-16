@@ -340,7 +340,7 @@ impl SlotHandle {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc as StdArc, Mutex};
     use std::time::Duration;
 
     use tempfile::TempDir;
@@ -452,9 +452,13 @@ mod tests {
         }
     }
 
-    fn tracing_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    async fn tracing_lock() -> tokio::sync::OwnedMutexGuard<()> {
+        static LOCK: std::sync::OnceLock<StdArc<tokio::sync::Mutex<()>>> =
+            std::sync::OnceLock::new();
+        LOCK.get_or_init(|| StdArc::new(tokio::sync::Mutex::new(())))
+            .clone()
+            .lock_owned()
+            .await
     }
 
     fn test_app_state() -> (AgentContext, CancellationToken, TempDir) {
@@ -470,7 +474,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn run_task_completes_and_emits_free_event() {
-        let _tracing_guard = tracing_lock();
+        let _tracing_guard = tracing_lock().await;
         let layer = RecordingLayer::default();
         let subscriber = tracing_subscriber::registry().with(layer.clone());
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
@@ -547,7 +551,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn kill_emits_killed_event_and_kill_span_with_task_id() {
-        let _tracing_guard = tracing_lock();
+        let _tracing_guard = tracing_lock().await;
         let layer = RecordingLayer::default();
         let subscriber = tracing_subscriber::registry().with(layer.clone());
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
