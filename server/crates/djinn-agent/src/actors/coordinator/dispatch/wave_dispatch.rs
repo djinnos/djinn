@@ -231,8 +231,6 @@ impl CoordinatorActor {
                                 error = %e,
                                 "CoordinatorActor: failed to re-queue branch-missing approved task"
                             );
-                        } else {
-                            djinn_telemetry::task::increment_reopen();
                         }
                         self.pr_errors.remove(&task.project_id);
                         self.publish_status();
@@ -436,6 +434,23 @@ mod e6_tests {
             assert!(
                 apply.increment_reopen,
                 "merge-queue rejection reopen MUST bump reopen_count (arms the escalation), from {from:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pr_conflict_transition_does_not_increment_reopen_count() {
+        for from in [
+            TaskStatus::Approved,
+            TaskStatus::PrDraft,
+            TaskStatus::PrReview,
+        ] {
+            let apply = compute_transition(&TransitionAction::PrConflict, &from, None)
+                .expect("PrConflict must remain legal for approved/pr_draft/pr_review tasks");
+            assert_eq!(apply.to_status, Some(TaskStatus::Open));
+            assert!(
+                !apply.increment_reopen,
+                "PrConflict should not bump reopen_count; djinn_task_reopens_total must follow this semantic"
             );
         }
     }

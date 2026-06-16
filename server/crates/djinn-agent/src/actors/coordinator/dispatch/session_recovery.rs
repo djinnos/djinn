@@ -826,12 +826,35 @@ impl CoordinatorActor {
             )
             .await
         {
-            Ok(_) => true,
+            Ok(_) => {}
             Err(e) => {
                 tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: terminal close failed");
-                false
+                return false;
             }
         }
+
+        let session_repo = djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        match session_repo.interrupt_running_for_task(&task.id).await {
+            Ok(interrupted) if interrupted > 0 => {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    interrupted,
+                    "CoordinatorActor: interrupted running sessions after terminal task close to release capacity"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "CoordinatorActor: failed to interrupt running sessions after terminal task close"
+                );
+            }
+        }
+        true
     }
 }
 

@@ -1,5 +1,7 @@
 #[path = "tests/contracts.rs"]
 mod contracts;
+#[path = "tests/debug.rs"]
+mod debug;
 #[path = "tests/helpers.rs"]
 mod helpers;
 #[path = "tests/misc.rs"]
