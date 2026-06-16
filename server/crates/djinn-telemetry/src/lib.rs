@@ -1,3 +1,5 @@
+// Touch to advance main HEAD and trigger a warm job (verification warm-base
+// cargo cache validation, 2026-06-16). No behavior change.
 use std::sync::OnceLock;
 
 use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandle};
