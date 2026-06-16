@@ -306,6 +306,17 @@ mod tests {
             .unwrap_or_else(|| panic!("missing sample {metric}{labels:?} in:\n{rendered}"))
     }
 
+    fn unlabelled_sample_value(rendered: &str, metric: &str) -> f64 {
+        rendered
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix(metric)
+                    .and_then(|suffix| suffix.strip_prefix(' '))
+                    .and_then(|value| value.parse::<f64>().ok())
+            })
+            .unwrap_or_else(|| panic!("missing unlabelled sample {metric} in:\n{rendered}"))
+    }
+
     #[test]
     fn init_is_idempotent_and_registers_dispatch_labels() {
         let _guard = test_guard();
@@ -389,6 +400,13 @@ mod tests {
         assert_sync_unit(|| dispatch::set_inflight_ledger_size(0));
         assert_sync_unit(|| dispatch::set_user_cap_utilization("user-sync", "model-sync", 0, 1));
         assert_sync_unit(|| slot_pool::set_slots(slot_pool::STATE_FREE, "model-sync", 0));
+        assert_sync_unit(|| task::increment_reopen());
+        assert_sync_unit(|| task::increment_parked());
+        assert_sync_unit(|| pr_poller::set_tracked(0));
+        assert_sync_unit(|| pr_poller::increment_merge_failure());
+        assert_sync_unit(|| breaker::increment_trip());
+        assert_sync_unit(|| zombie::increment_reap(zombie::KIND_STALL));
+        assert_sync_unit(|| lead::increment_escalation());
     }
 
     #[test]
@@ -427,15 +445,29 @@ mod tests {
         let _guard = test_guard();
         init().unwrap();
 
+        let before = render().unwrap();
+        let reopens_before = unlabelled_sample_value(&before, TASK_REOPENS_TOTAL);
+        let parked_before = unlabelled_sample_value(&before, TASKS_PARKED_TOTAL);
+        let merge_failures_before = unlabelled_sample_value(&before, MERGE_FAILURES_TOTAL);
+
         task::increment_reopen();
         task::increment_parked();
         pr_poller::set_tracked(2);
         pr_poller::increment_merge_failure();
 
         let rendered = render().unwrap();
-        assert!(rendered.contains("djinn_task_reopens_total"));
-        assert!(rendered.contains("djinn_tasks_parked_total"));
-        assert!(rendered.contains("djinn_pr_poller_tracked"));
-        assert!(rendered.contains("djinn_merge_failures_total"));
+        assert_eq!(
+            unlabelled_sample_value(&rendered, TASK_REOPENS_TOTAL),
+            reopens_before + 1.0
+        );
+        assert_eq!(
+            unlabelled_sample_value(&rendered, TASKS_PARKED_TOTAL),
+            parked_before + 1.0
+        );
+        assert_eq!(unlabelled_sample_value(&rendered, PR_POLLER_TRACKED), 2.0);
+        assert_eq!(
+            unlabelled_sample_value(&rendered, MERGE_FAILURES_TOTAL),
+            merge_failures_before + 1.0
+        );
     }
 }
