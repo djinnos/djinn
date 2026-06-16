@@ -9,6 +9,16 @@ use djinn_db::VerificationCacheRepository;
 use super::environment::{environment_config_for_project_id, hook_commands_to_specs};
 use super::settings::verification_cache_key;
 
+/// Per-command timeout for verification commands. Without this, each command
+/// inherits the runner's 300s `DEFAULT_TIMEOUT_SECS`, which SIGKILLs a cold
+/// `cargo clippy --workspace --all-targets --all-features` mid-compile (recorded
+/// as exit -1) — false-failing the task AND leaving sccache only partially
+/// written, so the next run is cold again (a vicious cold-cache loop). Sized to
+/// fit a cold full-workspace build while staying under the verification Job's
+/// active-deadline / the pipeline poll timeout (both 3600s) so the command
+/// records a clean per-command result instead of the pod being hard-killed.
+const VERIFICATION_COMMAND_TIMEOUT_SECS: u64 = 3300;
+
 #[derive(Debug, Clone)]
 pub struct VerificationResult {
     pub passed: bool,
@@ -55,7 +65,7 @@ pub async fn verify_commit(
         .map(|(i, cmd)| CommandSpec {
             name: format!("verify-{}", i + 1),
             command: cmd.clone(),
-            timeout_secs: None,
+            timeout_secs: Some(VERIFICATION_COMMAND_TIMEOUT_SECS),
         })
         .collect();
 
