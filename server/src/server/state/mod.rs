@@ -1002,6 +1002,16 @@ impl AppState {
         self.inner.pool.lock().await.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) async fn set_agent_handles_for_tests(
+        &self,
+        pool: SlotPoolHandle,
+        coordinator: CoordinatorHandle,
+    ) {
+        *self.inner.pool.lock().await = Some(pool);
+        *self.inner.coordinator.lock().await = Some(coordinator);
+    }
+
     /// Non-blocking snapshot of the coordinator handle (for sync contexts).
     /// Returns `None` if the lock is contended or the coordinator is not yet initialized.
     pub fn coordinator_sync(&self) -> Option<CoordinatorHandle> {
