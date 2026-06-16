@@ -305,7 +305,6 @@ impl CoordinatorActor {
                 cooldown_until: Some(None),
                 last_dispatched: Some(None),
                 inflight: Some(None),
-                ..Default::default()
             },
         )
         .await;
