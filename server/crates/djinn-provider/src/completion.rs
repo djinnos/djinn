@@ -1542,6 +1542,20 @@ mod tests {
                 max_tokens_default: Some(64_000),
             },
             Expected {
+                id: "opencode",
+                fixed_family: Some(FormatFamily::OpenAI),
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: None,
+            },
+            Expected {
+                id: "zai-coding-plan",
+                fixed_family: Some(FormatFamily::OpenAI),
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: None,
+            },
+            Expected {
                 id: "chatgpt_codex",
                 fixed_family: Some(FormatFamily::OpenAIResponses),
                 auth_shape: AuthShape::Bearer,
