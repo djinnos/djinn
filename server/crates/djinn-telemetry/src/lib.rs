@@ -645,3 +645,5 @@ mod tests {
         );
     }
 }
+
+// warm-base validation: v0.6.11 incremental=0 (no-op)
