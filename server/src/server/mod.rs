@@ -62,6 +62,7 @@ async fn metrics(State(state): State<AppState>) -> Response {
         tracing::warn!(error = %e, "failed to initialize Prometheus metrics recorder");
         return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
+    refresh_metrics_live_state(&state).await;
     state.health_tracker().record_breaker_metrics();
     match djinn_telemetry::render() {
         Ok(body) => (
@@ -73,6 +74,20 @@ async fn metrics(State(state): State<AppState>) -> Response {
             tracing::warn!(error = %e, "failed to render Prometheus metrics");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+async fn refresh_metrics_live_state(state: &AppState) {
+    if let Some(coordinator) = state.coordinator().await
+        && let Err(e) = coordinator.record_live_metrics().await
+    {
+        tracing::warn!(error = %e, "failed to refresh coordinator metrics snapshot");
+    }
+
+    if let Some(pool) = state.pool().await
+        && let Err(e) = pool.get_status().await
+    {
+        tracing::warn!(error = %e, "failed to refresh slot-pool metrics snapshot");
     }
 }
 

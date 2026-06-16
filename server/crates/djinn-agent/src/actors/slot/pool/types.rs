@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::actors::coordinator::DebugSlot;
 use crate::context::AgentContext;
 
 use super::super::{SlotHandle, SlotPoolConfig};
@@ -107,6 +108,9 @@ pub enum PoolMessage {
     },
     GetStatus {
         respond_to: Reply<PoolStatus>,
+    },
+    Snapshot {
+        respond_to: Reply<Vec<DebugSlot>>,
     },
     GetSessionForTask {
         task_id: String,

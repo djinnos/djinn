@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::supervisor_impl::LiveMoverSummary;
 
-use super::types::CoordinatorError;
+use super::types::{CoordinatorDebugSnapshot, CoordinatorError};
 
 // ─── Messages (≤15 variants — AGENT-11) ──────────────────────────────────────
 
@@ -48,9 +48,18 @@ pub(super) enum CoordinatorMessage {
     /// Route a settled task that has no live mover through the shared no-op
     /// disposition ladder (if the live-mover predicate says it is orphaned).
     RouteSettledNoopWithoutLiveMover { task_id: String },
+    /// Publish scrape-time coordinator live-state gauges without exposing
+    /// per-task labels or storing per-task metric state.
+    RecordLiveMetrics {
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
     /// Increment the Lead escalation count for a task; reply with new count.
     IncrementEscalationCount {
         task_id: String,
         reply: tokio::sync::oneshot::Sender<u32>,
+    },
+    /// Return a read-only debug snapshot of coordinator dispatch state.
+    DebugSnapshot {
+        reply: tokio::sync::oneshot::Sender<CoordinatorDebugSnapshot>,
     },
 }

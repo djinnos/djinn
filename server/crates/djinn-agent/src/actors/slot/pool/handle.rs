@@ -1,6 +1,7 @@
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::actors::coordinator::DebugSlot;
 use crate::context::AgentContext;
 
 use super::super::SlotPoolConfig;
@@ -117,6 +118,11 @@ impl SlotPoolHandle {
 
     pub async fn get_status(&self) -> Result<PoolStatus, PoolError> {
         self.request(|tx| PoolMessage::GetStatus { respond_to: tx })
+            .await
+    }
+
+    pub async fn snapshot(&self) -> Result<Vec<DebugSlot>, PoolError> {
+        self.request(|tx| PoolMessage::Snapshot { respond_to: tx })
             .await
     }
 
