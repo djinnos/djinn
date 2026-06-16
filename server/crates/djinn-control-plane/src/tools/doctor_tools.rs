@@ -114,7 +114,11 @@ pub struct DoctorRunResponse {
     /// Results for each check that was selected and executed.
     pub results: Vec<DoctorRunCheckResult>,
     /// Total number of findings emitted across all selected checks.
-    pub total_findings: usize,
+    ///
+    /// Counters are `i64` (not `usize`) so the generated MCP JSON schema
+    /// lands on `format: int64` instead of the nonstandard `uint` pinned by
+    /// `tool_schemas::mcp_tools_list_schemas_do_not_use_nonstandard_uint_…`.
+    pub total_findings: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -301,7 +305,7 @@ impl DjinnMcpServer {
         let run_id = uuid::Uuid::now_v7().to_string();
 
         let mut results = Vec::with_capacity(checks.len());
-        let mut total_findings = 0usize;
+        let mut total_findings: i64 = 0;
 
         for check in &checks {
             let meta = DoctorRunCheckMeta {
@@ -320,7 +324,7 @@ impl DjinnMcpServer {
 
                     let entries = match repo.insert_many(new_rows).await {
                         Ok(persisted) => {
-                            total_findings += persisted.len();
+                            total_findings += persisted.len() as i64;
                             persisted
                                 .into_iter()
                                 .zip(findings.iter())
