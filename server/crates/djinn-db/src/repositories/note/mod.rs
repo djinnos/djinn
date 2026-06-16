@@ -67,6 +67,11 @@ pub use file_helpers::{
 };
 use indexing::{index_links_for_note, resolve_links_for_note};
 
+pub use housekeeping::{
+    AnchorProposerKind, BackfillRetrievalAnchorOptions, BackfillRetrievalAnchorReport,
+    LlmAnchorProposer, ProposedBackfillAnchor, propose_anchor_deterministic,
+};
+
 #[derive(Debug, Clone)]
 pub struct NoteSearchParams<'a> {
     pub project_id: &'a str,

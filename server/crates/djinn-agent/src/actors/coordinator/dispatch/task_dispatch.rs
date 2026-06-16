@@ -97,20 +97,25 @@ pub(in crate::actors::coordinator) enum DispatchCapObservationStage {
 }
 
 #[cfg(test)]
-std::thread_local! {
-    static DISPATCH_CAP_OBSERVATIONS: std::cell::RefCell<Vec<DispatchCapObservation>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
+static DISPATCH_CAP_OBSERVATIONS: std::sync::Mutex<Vec<DispatchCapObservation>> =
+    std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
 pub(in crate::actors::coordinator) fn clear_dispatch_cap_observations() {
-    DISPATCH_CAP_OBSERVATIONS.with(|observations| observations.borrow_mut().clear());
+    DISPATCH_CAP_OBSERVATIONS
+        .lock()
+        .expect("dispatch cap observations mutex poisoned")
+        .clear();
 }
 
 #[cfg(test)]
 pub(in crate::actors::coordinator) fn take_dispatch_cap_observations() -> Vec<DispatchCapObservation>
 {
-    DISPATCH_CAP_OBSERVATIONS.with(|observations| std::mem::take(&mut *observations.borrow_mut()))
+    std::mem::take(
+        &mut *DISPATCH_CAP_OBSERVATIONS
+            .lock()
+            .expect("dispatch cap observations mutex poisoned"),
+    )
 }
 
 #[cfg(test)]
@@ -120,14 +125,15 @@ fn observe_dispatch_cap_count(
     model: &str,
     effective_count: u32,
 ) {
-    DISPATCH_CAP_OBSERVATIONS.with(|observations| {
-        observations.borrow_mut().push(DispatchCapObservation {
+    DISPATCH_CAP_OBSERVATIONS
+        .lock()
+        .expect("dispatch cap observations mutex poisoned")
+        .push(DispatchCapObservation {
             creator_user_id: creator_user_id.to_owned(),
             model: model.to_owned(),
             effective_count,
             stage,
         });
-    });
 }
 
 #[cfg(test)]
@@ -1388,6 +1394,8 @@ impl CoordinatorActor {
 mod inflight_ledger_tests {
     use super::*;
     use djinn_core::models::{DispatchPause, DispatchPauseState, Task};
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+    use std::time::Duration;
 
     fn pause() -> DispatchPause {
         DispatchPause {
@@ -1491,7 +1499,7 @@ mod inflight_ledger_tests {
     }
 
     const WND1_READY_TASK_COUNT: usize = 10;
-    const WND1_STABLE_MODEL_ID: &str = "openai/gpt-5.5";
+    const WND1_STABLE_MODEL_ID: &str = "test/mock";
     const WND1_DISPATCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
     const WND1_CONTROLLED_RUNTIME_GUARD: Duration = Duration::from_secs(60);
 
@@ -1732,15 +1740,6 @@ mod inflight_ledger_tests {
             .expect("configure wnd1 user max_sessions cap")
     }
 
-    async fn wnd1_recv_started(
-        started_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-    ) -> String {
-        tokio::time::timeout(WND1_DISPATCH_SETTLE_TIMEOUT, started_rx.recv())
-            .await
-            .expect("timed out waiting for wnd1 controlled runtime start")
-            .expect("wnd1 controlled runtime start channel closed")
-    }
-
     async fn materialize_wnd1_running_session(
         db: &djinn_db::Database,
         fixture: &Wnd1DispatchFixture,
@@ -1773,6 +1772,21 @@ mod inflight_ledger_tests {
             )
             .await
             .expect("complete wnd1 running session row");
+    }
+
+    async fn wnd1_active_count(
+        session_repo: &djinn_db::SessionRepository,
+        creator: &str,
+        model: &str,
+    ) -> i64 {
+        session_repo
+            .count_active_by_user_and_model()
+            .await
+            .expect("count active sessions for wnd1 cap")
+            .into_iter()
+            .filter(|(c, m, _)| c.as_deref() == Some(creator) && m == model)
+            .map(|(_, _, count)| count)
+            .sum()
     }
 
     async fn wait_for_pool_to_forget_task(
@@ -1811,31 +1825,6 @@ mod inflight_ledger_tests {
             max_observed <= cap,
             "wnd1 cap {cap} exceeded during {phase}: max_observed={max_observed}, observations={observations:?}"
         );
-    }
-
-    async fn drain_wnd1_started(
-        started_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-        active_tasks: &mut Vec<String>,
-        expected: u64,
-    ) {
-        for _ in 0..expected {
-            let task_id = wnd1_recv_started(started_rx).await;
-            active_tasks.push(task_id);
-        }
-    }
-
-    async fn materialize_wnd1_active_tasks(
-        db: &djinn_db::Database,
-        fixture: &Wnd1DispatchFixture,
-        running_sessions: &mut HashMap<String, String>,
-        active_tasks: &[String],
-    ) {
-        for task_id in active_tasks {
-            if !running_sessions.contains_key(task_id) {
-                let session_id = materialize_wnd1_running_session(db, fixture, task_id).await;
-                running_sessions.insert(task_id.clone(), session_id);
-            }
-        }
     }
 
     async fn wnd1_running_count_for_fixture(
@@ -1909,12 +1898,13 @@ mod inflight_ledger_tests {
     // Normal Rust/nextest-discoverable test: it uses only TestRuntime/template
     // Postgres (no kind/k8s) and covers the historical v0.4.15 per-user cap
     // overshoot when session rows lagged behind newly-dispatched worker tasks.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn wnd1_dispatch_race_harness_never_exceeds_caps_1_through_5() {
         for cap in 1..=5 {
+            clear_dispatch_cap_observations();
             let db = crate::test_helpers::create_test_db();
             let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
-            let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+            let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT + 2).await;
             assert!(
                 std::path::Path::new(&fixture.project_path).is_dir(),
                 "wnd1 fixture project path must exist for in-process dispatch"
@@ -1928,162 +1918,201 @@ mod inflight_ledger_tests {
             .await;
 
             let (runtime, mut started_rx) = Wnd1ControlledRuntime::new();
-            let mut actor = wnd1_actor_for_tests(&db, &events_tx, &runtime, cap);
-            let mut observations = Vec::new();
-            let mut running_sessions: HashMap<String, String> = HashMap::new();
-            let mut active_tasks = Vec::new();
+            let actor = wnd1_actor_for_tests(
+                &db,
+                &events_tx,
+                &runtime,
+                u32::try_from(WND1_READY_TASK_COUNT).expect("wnd1 slot count fits u32"),
+            );
+            let pool = actor.pool.clone();
+            let actor = StdArc::new(tokio::sync::Mutex::new(actor));
+            let observations = StdArc::new(StdMutex::new(Vec::<DispatchCapObservation>::new()));
+            let dispatch_done = StdArc::new(std::sync::atomic::AtomicBool::new(false));
 
-            let fill_deadline = tokio::time::Instant::now() + WND1_DISPATCH_SETTLE_TIMEOUT;
-            while active_tasks.len() < cap as usize {
-                let before = actor.dispatched;
-                clear_dispatch_cap_observations();
-                actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-                assert_wnd1_observed_cap(
-                    cap,
-                    &mut observations,
-                    "initial cold-DB dispatch passes before running rows materialize",
-                );
-                assert!(
-                    tokio::time::Instant::now() < fill_deadline,
-                    "cap {cap}: initial bounded fill did not reach the cap before the deadline"
-                );
+            let settler_db = db.clone();
+            let settler_fixture = Wnd1DispatchFixture {
+                project_id: fixture.project_id.clone(),
+                project_path: fixture.project_path.clone(),
+                created_by_user_id: fixture.created_by_user_id.clone(),
+                model_id: fixture.model_id.clone(),
+                task_ids: fixture.task_ids.clone(),
+            };
+            let settler_runtime = runtime.clone();
+            let settler_pool = pool.clone();
+            let settler_done = dispatch_done.clone();
+            let settler = tokio::spawn(async move {
+                let mut active: Vec<(String, String)> = Vec::new();
+                let mut observed_starts = 0usize;
+                loop {
+                    tokio::select! {
+                        maybe_task_id = started_rx.recv() => {
+                            if let Some(task_id) = maybe_task_id {
+                                // Simulate the pod/session-row lag window: the local
+                                // in-flight ledger is already populated by dispatch,
+                                // while the DB row becomes visible shortly after.
+                                tokio::task::yield_now().await;
+                                tokio::time::sleep(Duration::from_millis(1)).await;
+                                let session_id = materialize_wnd1_running_session(
+                                    &settler_db,
+                                    &settler_fixture,
+                                    &task_id,
+                                ).await;
+                                observed_starts += 1;
+                                active.push((task_id, session_id));
+                            }
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(2)) => {}
+                    }
 
-                let started = actor.dispatched - before;
-                if started == 0 {
-                    // A no-op pass before the configured cap is not itself a
-                    // dispatch invariant: under CI scheduling the slot-pool actor
-                    // can report transient capacity/backpressure before every
-                    // free slot has observed the test runner. The wnd1 invariant
-                    // is that the effective running+in-flight count never
-                    // exceeds the cap while the harness makes bounded progress;
-                    // once at least one controlled task is active, move on to the
-                    // completion/settlement race instead of requiring the cold
-                    // fill to reach the cap in a fixed number of passes.
-                    if !active_tasks.is_empty() {
+                    if active.len() >= cap as usize
+                        || (settler_done.load(std::sync::atomic::Ordering::SeqCst)
+                            && !active.is_empty())
+                    {
+                        let (task_id, session_id) = active.remove(0);
+                        complete_wnd1_session(&settler_db, &session_id).await;
+                        settler_runtime.release(&task_id).await;
+                        wait_for_pool_to_forget_task(&settler_pool, &task_id).await;
+                    }
+
+                    if settler_done.load(std::sync::atomic::Ordering::SeqCst)
+                        && active.is_empty()
+                        && observed_starts >= WND1_READY_TASK_COUNT
+                    {
                         break;
                     }
-                    tokio::task::yield_now().await;
-                    continue;
                 }
-                drain_wnd1_started(&mut started_rx, &mut active_tasks, started).await;
-                assert!(
-                    active_tasks.len() <= cap as usize,
-                    "cap {cap}: active controlled runtime tasks exceeded cap during initial fill: {active_tasks:?}"
-                );
+            });
+
+            let mut dispatchers = Vec::new();
+            for _ in 0..4 {
+                let actor = actor.clone();
+                let observations = observations.clone();
+                let project_id = fixture.project_id.clone();
+                dispatchers.push(tokio::spawn(async move {
+                    let deadline = tokio::time::Instant::now() + WND1_DISPATCH_SETTLE_TIMEOUT;
+                    loop {
+                        let dispatched = {
+                            let mut actor = actor.lock().await;
+                            clear_dispatch_cap_observations();
+                            actor.dispatch_ready_tasks(Some(&project_id)).await;
+                            let dispatched = actor.dispatched;
+                            let mut observations = observations
+                                .lock()
+                                .expect("wnd1 observations mutex poisoned");
+                            assert_wnd1_observed_cap(
+                                cap,
+                                &mut observations,
+                                "concurrent repeated dispatch passes",
+                            );
+                            dispatched
+                        };
+                        if dispatched >= WND1_READY_TASK_COUNT as u64 {
+                            break;
+                        }
+                        assert!(
+                            tokio::time::Instant::now() < deadline,
+                            "cap {cap}: concurrent dispatch stress did not make bounded progress"
+                        );
+                        tokio::task::yield_now().await;
+                    }
+                }));
             }
+            for dispatcher in dispatchers {
+                dispatcher
+                    .await
+                    .expect("wnd1 dispatcher task should not panic");
+            }
+            dispatch_done.store(true, std::sync::atomic::Ordering::SeqCst);
+            settler.await.expect("wnd1 settler task should not panic");
 
-            materialize_wnd1_active_tasks(&db, &fixture, &mut running_sessions, &active_tasks)
-                .await;
-
-            clear_dispatch_cap_observations();
-            let before_overlap_pass = actor.dispatched;
-            actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-            assert_wnd1_observed_cap(
-                cap,
-                &mut observations,
-                "re-dispatch while delayed running rows overlap in-flight ledger",
-            );
-            let overlap_started = actor.dispatched - before_overlap_pass;
-            drain_wnd1_started(&mut started_rx, &mut active_tasks, overlap_started).await;
-            materialize_wnd1_active_tasks(&db, &fixture, &mut running_sessions, &active_tasks)
-                .await;
-            assert!(
-                active_tasks.len() <= cap as usize,
-                "cap {cap}: overlap phase active tasks exceeded cap: {active_tasks:?}"
-            );
-
-            let progress_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-            while actor.dispatched < WND1_READY_TASK_COUNT as u64 {
-                assert!(
-                    tokio::time::Instant::now() < progress_deadline,
-                    "cap {cap}: dispatch race harness did not make bounded progress"
-                );
-                assert!(
-                    !active_tasks.is_empty(),
-                    "cap {cap}: harness lost all active tasks before completing ready queue"
-                );
-
-                let completed_task = active_tasks.remove(0);
-                let session_id = running_sessions
-                    .remove(&completed_task)
-                    .expect("active wnd1 task has materialized session");
-                complete_wnd1_session(&db, &session_id).await;
-
-                let before_raced_pass = actor.dispatched;
+            let task_repo =
+                djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+            for task_id in &fixture.task_ids {
+                task_repo
+                    .set_status(task_id, "closed")
+                    .await
+                    .expect("close wnd1 fixture task for quiescence");
+                let _ = pool.kill_session(task_id).await;
+                djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+                    .interrupt_running_for_task(task_id)
+                    .await
+                    .expect("settle wnd1 fixture task for quiescence");
+            }
+            {
+                let mut actor = actor.lock().await;
                 clear_dispatch_cap_observations();
                 actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-                assert_wnd1_observed_cap(
-                    cap,
-                    &mut observations,
-                    "dispatch pass raced against DB settlement before pool free",
-                );
-                let raced_started = actor.dispatched - before_raced_pass;
-                drain_wnd1_started(&mut started_rx, &mut active_tasks, raced_started).await;
-                materialize_wnd1_active_tasks(&db, &fixture, &mut running_sessions, &active_tasks)
-                    .await;
-                assert!(
-                    active_tasks.len() <= cap as usize,
-                    "cap {cap}: pre-settlement race active tasks exceeded cap: {active_tasks:?}"
-                );
-
-                runtime.release(&completed_task).await;
-                wait_for_pool_to_forget_task(&actor.pool, &completed_task).await;
-
-                let before_settled_passes = actor.dispatched;
-                let mut settled_attempts = 0;
-                while actor.dispatched == before_settled_passes
-                    && actor.dispatched < WND1_READY_TASK_COUNT as u64
-                {
-                    settled_attempts += 1;
-                    assert!(
-                        settled_attempts <= WND1_READY_TASK_COUNT,
-                        "cap {cap}: no dispatch progress after controlled completion settlement"
-                    );
-                    clear_dispatch_cap_observations();
-                    actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-                    assert_wnd1_observed_cap(
-                        cap,
-                        &mut observations,
-                        "dispatch pass after controlled completion settlement",
-                    );
-                    let settled_started = actor.dispatched - before_settled_passes;
-                    drain_wnd1_started(&mut started_rx, &mut active_tasks, settled_started).await;
-                    materialize_wnd1_active_tasks(
-                        &db,
-                        &fixture,
-                        &mut running_sessions,
-                        &active_tasks,
-                    )
-                    .await;
-                    assert!(
-                        active_tasks.len() <= cap as usize,
-                        "cap {cap}: post-settlement active tasks exceeded cap: {active_tasks:?}"
-                    );
-                }
+                let mut observations = observations
+                    .lock()
+                    .expect("wnd1 observations mutex poisoned");
+                assert_wnd1_observed_cap(cap, &mut observations, "quiescence reconciliation");
             }
 
-            for task_id in active_tasks {
-                if let Some(session_id) = running_sessions.remove(&task_id) {
-                    complete_wnd1_session(&db, &session_id).await;
-                }
-                runtime.release(&task_id).await;
-                wait_for_pool_to_forget_task(&actor.pool, &task_id).await;
+            {
+                let mut actor = actor.lock().await;
+                assert_wnd1_post_settlement_convergence(cap, &db, &mut actor, &fixture).await;
             }
-
-            assert_wnd1_post_settlement_convergence(cap, &db, &mut actor, &fixture).await;
-
+            let observations = observations
+                .lock()
+                .expect("wnd1 observations mutex poisoned")
+                .clone();
             assert!(
-                !observations.is_empty(),
-                "cap {cap}: harness must record cap instrumentation observations"
+                observations.iter().any(|obs| {
+                    obs.stage == DispatchCapObservationStage::InflightIncremented
+                        && obs.creator_user_id == fixture.created_by_user_id
+                        && obs.model == fixture.model_id
+                }),
+                "cap {cap}: stress run must exercise real dispatch admissions, not only the pure ledger helper"
             );
-            let max_observed = observations
+            assert!(
+                observations.iter().any(|obs| {
+                    obs.stage == DispatchCapObservationStage::LedgerOverlay
+                        && obs.creator_user_id == fixture.created_by_user_id
+                        && obs.model == fixture.model_id
+                }),
+                "cap {cap}: stress run must observe the lag-window ledger overlay"
+            );
+            for obs in observations.iter().filter(|obs| {
+                obs.creator_user_id == fixture.created_by_user_id && obs.model == fixture.model_id
+            }) {
+                assert!(
+                    obs.effective_count <= cap,
+                    "cap {cap}: observed instantaneous {:?} count {} above cap",
+                    obs.stage,
+                    obs.effective_count
+                );
+            }
+            let max_instantaneous_count = observations
                 .iter()
-                .map(|observation| observation.effective_count)
+                .filter(|obs| {
+                    obs.creator_user_id == fixture.created_by_user_id
+                        && obs.model == fixture.model_id
+                })
+                .map(|obs| obs.effective_count)
                 .max()
                 .unwrap_or(0);
-            assert!(
-                max_observed <= cap,
-                "cap {cap}: instantaneous effective running/in-flight count exceeded cap; observations={observations:?}"
+            assert_eq!(
+                max_instantaneous_count, cap,
+                "cap {cap}: stress run should make the per-user cap, not the test pool, the limiting factor"
+            );
+
+            let actor = actor.lock().await;
+            assert_eq!(
+                actor.inflight_dispatches.len(),
+                0,
+                "cap {cap}: in-flight dispatch ledger must drain after quiescence"
+            );
+            let session_repo =
+                djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+            assert_eq!(
+                wnd1_active_count(
+                    &session_repo,
+                    &fixture.created_by_user_id,
+                    &fixture.model_id,
+                )
+                .await,
+                0,
+                "cap {cap}: DB active-session count must converge to zero after quiescence"
             );
         }
     }

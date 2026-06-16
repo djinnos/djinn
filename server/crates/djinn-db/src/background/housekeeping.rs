@@ -13,6 +13,12 @@ const DEFAULT_HOUSEKEEPING_INTERVAL_SECS: u64 = 60 * 60;
 const ORPHAN_TAG: &str = "orphan";
 const BROKEN_WIKILINK_MIN_SCORE: f64 = 0.0;
 const HOUSEKEEPING_INTERVAL_ENV: &str = "DJINN_HOUSEKEEPING_INTERVAL_SECS";
+/// Env-gated opt-in: when set to "1" (true), the periodic housekeeping tick
+/// also runs a one-shot dry-run retrieval-anchor backfill report (proposal
+/// counts and proposed anchors, no writes). Apply mode is never invoked
+/// automatically — operators must call the explicit entry point
+/// [`run_backfill_anchors_for_all_projects`] to write.
+const BACKFILL_DRY_RUN_ENV: &str = "DJINN_HOUSEKEEPING_BACKFILL_ANCHORS_DRY_RUN";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HousekeepingConfig {
@@ -75,6 +81,96 @@ impl HousekeepingTickReport {
             total_repaired_broken_wikilinks,
         }
     }
+}
+
+/// Per-project summary of a retrieval-anchor backfill run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectBackfillReport {
+    pub project_id: String,
+    pub project_name: String,
+    pub report: crate::BackfillRetrievalAnchorReport,
+}
+
+/// Cross-project summary of a backfill run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackfillTickReport {
+    pub projects: Vec<ProjectBackfillReport>,
+    pub total_candidates: usize,
+    pub total_updated: usize,
+    pub total_skipped_blank_proposal: usize,
+    pub dry_run: bool,
+}
+
+impl BackfillTickReport {
+    fn new(projects: Vec<ProjectBackfillReport>, dry_run: bool) -> Self {
+        let total_candidates = projects.iter().map(|p| p.report.candidate_count).sum();
+        let total_updated = projects.iter().map(|p| p.report.updated).sum();
+        let total_skipped_blank_proposal = projects
+            .iter()
+            .map(|p| p.report.skipped_blank_proposal)
+            .sum();
+        Self {
+            projects,
+            total_candidates,
+            total_updated,
+            total_skipped_blank_proposal,
+            dry_run,
+        }
+    }
+}
+
+fn backfill_dry_run_enabled() -> bool {
+    matches!(
+        std::env::var(BACKFILL_DRY_RUN_ENV).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
+/// Explicit, re-runnable entry point: run a retrieval-anchor backfill across
+/// every project in the database. `dry_run` defaults to true so the first
+/// call is always a report. Set `dry_run = false` to apply. Idempotent:
+/// notes that already have a non-empty anchor are skipped unless
+/// `force = true`.
+pub async fn run_backfill_anchors_for_all_projects(
+    db: &Database,
+    event_bus: &EventBus,
+    options: crate::BackfillRetrievalAnchorOptions,
+) -> anyhow::Result<BackfillTickReport> {
+    let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
+    let projects = project_repo.list().await?;
+    let note_repo = NoteRepository::new(db.clone(), event_bus.clone());
+
+    let mut project_reports = Vec::with_capacity(projects.len());
+    for project in projects {
+        let report = note_repo
+            .backfill_retrieval_anchors(&project.id, options.clone())
+            .await?;
+        tracing::info!(
+            project_id = %project.id,
+            project_name = %project.name,
+            candidate_count = report.candidate_count,
+            updated = report.updated,
+            skipped_blank_proposal = report.skipped_blank_proposal,
+            dry_run = report.dry_run,
+            "retrieval-anchor backfill project report"
+        );
+        project_reports.push(ProjectBackfillReport {
+            project_id: project.id,
+            project_name: project.name,
+            report,
+        });
+    }
+
+    let tick = BackfillTickReport::new(project_reports, options.dry_run);
+    tracing::info!(
+        project_count = tick.projects.len(),
+        total_candidates = tick.total_candidates,
+        total_updated = tick.total_updated,
+        total_skipped_blank_proposal = tick.total_skipped_blank_proposal,
+        dry_run = tick.dry_run,
+        "retrieval-anchor backfill tick summary"
+    );
+    Ok(tick)
 }
 
 /// Spawn the periodic knowledge-base housekeeping task. Runs every
@@ -150,6 +246,30 @@ async fn run_tick(db: &Database, event_bus: &EventBus) -> anyhow::Result<Houseke
         total_repaired_broken_wikilinks = report.total_repaired_broken_wikilinks,
         "knowledge base housekeeping tick summary"
     );
+
+    // Opt-in retrieval-anchor backfill (DRY RUN only). Operators wanting
+    // apply-mode must call `run_backfill_anchors_for_all_projects` directly
+    // — the periodic tick never writes. The env flag exists so an operator
+    // can keep an eye on the candidate count in production logs without
+    // standing up a separate control-plane call.
+    if backfill_dry_run_enabled() {
+        match run_backfill_anchors_for_all_projects(
+            db,
+            event_bus,
+            crate::BackfillRetrievalAnchorOptions {
+                dry_run: true,
+                ..crate::BackfillRetrievalAnchorOptions::default()
+            },
+        )
+        .await
+        {
+            Ok(_tick) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                "retrieval-anchor dry-run backfill failed; continuing periodic housekeeping"
+            ),
+        }
+    }
 
     Ok(report)
 }
