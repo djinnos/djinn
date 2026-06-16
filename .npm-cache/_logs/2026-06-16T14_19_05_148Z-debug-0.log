@@ -1,0 +1,35 @@
+0 verbose cli /usr/local/share/fnm/node-versions/v26.3.0/installation/bin/node /usr/local/share/fnm/node-versions/v26.3.0/installation/bin/npm
+1 info using npm@11.16.0
+2 info using node@v26.3.0
+3 silly config load:file:/usr/local/share/fnm/node-versions/v26.3.0/installation/lib/node_modules/npm/npmrc
+4 silly config load:file:/home/djinn/.npmrc
+5 silly config load:file:/workspace/.tmpgnV0wV/.npm-prefix/etc/npmrc
+6 verbose title npm install pnpm
+7 verbose argv "install" "--global" "pnpm"
+8 verbose logfile logs-max:10 dir:/workspace/.tmpgnV0wV/.npm-cache/_logs/2026-06-16T14_19_05_148Z-
+9 verbose logfile /workspace/.tmpgnV0wV/.npm-cache/_logs/2026-06-16T14_19_05_148Z-debug-0.log
+10 silly packumentCache heap:4395630592 maxSize:1098907648 maxEntrySize:549453824
+11 silly logfile done cleaning log files
+12 silly idealTree buildDeps
+13 silly fetch manifest pnpm@*
+14 silly packumentCache full:https://registry.npmjs.org/pnpm cache-miss
+15 http fetch GET 200 https://registry.npmjs.org/npm 222ms
+16 http fetch GET 200 https://registry.npmjs.org/pnpm 420ms (cache miss)
+17 silly packumentCache full:https://registry.npmjs.org/pnpm set size:undefined disposed:false
+18 silly placeDep ROOT pnpm@11.7.0 OK for:  want: *
+19 silly reify moves {}
+20 http cache pnpm@https://registry.npmjs.org/pnpm/-/pnpm-11.7.0.tgz 0ms (cache hit)
+21 silly tarball no local data for pnpm@https://registry.npmjs.org/pnpm/-/pnpm-11.7.0.tgz. Extracting by manifest.
+22 http fetch GET 200 https://registry.npmjs.org/pnpm/-/pnpm-11.7.0.tgz 2506ms (cache miss)
+23 silly ADD node_modules/pnpm
+24 verbose cwd /workspace/.tmpgnV0wV/.npm-prefix
+25 verbose os Linux 6.8.0-124-generic
+26 verbose node v26.3.0
+27 verbose npm  v11.16.0
+28 notice
+28 notice New minor version of npm available! 11.16.0 -> 11.17.0
+28 notice Changelog: https://github.com/npm/cli/releases/tag/v11.17.0
+28 notice To update run: npm install -g npm@11.17.0
+28 notice  { force: true, Symbol(proc-log.meta): true }
+29 verbose exit 0
+30 info ok
