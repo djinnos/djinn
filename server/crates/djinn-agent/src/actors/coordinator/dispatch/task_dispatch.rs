@@ -1946,6 +1946,7 @@ mod inflight_ledger_tests {
             let actor = StdArc::new(tokio::sync::Mutex::new(actor));
             let observations = StdArc::new(StdMutex::new(Vec::<DispatchCapObservation>::new()));
             let dispatch_done = StdArc::new(std::sync::atomic::AtomicBool::new(false));
+            let ledger_overlay_observed = StdArc::new(std::sync::atomic::AtomicBool::new(false));
 
             let settler_db = db.clone();
             let settler_fixture = Wnd1DispatchFixture {
@@ -1958,6 +1959,7 @@ mod inflight_ledger_tests {
             let settler_runtime = runtime.clone();
             let settler_pool = pool.clone();
             let settler_done = dispatch_done.clone();
+            let settler_ledger_overlay_observed = ledger_overlay_observed.clone();
             let settler = tokio::spawn(async move {
                 let mut active: Vec<(String, String)> = Vec::new();
                 let mut observed_starts = 0usize;
@@ -1967,9 +1969,24 @@ mod inflight_ledger_tests {
                             if let Some(task_id) = maybe_task_id {
                                 // Simulate the pod/session-row lag window: the local
                                 // in-flight ledger is already populated by dispatch,
-                                // while the DB row becomes visible shortly after.
-                                tokio::task::yield_now().await;
-                                tokio::time::sleep(Duration::from_millis(1)).await;
+                                // while the DB row becomes visible only after a
+                                // subsequent dispatch pass has had a deterministic
+                                // chance to overlay that ledger entry. This keeps the
+                                // stress proof from depending on scheduler timing on
+                                // fast CI runners where a 1ms synthetic lag can elapse
+                                // before the next dispatch loop reacquires the actor.
+                                let deadline = tokio::time::Instant::now()
+                                    + WND1_DISPATCH_SETTLE_TIMEOUT;
+                                while !settler_ledger_overlay_observed
+                                    .load(std::sync::atomic::Ordering::SeqCst)
+                                    && !settler_done.load(std::sync::atomic::Ordering::SeqCst)
+                                {
+                                    assert!(
+                                        tokio::time::Instant::now() < deadline,
+                                        "cap {cap}: timed out waiting for dispatch to observe the lag-window ledger overlay before materializing the session row"
+                                    );
+                                    tokio::task::yield_now().await;
+                                }
                                 let session_id = materialize_wnd1_running_session(
                                     &settler_db,
                                     &settler_fixture,
@@ -2005,7 +2022,10 @@ mod inflight_ledger_tests {
             for _ in 0..4 {
                 let actor = actor.clone();
                 let observations = observations.clone();
+                let ledger_overlay_observed = ledger_overlay_observed.clone();
                 let project_id = fixture.project_id.clone();
+                let creator_user_id = fixture.created_by_user_id.clone();
+                let model_id = fixture.model_id.clone();
                 dispatchers.push(tokio::spawn(async move {
                     let deadline = tokio::time::Instant::now() + WND1_DISPATCH_SETTLE_TIMEOUT;
                     loop {
@@ -2022,6 +2042,14 @@ mod inflight_ledger_tests {
                                 &mut observations,
                                 "concurrent repeated dispatch passes",
                             );
+                            if observations.iter().any(|obs| {
+                                obs.stage == DispatchCapObservationStage::LedgerOverlay
+                                    && obs.creator_user_id == creator_user_id
+                                    && obs.model == model_id
+                            }) {
+                                ledger_overlay_observed
+                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
                             dispatched
                         };
                         if dispatched >= WND1_READY_TASK_COUNT as u64 {

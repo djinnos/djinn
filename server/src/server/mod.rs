@@ -58,7 +58,12 @@ pub fn router(state: AppState, serve_ui: bool) -> Router {
 }
 
 async fn metrics(State(state): State<AppState>) -> Response {
+    if let Err(e) = djinn_telemetry::init() {
+        tracing::warn!(error = %e, "failed to initialize Prometheus metrics recorder");
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
     refresh_metrics_live_state(&state).await;
+    state.health_tracker().record_breaker_metrics();
     match djinn_telemetry::render() {
         Ok(body) => (
             [(CONTENT_TYPE, djinn_telemetry::PROMETHEUS_TEXT_CONTENT_TYPE)],
