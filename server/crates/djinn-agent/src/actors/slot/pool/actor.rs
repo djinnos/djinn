@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::actors::coordinator::CoordinatorHandle;
+use crate::actors::coordinator::{CoordinatorHandle, DebugSlot};
 use crate::context::AgentContext;
 use djinn_db::{SessionRepository, TaskRepository};
 
@@ -241,6 +241,9 @@ impl SlotPool {
             PoolMessage::GetStatus { respond_to } => {
                 let _ = respond_to.send(Ok(self.get_status()));
             }
+            PoolMessage::Snapshot { respond_to } => {
+                let _ = respond_to.send(Ok(self.snapshot()));
+            }
             PoolMessage::GetSessionForTask {
                 task_id,
                 respond_to,
@@ -443,6 +446,55 @@ impl SlotPool {
 
     fn has_session(&self, task_id: &str) -> bool {
         self.task_to_slot.contains_key(task_id)
+    }
+
+    pub fn snapshot(&self) -> Vec<DebugSlot> {
+        let mut slots: Vec<_> = self
+            .slot_models
+            .iter()
+            .map(|(slot_id, model)| {
+                let state = self.slot_states.get(slot_id).unwrap_or(&SlotState::Free);
+                match state {
+                    SlotState::Free => DebugSlot {
+                        slot_id: *slot_id as u32,
+                        model: model.clone(),
+                        state: "free".to_owned(),
+                        task_id: None,
+                        started_at: None,
+                    },
+                    SlotState::Busy {
+                        task_id,
+                        started_at,
+                        ..
+                    } => DebugSlot {
+                        slot_id: *slot_id as u32,
+                        model: model.clone(),
+                        state: "busy".to_owned(),
+                        task_id: if task_id.is_empty() {
+                            self.task_to_slot
+                                .iter()
+                                .find_map(|(mapped_task, mapped_slot)| {
+                                    (*mapped_slot == *slot_id).then(|| mapped_task.clone())
+                                })
+                        } else {
+                            Some(task_id.clone())
+                        },
+                        started_at: Some(started_at.clone()),
+                    },
+                    SlotState::Draining => DebugSlot {
+                        slot_id: *slot_id as u32,
+                        model: model.clone(),
+                        state: "draining".to_owned(),
+                        task_id: self.task_to_slot.iter().find_map(|(task_id, mapped_slot)| {
+                            (*mapped_slot == *slot_id).then(|| task_id.clone())
+                        }),
+                        started_at: None,
+                    },
+                }
+            })
+            .collect();
+        slots.sort_by_key(|slot| slot.slot_id);
+        slots
     }
 
     #[tracing::instrument(
@@ -943,6 +995,18 @@ impl SlotPool {
 
     pub(super) fn test_task_slots(&self) -> HashMap<String, usize> {
         self.task_to_slot.clone()
+    }
+
+    pub(super) fn test_set_slot_model(&mut self, slot_id: usize, model_id: &str) {
+        self.slot_models.insert(slot_id, model_id.to_owned());
+    }
+
+    pub(super) fn test_set_slot_state(&mut self, slot_id: usize, state: SlotState) {
+        self.slot_states.insert(slot_id, state);
+    }
+
+    pub(super) fn test_set_task_slot(&mut self, task_id: &str, slot_id: usize) {
+        self.task_to_slot.insert(task_id.to_owned(), slot_id);
     }
 
     /// Raw push onto the free list, bypassing `mark_slot_free` — used to inject

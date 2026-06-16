@@ -1,3 +1,4 @@
+// djinn:allow-oversize — integration tests for slot-pool actor behavior.
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -410,6 +411,43 @@ fn new_white_box_pool(slot_count: u32) -> (SlotPool, TempDir) {
         test_slot_factory(Duration::from_secs(3600), signal_tx),
     );
     (pool, temp)
+}
+
+#[tokio::test]
+async fn snapshot_reports_free_busy_and_draining_slots() {
+    let (mut pool, _temp) = new_white_box_pool(3);
+    pool.test_set_slot_model(0, "model-a");
+    pool.test_set_slot_model(1, "model-a");
+    pool.test_set_slot_model(2, "model-b");
+    pool.test_set_slot_state(0, SlotState::Free);
+    pool.test_set_slot_state(
+        1,
+        SlotState::Busy {
+            task_id: "task-busy".to_owned(),
+            started_at: "12345".to_owned(),
+            agent_type: "worker".to_owned(),
+        },
+    );
+    pool.test_set_slot_state(2, SlotState::Draining);
+    pool.test_set_task_slot("task-busy", 1);
+    pool.test_set_task_slot("task-draining", 2);
+
+    let snapshot = pool.snapshot();
+    assert_eq!(snapshot.len(), 3);
+    assert_eq!(snapshot[0].state, "free");
+    assert_eq!(snapshot[0].model, "model-a");
+    assert_eq!(snapshot[0].task_id, None);
+    assert_eq!(snapshot[0].started_at, None);
+
+    assert_eq!(snapshot[1].state, "busy");
+    assert_eq!(snapshot[1].model, "model-a");
+    assert_eq!(snapshot[1].task_id.as_deref(), Some("task-busy"));
+    assert_eq!(snapshot[1].started_at.as_deref(), Some("12345"));
+
+    assert_eq!(snapshot[2].state, "draining");
+    assert_eq!(snapshot[2].model, "model-b");
+    assert_eq!(snapshot[2].task_id.as_deref(), Some("task-draining"));
+    assert_eq!(snapshot[2].started_at, None);
 }
 
 #[derive(Debug, Clone, Copy)]
