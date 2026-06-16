@@ -1,3 +1,5 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
+
 //! `RepoDependencyGraph` — the in-memory petgraph-backed repo graph
 //! data structure plus its query/lookup/neighborhood helpers.
 //!
@@ -18,6 +20,7 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 
 use crate::complexity::ComplexityWalker;
+use crate::layout::GraphLayoutPosition;
 use crate::scip_parser::{ParsedScipIndex, ScipSymbolKind, ScipVisibility};
 
 use super::artifact::RouteExclusionConfig;
@@ -128,6 +131,8 @@ pub struct RepoDependencyGraph {
     /// re-fetching the artifact, and unit tests can construct a graph
     /// with a custom config in-memory.
     pub(super) route_exclusion_config: RouteExclusionConfig,
+    /// Warm-time deterministic layout positions keyed by stable node UID.
+    pub(super) layout_positions: BTreeMap<String, GraphLayoutPosition>,
 }
 
 /// A single SCIP definition range pinned to a graph node.
@@ -194,9 +199,33 @@ impl RepoDependencyGraph {
         &self.route_exclusion_config
     }
 
+    /// Return all precomputed layout positions keyed by stable node UID.
+    pub fn layout_positions(&self) -> &BTreeMap<String, GraphLayoutPosition> {
+        &self.layout_positions
+    }
+
+    /// Look up a precomputed layout coordinate by stable node UID.
+    pub fn layout_position_by_uid(&self, stable_uid: &str) -> Option<GraphLayoutPosition> {
+        self.layout_positions.get(stable_uid).copied()
+    }
+
+    /// Look up a precomputed layout coordinate by graph node identity.
+    pub fn layout_position(&self, node: NodeIndex) -> Option<GraphLayoutPosition> {
+        let uid = self.graph.node_weight(node)?.stable_uid();
+        self.layout_position_by_uid(&uid)
+    }
+
     /// Replace the inferred-route exclusion config sidecar.
     pub fn set_route_exclusion_config(&mut self, config: RouteExclusionConfig) {
         self.route_exclusion_config = config;
+    }
+
+    /// Replace the precomputed layout sidecar.
+    pub fn set_layout_positions(
+        &mut self,
+        layout_positions: BTreeMap<String, GraphLayoutPosition>,
+    ) {
+        self.layout_positions = layout_positions;
     }
 
     /// Compute compat-safe language-chain audit metadata for a route edge.

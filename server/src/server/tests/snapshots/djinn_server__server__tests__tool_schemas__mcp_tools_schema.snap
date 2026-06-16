@@ -827,6 +827,12 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "current_head": {
+          "default": null,
+          "description": "jc47: the caller's current HEAD / git commit SHA. When supplied,\nevery successful `code_graph` response includes an additive\n`graph_staleness` object comparing this commit against the cached\ngraph blob's pinned commit. Omit to keep the previous response\nshape (no `graph_staleness` field). Empty/whitespace values are\nnormalized to `None` so clients that serialize every field as `\"\"`\ndon't accidentally trigger staleness computation. `caller_commit`\nand `currentHead` are accepted as aliases.",
+          "nullable": true,
+          "type": "string"
+        },
         "direction": {
           "default": null,
           "description": "Edge direction filter for `neighbors`: `incoming`, `outgoing`, or omit for both.",
