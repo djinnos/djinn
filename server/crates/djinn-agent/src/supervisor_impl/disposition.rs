@@ -403,9 +403,45 @@ mod tests {
 
     #[test]
     fn noop_first_time_nudges() {
+        assert_eq!(NUDGE_CAP, 2, "the production no-op nudge cap is locked");
         assert_eq!(
             decide_run_disposition(RunProgress::NoOp, 0, NUDGE_CAP),
             RunDisposition::Nudge
+        );
+    }
+
+    #[test]
+    fn noop_disposition_semantics_are_locked() {
+        assert_eq!(NUDGE_CAP, 2, "do not change the no-op nudge budget");
+        assert_eq!(
+            decide_run_disposition(RunProgress::Productive, 0, NUDGE_CAP),
+            RunDisposition::Proceed,
+            "productive runs must continue to proceed"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 0, NUDGE_CAP),
+            RunDisposition::Nudge,
+            "first no-op still nudges"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 1, NUDGE_CAP),
+            RunDisposition::Nudge,
+            "second no-op still nudges"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 2, NUDGE_CAP),
+            RunDisposition::Close,
+            "at the cap, no-op closes"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 3, NUDGE_CAP),
+            RunDisposition::Close,
+            "over the cap, no-op closes"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::Inconclusive, 0, NUDGE_CAP),
+            RunDisposition::Close,
+            "inconclusive remains a conservative close"
         );
     }
 
