@@ -6,6 +6,11 @@ pub const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 
 const DISPATCH_ATTEMPTS_TOTAL: &str = "djinn_dispatch_attempts_total";
 const DISPATCH_OUTCOMES: [&str; 5] = ["ok", "cooldown", "cap", "breaker", "error"];
+const BREAKER_TRIPS_TOTAL: &str = "djinn_breaker_trips_total";
+const BREAKER_STATE: &str = "djinn_breaker_state";
+const ZOMBIE_REAPS_TOTAL: &str = "djinn_zombie_reaps_total";
+const ZOMBIE_REAP_KINDS: [&str; 3] = ["startup", "periodic", "stall"];
+const LEAD_ESCALATIONS_TOTAL: &str = "djinn_lead_escalations_total";
 
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
@@ -16,6 +21,36 @@ static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 /// taking application locks or requiring an async runtime.
 pub fn init() -> Result<(), String> {
     handle().map(|_| ())
+}
+
+pub mod breaker {
+    /// Increment the breaker-trip counter. Synchronous and non-async by design.
+    pub fn increment_trip() {
+        metrics::counter!(super::BREAKER_TRIPS_TOTAL).increment(1);
+    }
+
+    /// Set the scrape-time breaker-state gauge for a `(scope, model)` bucket.
+    pub fn set_state(scope: &str, model: &str, value: f64) {
+        metrics::gauge!(super::BREAKER_STATE, "scope" => scope.to_owned(), "model" => model.to_owned()).set(value);
+    }
+}
+
+pub mod zombie {
+    pub const KIND_STARTUP: &str = "startup";
+    pub const KIND_PERIODIC: &str = "periodic";
+    pub const KIND_STALL: &str = "stall";
+
+    /// Increment the zombie-reap counter for one of the stable kind labels.
+    pub fn increment_reap(kind: &'static str) {
+        metrics::counter!(super::ZOMBIE_REAPS_TOTAL, "kind" => kind).increment(1);
+    }
+}
+
+pub mod lead {
+    /// Increment the Lead-escalation counter. Synchronous and non-async by design.
+    pub fn increment_escalation() {
+        metrics::counter!(super::LEAD_ESCALATIONS_TOTAL).increment(1);
+    }
 }
 
 /// Render the current registry in Prometheus text format.
@@ -50,6 +85,27 @@ fn register_metrics() {
     for outcome in DISPATCH_OUTCOMES {
         metrics::counter!(DISPATCH_ATTEMPTS_TOTAL, "outcome" => outcome).absolute(0);
     }
+    metrics::describe_counter!(
+        BREAKER_TRIPS_TOTAL,
+        "Circuit-breaker trips at the authoritative closed-to-open transition."
+    );
+    metrics::counter!(BREAKER_TRIPS_TOTAL).absolute(0);
+    metrics::describe_gauge!(
+        BREAKER_STATE,
+        "Circuit-breaker state by scope and model: Closed=0.0, HalfOpen=0.5, Open=1.0."
+    );
+    metrics::describe_counter!(
+        ZOMBIE_REAPS_TOTAL,
+        "Zombie reaps partitioned by reaper kind."
+    );
+    for kind in ZOMBIE_REAP_KINDS {
+        metrics::counter!(ZOMBIE_REAPS_TOTAL, "kind" => kind).absolute(0);
+    }
+    metrics::describe_counter!(
+        LEAD_ESCALATIONS_TOTAL,
+        "Lead escalation requests recorded by the coordinator."
+    );
+    metrics::counter!(LEAD_ESCALATIONS_TOTAL).absolute(0);
 }
 
 pub mod dispatch {
@@ -115,5 +171,34 @@ mod tests {
 
         let rendered = render().unwrap();
         assert!(rendered.contains("djinn_dispatch_attempts_total{outcome=\"ok\"}"));
+    }
+
+    #[test]
+    fn breaker_state_gauge_renders_scope_and_model() {
+        init().unwrap();
+
+        breaker::set_state("user-1", "model-a", 0.5);
+
+        let rendered = render().unwrap();
+        assert!(rendered.contains("djinn_breaker_state"));
+        assert!(rendered.contains("model-a"));
+        assert!(rendered.contains("user-1"));
+        assert!(rendered.contains(" 0.5"));
+    }
+
+    #[test]
+    fn zombie_and_lead_counters_render() {
+        init().unwrap();
+
+        zombie::increment_reap(zombie::KIND_STARTUP);
+        zombie::increment_reap(zombie::KIND_PERIODIC);
+        zombie::increment_reap(zombie::KIND_STALL);
+        lead::increment_escalation();
+
+        let rendered = render().unwrap();
+        for kind in ZOMBIE_REAP_KINDS {
+            assert!(rendered.contains(&format!("djinn_zombie_reaps_total{{kind=\"{kind}\"}}")));
+        }
+        assert!(rendered.contains("djinn_lead_escalations_total"));
     }
 }

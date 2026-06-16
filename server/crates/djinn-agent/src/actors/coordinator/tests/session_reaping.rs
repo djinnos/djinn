@@ -1,5 +1,18 @@
 use super::*;
 
+fn rendered_counter_value(metric: &str, kind: &str) -> f64 {
+    djinn_telemetry::init().unwrap();
+    let rendered = djinn_telemetry::render().unwrap();
+    let prefix = format!("{metric}{{kind=\"{kind}\"}}");
+    rendered
+        .lines()
+        .find_map(|line| {
+            let value = line.strip_prefix(&prefix)?.trim();
+            value.parse::<f64>().ok()
+        })
+        .unwrap_or(0.0)
+}
+
 // ── Model failover via the health circuit-breaker ────────────────────────
 
 /// A model tripped on a stall is skipped by `try_dispatch_to_pool`, which
@@ -178,6 +191,7 @@ async fn zombie_zero_token_session_is_reaped_on_db_truth() {
     let runtime = RecordingRuntimeOps::new(true);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.runtime_ops = Some(Arc::new(runtime.clone()));
+    let before_metric = rendered_counter_value("djinn_zombie_reaps_total", "stall");
     actor.reap_zombie_sessions().await;
 
     assert_eq!(
@@ -185,6 +199,7 @@ async fn zombie_zero_token_session_is_reaped_on_db_truth() {
         vec![run_id.to_string()],
         "zombie reaper must best-effort delete the task-run Job using DB session.task_run_id, even when teardown fails"
     );
+    assert!(rendered_counter_value("djinn_zombie_reaps_total", "stall") - before_metric >= 1.0);
 
     assert!(
         !session_repo
@@ -959,6 +974,7 @@ async fn stale_resource_sweep_runs_taskrun_job_backstop() {
     let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
 
+    let before_metric = rendered_counter_value("djinn_zombie_reaps_total", "periodic");
     health::sweep_stale_resources(&db, &app_state).await;
 
     assert_eq!(
@@ -966,6 +982,7 @@ async fn stale_resource_sweep_runs_taskrun_job_backstop() {
         vec![periodic_run_id.to_string()],
         "periodic stale-resource sweep must run the K8s task-run Job backstop"
     );
+    assert!(rendered_counter_value("djinn_zombie_reaps_total", "periodic") - before_metric >= 1.0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -989,6 +1006,7 @@ async fn startup_reconcile_runs_taskrun_job_backstop() {
     let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
 
+    let before_metric = rendered_counter_value("djinn_zombie_reaps_total", "startup");
     health::reap_orphaned_taskrun_jobs_for_startup(&db, &app_state).await;
 
     assert_eq!(
@@ -996,6 +1014,7 @@ async fn startup_reconcile_runs_taskrun_job_backstop() {
         vec![startup_run_id.to_string()],
         "startup reconcile must run the K8s task-run Job backstop before periodic intervals"
     );
+    assert!(rendered_counter_value("djinn_zombie_reaps_total", "startup") - before_metric >= 1.0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
