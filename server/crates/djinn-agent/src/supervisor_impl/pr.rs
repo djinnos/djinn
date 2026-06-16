@@ -1039,7 +1039,7 @@ fn is_concurrent_push_race(err: &GitError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        NOOP_CLOSE_REASON, PR_ALREADY_EXISTS_HINT, TASK_OUTCOME_BODY_EXCERPT_BYTES,
+        NOOP_CLOSE_REASON, PR_ALREADY_EXISTS_HINT, TASK_OUTCOME_BODY_EXCERPT_BYTES, close_noop,
         handle_noop_disposition, is_concurrent_push_race, pr_open_failure_outcome,
         pr_open_untyped_failure_outcome, should_close_noop,
         should_route_settled_noop_without_live_mover,
@@ -1345,6 +1345,80 @@ mod tests {
         // or trailing whitespace that would corrupt the `close_reason` column.
         assert!(!NOOP_CLOSE_REASON.contains('\n'));
         assert_eq!(NOOP_CLOSE_REASON, NOOP_CLOSE_REASON.trim());
+    }
+
+    #[tokio::test]
+    async fn close_noop_returns_historical_closed_outcome_for_no_mover_zero_diff() {
+        let (repo, task) = no_op_nudge_fixture().await;
+        let mut exhausted = task.clone();
+        exhausted.continuation_count = NUDGE_CAP;
+        let signals = RunProgressSignals {
+            commits_ahead: 0,
+            files_changed: 0,
+            ac_newly_satisfied: 0,
+        };
+
+        let outcome = close_noop(&exhausted, &repo, true, &signals).await;
+
+        match outcome {
+            TaskRunOutcome::Closed { reason } => assert_eq!(reason, NOOP_CLOSE_REASON),
+            other => panic!("expected historical Closed outcome, got {other:?}"),
+        }
+        let closed = repo
+            .get(&exhausted.id)
+            .await
+            .expect("reload task")
+            .expect("task exists");
+        assert_eq!(closed.status, "closed");
+        assert_eq!(closed.close_reason.as_deref(), Some(NOOP_CLOSE_REASON));
+    }
+
+    #[tokio::test]
+    async fn close_noop_skips_historical_close_for_no_mover_non_zero_diff() {
+        let (repo, task) = no_op_nudge_fixture().await;
+        let signals = RunProgressSignals {
+            commits_ahead: 0,
+            files_changed: 1,
+            ac_newly_satisfied: 0,
+        };
+
+        let outcome = close_noop(&task, &repo, true, &signals).await;
+
+        assert!(
+            matches!(&outcome, TaskRunOutcome::Escalated { reason } if reason.contains("close skipped")),
+            "non-zero-diff no-mover must not produce the historical Closed outcome: {outcome:?}"
+        );
+        let reloaded = repo
+            .get(&task.id)
+            .await
+            .expect("reload task")
+            .expect("task exists");
+        assert_eq!(reloaded.status, task.status);
+        assert_eq!(reloaded.close_reason, None);
+    }
+
+    #[tokio::test]
+    async fn close_noop_skips_historical_close_when_live_mover_predicate_disagrees() {
+        let (repo, task) = no_op_nudge_fixture().await;
+        let signals = RunProgressSignals {
+            commits_ahead: 0,
+            files_changed: 0,
+            ac_newly_satisfied: 0,
+        };
+
+        let outcome = close_noop(&task, &repo, false, &signals).await;
+
+        assert!(
+            matches!(&outcome, TaskRunOutcome::Escalated { reason } if reason.contains("close skipped")),
+            "live-mover verdict must keep task out of the historical Closed outcome: {outcome:?}"
+        );
+        let reloaded = repo
+            .get(&task.id)
+            .await
+            .expect("reload task")
+            .expect("task exists");
+        assert_eq!(reloaded.status, task.status);
+        assert_eq!(reloaded.close_reason, None);
     }
 
     /// (a) A no-mover + zero-diff task routes through the historical close
