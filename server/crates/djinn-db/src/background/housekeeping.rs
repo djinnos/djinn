@@ -43,6 +43,9 @@ pub(crate) struct ProjectHousekeepingReport {
     pub orphan_notes_flagged: u64,
     pub rebuilt_content_hashes: u64,
     pub repaired_broken_wikilinks: u64,
+    /// Extracted notes (`case`/`pattern`/`pitfall`) whose confidence crossed
+    /// below `STALE_CITATION` during this tick's decay pass.
+    pub decayed_notes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +55,7 @@ pub(crate) struct HousekeepingTickReport {
     pub total_orphan_notes_flagged: u64,
     pub total_rebuilt_content_hashes: u64,
     pub total_repaired_broken_wikilinks: u64,
+    pub total_decayed_notes: u64,
 }
 
 impl HousekeepingTickReport {
@@ -72,6 +76,7 @@ impl HousekeepingTickReport {
             .iter()
             .map(|report| report.repaired_broken_wikilinks)
             .sum();
+        let total_decayed_notes = project_reports.iter().map(|report| report.decayed_notes).sum();
 
         Self {
             project_reports,
@@ -79,6 +84,7 @@ impl HousekeepingTickReport {
             total_orphan_notes_flagged,
             total_rebuilt_content_hashes,
             total_repaired_broken_wikilinks,
+            total_decayed_notes,
         }
     }
 }
@@ -231,6 +237,7 @@ async fn run_tick(db: &Database, event_bus: &EventBus) -> anyhow::Result<Houseke
             orphan_notes_flagged = report.orphan_notes_flagged,
             rebuilt_content_hashes = report.rebuilt_content_hashes,
             repaired_broken_wikilinks = report.repaired_broken_wikilinks,
+            decayed_notes = report.decayed_notes,
             "knowledge base housekeeping project report"
         );
 
@@ -244,6 +251,7 @@ async fn run_tick(db: &Database, event_bus: &EventBus) -> anyhow::Result<Houseke
         total_orphan_notes_flagged = report.total_orphan_notes_flagged,
         total_rebuilt_content_hashes = report.total_rebuilt_content_hashes,
         total_repaired_broken_wikilinks = report.total_repaired_broken_wikilinks,
+        total_decayed_notes = report.total_decayed_notes,
         "knowledge base housekeeping tick summary"
     );
 
@@ -292,6 +300,12 @@ async fn run_project_housekeeping(
     let repaired_broken_wikilinks = note_repo
         .repair_broken_wikilinks(&project.id, path, BROKEN_WIKILINK_MIN_SCORE)
         .await?;
+    let decayed_notes = note_repo
+        .decay_stale_extracted_notes(
+            &project.id,
+            crate::repositories::note::lifecycle::DEFAULT_DECAY_WINDOW_DAYS,
+        )
+        .await?;
 
     Ok(ProjectHousekeepingReport {
         project_id: project.id.clone(),
@@ -300,6 +314,7 @@ async fn run_project_housekeeping(
         orphan_notes_flagged,
         rebuilt_content_hashes,
         repaired_broken_wikilinks,
+        decayed_notes,
     })
 }
 
@@ -368,6 +383,7 @@ mod tests {
                 orphan_notes_flagged: 2,
                 rebuilt_content_hashes: 3,
                 repaired_broken_wikilinks: 4,
+                decayed_notes: 5,
             },
             ProjectHousekeepingReport {
                 project_id: "project-b".to_string(),
@@ -376,6 +392,7 @@ mod tests {
                 orphan_notes_flagged: 20,
                 rebuilt_content_hashes: 30,
                 repaired_broken_wikilinks: 40,
+                decayed_notes: 50,
             },
         ]);
 
@@ -384,6 +401,7 @@ mod tests {
         assert_eq!(report.total_orphan_notes_flagged, 22);
         assert_eq!(report.total_rebuilt_content_hashes, 33);
         assert_eq!(report.total_repaired_broken_wikilinks, 44);
+        assert_eq!(report.total_decayed_notes, 55);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

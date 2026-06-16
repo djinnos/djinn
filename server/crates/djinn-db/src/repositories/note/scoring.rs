@@ -26,6 +26,33 @@ pub const STALE_CITATION: f64 = 0.3;
 pub const USER_CONFIRM: f64 = 0.95;
 pub const CONTRADICTION: f64 = 0.1;
 
+/// Bayesian signal applied per decay iteration to stale extracted notes.
+///
+/// Chosen between `0.1` (`CONTRADICTION`) and `0.3` (`STALE_CITATION`) so a
+/// single `bayesian_update` step moves the posterior toward the floor without
+/// collapsing it in one shot. Repeated application drives an unaccessed
+/// extracted note below `STALE_CITATION` within the per-tick iteration cap.
+pub const STALE_DECAY_SIGNAL: f64 = 0.15;
+
+/// Scales the stale-decay signal with the number of days elapsed since the
+/// note was last accessed. Notes just past the window get a gentler signal;
+/// long-dormant notes get the full `STALE_DECAY_SIGNAL`. The result is clamped
+/// to `[0.1, STALE_DECAY_SIGNAL]` so the signal never exceeds the configured
+/// ceiling and never drops to a value that would be a no-op underflow.
+///
+/// `days` is expected to be `>= 0`; negative values are clamped to `0`.
+pub fn decay_signal_for_elapsed_days(days: f64) -> f64 {
+    let days = days.max(0.0);
+    // Linear ramp from 0.1 at the window boundary to STALE_DECAY_SIGNAL once
+    // the note is ~90 days past the window. The ramp keeps recent-window
+    // boundary notes from being slammed while ensuring very stale notes hit
+    // the full signal quickly.
+    let ramp_span = 90.0_f64;
+    let t = (days / ramp_span).clamp(0.0, 1.0);
+    let scaled = CONTRADICTION + t * (STALE_DECAY_SIGNAL - CONTRADICTION);
+    scaled.clamp(CONTRADICTION, STALE_DECAY_SIGNAL)
+}
+
 pub fn bayesian_update(prior: f64, signal: f64) -> f64 {
     let posterior = (prior * signal) / (prior * signal + (1.0 - prior) * (1.0 - signal));
     posterior.clamp(CONFIDENCE_FLOOR, CONFIDENCE_CEILING)

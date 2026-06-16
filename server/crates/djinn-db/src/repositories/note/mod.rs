@@ -18,6 +18,7 @@ mod embeddings;
 mod file_helpers;
 mod graph;
 mod housekeeping;
+pub(crate) mod lifecycle;
 mod indexing;
 mod lexical_search;
 pub mod replay_validation;
@@ -61,7 +62,7 @@ pub use replay_validation::{
 pub use rrf::rrf_fuse;
 pub use scoring::{
     CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
-    USER_CONFIRM, bayesian_update,
+    STALE_DECAY_SIGNAL, USER_CONFIRM, bayesian_update, decay_signal_for_elapsed_days,
 };
 
 use file_helpers::build_catalog;
