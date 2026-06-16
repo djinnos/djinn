@@ -113,9 +113,30 @@ impl DjinnMcpServer {
         ctx: &ProjectCtx,
         params: &mut CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
+        // jc47: capture the caller commit before pre-resolve potentially
+        // short-circuits. The field is already normalized (blank → None)
+        // by `code_graph` / the chat extension before reaching here.
+        let caller_head = params
+            .current_head
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
         match Self::pre_resolve_key(self.state.repo_graph().as_ref(), ctx, params).await? {
             None => {}
-            Some(short_circuit) => return Ok(short_circuit),
+            Some(mut short_circuit) => {
+                if let Some(ref head) = caller_head {
+                    attach_graph_staleness(
+                        self.state.repo_graph().as_ref(),
+                        ctx,
+                        head,
+                        &mut short_circuit,
+                    )
+                    .await;
+                }
+                return Ok(short_circuit);
+            }
         }
 
         let timeout = code_graph_dispatch_timeout();
@@ -161,7 +182,24 @@ impl DjinnMcpServer {
             ),
         }
 
-        result
+        // jc47: attach per-query staleness metadata on success. Only
+        // populated when the caller supplied a commit; a missing or
+        // failed status lookup yields a non-stale-safe shape rather
+        // than erroring. This never blocks or triggers re-warming.
+        if let Ok(mut response) = result {
+            if let Some(ref head) = caller_head {
+                attach_graph_staleness(
+                    self.state.repo_graph().as_ref(),
+                    ctx,
+                    head,
+                    &mut response,
+                )
+                .await;
+            }
+            Ok(response)
+        } else {
+            result
+        }
     }
 
     /// Inner op-string match. Lives here so [`Self::dispatch_code_graph`]
@@ -266,6 +304,7 @@ impl DjinnMcpServer {
                     return Ok(Some(CodeGraphResponse::Ambiguous(AmbiguousResponse {
                         candidates,
                         next_step: None,
+                        graph_staleness: None,
                     })));
                 }
                 ResolveOutcome::NotFound => {
@@ -275,6 +314,7 @@ impl DjinnMcpServer {
                             kind_hint: kind_hint.map(str::to_string),
                         },
                         next_step: None,
+                        graph_staleness: None,
                     })));
                 }
             }
@@ -301,6 +341,7 @@ impl DjinnMcpServer {
                         return Ok(Some(CodeGraphResponse::Ambiguous(AmbiguousResponse {
                             candidates,
                             next_step: None,
+                            graph_staleness: None,
                         })));
                     }
                     ResolveOutcome::NotFound => {
@@ -310,6 +351,7 @@ impl DjinnMcpServer {
                                 kind_hint: kind_hint.map(str::to_string),
                             },
                             next_step: None,
+                            graph_staleness: None,
                         })));
                     }
                 }

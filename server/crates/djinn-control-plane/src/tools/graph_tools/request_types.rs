@@ -324,6 +324,16 @@ pub struct CodeGraphParams {
     /// internal traversal still runs to completion.
     #[serde(default, alias = "pageLimit")]
     pub page_limit: Option<i64>,
+    /// jc47: the caller's current HEAD / git commit SHA. When supplied,
+    /// every successful `code_graph` response includes an additive
+    /// `graph_staleness` object comparing this commit against the cached
+    /// graph blob's pinned commit. Omit to keep the previous response
+    /// shape (no `graph_staleness` field). Empty/whitespace values are
+    /// normalized to `None` so clients that serialize every field as `""`
+    /// don't accidentally trigger staleness computation. `caller_commit`
+    /// and `currentHead` are accepted as aliases.
+    #[serde(default, alias = "caller_commit", alias = "currentHead")]
+    pub current_head: Option<String>,
 }
 
 impl CodeGraphParams {
@@ -378,6 +388,7 @@ impl CodeGraphParams {
         clear(&mut self.level);
         clear(&mut self.target);
         clear(&mut self.tests);
+        clear(&mut self.current_head);
         clear(&mut self.route_id);
         clear(&mut self.method);
         clear(&mut self.path);

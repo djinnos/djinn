@@ -1473,6 +1473,7 @@
                 }],
             },
             next_step: None,
+            graph_staleness: None,
         }))
         .expect("serialize workspaces response");
 

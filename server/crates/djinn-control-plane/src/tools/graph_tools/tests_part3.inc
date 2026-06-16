@@ -12,6 +12,7 @@
             }],
             workspace_hint: None,
             next_step: None,
+            graph_staleness: None,
         })
     }
 
@@ -21,6 +22,7 @@
             hits: vec![],
             workspace_hint: None,
             next_step: None,
+            graph_staleness: None,
         })
     }
 
@@ -29,6 +31,7 @@
             nodes: vec![],
             workspace_hint: None,
             next_step: None,
+            graph_staleness: None,
         })
     }
 
@@ -37,6 +40,7 @@
             cycles: vec![],
             workspace_hint: None,
             next_step: None,
+            graph_staleness: None,
         })
     }
 
@@ -58,6 +62,7 @@
             summary_only: None,
             by_depth_counts: None,
             next_step: None,
+            graph_staleness: None,
         })
     }
 
@@ -99,6 +104,7 @@
             summary_only: None,
             by_depth_counts: None,
             next_step: None,
+            graph_staleness: None,
         })
     }
 
@@ -106,6 +112,7 @@
         CodeGraphResponse::Describe(DescribeResponse {
             description: None,
             next_step: None,
+            graph_staleness: None,
         })
     }
 
@@ -131,6 +138,7 @@
                 processes: vec![],
             },
             next_step: None,
+            graph_staleness: None,
         })
     }
 
@@ -139,6 +147,7 @@
             orphans: vec![],
             workspace_hint: None,
             next_step: None,
+            graph_staleness: None,
         })
     }
 
@@ -354,6 +363,7 @@
                         doc_coverage_pct: 0.0,
                     },
                     next_step: None,
+                    graph_staleness: None,
                 }),
             ),
         ];
@@ -704,6 +714,7 @@
             },
             workspace_hint: None,
             next_step: None,
+            graph_staleness: None,
         }
     }
 

@@ -793,6 +793,7 @@
             summary_only: None,
             by_depth_counts: None,
             page_limit: None,
+            current_head: None,
         }
     }
 
