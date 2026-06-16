@@ -1555,6 +1555,9 @@ impl TaskRunSupervisor {
                         tokens_in,
                         tokens_out,
                     } => {
+                        // Session-level budget parking sets `sessions.parked_reason` downstream,
+                        // but it is not a terminal task park event; `djinn_tasks_parked_total`
+                        // is counted only by the coordinator path that parks/closes the task.
                         tracing::info!(
                             target: "djinn_supervisor::budget_park",
                             kind = "budget_park",

@@ -384,10 +384,17 @@ impl CoordinatorActor {
         // callsite) can't double-spawn.
         let decision = {
             let mut guard = self.auto_merge_tracker.lock().unwrap();
-            decide_auto_merge_tick(&mut guard, task_id)
+            let decision = decide_auto_merge_tick(&mut guard, task_id);
+            djinn_telemetry::pr_poller::set_tracked(guard.len());
+            decision
         };
         match decision {
-            AutoMergeTickDecision::Return(state) => return state,
+            AutoMergeTickDecision::Return(state) => {
+                if matches!(state, AutoMergeFastPathState::Reopen) {
+                    djinn_telemetry::pr_poller::increment_merge_failure();
+                }
+                return state;
+            }
             AutoMergeTickDecision::Spawn => {}
         }
 
@@ -411,7 +418,12 @@ impl CoordinatorActor {
                 &project_id,
             )
             .await;
-            tracker.lock().unwrap().insert(task_id, final_state);
+            let tracked = {
+                let mut guard = tracker.lock().unwrap();
+                guard.insert(task_id, final_state);
+                guard.len()
+            };
+            djinn_telemetry::pr_poller::set_tracked(tracked);
         });
 
         AutoMergeFastPathState::InFlight

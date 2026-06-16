@@ -367,6 +367,12 @@ impl CoordinatorActor {
     ) {
         let task_repo = self.task_repo();
         let cleanup_action = action.clone();
+        let increments_reopen = matches!(
+            cleanup_action,
+            TransitionAction::PrCiFailed
+                | TransitionAction::PrConflict
+                | TransitionAction::PrChangesRequested
+        );
         if let Err(e) = task_repo
             .transition(task_id, action, "system", "pr_poller", reason, None)
             .await
@@ -378,6 +384,9 @@ impl CoordinatorActor {
             );
             return;
         }
+        if increments_reopen {
+            djinn_telemetry::task::increment_reopen();
+        }
         // Drop any clean-merge fast-path tracker entry for a now-terminal task,
         // so a background merge that finished after the PR closed doesn't leave a
         // dangling `Merged`/`Reopen` entry that is never consumed. Bounded leak
@@ -386,7 +395,12 @@ impl CoordinatorActor {
             cleanup_action,
             TransitionAction::PrMerge | TransitionAction::ForceClose
         ) {
-            self.auto_merge_tracker.lock().unwrap().remove(task_id);
+            let tracked = {
+                let mut guard = self.auto_merge_tracker.lock().unwrap();
+                guard.remove(task_id);
+                guard.len()
+            };
+            djinn_telemetry::pr_poller::set_tracked(tracked);
         }
         // Branch hygiene: once the task is closed (merged or force-closed via
         // any pr_poller path), delete the task branch on both the local mirror

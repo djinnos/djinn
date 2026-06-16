@@ -231,6 +231,8 @@ impl CoordinatorActor {
                                 error = %e,
                                 "CoordinatorActor: failed to re-queue branch-missing approved task"
                             );
+                        } else {
+                            djinn_telemetry::task::increment_reopen();
                         }
                         self.pr_errors.remove(&task.project_id);
                         self.publish_status();
