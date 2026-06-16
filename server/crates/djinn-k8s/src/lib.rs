@@ -13,6 +13,7 @@ pub mod job;
 pub mod runtime;
 pub mod secret;
 pub mod token_review;
+pub mod verification_job;
 pub mod verification_test_job;
 pub mod warm_job;
 
@@ -27,5 +28,6 @@ pub use graph_warmer::{
     WarmJobWatcher,
 };
 pub use runtime::KubernetesRuntime;
+pub use verification_job::build_verification_job;
 pub use verification_test_job::build_verification_test_job;
 pub use warm_job::build_warm_job;

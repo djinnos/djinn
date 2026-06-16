@@ -82,6 +82,28 @@ pub trait GraphWarmerService: Send + Sync {
         ))
     }
 
+    /// Dispatch a one-shot pre-PR verification run in the project's image,
+    /// writing per-command results + pass/fail to the `verification_runs` row
+    /// identified by `run_id`. The Job clones `target_branch`, fetches +
+    /// checks out `task_branch`, then runs the real verification pipeline.
+    /// Fire-and-forget: returns once the Job is created, not once it finishes
+    /// (the server polls the row).
+    ///
+    /// Default impl errors — only a backend that owns a kube client + runtime
+    /// config (the `K8sGraphWarmer`) can dispatch the Job. Non-Kubernetes
+    /// runtimes run verification inline on the host instead.
+    async fn dispatch_verification(
+        &self,
+        _run_id: &str,
+        _project_id: &str,
+        _task_branch: &str,
+        _target_branch: &str,
+    ) -> Result<(), WarmerError> {
+        Err(WarmerError::Backend(
+            "verification dispatch requires the kubernetes runtime".to_string(),
+        ))
+    }
+
     /// Provision an on-demand backing service (Phase C): create a Pod + ClusterIP
     /// Service for one (task, service-type), owned by the task-run Job so it's
     /// GC'd with the task. Returns the connection info the worker exports.

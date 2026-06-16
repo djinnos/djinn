@@ -221,6 +221,18 @@ impl McpState {
             .await
     }
 
+    pub async fn dispatch_verification(
+        &self,
+        run_id: &str,
+        project_id: &str,
+        task_branch: &str,
+        target_branch: &str,
+    ) -> Result<(), String> {
+        self.runtime
+            .dispatch_verification(run_id, project_id, task_branch, target_branch)
+            .await
+    }
+
     pub async fn provision_backing_service(
         &self,
         req: crate::bridge::ProvisionServiceRequest,
@@ -333,6 +345,15 @@ pub mod stubs {
         async fn trigger_graph_warm(&self, _: &str) {}
         async fn apply_user_model_change(&self) {}
         async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_verification(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<(), String> {
             Ok(())
         }
         async fn provision_backing_service(

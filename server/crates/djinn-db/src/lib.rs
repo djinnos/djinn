@@ -116,5 +116,6 @@ pub use repositories::{
     verification_result::{
         VerificationResultRepository, VerificationStepInsert, VerificationStepRow,
     },
+    verification_run::{VerificationRun, VerificationRunRepository, VerificationRunStatus},
     verification_test::{VerificationTestRepository, VerificationTestRun, VerificationTestStatus},
 };
