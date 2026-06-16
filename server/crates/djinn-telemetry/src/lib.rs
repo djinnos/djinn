@@ -16,6 +16,15 @@ const BREAKER_STATE: &str = "djinn_breaker_state";
 const ZOMBIE_REAPS_TOTAL: &str = "djinn_zombie_reaps_total";
 const ZOMBIE_REAP_KINDS: [&str; 3] = ["startup", "periodic", "stall"];
 const LEAD_ESCALATIONS_TOTAL: &str = "djinn_lead_escalations_total";
+const JIT_PITFALL_HINTS_TOTAL: &str = "djinn_jit_pitfall_hints_total";
+const JIT_PITFALL_OUTCOMES: [&str; 6] = [
+    "disabled",
+    "non_first_modification",
+    "eligible_search",
+    "injected",
+    "empty",
+    "error",
+];
 
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
@@ -55,6 +64,24 @@ pub mod lead {
     /// Increment the Lead-escalation counter. Synchronous and non-async by design.
     pub fn increment_escalation() {
         metrics::counter!(super::LEAD_ESCALATIONS_TOTAL).increment(1);
+    }
+}
+
+pub mod jit_pitfalls {
+    pub const OUTCOME_DISABLED: &str = "disabled";
+    pub const OUTCOME_NON_FIRST_MODIFICATION: &str = "non_first_modification";
+    pub const OUTCOME_ELIGIBLE_SEARCH: &str = "eligible_search";
+    pub const OUTCOME_INJECTED: &str = "injected";
+    pub const OUTCOME_EMPTY: &str = "empty";
+    pub const OUTCOME_ERROR: &str = "error";
+
+    /// Increment the JIT-pitfall hint counter for one stable outcome label.
+    ///
+    /// This intentionally accepts only `'static` labels so hot-path callers keep
+    /// metric cardinality bounded. Rich metadata belongs in structured tracing
+    /// fields emitted next to this counter.
+    pub fn increment_outcome(outcome: &'static str) {
+        metrics::counter!(super::JIT_PITFALL_HINTS_TOTAL, "outcome" => outcome).increment(1);
     }
 }
 
@@ -131,6 +158,13 @@ fn register_metrics() {
         "Lead escalation requests recorded by the coordinator."
     );
     metrics::counter!(LEAD_ESCALATIONS_TOTAL).absolute(0);
+    metrics::describe_counter!(
+        JIT_PITFALL_HINTS_TOTAL,
+        "JIT pitfall hint path observations partitioned by safe outcome labels."
+    );
+    for outcome in JIT_PITFALL_OUTCOMES {
+        metrics::counter!(JIT_PITFALL_HINTS_TOTAL, "outcome" => outcome).absolute(0);
+    }
 }
 
 pub mod dispatch {
@@ -251,6 +285,14 @@ mod tests {
                 "missing dispatch outcome label {outcome} in:\n{rendered}"
             );
         }
+        for outcome in JIT_PITFALL_OUTCOMES {
+            assert!(
+                rendered.contains(&format!(
+                    "djinn_jit_pitfall_hints_total{{outcome=\"{outcome}\"}}"
+                )),
+                "missing JIT pitfall outcome label {outcome} in:\n{rendered}"
+            );
+        }
     }
 
     #[test]
@@ -319,6 +361,9 @@ mod tests {
         assert_sync_unit(|| dispatch::set_inflight_ledger_size(0));
         assert_sync_unit(|| dispatch::set_user_cap_utilization("user-sync", "model-sync", 0, 1));
         assert_sync_unit(|| slot_pool::set_slots(slot_pool::STATE_FREE, "model-sync", 0));
+        assert_sync_unit(|| {
+            jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_ELIGIBLE_SEARCH);
+        });
     }
 
     #[test]
@@ -344,11 +389,13 @@ mod tests {
         zombie::increment_reap(zombie::KIND_PERIODIC);
         zombie::increment_reap(zombie::KIND_STALL);
         lead::increment_escalation();
+        jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_INJECTED);
 
         let rendered = render().unwrap();
         for kind in ZOMBIE_REAP_KINDS {
             assert!(rendered.contains(&format!("djinn_zombie_reaps_total{{kind=\"{kind}\"}}")));
         }
         assert!(rendered.contains("djinn_lead_escalations_total"));
+        assert!(rendered.contains("djinn_jit_pitfall_hints_total{outcome=\"injected\"}"));
     }
 }

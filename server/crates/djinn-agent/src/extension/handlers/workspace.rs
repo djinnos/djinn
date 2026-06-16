@@ -662,7 +662,8 @@ pub(crate) async fn call_code_search(
 /// run a scoped pitfall/pattern search over the touched paths and append the
 /// top-2 as a transient `jit_pitfalls` field on the response JSON. A miss,
 /// an error, or a non-first modification leaves `response` untouched. When the
-/// gate is OFF this is a single cheap env read with zero further cost.
+/// gate is OFF this records a structured disabled telemetry outcome but does no
+/// DB search and appends no hint.
 async fn maybe_append_pitfall_hint(
     response: serde_json::Value,
     state: &AgentContext,
