@@ -70,7 +70,7 @@ pub(crate) fn matching_task_dispatch_pause<'a>(
         .map(|pause| ("user", Some(creator.to_owned()), pause))
 }
 
-pub(crate) async fn load_dispatch_pause_state(
+pub async fn load_dispatch_pause_state(
     db: Database,
     events: EventBus,
 ) -> djinn_db::Result<DispatchPauseState> {

@@ -1029,6 +1029,15 @@ impl AppState {
                 self.inner.lsp.clone(),
             ));
 
+        self.set_agent_handles_for_tests(pool, coordinator).await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_agent_handles_for_tests(
+        &self,
+        pool: SlotPoolHandle,
+        coordinator: CoordinatorHandle,
+    ) {
         *self.inner.pool.lock().await = Some(pool);
         *self.inner.coordinator.lock().await = Some(coordinator);
     }
