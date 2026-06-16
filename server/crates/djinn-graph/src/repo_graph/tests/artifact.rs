@@ -1,3 +1,5 @@
+// djinn:allow-oversize — legacy test module over size-guard threshold; split when touched substantively.
+
 use super::*;
 
 /// v8 end-to-end: simulate a rust-analyzer SCIP feed (no `ReadAccess`

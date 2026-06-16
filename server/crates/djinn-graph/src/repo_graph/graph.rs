@@ -1,3 +1,5 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
+
 //! `RepoDependencyGraph` — the in-memory petgraph-backed repo graph
 //! data structure plus its query/lookup/neighborhood helpers.
 //!
