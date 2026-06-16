@@ -1562,7 +1562,12 @@ mod inflight_ledger_tests {
                 SlotPoolConfig {
                     models: vec![ModelSlotConfig {
                         model_id: model_id.to_owned(),
-                        max_slots: 1,
+                        // Keep the pool ceiling above every 1..=5 per-user cap
+                        // exercised below so the stress test proves the
+                        // coordinator's cap admission path, not a single-slot
+                        // bottleneck in the test pool.
+                        max_slots: u32::try_from(WND1_READY_TASK_COUNT)
+                            .expect("wnd1 fixture slot ceiling fits u32"),
                         roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
                     }],
                     role_priorities: HashMap::from([(
@@ -1805,6 +1810,19 @@ mod inflight_ledger_tests {
                     obs.effective_count
                 );
             }
+            let max_instantaneous_count = observations
+                .iter()
+                .filter(|obs| {
+                    obs.creator_user_id == fixture.created_by_user_id
+                        && obs.model == fixture.model_id
+                })
+                .map(|obs| obs.effective_count)
+                .max()
+                .unwrap_or(0);
+            assert_eq!(
+                max_instantaneous_count, cap,
+                "cap {cap}: stress run should make the per-user cap, not the test pool, the limiting factor"
+            );
 
             assert_eq!(
                 actor.lock().await.inflight_dispatches.len(),
