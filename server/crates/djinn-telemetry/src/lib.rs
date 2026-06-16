@@ -22,8 +22,9 @@ const PR_POLLER_TRACKED: &str = "djinn_pr_poller_tracked";
 const MERGE_FAILURES_TOTAL: &str = "djinn_merge_failures_total";
 const SLOT_POOL_STATES: [&str; 2] = ["free", "busy"];
 const JIT_PITFALL_HINTS_TOTAL: &str = "djinn_jit_pitfall_hints_total";
-const JIT_PITFALL_OUTCOMES: [&str; 6] = [
-    "disabled",
+const JIT_PITFALL_OUTCOMES: [&str; 7] = [
+    "disabled_default_off",
+    "disabled_kill_switch",
     "non_first_modification",
     "eligible_search",
     "injected",
