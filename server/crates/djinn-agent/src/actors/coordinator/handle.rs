@@ -12,6 +12,7 @@ use super::actor::CoordinatorActor;
 use super::consolidation::DbConsolidationRunner;
 use super::messages::CoordinatorMessage;
 use super::types::*;
+use crate::supervisor_impl::LiveMoverSummary;
 
 const TRY_TRIGGER_DISPATCH_LOG_INTERVAL_SECS: u64 = 30;
 
@@ -198,6 +199,28 @@ impl CoordinatorHandle {
             reason: reason.to_owned(),
         })
         .await
+    }
+
+    /// Return the reusable non-PR live-mover summary for a task.
+    ///
+    /// This is the coordinator/API call surface for post-run and orphan-task
+    /// checks: callers ask the coordinator to collect hard runtime/board
+    /// evidence, then receive the pure supervisor-side summary without importing
+    /// PR-open disposition code.
+    #[allow(dead_code)]
+    pub(crate) async fn live_mover_summary(
+        &self,
+        task_id: &str,
+    ) -> Result<LiveMoverSummary, CoordinatorError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(CoordinatorMessage::CheckLiveMover {
+                task_id: task_id.to_owned(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| CoordinatorError::ActorDead)?;
+        rx.await.map_err(|_| CoordinatorError::NoResponse)?
     }
 
     /// Route a settled no-op task through the shared no-mover disposition path
