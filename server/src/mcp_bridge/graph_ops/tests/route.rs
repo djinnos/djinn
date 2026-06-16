@@ -196,6 +196,7 @@ fn route_exclusion_fixture_graph() -> RepoDependencyGraph {
         communities: vec![],
         processes: vec![],
         route_exclusion_config: RouteExclusionConfig::default(),
+        layout_positions: std::collections::BTreeMap::new(),
     };
     RepoDependencyGraph::from_artifact(&artifact)
 }
@@ -272,6 +273,7 @@ fn route_fixture_graph() -> RepoDependencyGraph {
         communities: vec![],
         processes: vec![],
         route_exclusion_config: Default::default(),
+        layout_positions: std::collections::BTreeMap::new(),
     };
     RepoDependencyGraph::from_artifact(&artifact)
 }

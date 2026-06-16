@@ -91,7 +91,13 @@ async fn run_tick(state: &AppState) {
         if !clone.join(".git").exists() {
             continue;
         }
-        match djinn_workspace::git_gc(&clone).await {
+        match djinn_workspace::gc_project_clone_under(
+            &djinn_core::paths::projects_root(),
+            &project.github_owner,
+            &project.github_repo,
+        )
+        .await
+        {
             Ok(()) => gc_clones += 1,
             Err(err) => tracing::warn!(
                 project_id = %project.id,
