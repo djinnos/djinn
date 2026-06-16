@@ -1906,3 +1906,817 @@ fn code_graph_workspace_traversal_keeps_seed_resolution_in_backend() {
         "listing/bounded ops can still use normal dispatch; only traversal seeds are special"
     );
 }
+
+// -----------------------------------------------------------------------
+// wraw: graph_staleness contract on the chat dispatch path.
+//
+// Mirrors the control-plane jc47 contract: when the caller passes
+// `current_head`, the chat dispatcher's successful response should
+// include an additive `graph_staleness` object comparing the trimmed
+// caller commit against the cached graph blob's pinned commit. The
+// flag is serve-stale-with-warning only: it never blocks the query and
+// never triggers graph re-warming. A missing caller commit, a missing
+// pinned commit, or a status lookup failure must NOT cause the field
+// to appear.
+// -----------------------------------------------------------------------
+
+#[derive(Clone)]
+struct StalenessDispatchStub {
+    neighbors: djinn_control_plane::bridge::NeighborsResult,
+    /// `pinned_commit` returned by `status()`. `None` mirrors an
+    /// un-warmed cache so tests can exercise the non-stale-safe path.
+    pinned_commit: Option<String>,
+}
+
+fn staleness_stub(pinned_commit: Option<&str>) -> StalenessDispatchStub {
+    StalenessDispatchStub {
+        neighbors: detailed_neighbors(),
+        pinned_commit: pinned_commit.map(str::to_string),
+    }
+}
+
+impl StalenessDispatchStub {
+    fn status_value(&self) -> djinn_control_plane::bridge::GraphStatus {
+        djinn_control_plane::bridge::GraphStatus {
+            project_id: "project-1".to_string(),
+            warmed: self.pinned_commit.is_some(),
+            last_warm_at: None,
+            pinned_commit: self.pinned_commit.clone(),
+            commits_since_pin: None,
+            route_parity_enabled: false,
+            route_exclusion_config: serde_json::Value::Null,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl djinn_control_plane::bridge::RepoGraphOps for StalenessDispatchStub {
+    async fn neighbors(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<djinn_control_plane::bridge::NeighborsResult, String> {
+        Ok(self.neighbors.clone())
+    }
+    async fn status(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+    ) -> Result<djinn_control_plane::bridge::GraphStatus, String> {
+        Ok(self.status_value())
+    }
+    async fn ranked(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::RankedNode>, String> {
+        Err("not used".into())
+    }
+    async fn implementations(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+    ) -> Result<Vec<String>, String> {
+        Err("not used".into())
+    }
+    async fn search(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::SearchHit>, String> {
+        Err("not used".into())
+    }
+    async fn impact(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: &str,
+        _: usize,
+        _: Option<&str>,
+        _: Option<f64>,
+    ) -> Result<djinn_control_plane::bridge::ImpactResult, String> {
+        Err("not used".into())
+    }
+    async fn cycles(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CycleGroup>, String> {
+        Err("not used".into())
+    }
+    async fn orphans(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::OrphanEntry>, String> {
+        Err("not used".into())
+    }
+    async fn path(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: &str,
+        _: &str,
+        _: Option<usize>,
+    ) -> Result<Option<djinn_control_plane::bridge::PathResult>, String> {
+        Err("not used".into())
+    }
+    async fn edges(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::EdgeEntry>, String> {
+        Err("not used".into())
+    }
+    async fn describe(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+    ) -> Result<Option<djinn_control_plane::bridge::SymbolDescription>, String> {
+        Err("not used".into())
+    }
+    async fn context(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: bool,
+    ) -> Result<Option<djinn_control_plane::bridge::SymbolContext>, String> {
+        Err("not used".into())
+    }
+    async fn snapshot(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: djinn_control_plane::bridge::SnapshotLevel,
+        _: usize,
+        _: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
+    ) -> Result<djinn_control_plane::bridge::SnapshotPayload, String> {
+        Err("not used".into())
+    }
+    async fn symbols_at(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: u32,
+        _: Option<u32>,
+    ) -> Result<Vec<djinn_control_plane::bridge::SymbolAtHit>, String> {
+        Err("not used".into())
+    }
+    async fn diff_touches(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &[djinn_control_plane::bridge::ChangedRange],
+    ) -> Result<djinn_control_plane::bridge::DiffTouchesResult, String> {
+        Err("not used".into())
+    }
+    async fn detect_changes(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[String],
+    ) -> Result<djinn_control_plane::bridge::DetectedChangesResult, String> {
+        Err("not used".into())
+    }
+    async fn api_surface(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::ApiSurfaceEntry>, String> {
+        Err("not used".into())
+    }
+    async fn boundary_check(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &[djinn_control_plane::bridge::BoundaryRule],
+    ) -> Result<Vec<djinn_control_plane::bridge::BoundaryViolation>, String> {
+        Err("not used".into())
+    }
+    async fn hotspots(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: u32,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::HotspotEntry>, String> {
+        Err("not used".into())
+    }
+    async fn complexity(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<djinn_control_plane::bridge::ComplexityResult, String> {
+        Err("not used".into())
+    }
+    async fn refactor_candidates(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<u32>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::RefactorCandidate>, String> {
+        Err("not used".into())
+    }
+    async fn metrics_at(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+    ) -> Result<djinn_control_plane::bridge::MetricsAtResult, String> {
+        Err("not used".into())
+    }
+    async fn dead_symbols(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::DeadSymbolEntry>, String> {
+        Err("not used".into())
+    }
+    async fn deprecated_callers(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::DeprecatedHit>, String> {
+        Err("not used".into())
+    }
+    async fn touches_hot_path(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: &[String],
+        _: &[String],
+        _: &[String],
+    ) -> Result<Vec<djinn_control_plane::bridge::HotPathHit>, String> {
+        Err("not used".into())
+    }
+    async fn coupling(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CouplingEntry>, String> {
+        Err("not used".into())
+    }
+    async fn churn(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: usize,
+        _: Option<u32>,
+    ) -> Result<Vec<djinn_control_plane::bridge::ChurnEntry>, String> {
+        Err("not used".into())
+    }
+    async fn coupling_hotspots(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: usize,
+        _: Option<u32>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CoupledPairEntry>, String> {
+        Err("not used".into())
+    }
+    async fn coupling_hubs(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: usize,
+        _: Option<u32>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CouplingHubEntry>, String> {
+        Err("not used".into())
+    }
+    async fn resolve(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<djinn_control_plane::bridge::ResolveOutcome, String> {
+        Err("not used".into())
+    }
+}
+
+async fn dispatch_with_staleness_stub(
+    mut params: CodeGraphParams,
+    stub: StalenessDispatchStub,
+) -> serde_json::Value {
+    params.normalize();
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let ctx = djinn_control_plane::bridge::ProjectCtx {
+        id: "project-1".to_string(),
+        clone_path: "/repo".to_string(),
+        workspace: None,
+        sub_path: None,
+    };
+    call_code_graph_inner(&state, &mut params, &ctx, &stub)
+        .await
+        .expect("code_graph dispatch should serialize")
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_neighbors_attaches_graph_staleness_when_caller_head_matches() {
+    // Wrapped op (neighbors -> emits `{ key, neighbors, ... }`): when
+    // `current_head` matches the cached graph commit, the response
+    // should include `graph_staleness` with `is_stale=false`.
+    let mut params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "key": "symbol:root",
+        "current_head": "  abc123 "
+    }))
+    .expect("neighbors params parse");
+    params.normalize();
+
+    let value =
+        dispatch_with_staleness_stub(params, staleness_stub(Some("abc123"))).await;
+
+    assert_eq!(value["key"], "symbol:root");
+    let staleness = value
+        .get("graph_staleness")
+        .expect("graph_staleness must be present when caller supplies current_head");
+    assert_eq!(staleness["cached_commit"], "abc123");
+    assert_eq!(staleness["caller_commit"], "abc123");
+    assert_eq!(staleness["is_stale"], false);
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_neighbors_attaches_graph_staleness_when_caller_head_differs() {
+    // Same wrapped op: when the caller commit differs from the cached
+    // commit, `is_stale=true` so the agent can warn the user.
+    let mut params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "key": "symbol:root",
+        "current_head": "newer-sha"
+    }))
+    .expect("neighbors params parse");
+    params.normalize();
+
+    let value =
+        dispatch_with_staleness_stub(params, staleness_stub(Some("older-sha"))).await;
+
+    let staleness = value
+        .get("graph_staleness")
+        .expect("graph_staleness must be present when caller supplies current_head");
+    assert_eq!(staleness["cached_commit"], "older-sha");
+    assert_eq!(staleness["caller_commit"], "newer-sha");
+    assert_eq!(staleness["is_stale"], true);
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_neighbors_omits_graph_staleness_without_caller_head() {
+    // No `current_head` passed — the response shape must be exactly
+    // what callers got before the staleness contract landed (no
+    // `graph_staleness` field). Backward compatibility.
+    let mut params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "key": "symbol:root"
+    }))
+    .expect("neighbors params parse");
+    params.normalize();
+
+    let value =
+        dispatch_with_staleness_stub(params, staleness_stub(Some("abc123"))).await;
+
+    assert_eq!(value["key"], "symbol:root");
+    assert!(
+        value.get("graph_staleness").is_none(),
+        "no current_head supplied => no graph_staleness field: {value}"
+    );
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_neighbors_omits_graph_staleness_when_caller_head_blank() {
+    // `current_head: ""` is normalized to `None` by `CodeGraphParams::normalize()`,
+    // so the field should still be absent — protects against chat-side
+    // LLMs that emit every field as an empty string.
+    let mut params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "key": "symbol:root",
+        "current_head": "   "
+    }))
+    .expect("neighbors params parse");
+    params.normalize();
+    assert!(
+        params.current_head.is_none(),
+        "blank current_head must normalize to None"
+    );
+
+    let value =
+        dispatch_with_staleness_stub(params, staleness_stub(Some("abc123"))).await;
+
+    assert!(
+        value.get("graph_staleness").is_none(),
+        "blank current_head normalizes to None => no graph_staleness field: {value}"
+    );
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_neighbors_graph_staleness_reports_unknown_when_cache_unwarmed() {
+    // Wrapped op with `current_head` but the cache has no pinned
+    // commit. The contract is non-stale-safe: `is_stale=false` and
+    // `cached_commit` is absent. The query must still return the
+    // graph result (no error, no block).
+    let mut params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "key": "symbol:root",
+        "current_head": "abc123"
+    }))
+    .expect("neighbors params parse");
+    params.normalize();
+
+    let value =
+        dispatch_with_staleness_stub(params, staleness_stub(None)).await;
+
+    assert_eq!(value["key"], "symbol:root");
+    let staleness = value
+        .get("graph_staleness")
+        .expect("graph_staleness present even when cache has no pinned commit");
+    assert_eq!(staleness["caller_commit"], "abc123");
+    assert_eq!(staleness["is_stale"], false);
+    assert!(
+        staleness.get("cached_commit").is_none(),
+        "missing pinned commit must not invent a cached_commit value: {staleness}"
+    );
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_describe_serde_direct_attaches_graph_staleness() {
+    // Serde-direct op (describe -> `serde_json::to_value(&description)`
+    // emits a flat object with no agent-side wrapper). Confirms the
+    // staleness field attaches to every response shape, not only
+    // the wrapped ones.
+    #[derive(Clone)]
+    struct DescribeStub;
+    #[async_trait::async_trait]
+    impl djinn_control_plane::bridge::RepoGraphOps for DescribeStub {
+        async fn describe(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: &str,
+        ) -> Result<Option<djinn_control_plane::bridge::SymbolDescription>, String> {
+            Ok(Some(djinn_control_plane::bridge::SymbolDescription {
+                key: "symbol:root".to_string(),
+                kind: "function".to_string(),
+                display_name: "root".to_string(),
+                file: "src/lib.rs".to_string(),
+                line: 42,
+                signature: Some("fn root()".to_string()),
+                documentation: Some("entry".to_string()),
+                role: "definition".to_string(),
+                uid: "symbol:root".to_string(),
+            }))
+        }
+        async fn status(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+        ) -> Result<djinn_control_plane::bridge::GraphStatus, String> {
+            Ok(djinn_control_plane::bridge::GraphStatus {
+                project_id: "project-1".to_string(),
+                warmed: true,
+                last_warm_at: None,
+                pinned_commit: Some("abc123".to_string()),
+                commits_since_pin: None,
+                route_parity_enabled: false,
+                route_exclusion_config: serde_json::Value::Null,
+            })
+        }
+        async fn ranked(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::RankedNode>, String> {
+            Err("not used".into())
+        }
+        async fn implementations(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: &str,
+        ) -> Result<Vec<String>, String> {
+            Err("not used".into())
+        }
+        async fn search(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::SearchHit>, String> {
+            Err("not used".into())
+        }
+        async fn neighbors(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<djinn_control_plane::bridge::NeighborsResult, String> {
+            Err("not used".into())
+        }
+        async fn impact(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: Option<&str>,
+            _: &str,
+            _: usize,
+            _: Option<&str>,
+            _: Option<f64>,
+        ) -> Result<djinn_control_plane::bridge::ImpactResult, String> {
+            Err("not used".into())
+        }
+        async fn cycles(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::CycleGroup>, String> {
+            Err("not used".into())
+        }
+        async fn orphans(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::OrphanEntry>, String> {
+            Err("not used".into())
+        }
+        async fn path(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+            _: Option<usize>,
+        ) -> Result<Option<djinn_control_plane::bridge::PathResult>, String> {
+            Err("not used".into())
+        }
+        async fn edges(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::EdgeEntry>, String> {
+            Err("not used".into())
+        }
+        async fn context(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: &str,
+            _: bool,
+        ) -> Result<Option<djinn_control_plane::bridge::SymbolContext>, String> {
+            Err("not used".into())
+        }
+        async fn snapshot(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: Option<&str>,
+            _: djinn_control_plane::bridge::SnapshotLevel,
+            _: usize,
+            _: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
+        ) -> Result<djinn_control_plane::bridge::SnapshotPayload, String> {
+            Err("not used".into())
+        }
+        async fn symbols_at(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: &str,
+            _: u32,
+            _: Option<u32>,
+        ) -> Result<Vec<djinn_control_plane::bridge::SymbolAtHit>, String> {
+            Err("not used".into())
+        }
+        async fn diff_touches(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: &[djinn_control_plane::bridge::ChangedRange],
+        ) -> Result<djinn_control_plane::bridge::DiffTouchesResult, String> {
+            Err("not used".into())
+        }
+        async fn detect_changes(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &[String],
+        ) -> Result<djinn_control_plane::bridge::DetectedChangesResult, String> {
+            Err("not used".into())
+        }
+        async fn api_surface(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::ApiSurfaceEntry>, String> {
+            Err("not used".into())
+        }
+        async fn boundary_check(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: &[djinn_control_plane::bridge::BoundaryRule],
+        ) -> Result<Vec<djinn_control_plane::bridge::BoundaryViolation>, String> {
+            Err("not used".into())
+        }
+        async fn hotspots(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: u32,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::HotspotEntry>, String> {
+            Err("not used".into())
+        }
+        async fn complexity(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<djinn_control_plane::bridge::ComplexityResult, String> {
+            Err("not used".into())
+        }
+        async fn refactor_candidates(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: Option<u32>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::RefactorCandidate>, String> {
+            Err("not used".into())
+        }
+        async fn metrics_at(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+        ) -> Result<djinn_control_plane::bridge::MetricsAtResult, String> {
+            Err("not used".into())
+        }
+        async fn dead_symbols(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::DeadSymbolEntry>, String> {
+            Err("not used".into())
+        }
+        async fn deprecated_callers(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::DeprecatedHit>, String> {
+            Err("not used".into())
+        }
+        async fn touches_hot_path(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: Option<&str>,
+            _: &[String],
+            _: &[String],
+            _: &[String],
+        ) -> Result<Vec<djinn_control_plane::bridge::HotPathHit>, String> {
+            Err("not used".into())
+        }
+        async fn coupling(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::CouplingEntry>, String> {
+            Err("not used".into())
+        }
+        async fn churn(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+        ) -> Result<Vec<djinn_control_plane::bridge::ChurnEntry>, String> {
+            Err("not used".into())
+        }
+        async fn coupling_hotspots(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::CoupledPairEntry>, String> {
+            Err("not used".into())
+        }
+        async fn coupling_hubs(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::CouplingHubEntry>, String> {
+            Err("not used".into())
+        }
+        async fn resolve(
+            &self,
+            _: &djinn_control_plane::bridge::ProjectCtx,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<djinn_control_plane::bridge::ResolveOutcome, String> {
+            Err("not used".into())
+        }
+    }
+
+    let mut params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "describe",
+        "key": "symbol:root",
+        "current_head": "abc123"
+    }))
+    .expect("describe params parse");
+    params.normalize();
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let ctx = djinn_control_plane::bridge::ProjectCtx {
+        id: "project-1".to_string(),
+        clone_path: "/repo".to_string(),
+        workspace: None,
+        sub_path: None,
+    };
+    let value = call_code_graph_inner(&state, &mut params, &ctx, &DescribeStub)
+        .await
+        .expect("describe dispatch should serialize");
+
+    // `describe` is serde-direct (calls `serde_json::to_value`); the
+    // `graph_staleness` object must be added on top of the flat
+    // `SymbolDescription` shape, NOT in a wrapper.
+    assert_eq!(value["key"], "symbol:root");
+    assert_eq!(value["kind"], "function");
+    let staleness = value
+        .get("graph_staleness")
+        .expect("graph_staleness must attach to serde-direct describe response too");
+    assert_eq!(staleness["cached_commit"], "abc123");
+    assert_eq!(staleness["caller_commit"], "abc123");
+    assert_eq!(staleness["is_stale"], false);
+}
+
+#[test]
+fn code_graph_params_current_head_blank_normalizes_to_none() {
+    // Acceptance: blank `current_head` and the camelCase / snake-case
+    // aliases all parse cleanly. Blank / whitespace values normalize
+    // to `None` so chat-side LLMs that emit every schema field as
+    // `""` don't accidentally trigger staleness computation.
+    let mut params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "key": "x",
+        "currentHead": "  ",
+        "caller_commit": "  abc  "
+    }))
+    .expect("current_head + aliases params parse");
+    params.normalize();
+    assert!(
+        params.current_head.is_none(),
+        "blank currentHead alias must normalize to None: {:?}",
+        params.current_head
+    );
+    assert_eq!(params.current_head.as_deref(), None);
+    assert_eq!(params.resolved_current_head(), None);
+
+    let mut params_alias: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "key": "x",
+        "currentHead": "abc123"
+    }))
+    .expect("camelCase alias parses");
+    params_alias.normalize();
+    assert_eq!(params_alias.current_head.as_deref(), Some("abc123"));
+    assert_eq!(
+        params_alias.resolved_current_head().as_deref(),
+        Some("abc123")
+    );
+
+    let mut params_snake: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "key": "x",
+        "caller_commit": "abc123"
+    }))
+    .expect("caller_commit alias parses");
+    params_snake.normalize();
+    assert_eq!(params_snake.current_head.as_deref(), Some("abc123"));
+}

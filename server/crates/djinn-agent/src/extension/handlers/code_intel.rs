@@ -270,10 +270,19 @@ pub(crate) async fn call_code_graph(
         sub_path: None,
     };
 
+    // wraw (jc47 mirror): capture the caller commit once so both the
+    // pre-resolve short-circuit and the normal dispatch path can
+    // attach the same `graph_staleness` object on success. Normalized
+    // (blank → None) by `CodeGraphParams::normalize()` already.
+    let caller_head = p.resolved_current_head();
+
     // PR C2: pre-resolve key-bearing ops so the chat tool surfaces
     // `Ambiguous` / `NotFound` as structured JSON the model can act on,
     // instead of failing the call with a generic "not found" string.
-    if let Some(short_circuit) = pre_resolve_chat_key(graph_ops.as_ref(), &ctx, &mut p).await? {
+    if let Some(mut short_circuit) =
+        pre_resolve_chat_key(graph_ops.as_ref(), &ctx, &mut p).await?
+    {
+        attach_chat_graph_staleness(graph_ops.as_ref(), &ctx, caller_head.as_deref(), &mut short_circuit).await;
         return Ok(short_circuit);
     }
 
@@ -294,7 +303,7 @@ pub(crate) async fn call_code_graph(
     );
     let timeout = code_graph_chat_dispatch_timeout();
     let inner = call_code_graph_inner(state, &mut p, &ctx, graph_ops.as_ref());
-    let result = {
+    let mut result = {
         use tracing::Instrument;
         tokio::time::timeout(timeout, inner)
             .instrument(span)
@@ -307,6 +316,15 @@ pub(crate) async fn call_code_graph(
                 ))
             })
     };
+    // wraw (jc47 mirror): on success, attach `graph_staleness` so the
+    // chat caller can see whether the served graph blob matches its
+    // current HEAD. Mirrors `attach_graph_staleness` on the
+    // control-plane side without forcing the chat extension to round
+    // trip through the typed `CodeGraphResponse` enum (the chat layer
+    // always returns `serde_json::Value`).
+    if let Ok(ref mut value) = result {
+        attach_chat_graph_staleness(graph_ops.as_ref(), &ctx, caller_head.as_deref(), value).await;
+    }
     let elapsed_ms = started.elapsed().as_millis() as u64;
     match &result {
         Ok(_) => tracing::info!(
@@ -328,6 +346,74 @@ pub(crate) async fn call_code_graph(
         ),
     }
     result
+}
+
+/// wraw: build and attach a `graph_staleness` object to a successful
+/// chat-side `code_graph` response.
+///
+/// Mirrors the control-plane `attach_graph_staleness` helper — the
+/// agent extension doesn't round-trip through the typed
+/// `CodeGraphResponse` enum, so we read the same `RepoGraphOps::status`
+/// peek (never warms) and write the same field shape directly into the
+/// returned `serde_json::Value`. The field is added at the top level
+/// alongside the op-specific wrapper (e.g. `{ "key": ..., "neighbors":
+/// ..., "graph_staleness": {...} }`).
+///
+/// No-op when `caller_head` is `None` so existing callers that don't
+/// track their current commit see the same response shape as before.
+/// No-op on status-lookup failure so a transient error never blocks
+/// the served graph result. This is a best-effort warning, never a
+/// hard signal.
+async fn attach_chat_graph_staleness(
+    graph: &dyn RepoGraphOps,
+    ctx: &ProjectCtx,
+    caller_head: Option<&str>,
+    response: &mut serde_json::Value,
+) {
+    let Some(caller_commit) = caller_head else {
+        return;
+    };
+    let cached_commit = match graph.status(ctx).await {
+        Ok(status) => status
+            .pinned_commit
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string),
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                "code_graph chat staleness: status lookup failed; omitting graph_staleness"
+            );
+            return;
+        }
+    };
+    let trimmed_caller = caller_commit.trim();
+    let staleness = match cached_commit.as_deref() {
+        Some(cached) => {
+            let is_stale = cached != trimmed_caller;
+            serde_json::json!({
+                "cached_commit": cached,
+                "caller_commit": trimmed_caller,
+                "is_stale": is_stale,
+            })
+        }
+        None => {
+            // Non-stale-safe: missing pinned commit means the graph
+            // blob has no recorded commit (unwarmed or status lookup
+            // returned an unindexed result). Per jc47's contract, a
+            // missing cached commit never blocks the query; surface
+            // `is_stale=false` so the agent knows the result is
+            // ambiguous rather than known-stale.
+            serde_json::json!({
+                "caller_commit": trimmed_caller,
+                "is_stale": false,
+            })
+        }
+    };
+    if let Some(object) = response.as_object_mut() {
+        object.insert("graph_staleness".to_string(), staleness);
+    }
 }
 
 /// Default per-op timeout for the chat-side `code_graph` dispatch.
@@ -1540,6 +1626,13 @@ fn code_graph_capabilities() -> serde_json::Value {
                 ],
                 "retry_guidance": "If truncated or too broad, retry with context_filter, file_filter, edge_filters, lower max_depth/max_seeds, or a different token_budget."
             }
+        },
+        "staleness": {
+            "field": "current_head",
+            "aliases": ["caller_commit", "currentHead"],
+            "behavior": "serve-stale-with-warning-only",
+            "response_field": "graph_staleness",
+            "description": "Pass the caller's current git commit SHA in `current_head` (or its `caller_commit` / `currentHead` aliases). Every successful response then carries an additive `graph_staleness` object comparing that commit against the cached graph blob's pinned commit. The flag is advisory: the query is never blocked and graph re-warming is never auto-triggered. Omit `current_head` to keep the previous response shape."
         },
         "env_features": {
             // Defaults match the on-by-default behavior in djinn-graph.

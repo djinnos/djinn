@@ -385,7 +385,12 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
          Partial pages and capped summaries are triage views; absence from a page or \
          summary is NOT evidence a node/edge/pair is absent from the full graph. `workspaces` \
          lists available-workspace slugs plus name/node_count/commit_sha/warmed_at/status; \
-         unknown workspace degradation includes `workspace_hint`. WHEN TO USE: capabilities \
+         unknown workspace degradation includes `workspace_hint`. STALENESS: pass \
+         `current_head` (your current git commit SHA) when known — every successful \
+         response will then include an additive `graph_staleness` object comparing your \
+         commit against the cached graph blob. The flag is serve-stale-with-warning only: \
+         it NEVER blocks the query and NEVER triggers re-warming; you decide whether to \
+         trust the result, retry later, or ask the user to re-warm. WHEN TO USE: capabilities \
          = cheap discovery of supported ops/params/defaults before spending graph budget; \
          query_subgraph = ask a natural-language question in `query` and get a token-budgeted \
          focused subgraph with narrowing hints; search = find candidate files/symbols by \
@@ -460,6 +465,10 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                 "context_filter": {
                     "type": "string",
                     "description": "Optional coarse subsystem/API/type/concern substring for operation='query_subgraph'. Use returned narrowing_hints to choose values when the first response is too broad."
+                },
+                "current_head": {
+                    "type": "string",
+                    "description": "Optional caller HEAD / git commit SHA. When provided, every successful response includes an additive `graph_staleness` object comparing this commit against the cached graph blob's pinned commit (is_stale=true when they differ). The flag is serve-stale-with-warning only: the query is never blocked and graph re-warming is never auto-triggered. Omit when the caller does not know its current commit. `caller_commit` and `currentHead` are accepted as aliases."
                 },
                 "file_filter": {
                     "type": "string",
