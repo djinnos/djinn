@@ -259,6 +259,42 @@ impl StageOutcome {
     }
 }
 
+fn emit_stage_outcome_event(
+    outcome: &StageOutcome,
+    role_kind: RoleKind,
+    task_id: &str,
+    task_run_id: &str,
+) {
+    let outcome_kind = match outcome {
+        StageOutcome::WorkerDone => "worker_done",
+        StageOutcome::PlannerExecute => "planner_execute",
+        StageOutcome::PlannerClose { .. } => "planner_close",
+        StageOutcome::ReviewerApproved => "reviewer_approved",
+        StageOutcome::ReviewerRejected { .. } => "reviewer_rejected",
+        StageOutcome::VerifierPassed => "verifier_passed",
+        StageOutcome::VerifierFailed { .. } => "verifier_failed",
+        StageOutcome::ArchitectDone => "architect_done",
+        StageOutcome::Escalate { .. } => "escalate",
+        StageOutcome::LeadApproved => "lead_approved",
+        StageOutcome::LeadApproveConflict { .. } => "lead_approve_conflict",
+        StageOutcome::LeadReopen { .. } => "lead_reopen",
+        StageOutcome::LeadClose { .. } => "lead_close",
+        StageOutcome::LeadEscalate { .. } => "lead_escalate",
+        StageOutcome::Failed { .. } => "failed",
+        StageOutcome::LoopGuardTripped { .. } => "loop_guard_tripped",
+        StageOutcome::Parked { .. } => "parked",
+    };
+
+    tracing::info!(
+        event = "supervisor.stage_outcome",
+        outcome = outcome_kind,
+        role = role_kind.as_str(),
+        task_id = %task_id,
+        task_run_id = %task_run_id,
+        "supervisor: stage outcome observed"
+    );
+}
+
 /// Routing decision for [`apply_planner_escalate_route`].
 ///
 /// Pure helper — no I/O, no async — so unit tests can branch on the rule
@@ -901,6 +937,8 @@ impl TaskRunSupervisor {
 
                 last_stage_role = Some(role_kind);
                 completed.push(role_kind);
+
+                emit_stage_outcome_event(&stage_outcome, role_kind, &spec.task_id, &run_id);
 
                 match stage_outcome {
                     StageOutcome::WorkerDone | StageOutcome::ArchitectDone => {
@@ -2319,6 +2357,13 @@ mod tests {
         ));
 
         let captured = logs.take();
+        assert!(
+            captured.contains("supervisor.stage_outcome")
+                && captured.contains("outcome=\"loop_guard_tripped\"")
+                && captured.contains("task_run_id=run-loop-guard")
+                && captured.contains("task_id=task-loop-guard"),
+            "expected supervisor.stage_outcome child event with task/run context, got:\n{captured}"
+        );
         assert!(
             captured.contains("djinn_supervisor::loop_guard_tripped"),
             "expected distinct tracing target for loop guard event, got:\n{captured}"

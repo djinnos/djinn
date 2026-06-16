@@ -50,6 +50,15 @@ use super::helpers::{
     conflict_context_for_dispatch, default_target_branch, load_provider_credential, parse_model_id,
 };
 
+fn supervisor_rpc_span(op: &'static str, session_id: &str, task_id: &str) -> tracing::Span {
+    tracing::info_span!(
+        "djinn.supervisor.rpc",
+        op,
+        session_id = %session_id,
+        task_id = %task_id,
+    )
+}
+
 /// Persist and surface a credential revocation after a run hit a 401.
 ///
 /// Marks the stored credential for the run's provider revoked (the F5-safe
@@ -465,6 +474,7 @@ pub(crate) async fn run_supervisor_dispatch(
     let cancel_handle = handle.clone();
     let cancel_task_id = task.id.clone();
     let cancel_model_id = model_id.clone();
+    let cancel_session_id = spec.task_run_id.clone();
     let cancel_task = tokio::spawn({
         let kill = kill.clone();
         async move {
@@ -480,7 +490,18 @@ pub(crate) async fn run_supervisor_dispatch(
                     task_id = %cancel_task_id,
                     model_id = %cancel_model_id,
                 );
-                let _ = cancel_runtime.cancel(&cancel_handle).await;
+                let rpc_span = supervisor_rpc_span("kill", &cancel_session_id, &cancel_task_id);
+                async move {
+                    tracing::info!(
+                        event = "supervisor.rpc.cancel",
+                        op = "kill",
+                        session_id = %cancel_session_id,
+                        task_id = %cancel_task_id,
+                    );
+                    let _ = cancel_runtime.cancel(&cancel_handle).await;
+                }
+                .instrument(rpc_span)
+                .await;
             }
             .instrument(span)
             .await;
@@ -529,7 +550,7 @@ pub(crate) async fn run_supervisor_dispatch(
                 // Prefer it (biased) so a Job that flips Failed in the same
                 // instant the worker delivered a report doesn't shadow the
                 // real outcome.
-                res = await_report_from_stream(bistream, &kill) => res,
+                res = await_report_from_stream(bistream, &kill, &spec.task_run_id, &spec.task_id) => res,
                 reason = runtime.watch_infra_death(&handle) => {
                     tracing::warn!(
                         task_id = %task.short_id,
@@ -1151,20 +1172,45 @@ async fn reap_orphan_task_run(
 async fn await_report_from_stream(
     mut stream: BiStream,
     kill: &CancellationToken,
+    session_id: &str,
+    task_id: &str,
 ) -> anyhow::Result<Option<TaskRunReport>> {
     loop {
         tokio::select! {
             biased;
             _ = kill.cancelled() => {
-                tracing::debug!(
-                    "supervisor dispatch: kill fired while awaiting terminal report; \
-                     proceeding to teardown"
-                );
+                let rpc_span = supervisor_rpc_span("kill", session_id, task_id);
+                async move {
+                    tracing::debug!(
+                        op = "kill",
+                        session_id = %session_id,
+                        task_id = %task_id,
+                        "supervisor dispatch: kill fired while awaiting terminal report; \
+                         proceeding to teardown"
+                    );
+                }
+                .instrument(rpc_span)
+                .await;
                 return Ok(None);
             }
             frame = stream.events_rx.recv() => {
                 match frame {
-                    Some(StreamEvent::Report(report)) => return Ok(Some(report)),
+                    Some(StreamEvent::Report(report)) => {
+                        let rpc_span = supervisor_rpc_span("terminal_report", session_id, task_id);
+                        let report_task_run_id = report.task_run_id.clone();
+                        async move {
+                            tracing::info!(
+                                event = "supervisor.rpc.terminal_report",
+                                op = "terminal_report",
+                                session_id = %session_id,
+                                task_id = %task_id,
+                                task_run_id = %report_task_run_id,
+                            );
+                        }
+                        .instrument(rpc_span)
+                        .await;
+                        return Ok(Some(report));
+                    }
                     Some(other) => {
                         tracing::trace!(event = ?other, "supervisor dispatch: dropping non-terminal frame");
                     }
@@ -1182,6 +1228,97 @@ async fn await_report_from_stream(
 mod tests {
     use super::*;
     use djinn_runtime::RoleKind;
+    use std::collections::HashMap;
+    use std::sync::{Arc as StdArc, Mutex as StdMutex, OnceLock};
+    use std::time::{Duration, Instant};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::{Layer, registry::LookupSpan};
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordedSpan {
+        name: String,
+        fields: HashMap<String, String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingLayer {
+        spans: StdArc<StdMutex<Vec<RecordedSpan>>>,
+    }
+
+    impl RecordingLayer {
+        fn spans(&self) -> Vec<RecordedSpan> {
+            self.spans.lock().expect("recorded spans mutex").clone()
+        }
+    }
+
+    #[derive(Default)]
+    struct FieldRecorder {
+        fields: HashMap<String, String>,
+    }
+
+    impl Visit for FieldRecorder {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields.insert(
+                field.name().to_owned(),
+                format!("{value:?}").trim_matches('\"').to_owned(),
+            );
+        }
+    }
+
+    impl<S> Layer<S> for RecordingLayer
+    where
+        S: tracing::Subscriber,
+        S: for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            id: &tracing::Id,
+            ctx: Context<'_, S>,
+        ) {
+            let mut recorder = FieldRecorder::default();
+            attrs.record(&mut recorder);
+            if let Some(span) = ctx.span(id) {
+                span.extensions_mut().insert(RecordedSpan {
+                    name: attrs.metadata().name().to_owned(),
+                    fields: recorder.fields,
+                });
+            }
+        }
+
+        fn on_record(
+            &self,
+            id: &tracing::Id,
+            values: &tracing::span::Record<'_>,
+            ctx: Context<'_, S>,
+        ) {
+            if let Some(span) = ctx.span(id) {
+                let mut recorder = FieldRecorder::default();
+                values.record(&mut recorder);
+                if let Some(recorded) = span.extensions_mut().get_mut::<RecordedSpan>() {
+                    recorded.fields.extend(recorder.fields);
+                }
+            }
+        }
+
+        fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
+            if let Some(span) = ctx.span(&id)
+                && let Some(recorded) = span.extensions().get::<RecordedSpan>()
+            {
+                self.spans
+                    .lock()
+                    .expect("recorded spans mutex")
+                    .push(recorded.clone());
+            }
+        }
+    }
+
+    fn tracing_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(())).lock().unwrap()
+    }
 
     fn report(id: &str, stages: Vec<RoleKind>, outcome: TaskRunOutcome) -> TaskRunReport {
         TaskRunReport {
@@ -1409,10 +1546,51 @@ mod tests {
             .await
             .expect("send report");
 
-        let got = await_report_from_stream(bistream, &kill)
+        let got = await_report_from_stream(bistream, &kill, "session-id-b", "task-id-b")
             .await
             .expect("await ok");
         assert_eq!(got.expect("some report").task_run_id, "id-B");
+    }
+
+    #[tokio::test]
+    async fn supervisor_rpc_terminal_report_span_records_fields() {
+        let _tracing_guard = tracing_lock();
+        let layer = RecordingLayer::default();
+        let subscriber = tracing_subscriber::registry().with(layer.clone());
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
+        let kill = CancellationToken::new();
+        events_tx
+            .send(StreamEvent::Report(report(
+                "run-terminal",
+                vec![RoleKind::Worker],
+                TaskRunOutcome::Interrupted,
+            )))
+            .await
+            .unwrap();
+
+        let got = await_report_from_stream(bistream, &kill, "session-terminal", "task-terminal")
+            .await
+            .expect("await ok");
+
+        assert!(got.is_some());
+        let span = layer
+            .spans()
+            .into_iter()
+            .find(|span| span.name == "djinn.supervisor.rpc")
+            .expect("djinn.supervisor.rpc span recorded");
+        assert_eq!(
+            span.fields.get("op").map(String::as_str),
+            Some("terminal_report")
+        );
+        assert_eq!(
+            span.fields.get("session_id").map(String::as_str),
+            Some("session-terminal")
+        );
+        assert_eq!(
+            span.fields.get("task_id").map(String::as_str),
+            Some("task-terminal")
+        );
     }
 
     #[tokio::test]
@@ -1435,7 +1613,7 @@ mod tests {
             .await
             .unwrap();
 
-        let got = await_report_from_stream(bistream, &kill)
+        let got = await_report_from_stream(bistream, &kill, "session-id-b", "task-id-b")
             .await
             .expect("await ok");
         assert_eq!(got.expect("some report").task_run_id, "id-B");
@@ -1448,10 +1626,41 @@ mod tests {
         let (bistream, _events_tx, _requests_rx) = BiStream::new_in_memory(8);
         let kill = CancellationToken::new();
         kill.cancel();
-        let got = await_report_from_stream(bistream, &kill)
+        let got = await_report_from_stream(bistream, &kill, "session-kill", "task-kill")
             .await
             .expect("await ok");
         assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn supervisor_rpc_kill_span_records_fields() {
+        let _tracing_guard = tracing_lock();
+        let layer = RecordingLayer::default();
+        let subscriber = tracing_subscriber::registry().with(layer.clone());
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let (bistream, _events_tx, _requests_rx) = BiStream::new_in_memory(8);
+        let kill = CancellationToken::new();
+        kill.cancel();
+
+        let got = await_report_from_stream(bistream, &kill, "session-kill", "task-kill")
+            .await
+            .expect("await ok");
+
+        assert!(got.is_none());
+        let span = layer
+            .spans()
+            .into_iter()
+            .find(|span| span.name == "djinn.supervisor.rpc")
+            .expect("djinn.supervisor.rpc kill span recorded");
+        assert_eq!(span.fields.get("op").map(String::as_str), Some("kill"));
+        assert_eq!(
+            span.fields.get("session_id").map(String::as_str),
+            Some("session-kill")
+        );
+        assert_eq!(
+            span.fields.get("task_id").map(String::as_str),
+            Some("task-kill")
+        );
     }
 
     #[tokio::test]
@@ -1459,9 +1668,44 @@ mod tests {
         let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
         let kill = CancellationToken::new();
         drop(events_tx);
-        let got = await_report_from_stream(bistream, &kill)
+        let got = await_report_from_stream(bistream, &kill, "session-closed", "task-closed")
             .await
             .expect("await ok");
         assert!(got.is_none());
+    }
+
+    #[test]
+    fn dispatch_span_creation_overhead_stays_under_hard_cap() {
+        let iterations = 25_000;
+        let baseline_start = Instant::now();
+        for idx in 0..iterations {
+            let span = tracing::info_span!("djinn.dispatch.baseline");
+            let _entered = span.enter();
+            std::hint::black_box(idx);
+        }
+        let baseline = baseline_start.elapsed().max(Duration::from_nanos(1));
+
+        let instrumented_start = Instant::now();
+        for idx in 0..iterations {
+            let span = tracing::info_span!(
+                "djinn.dispatch",
+                task_id = "span-task",
+                model_id = "span-model",
+                attempt = idx,
+            );
+            let _entered = span.enter();
+            std::hint::black_box(idx);
+        }
+        let instrumented = instrumented_start.elapsed();
+        let ratio = instrumented.as_secs_f64() / baseline.as_secs_f64();
+        eprintln!(
+            "dispatch span overhead ratio {ratio:.3} (baseline={baseline:?}, instrumented={instrumented:?}, iterations={iterations})"
+        );
+
+        assert!(
+            ratio <= 1.10,
+            "dispatch span overhead ratio {ratio:.3} exceeded hard cap 1.100 \
+             (baseline={baseline:?}, instrumented={instrumented:?}, iterations={iterations})"
+        );
     }
 }
