@@ -48,6 +48,11 @@ pub(super) enum CoordinatorMessage {
     /// Route a settled task that has no live mover through the shared no-op
     /// disposition ladder (if the live-mover predicate says it is orphaned).
     RouteSettledNoopWithoutLiveMover { task_id: String },
+    /// Publish scrape-time coordinator live-state gauges without exposing
+    /// per-task labels or storing per-task metric state.
+    RecordLiveMetrics {
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
     /// Increment the Lead escalation count for a task; reply with new count.
     IncrementEscalationCount {
         task_id: String,

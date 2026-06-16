@@ -645,6 +645,7 @@ impl CoordinatorActor {
 
     /// Publish current state to the watch channel for lock-free status reads.
     pub(super) fn publish_status(&self) {
+        self.record_live_metrics();
         let _ = self.status_tx.send(SharedCoordinatorState {
             dispatched: self.dispatched,
             recovered: self.recovered,
@@ -652,6 +653,16 @@ impl CoordinatorActor {
             pr_errors: self.pr_errors.clone(),
             rate_limited_until: self.current_rate_limited_until(),
         });
+    }
+
+    /// Publish aggregate coordinator live-state gauges from actor-owned maps.
+    ///
+    /// This helper is deliberately synchronous: `/metrics` can request a fresh
+    /// actor snapshot before rendering without any lock guard crossing an await,
+    /// and the storage remains O(1) with no per-task metric labels.
+    pub(super) fn record_live_metrics(&self) {
+        djinn_telemetry::dispatch::set_cooldowns_active(self.dispatch_cooldowns.len());
+        djinn_telemetry::dispatch::set_inflight_ledger_size(self.inflight_dispatches.len());
     }
 
     pub(super) fn maintenance_context(&self) -> crate::context::AgentContext {
@@ -753,6 +764,10 @@ impl CoordinatorActor {
             }
             CoordinatorMessage::RouteSettledNoopWithoutLiveMover { task_id } => {
                 self.route_settled_noop_without_live_mover(&task_id).await;
+            }
+            CoordinatorMessage::RecordLiveMetrics { reply } => {
+                self.record_live_metrics();
+                let _ = reply.send(());
             }
             CoordinatorMessage::CheckLiveMover { task_id, reply } => {
                 let result = match self.task_repo().get(&task_id).await {
@@ -1519,5 +1534,95 @@ impl CoordinatorActor {
         }
         // Drop the handle — the spawned task will wind down on its own.
         self.idle_consolidation_handle = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig};
+    use std::collections::HashSet;
+
+    fn rendered_metric_sample<'a>(rendered: &'a str, metric: &str) -> &'a str {
+        rendered
+            .lines()
+            .find(|line| line.starts_with(metric))
+            .unwrap_or_else(|| panic!("missing metric {metric} in:\n{rendered}"))
+    }
+
+    #[tokio::test]
+    async fn record_live_metrics_publishes_synthetic_cooldown_and_inflight_state() {
+        djinn_telemetry::init().unwrap();
+
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let cancel = CancellationToken::new();
+        let pool = SlotPoolHandle::spawn(
+            crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+            cancel.clone(),
+            SlotPoolConfig {
+                models: vec![ModelSlotConfig {
+                    model_id: DEFAULT_MODEL_ID.to_owned(),
+                    max_slots: 1,
+                    roles: HashSet::from(["worker".to_owned()]),
+                }],
+                role_priorities: HashMap::new(),
+            },
+        );
+        let (sender, receiver) = mpsc::channel(1);
+        let (status_tx, _status_rx) = watch::channel(SharedCoordinatorState {
+            dispatched: 0,
+            recovered: 0,
+            epic_throughput: HashMap::new(),
+            pr_errors: HashMap::new(),
+            rate_limited_until: None,
+        });
+        let mut actor = CoordinatorActor::new(
+            CoordinatorDeps::new(
+                events_tx,
+                cancel,
+                db,
+                pool,
+                CatalogService::new(),
+                HealthTracker::new(),
+                Arc::new(RoleRegistry::new()),
+                VerificationTracker::default(),
+                crate::lsp::LspManager::new(),
+            ),
+            receiver,
+            sender,
+            status_tx,
+        );
+        actor.dispatch_cooldowns.insert(
+            "cooldown-a".to_owned(),
+            StdInstant::now() + StdDuration::from_secs(30),
+        );
+        actor.dispatch_cooldowns.insert(
+            "cooldown-b".to_owned(),
+            StdInstant::now() + StdDuration::from_secs(60),
+        );
+        actor.inflight_dispatches.insert(
+            "inflight-a".to_owned(),
+            (Some("user-a".to_owned()), DEFAULT_MODEL_ID.to_owned()),
+        );
+        actor.inflight_dispatches.insert(
+            "inflight-b".to_owned(),
+            (Some("user-b".to_owned()), DEFAULT_MODEL_ID.to_owned()),
+        );
+        actor
+            .inflight_dispatches
+            .insert("inflight-c".to_owned(), (None, DEFAULT_MODEL_ID.to_owned()));
+
+        actor.record_live_metrics();
+
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            rendered_metric_sample(&rendered, "djinn_dispatch_cooldowns_active"),
+            "djinn_dispatch_cooldowns_active 2"
+        );
+        assert_eq!(
+            rendered_metric_sample(&rendered, "djinn_inflight_ledger_size"),
+            "djinn_inflight_ledger_size 3"
+        );
     }
 }

@@ -5,6 +5,11 @@ use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandl
 pub const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 
 const DISPATCH_ATTEMPTS_TOTAL: &str = "djinn_dispatch_attempts_total";
+const DISPATCH_LAST_SUCCESS_TIMESTAMP: &str = "djinn_dispatch_last_success_timestamp";
+const DISPATCH_COOLDOWNS_ACTIVE: &str = "djinn_dispatch_cooldowns_active";
+const INFLIGHT_LEDGER_SIZE: &str = "djinn_inflight_ledger_size";
+const USER_CAP_UTILIZATION: &str = "djinn_user_cap_utilization";
+const SLOT_POOL: &str = "djinn_slot_pool";
 const DISPATCH_OUTCOMES: [&str; 5] = ["ok", "cooldown", "cap", "breaker", "error"];
 const BREAKER_TRIPS_TOTAL: &str = "djinn_breaker_trips_total";
 const BREAKER_STATE: &str = "djinn_breaker_state";
@@ -85,6 +90,26 @@ fn register_metrics() {
     for outcome in DISPATCH_OUTCOMES {
         metrics::counter!(DISPATCH_ATTEMPTS_TOTAL, "outcome" => outcome).absolute(0);
     }
+    metrics::describe_gauge!(
+        DISPATCH_LAST_SUCCESS_TIMESTAMP,
+        "Unix timestamp in seconds for the last successful dispatch."
+    );
+    metrics::describe_gauge!(
+        DISPATCH_COOLDOWNS_ACTIVE,
+        "Current number of active dispatch cooldown entries."
+    );
+    metrics::describe_gauge!(
+        INFLIGHT_LEDGER_SIZE,
+        "Current number of entries in the coordinator in-flight dispatch ledger."
+    );
+    metrics::describe_gauge!(
+        USER_CAP_UTILIZATION,
+        "Per user/model dispatch cap utilization ratio: (db_running plus in-flight ledger overlay) divided by configured cap."
+    );
+    metrics::describe_gauge!(
+        SLOT_POOL,
+        "Slot pool slots aggregated by state and model. Labels are state=free|busy and model only."
+    );
     metrics::describe_counter!(
         BREAKER_TRIPS_TOTAL,
         "Circuit-breaker trips at the authoritative closed-to-open transition."
@@ -123,6 +148,40 @@ pub mod dispatch {
         metrics::counter!(super::DISPATCH_ATTEMPTS_TOTAL, "outcome" => outcome).increment(1);
     }
 
+    pub fn record_last_success_now() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |duration| duration.as_secs_f64());
+        metrics::gauge!(super::DISPATCH_LAST_SUCCESS_TIMESTAMP).set(ts);
+    }
+
+    pub fn set_cooldowns_active(count: usize) {
+        metrics::gauge!(super::DISPATCH_COOLDOWNS_ACTIVE).set(count as f64);
+    }
+
+    pub fn set_inflight_ledger_size(count: usize) {
+        metrics::gauge!(super::INFLIGHT_LEDGER_SIZE).set(count as f64);
+    }
+
+    /// Record a per-user/model cap-utilization ratio.
+    ///
+    /// `djinn_user_cap_utilization{user,model}` is a single gauge because the
+    /// current metrics facade does not expose paired numerator/denominator
+    /// samples. The convention is `used / cap`, where `used` is the same
+    /// DB-running count overlaid with the coordinator in-flight ledger used for
+    /// admission control, and `cap` is the configured per-user/model cap (default
+    /// 1). Values may exceed 1.0 if live state was already over cap.
+    pub fn set_user_cap_utilization(user: &str, model: &str, used: u32, cap: u32) {
+        let cap = cap.max(1);
+        let utilization = f64::from(used) / f64::from(cap);
+        metrics::gauge!(super::USER_CAP_UTILIZATION, "user" => user.to_owned(), "model" => model.to_owned()).set(utilization);
+    }
+
+    pub fn record_success() {
+        increment_attempt(OUTCOME_OK);
+        record_last_success_now();
+    }
+
     pub fn increment_ok() {
         increment_attempt(OUTCOME_OK);
     }
@@ -144,12 +203,42 @@ pub mod dispatch {
     }
 }
 
+pub mod slot_pool {
+    pub const STATE_FREE: &str = "free";
+    pub const STATE_BUSY: &str = "busy";
+
+    pub fn set_slots(state: &'static str, model: &str, count: usize) {
+        metrics::gauge!(super::SLOT_POOL, "state" => state, "model" => model.to_owned())
+            .set(count as f64);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn test_guard() -> MutexGuard<'static, ()> {
+        TEST_MUTEX.lock().expect("telemetry test mutex poisoned")
+    }
+
+    fn rendered_sample<'a>(rendered: &'a str, metric: &str, labels: &[(&str, &str)]) -> &'a str {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with(metric)
+                    && labels
+                        .iter()
+                        .all(|(key, value)| line.contains(&format!("{key}=\"{value}\"")))
+            })
+            .unwrap_or_else(|| panic!("missing sample {metric}{labels:?} in:\n{rendered}"))
+    }
 
     #[test]
     fn init_is_idempotent_and_registers_dispatch_labels() {
+        let _guard = test_guard();
         init().unwrap();
         init().unwrap();
 
@@ -166,6 +255,7 @@ mod tests {
 
     #[test]
     fn dispatch_attempt_increment_renders_counter() {
+        let _guard = test_guard();
         init().unwrap();
         dispatch::increment_ok();
 
@@ -174,7 +264,66 @@ mod tests {
     }
 
     #[test]
+    fn live_state_gauges_render_with_bounded_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+        dispatch::set_cooldowns_active(2);
+        dispatch::set_inflight_ledger_size(3);
+        dispatch::set_user_cap_utilization("user-a", "model-a", 1, 2);
+        slot_pool::set_slots(slot_pool::STATE_FREE, "model-a", 4);
+        slot_pool::set_slots(slot_pool::STATE_BUSY, "model-a", 5);
+
+        let rendered = render().unwrap();
+        assert!(rendered.contains("djinn_dispatch_cooldowns_active 2"));
+        assert!(rendered.contains("djinn_inflight_ledger_size 3"));
+        assert!(
+            rendered_sample(
+                &rendered,
+                "djinn_user_cap_utilization",
+                &[("user", "user-a"), ("model", "model-a")]
+            )
+            .ends_with(" 0.5"),
+            "user-cap gauge must use the documented used/cap ratio convention:\n{rendered}"
+        );
+        assert!(
+            rendered_sample(
+                &rendered,
+                "djinn_slot_pool",
+                &[("state", "free"), ("model", "model-a")]
+            )
+            .ends_with(" 4")
+        );
+        assert!(
+            rendered_sample(
+                &rendered,
+                "djinn_slot_pool",
+                &[("state", "busy"), ("model", "model-a")]
+            )
+            .ends_with(" 5")
+        );
+        assert!(!rendered.contains("slot_id="));
+    }
+
+    #[test]
+    fn metric_facade_helpers_are_synchronous_unit_functions() {
+        let _guard = test_guard();
+
+        fn assert_sync_unit<F: FnOnce() -> ()>(f: F) {
+            f();
+        }
+
+        init().unwrap();
+        assert_sync_unit(|| dispatch::increment_attempt(dispatch::OUTCOME_ERROR));
+        assert_sync_unit(|| dispatch::record_last_success_now());
+        assert_sync_unit(|| dispatch::set_cooldowns_active(0));
+        assert_sync_unit(|| dispatch::set_inflight_ledger_size(0));
+        assert_sync_unit(|| dispatch::set_user_cap_utilization("user-sync", "model-sync", 0, 1));
+        assert_sync_unit(|| slot_pool::set_slots(slot_pool::STATE_FREE, "model-sync", 0));
+    }
+
+    #[test]
     fn breaker_state_gauge_renders_scope_and_model() {
+        let _guard = test_guard();
         init().unwrap();
 
         breaker::set_state("user-1", "model-a", 0.5);
@@ -188,6 +337,7 @@ mod tests {
 
     #[test]
     fn zombie_and_lead_counters_render() {
+        let _guard = test_guard();
         init().unwrap();
 
         zombie::increment_reap(zombie::KIND_STARTUP);
