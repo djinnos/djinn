@@ -771,7 +771,7 @@ mod backfill_tests {
         let after = repo.get(&created.id).await.unwrap().expect("note");
         assert_eq!(
             after.retrieval_anchor.as_deref(),
-            Some("Recall Pre-anchored Pattern when relevant.")
+            Some("Recall pre-anchored Pattern when relevant.")
         );
     }
 

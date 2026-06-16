@@ -2044,13 +2044,7 @@ mod tests {
         // The full extraction prompt must explicitly request `applies_when`
         // and the ADR-054 sections. (Reuse the production prompt builder so
         // the test cannot drift from the live template.)
-        let prompt = build_extraction_prompt(
-            "title-x",
-            "desc-y",
-            "{}",
-            "(none)",
-            "[]",
-        );
+        let prompt = build_extraction_prompt("title-x", "desc-y", "{}", "(none)", "[]");
 
         assert!(
             prompt.contains("\"applies_when\""),

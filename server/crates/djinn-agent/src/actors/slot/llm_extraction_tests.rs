@@ -1079,7 +1079,7 @@ fn anchor_extraction_provider() -> Arc<FakeProvider> {
     let json = serde_json::json!({
         "cases": [{
             "title": "Anchored Case",
-            "content": "## Situation\nA case must persist with a one-sentence retrieval anchor distinct from the body. The constraint is that future tasks need an objective hook to decide when this case is the right recall. The approach taken is to add an applies_when field and persist it into retrieval_anchor. The result is that the durable case keeps its body and gains an anchor. The reusable lesson is that durable notes should be reachable by an objective situation. ## Related\n- retrieval anchor\n- embedding",
+            "content": "## Situation\nA case must persist with a one-sentence retrieval anchor distinct from the body.\n## Constraint\nFuture tasks need an objective hook to decide when this case is the right recall.\n## Approach taken\nAdd an applies_when field and persist it into retrieval_anchor.\n## Result\nThe durable case keeps its body and gains an anchor.\n## Why it worked / failed\nThe separate field gives retrieval a focused sentence without replacing the ADR-054 body.\n## Reusable lesson\nDurable notes should be reachable by an objective situation.\n## Related\n- retrieval anchor\n- embedding",
             "applies_when": "When you need an objective situation sentence for a case note."
         }],
         "patterns": [{
