@@ -420,10 +420,40 @@ const VERIFICATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::fro
 /// The surrounding [`spawn_verification_with_timeout`] enforces the wall-clock
 /// pipeline timeout (and releases the task on expiry), so the poll loop here
 /// runs unbounded inside that budget.
+/// Per-project verification gate: at most ONE verification pod per project at a
+/// time. Concurrent verifications share the project's `CARGO_TARGET_DIR`, where
+/// cargo takes an exclusive build-dir lock — so a second pod just blocks behind
+/// the first anyway (observed: a verify pod stuck ~22min, partly serialized),
+/// while burning a second pod's CPU/memory. Serializing keeps the single warm
+/// target base uncontended (fast, cache-friendly) and bounds resource use.
+/// In-process gate — correct for the single-replica VPS; a multi-replica
+/// deployment would need a DB/advisory lock instead.
+static VERIFICATION_PROJECT_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Semaphore>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn project_verification_semaphore(project_id: &str) -> Arc<tokio::sync::Semaphore> {
+    VERIFICATION_PROJECT_LOCKS
+        .lock()
+        .expect("verification locks mutex poisoned")
+        .entry(project_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(1)))
+        .clone()
+}
+
 async fn run_verification_in_pod(
     task: &djinn_core::models::Task,
     app_state: &AgentContext,
 ) -> anyhow::Result<crate::verification::service::VerificationResult> {
+    // Serialize verification per project (one verify pod at a time). The permit
+    // is held until this function returns — including on `?` early-return or
+    // when the outer pipeline timeout cancels the future (drops the guard) — so
+    // the next queued verification for the project proceeds promptly.
+    let _verify_permit = project_verification_semaphore(&task.project_id)
+        .acquire_owned()
+        .await
+        .map_err(|e| anyhow::anyhow!("verification semaphore closed: {e}"))?;
+
     let runtime_ops = app_state.runtime_ops.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "verification requires a RuntimeOps bridge on AgentContext to dispatch the pod; none configured"
