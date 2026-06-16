@@ -3,6 +3,7 @@ pub mod code_chunk;
 pub mod commit_file_changes;
 pub mod dispatch_pause;
 pub mod dispatch_state;
+pub mod doctor_finding;
 pub mod epic;
 pub mod events;
 pub mod git_settings;
