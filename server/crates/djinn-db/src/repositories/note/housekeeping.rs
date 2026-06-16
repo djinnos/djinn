@@ -245,6 +245,16 @@ impl NoteRepository {
         project_id: &str,
         note_types: &[&str],
     ) -> Result<Vec<Note>> {
+        self.list_notes_for_retrieval_anchor_backfill(project_id, note_types, false)
+            .await
+    }
+
+    async fn list_notes_for_retrieval_anchor_backfill(
+        &self,
+        project_id: &str,
+        note_types: &[&str],
+        include_existing_anchors: bool,
+    ) -> Result<Vec<Note>> {
         self.db.ensure_initialized().await?;
 
         if note_types.is_empty() {
@@ -263,9 +273,15 @@ impl NoteRepository {
                FROM notes
                WHERE project_id = $1
                  AND note_type NOT IN ('brief', 'roadmap', 'catalog')
-                 AND (retrieval_anchor IS NULL OR BTRIM(retrieval_anchor) = '')
-                 AND note_type IN ("#,
+                 AND "#,
         );
+        if include_existing_anchors {
+            sql.push_str("note_type IN (");
+        } else {
+            sql.push_str(
+                "(retrieval_anchor IS NULL OR BTRIM(retrieval_anchor) = '') AND note_type IN (",
+            );
+        }
         for (idx, _) in note_types.iter().enumerate() {
             if idx > 0 {
                 sql.push_str(", ");
@@ -309,7 +325,7 @@ impl NoteRepository {
         };
 
         let candidates = self
-            .list_notes_missing_retrieval_anchor(project_id, &note_types)
+            .list_notes_for_retrieval_anchor_backfill(project_id, &note_types, options.force)
             .await?;
 
         let mut report = BackfillRetrievalAnchorReport {
@@ -377,7 +393,7 @@ impl NoteRepository {
 /// The defaults make the backfill a safe, dry-run-friendly maintenance tool:
 /// it lists candidates, proposes anchors without writing, and only updates
 /// the `retrieval_anchor` column when `dry_run = false`.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct BackfillRetrievalAnchorOptions {
     /// When true, the backfill computes proposed anchors and returns them in
     /// the report without writing to the database. Defaults to true so the
@@ -395,6 +411,17 @@ pub struct BackfillRetrievalAnchorOptions {
     /// proposer ([`crate::propose_anchor_deterministic`]), which derives a
     /// one-sentence anchor from the note title (no LLM).
     pub proposer: AnchorProposerKind,
+}
+
+impl Default for BackfillRetrievalAnchorOptions {
+    fn default() -> Self {
+        Self {
+            dry_run: true,
+            force: false,
+            note_types: Vec::new(),
+            proposer: AnchorProposerKind::default(),
+        }
+    }
 }
 
 /// Selects how [`NoteRepository::backfill_retrieval_anchors`] computes
@@ -419,9 +446,8 @@ pub type LlmAnchorProposer = std::sync::Arc<
             &'a Note,
         ) -> std::pin::Pin<
             Box<
-                dyn std::future::Future<
-                        Output = std::result::Result<Option<String>, String>,
-                    > + Send
+                dyn std::future::Future<Output = std::result::Result<Option<String>, String>>
+                    + Send
                     + 'a,
             >,
         > + Send
@@ -461,7 +487,11 @@ pub fn propose_anchor_deterministic(note: &Note) -> Option<String> {
         .map(|c| !c.is_ascii_uppercase())
         .unwrap_or(true)
     {
-        format!("{}{}", lowered_first, title.chars().skip(1).collect::<String>())
+        format!(
+            "{}{}",
+            lowered_first,
+            title.chars().skip(1).collect::<String>()
+        )
     } else {
         title.to_string()
     };
@@ -529,47 +559,23 @@ mod backfill_tests {
         let repo = make_repo(db);
 
         // No-anchor candidates across the durable types AND outside them.
-        repo.create(
-            &project.id,
-            "Anchored Pattern",
-            "body",
-            "pattern",
-            "[]",
-        )
-        .await
-        .unwrap();
+        repo.create(&project.id, "Anchored Pattern", "body", "pattern", "[]")
+            .await
+            .unwrap();
         repo.create(&project.id, "Anchored Case", "body", "case", "[]")
             .await
             .unwrap();
-        repo.create(
-            &project.id,
-            "Anchored Pitfall",
-            "body",
-            "pitfall",
-            "[]",
-        )
-        .await
-        .unwrap();
+        repo.create(&project.id, "Anchored Pitfall", "body", "pitfall", "[]")
+            .await
+            .unwrap();
         // An ADR — NOT in the default durable scope; should be ignored.
-        repo.create(
-            &project.id,
-            "Some ADR",
-            "body",
-            "adr",
-            "[]",
-        )
-        .await
-        .unwrap();
+        repo.create(&project.id, "Some ADR", "body", "adr", "[]")
+            .await
+            .unwrap();
         // A brief singleton — always excluded.
-        repo.create(
-            &project.id,
-            "Brief",
-            "body",
-            "brief",
-            "[]",
-        )
-        .await
-        .unwrap();
+        repo.create(&project.id, "Brief", "body", "brief", "[]")
+            .await
+            .unwrap();
 
         let candidates = repo
             .list_notes_missing_retrieval_anchor(&project.id, &[])
@@ -671,11 +677,7 @@ mod backfill_tests {
             .await
             .unwrap();
 
-        let before = repo
-            .get(&created.id)
-            .await
-            .unwrap()
-            .expect("note present");
+        let before = repo.get(&created.id).await.unwrap().expect("note present");
 
         let report = repo
             .backfill_retrieval_anchors(&project.id, empty_options(false))
@@ -707,15 +709,9 @@ mod backfill_tests {
         let (_tmp, project) = make_test_project(&db).await;
         let repo = make_repo(db.clone());
 
-        repo.create(
-            &project.id,
-            "Idempotent Pattern",
-            "body",
-            "pattern",
-            "[]",
-        )
-        .await
-        .unwrap();
+        repo.create(&project.id, "Idempotent Pattern", "body", "pattern", "[]")
+            .await
+            .unwrap();
 
         let first = repo
             .backfill_retrieval_anchors(&project.id, empty_options(false))
@@ -741,13 +737,7 @@ mod backfill_tests {
         let repo = make_repo(db.clone());
 
         let created = repo
-            .create(
-                &project.id,
-                "Pre-anchored Pattern",
-                "body",
-                "pattern",
-                "[]",
-            )
+            .create(&project.id, "Pre-anchored Pattern", "body", "pattern", "[]")
             .await
             .unwrap();
         repo.update_retrieval_anchor(&created.id, Some("Old manual anchor."))
@@ -763,14 +753,6 @@ mod backfill_tests {
             "without force, anchored notes are skipped"
         );
 
-        // With force=true the listing still excludes already-anchored rows;
-        // force affects update behaviour inside the loop, not selection. To
-        // exercise the rewrite we manually reset the anchor and re-run with
-        // force.
-        repo.update_retrieval_anchor(&created.id, None)
-            .await
-            .unwrap();
-
         let forced = BackfillRetrievalAnchorOptions {
             dry_run: false,
             force: true,
@@ -781,6 +763,10 @@ mod backfill_tests {
             .backfill_retrieval_anchors(&project.id, forced)
             .await
             .unwrap();
+        assert_eq!(
+            report.candidate_count, 1,
+            "force=true selects already-anchored notes for an explicit rewrite"
+        );
         assert_eq!(report.updated, 1);
         let after = repo.get(&created.id).await.unwrap().expect("note");
         assert_eq!(
