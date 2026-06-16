@@ -23,6 +23,54 @@ async fn create_and_get_note() {
 
     let fetched = repo.get(&note.id).await.unwrap().unwrap();
     assert_eq!(fetched.title, "My ADR");
+    assert_eq!(fetched.status, djinn_memory::note_status::ACTIVE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn note_status_archives_filters_and_restores_without_delete() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    let active = repo
+        .create(&project.id, "Active Note", "body", "reference", "[]")
+        .await
+        .unwrap();
+    let archived = repo
+        .create(&project.id, "Archived Note", "body", "reference", "[]")
+        .await
+        .unwrap();
+
+    assert_eq!(active.status, djinn_memory::note_status::ACTIVE);
+    assert_eq!(archived.status, djinn_memory::note_status::ACTIVE);
+
+    let archived = repo
+        .update_status(&archived.id, djinn_memory::note_status::ARCHIVED)
+        .await
+        .unwrap();
+    assert_eq!(archived.status, djinn_memory::note_status::ARCHIVED);
+    assert!(repo.get(&archived.id).await.unwrap().is_some());
+
+    let default_list = repo.list(&project.id, None).await.unwrap();
+    assert!(default_list.iter().any(|note| note.id == active.id));
+    assert!(default_list.iter().all(|note| note.id != archived.id));
+
+    let archived_list = repo
+        .list_with_status(&project.id, None, Some(djinn_memory::note_status::ARCHIVED))
+        .await
+        .unwrap();
+    assert_eq!(archived_list.len(), 1);
+    assert_eq!(archived_list[0].id, archived.id);
+
+    let restored = repo
+        .update_status(&archived.id, djinn_memory::note_status::ACTIVE)
+        .await
+        .unwrap();
+    assert_eq!(restored.status, djinn_memory::note_status::ACTIVE);
+    let restored_list = repo.list(&project.id, None).await.unwrap();
+    assert!(restored_list.iter().any(|note| note.id == archived.id));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

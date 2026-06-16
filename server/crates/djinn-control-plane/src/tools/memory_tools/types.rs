@@ -87,6 +87,9 @@ pub struct ListParams {
     #[serde(rename = "type")]
     #[schemars(rename = "type")]
     pub note_type: Option<String>,
+    /// Explicit lifecycle status filter. Defaults to active; use archived or
+    /// deprecated to list non-live notes.
+    pub status: Option<String>,
     /// Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels.
     pub depth: Option<i64>,
 }
@@ -282,6 +285,7 @@ pub struct MemoryNoteResponse {
     pub file_path: Option<String>,
     pub note_type: Option<String>,
     pub folder: Option<String>,
+    pub status: Option<String>,
     pub tags: Option<Vec<String>>,
     pub content: Option<String>,
     pub retrieval_anchor: Option<String>,
@@ -429,6 +433,7 @@ pub struct MemoryNoteView {
     pub file_path: String,
     pub note_type: String,
     pub folder: String,
+    pub status: String,
     pub tags: Vec<String>,
     pub content: String,
     pub retrieval_anchor: Option<String>,
@@ -448,6 +453,7 @@ impl From<djinn_memory::Note> for MemoryNoteView {
             file_path: note.file_path,
             note_type: note.note_type,
             folder: note.folder,
+            status: note.status,
             content: note.content,
             retrieval_anchor: note.retrieval_anchor,
             created_at: note.created_at,
@@ -467,6 +473,7 @@ impl From<&djinn_memory::Note> for MemoryNoteView {
             file_path: note.file_path.clone(),
             note_type: note.note_type.clone(),
             folder: note.folder.clone(),
+            status: note.status.clone(),
             tags: note.parsed_tags(),
             content: note.content.clone(),
             retrieval_anchor: note.retrieval_anchor.clone(),
@@ -495,6 +502,7 @@ impl MemoryNoteResponse {
             file_path: Some(note.file_path.clone()),
             note_type: Some(note.note_type.clone()),
             folder: Some(note.folder.clone()),
+            status: Some(note.status.clone()),
             tags: Some(note.parsed_tags()),
             content: Some(note.content.clone()),
             retrieval_anchor: note.retrieval_anchor.clone(),
@@ -515,6 +523,7 @@ impl MemoryNoteResponse {
             file_path: None,
             note_type: None,
             folder: None,
+            status: None,
             tags: None,
             content: None,
             retrieval_anchor: None,

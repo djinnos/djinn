@@ -459,6 +459,7 @@ mod tests {
                 project: setup.project.clone(),
                 folder: Some("memory://design/".to_string()),
                 note_type: Some("design".to_string()),
+                status: None,
                 depth: Some(1),
             },
         )
@@ -818,6 +819,7 @@ mod tests {
                 project: setup.project.clone(),
                 folder: None,
                 note_type: None,
+                status: None,
                 depth: Some(1),
             }))
             .await

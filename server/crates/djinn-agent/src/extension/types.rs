@@ -204,6 +204,7 @@ pub(super) struct MemoryListParams {
     pub folder: Option<String>,
     #[serde(rename = "type")]
     pub note_type: Option<String>,
+    pub status: Option<String>,
     pub depth: Option<i64>,
 }
 
