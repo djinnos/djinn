@@ -251,6 +251,7 @@ async fn consolidation_create_canonical_note_persists_db_note_confidence_and_pro
             confidence: 1.2,
             source_session_ids: &[&session_a, &session_b],
             scope_paths: "[]",
+            source_note_ids: &[],
         })
         .await
         .unwrap();
@@ -444,6 +445,7 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
             consolidated_cluster_count: 1,
             consolidated_note_count: 1,
             source_note_count: 3,
+            superseded_source_note_count: 0,
             started_at: "2026-03-25T10:00:00.000Z",
             completed_at: Some("2026-03-25T10:01:00.000Z"),
             error_message: None,
@@ -461,6 +463,7 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
             consolidated_cluster_count: 0,
             consolidated_note_count: 0,
             source_note_count: 0,
+            superseded_source_note_count: 0,
             started_at: "2026-03-25T11:00:00.000Z",
             completed_at: Some("2026-03-25T11:02:00.000Z"),
             error_message: Some("llm timeout"),
@@ -478,6 +481,7 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
             consolidated_cluster_count: 1,
             consolidated_note_count: 1,
             source_note_count: 4,
+            superseded_source_note_count: 0,
             started_at: "2026-03-25T12:00:00.000Z",
             completed_at: Some("2026-03-25T12:03:00.000Z"),
             error_message: None,
@@ -798,4 +802,180 @@ async fn housekeeping_repair_broken_wikilinks_skips_ambiguous_matches() {
         .unwrap();
     assert!(best.len() >= 2);
     assert!((best[0].score - best[1].score).abs() < 5.0);
+}
+
+// ─── Supersession edge recording (yk9t dm4w) ──────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_canonical_with_source_note_ids_records_supersedes_edges() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+    let src_a = note_repo
+        .create_db_note(&project.id, "Source A", "body a", "pattern", "[]")
+        .await
+        .unwrap();
+    let src_b = note_repo
+        .create_db_note(&project.id, "Source B", "body b", "pattern", "[]")
+        .await
+        .unwrap();
+    let src_c = note_repo
+        .create_db_note(&project.id, "Source C", "body c", "pattern", "[]")
+        .await
+        .unwrap();
+
+    let source_note_ids = vec![src_a.id.clone(), src_b.id.clone(), src_c.id.clone()];
+
+    let created = consolidation_repo
+        .create_canonical_consolidated_note(CreateCanonicalConsolidatedNote {
+            project_id: &project.id,
+            note_type: "pattern",
+            title: "Canonical Pattern",
+            content: "canonical content",
+            tags: "[]",
+            abstract_: Some("abstract"),
+            overview: Some("overview"),
+            confidence: 0.8,
+            source_session_ids: &[],
+            scope_paths: "[]",
+            source_note_ids: &source_note_ids,
+        })
+        .await
+        .unwrap();
+
+    // Exactly 3 supersession edges were recorded.
+    assert_eq!(created.superseded_source_note_count, 3);
+
+    // Each edge reads back with kind = 'supersedes'.
+    for src_id in &source_note_ids {
+        let kind = note_repo
+            .get_association_kind(&created.note.id, src_id)
+            .await
+            .unwrap();
+        assert!(kind.is_some(), "edge should exist for source {src_id}");
+        let (weight, kind_str) = kind.unwrap();
+        assert_eq!(kind_str, "supersedes");
+        assert!((weight - 1.0).abs() < 1e-9);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_canonical_without_source_note_ids_preserves_legacy_behavior() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let project = make_project(&db, tmp.path()).await;
+    let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+    // Legacy call: source_note_ids = &[] — no edges recorded, no error.
+    let created = consolidation_repo
+        .create_canonical_consolidated_note(CreateCanonicalConsolidatedNote {
+            project_id: &project.id,
+            note_type: "pattern",
+            title: "Canonical Pattern",
+            content: "canonical content",
+            tags: "[]",
+            abstract_: None,
+            overview: None,
+            confidence: 0.5,
+            source_session_ids: &[],
+            scope_paths: "[]",
+            source_note_ids: &[],
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(created.superseded_source_note_count, 0);
+    assert_eq!(created.provenance.len(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn supersession_metric_round_trips_superseded_source_note_count() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let project = make_project(&db, tmp.path()).await;
+    let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+    let metric = consolidation_repo
+        .create_run_metric(CreateConsolidationRunMetric {
+            project_id: &project.id,
+            note_type: "pattern",
+            status: "completed",
+            scanned_note_count: 10,
+            candidate_cluster_count: 2,
+            consolidated_cluster_count: 1,
+            consolidated_note_count: 1,
+            source_note_count: 3,
+            superseded_source_note_count: 3,
+            started_at: "2026-06-17T10:00:00.000Z",
+            completed_at: Some("2026-06-17T10:01:00.000Z"),
+            error_message: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(metric.superseded_source_note_count, 3);
+
+    // Round-trip via list.
+    let listed = consolidation_repo
+        .list_run_metrics(&project.id, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].superseded_source_note_count, 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn supersession_direction_convention_records_edge_regardless_of_id_order() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    // Create two notes; we don't control which id is lower, but the test
+    // verifies that record_supersedes works regardless of the relative id
+    // ordering.
+    let note_lower = note_repo
+        .create_db_note(&project.id, "Lower", "body", "pattern", "[]")
+        .await
+        .unwrap();
+    let note_higher = note_repo
+        .create_db_note(&project.id, "Higher", "body", "pattern", "[]")
+        .await
+        .unwrap();
+
+    let (canonical_id, source_id) = if note_lower.id < note_higher.id {
+        (note_higher.id.clone(), note_lower.id.clone())
+    } else {
+        (note_lower.id.clone(), note_higher.id.clone())
+    };
+
+    // Record the edge with canonical → source.
+    note_repo
+        .record_supersedes(&canonical_id, &source_id, 1.0)
+        .await
+        .unwrap();
+
+    // The edge should read back with kind = 'supersedes'.
+    let kind = note_repo
+        .get_association_kind(&canonical_id, &source_id)
+        .await
+        .unwrap();
+    assert!(kind.is_some());
+    let (_, kind_str) = kind.unwrap();
+    assert_eq!(kind_str, "supersedes");
+
+    // supersedes_neighbors should return the edge for both endpoints.
+    let neighbors = note_repo
+        .supersedes_neighbors(&[canonical_id.clone(), source_id.clone()])
+        .await
+        .unwrap();
+    assert!(neighbors.contains_key(&canonical_id));
+    assert!(neighbors.contains_key(&source_id));
+    assert!(neighbors[&canonical_id].contains(&source_id));
+    assert!(neighbors[&source_id].contains(&canonical_id));
 }

@@ -163,6 +163,70 @@ impl NoteRepository {
         Ok(())
     }
 
+    /// Record a typed `supersedes` edge marking `source_note_id` as superseded
+    /// by `canonical_note_id`.
+    ///
+    /// Used when a canonical consolidated note is created from a cluster of
+    /// source notes (yk9t task dm4w). The edge is tagged `kind = 'supersedes'`
+    /// so retrieval/build_context can drop the superseded source from a result
+    /// set when the canonical note is also present, preventing the two from
+    /// competing in the prompt.
+    ///
+    /// # Direction convention (provisional — pending cik0)
+    ///
+    /// The current F5 `note_associations` substrate is **undirected**: the
+    /// `chk_note_association_order` CHECK constraint requires `note_a_id <
+    /// note_b_id`, so we store the edge via [`canonical_pair`] like
+    /// [`record_derived_from`]. Supersession *is* inherently directed
+    /// (canonical → source), but the substrate does not yet encode direction.
+    /// We therefore adopt the convention that **`note_a_id` (the lower id) is
+    /// the source and `note_b_id` (the higher id) is the canonical**. Callers
+    /// pass `(canonical_note_id, source_note_id)`; this method swaps the pair
+    /// internally if the canonical/source order is reversed relative to the
+    /// canonical-pair ordering, so the recorded row always encodes the
+    /// canonical/source split correctly regardless of how the ids compare.
+    ///
+    /// This convention is good enough for v1: retrieval hides either endpoint
+    /// of a `supersedes` edge when its sibling is also returned, which is the
+    /// desired behavior regardless of which physical column holds the canonical
+    /// id. cik0 will land the direction-aware enhancement; the recorded edges
+    /// are forward-compatible because they only add a new kind value to the
+    /// existing substrate.
+    ///
+    /// Merge semantics: max-weight merge (same as `record_derived_from`). The
+    /// `kind` is promoted to `supersedes` on conflict.
+    ///
+    /// Implemented with a runtime (non-macro) query for the same offline-cache
+    /// reason as [`record_derived_from`].
+    pub async fn record_supersedes(
+        &self,
+        canonical_note_id: &str,
+        source_note_id: &str,
+        weight: f64,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+
+        let (a_id, b_id) = canonical_pair(canonical_note_id, source_note_id);
+        let weight = weight.clamp(0.0, 1.0);
+
+        sqlx::query(
+            r#"INSERT INTO note_associations
+             (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind)
+             VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'supersedes')
+             ON CONFLICT (note_a_id, note_b_id) DO UPDATE SET
+                 weight = GREATEST(note_associations.weight, EXCLUDED.weight),
+                 kind = 'supersedes',
+                 last_co_access = EXCLUDED.last_co_access"#,
+        )
+        .bind(a_id)
+        .bind(b_id)
+        .bind(weight)
+        .execute(self.db.pool())
+        .await?;
+
+        Ok(())
+    }
+
     /// Read back the `(weight, kind)` of the association between two notes, if
     /// any. The IDs are canonicalized internally. Primarily a provenance probe
     /// for callers (and tests) that need to inspect a typed edge.
@@ -187,6 +251,67 @@ impl NoteRepository {
         .await?;
 
         Ok(row)
+    }
+
+    /// Batch-fetch the `supersedes` neighbors for a set of note ids.
+    ///
+    /// For each input `note_id` that participates in a `kind = 'supersedes'`
+    /// edge (as either endpoint), returns the set of note ids on the *other*
+    /// side of those edges. Because the substrate is undirected, a note's
+    /// `supersedes` neighbors are the notes it either supersedes or is
+    /// superseded by.
+    ///
+    /// Used by [`build_context`](super::context) to post-filter a result set:
+    /// when two notes are connected by a `supersedes` edge and both appear in
+    /// the same context set, the superseded source is dropped.
+    ///
+    /// Returns a map keyed by each input id that has at least one `supersedes`
+    /// neighbor; ids with no such edge are absent from the map.
+    pub async fn supersedes_neighbors(
+        &self,
+        note_ids: &[String],
+    ) -> Result<HashMap<String, Vec<String>>> {
+        self.db.ensure_initialized().await?;
+
+        if note_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let placeholders = crate::repositories::pg_placeholders(note_ids.len(), 1);
+        // NOTE: dynamic SQL (IN list built at runtime) — compile-time check not possible.
+        let sql = format!(
+            r#"SELECT note_a_id, note_b_id
+               FROM note_associations
+               WHERE kind = 'supersedes'
+                 AND (note_a_id IN ({placeholders}) OR note_b_id IN ({placeholders}))"#,
+        );
+
+        let mut query = sqlx::query_as::<sqlx::Postgres, (String, String)>(&sql);
+        for id in note_ids {
+            query = query.bind(id);
+        }
+        for id in note_ids {
+            query = query.bind(id);
+        }
+
+        let rows: Vec<(String, String)> = query.fetch_all(self.db.pool()).await?;
+
+        let id_set: HashSet<&str> = note_ids.iter().map(String::as_str).collect();
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for (a_id, b_id) in rows {
+            if id_set.contains(a_id.as_str()) {
+                map.entry(a_id.clone()).or_default().push(b_id.clone());
+            }
+            if id_set.contains(b_id.as_str()) {
+                map.entry(b_id.clone()).or_default().push(a_id.clone());
+            }
+        }
+        // Sort for deterministic test output.
+        for neighbors in map.values_mut() {
+            neighbors.sort();
+        }
+
+        Ok(map)
     }
 
     /// Get all associations for a given note.
