@@ -1479,6 +1479,15 @@ mod inflight_ledger_tests {
     const WND1_STABLE_MODEL_ID: &str = "test/mock";
     const WND1_DISPATCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
     const WND1_CONTROLLED_RUNTIME_GUARD: Duration = Duration::from_secs(60);
+    // Settler-side lag between slot start (`started_tx`) and the DB session row
+    // materializing. Production lag is the worker pod boot (20-60s); the test
+    // just needs a window wide enough that the in-flight ledger is observably
+    // populated before the next dispatch pass reads the running-row count. The
+    // full race window also includes the slot pool's start time + DB op, so
+    // 30ms gives the next dispatch pass a comfortable margin to land inside
+    // the window even under heavy CI load. Smaller values (e.g. 1ms-10ms) have
+    // repeatedly flaked the harness on the cap=1 iteration of the stress loop.
+    const WND1_LAG_WINDOW: Duration = Duration::from_millis(30);
 
     struct Wnd1DispatchFixture {
         project_id: String,
@@ -1927,8 +1936,11 @@ mod inflight_ledger_tests {
                                 // Simulate the pod/session-row lag window: the local
                                 // in-flight ledger is already populated by dispatch,
                                 // while the DB row becomes visible shortly after.
+                                // The WND1_LAG_WINDOW delay must outlast a single
+                                // dispatch pass on CI hardware so the next pass
+                                // reliably observes the overlay stage.
                                 tokio::task::yield_now().await;
-                                tokio::time::sleep(Duration::from_millis(1)).await;
+                                tokio::time::sleep(WND1_LAG_WINDOW).await;
                                 let session_id = materialize_wnd1_running_session(
                                     &settler_db,
                                     &settler_fixture,
