@@ -296,9 +296,15 @@ mod tests {
             cmd.contains("verify-task"),
             "command must invoke verify-task: {cmd}"
         );
-        assert!(cmd.contains("run-123"), "command must pass the run id: {cmd}");
+        assert!(
+            cmd.contains("run-123"),
+            "command must pass the run id: {cmd}"
+        );
         // Pod must build the task branch's tree (clone target, fetch+checkout task).
-        assert!(cmd.contains("--branch \"main\""), "clones target branch: {cmd}");
+        assert!(
+            cmd.contains("--branch \"main\""),
+            "clones target branch: {cmd}"
+        );
         assert!(
             cmd.contains("checkout -B \"task/ab12\""),
             "checks out task branch: {cmd}"
