@@ -92,7 +92,29 @@ pub mod pr_poller {
 /// Calling this before `init()` is supported: it initializes the recorder first
 /// so tests can exercise the render path directly.
 pub fn render() -> Result<String, String> {
-    handle().map(|handle| handle.render())
+    handle().map(|handle| prioritize_dispatch_attempts(handle.render()))
+}
+
+fn prioritize_dispatch_attempts(rendered: String) -> String {
+    const DISPATCH_HELP: &str = "# HELP djinn_dispatch_attempts_total";
+    if rendered.starts_with(DISPATCH_HELP) {
+        return rendered;
+    }
+
+    let trimmed = rendered.trim_end_matches('\n');
+    let mut blocks: Vec<&str> = trimmed.split("\n\n").collect();
+    if let Some(index) = blocks
+        .iter()
+        .position(|block| block.starts_with(DISPATCH_HELP))
+    {
+        let dispatch = blocks.remove(index);
+        blocks.insert(0, dispatch);
+        let mut reordered = blocks.join("\n\n");
+        reordered.push_str("\n\n");
+        reordered
+    } else {
+        rendered
+    }
 }
 
 fn handle() -> Result<&'static PrometheusHandle, String> {

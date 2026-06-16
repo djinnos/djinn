@@ -79,7 +79,9 @@ use conversation_resolution::{
 use installation::resolve_installation_client;
 use pr_commands::enable_auto_merge_best_effort;
 #[allow(unused_imports)]
-pub(crate) use pr_commands::{AutoMergeTickDecision, decide_auto_merge_tick};
+pub(crate) use pr_commands::{
+    AutoMergeTickDecision, decide_auto_merge_tick, record_auto_merge_decision_metrics,
+};
 use pr_review_handlers::effective_review_decision;
 pub(crate) use pr_review_handlers::parse_pr_url;
 

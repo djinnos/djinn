@@ -485,8 +485,9 @@ impl CoordinatorActor {
                 "planner_second_strike_terminal_close_clear",
             )
             .await;
-            self.terminally_fail_task(task, role, &reason).await;
-            djinn_telemetry::task::increment_parked();
+            if self.terminally_fail_task(task, role, &reason).await {
+                djinn_telemetry::task::increment_parked();
+            }
             if let Err(e) = self
                 .task_repo()
                 .set_status_with_reason(&task.id, "closed", Some(&reason))

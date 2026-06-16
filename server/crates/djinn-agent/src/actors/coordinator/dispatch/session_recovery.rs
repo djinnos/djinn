@@ -806,7 +806,7 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
         role: &str,
         reason: &str,
-    ) {
+    ) -> bool {
         tracing::warn!(
             task_id = %task.short_id,
             role,
@@ -815,7 +815,7 @@ impl CoordinatorActor {
             "CoordinatorActor: failing task terminally (undispatchable / max retries)"
         );
         let repo = self.task_repo();
-        if let Err(e) = repo
+        match repo
             .transition(
                 &task.id,
                 TransitionAction::ForceClose,
@@ -826,7 +826,11 @@ impl CoordinatorActor {
             )
             .await
         {
-            tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: terminal close failed");
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: terminal close failed");
+                false
+            }
         }
     }
 }

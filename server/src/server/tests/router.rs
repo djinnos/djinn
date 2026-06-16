@@ -78,11 +78,10 @@ async fn metrics_returns_prometheus_text_without_auth() {
         "djinn_dispatch_attempts_total{outcome=\"error\"}",
         "djinn_dispatch_cooldowns_active",
         "djinn_dispatch_last_success_timestamp",
-        "djinn_slot_pool{model=\"\",state=\"free\"}",
-        "djinn_slot_pool{model=\"\",state=\"busy\"}",
+        "djinn_slot_pool{",
         "djinn_inflight_ledger_size",
-        "djinn_user_cap_utilization{model=\"\",user=\"\"}",
-        "djinn_breaker_state{model=\"metrics-model\",scope=\"metrics-user\"}",
+        "djinn_user_cap_utilization{",
+        "djinn_breaker_state{",
         "djinn_breaker_trips_total",
         "djinn_zombie_reaps_total{kind=\"startup\"}",
         "djinn_zombie_reaps_total{kind=\"periodic\"}",
@@ -95,9 +94,28 @@ async fn metrics_returns_prometheus_text_without_auth() {
     ] {
         assert!(text.contains(metric), "missing metric {metric} in:\n{text}");
     }
-    assert!(text.contains("metrics-model"));
-    assert!(text.contains("metrics-user"));
+    assert_metric_line_contains_all(text, "djinn_slot_pool", &["state=\"free\"", "model=\"\""]);
+    assert_metric_line_contains_all(text, "djinn_slot_pool", &["state=\"busy\"", "model=\"\""]);
+    assert_metric_line_contains_all(
+        text,
+        "djinn_user_cap_utilization",
+        &["user=\"\"", "model=\"\""],
+    );
+    assert_metric_line_contains_all(
+        text,
+        "djinn_breaker_state",
+        &["scope=\"metrics-user\"", "model=\"metrics-model\""],
+    );
     assert!(text.contains(" 1"));
+}
+
+fn assert_metric_line_contains_all(text: &str, metric: &str, labels: &[&str]) {
+    assert!(
+        text.lines()
+            .filter(|line| line.starts_with(metric))
+            .any(|line| labels.iter().all(|label| line.contains(label))),
+        "missing metric line for {metric} with labels {labels:?} in:\n{text}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

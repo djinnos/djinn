@@ -382,19 +382,14 @@ impl CoordinatorActor {
         // returned, an in-flight entry short-circuits (skip), and an absent entry
         // is marked in-flight so a re-entrant tick (or the sibling draft/review
         // callsite) can't double-spawn.
-        let decision = {
+        let (decision, tracked) = {
             let mut guard = self.auto_merge_tracker.lock().unwrap();
             let decision = decide_auto_merge_tick(&mut guard, task_id);
-            djinn_telemetry::pr_poller::set_tracked(guard.len());
-            decision
+            (decision, guard.len())
         };
+        record_auto_merge_decision_metrics(&decision, tracked);
         match decision {
-            AutoMergeTickDecision::Return(state) => {
-                if matches!(state, AutoMergeFastPathState::Reopen) {
-                    djinn_telemetry::pr_poller::increment_merge_failure();
-                }
-                return state;
-            }
+            AutoMergeTickDecision::Return(state) => return state,
             AutoMergeTickDecision::Spawn => {}
         }
 
@@ -603,6 +598,23 @@ pub(crate) fn decide_auto_merge_tick(
             tracker.insert(task_id.to_string(), AutoMergeFastPathState::InFlight);
             AutoMergeTickDecision::Spawn
         }
+    }
+}
+
+/// Emit PR-poller metrics after the tracker lock has been released.
+///
+/// The poller holds the tracker mutex only long enough to make the state-machine
+/// decision and capture its O(1) size. Counter/gauge recording is synchronous,
+/// but keeping it outside the critical section prevents future telemetry changes
+/// from accidentally expanding the lock scope or introducing a lock-across-await
+/// footgun at the merge-failure call site.
+pub(crate) fn record_auto_merge_decision_metrics(decision: &AutoMergeTickDecision, tracked: usize) {
+    djinn_telemetry::pr_poller::set_tracked(tracked);
+    if matches!(
+        decision,
+        AutoMergeTickDecision::Return(AutoMergeFastPathState::Reopen)
+    ) {
+        djinn_telemetry::pr_poller::increment_merge_failure();
     }
 }
 
