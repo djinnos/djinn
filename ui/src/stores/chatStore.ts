@@ -53,7 +53,17 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   attachments?: ChatAttachment[];
-  toolCalls?: { name: string; success?: boolean; input?: unknown }[];
+  toolCalls?: {
+    name: string;
+    success?: boolean;
+    input?: unknown;
+    /**
+     * Structured result payload from the matching `tool_result` SSE event.
+     * Additive — older readers that ignore it keep working. Populated when
+     * `sendChatMessage`'s `onToolResult` callback fires for this tool's id.
+     */
+    result?: { output: string; success: boolean };
+  }[];
   createdAt: number;
 }
 
