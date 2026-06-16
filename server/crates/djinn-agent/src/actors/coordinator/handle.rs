@@ -200,6 +200,18 @@ impl CoordinatorHandle {
         .await
     }
 
+    /// Route a settled no-op task through the shared no-mover disposition path
+    /// if the coordinator's live-mover predicate finds no active owner.
+    pub async fn route_settled_noop_without_live_mover(
+        &self,
+        task_id: &str,
+    ) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::RouteSettledNoopWithoutLiveMover {
+            task_id: task_id.to_owned(),
+        })
+        .await
+    }
+
     /// Increment the Lead escalation count for a task and return the new count.
     ///
     /// When the count reaches ≥ 2, the caller should route to Planner instead of Lead
