@@ -151,6 +151,85 @@ async fn skill_read_rejects_tampered_skill_when_manifest_exists() {
     assert!(err.contains("content_hash"), "got: {err}");
 }
 
+#[tokio::test]
+async fn skill_read_serves_directory_skill_references_and_rejects_reference_tamper() {
+    let db = create_test_db();
+    let state = agent_context_from_db(db, CancellationToken::new());
+    let services = crate::test_helpers::test_services();
+
+    let tmp = crate::test_helpers::test_tempdir("djinn-skill-read-ref-manifest-");
+    let skill_dir = tmp.path().join(".djinn").join("skills").join("ref-skill");
+    let references_dir = skill_dir.join("references");
+    fs::create_dir_all(&references_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: ref-skill\ndescription: Directory skill with references\n---\n\nPrimary body.\n",
+    )
+    .unwrap();
+    fs::write(references_dir.join("guide.md"), "Reference guide body.\n").unwrap();
+    write_checked_skills_manifest(tmp.path());
+
+    let ok = call_tool(
+        &state,
+        &services,
+        "skill_read",
+        Some(
+            serde_json::json!({ "name": "ref-skill" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        tmp.path(),
+        None,
+        Some("worker"),
+        None,
+    )
+    .await
+    .expect("skill_read should serve a verified directory skill");
+
+    let content = ok.get("content").and_then(|v| v.as_str()).unwrap();
+    assert!(content.contains("Primary body."));
+    assert!(content.contains("## References"));
+    assert!(content.contains("### guide.md"));
+    assert!(content.contains("Reference guide body."));
+
+    fs::write(
+        references_dir.join("guide.md"),
+        "Tampered reference body.\n",
+    )
+    .unwrap();
+    let err = call_tool(
+        &state,
+        &services,
+        "skill_read",
+        Some(
+            serde_json::json!({ "name": "ref-skill" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        tmp.path(),
+        None,
+        Some("worker"),
+        None,
+    )
+    .await
+    .expect_err("skill_read must reject a stale/tampered reference file");
+
+    assert!(
+        err.contains("skill_read refused to serve `ref-skill`"),
+        "got: {err}"
+    );
+    assert!(
+        err.contains("skills manifest verification failed"),
+        "got: {err}"
+    );
+    assert!(
+        err.contains("content_hash") || err.contains("source file"),
+        "got: {err}"
+    );
+}
+
 /// `skill_read` is present in every role's tool schema (it rides the base set,
 /// like `read`).
 #[test]

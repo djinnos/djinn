@@ -1,5 +1,6 @@
 use super::super::*;
 use djinn_core::models::{TaskStatus, TransitionAction};
+use tracing::Instrument as _;
 
 impl CoordinatorActor {
     async fn teardown_zombie_taskrun_job(
@@ -26,6 +27,11 @@ impl CoordinatorActor {
         }
     }
 
+    #[tracing::instrument(
+        name = "djinn.session_recovery.stall_timeout",
+        skip(self),
+        fields(kind = "stall")
+    )]
     pub(in crate::actors::coordinator) async fn enforce_session_stall_timeout(&mut self) {
         let repo = djinn_db::SessionRepository::new(
             self.db.clone(),
@@ -141,7 +147,33 @@ impl CoordinatorActor {
                 continue;
             }
 
-            if let Err(e) = self.pool.kill_session(task_id).await {
+            let kill_task_id = task_id.to_owned();
+            let kill_session_id = session.id.clone();
+            let kill_span = tracing::info_span!(
+                "djinn.session_recovery.kill_session",
+                kind = "stall",
+                task_id = %kill_task_id,
+                session_id = %kill_session_id
+            );
+            let kill_result = async {
+                let result = self.pool.kill_session(&kill_task_id).await;
+                let outcome = match &result {
+                    Ok(()) => "ok",
+                    Err(PoolError::TaskNotFound { .. }) => "not_found",
+                    Err(_) => "error",
+                };
+                tracing::info!(
+                    kind = "stall",
+                    task_id = %kill_task_id,
+                    session_id = %kill_session_id,
+                    outcome,
+                    "CoordinatorActor: session recovery kill_session attempt"
+                );
+                result
+            }
+            .instrument(kill_span)
+            .await;
+            if let Err(e) = kill_result {
                 tracing::warn!(task_id = %task_id, session_id = %session.id, error = %e, "CoordinatorActor: failed to kill stalled session");
                 continue;
             }
@@ -231,6 +263,11 @@ impl CoordinatorActor {
     /// slot forcibly reclaimed, and its task released for redispatch. The hard
     /// cap sits well above the 180s zero-token stall threshold so the fast path
     /// always wins in the normal case; this only fires for genuine drift.
+    #[tracing::instrument(
+        name = "djinn.session_recovery.zombie_reap",
+        skip(self),
+        fields(kind = "periodic")
+    )]
     pub(in crate::actors::coordinator) async fn reap_zombie_sessions(&mut self) {
         /// A `running`, zero-token session older than this has slipped past the
         /// 180s fast-path stall breaker — its in-memory tracking has drifted.
@@ -343,14 +380,64 @@ impl CoordinatorActor {
             // not rejected with `SessionAlreadyActive` on redispatch.
             self.teardown_zombie_taskrun_job(task_id, &session.id, session.task_run_id.as_deref())
                 .await;
-            if let Err(e) = self.pool.evict_session(task_id).await {
+            let evict_task_id = task_id.to_owned();
+            let evict_session_id = session.id.clone();
+            let evict_span = tracing::info_span!(
+                "djinn.session_recovery.zombie_reap.evict_session",
+                kind = "periodic",
+                task_id = %evict_task_id,
+                session_id = %evict_session_id
+            );
+            let evict_result = async {
+                let result = self.pool.evict_session(&evict_task_id).await;
+                let outcome = match &result {
+                    Ok(()) => "ok",
+                    Err(PoolError::TaskNotFound { .. }) => "not_found",
+                    Err(_) => "error",
+                };
+                tracing::info!(
+                    kind = "periodic",
+                    task_id = %evict_task_id,
+                    session_id = %evict_session_id,
+                    outcome,
+                    "CoordinatorActor: zombie session evict attempt"
+                );
+                result
+            }
+            .instrument(evict_span)
+            .await;
+            if let Err(e) = evict_result {
                 tracing::warn!(task_id = %task_id, error = %e, "CoordinatorActor: failed to evict slot for zombie session");
             }
             // Drop the stale stall guard for this finalized session.
             self.stall_killed.remove(&session.id);
 
             // Finalize the orphaned `running` row so it stops being listed.
-            if let Err(e) = session_repo.interrupt_running_for_task(task_id).await {
+            let finalize_task_id = task_id.to_owned();
+            let finalize_session_id = session.id.clone();
+            let finalize_span = tracing::info_span!(
+                "djinn.session_recovery.zombie_reap.finalize_session",
+                kind = "periodic",
+                task_id = %finalize_task_id,
+                session_id = %finalize_session_id
+            );
+            let finalize_result = async {
+                let result = session_repo
+                    .interrupt_running_for_task(&finalize_task_id)
+                    .await;
+                let outcome = if result.is_ok() { "ok" } else { "error" };
+                tracing::info!(
+                    kind = "periodic",
+                    task_id = %finalize_task_id,
+                    session_id = %finalize_session_id,
+                    outcome,
+                    "CoordinatorActor: zombie session finalize attempt"
+                );
+                result
+            }
+            .instrument(finalize_span)
+            .await;
+            if let Err(e) = finalize_result {
                 tracing::warn!(task_id = %task_id, error = %e, "CoordinatorActor: failed to finalize zombie session row");
             }
 
@@ -408,6 +495,11 @@ impl CoordinatorActor {
     /// A settled session revives to `running` on its next turn via
     /// `upsert_chat_session`. The stall sweep above can't cover these: it keys
     /// on `task_id`, which is always NULL for chat.
+    #[tracing::instrument(
+        name = "djinn.session_recovery.idle_reap",
+        skip(self),
+        fields(kind = "idle")
+    )]
     pub(in crate::actors::coordinator) async fn reap_idle_chat_sessions(&self) {
         /// Idle window before a chat session is considered settled: 30 minutes,
         /// matching the worker stall timeout.
@@ -431,7 +523,26 @@ impl CoordinatorActor {
             if idle <= CHAT_IDLE_TIMEOUT_SECS {
                 continue;
             }
-            if let Err(e) = repo.settle_idle_chat(&session_id).await {
+            let reap_session_id = session_id.clone();
+            let reap_span = tracing::info_span!(
+                "djinn.session_recovery.idle_reap.settle_session",
+                kind = "idle",
+                session_id = %reap_session_id
+            );
+            let settle_result = async {
+                let result = repo.settle_idle_chat(&reap_session_id).await;
+                let outcome = if result.is_ok() { "ok" } else { "error" };
+                tracing::info!(
+                    kind = "idle",
+                    session_id = %reap_session_id,
+                    outcome,
+                    "CoordinatorActor: idle chat session settle attempt"
+                );
+                result
+            }
+            .instrument(reap_span)
+            .await;
+            if let Err(e) = settle_result {
                 tracing::warn!(session_id = %session_id, error = %e, "CoordinatorActor: failed to settle idle chat session");
                 continue;
             }
