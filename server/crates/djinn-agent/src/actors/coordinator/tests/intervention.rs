@@ -2,7 +2,7 @@ use super::*;
 use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
 use djinn_core::run_progress::RunProgress;
 use djinn_core::{events::DjinnEventEnvelope, models::SessionStatus};
-use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
+use djinn_db::{DispatchStateRepository, DispatchStateUpsert, UserRepository};
 
 #[allow(dead_code)]
 struct InterventionChaosHarness {
@@ -12,9 +12,14 @@ struct InterventionChaosHarness {
     actor: CoordinatorActor,
     repo: TaskRepository,
     task_id: String,
+    /// Stable `users.id` for the synthetic capacity-bearer that backs the
+    /// `seed_running_capacity_occupancy` flow. Seeded via
+    /// `UserRepository::upsert_from_github` so the FK from
+    /// `sessions.created_by_user_id` is satisfied; the test only needs this
+    /// id to round-trip through `count_active_by_user_and_model()` and the
+    /// in-memory `inflight_dispatches` ledger.
+    capacity_user_id: String,
 }
-
-const CHAOS_CAPACITY_USER_ID: &str = "capacity-user";
 
 #[allow(dead_code)]
 impl InterventionChaosHarness {
@@ -23,6 +28,22 @@ impl InterventionChaosHarness {
         let (tx, rx) = broadcast::channel(256);
         let actor = coordinator_actor_for_tests(&db, &tx);
         let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        // Seed a real user row so the FK from `sessions.created_by_user_id`
+        // to `users.id` is satisfied when `seed_running_capacity_occupancy`
+        // scopes `SESSION_USER_ID` to the harness's capacity bearer.
+        // The actual id minted here is opaque to the assertions; the
+        // harness only uses it to round-trip the in-memory inflight
+        // ledger and the `count_active_by_user_and_model` lookup.
+        let capacity_user_id = UserRepository::new(db.clone())
+            .upsert_from_github(
+                9_001_001,
+                "chaos-capacity-bearer",
+                Some("Chaos Capacity Bearer"),
+                None,
+            )
+            .await
+            .unwrap()
+            .id;
         let task = make_task_with_reopen_count(&db, &tx, initial_reopen_count).await;
 
         Self {
@@ -32,6 +53,7 @@ impl InterventionChaosHarness {
             actor,
             repo,
             task_id: task.id,
+            capacity_user_id,
         }
     }
 
@@ -288,8 +310,9 @@ impl InterventionChaosHarness {
         let task = self.task().await;
         let session_repo =
             SessionRepository::new(self.db.clone(), crate::events::event_bus_for(&self.tx));
+        let capacity_user_id = self.capacity_user_id.clone();
         djinn_core::auth_context::SESSION_USER_ID
-            .scope(Some(CHAOS_CAPACITY_USER_ID.to_owned()), async {
+            .scope(Some(capacity_user_id.clone()), async {
                 session_repo
                     .create(CreateSessionParams {
                         project_id: &task.project_id,
@@ -306,10 +329,7 @@ impl InterventionChaosHarness {
 
         self.actor.inflight_dispatches.insert(
             self.task_id.clone(),
-            (
-                Some(CHAOS_CAPACITY_USER_ID.to_owned()),
-                DEFAULT_MODEL_ID.to_owned(),
-            ),
+            (Some(capacity_user_id.clone()), DEFAULT_MODEL_ID.to_owned()),
         );
 
         let existing = self.durable_dispatch_state().await;
@@ -329,7 +349,7 @@ impl InterventionChaosHarness {
                 last_dispatched_role: existing
                     .as_ref()
                     .and_then(|record| record.last_dispatched_role.as_deref()),
-                inflight_creator_user_id: Some(CHAOS_CAPACITY_USER_ID),
+                inflight_creator_user_id: Some(&capacity_user_id),
                 inflight_model_id: Some(DEFAULT_MODEL_ID),
             })
             .await
@@ -345,7 +365,8 @@ impl InterventionChaosHarness {
             .unwrap()
             .into_iter()
             .find(|(creator, model, _)| {
-                creator.as_deref() == Some(CHAOS_CAPACITY_USER_ID) && model == DEFAULT_MODEL_ID
+                creator.as_deref() == Some(self.capacity_user_id.as_str())
+                    && model == DEFAULT_MODEL_ID
             })
             .map_or(0, |(_, _, count)| count)
     }
@@ -359,7 +380,7 @@ impl InterventionChaosHarness {
         assert_eq!(
             self.actor.inflight_dispatches.get(&self.task_id),
             Some(&(
-                Some(CHAOS_CAPACITY_USER_ID.to_owned()),
+                Some(self.capacity_user_id.clone()),
                 DEFAULT_MODEL_ID.to_owned()
             )),
             "in-memory in-flight capacity ledger should be seeded"
@@ -370,7 +391,7 @@ impl InterventionChaosHarness {
             .expect("durable dispatch state should be seeded");
         assert_eq!(
             durable.inflight_creator_user_id.as_deref(),
-            Some(CHAOS_CAPACITY_USER_ID)
+            Some(self.capacity_user_id.as_str())
         );
         assert_eq!(durable.inflight_model_id.as_deref(), Some(DEFAULT_MODEL_ID));
     }
