@@ -70,6 +70,34 @@ impl NoteRepository {
         .await
     }
 
+    /// `create_db_note_with_scope` plus a normalized retrieval anchor. Used by
+    /// the LLM extraction path so newly written case/pattern/pitfall notes
+    /// carry an objective `applies_when` sentence distinct from the body.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_db_note_with_scope_and_retrieval_anchor(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        tags: &str,
+        scope_paths: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> Result<Note> {
+        self.create_internal(
+            project_id,
+            None,
+            title,
+            content,
+            note_type,
+            None,
+            tags,
+            scope_paths,
+            retrieval_anchor,
+        )
+        .await
+    }
+
     pub async fn update_scope_paths(&self, id: &str, scope_paths: &str) -> Result<Note> {
         self.db.ensure_initialized().await?;
 
