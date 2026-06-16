@@ -80,6 +80,22 @@ impl RuntimeOps for AppState {
             .map_err(|e| e.to_string())
     }
 
+    async fn dispatch_verification(
+        &self,
+        run_id: &str,
+        project_id: &str,
+        task_branch: &str,
+        target_branch: &str,
+    ) -> Result<(), String> {
+        // The K8s graph warmer owns the one-shot Job dispatcher + project-image
+        // resolution; the in-process warmer's default impl errors (no kube).
+        self.graph_warmer()
+            .await
+            .dispatch_verification(run_id, project_id, task_branch, target_branch)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn provision_backing_service(
         &self,
         req: ProvisionServiceRequest,

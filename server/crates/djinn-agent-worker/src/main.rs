@@ -189,6 +189,19 @@ enum Cmd {
         /// `verification_test_runs.id` (positional).
         test_id: String,
     },
+
+    /// Run a one-shot pre-PR verification for a task and exit. Reads the
+    /// `verification_runs` row, runs the real verification pipeline
+    /// (`verify_commit`) against the task branch's tree (already cloned +
+    /// checked out at `DJINN_PROJECT_ROOT` by the Job's bash wrapper), and
+    /// writes per-command results + pass/fail back to the row. Dispatched by
+    /// `build_verification_job` in `djinn-k8s` — this is what gives the pre-PR
+    /// quality gate a real toolchain + shared `/cache` instead of false-failing
+    /// on the toolchain-less server host.
+    VerifyTask {
+        /// `verification_runs.id` (positional).
+        run_id: String,
+    },
 }
 
 /// Arguments for the `task-run` subcommand.
@@ -309,6 +322,7 @@ async fn run() -> Result<()> {
             new_commit,
         } => run_compare_graph_artifacts(&project_id, &old_commit, &new_commit).await,
         Cmd::VerifyTest { test_id } => run_verify_test(&test_id).await,
+        Cmd::VerifyTask { run_id } => run_verify_task(&run_id).await,
     }
 }
 
@@ -1593,6 +1607,144 @@ async fn run_verify_test(test_id: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Run a one-shot pre-PR verification for a task and write the outcome back to
+/// the `verification_runs` row. Dispatched by `build_verification_job` in
+/// `djinn-k8s`: the Job's bash wrapper has already cloned the target branch and
+/// checked out the task branch into `DJINN_PROJECT_ROOT`, so this resolves the
+/// scoped verification commands against that tree and runs the SAME pipeline
+/// (`verify_commit`) the server runs inline on the non-Kubernetes path.
+///
+/// Faithful to the server-side pipeline (`actors/slot/verification.rs`): it
+/// normalizes tracked-file mtimes (cargo-cache reuse), resolves the role-level
+/// `verification_command` override + the project's scoped rules, then runs
+/// `verify_commit` keyed on the real HEAD commit.
+async fn run_verify_task(run_id: &str) -> Result<()> {
+    let db = bootstrap_warm_database().await?;
+    let repo = djinn_db::VerificationRunRepository::new(db.clone());
+
+    let run = repo
+        .get(run_id)
+        .await
+        .with_context(|| format!("load verification_run {run_id}"))?
+        .ok_or_else(|| anyhow::anyhow!("verification_run {run_id} not found"))?;
+    let _ = repo.mark_running(run_id).await;
+
+    // Resolve everything the pipeline needs from the task + project rows.
+    let task_repo = djinn_db::TaskRepository::new(db.clone(), EventBus::noop());
+    let task = task_repo
+        .get(&run.task_id)
+        .await
+        .with_context(|| format!("load task {}", run.task_id))?
+        .ok_or_else(|| anyhow::anyhow!("task {} not found", run.task_id))?;
+
+    let project_repo = djinn_db::ProjectRepository::new(db.clone(), EventBus::noop());
+    let target_branch = match project_repo.get_config(&run.project_id).await {
+        Ok(Some(config)) => config.target_branch,
+        _ => "main".to_string(),
+    };
+
+    let project_root = std::env::var("DJINN_PROJECT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/workspace"));
+
+    // Reset tracked-file mtimes to commit times so the verification build reuses
+    // the warm/verification-owned cargo target base for byte-identical crates.
+    // Best-effort; never fails verification.
+    djinn_workspace::normalize_mtimes_at(&project_root).await;
+
+    // Role/specialist `verification_command` override (absolute priority in
+    // resolve_scoped_commands), mirroring the server pipeline.
+    let role_cmd_override = verify_task_role_override(&db, &task).await;
+
+    let scoped_commands = djinn_agent::verification::scoped::resolve_scoped_commands(
+        &db,
+        Some(&run.project_id),
+        &project_root,
+        &target_branch,
+        role_cmd_override.as_deref(),
+    )
+    .await;
+
+    let commit_sha = verify_task_head_commit(&project_root)
+        .unwrap_or_else(|_| format!("verify-run-{run_id}"));
+
+    let outcome = djinn_agent::verification::service::verify_commit(
+        &run.project_id,
+        &commit_sha,
+        &project_root,
+        &db,
+        &scoped_commands,
+    )
+    .await;
+
+    match outcome {
+        Ok(result) => {
+            let setup_json =
+                serde_json::to_string(&result.setup_results).unwrap_or_else(|_| "[]".to_string());
+            let verify_json = serde_json::to_string(&result.verification_results)
+                .unwrap_or_else(|_| "[]".to_string());
+            let status = if result.passed {
+                djinn_db::VerificationRunStatus::PASSED
+            } else {
+                djinn_db::VerificationRunStatus::FAILED
+            };
+            repo.complete(run_id, status, &setup_json, &verify_json, None)
+                .await
+                .with_context(|| format!("write verification_run {run_id} result"))?;
+            info!(run_id, passed = result.passed, "verification run complete");
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            let _ = repo
+                .complete(
+                    run_id,
+                    djinn_db::VerificationRunStatus::ERROR,
+                    "[]",
+                    "[]",
+                    Some(&msg),
+                )
+                .await;
+            warn!(run_id, error = %msg, "verification run errored");
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the role-level `verification_command` override for a task, mirroring
+/// `role_verification_command_for_task` in the server pipeline. Returns `None`
+/// when the task has no `agent_type`, the role is missing, or its command is
+/// empty.
+async fn verify_task_role_override(
+    db: &Database,
+    task: &djinn_core::models::Task,
+) -> Option<String> {
+    let specialist_name = task.agent_type.as_deref().filter(|s| !s.is_empty())?;
+    let role_repo = djinn_db::AgentRepository::new(db.clone(), EventBus::noop());
+    let role = role_repo
+        .get_by_name_for_project(&task.project_id, specialist_name)
+        .await
+        .ok()
+        .flatten()?;
+    role.verification_command
+        .filter(|cmd| !cmd.trim().is_empty())
+}
+
+/// Resolve the HEAD commit of the checked-out task branch in `project_root`.
+fn verify_task_head_commit(project_root: &Path) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .arg("rev-parse")
+        .arg("HEAD")
+        .current_dir(project_root)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git rev-parse HEAD failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Replicates `AppState::minimal_for_warm_only`'s DB resolution — the

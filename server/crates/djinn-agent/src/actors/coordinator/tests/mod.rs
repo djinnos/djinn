@@ -118,6 +118,15 @@ impl djinn_control_plane::bridge::RuntimeOps for RecordingRuntimeOps {
     async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
         Ok(())
     }
+    async fn dispatch_verification(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 
     async fn enqueue_image_build(&self, _: &str) -> Result<(), String> {
         Ok(())

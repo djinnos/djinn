@@ -62,6 +62,15 @@ mod tests {
         async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
             Ok(())
         }
+        async fn dispatch_verification(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
         async fn provision_backing_service(
             &self,
             _: crate::bridge::ProvisionServiceRequest,
@@ -112,6 +121,15 @@ mod tests {
         async fn trigger_graph_warm(&self, _: &str) {}
         async fn apply_user_model_change(&self) {}
         async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_verification(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<(), String> {
             Ok(())
         }
         async fn provision_backing_service(

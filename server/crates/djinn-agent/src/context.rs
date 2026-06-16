@@ -271,6 +271,18 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
         // no kube client.
         Err("dispatch_verification_test not supported on the agent-internal runtime".to_string())
     }
+    async fn dispatch_verification(
+        &self,
+        _run_id: &str,
+        _project_id: &str,
+        _task_branch: &str,
+        _target_branch: &str,
+    ) -> Result<(), String> {
+        // Verification dispatch is owned by the server-side AppState impl (it
+        // routes to the K8s graph warmer). The agent-internal runtime has no
+        // kube client; the verification pipeline falls back to host execution.
+        Err("dispatch_verification not supported on the agent-internal runtime".to_string())
+    }
     async fn provision_backing_service(
         &self,
         _req: djinn_control_plane::bridge::ProvisionServiceRequest,

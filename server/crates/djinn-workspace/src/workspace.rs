@@ -230,21 +230,7 @@ impl Workspace {
     /// are skipped (cargo doesn't fingerprint them); symlinks are skipped (we
     /// don't want to chase them to their targets).
     pub async fn normalize_mtimes(&self) {
-        let root = self.root.path().to_path_buf();
-        // The whole thing is CPU/syscall-bound filesystem work over a `git log`
-        // pipe; run it off the async runtime so we don't park a worker thread.
-        let result = tokio::task::spawn_blocking(move || normalize_mtimes_blocking(&root)).await;
-        match result {
-            Ok(Ok(stats)) => debug!(
-                files_touched = stats.touched,
-                tracked = stats.tracked,
-                commits_walked = stats.commits_walked,
-                duration_ms = stats.duration.as_millis() as u64,
-                "normalize_mtimes: reset tracked-file mtimes to commit times"
-            ),
-            Ok(Err(e)) => warn!(error = %e, "normalize_mtimes: skipped (non-fatal)"),
-            Err(e) => warn!(error = %e, "normalize_mtimes: blocking task panicked (non-fatal)"),
-        }
+        normalize_mtimes_at(self.root.path()).await;
     }
 
     /// Whether `origin/<target_branch>` is already an ancestor of the current
@@ -585,6 +571,32 @@ struct NormalizeStats {
     tracked: usize,
     commits_walked: usize,
     duration: Duration,
+}
+
+/// Best-effort tracked-file mtime normalization on an arbitrary checked-out
+/// working tree at `root`.
+///
+/// Free-function form of [`Workspace::normalize_mtimes`] for callers that hold
+/// a plain directory rather than a [`Workspace`] handle — e.g. the verification
+/// Job pod, which clones the task branch into its own workspace before running
+/// the pipeline. Same best-effort contract: every failure is logged and
+/// swallowed; this is a pure cargo-cache optimization and must NEVER fail a run.
+pub async fn normalize_mtimes_at(root: &Path) {
+    let root = root.to_path_buf();
+    // The whole thing is CPU/syscall-bound filesystem work over a `git log`
+    // pipe; run it off the async runtime so we don't park a worker thread.
+    let result = tokio::task::spawn_blocking(move || normalize_mtimes_blocking(&root)).await;
+    match result {
+        Ok(Ok(stats)) => debug!(
+            files_touched = stats.touched,
+            tracked = stats.tracked,
+            commits_walked = stats.commits_walked,
+            duration_ms = stats.duration.as_millis() as u64,
+            "normalize_mtimes: reset tracked-file mtimes to commit times"
+        ),
+        Ok(Err(e)) => warn!(error = %e, "normalize_mtimes: skipped (non-fatal)"),
+        Err(e) => warn!(error = %e, "normalize_mtimes: blocking task panicked (non-fatal)"),
+    }
 }
 
 /// Synchronous core of [`Workspace::normalize_mtimes`]; see that method's docs
