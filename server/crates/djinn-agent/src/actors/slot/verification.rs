@@ -470,16 +470,16 @@ async fn run_verification_in_pod(
                 anyhow::anyhow!("verification run row {run_id} disappeared before completion")
             })?;
         match run.status.as_str() {
-            djinn_db::VerificationRunStatus::PENDING
-            | djinn_db::VerificationRunStatus::RUNNING => continue,
+            djinn_db::VerificationRunStatus::PENDING | djinn_db::VerificationRunStatus::RUNNING => {
+                continue;
+            }
             djinn_db::VerificationRunStatus::ERROR => {
                 anyhow::bail!(
                     "verification pod errored: {}",
                     run.error.as_deref().unwrap_or("unknown error")
                 );
             }
-            djinn_db::VerificationRunStatus::PASSED
-            | djinn_db::VerificationRunStatus::FAILED => {
+            djinn_db::VerificationRunStatus::PASSED | djinn_db::VerificationRunStatus::FAILED => {
                 let passed = run.status == djinn_db::VerificationRunStatus::PASSED;
                 let setup_results: Vec<djinn_core::commands::CommandResult> =
                     serde_json::from_str(&run.setup_results).unwrap_or_default();

@@ -1667,8 +1667,8 @@ async fn run_verify_task(run_id: &str) -> Result<()> {
     )
     .await;
 
-    let commit_sha = verify_task_head_commit(&project_root)
-        .unwrap_or_else(|_| format!("verify-run-{run_id}"));
+    let commit_sha =
+        verify_task_head_commit(&project_root).unwrap_or_else(|_| format!("verify-run-{run_id}"));
 
     let outcome = djinn_agent::verification::service::verify_commit(
         &run.project_id,
