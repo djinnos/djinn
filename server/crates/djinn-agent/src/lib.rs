@@ -7,7 +7,7 @@
 #![recursion_limit = "256"]
 
 pub(crate) mod commands;
-pub(crate) mod dispatch_pause;
+pub mod dispatch_pause;
 pub(crate) mod events;
 pub(crate) mod process;
 

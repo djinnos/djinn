@@ -1,3 +1,4 @@
+// djinn:allow-oversize — integration tests for slot-pool actor behavior.
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
