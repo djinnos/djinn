@@ -87,8 +87,13 @@ async fn repair_embeddings(
     };
 
     for row in rows {
-        let expected_hash =
-            embedding_content_hash(&row.title, &row.note_type, &row.tags, &row.content);
+        let expected_hash = embedding_content_hash(
+            &row.title,
+            &row.note_type,
+            &row.tags,
+            &row.content,
+            row.retrieval_anchor.as_deref(),
+        );
 
         let is_stale = match (row.content_hash.as_deref(), row.model_version.as_deref()) {
             (Some(hash), Some(version)) => {
@@ -108,7 +113,14 @@ async fn repair_embeddings(
             response.up_to_date += 1;
         } else {
             match repo
-                .embed_note_now(&row.id, &row.title, &row.note_type, &row.tags, &row.content)
+                .embed_note_now(
+                    &row.id,
+                    &row.title,
+                    &row.note_type,
+                    &row.tags,
+                    &row.content,
+                    row.retrieval_anchor.as_deref(),
+                )
                 .await
             {
                 Ok(_) => response.repaired += 1,

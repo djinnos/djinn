@@ -32,6 +32,70 @@ fn embedding_with_value(value: f32) -> Vec<f32> {
 }
 
 #[test]
+fn embedding_document_text_prefers_retrieval_anchor() {
+    let text = embedding_document_text(
+        "Anchored Note",
+        "reference",
+        "[\"db\"]",
+        "full note body that must not be embedded",
+        Some("When choosing a database migration strategy."),
+    );
+
+    assert_eq!(
+        text,
+        "title: Anchored Note\nretrieval_anchor: When choosing a database migration strategy."
+    );
+    assert!(!text.contains("full note body"));
+    assert!(!text.contains("type: reference"));
+    assert!(!text.contains("[\"db\"]"));
+}
+
+#[test]
+fn embedding_document_text_uses_legacy_fallback_without_anchor() {
+    let legacy = legacy_embedding_document_text("Legacy Note", "case", "[]", "legacy body");
+
+    assert_eq!(
+        embedding_document_text("Legacy Note", "case", "[]", "legacy body", None),
+        legacy
+    );
+    assert_eq!(
+        embedding_document_text("Legacy Note", "case", "[]", "legacy body", Some("  ")),
+        legacy
+    );
+}
+
+#[test]
+fn embedding_content_hash_follows_selected_document_text() {
+    let first = embedding_content_hash(
+        "Hash Note",
+        "reference",
+        "[]",
+        "body stays unchanged",
+        Some("When handling the first situation."),
+    );
+    let second = embedding_content_hash(
+        "Hash Note",
+        "reference",
+        "[]",
+        "body stays unchanged",
+        Some("When handling the second situation."),
+    );
+    let legacy =
+        embedding_content_hash("Hash Note", "reference", "[]", "body stays unchanged", None);
+
+    assert_ne!(first, second);
+    assert_eq!(
+        legacy,
+        crate::note_hash::note_content_hash(&legacy_embedding_document_text(
+            "Hash Note",
+            "reference",
+            "[]",
+            "body stays unchanged",
+        ))
+    );
+}
+
+#[test]
 fn worktree_root_infers_task_embedding_branch() {
     let worktree = std::path::Path::new("/tmp/.djinn/worktrees/exen");
     assert_eq!(
@@ -159,9 +223,8 @@ async fn embedding_lifecycle_tracks_create_update_delete_with_provider() {
 
     // Embeddings are now scheduled on a background tokio task; poll until
     // the create-time embedding lands.
-    let expected_hash = crate::note_hash::note_content_hash(
-        "title: Lifecycle Note\ntype: reference\ntags: []\n\noriginal body",
-    );
+    let expected_hash =
+        embedding_content_hash("Lifecycle Note", "reference", "[]", "original body", None);
     let created = poll_embedding_with_hash(&repo, &note.id, &expected_hash).await;
     assert_eq!(created.model_version, "model-v1");
 
@@ -169,9 +232,8 @@ async fn embedding_lifecycle_tracks_create_update_delete_with_provider() {
         .update(&note.id, "Lifecycle Note", "updated body", "[]")
         .await
         .unwrap();
-    let updated_expected_hash = crate::note_hash::note_content_hash(
-        "title: Lifecycle Note\ntype: reference\ntags: []\n\nupdated body",
-    );
+    let updated_expected_hash =
+        embedding_content_hash("Lifecycle Note", "reference", "[]", "updated body", None);
     let updated_embedding =
         poll_embedding_with_hash(&repo, &updated.id, &updated_expected_hash).await;
     assert_eq!(updated_embedding.model_version, "model-v1");
@@ -179,6 +241,67 @@ async fn embedding_lifecycle_tracks_create_update_delete_with_provider() {
 
     repo.delete(&updated.id).await.unwrap();
     assert!(repo.get_embedding(&updated.id).await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedding_lifecycle_uses_anchor_and_repair_rows_include_anchor() {
+    let _guard = super::sqlite_vec_test_lock().lock().await;
+    crate::database::set_sqlite_vec_disabled_for_tests(false);
+
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx)).with_embedding_provider(Some(Arc::new(
+        StubEmbeddingProvider {
+            value: 0.3,
+            model_version: "model-v1",
+            fail: false,
+        },
+    )));
+
+    let note = repo
+        .create_with_retrieval_anchor(
+            &project.id,
+            "Anchored Lifecycle Note",
+            "body that should not affect anchored embedding",
+            "reference",
+            "[]",
+            Some("When exercising anchored embedding sync."),
+        )
+        .await
+        .unwrap();
+    let first_hash = embedding_content_hash(
+        "Anchored Lifecycle Note",
+        "reference",
+        "[]",
+        "body that should not affect anchored embedding",
+        Some("When exercising anchored embedding sync."),
+    );
+    let first = poll_embedding_with_hash(&repo, &note.id, &first_hash).await;
+
+    let repair_rows = repo.list_repair_embedding_rows(&project.id).await.unwrap();
+    let repair_row = repair_rows.iter().find(|row| row.id == note.id).unwrap();
+    assert_eq!(
+        repair_row.retrieval_anchor.as_deref(),
+        Some("When exercising anchored embedding sync.")
+    );
+
+    let updated = repo
+        .update_retrieval_anchor(&note.id, Some("When the anchor changes."))
+        .await
+        .unwrap();
+    let second_hash = embedding_content_hash(
+        "Anchored Lifecycle Note",
+        "reference",
+        "[]",
+        "body that should not affect anchored embedding",
+        Some("When the anchor changes."),
+    );
+    let second = poll_embedding_with_hash(&repo, &updated.id, &second_hash).await;
+
+    assert_ne!(first.content_hash, second.content_hash);
 }
 
 async fn poll_embedding_with_hash(

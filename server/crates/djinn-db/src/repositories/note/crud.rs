@@ -913,9 +913,17 @@ impl NoteRepository {
         let note_type = note.note_type.clone();
         let tags = note.tags.clone();
         let content = note.content.clone();
+        let retrieval_anchor = note.retrieval_anchor.clone();
         tokio::spawn(async move {
-            repo.sync_note_embedding(&note_id, &title, &note_type, &tags, &content)
-                .await;
+            repo.sync_note_embedding(
+                &note_id,
+                &title,
+                &note_type,
+                &tags,
+                &content,
+                retrieval_anchor.as_deref(),
+            )
+            .await;
         });
     }
 }

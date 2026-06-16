@@ -45,7 +45,7 @@ pub use embeddings::{
     NoteEmbeddingProvider, NoteEmbeddingRecord, NoteRepairEmbeddingRow, NoteVectorBackend,
     NoteVectorStore, QdrantConfig, QdrantNoteVectorStore, UpsertNoteEmbedding,
     embedding_content_hash, embedding_document_text, infer_embedding_branch_from_worktree,
-    task_branch_name,
+    legacy_embedding_document_text, task_branch_name,
 };
 pub use lexical_search::{
     LexicalSearchBackend, LexicalSearchMode, LexicalSearchPlan, build_lexical_search_plan,
