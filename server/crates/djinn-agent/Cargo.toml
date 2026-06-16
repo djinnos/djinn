@@ -22,6 +22,7 @@ djinn-memory = { path = "../djinn-memory" }
 djinn-git = { path = "../djinn-git" }
 djinn-provider = { path = "../djinn-provider" }
 djinn-control-plane = { path = "../djinn-control-plane" }
+djinn-telemetry = { path = "../djinn-telemetry" }
 djinn-runtime = { path = "../djinn-runtime", features = ["test-runtime"] }
 djinn-stack = { path = "../djinn-stack" }
 djinn-supervisor = { path = "../djinn-supervisor" }
