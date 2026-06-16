@@ -750,6 +750,18 @@ impl CoordinatorActor {
                 self.clear_planned_dispatch_completion(&task_id, &reason)
                     .await;
             }
+            CoordinatorMessage::CheckLiveMover { task_id, reply } => {
+                let result = match self.task_repo().get(&task_id).await {
+                    Ok(Some(task)) => self
+                        .collect_live_mover_evidence(&task)
+                        .await
+                        .map(|evidence| crate::supervisor_impl::summarize_live_mover(&evidence))
+                        .map_err(|err| CoordinatorError::LiveMoverEvidence(err.to_string())),
+                    Ok(None) => Err(CoordinatorError::TaskNotFound(task_id)),
+                    Err(err) => Err(CoordinatorError::LiveMoverEvidence(err.to_string())),
+                };
+                let _ = reply.send(result);
+            }
             CoordinatorMessage::IncrementEscalationCount { task_id, reply } => {
                 match self.increment_durable_escalation_count(&task_id).await {
                     Ok(count) => {

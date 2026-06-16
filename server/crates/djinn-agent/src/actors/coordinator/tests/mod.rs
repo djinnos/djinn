@@ -908,6 +908,58 @@ async fn live_mover_evidence_collects_no_evidence_for_closed_task() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_mover_summary_handle_exposes_reusable_non_pr_api() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _project_path) = create_simple_task(
+        &db,
+        &tx,
+        "task",
+        "live mover handle API summarizes evidence",
+    )
+    .await;
+    let (blocking_task, _project_path) =
+        create_simple_task(&db, &tx, "task", "live mover handle blocker").await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    repo.add_blocker(&task.id, &blocking_task.id).await.unwrap();
+    let task = repo.set_status(&task.id, "pr_review").await.unwrap();
+    let task = repo
+        .set_pr_url(&task.id, "https://github.com/example/repo/pull/2")
+        .await
+        .unwrap();
+    let handle = spawn_coordinator(&db, &tx);
+
+    let summary = handle.live_mover_summary(&task.id).await.unwrap();
+
+    assert!(summary.is_live());
+    assert_eq!(
+        summary.reasons,
+        vec![
+            crate::supervisor_impl::LiveMoverReason::OpenPr,
+            crate::supervisor_impl::LiveMoverReason::PrPollerOwned,
+            crate::supervisor_impl::LiveMoverReason::UnresolvedBlockers,
+        ],
+        "the handle API must preserve the supervisor predicate reason order"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_mover_summary_handle_reports_no_mover_for_closed_task() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _project_path) =
+        create_simple_task(&db, &tx, "task", "live mover handle no mover").await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = repo.set_status(&task.id, "closed").await.unwrap();
+    let handle = spawn_coordinator(&db, &tx);
+
+    let summary = handle.live_mover_summary(&task.id).await.unwrap();
+
+    assert!(!summary.is_live());
+    assert!(summary.reasons.is_empty());
+}
+
 async fn create_simple_task(
     db: &Database,
     tx: &broadcast::Sender<DjinnEventEnvelope>,
