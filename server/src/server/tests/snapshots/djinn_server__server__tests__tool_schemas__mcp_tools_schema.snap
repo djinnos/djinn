@@ -5315,6 +5315,9 @@ expression: signatures
               "format": "int64",
               "type": "integer"
             },
+            "kind": {
+              "type": "string"
+            },
             "last_co_access": {
               "type": "string"
             },

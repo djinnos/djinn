@@ -672,3 +672,67 @@ async fn mcp_memory_task_refs_returns_tasks_for_permalink() {
             .any(|t| t["id"] == task["id"] && t["title"] == "Task referencing memory note")
     );
 }
+
+#[tokio::test]
+async fn mcp_memory_associations_returns_kind_field() {
+    // Wave-1 graph canvas: the `MemoryAssociationEntry.kind` column is projected
+    // straight from `note_associations.kind` (migration 35, default `'co_access'`).
+    // The MCP response must surface the kind so the UI can switch on edge
+    // styling without a follow-up contract change. Future wave-1 graph-typed
+    // edges (builds_on / contradicts / supersedes / exemplifies) will widen
+    // the value set — see Epic 2chl.
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+    let (proj, _dir) = common::create_test_project_with_dir(&db).await;
+    let project = proj.slug();
+
+    let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+    let project_id: String = project_repo
+        .resolve(&project)
+        .await
+        .unwrap()
+        .expect("test project should resolve");
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+    // Seed two notes directly via the repo so we can capture their IDs without
+    // paying the memory_write contract path.
+    let note_a = note_repo
+        .create(&project_id, "Source Note", "source body", "reference", "[]")
+        .await
+        .expect("seed note A should be created");
+    let note_b = note_repo
+        .create(&project_id, "Target Note", "target body", "reference", "[]")
+        .await
+        .expect("seed note B should be created");
+
+    // Seed a co-access association. Migration 35 sets the kind default to
+    // 'co_access', so the row will have the value we expect to see in the
+    // MCP response.
+    note_repo
+        .upsert_association(&note_a.id, &note_b.id, 1)
+        .await
+        .expect("seed association should upsert");
+
+    let response = harness
+        .call_tool(
+            "memory_associations",
+            json!({
+                "project": project,
+                "identifier": note_a.permalink,
+            }),
+        )
+        .await
+        .expect("memory_associations should dispatch");
+
+    assert!(response.get("error").is_none() || response["error"].is_null());
+    let associations = response["associations"].as_array().unwrap();
+    assert_eq!(associations.len(), 1, "expected one association row");
+
+    let entry = &associations[0];
+    assert_eq!(entry["note_permalink"], note_b.permalink);
+    assert_eq!(
+        entry["kind"], "co_access",
+        "kind should be projected from note_associations.kind; got {:?}",
+        entry["kind"]
+    );
+}

@@ -42,6 +42,7 @@ impl DjinnMcpServer {
                         note_permalink: e.note_permalink,
                         note_title: e.note_title,
                         weight: e.weight,
+                        kind: e.kind,
                         co_access_count: e.co_access_count,
                         last_co_access: e.last_co_access,
                     })
