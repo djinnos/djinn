@@ -511,6 +511,79 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
     destination_run_dir
 }
 
+/// Seed a private run target dir for a pre-PR verification run from the warm
+/// per-project base and point `CARGO_TARGET_DIR` at it, mirroring the task-run
+/// path (`prepare_cargo_target_dir`). Verification thereby reuses main's warm
+/// compiled artifacts and recompiles only the task's delta incrementally — no
+/// shared-base writes, no Cargo build-dir lock contention. The seed is
+/// best-effort: a missing/unusable warm base degrades to a cold private run dir
+/// rather than failing the verification.
+///
+/// Keyed on the verification `run_id` (unique per run) so concurrent
+/// verifications for the same project never share a target dir. Returns the
+/// chosen run dir so the caller can tear it down when the run completes.
+async fn prepare_verify_target_dir(project_id: &str, run_id: &str) -> PathBuf {
+    let source_base = warm_base_dir(project_id);
+    let run_dir = run_target_dir(run_id);
+    set_cargo_target_dir_for_children(&run_dir);
+
+    info!(
+        run_id,
+        project_id,
+        source_base = %source_base.display(),
+        destination_run_dir = %run_dir.display(),
+        "verify cargo target seed: preparing private run target dir"
+    );
+
+    let seed_source_base = source_base.clone();
+    let seed_destination_run_dir = run_dir.clone();
+    match tokio::task::spawn_blocking(move || {
+        seed_cargo_target_dir(seed_source_base, seed_destination_run_dir)
+    })
+    .await
+    {
+        Ok(Ok(result)) => {
+            if result.cold_started() {
+                warn!(
+                    run_id,
+                    project_id,
+                    destination_run_dir = %run_dir.display(),
+                    fallback_reason = result
+                        .fallback_reason
+                        .as_ref()
+                        .map(std::string::ToString::to_string)
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    "verify cargo target seed: falling back to cold private target dir"
+                );
+            } else {
+                info!(
+                    run_id,
+                    project_id,
+                    destination_run_dir = %run_dir.display(),
+                    seed_duration_ms = result.elapsed.as_millis(),
+                    linked_file_count = result.linked_file_count,
+                    copied_file_count = result.copied_file_count,
+                    "verify cargo target seed: seeded private run target dir"
+                );
+            }
+        }
+        Ok(Err(err)) => warn!(
+            run_id,
+            project_id,
+            error = %err,
+            "verify cargo target seed: proceeding with cold private target dir after setup error"
+        ),
+        Err(err) => warn!(
+            run_id,
+            project_id,
+            error = %err,
+            "verify cargo target seed: proceeding with cold private target dir after task failure"
+        ),
+    }
+
+    run_dir
+}
+
 struct CargoTargetRunDirGuard {
     task_run_id: String,
     project_id: String,
@@ -1649,9 +1722,22 @@ async fn run_verify_task(run_id: &str) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/workspace"));
 
+    // Seed a private run target dir from the warm per-project base and point
+    // CARGO_TARGET_DIR at it (mirrors the task-run path). Verification thereby
+    // reuses main's warm compiled artifacts and recompiles only the task delta
+    // incrementally instead of cold-building or churning the shared base. The
+    // guard tears the private dir down when this function returns.
+    let verify_target_run_dir = prepare_verify_target_dir(&run.project_id, run_id).await;
+    let _verify_target_guard = CargoTargetRunDirGuard::new(
+        run_id.to_string(),
+        run.project_id.clone(),
+        verify_target_run_dir,
+    );
+
     // Reset tracked-file mtimes to commit times so the verification build reuses
-    // the warm/verification-owned cargo target base for byte-identical crates.
-    // Best-effort; never fails verification.
+    // the warm cargo artifacts seeded above for byte-identical crates. Required
+    // for cargo freshness on a fresh clone. Best-effort; never fails
+    // verification.
     djinn_workspace::normalize_mtimes_at(&project_root).await;
 
     // Role/specialist `verification_command` override (absolute priority in
@@ -1667,8 +1753,8 @@ async fn run_verify_task(run_id: &str) -> Result<()> {
     )
     .await;
 
-    let commit_sha = verify_task_head_commit(&project_root)
-        .unwrap_or_else(|_| format!("verify-run-{run_id}"));
+    let commit_sha =
+        verify_task_head_commit(&project_root).unwrap_or_else(|_| format!("verify-run-{run_id}"));
 
     let outcome = djinn_agent::verification::service::verify_commit(
         &run.project_id,
@@ -1929,6 +2015,7 @@ mod tests {
             }],
             processes: Vec::new(),
             route_exclusion_config: Default::default(),
+            layout_positions: BTreeMap::new(),
         };
         bincode::serialize(&artifact).expect("serialize graph artifact")
     }

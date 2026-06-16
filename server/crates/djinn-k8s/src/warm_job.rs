@@ -105,6 +105,19 @@ elif [ -f yarn.lock ]; then
 elif [ -f package-lock.json ]; then
   ( npm ci || npm install ) || true
 fi
+# Warm the cargo target cache from main so verification/task-run pods seed a
+# private run dir from it and recompile only their delta incrementally — the
+# CI-style fast path (cf. Swatinem/rust-cache: deps + main artifacts prebuilt,
+# restored clean, then incremental). Run the SAME work verification runs so the
+# base is actually reusable (matching fingerprints/artifacts). Gated on
+# Cargo.toml so non-Rust repos are untouched; `|| true` so a compile failure
+# never aborts the graph warm above. CARGO_INCREMENTAL=1 (from warm_cache_env_vars)
+# makes the base carry main's incremental state.
+if [ -f Cargo.toml ]; then
+  ( cargo clippy --workspace --all-targets --all-features \
+      || cargo build --workspace --all-targets ) || true
+  cargo test --workspace --all-targets --all-features --no-run || true
+fi
 exec {bin} warm-graph "{project_id}"
 "#,
         mirror_path = mirror_path,
@@ -406,6 +419,19 @@ mod tests {
             cmd[2]
         );
         assert!(cmd[2].contains("pnpm install"));
+        // The warm pod pre-compiles the cargo target cache from main (gated on
+        // Cargo.toml) so verification/task-run pods reuse it incrementally.
+        // Must run the SAME work verification runs so the base is reusable.
+        assert!(
+            cmd[2].contains("if [ -f Cargo.toml ]"),
+            "warm must gate cargo compile on Cargo.toml: {}",
+            cmd[2]
+        );
+        assert!(
+            cmd[2].contains("cargo clippy --workspace --all-targets --all-features"),
+            "warm must run the same clippy verification runs: {}",
+            cmd[2]
+        );
 
         let envs: BTreeMap<&str, &str> = container
             .env
@@ -446,7 +472,15 @@ mod tests {
             envs.get("CARGO_TARGET_DIR").copied(),
             Some("/cache/cargo-target/proj-xyz"),
         );
-        assert_eq!(envs.get("CARGO_INCREMENTAL").copied(), Some("0"));
+        // Warm base is now incremental-enabled so it carries main's incremental
+        // compiler state for verification/task-run pods to reuse.
+        assert_eq!(envs.get("CARGO_INCREMENTAL").copied(), Some("1"));
+        // We no longer force the sccache wrapper (it requires CARGO_INCREMENTAL=0
+        // and disabled the incremental fast path).
+        assert!(
+            !envs.contains_key("RUSTC_WRAPPER"),
+            "warm pod must not force RUSTC_WRAPPER=sccache (disables incremental)"
+        );
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),
             Some("/cache/sccache/proj-xyz"),
