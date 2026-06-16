@@ -144,6 +144,81 @@ pub(crate) fn has_live_mover(evidence: &LiveMoverEvidence) -> bool {
         || evidence.unresolved_blockers
 }
 
+/// Combined live-mover answer: a boolean plus the explicit reason list, in one
+/// value non-PR callers can pass around without losing the explanation.
+///
+/// This is the **non-PR internal API** the live-mover epic exposes for
+/// post-run and orphan-task checks (e.g. the future `vnwi` doctor orphan-task
+/// check). It deliberately does not collapse to a bare `bool` — callers can
+/// always project the boolean via [`LiveMoverSummary::is_live`] but the
+/// structured reasons are preserved so consumers can explain *why* a task was
+/// considered live (e.g. in operator logs, doctor reports, or audit trails).
+///
+/// Construction is pure: a function of the supplied [`LiveMoverEvidence`]
+/// alone. The evidence itself is normally built by
+/// `actors::coordinator::CoordinatorActor::collect_live_mover_evidence`
+/// (epic task `yc6g`), but **this type is independent of that path** —
+/// callers that already hold hard evidence (tests, alternative collectors,
+/// mocks) can feed it in directly.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LiveMoverSummary {
+    /// Convenience boolean mirror of the [`LiveMoverReason`] set: true when
+    /// any evidence class says the task still has a live mover. Equivalent
+    /// to [`has_live_mover`].
+    pub has_live_mover: bool,
+    /// Stable, ordered list of every evidence class that contributed to
+    /// `has_live_mover = true`. Empty when no evidence is present. Order
+    /// follows the field order of [`LiveMoverEvidence`] and is documented on
+    /// [`live_mover_reasons`].
+    pub reasons: Vec<LiveMoverReason>,
+}
+
+impl LiveMoverSummary {
+    /// Borrow the boolean as `&self` for ergonomic call sites that want a
+    /// plain `bool` (e.g. `if summary.is_live() { ... }`).
+    #[allow(dead_code)]
+    pub fn is_live(&self) -> bool {
+        self.has_live_mover
+    }
+}
+
+/// Build a [`LiveMoverSummary`] from already-collected evidence.
+///
+/// This is the **canonical non-PR entry point** for callers that want both a
+/// boolean and the explanatory reason list. It does not import
+/// `supervisor_impl::pr` and does not touch the no-op disposition ladder —
+/// those concerns are deliberately separate. A future `vnwi` doctor
+/// orphan-task check, a post-run audit, or a coordinator-side diagnostics
+/// surface can call this and obtain a structured answer without coupling to
+/// the PR-open code path.
+///
+/// Pure: a function of the supplied evidence alone. No I/O, no DB, no
+/// GitHub, no LLM judgement.
+#[allow(dead_code)]
+pub(crate) fn live_mover_summary(evidence: &LiveMoverEvidence) -> LiveMoverSummary {
+    let reasons = live_mover_reasons(evidence);
+    LiveMoverSummary {
+        has_live_mover: has_live_mover(evidence),
+        reasons,
+    }
+}
+
+/// Convenience: build a [`LiveMoverSummary`] for a task, given pre-collected
+/// evidence. This is the surface non-PR callers reach for when they already
+/// have a [`LiveMoverEvidence`] (e.g. returned by
+/// `CoordinatorActor::collect_live_mover_evidence`) and just want the
+/// combined boolean + reasons.
+///
+/// It is a thin named wrapper around [`live_mover_summary`] that documents
+/// the canonical "ask the live-mover predicate" call site. Returning a
+/// [`LiveMoverSummary`] (not a bare `bool`) means callers can always inspect
+/// the reasons — see [`LiveMoverSummary::is_live`] for the boolean shortcut.
+#[allow(dead_code)]
+pub(crate) fn summarize_live_mover(evidence: &LiveMoverEvidence) -> LiveMoverSummary {
+    live_mover_summary(evidence)
+}
+
 /// Decide the disposition of a finished run from its classified progress and
 /// how many nudges it has already consumed.
 ///
@@ -328,9 +403,45 @@ mod tests {
 
     #[test]
     fn noop_first_time_nudges() {
+        assert_eq!(NUDGE_CAP, 2, "the production no-op nudge cap is locked");
         assert_eq!(
             decide_run_disposition(RunProgress::NoOp, 0, NUDGE_CAP),
             RunDisposition::Nudge
+        );
+    }
+
+    #[test]
+    fn noop_disposition_semantics_are_locked() {
+        assert_eq!(NUDGE_CAP, 2, "do not change the no-op nudge budget");
+        assert_eq!(
+            decide_run_disposition(RunProgress::Productive, 0, NUDGE_CAP),
+            RunDisposition::Proceed,
+            "productive runs must continue to proceed"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 0, NUDGE_CAP),
+            RunDisposition::Nudge,
+            "first no-op still nudges"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 1, NUDGE_CAP),
+            RunDisposition::Nudge,
+            "second no-op still nudges"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 2, NUDGE_CAP),
+            RunDisposition::Close,
+            "at the cap, no-op closes"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::NoOp, 3, NUDGE_CAP),
+            RunDisposition::Close,
+            "over the cap, no-op closes"
+        );
+        assert_eq!(
+            decide_run_disposition(RunProgress::Inconclusive, 0, NUDGE_CAP),
+            RunDisposition::Close,
+            "inconclusive remains a conservative close"
         );
     }
 
@@ -441,5 +552,123 @@ mod tests {
             decide_run_disposition(RunProgress::NoOp, 0, 0),
             RunDisposition::Close
         );
+    }
+
+    // ── LiveMoverSummary: non-PR reusable internal API ──────────────────────
+
+    /// The reusable summary must agree with the underlying pure predicate.
+    #[test]
+    fn live_mover_summary_agrees_with_has_live_mover_predicate() {
+        let cases = [
+            LiveMoverEvidence::default(),
+            LiveMoverEvidence {
+                active_session: true,
+                ..Default::default()
+            },
+            LiveMoverEvidence {
+                open_pr: true,
+                pr_poller_owned: true,
+                ..Default::default()
+            },
+            LiveMoverEvidence {
+                unresolved_blockers: true,
+                ..Default::default()
+            },
+        ];
+        for evidence in cases.iter() {
+            let summary = live_mover_summary(evidence);
+            assert_eq!(
+                summary.has_live_mover,
+                has_live_mover(evidence),
+                "summary.has_live_mover must match has_live_mover(&evidence)"
+            );
+            assert_eq!(
+                summary.is_live(),
+                has_live_mover(evidence),
+                "summary.is_live() must match has_live_mover(&evidence)"
+            );
+            assert_eq!(
+                summary.reasons,
+                live_mover_reasons(evidence),
+                "summary.reasons must match live_mover_reasons(&evidence)"
+            );
+        }
+    }
+
+    /// Empty evidence must produce a `not live` summary with no reasons — the
+    /// canonical "no mover" answer a future vnwi doctor orphan-task check will
+    /// consult when deciding to flag a task as stuck.
+    #[test]
+    fn live_mover_summary_empty_is_not_live() {
+        let summary = live_mover_summary(&LiveMoverEvidence::default());
+        assert!(!summary.has_live_mover);
+        assert!(!summary.is_live());
+        assert!(summary.reasons.is_empty());
+    }
+
+    /// `summarize_live_mover` is a documented non-PR entry point and must
+    /// return the same value as `live_mover_summary` for any evidence input.
+    /// This pins the contract that downstream non-PR callers can reach for
+    /// either name and get an equivalent result.
+    #[test]
+    fn summarize_live_mover_matches_live_mover_summary() {
+        let evidence = LiveMoverEvidence {
+            active_session: true,
+            review_pending_with_reviewer: true,
+            unresolved_blockers: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            summarize_live_mover(&evidence),
+            live_mover_summary(&evidence)
+        );
+    }
+
+    /// The summary is a deterministic view of the evidence: same evidence in
+    /// ⇒ same summary out. This is the property an audit trail / operator
+    /// log / doctor report relies on to reproduce the predicate output.
+    #[test]
+    fn live_mover_summary_is_deterministic() {
+        let evidence = LiveMoverEvidence {
+            active_session: true,
+            dispatch_inflight: true,
+            open_pr: true,
+            unresolved_blockers: true,
+            ..Default::default()
+        };
+        let a = live_mover_summary(&evidence);
+        let b = live_mover_summary(&evidence);
+        assert_eq!(a, b);
+        assert_eq!(
+            a.reasons,
+            vec![
+                LiveMoverReason::ActiveSession,
+                LiveMoverReason::DispatchInflight,
+                LiveMoverReason::OpenPr,
+                LiveMoverReason::UnresolvedBlockers,
+            ]
+        );
+    }
+
+    /// Compile-time witness that the new public-to-crate surface is reachable
+    /// via `supervisor_impl` (not via `supervisor_impl::pr`). This is the
+    /// "callable without importing PR-open-specific code" guarantee the
+    /// epic-level acceptance criteria require.
+    #[test]
+    fn summary_api_is_reachable_via_supervisor_impl_module_root() {
+        use crate::supervisor_impl::{
+            LiveMoverEvidence as RootEvidence, LiveMoverSummary as RootSummary,
+            live_mover_summary as root_summarize,
+        };
+
+        // Build a synthetic piece of evidence purely from the supervisor_impl
+        // re-exports — no `supervisor_impl::pr` symbol in scope.
+        let evidence = RootEvidence {
+            active_session: true,
+            ..Default::default()
+        };
+        let summary: RootSummary = root_summarize(&evidence);
+        assert!(summary.has_live_mover);
+        assert_eq!(summary.reasons, vec![LiveMoverReason::ActiveSession]);
     }
 }

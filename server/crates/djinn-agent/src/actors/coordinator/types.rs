@@ -560,6 +560,10 @@ pub enum CoordinatorError {
     ActorDead,
     #[error("no response from actor")]
     NoResponse,
+    #[error("task not found: {0}")]
+    TaskNotFound(String),
+    #[error("live-mover evidence query failed: {0}")]
+    LiveMoverEvidence(String),
 }
 
 // ─── Public types ────────────────────────────────────────────────────────────

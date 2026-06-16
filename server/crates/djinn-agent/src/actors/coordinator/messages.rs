@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+use crate::supervisor_impl::LiveMoverSummary;
+
+use super::types::CoordinatorError;
+
 // ─── Messages (≤15 variants — AGENT-11) ──────────────────────────────────────
 
 pub(super) enum CoordinatorMessage {
@@ -34,6 +38,16 @@ pub(super) enum CoordinatorMessage {
     /// ending (for example a budget park). The next continuation dispatch must
     /// start from the disposition ladder, not from stale failure accounting.
     ClearPlannedDispatchCompletion { task_id: String, reason: String },
+    /// Collect coordinator/repository evidence for the task and return the
+    /// reusable live-mover summary exposed outside the PR-open path.
+    #[allow(dead_code)]
+    CheckLiveMover {
+        task_id: String,
+        reply: tokio::sync::oneshot::Sender<Result<LiveMoverSummary, CoordinatorError>>,
+    },
+    /// Route a settled task that has no live mover through the shared no-op
+    /// disposition ladder (if the live-mover predicate says it is orphaned).
+    RouteSettledNoopWithoutLiveMover { task_id: String },
     /// Increment the Lead escalation count for a task; reply with new count.
     IncrementEscalationCount {
         task_id: String,
