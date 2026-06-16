@@ -384,6 +384,13 @@ jobs:
           git config --global user.email "ci@test.local"
           git config --global user.name "CI Test"
 
+      # This unfiltered nextest invocation is the authoritative merge-queue /
+      # manual full-suite path for lifecycle/concurrency regressions inventoried
+      # in docs/LIFECYCLE_CONCURRENCY_TEST_INVENTORY.md. Keep the dispatch-cap,
+      # slot-pool event-race, execution_kill_task settlement, and
+      # reopen/intervention chaos tests discoverable here; if future stress
+      # coverage needs a slower profile, wire that explicit profile into this
+      # job instead of filtering the regressions out of CI.
       - name: Tests
         run: cargo nextest run --workspace --all-targets --all-features --profile ci
 
