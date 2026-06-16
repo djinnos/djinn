@@ -43,7 +43,11 @@ async fn health_returns_ok() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_returns_prometheus_text_without_auth() {
-    let app = test_helpers::create_test_app();
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    state
+        .health_tracker()
+        .record_stall(Some("metrics-user"), "metrics-model");
+    let app = server::router(state, false);
 
     let req = axum::http::Request::builder()
         .uri("/metrics")
@@ -63,6 +67,10 @@ async fn metrics_returns_prometheus_text_without_auth() {
     let text = std::str::from_utf8(&body).unwrap();
     assert!(text.contains("# HELP djinn_dispatch_attempts_total"));
     assert!(text.contains("djinn_dispatch_attempts_total{outcome=\"ok\"}"));
+    assert!(text.contains("djinn_breaker_state"));
+    assert!(text.contains("metrics-model"));
+    assert!(text.contains("metrics-user"));
+    assert!(text.contains(" 1"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
