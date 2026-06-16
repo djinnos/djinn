@@ -6,11 +6,18 @@
  *      and a container ref.
  *   2. We mount a Sigma instance once per (graph identity, container)
  *      pair, register the curved-edge program, paint a custom dark
- *      hover label/halo, and spin up a ForceAtlas2 layout supervisor
- *      running off the main thread.
- *   3. After FA2 stops, we run a short noverlap pass for visual cleanup
- *      and reset the camera so the user lands on a centered, settled
- *      layout.
+ *      hover label/halo.
+ *   3a. **Precomputed branch** — when the graph carries the
+ *       `precomputedLayout` attribute (set by `buildGraphFromSnapshot`
+ *       for snapshots whose nodes all ship finite `x`/`y` from the
+ *       warm-time server layout), we stop here. No FA2 supervisor, no
+ *       stop-timer / noverlap pass, `layoutRunning` stays false so the
+ *       "Layout optimizing…" pill never shows. The browser renders the
+ *       static server positions immediately.
+ *   3b. **FA2 branch** — otherwise we spin up a ForceAtlas2 layout
+ *       supervisor running off the main thread. After FA2 stops, we run
+ *       a short noverlap pass for visual cleanup and reset the camera
+ *       so the user lands on a centered, settled layout.
  *   4. A camera-nudge effect fires on selection changes — Sigma 3
  *      caches edges aggressively across frames, and a 0.0001× zoom
  *      jiggle is the cheapest way to invalidate that cache.
@@ -24,6 +31,7 @@ import type Graph from "graphology";
 import Sigma from "sigma";
 
 import type { Attributes } from "@/lib/codeGraphReducers";
+import { PRECOMPUTED_LAYOUT_ATTRIBUTE } from "@/lib/codeGraphAdapter";
 import EdgeCurveProgram from "@sigma/edge-curve";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import FA2LayoutSupervisor from "graphology-layout-forceatlas2/worker";
@@ -269,39 +277,53 @@ export function useSigmaGraph(
     });
 
     // ── ForceAtlas2 supervisor (off main thread) ────────────────
-    const inferred = forceAtlas2.inferSettings(graph);
-    const tuned = fa2Settings(graph.order);
-    const supervisor = new FA2LayoutSupervisor(graph, {
-      settings: { ...inferred, ...tuned },
-    });
-    supervisorRef.current = supervisor;
-    supervisor.start();
-    setLayoutRunning(true);
+    // Precomputed-layout graphs already carry warm-time server
+    // coordinates for every node — FA2 has nothing to converge on
+    // and would just churn the canvas. The legacy path below
+    // remains the fallback for snapshots without the
+    // precomputedLayout marker (and the future explicit force-layout
+    // mode). The cleanup at the bottom of the effect is safe on
+    // both branches: it no-ops on the precomputed case because
+    // `supervisorRef.current` and `stopTimerRef.current` are still
+    // null there.
+    const precomputedLayout = graph.getAttribute(
+      PRECOMPUTED_LAYOUT_ATTRIBUTE,
+    );
 
-    const runMs = inferRunMs(graph.order);
-    const timer = setTimeout(() => {
-      try {
-        supervisor.stop();
-      } catch {
-        // graceful — supervisor may already be torn down by unmount
-      }
-      setLayoutRunning(false);
-      // Light noverlap pass for the final cleanup.
-      try {
-        noverlap.assign(graph, NOVERLAP_SETTINGS);
-      } catch {
-        // jsdom / older graph engines may not support noverlap; the
-        // visual gain is incremental, so swallow.
-      }
-      // Refit camera once the layout has cooled.
-      try {
-        sigma?.refresh();
-        sigma?.getCamera().animatedReset({ duration: 400 });
-      } catch {
-        // Sigma may already be killed by unmount; ignore.
-      }
-    }, runMs);
-    stopTimerRef.current = timer;
+    if (!precomputedLayout) {
+      const inferred = forceAtlas2.inferSettings(graph);
+      const tuned = fa2Settings(graph.order);
+      const supervisor = new FA2LayoutSupervisor(graph, {
+        settings: { ...inferred, ...tuned },
+      });
+      supervisorRef.current = supervisor;
+      supervisor.start();
+      setLayoutRunning(true);
+
+      const runMs = inferRunMs(graph.order);
+      stopTimerRef.current = setTimeout(() => {
+        try {
+          supervisor.stop();
+        } catch {
+          // graceful — supervisor may already be torn down by unmount
+        }
+        setLayoutRunning(false);
+        // Light noverlap pass for the final cleanup.
+        try {
+          noverlap.assign(graph, NOVERLAP_SETTINGS);
+        } catch {
+          // jsdom / older graph engines may not support noverlap; the
+          // visual gain is incremental, so swallow.
+        }
+        // Refit camera once the layout has cooled.
+        try {
+          sigma?.refresh();
+          sigma?.getCamera().animatedReset({ duration: 400 });
+        } catch {
+          // Sigma may already be killed by unmount; ignore.
+        }
+      }, runMs);
+    }
 
     return () => {
       killed = true;
