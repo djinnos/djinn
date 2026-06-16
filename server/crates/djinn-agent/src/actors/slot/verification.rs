@@ -319,6 +319,7 @@ async fn run_verification_pipeline(
     let role_cmd_override = role_verification_command_for_task(&task, app_state).await;
     let scoped_commands = resolve_scoped_commands(
         &app_state.db,
+        Some(&task.project_id),
         &workspace_path,
         &target_branch,
         role_cmd_override.as_deref(),

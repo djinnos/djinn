@@ -10,7 +10,7 @@ use std::path::Path;
 use djinn_db::Database;
 use djinn_stack::environment::{Verification, VerificationRule};
 
-use super::environment::verification_for_path;
+use super::environment::{verification_for_path, verification_for_project_id};
 
 /// Resolve the set of verification commands to run for the current branch.
 ///
@@ -32,6 +32,7 @@ use super::environment::verification_for_path;
 /// found (see [`crate::verification::environment`] for soft-failure rules).
 pub async fn resolve_scoped_commands(
     db: &Database,
+    project_id: Option<&str>,
     worktree_path: &Path,
     target_branch: &str,
     role_verification_override: Option<&str>,
@@ -48,7 +49,17 @@ pub async fn resolve_scoped_commands(
         }
     }
 
-    let verification = verification_for_path(db, worktree_path).await;
+    // Prefer resolving rules by the known project id. The verification pipeline
+    // runs against an ephemeral clone at `/tmp/.tmp<random>`, whose path does
+    // NOT carry the `{owner}/{repo}` shape `verification_for_path` reverse-parses
+    // — so the path form silently resolves to empty config and skips ALL
+    // verification (no quality gate, no cache warm). Callers that know the
+    // project id (the slot-free pipeline) pass it; only path-only callers (and
+    // tests) fall back to the path resolver.
+    let verification = match project_id {
+        Some(pid) => verification_for_project_id(db, pid).await,
+        None => verification_for_path(db, worktree_path).await,
+    };
     resolve_scoped_commands_from_config(&verification, worktree_path, target_branch)
 }
 
@@ -301,7 +312,8 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let dir = tempdir_in_tmp();
         let result =
-            resolve_scoped_commands(&db, dir.path(), "main", Some("cargo test --workspace")).await;
+            resolve_scoped_commands(&db, None, dir.path(), "main", Some("cargo test --workspace"))
+                .await;
         assert_eq!(result, vec!["cargo test --workspace"]);
     }
 
@@ -310,7 +322,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let dir = tempdir_in_tmp();
         // No env config → no rules → empty.
-        let result = resolve_scoped_commands(&db, dir.path(), "main", Some("   ")).await;
+        let result = resolve_scoped_commands(&db, None, dir.path(), "main", Some("   ")).await;
         assert!(result.is_empty());
     }
 
@@ -321,7 +333,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let dir = tempdir_in_tmp();
         seed_project_with_verification(&db, "p1", dir.path(), make_verification(vec![])).await;
-        let result = resolve_scoped_commands(&db, dir.path(), "main", None).await;
+        let result = resolve_scoped_commands(&db, None, dir.path(), "main", None).await;
         assert!(result.is_empty());
     }
 
@@ -330,7 +342,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let dir = tempdir_in_tmp();
-        let result = resolve_scoped_commands(&db, dir.path(), "main", None).await;
+        let result = resolve_scoped_commands(&db, None, dir.path(), "main", None).await;
         assert!(result.is_empty());
     }
 
@@ -511,7 +523,43 @@ mod tests {
             "// mcp",
         );
 
-        let result = resolve_scoped_commands(&db, &project_root, &base, None).await;
+        let result = resolve_scoped_commands(&db, None, &project_root, &base, None).await;
+
         assert_eq!(result, vec!["cargo test -p djinn-control-plane"]);
+    }
+
+    /// Regression: the slot-free verification pipeline runs against an ephemeral
+    /// clone at `/tmp/.tmp<random>`, whose path can't reverse-parse to
+    /// `{owner}/{repo}`. Passing the known `project_id` must resolve the rules
+    /// regardless of the worktree path (previously this silently skipped ALL
+    /// verification — no gate, no cache warm).
+    #[tokio::test]
+    async fn project_id_resolves_rules_for_non_owner_repo_path() {
+        let db = Database::open_in_memory().unwrap();
+        let dir = tempdir_in_tmp();
+        // A path that does NOT carry an `{owner}/{repo}` shape, like the
+        // ephemeral verification clone.
+        let project_root = dir.keep().join(".tmpEPHEMERAL");
+        std::fs::create_dir_all(&project_root).expect("create project root");
+        let base = init_git_repo_with_task_branch(&project_root, "main", "task/test");
+        let verification = make_verification(vec![VerificationRule {
+            match_pattern: "crates/djinn-control-plane/**".into(),
+            commands: vec!["cargo test -p djinn-control-plane".into()],
+        }]);
+        seed_project_with_verification(&db, "p1", &project_root, verification).await;
+        git_commit_file(
+            &project_root,
+            "crates/djinn-control-plane/src/lib.rs",
+            "// mcp",
+        );
+
+        // Path form would skip (no owner/repo); id form must resolve.
+        let by_path = resolve_scoped_commands(&db, None, &project_root, &base, None).await;
+        assert!(
+            by_path.is_empty(),
+            "non-owner/repo path should not resolve via path form"
+        );
+        let by_id = resolve_scoped_commands(&db, Some("p1"), &project_root, &base, None).await;
+        assert_eq!(by_id, vec!["cargo test -p djinn-control-plane"]);
     }
 }
