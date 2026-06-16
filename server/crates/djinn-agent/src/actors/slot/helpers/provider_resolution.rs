@@ -459,25 +459,60 @@ pub(crate) fn build_provider_from_resolved(
             cfg.session_affinity_key = session_affinity_key;
             Some(djinn_provider::provider::create_provider(*cfg))
         }
-        Some(ProviderCredential::ApiKey(_key_name, api_key)) => Some(
-            djinn_provider::provider::create_provider(djinn_provider::provider::ProviderConfig {
-                base_url,
-                auth: auth_method_for_provider(&resolved.catalog_provider_id, &api_key),
-                format_family: format_family_for_provider(
-                    &resolved.catalog_provider_id,
-                    &resolved.model_name,
-                ),
-                model_id: resolved.model_name.clone(),
-                context_window,
-                telemetry,
-                session_affinity_key,
-                provider_headers: Default::default(),
-                capabilities: capabilities_for_provider(&resolved.catalog_provider_id),
-                reasoning_effort: None,
-            }),
-        ),
+        Some(ProviderCredential::ApiKey(_key_name, api_key)) => {
+            // Computed before the move of `session_affinity_key` into the config.
+            let provider_headers = provider_headers_for(
+                &resolved.catalog_provider_id,
+                session_affinity_key.as_deref(),
+            );
+            Some(djinn_provider::provider::create_provider(
+                djinn_provider::provider::ProviderConfig {
+                    base_url,
+                    auth: auth_method_for_provider(&resolved.catalog_provider_id, &api_key),
+                    format_family: format_family_for_provider(
+                        &resolved.catalog_provider_id,
+                        &resolved.model_name,
+                    ),
+                    model_id: resolved.model_name.clone(),
+                    context_window,
+                    telemetry,
+                    session_affinity_key,
+                    provider_headers,
+                    capabilities: capabilities_for_provider(&resolved.catalog_provider_id),
+                    reasoning_effort: None,
+                },
+            ))
+        }
         None => None,
     }
+}
+
+/// Provider-specific outbound HTTP headers applied to every request for a
+/// resolved API-key provider.
+///
+/// OpenCode Zen (`opencode`) identifies its first-party CLI via these headers.
+/// The Zen gateway uses them for metrics and session-sticky provider routing —
+/// `x-opencode-session` pins a session to one upstream backend — and strips them
+/// before forwarding to the real provider; for free models the rate limit is
+/// per-IP, not per-header (see opencode `routes/zen/util/handler.ts`). Matching
+/// the real CLI's shape keeps us off the anonymous path and gives stable sticky
+/// routing. Values mirror `session/llm/request.ts`: client `cli`, User-Agent
+/// `opencode/<version>`, and the session id in `x-opencode-session`. Every other
+/// provider gets no extra headers, so these only ever reach the Zen endpoint.
+fn provider_headers_for(
+    provider_id: &str,
+    session_key: Option<&str>,
+) -> std::collections::HashMap<String, String> {
+    let mut headers = std::collections::HashMap::new();
+    if provider_id == "opencode" {
+        let sid = session_key.unwrap_or("djinn").to_string();
+        headers.insert("x-opencode-client".to_string(), "cli".to_string());
+        headers.insert("User-Agent".to_string(), "opencode/1.15.12".to_string());
+        headers.insert("x-opencode-session".to_string(), sid.clone());
+        headers.insert("x-opencode-project".to_string(), sid.clone());
+        headers.insert("x-opencode-request".to_string(), sid);
+    }
+    headers
 }
 
 /// True when a resolved credential needs an API base URL (API-key providers);
