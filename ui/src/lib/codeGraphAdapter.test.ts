@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   COMMUNITY_COLORS,
+  PRECOMPUTED_LAYOUT_ATTRIBUTE,
   WORKSPACE_COLORS,
   buildGraphFromSnapshot,
   colorForCommunity,
@@ -8,6 +9,7 @@ import {
   colorForWorkspace,
   edgeStyleFor,
   filterSnapshotForWorkspace,
+  hasPrecomputedCoordinates,
   massForNode,
   parseSnapshotResponse,
   prettifyLabel,
@@ -214,6 +216,63 @@ describe("parseSnapshotResponse", () => {
       undefined,
     ]);
   });
+
+  it("preserves finite numeric x/y coordinates when present", () => {
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [
+          { ...fixtureSnapshot.nodes[0], x: 12.5, y: -7.25 },
+          { ...fixtureSnapshot.nodes[1], x: 0, y: 0 }, // 0 is finite
+        ],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    expect(parsed?.nodes[0]?.x).toBe(12.5);
+    expect(parsed?.nodes[0]?.y).toBe(-7.25);
+    expect(parsed?.nodes[1]?.x).toBe(0);
+    expect(parsed?.nodes[1]?.y).toBe(0);
+  });
+
+  it("coerces invalid x/y to undefined so hasPrecomputedCoordinates degrades safely", () => {
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [
+          { ...fixtureSnapshot.nodes[0], x: null, y: "left" },
+          { ...fixtureSnapshot.nodes[1], x: Number.NaN, y: Number.POSITIVE_INFINITY },
+          { ...fixtureSnapshot.nodes[2], x: Number.NEGATIVE_INFINITY, y: null },
+          { ...fixtureSnapshot.nodes[3] }, // missing
+        ],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    // Every coord on every node is non-finite or missing, so all four
+    // (x, y) pairs must be undefined.
+    expect(parsed?.nodes.map((n) => [n.x, n.y])).toEqual([
+      [undefined, undefined],
+      [undefined, undefined],
+      [undefined, undefined],
+      [undefined, undefined],
+    ]);
+  });
+
+  it("treats zero coordinates as finite, not as missing", () => {
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [{ ...fixtureSnapshot.nodes[0], x: 0, y: -0 }],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    // Object.is(-0, 0) is false, but Number.isFinite(-0) is true and
+    // the snapshot path treats 0 / -0 as a valid origin position, not
+    // as a missing field. We assert the post-parse values are numbers
+    // and that hasPrecomputedCoordinates flips to true.
+    expect(typeof parsed?.nodes[0]?.x).toBe("number");
+    expect(typeof parsed?.nodes[0]?.y).toBe("number");
+    expect(parsed && hasPrecomputedCoordinates(parsed)).toBe(true);
+  });
 });
 
 describe("prettifyLabel", () => {
@@ -369,6 +428,73 @@ describe("filterSnapshotForWorkspace", () => {
     expect(filtered.nodes.some((node) => node.id.startsWith("worker:"))).toBe(
       false,
     );
+  });
+});
+
+describe("hasPrecomputedCoordinates", () => {
+  it("returns false for a snapshot whose nodes lack any coordinates", () => {
+    expect(hasPrecomputedCoordinates(fixtureSnapshot)).toBe(false);
+  });
+
+  it("returns false when even one node has a missing or invalid coordinate", () => {
+    const partial: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: [
+        { ...fixtureSnapshot.nodes[0], x: 1, y: 2 },
+        { ...fixtureSnapshot.nodes[1], x: 3, y: 4 },
+        { ...fixtureSnapshot.nodes[2] }, // missing
+        { ...fixtureSnapshot.nodes[3], x: 5, y: 6 },
+      ],
+    };
+    expect(hasPrecomputedCoordinates(partial)).toBe(false);
+  });
+
+  it("returns false for non-finite coordinate values (NaN, ±Infinity, strings)", () => {
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [
+          { ...fixtureSnapshot.nodes[0], x: Number.NaN, y: 1 },
+          { ...fixtureSnapshot.nodes[1], x: 2, y: Number.POSITIVE_INFINITY },
+          { ...fixtureSnapshot.nodes[2], x: 3, y: Number.NEGATIVE_INFINITY },
+          { ...fixtureSnapshot.nodes[3], x: "left" as unknown as number, y: 4 },
+        ],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    expect(parsed).not.toBeNull();
+    if (parsed) expect(hasPrecomputedCoordinates(parsed)).toBe(false);
+  });
+
+  it("returns true when every node has finite numeric coordinates", () => {
+    const complete: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: fixtureSnapshot.nodes.map((n, i) => ({
+        ...n,
+        x: i * 10,
+        y: -(i * 7),
+      })),
+    };
+    expect(hasPrecomputedCoordinates(complete)).toBe(true);
+  });
+
+  it("returns true for an empty snapshot (vacuous: no nodes to verify)", () => {
+    const empty: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: [],
+      total_nodes: 0,
+      edges: [],
+      total_edges: 0,
+    };
+    expect(hasPrecomputedCoordinates(empty)).toBe(true);
+  });
+
+  it("treats 0 / -0 as a valid finite coordinate, not as missing", () => {
+    const origin: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: fixtureSnapshot.nodes.map((n) => ({ ...n, x: 0, y: -0 })),
+    };
+    expect(hasPrecomputedCoordinates(origin)).toBe(true);
   });
 });
 
@@ -610,6 +736,103 @@ describe("buildGraphFromSnapshot", () => {
     expect(noDrop.size).toBe(withMember.edges.length);
     const dropped = buildGraphFromSnapshot(withMember, { dropMemberOf: true });
     expect(dropped.size).toBe(fixtureSnapshot.edges.length);
+  });
+
+  // ── Precomputed-coordinate path (server-shipped layout) ───────────────────
+
+  const withServerCoords = (): SnapshotPayload => ({
+    ...fixtureSnapshot,
+    nodes: [
+      { ...fixtureSnapshot.nodes[0], x: 12.5, y: -7.25 },
+      { ...fixtureSnapshot.nodes[1], x: 100, y: 200 },
+      { ...fixtureSnapshot.nodes[2], x: -50, y: 0 },
+      { ...fixtureSnapshot.nodes[3], x: 0.001, y: -0.001 },
+    ],
+  });
+
+  it("uses server-provided positions verbatim when every node has finite x/y", () => {
+    const graph = buildGraphFromSnapshot(withServerCoords());
+    expect(graph.getNodeAttribute("file:src/main.rs", "x")).toBe(12.5);
+    expect(graph.getNodeAttribute("file:src/main.rs", "y")).toBe(-7.25);
+    expect(
+      graph.getNodeAttribute("symbol:scip-rust . . . main()", "x"),
+    ).toBe(100);
+    expect(
+      graph.getNodeAttribute("symbol:scip-rust . . . main()", "y"),
+    ).toBe(200);
+    expect(
+      graph.getNodeAttribute("symbol:scip-rust . . . User#", "x"),
+    ).toBe(-50);
+    expect(
+      graph.getNodeAttribute("symbol:scip-rust . . . User#", "y"),
+    ).toBe(0);
+    expect(graph.getNodeAttribute("file:src/user.rs", "x")).toBe(0.001);
+    expect(graph.getNodeAttribute("file:src/user.rs", "y")).toBe(-0.001);
+  });
+
+  it("marks the graph with the precomputedLayout attribute so useSigmaGraph can skip FA2", () => {
+    const graph = buildGraphFromSnapshot(withServerCoords());
+    expect(graph.getAttribute(PRECOMPUTED_LAYOUT_ATTRIBUTE)).toBe(true);
+  });
+
+  it("does not mark the graph as precomputed when coordinates are incomplete", () => {
+    const partial: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: [
+        { ...fixtureSnapshot.nodes[0], x: 1, y: 2 },
+        { ...fixtureSnapshot.nodes[1] }, // missing
+        { ...fixtureSnapshot.nodes[2] },
+        { ...fixtureSnapshot.nodes[3] },
+      ],
+    };
+    const graph = buildGraphFromSnapshot(partial);
+    expect(graph.getAttribute(PRECOMPUTED_LAYOUT_ATTRIBUTE)).toBeUndefined();
+  });
+
+  it("does not mark the graph as precomputed when no node has coordinates (existing seed path)", () => {
+    const graph = buildGraphFromSnapshot(fixtureSnapshot);
+    expect(graph.getAttribute(PRECOMPUTED_LAYOUT_ATTRIBUTE)).toBeUndefined();
+  });
+
+  it("falls back to the seed path when parseSnapshotResponse drops a single invalid coord", () => {
+    // Wire payload deliberately ships one NaN; after parseSnapshotResponse
+    // the parsed node has x/y = undefined, so the helper flips to false and
+    // the function must take the seed branch.
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [
+          { ...fixtureSnapshot.nodes[0], x: 1, y: 2 },
+          { ...fixtureSnapshot.nodes[1], x: 3, y: 4 },
+          { ...fixtureSnapshot.nodes[2], x: Number.NaN, y: 5 },
+          { ...fixtureSnapshot.nodes[3], x: 6, y: 7 },
+        ],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    expect(parsed).not.toBeNull();
+    if (!parsed) return;
+    const graph = buildGraphFromSnapshot(parsed);
+    expect(graph.getAttribute(PRECOMPUTED_LAYOUT_ATTRIBUTE)).toBeUndefined();
+  });
+
+  it("still wires up edges when using the precomputed-coordinate path", () => {
+    const graph = buildGraphFromSnapshot(withServerCoords());
+    expect(graph.order).toBe(fixtureSnapshot.nodes.length);
+    expect(graph.size).toBe(fixtureSnapshot.edges.length);
+  });
+
+  it("treats (0, 0) as a valid precomputed position rather than falling back", () => {
+    const atOrigin: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: fixtureSnapshot.nodes.map((n) => ({ ...n, x: 0, y: 0 })),
+    };
+    const graph = buildGraphFromSnapshot(atOrigin);
+    expect(graph.getAttribute(PRECOMPUTED_LAYOUT_ATTRIBUTE)).toBe(true);
+    for (const id of graph.nodes()) {
+      expect(graph.getNodeAttribute(id, "x")).toBe(0);
+      expect(graph.getNodeAttribute(id, "y")).toBe(0);
+    }
   });
 });
 
