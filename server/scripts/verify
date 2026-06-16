@@ -7,14 +7,25 @@
 #   check           Cargo check workspace
 #   clippy          Run clippy with -D warnings
 #   quality         fmt + check + clippy  (fast gate)
-#   test            Run unit tests with nextest
+#   test            Run the merge-queue/full-suite nextest profile
 #   hakari          Verify workspace-hack is up to date
 #   ci              quality + hakari + test  (default)
 #
 # Examples:
 #   ./scripts/verify            # Run full CI equivalent
 #   ./scripts/verify quality    # Fast quality checks only
-#   ./scripts/verify test       # Tests only
+#   ./scripts/verify test       # Tests only (requires test Postgres/template)
+#
+# The test/ci stages intentionally mirror the merge-queue full-suite command:
+#   cargo nextest run --workspace --all-targets --all-features --profile ci
+# This is where the vjs6/ir2i lifecycle-concurrency regressions run
+# (dispatch-cap races, slot-pool lifecycle events, execution_kill_task
+# kill/cancel settlement, and reopen/intervention chaos). Keep them enabled;
+# they protect proposal-vjs6 incident classes and should not be filtered out to
+# make the fast PR gate cheaper. They use in-process TestRuntime/template
+# Postgres or in-memory helpers, not kind/k8s. Local runs need the test
+# Postgres service plus djinn_test_template; stripped-down worker pods may lack
+# that infrastructure.
 
 set -euo pipefail
 
@@ -60,9 +71,9 @@ stage_quality() {
 
 stage_test() {
     if command -v cargo-nextest &>/dev/null; then
-        run "cargo nextest run" cargo nextest run --workspace --all-targets --all-features
+        run "cargo nextest run --profile ci" cargo nextest run --workspace --all-targets --all-features --profile ci
     else
-        echo -e "${CYAN}(nextest not found, falling back to cargo test)${NC}"
+        echo -e "${CYAN}(nextest not found, falling back to cargo test; this is less CI-like than profile ci)${NC}"
         run "cargo test" cargo test --workspace --all-targets --all-features
     fi
 }
