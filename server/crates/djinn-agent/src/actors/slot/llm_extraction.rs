@@ -114,6 +114,60 @@ async fn resolve_llm_extraction_provider_after_creator_attempt(
     }
 }
 
+/// Render the extraction prompt the LLM sees.
+///
+/// Exposed (not inlined into `run_llm_extraction_inner`) so the prompt schema
+/// can be unit-tested independently of the rest of the extraction pipeline.
+/// The prompt asks for one `applies_when` anchor per case/pattern/pitfall
+/// note, distinct from the durable markdown body, and lists the exact
+/// ADR-054 markdown headings each note type must include. The headings must
+/// remain present so a future prompt edit does not silently regress the
+/// durable note schema (T2 of the x72l epic).
+fn build_extraction_prompt(
+    title: &str,
+    description: &str,
+    taxonomy_json: &str,
+    transcript: &str,
+    scope_json: &str,
+) -> String {
+    format!(
+        "Task: {title}\n\
+         Description: {description}\n\n\
+         Session event counts: {taxonomy_json}\n\n\
+         Session transcript (excerpt — assistant reasoning, tool actions, and results; \
+         this is the actual work to distill knowledge from):\n{transcript}\n\n\
+         Files touched were in these areas: {scope_json}\n\
+         Include a \"scope_paths\" array per note with relevant path prefixes from the list above.\n\n\
+         Extract knowledge from this session. Return JSON:\n\
+         {{\n\
+           \"cases\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required case headings\", \"applies_when\": \"One sentence describing when this case applies.\", \"scope_paths\": [\"...\"]}}],\n\
+           \"patterns\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required pattern headings\", \"applies_when\": \"One sentence describing when this pattern applies.\", \"scope_paths\": [\"...\"]}}],\n\
+           \"pitfalls\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required pitfall headings\", \"applies_when\": \"One sentence describing when this pitfall applies.\", \"scope_paths\": [\"...\"]}}]\n\
+         }}\n\
+         Required durable templates:\n\
+         Pattern content must contain exactly these markdown headings in order:\n\
+         ## Context\n## Problem shape\n## Recommended approach\n## Why it works\n## Tradeoffs / limits\n## When to use\n## When not to use\n## Related\n\
+         Pitfall content must contain exactly these markdown headings in order:\n\
+         ## Trigger / smell\n## Failure mode\n## Observable symptoms\n## Prevention\n## Recovery\n## Related\n\
+         Case content must contain exactly these markdown headings in order:\n\
+         ## Situation\n## Constraint\n## Approach taken\n## Result\n## Why it worked / failed\n## Reusable lesson\n## Related\n\
+         For every note, also include an \"applies_when\" field: a single concise sentence \
+         describing the situation where the note is the right thing to recall. \
+         \"applies_when\" must be DISTINCT from the markdown body (do not duplicate a heading) \
+         and must be one sentence ending in a period. If you cannot articulate a useful \
+         applies_when for a note, omit that note instead of returning a vague one. \
+         If you cannot fill every required section for a note type, omit that note instead of returning a shorter paragraph.\n\
+         Return empty arrays if nothing significant was learned. \
+         Maximum 3 cases, 3 patterns, 2 pitfalls.\n\
+         Only extract if there is clear signal (high errors+files_changed suggests pitfalls; \
+         many notes_written suggests patterns).",
+        title = title,
+        description = description,
+        taxonomy_json = taxonomy_json,
+        scope_json = scope_json,
+    )
+}
+
 /// Render a compact transcript excerpt for the extraction prompt: assistant
 /// reasoning, tool actions, and (truncated) tool results, capped to `max_chars`
 /// and tail-biased so the session's outcome/conclusions are retained. The
@@ -235,8 +289,30 @@ const CASE_REQUIRED_SECTIONS: &[&str] = &[
 struct ExtractedNote {
     title: String,
     content: String,
+    /// One-sentence retrieval situation where the note applies. Distinct from
+    /// the durable markdown body. Prompted and parsed as `applies_when` (the
+    /// human-facing prompt term) with `retrieval_anchor` accepted as an alias
+    /// for callers that already use the storage-field name. Missing or empty
+    /// values are tolerated so a model that forgets the field does not break
+    /// extraction — durable write happens, just without an anchor.
+    #[serde(default, alias = "applies_when")]
+    retrieval_anchor: Option<String>,
     #[serde(default)]
     scope_paths: Vec<String>,
+}
+
+impl ExtractedNote {
+    /// Returns the retrieval anchor as a normalized one-sentence string, or
+    /// `None` when the model did not provide one. Normalization trims
+    /// surrounding whitespace and treats empty / whitespace-only values as
+    /// missing so the persistence path never stores a blank anchor.
+    fn normalized_anchor(&self) -> Option<String> {
+        self.retrieval_anchor
+            .as_deref()
+            .map(str::trim)
+            .filter(|anchor| !anchor.is_empty())
+            .map(str::to_owned)
+    }
 }
 
 /// Normalized dedup key for an extracted note: lowercase+trimmed title paired
@@ -283,23 +359,25 @@ impl ExtractionContext<'_> {
         content: &str,
         note_type: &str,
         scope_paths_json: &str,
+        retrieval_anchor: Option<&str>,
     ) -> djinn_db::Result<djinn_memory::Note> {
         match self.knowledge_branch_target {
             KnowledgeBranchTarget::Main => {
                 self.note_repo
-                    .create_db_note_with_scope(
+                    .create_db_note_with_scope_and_retrieval_anchor(
                         self.project_id,
                         title,
                         content,
                         note_type,
                         "[]",
                         scope_paths_json,
+                        retrieval_anchor,
                     )
                     .await
             }
             KnowledgeBranchTarget::TaskScoped { .. } => {
                 self.note_repo
-                    .create_with_scope(
+                    .create_with_scope_and_retrieval_anchor(
                         self.project_id,
                         title,
                         content,
@@ -307,6 +385,7 @@ impl ExtractionContext<'_> {
                         None,
                         "[]",
                         scope_paths_json,
+                        retrieval_anchor,
                     )
                     .await
             }
@@ -718,36 +797,12 @@ async fn run_llm_extraction_inner(
     );
     let scope_json =
         serde_json::to_string(&session_scope_paths).unwrap_or_else(|_| "[]".to_string());
-    let prompt = format!(
-        "Task: {title}\n\
-         Description: {description}\n\n\
-         Session event counts: {taxonomy_json}\n\n\
-         Session transcript (excerpt — assistant reasoning, tool actions, and results; \
-         this is the actual work to distill knowledge from):\n{transcript}\n\n\
-         Files touched were in these areas: {scope_json}\n\
-         Include a \"scope_paths\" array per note with relevant path prefixes from the list above.\n\n\
-         Extract knowledge from this session. Return JSON:\n\
-         {{\n\
-           \"cases\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required case headings\", \"scope_paths\": [\"...\"]}}],\n\
-           \"patterns\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required pattern headings\", \"scope_paths\": [\"...\"]}}],\n\
-           \"pitfalls\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required pitfall headings\", \"scope_paths\": [\"...\"]}}]\n\
-         }}\n\
-         Required durable templates:\n\
-         Pattern content must contain exactly these markdown headings in order:\n\
-         ## Context\n## Problem shape\n## Recommended approach\n## Why it works\n## Tradeoffs / limits\n## When to use\n## When not to use\n## Related\n\
-         Pitfall content must contain exactly these markdown headings in order:\n\
-         ## Trigger / smell\n## Failure mode\n## Observable symptoms\n## Prevention\n## Recovery\n## Related\n\
-         Case content must contain exactly these markdown headings in order:\n\
-         ## Situation\n## Constraint\n## Approach taken\n## Result\n## Why it worked / failed\n## Reusable lesson\n## Related\n\
-         If you cannot fill every required section for a note type, omit that note instead of returning a shorter paragraph.\n\
-         Return empty arrays if nothing significant was learned. \
-         Maximum 3 cases, 3 patterns, 2 pitfalls.\n\
-         Only extract if there is clear signal (high errors+files_changed suggests pitfalls; \
-         many notes_written suggests patterns).",
-        title = task.title,
-        description = task.description,
-        taxonomy_json = taxonomy_json,
-        scope_json = scope_json,
+    let prompt = build_extraction_prompt(
+        &task.title,
+        &task.description,
+        &taxonomy_json,
+        &transcript,
+        &scope_json,
     );
 
     // ── Call LLM ───────────────────────────────────────────────────────────
@@ -1011,12 +1066,30 @@ async fn process_extracted_note(
         note.scope_paths.clone()
     };
     let scope_paths_json = serde_json::to_string(&scope_paths).unwrap_or_else(|_| "[]".to_string());
+    let retrieval_anchor = note.normalized_anchor();
+    if note
+        .retrieval_anchor
+        .as_deref()
+        .map(str::trim)
+        .map(str::is_empty)
+        .unwrap_or(false)
+    {
+        // Model emitted an anchor that was empty after whitespace trimming.
+        // The field is optional, so we accept the note without it — debug only.
+        tracing::debug!(
+            session_id = %extraction_context.session_id,
+            note_type = %note_type,
+            title = %note.title,
+            "llm_extraction: retrieval anchor was empty after trim; writing note without anchor"
+        );
+    }
     match extraction_context
         .create_extracted_note(
             &note.title,
             &content_with_provenance,
             note_type,
             &scope_paths_json,
+            retrieval_anchor.as_deref(),
         )
         .await
     {
@@ -1877,6 +1950,116 @@ mod tests {
     }
 
     #[test]
+    fn parse_extraction_response_parses_applies_when_per_note() {
+        // Prompt-facing field name `applies_when` must parse into the durable
+        // `retrieval_anchor` slot.
+        let json = r#"{
+            "cases": [{"title":"T","content":"C","applies_when":"When T applies."}],
+            "patterns": [{"title":"P","content":"P","applies_when":"When P applies."}],
+            "pitfalls": [{"title":"F","content":"F","applies_when":"When F applies."}]
+        }"#;
+        let result = parse_extraction_response(json).expect("applies_when json parses");
+        assert_eq!(
+            result.cases[0].normalized_anchor().as_deref(),
+            Some("When T applies.")
+        );
+        assert_eq!(
+            result.patterns[0].normalized_anchor().as_deref(),
+            Some("When P applies.")
+        );
+        assert_eq!(
+            result.pitfalls[0].normalized_anchor().as_deref(),
+            Some("When F applies.")
+        );
+    }
+
+    #[test]
+    fn parse_extraction_response_accepts_retrieval_anchor_alias() {
+        // The storage-facing field name `retrieval_anchor` is also accepted as
+        // a serde alias so existing call sites that already use it still work.
+        let json = r#"{
+            "cases": [{"title":"T","content":"C","retrieval_anchor":"When T applies."}],
+            "patterns": [],
+            "pitfalls": []
+        }"#;
+        let result = parse_extraction_response(json).expect("retrieval_anchor alias parses");
+        assert_eq!(
+            result.cases[0].normalized_anchor().as_deref(),
+            Some("When T applies.")
+        );
+    }
+
+    #[test]
+    fn parse_extraction_response_tolerates_missing_applies_when() {
+        // A model that forgets the field must not break extraction — the note
+        // persists without an anchor (legacy behavior).
+        let json = r#"{
+            "cases": [{"title":"T","content":"C"}],
+            "patterns": [],
+            "pitfalls": []
+        }"#;
+        let result = parse_extraction_response(json).expect("missing anchor parses");
+        assert_eq!(result.cases.len(), 1);
+        assert!(result.cases[0].normalized_anchor().is_none());
+    }
+
+    #[test]
+    fn parse_extraction_response_tolerates_empty_and_whitespace_anchor() {
+        // Empty / whitespace-only anchors normalize to None and do not crash.
+        let json = r#"{
+            "cases": [
+                {"title":"A","content":"A","applies_when":""},
+                {"title":"B","content":"B","applies_when":"   "},
+                {"title":"C","content":"C","applies_when":"\n\t"}
+            ],
+            "patterns": [],
+            "pitfalls": []
+        }"#;
+        let result = parse_extraction_response(json).expect("empty anchor json parses");
+        for note in &result.cases {
+            assert!(
+                note.normalized_anchor().is_none(),
+                "empty/whitespace anchor must normalize to None; got {:?}",
+                note.normalized_anchor()
+            );
+        }
+    }
+
+    #[test]
+    fn normalized_anchor_trims_surrounding_whitespace() {
+        let note = ExtractedNote {
+            title: "T".to_string(),
+            content: "C".to_string(),
+            retrieval_anchor: Some("  When trimming matters.  \n".to_string()),
+            scope_paths: vec![],
+        };
+        assert_eq!(
+            note.normalized_anchor().as_deref(),
+            Some("When trimming matters.")
+        );
+    }
+
+    #[test]
+    fn prompt_template_requires_applies_when_field() {
+        // The full extraction prompt must explicitly request `applies_when`
+        // and the ADR-054 sections. (Reuse the production prompt builder so
+        // the test cannot drift from the live template.)
+        let prompt = build_extraction_prompt("title-x", "desc-y", "{}", "(none)", "[]");
+
+        assert!(
+            prompt.contains("\"applies_when\""),
+            "prompt must include the applies_when field name"
+        );
+        // All three ADR-054 section lists must remain — the new anchor field
+        // must not displace the durable body schema.
+        assert!(prompt.contains("## Recommended approach"));
+        assert!(prompt.contains("## Failure mode"));
+        assert!(prompt.contains("## Approach taken"));
+        // Anchor must be required to be distinct from the body.
+        assert!(prompt.contains("DISTINCT from the markdown body"));
+    }
+
+    #[test]
     fn extraction_quality_defaults_to_zero() {
         assert_eq!(ExtractionQuality::default().novelty_skipped, 0);
     }
@@ -1895,11 +2078,13 @@ mod tests {
                 ExtractedNote {
                     title: "Flaky Extraction".to_string(),
                     content: "first body".to_string(),
+                    retrieval_anchor: Some("When extraction is flaky across runs.".to_string()),
                     scope_paths: vec![],
                 },
                 ExtractedNote {
                     title: "  flaky extraction ".to_string(),
                     content: "second body (duplicate)".to_string(),
+                    retrieval_anchor: Some("When extraction is flaky across runs.".to_string()),
                     scope_paths: vec![],
                 },
             ],
@@ -1920,12 +2105,14 @@ mod tests {
             cases: vec![ExtractedNote {
                 title: "Shared Title".to_string(),
                 content: "case body".to_string(),
+                retrieval_anchor: None,
                 scope_paths: vec![],
             }],
             patterns: vec![],
             pitfalls: vec![ExtractedNote {
                 title: "shared title".to_string(),
                 content: "pitfall body".to_string(),
+                retrieval_anchor: None,
                 scope_paths: vec![],
             }],
         };
