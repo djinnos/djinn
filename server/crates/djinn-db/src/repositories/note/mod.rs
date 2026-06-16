@@ -20,6 +20,7 @@ mod graph;
 mod housekeeping;
 mod indexing;
 mod lexical_search;
+pub mod replay_validation;
 pub mod rrf;
 mod scoring;
 mod search;
@@ -51,6 +52,11 @@ pub use lexical_search::{
     LexicalSearchBackend, LexicalSearchMode, LexicalSearchPlan, build_lexical_search_plan,
     executable_lexical_search_sql, lexical_search_threshold, normalize_lexical_score,
     sanitize_postgres_tsquery, sanitize_sqlite_fts5_query, validate_postgres_tsvector_threshold,
+};
+pub use replay_validation::{
+    PromptBudgetReport, QueryReplayReport, RankedHit, RankingReport, ReplayCriteria, ReplayFixture,
+    ReplayNote, ReplayQuery, ReplayReport, anchor_embedding_replay_fixture,
+    generate_anchor_embedding_replay_report, render_anchor_embedding_replay_report_markdown,
 };
 pub use rrf::rrf_fuse;
 pub use scoring::{
