@@ -9,6 +9,45 @@ fn record_dispatch_attempt(outcome: &'static str) {
     djinn_telemetry::dispatch::increment_attempt(outcome);
 }
 
+fn record_dispatch_outcome(outcome: &'static str) {
+    if outcome == djinn_telemetry::dispatch::OUTCOME_OK {
+        djinn_telemetry::dispatch::record_success();
+    } else {
+        record_dispatch_attempt(outcome);
+    }
+}
+
+fn record_dispatch_live_state(cooldowns_active: usize, inflight_ledger_size: usize) {
+    djinn_telemetry::dispatch::set_cooldowns_active(cooldowns_active);
+    djinn_telemetry::dispatch::set_inflight_ledger_size(inflight_ledger_size);
+}
+
+fn record_user_cap_utilization(user: &str, model: &str, used: u32, cap: u32) {
+    djinn_telemetry::dispatch::set_user_cap_utilization(user, model, used, cap);
+}
+
+fn model_under_user_cap(
+    running_by_user_model: &HashMap<(String, String), u32>,
+    creator: &str,
+    model: &str,
+    cap: u32,
+) -> bool {
+    let used = running_by_user_model
+        .get(&(creator.to_string(), model.to_owned()))
+        .copied()
+        .unwrap_or(0);
+    #[cfg(test)]
+    observe_dispatch_cap_count(
+        DispatchCapObservationStage::CapConsidered,
+        creator,
+        model,
+        used,
+    );
+    let cap = cap.max(1);
+    record_user_cap_utilization(creator, model, used, cap);
+    used < cap
+}
+
 /// Env flag allowing operators (and the in-process TestRuntime path) to
 /// bypass the devcontainer-image + graph-warm readiness gate. Default is
 /// "on" (fail-closed). Set to `0`/`false`/`no` to dispatch as soon as a
@@ -742,6 +781,10 @@ impl CoordinatorActor {
         // ledger resets, but old `running` rows still gate until reaped).
         self.reconcile_inflight_dispatch_ledger().await;
         overlay_inflight_ledger(&mut running_by_user_model, &self.inflight_dispatches);
+        record_dispatch_live_state(
+            self.dispatch_cooldowns.len(),
+            self.inflight_dispatches.len(),
+        );
 
         // Memoized per-creator cap maps (model_id → max concurrent) for this pass.
         let mut creator_caps: HashMap<String, std::collections::HashMap<String, u32>> =
@@ -846,7 +889,7 @@ impl CoordinatorActor {
             }
             // Skip tasks still inside an active dispatch cooldown.
             if self.dispatch_cooldowns.contains_key(&task.id) {
-                record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_COOLDOWN);
+                record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_COOLDOWN);
                 tracing::debug!(outcome = "cooldown", task_id = %task.short_id, task_uuid = %task.id);
                 tracing::debug!(
                     task_id = %task.short_id,
@@ -1146,21 +1189,15 @@ impl CoordinatorActor {
                 }
                 let caps = &creator_caps[c];
                 model_ids.retain(|m| {
-                    let used = running_by_user_model
-                        .get(&(c.to_string(), m.clone()))
-                        .copied()
-                        .unwrap_or(0);
-                    #[cfg(test)]
-                    observe_dispatch_cap_count(
-                        DispatchCapObservationStage::CapConsidered,
+                    model_under_user_cap(
+                        &running_by_user_model,
                         c,
                         m,
-                        used,
-                    );
-                    used < caps.get(m).copied().unwrap_or(1)
+                        caps.get(m).copied().unwrap_or(1),
+                    )
                 });
                 if model_ids.is_empty() {
-                    record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_CAP);
+                    record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_CAP);
                     tracing::debug!(outcome = "cap", task_id = %task.short_id, role);
                     tracing::debug!(
                         task_id = %task.short_id,
@@ -1233,7 +1270,7 @@ impl CoordinatorActor {
 
             match outcome {
                 DispatchOutcome::Dispatched => {
-                    record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_OK);
+                    record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_OK);
                     tracing::info!(outcome = "ok", task_id = %task.short_id, role);
                     tracing::info!(
                         task_id = %task.short_id,
@@ -1295,6 +1332,10 @@ impl CoordinatorActor {
                         // pass, so it drops out the moment the task completes.
                         self.inflight_dispatches
                             .insert(task.id.clone(), (Some(c.to_string()), used.clone()));
+                        record_dispatch_live_state(
+                            self.dispatch_cooldowns.len(),
+                            self.inflight_dispatches.len(),
+                        );
                         self.persist_durable_dispatch_state_update(
                             &task.id,
                             Some(&task.short_id),
@@ -1308,7 +1349,7 @@ impl CoordinatorActor {
                     }
                 }
                 DispatchOutcome::AtCapacity => {
-                    record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_CAP);
+                    record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_CAP);
                     tracing::debug!(outcome = "cap", task_id = %task.short_id, role);
                     tracing::debug!(
                         task_id = %task.short_id,
@@ -1322,7 +1363,7 @@ impl CoordinatorActor {
                     exhausted_roles.insert(role);
                 }
                 DispatchOutcome::PoolDead => {
-                    record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_ERROR);
+                    record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_ERROR);
                     return;
                 }
                 DispatchOutcome::Failed => {
@@ -1330,10 +1371,10 @@ impl CoordinatorActor {
                         .iter()
                         .all(|model_id| !self.health.is_available(creator.as_deref(), model_id));
                     if breaker_open_for_all_candidates {
-                        record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_BREAKER);
+                        record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_BREAKER);
                         tracing::debug!(outcome = "breaker", task_id = %task.short_id, role);
                     } else {
-                        record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_ERROR);
+                        record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_ERROR);
                         tracing::debug!(outcome = "error", task_id = %task.short_id, role);
                     }
                     tracing::debug!(
@@ -1479,15 +1520,6 @@ mod inflight_ledger_tests {
     const WND1_STABLE_MODEL_ID: &str = "test/mock";
     const WND1_DISPATCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
     const WND1_CONTROLLED_RUNTIME_GUARD: Duration = Duration::from_secs(60);
-    // Settler-side lag between slot start (`started_tx`) and the DB session row
-    // materializing. Production lag is the worker pod boot (20-60s); the test
-    // just needs a window wide enough that the in-flight ledger is observably
-    // populated before the next dispatch pass reads the running-row count. The
-    // full race window also includes the slot pool's start time + DB op, so
-    // 30ms gives the next dispatch pass a comfortable margin to land inside
-    // the window even under heavy CI load. Smaller values (e.g. 1ms-10ms) have
-    // repeatedly flaked the harness on the cap=1 iteration of the stress loop.
-    const WND1_LAG_WINDOW: Duration = Duration::from_millis(30);
 
     struct Wnd1DispatchFixture {
         project_id: String,
@@ -1914,6 +1946,7 @@ mod inflight_ledger_tests {
             let actor = StdArc::new(tokio::sync::Mutex::new(actor));
             let observations = StdArc::new(StdMutex::new(Vec::<DispatchCapObservation>::new()));
             let dispatch_done = StdArc::new(std::sync::atomic::AtomicBool::new(false));
+            let ledger_overlay_observed = StdArc::new(std::sync::atomic::AtomicBool::new(false));
 
             let settler_db = db.clone();
             let settler_fixture = Wnd1DispatchFixture {
@@ -1926,6 +1959,7 @@ mod inflight_ledger_tests {
             let settler_runtime = runtime.clone();
             let settler_pool = pool.clone();
             let settler_done = dispatch_done.clone();
+            let settler_ledger_overlay_observed = ledger_overlay_observed.clone();
             let settler = tokio::spawn(async move {
                 let mut active: Vec<(String, String)> = Vec::new();
                 let mut observed_starts = 0usize;
@@ -1935,12 +1969,24 @@ mod inflight_ledger_tests {
                             if let Some(task_id) = maybe_task_id {
                                 // Simulate the pod/session-row lag window: the local
                                 // in-flight ledger is already populated by dispatch,
-                                // while the DB row becomes visible shortly after.
-                                // The WND1_LAG_WINDOW delay must outlast a single
-                                // dispatch pass on CI hardware so the next pass
-                                // reliably observes the overlay stage.
-                                tokio::task::yield_now().await;
-                                tokio::time::sleep(WND1_LAG_WINDOW).await;
+                                // while the DB row becomes visible only after a
+                                // subsequent dispatch pass has had a deterministic
+                                // chance to overlay that ledger entry. This keeps the
+                                // stress proof from depending on scheduler timing on
+                                // fast CI runners where a 1ms synthetic lag can elapse
+                                // before the next dispatch loop reacquires the actor.
+                                let deadline = tokio::time::Instant::now()
+                                    + WND1_DISPATCH_SETTLE_TIMEOUT;
+                                while !settler_ledger_overlay_observed
+                                    .load(std::sync::atomic::Ordering::SeqCst)
+                                    && !settler_done.load(std::sync::atomic::Ordering::SeqCst)
+                                {
+                                    assert!(
+                                        tokio::time::Instant::now() < deadline,
+                                        "cap {cap}: timed out waiting for dispatch to observe the lag-window ledger overlay before materializing the session row"
+                                    );
+                                    tokio::task::yield_now().await;
+                                }
                                 let session_id = materialize_wnd1_running_session(
                                     &settler_db,
                                     &settler_fixture,
@@ -1976,7 +2022,10 @@ mod inflight_ledger_tests {
             for _ in 0..4 {
                 let actor = actor.clone();
                 let observations = observations.clone();
+                let ledger_overlay_observed = ledger_overlay_observed.clone();
                 let project_id = fixture.project_id.clone();
+                let creator_user_id = fixture.created_by_user_id.clone();
+                let model_id = fixture.model_id.clone();
                 dispatchers.push(tokio::spawn(async move {
                     let deadline = tokio::time::Instant::now() + WND1_DISPATCH_SETTLE_TIMEOUT;
                     loop {
@@ -1993,6 +2042,14 @@ mod inflight_ledger_tests {
                                 &mut observations,
                                 "concurrent repeated dispatch passes",
                             );
+                            if observations.iter().any(|obs| {
+                                obs.stage == DispatchCapObservationStage::LedgerOverlay
+                                    && obs.creator_user_id == creator_user_id
+                                    && obs.model == model_id
+                            }) {
+                                ledger_overlay_observed
+                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
                             dispatched
                         };
                         if dispatched >= WND1_READY_TASK_COUNT as u64 {
@@ -2291,8 +2348,42 @@ mod inflight_ledger_tests {
     }
 
     #[test]
-    fn dispatch_attempt_metrics_cover_all_outcome_labels() {
+    fn cap_utilization_metric_uses_db_seed_overlaid_with_inflight_ledger() {
         djinn_telemetry::init().unwrap();
+
+        let user = "cap-path-user";
+        let model = "cap-path-model";
+        let mut running = HashMap::from([((user.to_owned(), model.to_owned()), 1)]);
+        let mut inflight: HashMap<String, (Option<String>, String)> = HashMap::new();
+        inflight.insert("task-a".into(), (Some(user.into()), model.into()));
+        inflight.insert("task-b".into(), (Some(user.into()), model.into()));
+        overlay_inflight_ledger(&mut running, &inflight);
+
+        assert!(model_under_user_cap(&running, user, model, 4));
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let sample = rendered_metric_sample(
+            &rendered,
+            "djinn_user_cap_utilization",
+            &[("user", user), ("model", model)],
+        );
+        assert!(
+            sample.ends_with(" 0.5"),
+            "cap utilization must be overlaid used/cap = 2/4 in:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn dispatch_outcome_metrics_record_exact_once_and_ok_updates_timestamp() {
+        djinn_telemetry::init().unwrap();
+
+        let before_rendered = djinn_telemetry::render().unwrap();
+        let before_timestamp = metric_value(
+            &before_rendered,
+            "djinn_dispatch_last_success_timestamp",
+            &[],
+        )
+        .unwrap_or(0.0);
 
         for outcome in [
             djinn_telemetry::dispatch::OUTCOME_OK,
@@ -2301,18 +2392,63 @@ mod inflight_ledger_tests {
             djinn_telemetry::dispatch::OUTCOME_BREAKER,
             djinn_telemetry::dispatch::OUTCOME_ERROR,
         ] {
-            record_dispatch_attempt(outcome);
+            let before = metric_value(
+                &djinn_telemetry::render().unwrap(),
+                "djinn_dispatch_attempts_total",
+                &[("outcome", outcome)],
+            )
+            .unwrap_or(0.0);
+            record_dispatch_outcome(outcome);
+            let after_rendered = djinn_telemetry::render().unwrap();
+            let after = metric_value(
+                &after_rendered,
+                "djinn_dispatch_attempts_total",
+                &[("outcome", outcome)],
+            )
+            .unwrap_or(0.0);
+            assert_eq!(
+                after - before,
+                1.0,
+                "outcome={outcome} must increment exactly once in:\n{after_rendered}"
+            );
         }
 
         let rendered = djinn_telemetry::render().unwrap();
-        for outcome in ["ok", "cooldown", "cap", "breaker", "error"] {
-            assert!(
-                rendered.contains(&format!(
-                    "djinn_dispatch_attempts_total{{outcome=\"{outcome}\"}}"
-                )),
-                "missing dispatch metric label {outcome} in:\n{rendered}"
-            );
-        }
+        let after_timestamp = metric_value(&rendered, "djinn_dispatch_last_success_timestamp", &[])
+            .expect("ok outcome must set dispatch last-success timestamp");
+        assert!(
+            after_timestamp >= before_timestamp && after_timestamp > 0.0,
+            "ok outcome must update last-success timestamp from {before_timestamp} in:\n{rendered}"
+        );
+    }
+
+    fn rendered_metric_sample<'a>(
+        rendered: &'a str,
+        metric: &str,
+        labels: &[(&str, &str)],
+    ) -> &'a str {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with(metric)
+                    && labels
+                        .iter()
+                        .all(|(key, value)| line.contains(&format!("{key}=\"{value}\"")))
+            })
+            .unwrap_or_else(|| panic!("missing metric {metric}{labels:?} in:\n{rendered}"))
+    }
+
+    fn metric_value(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> Option<f64> {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with(metric)
+                    && labels
+                        .iter()
+                        .all(|(key, value)| line.contains(&format!("{key}=\"{value}\"")))
+            })
+            .and_then(|line| line.split_whitespace().last())
+            .and_then(|value| value.parse::<f64>().ok())
     }
 
     /// Creator-less (legacy system) dispatches are ungated by the per-user cap,

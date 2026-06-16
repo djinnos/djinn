@@ -170,6 +170,9 @@ async fn execution_kill_task_settles_live_run_through_control_plane_tool_route()
         harness.running_task_ids().await.is_empty(),
         "pool status should not report running tasks after kill settlement"
     );
+    harness
+        .assert_single_terminal_session(&seeded.task_id, SessionStatus::Interrupted)
+        .await;
 
     harness.dispatch(&seeded.task_id).await;
     harness.wait_for_pool_session(&seeded.task_id).await;
@@ -237,6 +240,9 @@ async fn execution_kill_task_racing_natural_completion_settles_once_and_releases
         harness.active_sessions().await.is_empty(),
         "naturally settled session should no longer be active after raced kill"
     );
+    harness
+        .assert_single_terminal_session(&seeded.task_id, SessionStatus::Completed)
+        .await;
     assert_eq!(
         harness.running_count_for_cap().await,
         0,
@@ -352,6 +358,9 @@ async fn assert_settled_after_kill(harness: &RealPoolKillHarness, seeded: &Seede
         0,
         "settled task must not consume per-user/model capacity"
     );
+    harness
+        .assert_single_terminal_session(&seeded.task_id, SessionStatus::Interrupted)
+        .await;
     let session = harness.session(&seeded.session_id).await;
     assert_eq!(session.status, SessionStatus::Interrupted.as_str());
     assert!(
@@ -619,7 +628,35 @@ impl RealPoolKillHarness {
             .map(|task| task.task_id)
             .collect();
         task_ids.sort();
+        assert_eq!(
+            task_ids.iter().collect::<HashSet<_>>().len(),
+            task_ids.len(),
+            "pool status must not expose duplicate busy task entries: {task_ids:?}"
+        );
         task_ids
+    }
+
+    async fn assert_single_terminal_session(&self, task_id: &str, expected: SessionStatus) {
+        let sessions =
+            SessionRepository::new(self.app_state.db.clone(), self.app_state.event_bus.clone())
+                .list_for_task(task_id)
+                .await
+                .expect("sessions for task query should succeed");
+        assert_eq!(
+            sessions.len(),
+            1,
+            "kill/completion race should leave exactly one session row for task {task_id}: {sessions:?}"
+        );
+        let session = &sessions[0];
+        assert_eq!(
+            session.status,
+            expected.as_str(),
+            "task {task_id} should have exactly one terminal settlement"
+        );
+        assert!(
+            session.ended_at.is_some(),
+            "terminal session for task {task_id} must have ended_at stamped"
+        );
     }
 
     async fn assert_pool_capacity(&self, expected_active: u32, expected_free: u32) {

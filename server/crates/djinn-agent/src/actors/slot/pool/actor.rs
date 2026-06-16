@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::actors::coordinator::CoordinatorHandle;
+use crate::actors::coordinator::{CoordinatorHandle, DebugSlot};
 use crate::context::AgentContext;
 use djinn_db::{SessionRepository, TaskRepository};
 
@@ -125,6 +125,52 @@ impl SlotPool {
         }
     }
 
+    /// Publish scrape-visible slot-pool gauges aggregated only by `(state, model)`.
+    ///
+    /// This is deliberately synchronous and walks the actor-owned live maps at
+    /// snapshot time: `free_slots` is the source of truth for free capacity and
+    /// `task_to_slot` is the source of truth for busy assignments. No per-slot or
+    /// per-task labels are emitted, keeping cardinality bounded by the configured
+    /// model set.
+    fn record_slot_pool_metrics(&self) {
+        let mut free_by_model: HashMap<String, usize> = HashMap::new();
+        let mut busy_by_model: HashMap<String, usize> = HashMap::new();
+
+        for (model_id, slots) in &self.free_slots {
+            let count = slots
+                .iter()
+                .filter(|slot_id| !self.retired_slots.contains(slot_id))
+                .count();
+            free_by_model.insert(model_id.clone(), count);
+        }
+
+        for slot_id in self.task_to_slot.values() {
+            if self.retired_slots.contains(slot_id) {
+                continue;
+            }
+            if let Some(model_id) = self.slot_models.get(slot_id) {
+                *busy_by_model.entry(model_id.clone()).or_insert(0) += 1;
+            }
+        }
+
+        let mut model_ids: HashSet<&str> = HashSet::new();
+        model_ids.extend(free_by_model.keys().map(String::as_str));
+        model_ids.extend(busy_by_model.keys().map(String::as_str));
+
+        for model_id in model_ids {
+            djinn_telemetry::slot_pool::set_slots(
+                djinn_telemetry::slot_pool::STATE_FREE,
+                model_id,
+                free_by_model.get(model_id).copied().unwrap_or(0),
+            );
+            djinn_telemetry::slot_pool::set_slots(
+                djinn_telemetry::slot_pool::STATE_BUSY,
+                model_id,
+                busy_by_model.get(model_id).copied().unwrap_or(0),
+            );
+        }
+    }
+
     fn slot(&self, slot_id: usize) -> Result<&SlotHandle, PoolError> {
         self.slots
             .get(slot_id)
@@ -194,6 +240,9 @@ impl SlotPool {
             }
             PoolMessage::GetStatus { respond_to } => {
                 let _ = respond_to.send(Ok(self.get_status()));
+            }
+            PoolMessage::Snapshot { respond_to } => {
+                let _ = respond_to.send(Ok(self.snapshot()));
             }
             PoolMessage::GetSessionForTask {
                 task_id,
@@ -399,6 +448,55 @@ impl SlotPool {
         self.task_to_slot.contains_key(task_id)
     }
 
+    pub fn snapshot(&self) -> Vec<DebugSlot> {
+        let mut slots: Vec<_> = self
+            .slot_models
+            .iter()
+            .map(|(slot_id, model)| {
+                let state = self.slot_states.get(slot_id).unwrap_or(&SlotState::Free);
+                match state {
+                    SlotState::Free => DebugSlot {
+                        slot_id: *slot_id as u32,
+                        model: model.clone(),
+                        state: "free".to_owned(),
+                        task_id: None,
+                        started_at: None,
+                    },
+                    SlotState::Busy {
+                        task_id,
+                        started_at,
+                        ..
+                    } => DebugSlot {
+                        slot_id: *slot_id as u32,
+                        model: model.clone(),
+                        state: "busy".to_owned(),
+                        task_id: if task_id.is_empty() {
+                            self.task_to_slot
+                                .iter()
+                                .find_map(|(mapped_task, mapped_slot)| {
+                                    (*mapped_slot == *slot_id).then(|| mapped_task.clone())
+                                })
+                        } else {
+                            Some(task_id.clone())
+                        },
+                        started_at: Some(started_at.clone()),
+                    },
+                    SlotState::Draining => DebugSlot {
+                        slot_id: *slot_id as u32,
+                        model: model.clone(),
+                        state: "draining".to_owned(),
+                        task_id: self.task_to_slot.iter().find_map(|(task_id, mapped_slot)| {
+                            (*mapped_slot == *slot_id).then(|| task_id.clone())
+                        }),
+                        started_at: None,
+                    },
+                }
+            })
+            .collect();
+        slots.sort_by_key(|slot| slot.slot_id);
+        slots
+    }
+
     #[tracing::instrument(
         name = "djinn.slot.kill",
         skip(self),
@@ -596,6 +694,8 @@ impl SlotPool {
     }
 
     fn get_status(&self) -> super::types::PoolStatus {
+        self.record_slot_pool_metrics();
+
         let mut per_model: HashMap<String, super::types::ModelPoolStatus> = HashMap::new();
         let mut active_slots = 0usize;
 
@@ -897,6 +997,18 @@ impl SlotPool {
         self.task_to_slot.clone()
     }
 
+    pub(super) fn test_set_slot_model(&mut self, slot_id: usize, model_id: &str) {
+        self.slot_models.insert(slot_id, model_id.to_owned());
+    }
+
+    pub(super) fn test_set_slot_state(&mut self, slot_id: usize, state: SlotState) {
+        self.slot_states.insert(slot_id, state);
+    }
+
+    pub(super) fn test_set_task_slot(&mut self, task_id: &str, slot_id: usize) {
+        self.task_to_slot.insert(task_id.to_owned(), slot_id);
+    }
+
     /// Raw push onto the free list, bypassing `mark_slot_free` — used to inject
     /// the exact desync (`evict_session`'s old "push regardless" + the Killed
     /// event pushing again) that produced a duplicate/stale entry.
@@ -909,6 +1021,25 @@ impl SlotPool {
 
     pub(super) fn test_mark_slot_free(&mut self, slot_id: usize, model_id: &str) {
         self.mark_slot_free(slot_id, model_id.to_string());
+    }
+
+    pub(super) fn test_assign_busy(&mut self, task_id: &str, slot_id: usize) {
+        self.task_to_slot.insert(task_id.to_owned(), slot_id);
+        if let Some(model_id) = self.slot_models.get(&slot_id).cloned() {
+            self.remove_from_free_list(&model_id, slot_id);
+        }
+        self.slot_states.insert(
+            slot_id,
+            SlotState::Busy {
+                task_id: task_id.to_owned(),
+                started_at: now_unix_string(),
+                agent_type: "worker".to_owned(),
+            },
+        );
+    }
+
+    pub(super) fn test_record_slot_pool_metrics(&self) {
+        self.record_slot_pool_metrics();
     }
 
     pub(super) fn test_retire(&mut self, slot_id: usize) {
