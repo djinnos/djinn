@@ -43,6 +43,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod checks;
+
 /// Errors that a [`DoctorCheck`] can surface from `run` or `fix`.
 #[derive(Debug, Error)]
 pub enum DoctorError {

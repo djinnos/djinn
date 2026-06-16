@@ -16,9 +16,11 @@
 //! `backoffLimit: 0` — a failed *run* of the Job is itself recorded by the
 //! worker (or surfaced to the server as a poll timeout); we don't retry the pod.
 //!
-//! The verification pod is the designated writer of the shared per-project cargo
-//! target base on `/cache` (incremental disabled) that task-run pods read from
-//! private target dirs — preserved here via [`crate::job::warm_cache_env_vars`].
+//! Verification reuses the warm per-project cargo target base on `/cache` as a
+//! read-only SEED, exactly like task-run pods: the worker seeds a private run
+//! target dir from the warm base and recompiles only the task's delta
+//! incrementally (`CARGO_INCREMENTAL=1`), instead of cold-building or churning a
+//! shared mutable base — see [`crate::job::verify_cache_env_vars`].
 
 use std::collections::BTreeMap;
 
@@ -125,12 +127,13 @@ exec {bin} verify-task "{run_id}"
     if let Some(url) = config.database_url.as_deref() {
         env.push(env_var("DJINN_DATABASE_URL", url));
     }
-    // Route the Rust toolchain caches to the /cache PVC. The verification pod is
-    // the designated writer of the shared per-project cargo target base with
-    // incremental compilation disabled; task-run pods use private run target
-    // dirs but keep the same shared CARGO_HOME/SCCACHE settings. Single-sourced
-    // in job.rs; needs the cache volume below.
-    env.extend(crate::job::warm_cache_env_vars(project_id));
+    // Route the Rust toolchain caches to the /cache PVC. Verification reuses the
+    // warm per-project cargo target base as a read-only SEED (like task-runs):
+    // the worker seeds a private run target dir from it and recompiles only the
+    // task's delta incrementally (CARGO_INCREMENTAL=1) — no shared-base writes,
+    // no Cargo build-dir lock contention. Single-sourced in job.rs; needs the
+    // cache volume below.
+    env.extend(crate::job::verify_cache_env_vars(project_id));
 
     let container = Container {
         name: "verify".to_string(),
@@ -296,9 +299,15 @@ mod tests {
             cmd.contains("verify-task"),
             "command must invoke verify-task: {cmd}"
         );
-        assert!(cmd.contains("run-123"), "command must pass the run id: {cmd}");
+        assert!(
+            cmd.contains("run-123"),
+            "command must pass the run id: {cmd}"
+        );
         // Pod must build the task branch's tree (clone target, fetch+checkout task).
-        assert!(cmd.contains("--branch \"main\""), "clones target branch: {cmd}");
+        assert!(
+            cmd.contains("--branch \"main\""),
+            "clones target branch: {cmd}"
+        );
         assert!(
             cmd.contains("checkout -B \"task/ab12\""),
             "checks out task branch: {cmd}"
@@ -316,8 +325,10 @@ mod tests {
                 .iter()
                 .any(|m| m.name == crate::job::VOLUME_CACHE && m.read_only == Some(false))
         );
-        // Verification keeps shared CARGO_HOME/SCCACHE routing while using the
-        // warm/verification-owned base target dir with incremental disabled.
+        // Verification keeps shared CARGO_HOME/SCCACHE routing. CARGO_TARGET_DIR
+        // points at the warm base as the seed source + fallback; the worker
+        // overrides it to a private run dir at runtime. Incremental is ENABLED so
+        // the run dir recompiles only the task delta over main's warm artifacts.
         let envs: BTreeMap<&str, &str> = c
             .env
             .as_ref()
@@ -329,12 +340,16 @@ mod tests {
         assert_eq!(
             envs.get("CARGO_TARGET_DIR").copied(),
             Some("/cache/cargo-target/proj-xyz"),
-            "verification jobs must write the shared warm/verification cargo target base"
+            "verification seeds from the shared warm cargo target base"
         );
         assert_eq!(
             envs.get("CARGO_INCREMENTAL").copied(),
-            Some("0"),
-            "shared base writers must not persist incremental compiler state"
+            Some("1"),
+            "verification recompiles only its delta incrementally over the warm base"
+        );
+        assert!(
+            !envs.contains_key("RUSTC_WRAPPER"),
+            "verification must not force sccache (it disables incremental)"
         );
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),
