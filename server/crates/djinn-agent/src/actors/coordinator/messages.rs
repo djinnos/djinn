@@ -45,6 +45,9 @@ pub(super) enum CoordinatorMessage {
         task_id: String,
         reply: tokio::sync::oneshot::Sender<Result<LiveMoverSummary, CoordinatorError>>,
     },
+    /// Route a settled task that has no live mover through the shared no-op
+    /// disposition ladder (if the live-mover predicate says it is orphaned).
+    RouteSettledNoopWithoutLiveMover { task_id: String },
     /// Increment the Lead escalation count for a task; reply with new count.
     IncrementEscalationCount {
         task_id: String,
