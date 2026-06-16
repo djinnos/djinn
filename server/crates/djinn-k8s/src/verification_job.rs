@@ -81,20 +81,22 @@ pub fn build_verification_job(
     labels.insert(LABEL_PROJECT_ID.to_string(), sanitized_project.clone());
     labels.insert(LABEL_RUN_ID.to_string(), sanitized_run);
 
-    // Same clone strategy as the warm / verification-test Jobs: the bare mirror
-    // is a blobless partial clone, so pull the upstream URL (fresh installation
-    // token, rotated by the mirror fetcher) and do a single-branch clone of the
-    // target branch from the origin, then fetch + check out the task branch the
-    // worker pushed. Install JS deps lockfile-gated (so verification commands
-    // resolve workspace packages), then run verify-task, which resolves the
-    // scoped commands against this tree and runs the real verify_commit.
+    // Clone the target branch from the upstream URL (fresh installation token,
+    // rotated by the mirror fetcher) for a full, buildable main tree. The TASK
+    // branch, however, is pushed by workers to the local bare MIRROR — not to
+    // upstream (it only reaches GitHub later, at PR time) — so fetch it from the
+    // mirror, which holds the worker's commits + their blobs. Fetching it from
+    // `origin` (upstream) fails with "couldn't find remote ref" for any task
+    // not yet on GitHub. main's blobs come from the upstream clone; the task
+    // delta's blobs come from the mirror, so the checkout tree is complete with
+    // no promisor fetch. Install JS deps lockfile-gated, then run verify-task.
     let cmd = format!(
         r#"set -euo pipefail
 git config --global --add safe.directory "{mirror_path}"
 UPSTREAM_URL="$(git -C "{mirror_path}" config remote.origin.url)"
 git clone --single-branch --branch "{target_branch}" "$UPSTREAM_URL" "{project_root}"
 cd "{project_root}"
-git fetch origin "{task_branch}:refs/remotes/origin/{task_branch}"
+git fetch "{mirror_path}" "{task_branch}:refs/remotes/origin/{task_branch}"
 git checkout -B "{task_branch}" "origin/{task_branch}"
 if [ -f pnpm-lock.yaml ]; then
   ( corepack enable >/dev/null 2>&1 || true; \

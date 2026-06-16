@@ -22,7 +22,14 @@ const VERIFICATION_ESCALATION_THRESHOLD: i64 = 3;
 /// `projects.environment_config.verification`, which does not (yet) model a
 /// pipeline-level timeout. Every project falls back to this floor; when/if
 /// the schema grows an explicit field this function can start consulting it.
-const MIN_PIPELINE_TIMEOUT_SECS: u64 = 900;
+// Sized to fit a COLD `cargo clippy --workspace --all-targets --all-features`
+// (+ per-crate `cargo test --no-run`) in the verification Job pod, which on a
+// fresh sccache can take far longer than the old 900s floor — a cold run that
+// blew the floor was killed mid-compile (exit -1) and false-failed the task.
+// Matches the verification/warm Job's own active-deadline (3600s) so the server
+// polls for the full life of the pod rather than giving up early. Warm runs
+// finish in minutes, well under this ceiling.
+const MIN_PIPELINE_TIMEOUT_SECS: u64 = 3600;
 
 /// Return the fixed pipeline timeout floor.
 ///
