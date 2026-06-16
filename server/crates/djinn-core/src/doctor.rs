@@ -73,6 +73,67 @@ pub enum DoctorError {
 pub type DoctorResult<T> = std::result::Result<T, DoctorError>;
 
 // ---------------------------------------------------------------------------
+// Run cadence / subset
+// ---------------------------------------------------------------------------
+
+/// Operational cadence for a registered doctor check.
+///
+/// Checks default to [`OnDemand`](Self::OnDemand). A check must explicitly opt in
+/// to [`Cheap`](Self::Cheap) before coordinator-style periodic callers may run it
+/// outside the MCP `doctor_run` path. Cluster-facing or otherwise expensive
+/// checks, such as a Kubernetes pod-leak scan, should keep the default and remain
+/// on demand unless a slower scheduler is added for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorCheckCadence {
+    /// Safe to run frequently: pure DB, pure memory, or similarly bounded work.
+    Cheap,
+    /// Invoked explicitly by an operator/tool or by a future slower cadence.
+    OnDemand,
+}
+
+impl DoctorCheckCadence {
+    /// `true` when this check is explicitly part of the cheap periodic subset.
+    pub const fn is_cheap(self) -> bool {
+        matches!(self, Self::Cheap)
+    }
+}
+
+/// A named subset of registered checks that can be executed without MCP auth or
+/// tool-dispatch plumbing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorRunSubset {
+    /// Checks explicitly marked [`DoctorCheckCadence::Cheap`].
+    Cheap,
+}
+
+impl DoctorRunSubset {
+    /// Stable subset name accepted by helper dispatchers.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Cheap => "cheap",
+        }
+    }
+}
+
+/// Metadata for a registered doctor check, copied out of the registry so
+/// callers can inspect it without holding the registry lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DoctorCheckMetadata {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub cadence: DoctorCheckCadence,
+}
+
+/// Result of one check execution from a subset runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorCheckRun {
+    pub check_name: &'static str,
+    pub findings: Vec<Finding>,
+}
+
+// ---------------------------------------------------------------------------
 // Severity
 // ---------------------------------------------------------------------------
 
@@ -238,6 +299,12 @@ pub trait DoctorCheck: Send + Sync {
     /// empty `Vec` means "the check passed".
     fn run(&self) -> DoctorResult<Vec<Finding>>;
 
+    /// Operational cadence for this check. The default is on-demand so new
+    /// checks are never accidentally admitted to the coordinator's cheap subset.
+    fn cadence(&self) -> DoctorCheckCadence {
+        DoctorCheckCadence::OnDemand
+    }
+
     /// Attempt to fix the condition reported in `finding`. This is
     /// **opt-in** and **never** invoked from [`run`](Self::run); only an
     /// explicit `doctor_fix` MCP call may invoke it.
@@ -327,6 +394,38 @@ impl DoctorRegistry {
             .collect()
     }
 
+    /// Enumerate registered checks with cadence metadata in stable name order.
+    pub fn enumerate_with_cadence(&self) -> Vec<DoctorCheckMetadata> {
+        let guard = self.inner.lock().expect("doctor registry poisoned");
+        guard
+            .values()
+            .map(|check| DoctorCheckMetadata {
+                name: check.name(),
+                description: check.description(),
+                cadence: check.cadence(),
+            })
+            .collect()
+    }
+
+    /// Enumerate only checks that explicitly opted in to the cheap subset.
+    pub fn enumerate_cheap(&self) -> Vec<DoctorCheckMetadata> {
+        self.enumerate_with_cadence()
+            .into_iter()
+            .filter(|metadata| metadata.cadence.is_cheap())
+            .collect()
+    }
+
+    /// Return cheap checks in stable name order, cloning the stored `Arc`s so
+    /// callers can run them without holding the registry lock.
+    pub fn cheap_checks(&self) -> Vec<Arc<dyn DoctorCheck>> {
+        let guard = self.inner.lock().expect("doctor registry poisoned");
+        guard
+            .values()
+            .filter(|check| check.cadence().is_cheap())
+            .map(Arc::clone)
+            .collect()
+    }
+
     /// Look up a check by name. The returned `Arc` clones the stored
     /// reference; callers do not need to acquire the registry lock to use
     /// the check.
@@ -365,6 +464,46 @@ where
 pub fn registry() -> &'static DoctorRegistry {
     static REGISTRY: OnceLock<DoctorRegistry> = OnceLock::new();
     REGISTRY.get_or_init(DoctorRegistry::new)
+}
+
+/// Execute a named subset of registered checks without going through MCP auth or
+/// tool dispatch. This is the seam the coordinator can call in a later task.
+pub fn run_named_subset(
+    registry: &DoctorRegistry,
+    subset: &str,
+) -> DoctorResult<Vec<DoctorCheckRun>> {
+    match subset {
+        "cheap" => run_subset(registry, DoctorRunSubset::Cheap),
+        other => Err(DoctorError::InvalidInput(format!(
+            "unknown doctor run subset '{other}'"
+        ))),
+    }
+}
+
+/// Execute a registered check subset without using MCP auth/tool plumbing.
+pub fn run_subset(
+    registry: &DoctorRegistry,
+    subset: DoctorRunSubset,
+) -> DoctorResult<Vec<DoctorCheckRun>> {
+    let checks = match subset {
+        DoctorRunSubset::Cheap => registry.cheap_checks(),
+    };
+
+    checks
+        .into_iter()
+        .map(|check| {
+            let check_name = check.name();
+            check.run().map(|findings| DoctorCheckRun {
+                check_name,
+                findings,
+            })
+        })
+        .collect()
+}
+
+/// Convenience wrapper for the coordinator's future cheap doctor tick.
+pub fn run_cheap_subset(registry: &DoctorRegistry) -> DoctorResult<Vec<DoctorCheckRun>> {
+    run_subset(registry, DoctorRunSubset::Cheap)
 }
 
 #[cfg(test)]
@@ -447,6 +586,10 @@ mod tests {
             } else {
                 Ok(Vec::new())
             }
+        }
+
+        fn cadence(&self) -> DoctorCheckCadence {
+            DoctorCheckCadence::Cheap
         }
 
         fn fix(&self, finding: &Finding) -> DoctorResult<()> {
@@ -638,6 +781,74 @@ mod tests {
         }
         // No `fix` override — uses the default that returns
         // FixNotSupported.
+    }
+
+    struct ExpensiveClusterFacingCheck;
+
+    impl DoctorCheck for ExpensiveClusterFacingCheck {
+        fn name(&self) -> &'static str {
+            "k8s.pod_leak"
+        }
+
+        fn description(&self) -> &'static str {
+            "Expensive cluster-facing pod leak scan"
+        }
+
+        fn run(&self) -> DoctorResult<Vec<Finding>> {
+            Ok(vec![Finding::new(
+                FindingSeverity::Info,
+                self.name(),
+                ResolverSnapshot::new("resolve_pods", json!({}), json!({ "pods": 1 })),
+                "cluster-facing sample should stay on demand",
+            )])
+        }
+        // No cadence override: defaults to OnDemand and is excluded from cheap.
+    }
+
+    #[test]
+    fn cheap_subset_enumeration_excludes_on_demand_expensive_checks() {
+        let registry = DoctorRegistry::new();
+        register(&registry, SampleSharedResolverCheck);
+        register(&registry, ExpensiveClusterFacingCheck);
+
+        let all = registry.enumerate_with_cadence();
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all.iter()
+                .find(|metadata| metadata.name == SAMPLE_CHECK_NAME)
+                .expect("cheap sample present")
+                .cadence,
+            DoctorCheckCadence::Cheap
+        );
+        assert_eq!(
+            all.iter()
+                .find(|metadata| metadata.name == "k8s.pod_leak")
+                .expect("expensive sample present")
+                .cadence,
+            DoctorCheckCadence::OnDemand
+        );
+
+        let cheap = registry.enumerate_cheap();
+        assert_eq!(cheap.len(), 1);
+        assert_eq!(cheap[0].name, SAMPLE_CHECK_NAME);
+        assert!(!cheap.iter().any(|metadata| metadata.name == "k8s.pod_leak"));
+    }
+
+    #[test]
+    fn cheap_subset_runner_executes_only_explicitly_cheap_checks() {
+        let registry = DoctorRegistry::new();
+        register(&registry, SampleSharedResolverCheck);
+        register(&registry, ExpensiveClusterFacingCheck);
+
+        let runs = run_named_subset(&registry, DoctorRunSubset::Cheap.name())
+            .expect("cheap subset should run");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].check_name, SAMPLE_CHECK_NAME);
+        assert_eq!(runs[0].findings.len(), 1);
+
+        let direct_runs = run_cheap_subset(&registry).expect("cheap wrapper should run");
+        assert_eq!(direct_runs.len(), 1);
+        assert_eq!(direct_runs[0].check_name, SAMPLE_CHECK_NAME);
     }
 
     #[test]

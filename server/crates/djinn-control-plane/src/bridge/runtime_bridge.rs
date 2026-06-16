@@ -80,6 +80,18 @@ pub trait RuntimeOps: Send + Sync {
         test_id: &str,
         project_id: &str,
     ) -> Result<(), String>;
+    /// Dispatch a one-shot pre-PR verification run for `run_id` in `project_id`'s
+    /// image (the worker writes per-command results + pass/fail to the
+    /// `verification_runs` row). The Job clones `target_branch`, fetches +
+    /// checks out `task_branch`, then runs the real verification pipeline.
+    /// Routes to the K8s graph warmer; errors on runtimes without a kube client.
+    async fn dispatch_verification(
+        &self,
+        run_id: &str,
+        project_id: &str,
+        task_branch: &str,
+        target_branch: &str,
+    ) -> Result<(), String>;
     /// Reconcile a catalog image's build (migration 46): build the shared
     /// image once so every assigned project can use it. A no-op on runtimes
     /// without an image controller (dev mode).
