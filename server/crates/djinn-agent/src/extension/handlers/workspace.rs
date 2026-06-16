@@ -658,12 +658,14 @@ pub(crate) async fn call_code_search(
 }
 
 /// F2: best-effort just-in-time pitfall hint. On the FIRST write/edit/
-/// apply_patch of a session (gated by `DJINN_JIT_PITFALLS=1`, default OFF),
-/// run a scoped pitfall/pattern search over the touched paths and append the
-/// top-2 as a transient `jit_pitfalls` field on the response JSON. A miss,
-/// an error, or a non-first modification leaves `response` untouched. When the
-/// gate is OFF this records a structured disabled telemetry outcome but does no
-/// DB search and appends no hint.
+/// apply_patch of a session (when `DJINN_JIT_PITFALLS_ROLLOUT` explicitly
+/// selects `enabled`/`cohort`/`staging`, or the legacy migration
+/// `DJINN_JIT_PITFALLS=1` opt-in is present), run a scoped pitfall/pattern
+/// search over the touched paths and append the top-2 as a transient
+/// `jit_pitfalls` field on the response JSON. A miss, an error, or a non-first
+/// modification leaves `response` untouched. Default-off and explicit
+/// kill-switch decisions record distinct telemetry outcomes but do no DB search
+/// and append no hint.
 async fn maybe_append_pitfall_hint(
     response: serde_json::Value,
     state: &AgentContext,

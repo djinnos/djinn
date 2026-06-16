@@ -73,7 +73,8 @@ pub mod lead {
 }
 
 pub mod jit_pitfalls {
-    pub const OUTCOME_DISABLED: &str = "disabled";
+    pub const OUTCOME_DISABLED_DEFAULT_OFF: &str = "disabled_default_off";
+    pub const OUTCOME_DISABLED_KILL_SWITCH: &str = "disabled_kill_switch";
     pub const OUTCOME_NON_FIRST_MODIFICATION: &str = "non_first_modification";
     pub const OUTCOME_ELIGIBLE_SEARCH: &str = "eligible_search";
     pub const OUTCOME_INJECTED: &str = "injected";
