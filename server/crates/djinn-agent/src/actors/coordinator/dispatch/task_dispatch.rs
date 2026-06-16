@@ -9,6 +9,19 @@ fn record_dispatch_attempt(outcome: &'static str) {
     djinn_telemetry::dispatch::increment_attempt(outcome);
 }
 
+fn record_successful_dispatch_attempt() {
+    djinn_telemetry::dispatch::record_success();
+}
+
+fn record_dispatch_live_state(cooldowns_active: usize, inflight_ledger_size: usize) {
+    djinn_telemetry::dispatch::set_cooldowns_active(cooldowns_active);
+    djinn_telemetry::dispatch::set_inflight_ledger_size(inflight_ledger_size);
+}
+
+fn record_user_cap_utilization(user: &str, model: &str, used: u32, cap: u32) {
+    djinn_telemetry::dispatch::set_user_cap_utilization(user, model, used, cap);
+}
+
 /// Env flag allowing operators (and the in-process TestRuntime path) to
 /// bypass the devcontainer-image + graph-warm readiness gate. Default is
 /// "on" (fail-closed). Set to `0`/`false`/`no` to dispatch as soon as a
@@ -736,6 +749,10 @@ impl CoordinatorActor {
         // ledger resets, but old `running` rows still gate until reaped).
         self.reconcile_inflight_dispatch_ledger().await;
         overlay_inflight_ledger(&mut running_by_user_model, &self.inflight_dispatches);
+        record_dispatch_live_state(
+            self.dispatch_cooldowns.len(),
+            self.inflight_dispatches.len(),
+        );
 
         // Memoized per-creator cap maps (model_id → max concurrent) for this pass.
         let mut creator_caps: HashMap<String, std::collections::HashMap<String, u32>> =
@@ -1151,7 +1168,9 @@ impl CoordinatorActor {
                         m,
                         used,
                     );
-                    used < caps.get(m).copied().unwrap_or(1)
+                    let cap = caps.get(m).copied().unwrap_or(1);
+                    record_user_cap_utilization(c, m, used, cap);
+                    used < cap
                 });
                 if model_ids.is_empty() {
                     record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_CAP);
@@ -1227,7 +1246,7 @@ impl CoordinatorActor {
 
             match outcome {
                 DispatchOutcome::Dispatched => {
-                    record_dispatch_attempt(djinn_telemetry::dispatch::OUTCOME_OK);
+                    record_successful_dispatch_attempt();
                     tracing::info!(outcome = "ok", task_id = %task.short_id, role);
                     tracing::info!(
                         task_id = %task.short_id,
@@ -1289,6 +1308,10 @@ impl CoordinatorActor {
                         // pass, so it drops out the moment the task completes.
                         self.inflight_dispatches
                             .insert(task.id.clone(), (Some(c.to_string()), used.clone()));
+                        record_dispatch_live_state(
+                            self.dispatch_cooldowns.len(),
+                            self.inflight_dispatches.len(),
+                        );
                         self.persist_durable_dispatch_state_update(
                             &task.id,
                             Some(&task.short_id),

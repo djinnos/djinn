@@ -645,6 +645,8 @@ impl CoordinatorActor {
 
     /// Publish current state to the watch channel for lock-free status reads.
     pub(super) fn publish_status(&self) {
+        djinn_telemetry::dispatch::set_cooldowns_active(self.dispatch_cooldowns.len());
+        djinn_telemetry::dispatch::set_inflight_ledger_size(self.inflight_dispatches.len());
         let _ = self.status_tx.send(SharedCoordinatorState {
             dispatched: self.dispatched,
             recovered: self.recovered,

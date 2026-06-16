@@ -221,6 +221,33 @@ fn make_config(
     }
 }
 
+#[tokio::test]
+async fn slot_pool_metrics_aggregate_by_state_and_model_without_slot_labels() {
+    djinn_telemetry::init().unwrap();
+    let (app_state, cancel, _temp) = test_app_state();
+    let config = make_config(
+        vec![
+            model("model-a", 2, &["worker"]),
+            model("model-b", 1, &["worker"]),
+        ],
+        &[("worker", vec!["model-a", "model-b"])],
+    );
+    let (_tx, rx) = mpsc::channel(1);
+    let mut pool = SlotPool::new(rx, app_state, cancel, config);
+
+    pool.test_assign_busy("task-a", 0);
+    pool.test_record_slot_pool_metrics();
+    let rendered = djinn_telemetry::render().unwrap();
+
+    assert!(rendered.contains("djinn_slot_pool"));
+    assert!(rendered.contains("model=\"model-a\""));
+    assert!(rendered.contains("model=\"model-b\""));
+    assert!(rendered.contains("state=\"busy\""));
+    assert!(rendered.contains("state=\"free\""));
+    assert!(!rendered.contains("slot_id="));
+    assert!(!rendered.contains("task-a"));
+}
+
 fn test_slot_factory(
     runtime: Duration,
     signal_tx: mpsc::UnboundedSender<RunnerSignal>,
