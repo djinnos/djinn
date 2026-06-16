@@ -10,8 +10,11 @@ name: Release
 #   djinn-agent-runtime       — thin top: runtime-base + djinn-agent-worker
 #
 # Triggers:
-#   * push to main              — refreshes `:latest` and `:sha-<short>`.
-#   * tag push `v*`             — publishes SemVer tags (`:1.2.3`, `:1.2`, `:1`).
+#   * tag push `v*`             — publishes SemVer tags (`:1.2.3`, `:1.2`, `:1`)
+#                                 plus `:latest` and `:sha-<short>`. This is the
+#                                 only image-building trigger: releases are cut by
+#                                 tagging, so main pushes no longer rebuild (they
+#                                 just double-built the tagged commit).
 #   * workflow_dispatch         — manual rebuild with optional explicit tag.
 #
 # Binaries (djinn-server, djinn-agent-worker) build in dedicated jobs so
@@ -21,7 +24,6 @@ name: Release
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch:
     inputs:
