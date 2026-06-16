@@ -33,6 +33,7 @@ pub(crate) fn active_global_dispatch_pause(
         .filter(|pause| dispatch_pause_is_active(pause))
 }
 
+#[allow(dead_code)] // Read by the forthcoming /debug/dispatch-state server handler.
 pub fn debug_view(state: &DispatchPauseState) -> DispatchPauseView {
     let mut projects: Vec<_> = state.projects.keys().cloned().collect();
     projects.sort();
