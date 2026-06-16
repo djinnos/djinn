@@ -269,6 +269,120 @@ async fn execution_kill_task_racing_natural_completion_settles_once_and_releases
     harness.shutdown();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_kill_task_double_kill_is_harmless_and_leaves_capacity_available() {
+    let harness = RealPoolKillHarness::new().await;
+    let seeded = harness
+        .seed_running_session_with_task_run("double-kill-run")
+        .await;
+
+    harness.dispatch(&seeded.task_id).await;
+    harness.wait_for_runner_started(&seeded.task_id).await;
+    harness.wait_for_pool_session(&seeded.task_id).await;
+    assert!(
+        harness.pool_has_session(&seeded.task_id).await,
+        "precondition: dispatched task must have an active pool session"
+    );
+    harness.assert_pool_capacity(1, 0).await;
+    assert_eq!(harness.running_count_for_cap().await, 1);
+
+    let first_response = harness
+        .call_kill_tool(&seeded.task_id)
+        .await
+        .expect("first execution_kill_task should dispatch");
+
+    assert_eq!(first_response["ok"], true);
+    assert_eq!(first_response["task_id"], seeded.task_id);
+    assert_eq!(first_response["error"], serde_json::Value::Null);
+    harness.wait_for_runner_killed(&seeded.task_id).await;
+    harness.wait_for_pool_capacity(0, 1).await;
+
+    assert_settled_after_kill(&harness, &seeded).await;
+    assert_eq!(
+        harness.runtime_teardown_calls(),
+        vec![seeded.task_run_id.clone()],
+        "first kill should perform exactly one task-run teardown"
+    );
+
+    let second_response = harness
+        .call_kill_tool(&seeded.task_id)
+        .await
+        .expect("second execution_kill_task should still return a tool response");
+
+    assert_truthful_harmless_second_kill_response(&second_response, &seeded.task_id);
+    assert_settled_after_kill(&harness, &seeded).await;
+    assert_eq!(
+        harness.runtime_teardown_calls(),
+        vec![seeded.task_run_id.clone()],
+        "repeated kill must not duplicate task-run teardown"
+    );
+    harness.wait_for_pool_capacity(0, 1).await;
+
+    harness.dispatch(&seeded.task_id).await;
+    harness.wait_for_pool_session(&seeded.task_id).await;
+    harness.assert_pool_capacity(1, 0).await;
+    assert_eq!(
+        harness.running_task_ids().await,
+        vec![seeded.task_id.clone()],
+        "subsequent dispatch proves repeated kill did not poison free-list/capacity state"
+    );
+    assert_eq!(
+        harness.running_count_for_cap().await,
+        0,
+        "redispatching the same DB session fixture must not resurrect an active DB session row"
+    );
+    harness.shutdown();
+}
+
+async fn assert_settled_after_kill(harness: &RealPoolKillHarness, seeded: &SeededRun) {
+    assert!(
+        !harness.pool_has_session(&seeded.task_id).await,
+        "repeated kill attempts must leave no active pool session"
+    );
+    assert!(
+        harness.running_task_ids().await.is_empty(),
+        "pool status should not expose a running task after kill settlement"
+    );
+    assert!(
+        harness.active_sessions().await.is_empty(),
+        "kill settlement should leave no active DB sessions"
+    );
+    assert_eq!(
+        harness.running_count_for_cap().await,
+        0,
+        "settled task must not consume per-user/model capacity"
+    );
+    let session = harness.session(&seeded.session_id).await;
+    assert_eq!(session.status, SessionStatus::Interrupted.as_str());
+    assert!(
+        session.ended_at.is_some(),
+        "settled session must remain terminal after repeated kill attempts"
+    );
+}
+
+fn assert_truthful_harmless_second_kill_response(response: &serde_json::Value, task_id: &str) {
+    assert_eq!(response["task_id"], task_id);
+    if response["ok"] == true {
+        assert_eq!(
+            response["error"],
+            serde_json::Value::Null,
+            "idempotent success should not carry an error"
+        );
+        return;
+    }
+
+    assert_eq!(response["ok"], false);
+    let error = response["error"]
+        .as_str()
+        .expect("truthful second kill failure should include an error message");
+    assert!(
+        error.contains("no active slot")
+            || error.contains("not running")
+            || error.contains("not found"),
+        "second kill should fail only because the task is already not running/not found; got {error:?}"
+    );
+}
+
 struct SeededRun {
     task_id: String,
     task_run_id: String,
