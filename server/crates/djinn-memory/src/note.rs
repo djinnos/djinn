@@ -1,6 +1,26 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Shared note lifecycle vocabulary used by the schema, repository, and tool
+/// surfaces. Keep this as one status field rather than parallel booleans.
+pub mod note_status {
+    pub const ACTIVE: &str = "active";
+    pub const ARCHIVED: &str = "archived";
+    pub const DEPRECATED: &str = "deprecated";
+
+    pub fn normalize(status: Option<&str>) -> String {
+        status
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(ACTIVE)
+            .to_ascii_lowercase()
+    }
+
+    pub fn is_valid(status: &str) -> bool {
+        matches!(status, ACTIVE | ARCHIVED | DEPRECATED)
+    }
+}
+
 /// A knowledge base note persisted in the MySQL/Dolt index, optionally backed by a
 /// markdown file on disk.
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
@@ -18,6 +38,9 @@ pub struct Note {
     pub storage: String,
     pub note_type: String,
     pub folder: String,
+    /// Lifecycle status: active by default; archived/deprecated notes remain
+    /// restorable and listable only via explicit status filters.
+    pub status: String,
     pub tags: String,    // JSON array string, e.g. '["rust","db"]'
     pub content: String, // Markdown body without frontmatter
     /// Objective retrieval situation where this note applies. Stored separately
@@ -57,6 +80,7 @@ impl Note {
             "storage": self.storage,
             "note_type": self.note_type,
             "folder": self.folder,
+            "status": self.status,
             "tags": self.parsed_tags(),
             "content": self.content,
             "retrieval_anchor": self.retrieval_anchor,
@@ -129,6 +153,7 @@ pub struct NoteCompact {
     pub title: String,
     pub note_type: String,
     pub folder: String,
+    pub status: String,
     pub updated_at: String,
     pub scope_paths: String,
 }
@@ -322,6 +347,7 @@ mod tests {
             storage: "db".to_string(),
             note_type: "pattern".to_string(),
             folder: "patterns".to_string(),
+            status: "active".to_string(),
             tags: r#"["retrieval"]"#.to_string(),
             content: "Body remains separate from the retrieval anchor.".to_string(),
             retrieval_anchor,

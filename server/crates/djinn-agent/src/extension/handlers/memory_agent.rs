@@ -65,6 +65,7 @@ pub(super) async fn call_memory_list(
                 project: project_path,
                 folder: p.folder,
                 note_type: p.note_type,
+                status: p.status,
                 depth: p.depth,
             },
         )
