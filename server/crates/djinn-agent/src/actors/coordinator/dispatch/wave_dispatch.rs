@@ -438,6 +438,23 @@ mod e6_tests {
         }
     }
 
+    #[test]
+    fn pr_conflict_transition_does_not_increment_reopen_count() {
+        for from in [
+            TaskStatus::Approved,
+            TaskStatus::PrDraft,
+            TaskStatus::PrReview,
+        ] {
+            let apply = compute_transition(&TransitionAction::PrConflict, &from, None)
+                .expect("PrConflict must remain legal for approved/pr_draft/pr_review tasks");
+            assert_eq!(apply.to_status, Some(TaskStatus::Open));
+            assert!(
+                !apply.increment_reopen,
+                "PrConflict should not bump reopen_count; djinn_task_reopens_total must follow this semantic"
+            );
+        }
+    }
+
     /// Part A — a merge-queue-reopened worker task routes to the `worker`
     /// dispatch role. The escalation gate in `dispatch_ready_tasks` is
     /// `role == "worker" && maybe_intervene_on_stuck_task(..)`, so if a reopened

@@ -79,7 +79,9 @@ use conversation_resolution::{
 use installation::resolve_installation_client;
 use pr_commands::enable_auto_merge_best_effort;
 #[allow(unused_imports)]
-pub(crate) use pr_commands::{AutoMergeTickDecision, decide_auto_merge_tick};
+pub(crate) use pr_commands::{
+    AutoMergeTickDecision, decide_auto_merge_tick, record_auto_merge_decision_metrics,
+};
 use pr_review_handlers::effective_review_decision;
 pub(crate) use pr_review_handlers::parse_pr_url;
 
@@ -88,4 +90,7 @@ use ci_helpers::is_advisory_check_name;
 #[cfg(test)]
 use pr_commands::{dequeue_reason_is_failure, dequeue_requires_rework};
 #[cfg(test)]
-use pr_review_handlers::{is_racing_unmerged_status, pick_conflict_blocker_sibling};
+use pr_review_handlers::{
+    is_racing_unmerged_status, pick_conflict_blocker_sibling,
+    pr_transition_increments_reopen_count, record_pr_transition_reopen_metric,
+};

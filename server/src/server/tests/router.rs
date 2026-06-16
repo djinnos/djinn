@@ -65,12 +65,57 @@ async fn metrics_returns_prometheus_text_without_auth() {
 
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = std::str::from_utf8(&body).unwrap();
-    assert!(text.contains("# HELP djinn_dispatch_attempts_total"));
-    assert!(text.contains("djinn_dispatch_attempts_total{outcome=\"ok\"}"));
-    assert!(text.contains("djinn_breaker_state"));
-    assert!(text.contains("metrics-model"));
-    assert!(text.contains("metrics-user"));
+    assert!(
+        text.starts_with("# HELP djinn_dispatch_attempts_total"),
+        "metrics output should begin with dispatch HELP, got:\n{text}"
+    );
+    assert!(text.contains("# TYPE djinn_dispatch_attempts_total counter"));
+    for metric in [
+        "djinn_dispatch_attempts_total{outcome=\"ok\"}",
+        "djinn_dispatch_attempts_total{outcome=\"cooldown\"}",
+        "djinn_dispatch_attempts_total{outcome=\"cap\"}",
+        "djinn_dispatch_attempts_total{outcome=\"breaker\"}",
+        "djinn_dispatch_attempts_total{outcome=\"error\"}",
+        "djinn_dispatch_cooldowns_active",
+        "djinn_dispatch_last_success_timestamp",
+        "djinn_slot_pool{",
+        "djinn_inflight_ledger_size",
+        "djinn_user_cap_utilization{",
+        "djinn_breaker_state{",
+        "djinn_breaker_trips_total",
+        "djinn_zombie_reaps_total{kind=\"startup\"}",
+        "djinn_zombie_reaps_total{kind=\"periodic\"}",
+        "djinn_zombie_reaps_total{kind=\"stall\"}",
+        "djinn_task_reopens_total",
+        "djinn_lead_escalations_total",
+        "djinn_tasks_parked_total",
+        "djinn_pr_poller_tracked",
+        "djinn_merge_failures_total",
+    ] {
+        assert!(text.contains(metric), "missing metric {metric} in:\n{text}");
+    }
+    assert_metric_line_contains_all(text, "djinn_slot_pool", &["state=\"free\"", "model=\"\""]);
+    assert_metric_line_contains_all(text, "djinn_slot_pool", &["state=\"busy\"", "model=\"\""]);
+    assert_metric_line_contains_all(
+        text,
+        "djinn_user_cap_utilization",
+        &["user=\"\"", "model=\"\""],
+    );
+    assert_metric_line_contains_all(
+        text,
+        "djinn_breaker_state",
+        &["scope=\"metrics-user\"", "model=\"metrics-model\""],
+    );
     assert!(text.contains(" 1"));
+}
+
+fn assert_metric_line_contains_all(text: &str, metric: &str, labels: &[&str]) {
+    assert!(
+        text.lines()
+            .filter(|line| line.starts_with(metric))
+            .any(|line| labels.iter().all(|label| line.contains(label))),
+        "missing metric line for {metric} with labels {labels:?} in:\n{text}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
