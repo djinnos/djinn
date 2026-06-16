@@ -175,10 +175,7 @@ fn resolve_checks(
 
 /// Convert an in-memory core [`Finding`] into the DB insert DTO, carrying
 /// the structured fields through without manual stringification.
-fn finding_to_new_row(
-    finding: &Finding,
-    run_id: &str,
-) -> djinn_db::NewDoctorFinding {
+fn finding_to_new_row(finding: &Finding, run_id: &str) -> djinn_db::NewDoctorFinding {
     // entity_ids is a BTreeMap<String,String> in the core type but a JSON
     // array/object in the DB. We serialize the map as a JSON object so the
     // structured keys survive the round-trip.
@@ -208,7 +205,7 @@ fn persisted_to_finding(row: &djinn_db::DoctorFinding) -> Result<Finding, String
             return Err(format!(
                 "persisted finding has unknown severity '{other}' for check '{}'",
                 row.check_name
-            ))
+            ));
         }
     };
 
@@ -230,11 +227,7 @@ fn persisted_to_finding(row: &djinn_db::DoctorFinding) -> Result<Finding, String
                 row.id
             )
         })?,
-        None => ResolverSnapshot::new(
-            "unknown",
-            serde_json::Value::Null,
-            serde_json::Value::Null,
-        ),
+        None => ResolverSnapshot::new("unknown", serde_json::Value::Null, serde_json::Value::Null),
     };
 
     Ok(Finding {
@@ -259,12 +252,10 @@ impl DjinnMcpServer {
     /// persists all emitted findings, and returns a structured report with
     /// check metadata and persisted finding ids. This path **never** invokes
     /// `fix` — fixes are opt-in and only reachable through `doctor_fix`.
-    #[tool(
-        description = "Admin-only: run registered doctor health checks. \
+    #[tool(description = "Admin-only: run registered doctor health checks. \
                         Accepts an optional list of check names to run a subset; \
                         omit to run all registered checks. Persists findings and \
-                        returns a report with persisted finding ids. Never invokes fix."
-    )]
+                        returns a report with persisted finding ids. Never invokes fix.")]
     pub async fn doctor_run(
         &self,
         Parameters(p): Parameters<DoctorRunParams>,
@@ -507,7 +498,7 @@ impl DjinnMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use djinn_core::doctor::{DoctorCheckCadence, DoctorCheckMetadata};
+    use djinn_core::doctor::DoctorCheckMetadata;
 
     // -------------------------------------------------------------------
     // Sample check for tool-level wiring tests
@@ -525,17 +516,19 @@ mod tests {
             "Test check for doctor tool wiring"
         }
         fn run(&self) -> djinn_core::doctor::DoctorResult<Vec<Finding>> {
-            Ok(vec![Finding::new(
-                FindingSeverity::Warn,
-                self.name(),
-                ResolverSnapshot::new(
-                    "resolve_test",
-                    serde_json::json!({ "input": 1 }),
-                    serde_json::json!({ "output": 2 }),
-                ),
-                "test finding from wiring check",
-            )
-            .with_entity_id("entity", "test-1")])
+            Ok(vec![
+                Finding::new(
+                    FindingSeverity::Warn,
+                    self.name(),
+                    ResolverSnapshot::new(
+                        "resolve_test",
+                        serde_json::json!({ "input": 1 }),
+                        serde_json::json!({ "output": 2 }),
+                    ),
+                    "test finding from wiring check",
+                )
+                .with_entity_id("entity", "test-1"),
+            ])
         }
         fn fix(&self, finding: &Finding) -> djinn_core::doctor::DoctorResult<()> {
             // Shared-resolver invariant: re-run with the snapshot's inputs.
@@ -577,8 +570,7 @@ mod tests {
     #[test]
     fn resolve_checks_named_subset_returns_matching() {
         let reg = registry_with_test_check();
-        let checks =
-            resolve_checks(reg, &Some(vec![TEST_CHECK_NAME.to_string()])).expect("subset");
+        let checks = resolve_checks(reg, &Some(vec![TEST_CHECK_NAME.to_string()])).expect("subset");
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].name(), TEST_CHECK_NAME);
     }
@@ -586,8 +578,11 @@ mod tests {
     #[test]
     fn resolve_checks_unknown_name_returns_error_listing_known() {
         let reg = registry_with_test_check();
-        let err = resolve_checks(reg, &Some(vec!["nonexistent".to_string()]))
-            .expect_err("unknown name");
+        let result = resolve_checks(reg, &Some(vec!["nonexistent".to_string()]));
+        let err = match result {
+            Ok(_) => panic!("expected error for unknown check name"),
+            Err(e) => e,
+        };
         assert!(err.contains("unknown doctor check name"));
         assert!(err.contains(TEST_CHECK_NAME));
     }
@@ -601,7 +596,11 @@ mod tests {
         let finding = Finding::new(
             FindingSeverity::Critical,
             "round.trip",
-            ResolverSnapshot::new("resolve_x", serde_json::json!({"a": 1}), serde_json::json!({"b": 2})),
+            ResolverSnapshot::new(
+                "resolve_x",
+                serde_json::json!({"a": 1}),
+                serde_json::json!({"b": 2}),
+            ),
             "round-trip detail",
         )
         .with_entity_id("workspace", "ws-1")
@@ -630,7 +629,10 @@ mod tests {
         let back = persisted_to_finding(&persisted).expect("reconstruct");
         assert_eq!(back.severity, FindingSeverity::Critical);
         assert_eq!(back.check_name, "round.trip");
-        assert_eq!(back.entity_ids.get("workspace").map(|s| s.as_str()), Some("ws-1"));
+        assert_eq!(
+            back.entity_ids.get("workspace").map(|s| s.as_str()),
+            Some("ws-1")
+        );
         assert_eq!(back.evidence, serde_json::json!({"rows": 3}));
         assert_eq!(back.resolver_snapshot.resolver, "resolve_x");
         assert_eq!(back.resolver_snapshot.inputs, serde_json::json!({"a": 1}));
