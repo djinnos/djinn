@@ -252,8 +252,6 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         match load_cached_artifact(row.graph_blob).await {
             Ok((graph, pagerank, sccs, layout_positions)) => {
                 install_as_canonical(
-                    ctx,
-                    project_id,
                     handle.path().to_path_buf(),
                     commit_sha.clone(),
                     graph.clone(),
@@ -295,8 +293,6 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         match load_cached_artifact(row.graph_blob).await {
             Ok((graph, pagerank, sccs, layout_positions)) => {
                 install_as_canonical(
-                    ctx,
-                    project_id,
                     handle.path().to_path_buf(),
                     commit_sha.clone(),
                     graph.clone(),
@@ -549,8 +545,6 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     // `ensure_canonical_graph` for the rationale.
 
     install_as_canonical(
-        ctx,
-        project_id,
         handle.path().to_path_buf(),
         commit_sha.clone(),
         graph.clone(),
@@ -810,9 +804,7 @@ pub async fn canonical_graph_count_commits_since(
     count_commits_since(project_root, pinned_commit).await
 }
 
-async fn install_as_canonical<C: WarmContext>(
-    _ctx: &C,
-    _project_id: &str,
+async fn install_as_canonical(
     project_path: PathBuf,
     git_head: String,
     graph: crate::repo_graph::RepoDependencyGraph,
@@ -910,8 +902,6 @@ pub async fn load_canonical_graph<C: WarmContext>(
             GRAPH_NOT_WARMED_ERR.to_string()
         })?;
     install_as_canonical(
-        ctx,
-        project_id,
         index_tree_path,
         row.commit_sha,
         graph.clone(),
