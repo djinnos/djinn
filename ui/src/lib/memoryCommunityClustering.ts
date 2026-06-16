@@ -57,7 +57,9 @@ const STOP_WORDS = new Set([
 export function clusterMemoryCommunities(
   graph: Graph,
 ): Map<string, MemoryCommunityMetadata> {
-  if (graph.order <= 1) return new Map();
+  // Louvain throws when the graph has no edges; collapse that to an empty
+  // result so callers don't need to special-case the disconnected-only state.
+  if (graph.order <= 1 || graph.size === 0) return new Map();
 
   const nodeLabels = new Map<string, string>();
   graph.forEachNode((nodeId, attributes) => {
@@ -94,13 +96,19 @@ export function clusterMemoryCommunities(
   const clustered = new Map<string, MemoryCommunityMetadata>();
   for (const [communityKey, members] of communities) {
     const sortedMembers = [...members].sort();
+    // Drop communities that can't drive attraction: singletons (one note)
+    // and partitions that the graph's edge list shows no intra-edges for.
+    // Downstream code can treat absence from the map as "unclustered" and
+    // skip the per-community force toward a galaxy center.
     if (sortedMembers.length <= 1 || !intraEdgeCommunityKeys.has(communityKey)) {
       continue;
     }
 
     // Stable ids intentionally depend on the exact sorted membership: adding or
     // removing a note changes the hash so downstream caches do not confuse old
-    // and new community shapes.
+    // and new community shapes. This matches the shape used by
+    // server/crates/djinn-graph/src/communities.rs (sha2-of-sorted-member-uids
+    // → first 16 hex chars), just over note ids instead of repo node keys.
     const communityId = sha256Hex(sortedMembers.join("\n")).slice(0, 16);
     const label = labelForCommunity(sortedMembers, nodeLabels);
     const metadata = { communityId, label };

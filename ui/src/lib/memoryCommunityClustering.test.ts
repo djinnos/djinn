@@ -62,4 +62,49 @@ describe("clusterMemoryCommunities", () => {
 
     expect(clusterMemoryCommunities(graph)).toEqual(new Map());
   });
+
+  it("returns no clustered metadata for a multi-node graph with no edges", () => {
+    const graph = new Graph({ type: "undirected" });
+    graph.addNode("a", { label: "Isolated Note A" });
+    graph.addNode("b", { label: "Isolated Note B" });
+    graph.addNode("c", { label: "Isolated Note C" });
+
+    expect(clusterMemoryCommunities(graph)).toEqual(new Map());
+  });
+
+  it("excludes singleton communities that have no intra-edges", () => {
+    const graph = new Graph({ type: "undirected" });
+    graph.addNode("hub", { label: "Hub Note" });
+    graph.addNode("hub-friend", { label: "Hub Friend" });
+    graph.addNode("lonely", { label: "Lonely Note" });
+    graph.addEdge("hub", "hub-friend");
+
+    const clustered = clusterMemoryCommunities(graph);
+
+    // The hub+hub-friend pair should cluster; the singleton must not.
+    expect(clustered.has("hub")).toBe(true);
+    expect(clustered.has("hub-friend")).toBe(true);
+    expect(clustered.has("lonely")).toBe(false);
+    expect(clustered.get("hub")?.communityId).toBe(
+      clustered.get("hub-friend")?.communityId,
+    );
+  });
+
+  it("uses a 16-hex-char sha256 of sorted member ids as community id", () => {
+    const graph = new Graph({ type: "undirected" });
+    graph.addNode("a", { label: "Alpha" });
+    graph.addNode("b", { label: "Beta" });
+    graph.addNode("c", { label: "Gamma" });
+    graph.addEdge("a", "b");
+    graph.addEdge("b", "c");
+    graph.addEdge("a", "c");
+
+    const clustered = clusterMemoryCommunities(graph);
+    const id = clustered.get("a")?.communityId ?? "";
+
+    expect(id).toMatch(/^[0-9a-f]{16}$/);
+    // All clustered nodes share the same community id.
+    expect(clustered.get("b")?.communityId).toBe(id);
+    expect(clustered.get("c")?.communityId).toBe(id);
+  });
 });
