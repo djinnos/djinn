@@ -164,7 +164,7 @@ export function applyPerCommunityAttraction(
 
 export function assignCommunityCenters(
   orderedCommunityIds: readonly string[],
-  clusterRadius = DEFAULT_PER_COMMUNITY_ATTRACTION_OPTIONS.clusterRadius,
+  clusterRadius: number = DEFAULT_PER_COMMUNITY_ATTRACTION_OPTIONS.clusterRadius,
 ): Map<string, PerCommunityCenter> {
   const radius = finiteOrDefault(
     clusterRadius,
@@ -206,9 +206,10 @@ function getMetadata(
   metadataByNode: PerCommunityAttractionMetadata,
   nodeId: string,
 ): PerCommunityAttractionNodeMetadata | null | undefined {
-  return metadataByNode instanceof Map
-    ? metadataByNode.get(nodeId)
-    : metadataByNode[nodeId];
+  if (metadataByNode instanceof Map) {
+    return metadataByNode.get(nodeId);
+  }
+  return metadataByNode[nodeId];
 }
 
 function normalizeCommunityId(value: string | null | undefined): string | null {
