@@ -311,9 +311,14 @@ mod tests {
     async fn role_override_returns_single_command_immediately() {
         let db = Database::open_in_memory().unwrap();
         let dir = tempdir_in_tmp();
-        let result =
-            resolve_scoped_commands(&db, None, dir.path(), "main", Some("cargo test --workspace"))
-                .await;
+        let result = resolve_scoped_commands(
+            &db,
+            None,
+            dir.path(),
+            "main",
+            Some("cargo test --workspace"),
+        )
+        .await;
         assert_eq!(result, vec!["cargo test --workspace"]);
     }
 

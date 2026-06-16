@@ -50,6 +50,33 @@ pub enum MirrorError {
 
     #[error("mirror for {0} does not exist; call ensure_mirror first")]
     Missing(String),
+
+    #[error("refusing mirror gc: {0}")]
+    GcGuard(#[from] GcGuardError),
+}
+
+#[derive(Debug, Error)]
+pub enum GcGuardError {
+    #[error("invalid path segment `{0}`")]
+    InvalidSegment(String),
+
+    #[error("store root `{path}` is not accessible: {source}")]
+    RootIo {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("repo path `{path}` is not accessible: {source}")]
+    RepoIo {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("repo path `{repo}` escapes expected root `{root}`")]
+    OutsideRoot { root: PathBuf, repo: PathBuf },
+
+    #[error("git: {0}")]
+    Git(#[from] djinn_git::GitError),
 }
 
 /// Convert a [`djinn_git::GitError`] into the legacy `MirrorError::Git(String)`
@@ -361,9 +388,8 @@ impl MirrorManager {
         let lock = self.lock_for(project_id).await;
         let _held = lock.lock().await;
         debug!(project_id, "git gc (mirror)");
-        git_gc(&mirror)
-            .await
-            .map_err(|e| git_err_to_mirror("git gc (mirror)", e))
+        gc_mirror_under(&self.root, project_id).await?;
+        Ok(())
     }
 
     /// Delete a local branch ref from the bare mirror (`git update-ref -d`).
@@ -547,15 +573,53 @@ async fn unset_config_key(mirror: &Path, key: &str) -> Result<(), MirrorError> {
 /// per-project lock forever.
 const GC_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
-/// `git gc` a repo (bare mirror or working clone): prune now-unreferenced
-/// objects left behind by branches deleted upstream, then repack.
-///
-/// `git worktree prune` runs first to clear any stale worktree administrative
-/// entries so their once-referenced objects also become collectable. A
-/// generous `--prune=2.weeks.ago` expiry keeps very recent loose objects so a
-/// concurrent borrower (e.g. a `--shared` ephemeral clone) is never starved
-/// mid-operation. Process priority is already lowered by the git runner.
-pub async fn git_gc(repo: &Path) -> Result<(), djinn_git::GitError> {
+/// Run guarded gc for the expected bare mirror path `{root}/{project_id}.git`.
+pub async fn gc_mirror_under(root: &Path, project_id: &str) -> Result<(), GcGuardError> {
+    validate_path_segment(project_id)?;
+    let repo = root.join(format!("{project_id}.git"));
+    let repo = validate_repo_under_root(root, &repo)?;
+    run_git_gc(&repo).await.map_err(GcGuardError::Git)
+}
+
+/// Run guarded gc for the expected project clone path `{projects_root}/{owner}/{repo}`.
+pub async fn gc_project_clone_under(
+    projects_root: &Path,
+    owner: &str,
+    repo: &str,
+) -> Result<(), GcGuardError> {
+    validate_path_segment(owner)?;
+    validate_path_segment(repo)?;
+    let repo_path = projects_root.join(owner).join(repo);
+    let repo_path = validate_repo_under_root(projects_root, &repo_path)?;
+    run_git_gc(&repo_path).await.map_err(GcGuardError::Git)
+}
+
+fn validate_path_segment(segment: &str) -> Result<(), GcGuardError> {
+    let mut components = Path::new(segment).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(_)), None) => Ok(()),
+        _ => Err(GcGuardError::InvalidSegment(segment.to_string())),
+    }
+}
+
+fn validate_repo_under_root(root: &Path, repo: &Path) -> Result<PathBuf, GcGuardError> {
+    let root = root.canonicalize().map_err(|source| GcGuardError::RootIo {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let repo = repo.canonicalize().map_err(|source| GcGuardError::RepoIo {
+        path: repo.to_path_buf(),
+        source,
+    })?;
+    if !repo.starts_with(&root) {
+        return Err(GcGuardError::OutsideRoot { root, repo });
+    }
+    Ok(repo)
+}
+
+/// Low-level git-gc command sequence. Keep private; public entry points must
+/// validate repo paths against their expected store roots first.
+async fn run_git_gc(repo: &Path) -> Result<(), djinn_git::GitError> {
     // Best-effort worktree prune; a repo with no worktrees still succeeds.
     let _ = run_git_command_with_timeout(
         repo.to_path_buf(),
@@ -594,19 +658,101 @@ async fn snapshot_refs(mirror: &Path) -> Result<String, MirrorError> {
 mod gc_tests {
     use super::*;
 
-    /// `git_gc` succeeds on a real bare mirror (the worktree-prune + gc
-    /// sequence is a valid no-op on an empty repo) — guards the command shape.
-    #[tokio::test]
-    async fn git_gc_succeeds_on_bare_repo() {
-        let dir = TempDir::new().unwrap();
+    async fn init_bare(path: &Path) {
         run_git_command(
-            dir.path().to_path_buf(),
-            vec!["init".into(), "--bare".into(), "--quiet".into()],
+            path.parent().unwrap().to_path_buf(),
+            vec![
+                "init".into(),
+                "--bare".into(),
+                "--quiet".into(),
+                path.display().to_string(),
+            ],
         )
         .await
         .expect("git init --bare");
+    }
 
-        git_gc(dir.path()).await.expect("git_gc on bare repo");
+    async fn init_clone(path: &Path) {
+        tokio::fs::create_dir_all(path)
+            .await
+            .expect("create clone dir");
+        run_git_command(path.to_path_buf(), vec!["init".into(), "--quiet".into()])
+            .await
+            .expect("git init");
+    }
+
+    /// Guarded mirror gc succeeds on a real bare mirror — guards the command shape.
+    #[tokio::test]
+    async fn guarded_mirror_gc_succeeds_on_bare_repo() {
+        let root = TempDir::new().unwrap();
+        init_bare(&root.path().join("p1.git")).await;
+
+        gc_mirror_under(root.path(), "p1")
+            .await
+            .expect("guarded mirror gc");
+    }
+
+    /// Guarded project-clone gc succeeds on the expected `{root}/{owner}/{repo}` clone.
+    #[tokio::test]
+    async fn guarded_project_clone_gc_succeeds_on_clone_repo() {
+        let root = TempDir::new().unwrap();
+        init_clone(&root.path().join("owner").join("repo")).await;
+
+        gc_project_clone_under(root.path(), "owner", "repo")
+            .await
+            .expect("guarded project clone gc");
+    }
+
+    #[tokio::test]
+    async fn mirror_gc_rejects_traversal_before_git() {
+        let root = TempDir::new().unwrap();
+        let err = gc_mirror_under(root.path(), "../outside")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GcGuardError::InvalidSegment(_)));
+    }
+
+    #[tokio::test]
+    async fn project_clone_gc_rejects_traversal_before_git() {
+        let root = TempDir::new().unwrap();
+        let err = gc_project_clone_under(root.path(), "owner", "../repo")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GcGuardError::InvalidSegment(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mirror_gc_rejects_symlink_escape_before_git() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        init_bare(&outside.path().join("escape.git")).await;
+        symlink(
+            outside.path().join("escape.git"),
+            root.path().join("escape.git"),
+        )
+        .expect("symlink mirror escape");
+
+        let err = gc_mirror_under(root.path(), "escape").await.unwrap_err();
+        assert!(matches!(err, GcGuardError::OutsideRoot { .. }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_clone_gc_rejects_symlink_escape_before_git() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        init_clone(&outside.path().join("repo")).await;
+        symlink(outside.path(), root.path().join("owner")).expect("symlink owner escape");
+
+        let err = gc_project_clone_under(root.path(), "owner", "repo")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GcGuardError::OutsideRoot { .. }));
     }
 
     /// `MirrorManager::gc` errors `Missing` (not a git failure) when the
