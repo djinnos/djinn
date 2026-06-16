@@ -17,9 +17,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::doctor::{
-    DoctorCheck, DoctorResult, Finding, FindingSeverity, ResolverSnapshot,
-};
+use crate::doctor::{DoctorCheck, DoctorResult, Finding, FindingSeverity, ResolverSnapshot};
 
 /// A read-only projection of the inputs the zombie-session check needs.
 ///
@@ -137,7 +135,7 @@ pub enum ZombieReason {
 /// so the snapshot's `inputs` can reproduce the snapshot's `outputs`
 /// exactly — the shared-resolver invariant from the doctor framework
 /// module docs.
-fn resolve(inputs: &ZombieSessionInputs) -> ZombieSessionOutputs {
+fn resolve_state(inputs: &ZombieSessionInputs) -> ZombieSessionOutputs {
     if inputs.agent_type == "chat" {
         return ZombieSessionOutputs {
             is_zombie: false,
@@ -158,8 +156,7 @@ fn resolve(inputs: &ZombieSessionInputs) -> ZombieSessionOutputs {
     // *reaper* concern (when to act) — the *detector* is purely
     // structural: "is this row's liveness in conflict with its row
     // state?".
-    let is_zombie =
-        !inputs.pod_present && !inputs.slot_present && !inputs.is_connected;
+    let is_zombie = !inputs.pod_present && !inputs.slot_present && !inputs.is_connected;
     ZombieSessionOutputs {
         is_zombie,
         reason: if is_zombie {
@@ -189,17 +186,20 @@ impl<D: CheckDb> ZombieRunningSessionCheck<D> {
         Self { db }
     }
 
-    /// Build the [`Finding`] the check emits. Kept private so the
-    /// snapshot's `inputs`/`outputs` fields are guaranteed to come from
-    /// the *same* `resolve()` call the checker used.
-    fn build_finding(
-        inputs: &ZombieSessionInputs,
-        outputs: &ZombieSessionOutputs,
-    ) -> Finding {
-        let resolver_inputs_json = serde_json::to_value(inputs)
-            .expect("ZombieSessionInputs serializes");
-        let resolver_outputs_json = serde_json::to_value(outputs)
-            .expect("ZombieSessionOutputs serializes");
+    /// Resolve one candidate session into a [`Finding`], if it is a
+    /// zombie. Kept private so the snapshot's `inputs`/`outputs` fields
+    /// are guaranteed to come from the *same* `resolve_state()` call the
+    /// checker used.
+    fn resolve(inputs: &ZombieSessionInputs) -> Option<Finding> {
+        let outputs = resolve_state(inputs);
+        if !outputs.is_zombie {
+            return None;
+        }
+
+        let resolver_inputs_json =
+            serde_json::to_value(inputs).expect("ZombieSessionInputs serializes");
+        let resolver_outputs_json =
+            serde_json::to_value(&outputs).expect("ZombieSessionOutputs serializes");
         let snapshot = ResolverSnapshot::new(
             "resolve_zombie_session",
             resolver_inputs_json.clone(),
@@ -245,7 +245,7 @@ impl<D: CheckDb> ZombieRunningSessionCheck<D> {
         if let Some(task_run_id) = inputs.candidate_task_run_id.as_deref() {
             finding = finding.with_entity_id("task_run_id", task_run_id.to_owned());
         }
-        finding
+        Some(finding)
     }
 }
 
@@ -273,9 +273,7 @@ impl<D: CheckDb + Send + Sync> DoctorCheck for ZombieRunningSessionCheck<D> {
                 .slot_entries()
                 .iter()
                 .any(|s| s.busy_for_task.as_deref() == Some(task_id));
-            let is_connected = self
-                .db
-                .is_worker_connected(session.task_run_id.as_deref());
+            let is_connected = self.db.is_worker_connected(session.task_run_id.as_deref());
             let pod_present = self.db.pod_present(task_id);
 
             let inputs = ZombieSessionInputs {
@@ -290,9 +288,8 @@ impl<D: CheckDb + Send + Sync> DoctorCheck for ZombieRunningSessionCheck<D> {
                 tokens_in: session.tokens_in,
                 tokens_out: session.tokens_out,
             };
-            let outputs = resolve(&inputs);
-            if outputs.is_zombie {
-                findings.push(Self::build_finding(&inputs, &outputs));
+            if let Some(finding) = Self::resolve(&inputs) {
+                findings.push(finding);
             }
         }
         Ok(findings)
@@ -494,16 +491,12 @@ mod tests {
         // Snapshot must be populated and re-runnable: feeding
         // `snapshot.inputs` back into the same resolver reproduces
         // `snapshot.outputs` exactly.
-        assert_eq!(
-            finding.resolver_snapshot.resolver,
-            "resolve_zombie_session"
-        );
+        assert_eq!(finding.resolver_snapshot.resolver, "resolve_zombie_session");
         let snapshot_inputs: ZombieSessionInputs =
             serde_json::from_value(finding.resolver_snapshot.inputs.clone())
                 .expect("snapshot inputs deserialize as ZombieSessionInputs");
-        let replay_outputs = resolve(&snapshot_inputs);
-        let replay_outputs_json =
-            serde_json::to_value(&replay_outputs).expect("outputs serialize");
+        let replay_outputs = resolve_state(&snapshot_inputs);
+        let replay_outputs_json = serde_json::to_value(&replay_outputs).expect("outputs serialize");
         assert_eq!(
             replay_outputs_json, finding.resolver_snapshot.outputs,
             "resolver snapshot must be reproducible from snapshot.inputs"
@@ -524,8 +517,7 @@ mod tests {
         assert_eq!(findings.len(), 1);
         let finding = &findings[0];
         let inputs: ZombieSessionInputs =
-            serde_json::from_value(finding.resolver_snapshot.inputs.clone())
-                .unwrap();
+            serde_json::from_value(finding.resolver_snapshot.inputs.clone()).unwrap();
         assert!(!inputs.is_connected, "is_connected must be false");
         assert!(!inputs.pod_present, "pod_present must be false");
         assert!(!inputs.slot_present, "slot_present must be false");
@@ -574,8 +566,8 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
         };
-        let a = resolve(&inputs);
-        let b = resolve(&inputs);
+        let a = resolve_state(&inputs);
+        let b = resolve_state(&inputs);
         assert_eq!(a, b);
         assert!(a.is_zombie);
         assert_eq!(a.reason, ZombieReason::Zombie);
@@ -596,18 +588,18 @@ mod tests {
             tokens_out: 0,
         };
         inputs.is_connected = true;
-        let out = resolve(&inputs);
+        let out = resolve_state(&inputs);
         assert!(!out.is_zombie);
         assert_eq!(out.reason, ZombieReason::Healthy);
 
         inputs.is_connected = false;
         inputs.pod_present = true;
-        let out = resolve(&inputs);
+        let out = resolve_state(&inputs);
         assert!(!out.is_zombie);
 
         inputs.pod_present = false;
         inputs.slot_present = true;
-        let out = resolve(&inputs);
+        let out = resolve_state(&inputs);
         assert!(!out.is_zombie);
     }
 
@@ -625,13 +617,13 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
         };
-        let out = resolve(&inputs);
+        let out = resolve_state(&inputs);
         assert!(!out.is_zombie);
         assert_eq!(out.reason, ZombieReason::ChatSession);
 
         inputs.agent_type = "worker".to_owned();
         inputs.candidate_task_id = None;
-        let out = resolve(&inputs);
+        let out = resolve_state(&inputs);
         assert!(!out.is_zombie);
         assert_eq!(out.reason, ZombieReason::NoTaskId);
     }
@@ -661,11 +653,7 @@ mod tests {
         let finding = Finding::new(
             FindingSeverity::Critical,
             "zombie_running_session",
-            ResolverSnapshot::new(
-                "resolve_zombie_session",
-                json!({}),
-                json!({}),
-            ),
+            ResolverSnapshot::new("resolve_zombie_session", json!({}), json!({})),
             "synthetic",
         );
         let err = check

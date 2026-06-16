@@ -32,9 +32,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::doctor::{
-    DoctorCheck, DoctorResult, Finding, FindingSeverity, ResolverSnapshot,
-};
+use crate::doctor::{DoctorCheck, DoctorResult, Finding, FindingSeverity, ResolverSnapshot};
 
 /// A read-only projection of the inputs the slot-pool check needs.
 ///
@@ -125,7 +123,7 @@ pub struct SlotDivergenceOutputs {
 /// this so the snapshot's `inputs` can reproduce `snapshot.outputs`
 /// exactly — the shared-resolver invariant from the doctor framework
 /// module docs.
-fn resolve(inputs: &SlotDivergenceInputs) -> SlotDivergenceOutputs {
+fn resolve_state(inputs: &SlotDivergenceInputs) -> SlotDivergenceOutputs {
     let is_divergent = match inputs.divergence_kind {
         DivergenceKind::Duplicate => inputs.slot_ids.len() >= 2,
         DivergenceKind::OrphanBusy => {
@@ -161,8 +159,7 @@ impl<D: CheckDb> SlotPoolDivergenceCheck<D> {
     /// Returns one `SlotDivergenceInputs` per divergent group, with
     /// the slot ids sorted so the snapshot is deterministic.
     fn find_duplicates(pool: &[SlotRow]) -> Vec<SlotDivergenceInputs> {
-        let mut by_pair: BTreeMap<(String, String), Vec<&SlotRow>> =
-            BTreeMap::new();
+        let mut by_pair: BTreeMap<(String, String), Vec<&SlotRow>> = BTreeMap::new();
         for slot in pool {
             by_pair
                 .entry((slot.model_id.clone(), slot.user_id.clone()))
@@ -176,14 +173,8 @@ impl<D: CheckDb> SlotPoolDivergenceCheck<D> {
             }
             let mut sorted_slots = slots;
             sorted_slots.sort_by(|a, b| a.slot_id.cmp(&b.slot_id));
-            let slot_ids: Vec<String> = sorted_slots
-                .iter()
-                .map(|s| s.slot_id.clone())
-                .collect();
-            let slot_states: Vec<String> = sorted_slots
-                .iter()
-                .map(|s| s.state.clone())
-                .collect();
+            let slot_ids: Vec<String> = sorted_slots.iter().map(|s| s.slot_id.clone()).collect();
+            let slot_states: Vec<String> = sorted_slots.iter().map(|s| s.state.clone()).collect();
             out.push(SlotDivergenceInputs {
                 divergence_kind: DivergenceKind::Duplicate,
                 model_id,
@@ -234,17 +225,20 @@ impl<D: CheckDb> SlotPoolDivergenceCheck<D> {
         out
     }
 
-    /// Build the [`Finding`] the check emits. Kept private so the
-    /// snapshot's `inputs`/`outputs` fields are guaranteed to come
-    /// from the *same* `resolve()` call the checker used.
-    fn build_finding(
-        inputs: &SlotDivergenceInputs,
-        outputs: &SlotDivergenceOutputs,
-    ) -> Finding {
-        let resolver_inputs_json = serde_json::to_value(inputs)
-            .expect("SlotDivergenceInputs serializes");
-        let resolver_outputs_json = serde_json::to_value(outputs)
-            .expect("SlotDivergenceOutputs serializes");
+    /// Resolve one slot-pool divergence candidate into a [`Finding`], if
+    /// it is divergent. Kept private so the snapshot's `inputs`/`outputs`
+    /// fields are guaranteed to come from the *same* `resolve_state()` call
+    /// the checker used.
+    fn resolve(inputs: &SlotDivergenceInputs) -> Option<Finding> {
+        let outputs = resolve_state(inputs);
+        if !outputs.is_divergent {
+            return None;
+        }
+
+        let resolver_inputs_json =
+            serde_json::to_value(inputs).expect("SlotDivergenceInputs serializes");
+        let resolver_outputs_json =
+            serde_json::to_value(&outputs).expect("SlotDivergenceOutputs serializes");
         let snapshot = ResolverSnapshot::new(
             "resolve_slot_pool_divergence",
             resolver_inputs_json.clone(),
@@ -300,13 +294,15 @@ impl<D: CheckDb> SlotPoolDivergenceCheck<D> {
             .with_entity_id("user_id", inputs.user_id.clone())
             .with_entity_id("divergence_kind", kind_str.to_owned())
             .with_evidence(evidence);
-        for slot_id in &inputs.slot_ids {
-            finding = finding.with_entity_id("slot_id", slot_id.clone());
+        if inputs.slot_ids.len() == 1 {
+            finding = finding.with_entity_id("slot_id", inputs.slot_ids[0].clone());
+        } else {
+            finding = finding.with_entity_id("slot_ids", inputs.slot_ids.join(","));
         }
         if let Some(task_id) = inputs.orphan_busy_for_task.as_deref() {
             finding = finding.with_entity_id("task_id", task_id.to_owned());
         }
-        finding
+        Some(finding)
     }
 }
 
@@ -327,15 +323,13 @@ impl<D: CheckDb + Send + Sync> DoctorCheck for SlotPoolDivergenceCheck<D> {
         let active = self.db.active_task_run_ids();
         let mut findings = Vec::new();
         for inputs in Self::find_duplicates(&pool) {
-            let outputs = resolve(&inputs);
-            if outputs.is_divergent {
-                findings.push(Self::build_finding(&inputs, &outputs));
+            if let Some(finding) = Self::resolve(&inputs) {
+                findings.push(finding);
             }
         }
         for inputs in Self::find_orphan_busy(&pool, &active) {
-            let outputs = resolve(&inputs);
-            if outputs.is_divergent {
-                findings.push(Self::build_finding(&inputs, &outputs));
+            if let Some(finding) = Self::resolve(&inputs) {
+                findings.push(finding);
             }
         }
         Ok(findings)
@@ -400,8 +394,8 @@ mod tests {
             });
             db.pool.push(SlotRow {
                 slot_id: "slot-2".to_owned(),
-                model_id: "model-a".to_owned(),
-                user_id: "user-1".to_owned(),
+                model_id: "model-b".to_owned(),
+                user_id: "user-2".to_owned(),
                 state: "free".to_owned(),
                 busy_for_task: None,
             });
@@ -467,9 +461,7 @@ mod tests {
 
     #[test]
     fn happy_path_busy_slot_backed_by_active_task_run_emits_no_finding() {
-        let findings = run_check(
-            MemoryCheckDb::with_orphan_busy_backed_by_active_task_run(),
-        );
+        let findings = run_check(MemoryCheckDb::with_orphan_busy_backed_by_active_task_run());
         assert!(
             findings.is_empty(),
             "busy slot whose busy_for_task is active must not be \
@@ -503,19 +495,17 @@ mod tests {
             Some("user-1")
         );
         assert_eq!(
-            finding.entity_ids.get("divergence_kind").map(String::as_str),
+            finding
+                .entity_ids
+                .get("divergence_kind")
+                .map(String::as_str),
             Some("duplicate")
         );
-        // Both slot ids must appear in entity_ids.
-        let slot_ids: Vec<&str> = finding
-            .entity_ids
-            .iter()
-            .filter(|(k, _)| k == "slot_id")
-            .map(|(_, v)| v.as_str())
-            .collect();
-        assert_eq!(slot_ids.len(), 2);
-        assert!(slot_ids.contains(&"slot-1"));
-        assert!(slot_ids.contains(&"slot-2"));
+        assert_eq!(
+            finding.entity_ids.get("slot_ids").map(String::as_str),
+            Some("slot-1,slot-2"),
+            "entity_ids must contain the divergent slot ids"
+        );
 
         // Evidence must surface the divergent fields.
         assert_eq!(finding.evidence["divergence_kind"], "duplicate");
@@ -535,17 +525,13 @@ mod tests {
         let snapshot_inputs: SlotDivergenceInputs =
             serde_json::from_value(finding.resolver_snapshot.inputs.clone())
                 .expect("snapshot inputs deserialize");
-        let replay_outputs = resolve(&snapshot_inputs);
-        let replay_outputs_json =
-            serde_json::to_value(&replay_outputs).expect("outputs serialize");
+        let replay_outputs = resolve_state(&snapshot_inputs);
+        let replay_outputs_json = serde_json::to_value(&replay_outputs).expect("outputs serialize");
         assert_eq!(
             replay_outputs_json, finding.resolver_snapshot.outputs,
             "resolver snapshot must be reproducible from snapshot.inputs"
         );
-        assert_eq!(
-            snapshot_inputs.divergence_kind,
-            DivergenceKind::Duplicate
-        );
+        assert_eq!(snapshot_inputs.divergence_kind, DivergenceKind::Duplicate);
         assert_eq!(snapshot_inputs.model_id, "model-a");
         assert_eq!(snapshot_inputs.user_id, "user-1");
         assert_eq!(snapshot_inputs.slot_ids.len(), 2);
@@ -578,7 +564,10 @@ mod tests {
             Some("user-2")
         );
         assert_eq!(
-            finding.entity_ids.get("divergence_kind").map(String::as_str),
+            finding
+                .entity_ids
+                .get("divergence_kind")
+                .map(String::as_str),
             Some("orphan_busy")
         );
         assert_eq!(
@@ -603,18 +592,17 @@ mod tests {
         let snapshot_inputs: SlotDivergenceInputs =
             serde_json::from_value(finding.resolver_snapshot.inputs.clone())
                 .expect("snapshot inputs deserialize");
-        let replay_outputs = resolve(&snapshot_inputs);
-        let replay_outputs_json =
-            serde_json::to_value(&replay_outputs).expect("outputs serialize");
+        let replay_outputs = resolve_state(&snapshot_inputs);
+        let replay_outputs_json = serde_json::to_value(&replay_outputs).expect("outputs serialize");
         assert_eq!(
             replay_outputs_json, finding.resolver_snapshot.outputs,
             "resolver snapshot must be reproducible from snapshot.inputs"
         );
+        assert_eq!(snapshot_inputs.divergence_kind, DivergenceKind::OrphanBusy);
         assert_eq!(
-            snapshot_inputs.divergence_kind,
-            DivergenceKind::OrphanBusy
+            snapshot_inputs.orphan_busy_for_task.as_deref(),
+            Some("task-orphan")
         );
-        assert_eq!(snapshot_inputs.orphan_busy_for_task.as_deref(), Some("task-orphan"));
         assert_eq!(snapshot_inputs.slot_ids, vec!["slot-orphan".to_owned()]);
     }
 
@@ -633,8 +621,7 @@ mod tests {
         assert_eq!(findings.len(), 1);
         let finding = &findings[0];
         let inputs: SlotDivergenceInputs =
-            serde_json::from_value(finding.resolver_snapshot.inputs.clone())
-                .unwrap();
+            serde_json::from_value(finding.resolver_snapshot.inputs.clone()).unwrap();
         assert_eq!(inputs.divergence_kind, DivergenceKind::OrphanBusy);
         assert_eq!(inputs.orphan_busy_for_task.as_deref(), Some("task-orphan"));
     }
@@ -684,8 +671,8 @@ mod tests {
             slot_states: vec!["free".to_owned(), "free".to_owned()],
             orphan_busy_for_task: None,
         };
-        let a = resolve(&inputs);
-        let b = resolve(&inputs);
+        let a = resolve_state(&inputs);
+        let b = resolve_state(&inputs);
         assert_eq!(a, b);
         assert!(a.is_divergent);
         assert_eq!(a.reason, DivergenceKind::Duplicate);
@@ -702,8 +689,8 @@ mod tests {
             slot_states: vec!["busy".to_owned()],
             orphan_busy_for_task: Some("task-orphan".to_owned()),
         };
-        let a = resolve(&inputs);
-        let b = resolve(&inputs);
+        let a = resolve_state(&inputs);
+        let b = resolve_state(&inputs);
         assert_eq!(a, b);
         assert!(a.is_divergent);
         assert_eq!(a.reason, DivergenceKind::OrphanBusy);
@@ -720,7 +707,7 @@ mod tests {
             slot_states: vec!["free".to_owned()],
             orphan_busy_for_task: None,
         };
-        let out = resolve(&inputs);
+        let out = resolve_state(&inputs);
         assert!(!out.is_divergent);
     }
 
@@ -734,7 +721,7 @@ mod tests {
             slot_states: vec!["busy".to_owned()],
             orphan_busy_for_task: None,
         };
-        let out = resolve(&inputs);
+        let out = resolve_state(&inputs);
         assert!(!out.is_divergent);
     }
 
@@ -765,8 +752,7 @@ mod tests {
         let findings = run_check(db);
         assert_eq!(findings.len(), 1);
         let inputs: SlotDivergenceInputs =
-            serde_json::from_value(findings[0].resolver_snapshot.inputs.clone())
-                .unwrap();
+            serde_json::from_value(findings[0].resolver_snapshot.inputs.clone()).unwrap();
         assert_eq!(
             inputs.slot_ids,
             vec!["slot-a".to_owned(), "slot-z".to_owned()],
@@ -795,11 +781,7 @@ mod tests {
         let finding = Finding::new(
             FindingSeverity::Critical,
             "slot_pool_divergence",
-            ResolverSnapshot::new(
-                "resolve_slot_pool_divergence",
-                json!({}),
-                json!({}),
-            ),
+            ResolverSnapshot::new("resolve_slot_pool_divergence", json!({}), json!({})),
             "synthetic",
         );
         let err = check
