@@ -393,6 +393,30 @@ mod tests {
     }
 
     #[test]
+    fn jit_pitfall_rollout_decision_outcomes_render_separately() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_DISABLED_DEFAULT_OFF);
+        jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_DISABLED_KILL_SWITCH);
+        jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_ELIGIBLE_SEARCH);
+
+        let rendered = render().unwrap();
+        for outcome in [
+            jit_pitfalls::OUTCOME_DISABLED_DEFAULT_OFF,
+            jit_pitfalls::OUTCOME_DISABLED_KILL_SWITCH,
+            jit_pitfalls::OUTCOME_ELIGIBLE_SEARCH,
+        ] {
+            assert!(
+                rendered.contains(&format!(
+                    "djinn_jit_pitfall_hints_total{{outcome=\"{outcome}\"}}"
+                )),
+                "missing distinct JIT rollout outcome label {outcome} in:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn live_state_gauges_render_with_bounded_labels() {
         let _guard = test_guard();
         init().unwrap();
