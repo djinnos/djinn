@@ -1004,8 +1004,8 @@ fn is_concurrent_push_race(err: &GitError) -> bool {
 mod tests {
     use super::{
         PR_ALREADY_EXISTS_HINT, TASK_OUTCOME_BODY_EXCERPT_BYTES, handle_noop_disposition,
-        is_concurrent_push_race, pr_open_failure_outcome, pr_open_untyped_failure_outcome,
-        should_route_settled_noop_without_live_mover,
+        handle_settled_noop_without_live_mover, is_concurrent_push_race, pr_open_failure_outcome,
+        pr_open_untyped_failure_outcome, should_route_settled_noop_without_live_mover,
     };
     use crate::github_error_render::render_github_write_error;
     use crate::supervisor_impl::disposition::{
@@ -1021,6 +1021,8 @@ mod tests {
     use djinn_provider::github_api::GitHubApiError;
     use djinn_runtime::spec::TaskRunOutcome;
     use reqwest::StatusCode;
+
+    pub(crate) use crate::supervisor_impl::disposition::NUDGE_CAP as TEST_NUDGE_CAP;
 
     async fn no_op_nudge_fixture() -> (TaskRepository, Task) {
         let db = test_helpers::create_test_db();
@@ -1059,6 +1061,39 @@ mod tests {
             .expect("nudge comment body")
     }
 
+    async fn nudge_comment_bodies(repo: &TaskRepository, task_id: &str) -> Vec<String> {
+        let entries = repo.list_activity(task_id).await.expect("activity");
+        entries
+            .iter()
+            .filter(|entry| entry.event_type == "comment")
+            .filter_map(|entry| serde_json::from_str::<serde_json::Value>(&entry.payload).ok())
+            .filter_map(|payload| {
+                payload
+                    .get("body")
+                    .and_then(|body| body.as_str())
+                    .map(ToString::to_string)
+            })
+            .collect()
+    }
+
+    async fn start_for_noop_attempt(repo: &TaskRepository, task: &Task) -> Task {
+        repo.transition(
+            &task.id,
+            TransitionAction::Start,
+            "worker-1",
+            "worker",
+            None,
+            None,
+        )
+        .await
+        .expect("start task for no-op attempt")
+    }
+
+    #[test]
+    fn supervisor_nudge_cap_regression_is_reexported_and_locked() {
+        assert_eq!(TEST_NUDGE_CAP, 2, "review any no-op nudge cap change");
+    }
+
     #[tokio::test]
     async fn no_op_nudge_comment_uses_wind_down_summary_hint() {
         let (repo, task) = no_op_nudge_fixture().await;
@@ -1082,6 +1117,107 @@ mod tests {
         let body = latest_nudge_comment_body(&repo, &task.id).await;
         assert!(body.contains("Prior intent: resume by implementing the evidence resolver"));
         assert!(!body.contains("Prior intent: test task description"));
+    }
+
+    #[tokio::test]
+    async fn no_mover_call_site_routes_through_same_disposition_ladder_as_pr_open_fork() {
+        let (repo, task) = no_op_nudge_fixture().await;
+        repo.log_activity(
+            Some(&task.id),
+            "agent-supervisor",
+            "worker",
+            "work_submitted",
+            &serde_json::json!({
+                "summary": "wind down: finish the no-mover routing regression",
+            })
+            .to_string(),
+        )
+        .await
+        .expect("log wind-down evidence");
+
+        let signals = RunProgressSignals {
+            commits_ahead: 0,
+            files_changed: 0,
+            ac_newly_satisfied: 0,
+        };
+        let progress = classify_run_progress(&signals);
+        let expected = decide_run_disposition(progress, task.continuation_count, TEST_NUDGE_CAP);
+        assert_eq!(expected, RunDisposition::Nudge);
+
+        let outcome = handle_settled_noop_without_live_mover(
+            &task,
+            &repo,
+            "main",
+            &LiveMoverEvidence::default(),
+        )
+        .await
+        .expect("no live mover routes to no-op disposition");
+
+        assert!(
+            matches!(
+                (&expected, outcome),
+                (RunDisposition::Nudge, TaskRunOutcome::Escalated { .. })
+            ),
+            "new no-mover call site must produce the same disposition as the PR-open zero-commit fork"
+        );
+        let body = latest_nudge_comment_body(&repo, &task.id).await;
+        assert!(body.contains("Prior intent: wind down: finish the no-mover routing regression"));
+        assert!(!body.contains("Prior intent: test task description"));
+    }
+
+    #[tokio::test]
+    async fn no_op_disposition_idempotency_two_nudges_then_historical_close() {
+        let (repo, first_attempt) = no_op_nudge_fixture().await;
+
+        let first_outcome = handle_noop_disposition(&first_attempt, &repo, "main").await;
+        assert!(matches!(first_outcome, TaskRunOutcome::Escalated { .. }));
+        let after_first = repo
+            .get(&first_attempt.id)
+            .await
+            .expect("load task")
+            .expect("task exists");
+        assert_eq!(after_first.continuation_count, 1);
+        assert_eq!(after_first.status, "open");
+        let first_comments = nudge_comment_bodies(&repo, &first_attempt.id).await;
+        assert_eq!(first_comments.len(), 1);
+        assert!(first_comments[0].contains("corrective attempt 1/2"));
+
+        let second_attempt = start_for_noop_attempt(&repo, &after_first).await;
+        assert_eq!(second_attempt.continuation_count, 1);
+        let second_outcome = handle_noop_disposition(&second_attempt, &repo, "main").await;
+        assert!(matches!(second_outcome, TaskRunOutcome::Escalated { .. }));
+        let after_second = repo
+            .get(&first_attempt.id)
+            .await
+            .expect("load task")
+            .expect("task exists");
+        assert_eq!(after_second.continuation_count, 2);
+        assert_eq!(after_second.status, "open");
+        let second_comments = nudge_comment_bodies(&repo, &first_attempt.id).await;
+        assert_eq!(second_comments.len(), 2);
+        assert!(second_comments[0].contains("corrective attempt 1/2"));
+        assert!(second_comments[1].contains("corrective attempt 2/2"));
+        assert_ne!(second_comments[0], second_comments[1]);
+
+        let third_attempt = start_for_noop_attempt(&repo, &after_second).await;
+        assert_eq!(third_attempt.continuation_count, TEST_NUDGE_CAP);
+        let third_outcome = handle_noop_disposition(&third_attempt, &repo, "main").await;
+        assert!(matches!(third_outcome, TaskRunOutcome::Closed { .. }));
+        let after_third = repo
+            .get(&first_attempt.id)
+            .await
+            .expect("load task")
+            .expect("task exists");
+        assert_eq!(
+            after_third.continuation_count, 2,
+            "close path must not consume another nudge attempt"
+        );
+        assert_eq!(after_third.status, "closed");
+        assert_eq!(
+            nudge_comment_bodies(&repo, &first_attempt.id).await.len(),
+            2,
+            "third encounter closes via the historical close path without logging a third nudge"
+        );
     }
 
     #[tokio::test]
