@@ -479,6 +479,7 @@ impl CoordinatorActor {
             self.dispatch_failure_streak.remove(&task.id);
             self.dispatch_cooldowns.remove(&task.id);
             self.last_dispatched.remove(&task.id);
+            self.inflight_dispatches.remove(&task.id);
             self.clear_durable_dispatch_backoff_state(
                 &task.id,
                 Some(&task.short_id),
@@ -549,6 +550,7 @@ impl CoordinatorActor {
         self.dispatch_failure_streak.remove(&task.id);
         self.dispatch_cooldowns.remove(&task.id);
         self.last_dispatched.remove(&task.id);
+        self.inflight_dispatches.remove(&task.id);
         self.clear_durable_dispatch_backoff_state(
             &task.id,
             Some(&task.short_id),
