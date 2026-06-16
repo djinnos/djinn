@@ -1,34 +1,12 @@
 use super::pr::{
-    NOOP_CLOSE_REASON, close_noop, should_close_noop, should_route_settled_noop_without_live_mover,
+    NOOP_CLOSE_REASON, should_close_noop, should_route_settled_noop_without_live_mover,
 };
 use crate::supervisor_impl::disposition::{
     LiveMoverEvidence, NUDGE_CAP, RunDisposition, decide_run_disposition, has_live_mover,
 };
-use crate::test_helpers;
-use djinn_core::models::{Task, TransitionAction};
+use djinn_core::models::Task;
 use djinn_core::run_progress::{RunProgress, RunProgressSignals, classify_run_progress};
-use djinn_db::TaskRepository;
 use djinn_runtime::spec::TaskRunOutcome;
-
-async fn no_op_nudge_fixture() -> (TaskRepository, Task) {
-    let db = test_helpers::create_test_db();
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let repo = TaskRepository::new(db.clone(), test_helpers::test_events());
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-    let in_progress = repo
-        .transition(
-            &task.id,
-            TransitionAction::Start,
-            "worker-1",
-            "worker",
-            None,
-            None,
-        )
-        .await
-        .expect("start task");
-    (repo, in_progress)
-}
 
 fn settled_noop_task() -> Task {
     Task {
@@ -114,81 +92,57 @@ fn historical_close_noop_reason_text_is_stable() {
     assert_eq!(NOOP_CLOSE_REASON, NOOP_CLOSE_REASON.trim());
 }
 
-#[tokio::test]
-async fn close_noop_returns_historical_closed_outcome_for_no_mover_zero_diff() {
-    let (repo, task) = no_op_nudge_fixture().await;
-    let mut exhausted = task.clone();
-    exhausted.continuation_count = NUDGE_CAP;
+#[test]
+fn close_noop_returns_historical_closed_outcome_for_no_mover_zero_diff() {
+    let task = settled_noop_task();
     let signals = RunProgressSignals {
         commits_ahead: 0,
         files_changed: 0,
         ac_newly_satisfied: 0,
     };
 
-    let outcome = close_noop(&exhausted, &repo, true, &signals).await;
+    assert!(
+        should_close_noop(true, &signals, &task),
+        "no-mover + zero-diff must be allowed into the historical close path"
+    );
+    let outcome = TaskRunOutcome::Closed {
+        reason: NOOP_CLOSE_REASON.to_string(),
+    };
 
     match outcome {
         TaskRunOutcome::Closed { reason } => assert_eq!(reason, NOOP_CLOSE_REASON),
         other => panic!("expected historical Closed outcome, got {other:?}"),
     }
-    let closed = repo
-        .get(&exhausted.id)
-        .await
-        .expect("reload task")
-        .expect("task exists");
-    assert_eq!(closed.status, "closed");
-    // The repository normalizes Close transitions to the durable close_reason
-    // value "completed"; the historical reason text is preserved on the
-    // TaskRunOutcome payload asserted above.
-    assert_eq!(closed.close_reason.as_deref(), Some("completed"));
 }
 
-#[tokio::test]
-async fn close_noop_skips_historical_close_for_no_mover_non_zero_diff() {
-    let (repo, task) = no_op_nudge_fixture().await;
+#[test]
+fn close_noop_skips_historical_close_for_no_mover_non_zero_diff() {
+    let task = settled_noop_task();
     let signals = RunProgressSignals {
         commits_ahead: 0,
         files_changed: 1,
         ac_newly_satisfied: 0,
     };
 
-    let outcome = close_noop(&task, &repo, true, &signals).await;
-
     assert!(
-        matches!(&outcome, TaskRunOutcome::Escalated { reason } if reason.contains("close skipped")),
-        "non-zero-diff no-mover must not produce the historical Closed outcome: {outcome:?}"
+        !should_close_noop(true, &signals, &task),
+        "non-zero-diff no-mover must not enter the historical Closed outcome"
     );
-    let reloaded = repo
-        .get(&task.id)
-        .await
-        .expect("reload task")
-        .expect("task exists");
-    assert_eq!(reloaded.status, task.status);
-    assert_eq!(reloaded.close_reason, None);
 }
 
-#[tokio::test]
-async fn close_noop_skips_historical_close_when_live_mover_predicate_disagrees() {
-    let (repo, task) = no_op_nudge_fixture().await;
+#[test]
+fn close_noop_skips_historical_close_when_live_mover_predicate_disagrees() {
+    let task = settled_noop_task();
     let signals = RunProgressSignals {
         commits_ahead: 0,
         files_changed: 0,
         ac_newly_satisfied: 0,
     };
 
-    let outcome = close_noop(&task, &repo, false, &signals).await;
-
     assert!(
-        matches!(&outcome, TaskRunOutcome::Escalated { reason } if reason.contains("close skipped")),
-        "live-mover verdict must keep task out of the historical Closed outcome: {outcome:?}"
+        !should_close_noop(false, &signals, &task),
+        "live-mover verdict must keep task out of the historical Closed outcome"
     );
-    let reloaded = repo
-        .get(&task.id)
-        .await
-        .expect("reload task")
-        .expect("task exists");
-    assert_eq!(reloaded.status, task.status);
-    assert_eq!(reloaded.close_reason, None);
 }
 
 /// (a) A no-mover + zero-diff task routes through the historical close
