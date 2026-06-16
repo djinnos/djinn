@@ -196,7 +196,17 @@ Evidence:
 
 A later planner must be able to inspect only this section and decide whether creating a default-on flip task is justified.
 
-**Gate status:** `UNKNOWN` / `PASS` / `FAIL`
+**Gate status:** `UNKNOWN`
+
+Operator instructions:
+
+- Leave the gate status as `UNKNOWN` until a real staging/cohort read has completed and the required evidence rows below are filled in.
+- After the read, edit the single gate status value to exactly `PASS` or `FAIL`; do not add slash-separated alternatives or extra current statuses.
+- A later planner may create the default-on flip task only when all of these are true:
+  - **Gate status** is exactly `PASS`.
+  - Every required evidence row below is completed with a `PASS`/`DONE` status and a link or short summary.
+  - `Recommendation:` is exactly `create default-on flip task`.
+- `UNKNOWN` or `FAIL` must not produce a default-on flip task; instead leave the feature default-off and create follow-up work only if the operator recommendation asks for it.
 
 | Required evidence | Status | Link / short summary |
 | --- | --- | --- |
@@ -210,7 +220,7 @@ A later planner must be able to inspect only this section and decide whether cre
 
 Decision:
 
-- Recommendation: `create default-on flip task` / `extend cohort` / `do not flip`
+- Recommendation: `extend cohort`
 - Rationale:
 - Required follow-up before default-on:
 - Operator/date:
