@@ -7,6 +7,7 @@ import { getChatSessionMessages } from '@/api/chatSessions';
 import { Shimmer } from '@/components/ai-elements/shimmer';
 import { toast } from '@/lib/toast';
 import { useChatStore, type ChatAttachment, type ChatMessage } from '@/stores/chatStore';
+import { useCodeGraphStore } from '@/stores/codeGraphStore';
 import { useIsAllProjects, useSelectedProject } from '@/stores/useProjectStore';
 import { ChatMessageBubble } from './ChatMessageBubble';
 import { ChatInput } from './ChatInput';
@@ -65,6 +66,11 @@ export function ChatView() {
   type StreamingToolCall = { name: string; input?: unknown };
   const toolCallsRef = useRef<StreamingToolCall[]>([]);
   const [toolCalls, setToolCalls] = useState<StreamingToolCall[]>([]);
+  // Parallel to toolCallsRef: tool results in arrival order. The server emits
+  // tool_call → tool_result in strict 1:1 order per tool, so results[i] pairs
+  // with toolCallsRef.current[i]. Merged into the persisted assistant message
+  // at finalize time so each toolCall carries both call and result.
+  const toolResultsRef = useRef<{ output: string; success: boolean }[]>([]);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const { data: connectedModels = [] } = useQuery({ queryKey: ['provider-models-connected'], queryFn: fetchProviderModels });
@@ -185,6 +191,11 @@ export function ChatView() {
 
     if (selectedModel !== 'unknown/model') setSessionModel(sessionId, selectedModel);
 
+    // A new user turn starts a new assistant response — wipe any citations
+    // left over from the previous turn so the highlight layer doesn't carry
+    // stale ids forward. (Producer for citations lands in a later task.)
+    useCodeGraphStore.getState().clearCitations();
+
     addMessage(sessionId, {
       id: `${Date.now()}-user`,
       role: 'user',
@@ -197,6 +208,7 @@ export function ChatView() {
     setThinkingStartTime(sessionId, Date.now());
     toolCallsRef.current = [];
     setToolCalls([]);
+    toolResultsRef.current = [];
     const controller = new AbortController();
     setAbortController(controller);
 
@@ -217,7 +229,12 @@ export function ChatView() {
           id: `${Date.now()}-assistant`,
           role: 'assistant',
           createdAt: Date.now(),
-          toolCalls: toolCallsRef.current.map((tc) => ({ name: tc.name, input: tc.input })),
+          toolCalls: toolCallsRef.current.map((tc, idx) => {
+            const result = toolResultsRef.current[idx];
+            return result
+              ? { name: tc.name, input: tc.input, success: result.success, result }
+              : { name: tc.name, input: tc.input };
+          }),
         });
         // The server persisted a new row — invalidate the sidebar list so the
         // freshly-created session (and its server-assigned timestamps) show up.
@@ -230,7 +247,12 @@ export function ChatView() {
           role: 'assistant',
           content: 'Something went wrong while generating a response.',
           createdAt: Date.now(),
-          toolCalls: toolCallsRef.current.map((tc) => ({ name: tc.name, input: tc.input, success: false })),
+          toolCalls: toolCallsRef.current.map((tc, idx) => {
+            const result = toolResultsRef.current[idx];
+            return result
+              ? { name: tc.name, input: tc.input, success: false, result }
+              : { name: tc.name, input: tc.input, success: false };
+          }),
         });
       },
       {
@@ -238,6 +260,12 @@ export function ChatView() {
         onSessionTitle: (title) => {
           updateSessionTitle(sessionId, title);
           void queryClient.invalidateQueries({ queryKey: ['chat-sessions'] });
+        },
+        onToolResult: (result) => {
+          toolResultsRef.current = [
+            ...toolResultsRef.current,
+            { output: result.output, success: result.success },
+          ];
         },
         // Carry the proposal scope so the server seeds the proposal system
         // prompt + grants the proposal-editing tools on every turn.

@@ -271,6 +271,13 @@ pub(crate) fn build_snapshot_payload(
                 // v10: canonical test flag (file-path convention OR SCIP
                 // Test role), stamped at graph-build time.
                 is_test: node.is_test,
+                // 7e6o: warm-time layout coordinates from the deterministic
+                // community-aware cache (djinn-graph). The sidecar is
+                // populated during warm and backfilled on legacy-artifact
+                // load, so `unwrap_or(0.0, 0.0)` only fires for synthetic
+                // nodes that never had a position computed.
+                x: graph.layout_position(idx).map(|p| p.x).unwrap_or_default(),
+                y: graph.layout_position(idx).map(|p| p.y).unwrap_or_default(),
             }
         })
         .collect();
@@ -454,6 +461,13 @@ fn build_community_snapshot_payload(
                 (0, true) => (None, "unknown".to_string()),
                 _ => (None, "mixed".to_string()),
             };
+            // 7e6o: community aggregate coordinate. The warm-time layout
+            // cache is keyed by stable node UID, not by community id, so
+            // the community super-node position is the deterministic
+            // centroid of its finite member coordinates. Members with no
+            // cached position are skipped; if none have coordinates the
+            // centroid falls back to (0.0, 0.0).
+            let (x, y) = community_centroid(graph, &agg.members);
             SnapshotNode {
                 id: agg.id.clone(),
                 uid: agg.id.clone(),
@@ -469,6 +483,8 @@ fn build_community_snapshot_payload(
                 community_id: Some(agg.id),
                 cognitive: None,
                 is_test: false,
+                x,
+                y,
             }
         })
         .collect();
@@ -511,5 +527,33 @@ fn build_community_snapshot_payload(
         node_cap,
         nodes: snapshot_nodes,
         edges: snapshot_edges,
+    }
+}
+
+/// 7e6o: compute a deterministic community super-node coordinate as the
+/// centroid of the finite warm-time member positions. Members without a
+/// cached layout position are skipped so a single sparse member cannot
+/// skew the centre. Returns `(0.0, 0.0)` when no member has coordinates.
+fn community_centroid(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+    members: &std::collections::BTreeSet<petgraph::graph::NodeIndex>,
+) -> (f64, f64) {
+    let mut sum_x = 0.0_f64;
+    let mut sum_y = 0.0_f64;
+    let mut count = 0_u32;
+    for &idx in members {
+        if let Some(pos) = graph.layout_position(idx)
+            && pos.x.is_finite()
+            && pos.y.is_finite()
+        {
+            sum_x += pos.x;
+            sum_y += pos.y;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        (0.0, 0.0)
+    } else {
+        (sum_x / count as f64, sum_y / count as f64)
     }
 }

@@ -189,3 +189,82 @@ pub(crate) fn pick_next_step_target(
         })
         .map(|s| s.uid.clone())
 }
+
+// ── jc47: per-query graph staleness ───────────────────────────────────────────
+
+/// Mutable slot for the `graph_staleness` field on every response variant,
+/// mirroring [`next_step_slot`]. Returns `&mut Option<GraphStaleness>` so
+/// the dispatch layer can populate it after the op returns.
+pub(crate) fn graph_staleness_slot(
+    response: &mut CodeGraphResponse,
+) -> &mut Option<GraphStaleness> {
+    match response {
+        CodeGraphResponse::Neighbors(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Ranked(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Implementations(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Impact(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Search(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Cycles(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Orphans(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Path(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Edges(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Describe(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Context(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Status(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Workspaces(r) => &mut r.graph_staleness,
+        CodeGraphResponse::SymbolsAt(r) => &mut r.graph_staleness,
+        CodeGraphResponse::DiffTouches(r) => &mut r.graph_staleness,
+        CodeGraphResponse::ApiSurface(r) => &mut r.graph_staleness,
+        CodeGraphResponse::BoundaryCheck(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Hotspots(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Complexity(r) => &mut r.graph_staleness,
+        CodeGraphResponse::RefactorCandidates(r) => &mut r.graph_staleness,
+        CodeGraphResponse::MetricsAt(r) => &mut r.graph_staleness,
+        CodeGraphResponse::DeadSymbols(r) => &mut r.graph_staleness,
+        CodeGraphResponse::DeprecatedCallers(r) => &mut r.graph_staleness,
+        CodeGraphResponse::TouchesHotPath(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Coupling(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Churn(r) => &mut r.graph_staleness,
+        CodeGraphResponse::CouplingHotspots(r) => &mut r.graph_staleness,
+        CodeGraphResponse::CouplingHubs(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Ambiguous(r) => &mut r.graph_staleness,
+        CodeGraphResponse::NotFound(r) => &mut r.graph_staleness,
+        CodeGraphResponse::DetectedChanges(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Snapshot(r) => &mut r.graph_staleness,
+        CodeGraphResponse::QuerySubgraph(r) => &mut r.graph_staleness,
+        CodeGraphResponse::RouteMap(r) => &mut r.graph_staleness,
+        CodeGraphResponse::ShapeCheck(r) => &mut r.graph_staleness,
+        CodeGraphResponse::ApiImpact(r) => &mut r.graph_staleness,
+        CodeGraphResponse::Flow(r) => &mut r.graph_staleness,
+    }
+}
+
+/// jc47: attach per-query staleness metadata to a successful response.
+///
+/// Calls `RepoGraphOps::status` (the same peek used by the `status` op) to
+/// get the cached graph blob's pinned commit, computes [`GraphStaleness`]
+/// against the caller-supplied commit, and writes it into the response.
+///
+/// This is best-effort: if the status lookup fails, the staleness field
+/// is left as `None` so the query result is not affected. The status
+/// peek MUST NOT trigger warming or indexing — the bridge contract
+/// guarantees this.
+pub(crate) async fn attach_graph_staleness(
+    graph: &dyn crate::bridge::RepoGraphOps,
+    ctx: &crate::bridge::ProjectCtx,
+    caller_commit: &str,
+    response: &mut CodeGraphResponse,
+) {
+    let cached = match graph.status(ctx).await {
+        Ok(status) => status.pinned_commit.as_deref().map(str::to_string),
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                "code_graph staleness: status lookup failed; omitting graph_staleness"
+            );
+            return;
+        }
+    };
+    *graph_staleness_slot(response) =
+        Some(GraphStaleness::compute(caller_commit, cached.as_deref()));
+}
