@@ -24,6 +24,8 @@ use djinn_provider::provider::LlmProvider;
 
 pub(crate) mod disposition;
 pub(crate) mod pr;
+#[cfg(test)]
+mod pr_close;
 pub(crate) mod stage;
 
 /// Non-PR reusable live-mover API surface for post-run and orphan-task checks
