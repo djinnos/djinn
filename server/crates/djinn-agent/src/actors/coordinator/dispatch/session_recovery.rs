@@ -441,6 +441,8 @@ impl CoordinatorActor {
                 tracing::warn!(task_id = %task_id, error = %e, "CoordinatorActor: failed to finalize zombie session row");
             }
 
+            djinn_telemetry::zombie::increment_reap(djinn_telemetry::zombie::KIND_STALL);
+
             // Release the task from its execution status so dispatch can pick
             // it up again. Mirrors the orphan reconciler's status→action map,
             // but does not depend on `has_session` (which is exactly the gate
