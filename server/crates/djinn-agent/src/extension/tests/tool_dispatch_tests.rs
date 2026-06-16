@@ -975,6 +975,46 @@ async fn jit_pitfalls_on_miss_leaves_write_succeeding() {
     }
 }
 
+/// With the gate ON but no project id available, the JIT path records the
+/// safe error outcome and skips the hint without failing the write. This covers
+/// the search/error-path contract without needing to force a database failure.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_on_missing_project_id_leaves_write_succeeding() {
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    // SAFETY: single-threaded section guarded by the env-lock mutex.
+    unsafe {
+        std::env::set_var("DJINN_JIT_PITFALLS", "1");
+    }
+
+    let db = create_test_db();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-error-");
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+
+    let args = Some(
+        serde_json::json!({ "path": "src/a.rs", "content": "// x\\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let response = call_write(&state, &args, worktree.path(), None)
+        .await
+        .expect("write must still succeed when JIT search cannot be scoped");
+
+    assert_eq!(response.get("ok").and_then(|v| v.as_bool()), Some(true));
+    assert!(
+        response.get("jit_pitfalls").is_none(),
+        "error path must not append a hint, got {response:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+    }
+}
+
 /// With the gate ON, `call_edit`'s FIRST modification also surfaces the hint
 /// (parity with `call_write`) — confirms the wiring isn't write-only.
 #[allow(clippy::await_holding_lock)]

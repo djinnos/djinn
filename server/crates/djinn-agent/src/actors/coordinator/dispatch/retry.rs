@@ -3,6 +3,10 @@ use super::DispatchOutcome;
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
 
+fn record_task_parked_metric() {
+    djinn_telemetry::task::increment_parked();
+}
+
 impl CoordinatorActor {
     fn session_taxonomy_has_durable_artifacts(taxonomy: &serde_json::Value) -> bool {
         taxonomy
@@ -486,7 +490,9 @@ impl CoordinatorActor {
                 "planner_second_strike_terminal_close_clear",
             )
             .await;
-            self.terminally_fail_task(task, role, &reason).await;
+            if self.terminally_fail_task(task, role, &reason).await {
+                record_task_parked_metric();
+            }
             if let Err(e) = self
                 .task_repo()
                 .set_status_with_reason(&task.id, "closed", Some(&reason))
@@ -777,5 +783,35 @@ impl CoordinatorActor {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::record_task_parked_metric;
+
+    #[test]
+    fn planner_second_strike_park_metric_records_after_terminal_close() {
+        djinn_telemetry::init().unwrap();
+        let before = djinn_telemetry::render().unwrap();
+        let parked_before = unlabelled_metric_value(&before, "djinn_tasks_parked_total");
+
+        record_task_parked_metric();
+
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            unlabelled_metric_value(&rendered, "djinn_tasks_parked_total"),
+            parked_before + 1.0
+        );
+    }
+
+    fn unlabelled_metric_value(rendered: &str, metric: &str) -> f64 {
+        rendered
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(' ')?;
+                (name == metric).then(|| value.parse::<f64>().expect("metric value parses"))
+            })
+            .unwrap_or_else(|| panic!("missing metric {metric} in:\n{rendered}"))
     }
 }

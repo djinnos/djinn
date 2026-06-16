@@ -378,6 +378,7 @@ impl CoordinatorActor {
             );
             return;
         }
+        record_pr_transition_reopen_metric(&cleanup_action);
         // Drop any clean-merge fast-path tracker entry for a now-terminal task,
         // so a background merge that finished after the PR closed doesn't leave a
         // dangling `Merged`/`Reopen` entry that is never consumed. Bounded leak
@@ -386,7 +387,12 @@ impl CoordinatorActor {
             cleanup_action,
             TransitionAction::PrMerge | TransitionAction::ForceClose
         ) {
-            self.auto_merge_tracker.lock().unwrap().remove(task_id);
+            let tracked = {
+                let mut guard = self.auto_merge_tracker.lock().unwrap();
+                guard.remove(task_id);
+                guard.len()
+            };
+            djinn_telemetry::pr_poller::set_tracked(tracked);
         }
         // Branch hygiene: once the task is closed (merged or force-closed via
         // any pr_poller path), delete the task branch on both the local mirror
@@ -735,6 +741,22 @@ impl CoordinatorActor {
         }
     }
 }
+
+pub(crate) fn pr_transition_increments_reopen_count(action: &TransitionAction) -> bool {
+    matches!(
+        action,
+        TransitionAction::PrCiFailed | TransitionAction::PrChangesRequested
+    )
+}
+
+pub(crate) fn record_pr_transition_reopen_metric(action: &TransitionAction) -> bool {
+    let increments_reopen = pr_transition_increments_reopen_count(action);
+    if increments_reopen {
+        djinn_telemetry::task::increment_reopen();
+    }
+    increments_reopen
+}
+
 /// Parse a GitHub PR URL into `(owner, repo, pull_number)`.
 ///
 /// Handles URLs of the form `https://github.com/{owner}/{repo}/pull/{number}`.

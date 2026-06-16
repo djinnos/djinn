@@ -4,8 +4,10 @@ use super::{
     dequeue_reason_is_failure, dequeue_requires_rework, effective_review_decision,
     is_advisory_check_name, is_conversation_resolution_block, is_merge_queue_405,
     is_racing_unmerged_status, parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
-    should_auto_resolve_conversations,
+    pr_transition_increments_reopen_count, record_auto_merge_decision_metrics,
+    record_pr_transition_reopen_metric, should_auto_resolve_conversations,
 };
+use djinn_core::models::TransitionAction;
 use djinn_provider::github_api::{
     ActionsJob, ActionsJobStep, CheckRun, DequeueEvent, GitHubApiError, GitHubUser, PrReview,
 };
@@ -25,6 +27,37 @@ fn auto_merge_first_tick_spawns_and_marks_inflight() {
         tracker.get("task-1"),
         Some(&AutoMergeFastPathState::InFlight),
         "first tick must mark the task in-flight"
+    );
+}
+
+#[test]
+fn pr_transition_reopen_metric_tracks_reopen_count_semantics() {
+    djinn_telemetry::init().unwrap();
+    let before = djinn_telemetry::render().unwrap();
+    let reopens_before = unlabelled_metric_value(&before, "djinn_task_reopens_total");
+
+    assert!(pr_transition_increments_reopen_count(
+        &TransitionAction::PrCiFailed
+    ));
+    assert!(pr_transition_increments_reopen_count(
+        &TransitionAction::PrChangesRequested
+    ));
+    assert!(
+        !pr_transition_increments_reopen_count(&TransitionAction::PrConflict),
+        "PrConflict reopens a task for conflict handling but does not increment reopen_count"
+    );
+
+    assert!(record_pr_transition_reopen_metric(
+        &TransitionAction::PrCiFailed
+    ));
+    assert!(!record_pr_transition_reopen_metric(
+        &TransitionAction::PrConflict
+    ));
+    let rendered = djinn_telemetry::render().unwrap();
+    assert_eq!(
+        unlabelled_metric_value(&rendered, "djinn_task_reopens_total"),
+        reopens_before + 1.0,
+        "only the transition that increments reopen_count should bump djinn_task_reopens_total"
     );
 }
 
@@ -99,6 +132,41 @@ fn auto_merge_full_cycle_inflight_then_reopen_then_respawn() {
         AutoMergeTickDecision::Return(AutoMergeFastPathState::Reopen)
     );
     assert!(tracker.is_empty());
+}
+
+#[test]
+fn auto_merge_reopen_decision_records_merge_failure_after_lock_release() {
+    djinn_telemetry::init().unwrap();
+    let before = djinn_telemetry::render().unwrap();
+    let merge_failures_before = unlabelled_metric_value(&before, "djinn_merge_failures_total");
+
+    // Use the same tracked value as the coordinator live-metrics regression so
+    // the process-global gauge cannot make either test flaky if libtest runs
+    // them concurrently.
+    record_auto_merge_decision_metrics(
+        &AutoMergeTickDecision::Return(AutoMergeFastPathState::Reopen),
+        2,
+    );
+
+    let rendered = djinn_telemetry::render().unwrap();
+    assert_eq!(
+        unlabelled_metric_value(&rendered, "djinn_pr_poller_tracked"),
+        2.0
+    );
+    assert_eq!(
+        unlabelled_metric_value(&rendered, "djinn_merge_failures_total"),
+        merge_failures_before + 1.0
+    );
+}
+
+fn unlabelled_metric_value(rendered: &str, metric: &str) -> f64 {
+    rendered
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(' ')?;
+            (name == metric).then(|| value.parse::<f64>().expect("metric value parses"))
+        })
+        .unwrap_or_else(|| panic!("missing metric {metric} in:\n{rendered}"))
 }
 
 /// Minimal `PrReview` builder for the effective-decision tests.

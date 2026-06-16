@@ -16,6 +16,11 @@ const BREAKER_STATE: &str = "djinn_breaker_state";
 const ZOMBIE_REAPS_TOTAL: &str = "djinn_zombie_reaps_total";
 const ZOMBIE_REAP_KINDS: [&str; 3] = ["startup", "periodic", "stall"];
 const LEAD_ESCALATIONS_TOTAL: &str = "djinn_lead_escalations_total";
+const TASK_REOPENS_TOTAL: &str = "djinn_task_reopens_total";
+const TASKS_PARKED_TOTAL: &str = "djinn_tasks_parked_total";
+const PR_POLLER_TRACKED: &str = "djinn_pr_poller_tracked";
+const MERGE_FAILURES_TOTAL: &str = "djinn_merge_failures_total";
+const SLOT_POOL_STATES: [&str; 2] = ["free", "busy"];
 const JIT_PITFALL_HINTS_TOTAL: &str = "djinn_jit_pitfall_hints_total";
 const JIT_PITFALL_OUTCOMES: [&str; 6] = [
     "disabled",
@@ -85,12 +90,58 @@ pub mod jit_pitfalls {
     }
 }
 
+pub mod task {
+    /// Increment the task-reopen counter when a transition successfully bumps `reopen_count`.
+    pub fn increment_reopen() {
+        metrics::counter!(super::TASK_REOPENS_TOTAL).increment(1);
+    }
+
+    /// Increment the parked-task counter when the coordinator records a terminal task park.
+    pub fn increment_parked() {
+        metrics::counter!(super::TASKS_PARKED_TOTAL).increment(1);
+    }
+}
+
+pub mod pr_poller {
+    /// Set the O(1)-cardinality tracked fast-path PR count.
+    pub fn set_tracked(count: usize) {
+        metrics::gauge!(super::PR_POLLER_TRACKED).set(count as f64);
+    }
+
+    /// Increment merge failures that fall through to PR-poller reopen handling.
+    pub fn increment_merge_failure() {
+        metrics::counter!(super::MERGE_FAILURES_TOTAL).increment(1);
+    }
+}
+
 /// Render the current registry in Prometheus text format.
 ///
 /// Calling this before `init()` is supported: it initializes the recorder first
 /// so tests can exercise the render path directly.
 pub fn render() -> Result<String, String> {
-    handle().map(|handle| handle.render())
+    handle().map(|handle| prioritize_dispatch_attempts(handle.render()))
+}
+
+fn prioritize_dispatch_attempts(rendered: String) -> String {
+    const DISPATCH_HELP: &str = "# HELP djinn_dispatch_attempts_total";
+    if rendered.starts_with(DISPATCH_HELP) {
+        return rendered;
+    }
+
+    let trimmed = rendered.trim_end_matches('\n');
+    let mut blocks: Vec<&str> = trimmed.split("\n\n").collect();
+    if let Some(index) = blocks
+        .iter()
+        .position(|block| block.starts_with(DISPATCH_HELP))
+    {
+        let dispatch = blocks.remove(index);
+        blocks.insert(0, dispatch);
+        let mut reordered = blocks.join("\n\n");
+        reordered.push_str("\n\n");
+        reordered
+    } else {
+        rendered
+    }
 }
 
 fn handle() -> Result<&'static PrometheusHandle, String> {
@@ -158,6 +209,30 @@ fn register_metrics() {
         "Lead escalation requests recorded by the coordinator."
     );
     metrics::counter!(LEAD_ESCALATIONS_TOTAL).absolute(0);
+    metrics::describe_counter!(TASK_REOPENS_TOTAL, "Tasks reopened for another work cycle.");
+    metrics::counter!(TASK_REOPENS_TOTAL).absolute(0);
+    metrics::describe_counter!(
+        TASKS_PARKED_TOTAL,
+        "Tasks terminally parked by coordinator safeguards."
+    );
+    metrics::counter!(TASKS_PARKED_TOTAL).absolute(0);
+    metrics::describe_gauge!(
+        PR_POLLER_TRACKED,
+        "Number of PR-poller clean-merge fast-path tasks currently tracked."
+    );
+    metrics::gauge!(PR_POLLER_TRACKED).set(0.0);
+    metrics::describe_counter!(
+        MERGE_FAILURES_TOTAL,
+        "PR merge failures that fall back to task reopen/rework."
+    );
+    metrics::counter!(MERGE_FAILURES_TOTAL).absolute(0);
+    for state in SLOT_POOL_STATES {
+        metrics::gauge!(SLOT_POOL, "state" => state, "model" => "").set(0.0);
+    }
+    metrics::gauge!(DISPATCH_COOLDOWNS_ACTIVE).set(0.0);
+    metrics::gauge!(DISPATCH_LAST_SUCCESS_TIMESTAMP).set(0.0);
+    metrics::gauge!(INFLIGHT_LEDGER_SIZE).set(0.0);
+    metrics::gauge!(USER_CAP_UTILIZATION, "user" => "", "model" => "").set(0.0);
     metrics::describe_counter!(
         JIT_PITFALL_HINTS_TOTAL,
         "JIT pitfall hint path observations partitioned by safe outcome labels."
@@ -270,6 +345,17 @@ mod tests {
             .unwrap_or_else(|| panic!("missing sample {metric}{labels:?} in:\n{rendered}"))
     }
 
+    fn unlabelled_sample_value(rendered: &str, metric: &str) -> f64 {
+        rendered
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix(metric)
+                    .and_then(|suffix| suffix.strip_prefix(' '))
+                    .and_then(|value| value.parse::<f64>().ok())
+            })
+            .unwrap_or_else(|| panic!("missing unlabelled sample {metric} in:\n{rendered}"))
+    }
+
     #[test]
     fn init_is_idempotent_and_registers_dispatch_labels() {
         let _guard = test_guard();
@@ -364,6 +450,13 @@ mod tests {
         assert_sync_unit(|| {
             jit_pitfalls::increment_outcome(jit_pitfalls::OUTCOME_ELIGIBLE_SEARCH);
         });
+        assert_sync_unit(|| task::increment_reopen());
+        assert_sync_unit(|| task::increment_parked());
+        assert_sync_unit(|| pr_poller::set_tracked(0));
+        assert_sync_unit(|| pr_poller::increment_merge_failure());
+        assert_sync_unit(|| breaker::increment_trip());
+        assert_sync_unit(|| zombie::increment_reap(zombie::KIND_STALL));
+        assert_sync_unit(|| lead::increment_escalation());
     }
 
     #[test]
@@ -397,5 +490,36 @@ mod tests {
         }
         assert!(rendered.contains("djinn_lead_escalations_total"));
         assert!(rendered.contains("djinn_jit_pitfall_hints_total{outcome=\"injected\"}"));
+    }
+
+    #[test]
+    fn task_and_pr_poller_metrics_render() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let before = render().unwrap();
+        let reopens_before = unlabelled_sample_value(&before, TASK_REOPENS_TOTAL);
+        let parked_before = unlabelled_sample_value(&before, TASKS_PARKED_TOTAL);
+        let merge_failures_before = unlabelled_sample_value(&before, MERGE_FAILURES_TOTAL);
+
+        task::increment_reopen();
+        task::increment_parked();
+        pr_poller::set_tracked(2);
+        pr_poller::increment_merge_failure();
+
+        let rendered = render().unwrap();
+        assert_eq!(
+            unlabelled_sample_value(&rendered, TASK_REOPENS_TOTAL),
+            reopens_before + 1.0
+        );
+        assert_eq!(
+            unlabelled_sample_value(&rendered, TASKS_PARKED_TOTAL),
+            parked_before + 1.0
+        );
+        assert_eq!(unlabelled_sample_value(&rendered, PR_POLLER_TRACKED), 2.0);
+        assert_eq!(
+            unlabelled_sample_value(&rendered, MERGE_FAILURES_TOTAL),
+            merge_failures_before + 1.0
+        );
     }
 }

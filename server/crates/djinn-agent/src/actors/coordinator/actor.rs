@@ -740,6 +740,8 @@ impl CoordinatorActor {
     pub(super) fn record_live_metrics(&self) {
         djinn_telemetry::dispatch::set_cooldowns_active(self.dispatch_cooldowns.len());
         djinn_telemetry::dispatch::set_inflight_ledger_size(self.inflight_dispatches.len());
+        let pr_poller_tracked = self.auto_merge_tracker.lock().unwrap().len();
+        djinn_telemetry::pr_poller::set_tracked(pr_poller_tracked);
     }
 
     pub(super) fn maintenance_context(&self) -> crate::context::AgentContext {
@@ -1692,6 +1694,11 @@ mod tests {
         actor
             .inflight_dispatches
             .insert("inflight-c".to_owned(), (None, DEFAULT_MODEL_ID.to_owned()));
+        {
+            let mut tracker = actor.auto_merge_tracker.lock().unwrap();
+            tracker.insert("pr-a".to_owned(), AutoMergeFastPathState::InFlight);
+            tracker.insert("pr-b".to_owned(), AutoMergeFastPathState::Reopen);
+        }
 
         actor.record_live_metrics();
 
@@ -1703,6 +1710,10 @@ mod tests {
         assert_eq!(
             rendered_metric_sample(&rendered, "djinn_inflight_ledger_size"),
             "djinn_inflight_ledger_size 3"
+        );
+        assert_eq!(
+            rendered_metric_sample(&rendered, "djinn_pr_poller_tracked"),
+            "djinn_pr_poller_tracked 2"
         );
     }
 }
