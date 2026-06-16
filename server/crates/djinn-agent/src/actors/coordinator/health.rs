@@ -591,6 +591,16 @@ pub(super) async fn reap_orphaned_taskrun_jobs(
             continue;
         }
 
+        match reason {
+            "startup" => {
+                djinn_telemetry::zombie::increment_reap(djinn_telemetry::zombie::KIND_STARTUP)
+            }
+            "periodic" => {
+                djinn_telemetry::zombie::increment_reap(djinn_telemetry::zombie::KIND_PERIODIC)
+            }
+            _ => djinn_telemetry::zombie::increment_reap(reason),
+        }
+
         tracing::info!(
             job_name = %job.job_name,
             task_run_id = %task_run_id,
