@@ -48,6 +48,19 @@ export interface SnapshotNode {
    * Drives the "hide tests" toolbar toggle.
    */
   is_test?: boolean;
+  /**
+   * Server-precomputed layout coordinate, computed in `derive_graph_caches`
+   * during warm alongside PageRank / communities / SCCs. When every node
+   * in the snapshot carries finite `x`/`y` values, the UI uses them as the
+   * graphology node positions directly and skips ForceAtlas2 — see
+   * `hasPrecomputedCoordinates` and `buildGraphFromSnapshot`.
+   *
+   * `undefined` (or any non-finite value) means the server did not ship a
+   * layout for this node; the client falls back to the golden-angle /
+   * cluster-center seeding path so FA2 still has a starting position.
+   */
+  x?: number;
+  y?: number;
 }
 
 export interface SnapshotEdge {
@@ -175,6 +188,10 @@ export function parseSnapshotResponse(value: unknown): SnapshotPayload | null {
               ? n.cognitive
               : undefined,
           is_test: n.is_test === true,
+          x:
+            typeof n.x === "number" && Number.isFinite(n.x) ? n.x : undefined,
+          y:
+            typeof n.y === "number" && Number.isFinite(n.y) ? n.y : undefined,
         };
       })
       .filter((n) => n.id.length > 0),
@@ -449,18 +466,54 @@ export interface BuildGraphOptions {
 }
 
 /**
+ * Graph-level attribute name set by `buildGraphFromSnapshot` when the
+ * snapshot's positions are used verbatim. `useSigmaGraph` reads this on
+ * the follow-up task to gate `FA2LayoutSupervisor.start()` — if every
+ * node already sits at a server-computed coordinate, FA2 has nothing to
+ * converge on and would just churn the canvas.
+ */
+export const PRECOMPUTED_LAYOUT_ATTRIBUTE = "precomputedLayout";
+
+/**
+ * Returns true when every node in `snapshot` carries a finite numeric
+ * `x` and `y`. Empty snapshots are vacuously complete (there are no
+ * nodes to check), so the helper returns `true` — `buildGraphFromSnapshot`
+ * will simply emit an empty graphology graph with the precomputed flag
+ * set, which is the cheapest possible outcome.
+ *
+ * Any missing / non-numeric / non-finite coordinate forces a fallback to
+ * the golden-angle + cluster-center + BFS-jitter seed path so FA2 still
+ * has a starting layout. This is the reliability floor: partial
+ * coordinates from an old artifact, NaN from a buggy client, or missing
+ * fields from a stale cache must all degrade to the existing seed path
+ * rather than render a half-positioned graph.
+ */
+export function hasPrecomputedCoordinates(snapshot: SnapshotPayload): boolean {
+  if (!snapshot.nodes || snapshot.nodes.length === 0) return true;
+  for (const node of snapshot.nodes) {
+    if (typeof node.x !== "number" || !Number.isFinite(node.x)) return false;
+    if (typeof node.y !== "number" || !Number.isFinite(node.y)) return false;
+  }
+  return true;
+}
+
+/**
  * Convert a snapshot payload into a graphology `Graph` configured for
  * Sigma + ForceAtlas2.
  *
  * Layout seeding strategy:
- *  - Structural nodes (file/folder) → golden-angle spiral with 15%
- *    radial jitter so the geometry doesn't look mechanical.
- *  - Symbols with `community_id` → cluster-center jitter (golden-angle
- *    distributed over 80% of the structural spread).
- *  - Symbols without community → BFS jitter around their declaring
- *    file/folder via the parent map built from `ContainsDefinition` /
- *    `DeclaredInFile` / `FileReference`.
- *  - Orphans → random within half the structural spread.
+ *  - **Precomputed**: when every node carries a finite `x`/`y` (see
+ *    `hasPrecomputedCoordinates`), positions are used verbatim, the
+ *    golden-angle / cluster / BFS seed path is skipped, and the graph is
+ *    flagged with `precomputedLayout: true` so `useSigmaGraph` can skip
+ *    the FA2 supervisor. The server computes the layout once during warm
+ *    (see `derive_graph_caches`) and ships the result in the artifact.
+ *  - **Seeded fallback** (no precomputed coordinates): structural nodes
+ *    (file/folder) → golden-angle spiral with 15% radial jitter; symbols
+ *    with `community_id` → cluster-center jitter (golden-angle over 80%
+ *    of the structural spread); symbols without community → BFS jitter
+ *    around their declaring file/folder; orphans → random within half
+ *    the structural spread.
  */
 export function buildGraphFromSnapshot(
   snapshot: SnapshotPayload,
@@ -474,6 +527,34 @@ export function buildGraphFromSnapshot(
   const nodeCount = nodes.length;
   const ranks = nodes.map((n) => n.pagerank);
   const maxRank = ranks.length > 0 ? Math.max(...ranks, 0.000_001) : 1;
+
+  // Precomputed branch — when every node ships a finite (x, y), the
+  // server has already done the warm-time layout work and FA2 has
+  // nothing to converge on. Use the coordinates verbatim, mark the
+  // graph so `useSigmaGraph` can skip the FA2 supervisor, and exit
+  // before the structural / golden-angle / community / random seed
+  // branch below. The seed path is intentionally untouched for the
+  // fallback case so existing 4xx / 5xx / pre-warm snapshots render
+  // exactly as before.
+  if (nodeCount > 0 && hasPrecomputedCoordinates(snapshot)) {
+    for (const node of nodes) {
+      // hasPrecomputedCoordinates proved node.x / node.y are finite
+      // numbers, so the non-null assertions are safe at runtime.
+      addNode(
+        graph,
+        node,
+        { x: node.x!, y: node.y! },
+        maxRank,
+        nodeCount,
+      );
+    }
+    addEdgesFromSnapshot(graph, snapshot, nodeCount, {
+      dropSelfLoops,
+      dropMemberOf,
+    });
+    graph.setAttribute(PRECOMPUTED_LAYOUT_ATTRIBUTE, true);
+    return graph;
+  }
 
   const structuralSpread = Math.sqrt(Math.max(nodeCount, 1)) * 40;
   const childJitter = Math.sqrt(Math.max(nodeCount, 1)) * 3;
@@ -610,7 +691,24 @@ export function buildGraphFromSnapshot(
 
   // Edges — per-kind colors, base scaled by graph density, modulated
   // by per-edge confidence so hand-resolved edges trail brighter than
-  // weak heuristic ones.
+  // weak heuristic ones. Extracted so the precomputed-coords branch
+  // above reuses the same edge-rendering pipeline.
+  addEdgesFromSnapshot(graph, snapshot, nodeCount, {
+    dropSelfLoops,
+    dropMemberOf,
+  });
+
+  return graph;
+}
+
+function addEdgesFromSnapshot(
+  graph: Graph,
+  snapshot: SnapshotPayload,
+  nodeCount: number,
+  options: { dropSelfLoops: boolean; dropMemberOf: boolean },
+): void {
+  const { dropSelfLoops, dropMemberOf } = options;
+  const nodeMap = new Map(snapshot.nodes.map((n) => [n.id, n]));
   const baseSize = edgeBaseSize(nodeCount);
   for (const edge of snapshot.edges) {
     if (dropMemberOf && edge.kind === "MemberOf") continue;
@@ -640,8 +738,6 @@ export function buildGraphFromSnapshot(
       lineStyle: isCrossWorkspace ? "dashed" : "solid",
     });
   }
-
-  return graph;
 }
 
 function addNode(
