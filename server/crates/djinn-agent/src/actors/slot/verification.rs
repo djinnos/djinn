@@ -266,11 +266,68 @@ async fn run_verification_pipeline(
     let task = load_task(task_id, app_state).await?;
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
-    // Task #8: verification now runs against a mirror-native ephemeral
-    // workspace instead of a user-visible `.djinn/worktrees/<short_id>` task
-    // worktree.  We clone-ephemeral on the target branch, then fetch + check
-    // out the task branch so verification sees the same tree the worker just
-    // pushed to.  The workspace tempdir is dropped at the end of the pipeline.
+    // Verification commands need the project's toolchain + the shared `/cache`
+    // PVC, neither of which exists on the toolchain-less djinn-server host —
+    // running them inline there exits 127 ("cargo: not found") and false-fails
+    // every task. On the Kubernetes runtime we dispatch a one-shot Job in the
+    // project's image that runs the SAME pipeline (`verify_commit`) against the
+    // task branch's tree, with `/cache` shared, and poll its `verification_runs`
+    // row. On non-Kubernetes runtimes (dev/test) we keep the inline host path so
+    // unit tests and local dev still work.
+    let result = match crate::runtime_bridge::runtime_kind() {
+        crate::runtime_bridge::RuntimeKind::Kubernetes => {
+            run_verification_in_pod(&task, app_state).await?
+        }
+        crate::runtime_bridge::RuntimeKind::Test => {
+            run_verification_on_host(&task, app_state).await?
+        }
+    };
+    emit_verification_steps(&task.project_id, Some(task_id), &result, app_state).await;
+
+    if !result.passed {
+        let feedback = format_verification_failure_feedback(&result);
+        tracing::info!(task_id = %task_id, "Verification: verification commands failed");
+        handle_verification_failure(task_id, &feedback, &task_repo, app_state).await;
+        return Ok(());
+    }
+
+    // All passed — transition to needs_task_review.
+    tracing::info!(task_id = %task_id, "Verification: all commands passed");
+    // `transition` already retries internally on 40001/40P01. A non-retryable
+    // failure here would leave the task stuck in `verifying` even though the
+    // pipeline succeeded — surface it loudly.
+    if let Err(e) = task_repo
+        .transition(
+            task_id,
+            TransitionAction::VerificationPass,
+            "agent-supervisor",
+            "system",
+            None,
+            None,
+        )
+        .await
+    {
+        tracing::error!(
+            task_id = %task_id,
+            error = %e,
+            "Failed to transition task to `needs_task_review` after verification pass; task may stay in `verifying`"
+        );
+    }
+    Ok(())
+}
+
+/// Inline (host) verification — the dev/test path.
+///
+/// Clones the target branch into a mirror-native ephemeral workspace, fetches +
+/// checks out the task branch so verification sees the same tree the worker
+/// pushed, normalizes tracked-file mtimes (cargo-cache reuse), resolves the
+/// scoped commands, and runs `verify_commit` directly on the host. Only used on
+/// the non-Kubernetes runtime — the production path runs the same work in a pod
+/// (see [`run_verification_in_pod`]).
+async fn run_verification_on_host(
+    task: &djinn_core::models::Task,
+    app_state: &AgentContext,
+) -> anyhow::Result<crate::verification::service::VerificationResult> {
     let mirror = app_state.mirror.as_ref().ok_or_else(|| {
         anyhow::anyhow!("verification requires a MirrorManager on AgentContext; none configured")
     })?;
@@ -316,7 +373,7 @@ async fn run_verification_pipeline(
     let commit_sha = resolve_head_commit(&workspace_path)?;
 
     // Resolve scoped verification commands (AC-1 through AC-7).
-    let role_cmd_override = role_verification_command_for_task(&task, app_state).await;
+    let role_cmd_override = role_verification_command_for_task(task, app_state).await;
     let scoped_commands = resolve_scoped_commands(
         &app_state.db,
         Some(&task.project_id),
@@ -334,38 +391,114 @@ async fn run_verification_pipeline(
         &scoped_commands,
     )
     .await?;
-    emit_verification_steps(&task.project_id, Some(task_id), &result, app_state).await;
+    Ok(result)
+}
 
-    if !result.passed {
-        let feedback = format_verification_failure_feedback(&result);
-        tracing::info!(task_id = %task_id, "Verification: verification commands failed");
-        handle_verification_failure(task_id, &feedback, &task_repo, app_state).await;
-        return Ok(());
-    }
+/// How often [`run_verification_in_pod`] polls the `verification_runs` row for a
+/// terminal status. The pipeline-level timeout (`compute_pipeline_timeout`) is
+/// the real backstop — this just bounds how often we hit the DB while the Job
+/// compiles + runs the project's verification commands.
+const VERIFICATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
-    // All passed — transition to needs_task_review.
-    tracing::info!(task_id = %task_id, "Verification: all commands passed");
-    // `transition` already retries internally on 40001/40P01. A non-retryable
-    // failure here would leave the task stuck in `verifying` even though the
-    // pipeline succeeded — surface it loudly.
-    if let Err(e) = task_repo
-        .transition(
-            task_id,
-            TransitionAction::VerificationPass,
-            "agent-supervisor",
-            "system",
-            None,
-            None,
+/// Production (Kubernetes) verification — dispatch a one-shot Job in the
+/// project's image and poll its `verification_runs` row.
+///
+/// The Job clones the target branch, fetches + checks out the task branch
+/// (building the same tree the worker pushed) with `/cache` shared, then runs
+/// the SAME `verify_commit` pipeline the host path runs — the worker writes
+/// per-command results + pass/fail back to the row, which we reconstruct into a
+/// [`crate::verification::service::VerificationResult`] for the shared
+/// emit/transition tail.
+///
+/// The surrounding [`spawn_verification_with_timeout`] enforces the wall-clock
+/// pipeline timeout (and releases the task on expiry), so the poll loop here
+/// runs unbounded inside that budget.
+async fn run_verification_in_pod(
+    task: &djinn_core::models::Task,
+    app_state: &AgentContext,
+) -> anyhow::Result<crate::verification::service::VerificationResult> {
+    let runtime_ops = app_state.runtime_ops.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "verification requires a RuntimeOps bridge on AgentContext to dispatch the pod; none configured"
         )
+    })?;
+
+    let target_branch = default_target_branch(&task.project_id, app_state).await;
+    let task_branch = format!("task/{}", task.short_id);
+
+    let run_id = uuid::Uuid::now_v7().to_string();
+    let run_repo = djinn_db::VerificationRunRepository::new(app_state.db.clone());
+    run_repo
+        .create(&run_id, &task.id, &task.project_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("verification create run row: {e}"))?;
+
+    // Dispatch the one-shot Job (project image → clone target → fetch+checkout
+    // task branch → run verify_commit → write outcome to the row). On dispatch
+    // failure mark the row errored so the poll loop sees a terminal state.
+    if let Err(e) = runtime_ops
+        .dispatch_verification(&run_id, &task.project_id, &task_branch, &target_branch)
         .await
     {
-        tracing::error!(
-            task_id = %task_id,
-            error = %e,
-            "Failed to transition task to `needs_task_review` after verification pass; task may stay in `verifying`"
-        );
+        let _ = run_repo
+            .complete(
+                &run_id,
+                djinn_db::VerificationRunStatus::ERROR,
+                "[]",
+                "[]",
+                Some(&e),
+            )
+            .await;
+        anyhow::bail!("verification dispatch failed: {e}");
     }
-    Ok(())
+
+    // Poll the row until terminal. The outer pipeline timeout caps total wait.
+    loop {
+        tokio::time::sleep(VERIFICATION_POLL_INTERVAL).await;
+        let run = run_repo
+            .get(&run_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("verification poll run row: {e}"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("verification run row {run_id} disappeared before completion")
+            })?;
+        match run.status.as_str() {
+            djinn_db::VerificationRunStatus::PENDING
+            | djinn_db::VerificationRunStatus::RUNNING => continue,
+            djinn_db::VerificationRunStatus::ERROR => {
+                anyhow::bail!(
+                    "verification pod errored: {}",
+                    run.error.as_deref().unwrap_or("unknown error")
+                );
+            }
+            djinn_db::VerificationRunStatus::PASSED
+            | djinn_db::VerificationRunStatus::FAILED => {
+                let passed = run.status == djinn_db::VerificationRunStatus::PASSED;
+                let setup_results: Vec<djinn_core::commands::CommandResult> =
+                    serde_json::from_str(&run.setup_results).unwrap_or_default();
+                let verification_results: Vec<djinn_core::commands::CommandResult> =
+                    serde_json::from_str(&run.verification_results).unwrap_or_default();
+                let total_duration_ms: u64 = setup_results
+                    .iter()
+                    .chain(verification_results.iter())
+                    .map(|r| r.duration_ms)
+                    .sum();
+                return Ok(crate::verification::service::VerificationResult {
+                    passed,
+                    // The pod path always runs the commands (the pass-cache lives
+                    // in `verify_commit` inside the pod); from the server's view
+                    // this is a fresh, uncached result set.
+                    cached: false,
+                    setup_results,
+                    verification_results,
+                    total_duration_ms,
+                });
+            }
+            other => {
+                anyhow::bail!("verification run row has unexpected status `{other}`");
+            }
+        }
+    }
 }
 
 /// Log verification failure and transition appropriately.

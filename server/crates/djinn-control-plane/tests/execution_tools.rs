@@ -890,6 +890,16 @@ impl RuntimeOps for RecordingRuntimeOps {
         Ok(())
     }
 
+    async fn dispatch_verification(
+        &self,
+        _run_id: &str,
+        _project_id: &str,
+        _task_branch: &str,
+        _target_branch: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     async fn provision_backing_service(
         &self,
         _req: djinn_control_plane::bridge::ProvisionServiceRequest,

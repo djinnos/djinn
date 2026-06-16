@@ -20,6 +20,8 @@ const TASK_REOPENS_TOTAL: &str = "djinn_task_reopens_total";
 const TASKS_PARKED_TOTAL: &str = "djinn_tasks_parked_total";
 const PR_POLLER_TRACKED: &str = "djinn_pr_poller_tracked";
 const MERGE_FAILURES_TOTAL: &str = "djinn_merge_failures_total";
+const DOCTOR_FINDINGS: &str = "djinn_doctor_findings";
+const DOCTOR_RUN_DURATION_SECONDS: &str = "djinn_doctor_run_duration_seconds";
 const SLOT_POOL_STATES: [&str; 2] = ["free", "busy"];
 const JIT_PITFALL_HINTS_TOTAL: &str = "djinn_jit_pitfall_hints_total";
 const JIT_PITFALL_OUTCOMES: [&str; 7] = [
@@ -113,6 +115,34 @@ pub mod pr_poller {
     /// Increment merge failures that fall through to PR-poller reopen handling.
     pub fn increment_merge_failure() {
         metrics::counter!(super::MERGE_FAILURES_TOTAL).increment(1);
+    }
+}
+
+pub mod doctor {
+    pub const FINDINGS: &str = super::DOCTOR_FINDINGS;
+    pub const RUN_DURATION_SECONDS: &str = super::DOCTOR_RUN_DURATION_SECONDS;
+
+    /// Set the number of findings emitted by one stable doctor check name.
+    ///
+    /// The only metric label is `check`, and callers should pass
+    /// `DoctorCheck::name()` directly to keep cardinality bounded.
+    pub fn set_findings(check: &str, count: usize) {
+        metrics::gauge!(super::DOCTOR_FINDINGS, "check" => check.to_owned()).set(count as f64);
+    }
+
+    /// Record the last run duration for one stable doctor check name.
+    ///
+    /// This gauge keeps the rendered sample exactly
+    /// `djinn_doctor_run_duration_seconds{check="..."}` with no severity,
+    /// entity, bucket, or free-form labels.
+    pub fn set_run_duration_seconds(check: &str, seconds: f64) {
+        metrics::gauge!(super::DOCTOR_RUN_DURATION_SECONDS, "check" => check.to_owned())
+            .set(seconds);
+    }
+
+    /// Convenience wrapper for callers measuring with `std::time::Duration`.
+    pub fn record_run_duration(check: &str, duration: std::time::Duration) {
+        set_run_duration_seconds(check, duration.as_secs_f64());
     }
 }
 
@@ -242,6 +272,14 @@ fn register_metrics() {
     for outcome in JIT_PITFALL_OUTCOMES {
         metrics::counter!(JIT_PITFALL_HINTS_TOTAL, "outcome" => outcome).absolute(0);
     }
+    metrics::describe_gauge!(
+        DOCTOR_FINDINGS,
+        "Doctor findings observed per check on the most recent recorded run. The only label is the stable DoctorCheck::name() value as check."
+    );
+    metrics::describe_gauge!(
+        DOCTOR_RUN_DURATION_SECONDS,
+        "Doctor check run duration in seconds for the most recent recorded run. The only label is the stable DoctorCheck::name() value as check."
+    );
 }
 
 pub mod dispatch {
@@ -483,6 +521,62 @@ mod tests {
         assert_sync_unit(|| breaker::increment_trip());
         assert_sync_unit(|| zombie::increment_reap(zombie::KIND_STALL));
         assert_sync_unit(|| lead::increment_escalation());
+        assert_sync_unit(|| doctor::set_findings("sample.shared_resolver", 1));
+        assert_sync_unit(|| doctor::set_run_duration_seconds("sample.shared_resolver", 0.25));
+        assert_sync_unit(|| {
+            doctor::record_run_duration(
+                "sample.shared_resolver",
+                std::time::Duration::from_millis(250),
+            );
+        });
+    }
+
+    #[test]
+    fn doctor_metrics_render_with_check_only_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let check = "sample.shared_resolver";
+        doctor::set_findings(check, 3);
+        doctor::set_run_duration_seconds(check, 1.25);
+
+        let rendered = render().unwrap();
+        assert!(rendered.contains("# HELP djinn_doctor_findings"));
+        assert!(rendered.contains("# HELP djinn_doctor_run_duration_seconds"));
+
+        let findings = rendered_sample(&rendered, doctor::FINDINGS, &[("check", check)]);
+        assert!(
+            findings.ends_with(" 3"),
+            "unexpected findings sample: {findings}"
+        );
+        assert_eq!(
+            findings.matches('=').count(),
+            1,
+            "doctor findings must only render the check label: {findings}"
+        );
+
+        let duration =
+            rendered_sample(&rendered, doctor::RUN_DURATION_SECONDS, &[("check", check)]);
+        assert!(
+            duration.ends_with(" 1.25"),
+            "unexpected duration sample: {duration}"
+        );
+        assert_eq!(
+            duration.matches('=').count(),
+            1,
+            "doctor duration must only render the check label: {duration}"
+        );
+
+        for forbidden in ["severity=", "entity=", "workspace=", "le="] {
+            assert!(
+                !findings.contains(forbidden),
+                "doctor findings labels must stay bounded: {findings}"
+            );
+            assert!(
+                !duration.contains(forbidden),
+                "doctor duration labels must stay bounded: {duration}"
+            );
+        }
     }
 
     #[test]

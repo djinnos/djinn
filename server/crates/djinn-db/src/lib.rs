@@ -41,6 +41,10 @@ pub use repositories::{
     },
     dispatch_pause::{DispatchPauseMutation, DispatchPauseRepository, DispatchPauseTarget},
     dispatch_state::{DispatchStateRecord, DispatchStateRepository, DispatchStateUpsert},
+    doctor_finding::{
+        DoctorFinding, DoctorFindingRepository, MAX_RECENT_FINDINGS, NewDoctorFinding,
+        RecentDoctorFindings, severity as doctor_severity,
+    },
     epic::{
         EpicBlockerRef, EpicCountQuery, EpicCreateInput, EpicListQuery, EpicListResult,
         EpicRepository, EpicTaskCounts, EpicUpdateInput,
@@ -112,5 +116,6 @@ pub use repositories::{
     verification_result::{
         VerificationResultRepository, VerificationStepInsert, VerificationStepRow,
     },
+    verification_run::{VerificationRun, VerificationRunRepository, VerificationRunStatus},
     verification_test::{VerificationTestRepository, VerificationTestRun, VerificationTestStatus},
 };
