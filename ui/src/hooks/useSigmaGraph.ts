@@ -65,6 +65,13 @@ export interface SigmaInstanceHandle {
   getNodeAttributes: (id: string) => Attributes | null;
   focusNode: (id: string) => void;
   focusNodes: (ids: Iterable<string>) => void;
+  /**
+   * Iter y3mf: read the current Sigma camera ratio. Returns `Infinity`
+   * when the camera isn't available (Sigma not yet bound, unmount
+   * race, etc.) so the call site can treat that as the
+   * "show everything" sentinel from `shouldLabelAtZoom`.
+   */
+  getCameraRatio: () => number;
 }
 
 export interface UseSigmaGraphResult {
@@ -303,6 +310,22 @@ export function useSigmaGraph(
           return graph.getNodeAttributes(id);
         } catch {
           return null;
+        }
+      },
+      // Iter y3mf: the cast stays here (where Sigma is concretely typed)
+      // and not in the consumer; `SigmaInstanceHandle` exposes a clean
+      // method that always returns a finite number or the `Infinity`
+      // sentinel used by `shouldLabelAtZoom` for the "no camera
+      // reported" path.
+      getCameraRatio: () => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const ratio = (sigmaInstance as any).getCamera?.()?.ratio;
+          return typeof ratio === "number" && Number.isFinite(ratio)
+            ? ratio
+            : Infinity;
+        } catch {
+          return Infinity;
         }
       },
       focusNode: (id) => {
