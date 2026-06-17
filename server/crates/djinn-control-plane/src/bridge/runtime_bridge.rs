@@ -39,6 +39,81 @@ pub struct TaskrunJobRef {
     pub task_run_id: String,
 }
 
+/// Structured error returned from runtime dispatch calls
+/// (`dispatch_verification`, `dispatch_verification_test`) so callers can
+/// distinguish transient `ImageNotReady` (catalog image mid-rebuild) from
+/// hard backend failures. The string-form preserved via `Display` is the
+/// historical wire format; structured fields let callers decide whether to
+/// requeue with backoff or surface a terminal error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeDispatchError {
+    /// The project's dispatch image is not currently `ready`. See
+    /// [`djinn_runtime::WarmerError::ImageNotReady`] for the underlying
+    /// semantics; the bridge preserves the structured fields so the agent
+    /// slot actor and the MCP verification-test tool can implement a
+    /// bounded requeue without parsing strings.
+    ImageNotReady {
+        project_id: String,
+        image_status: String,
+        tag: Option<String>,
+        /// `true` when the missing image is expected to become ready
+        /// (catalog image is `building`, or the project is awaiting first
+        /// assignment); `false` when the project has no catalog image
+        /// selected at all.
+        transient: bool,
+    },
+    /// Any other (hard) runtime failure — K8s API error, kube-client
+    /// unavailable, malformed spec, etc. Surfaced as a terminal error
+    /// (the caller logs, marks the run row errored, bails).
+    Backend(String),
+}
+
+impl std::fmt::Display for RuntimeDispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ImageNotReady {
+                project_id,
+                image_status,
+                transient,
+                ..
+            } => write!(
+                f,
+                "project {project_id} image not ready (status: {image_status}, transient: {transient})"
+            ),
+            Self::Backend(msg) => write!(f, "runtime dispatch error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeDispatchError {}
+
+impl RuntimeDispatchError {
+    /// True when this error represents a transient "image not ready"
+    /// condition that the caller may defer / requeue (catalog image is
+    /// being rebuilt or project awaits first-time assignment).
+    pub fn is_image_not_ready_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::ImageNotReady {
+                transient: true,
+                ..
+            }
+        )
+    }
+
+    /// True when this error represents a permanently-missing image (no
+    /// catalog image selected, project needs configuration).
+    pub fn is_image_not_ready_permanent(&self) -> bool {
+        matches!(
+            self,
+            Self::ImageNotReady {
+                transient: false,
+                ..
+            }
+        )
+    }
+}
+
 #[async_trait]
 pub trait RuntimeOps: Send + Sync {
     async fn apply_settings(
@@ -75,23 +150,29 @@ pub trait RuntimeOps: Send + Sync {
     /// Dispatch a one-shot verification-test Job for `test_id` in `project_id`'s
     /// image (the worker writes the outcome to `verification_test_runs`). Routes
     /// to the K8s graph warmer; errors on runtimes without a kube client.
+    /// Returns a structured [`RuntimeDispatchError`] so callers can distinguish
+    /// transient `ImageNotReady` (catalog image mid-rebuild) from hard
+    /// backend failures.
     async fn dispatch_verification_test(
         &self,
         test_id: &str,
         project_id: &str,
-    ) -> Result<(), String>;
+    ) -> Result<(), RuntimeDispatchError>;
     /// Dispatch a one-shot pre-PR verification run for `run_id` in `project_id`'s
     /// image (the worker writes per-command results + pass/fail to the
     /// `verification_runs` row). The Job clones `target_branch`, fetches +
     /// checks out `task_branch`, then runs the real verification pipeline.
-    /// Routes to the K8s graph warmer; errors on runtimes without a kube client.
+    /// Routes to the K8s graph warmer; errors on runtimes without a kube
+    /// client. Returns a structured [`RuntimeDispatchError`] so callers can
+    /// distinguish transient `ImageNotReady` (catalog image mid-rebuild)
+    /// from hard backend failures.
     async fn dispatch_verification(
         &self,
         run_id: &str,
         project_id: &str,
         task_branch: &str,
         target_branch: &str,
-    ) -> Result<(), String>;
+    ) -> Result<(), RuntimeDispatchError>;
     /// Reconcile a catalog image's build (migration 46): build the shared
     /// image once so every assigned project can use it. A no-op on runtimes
     /// without an image controller (dev mode).
@@ -122,4 +203,48 @@ pub trait RuntimeOps: Send + Sync {
     /// to clean up branches/PRs of force-closed tasks. A no-op on runtimes
     /// without a mirror manager.
     async fn cleanup_task_branches(&self, task_id: &str);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Pin the discriminator contract that the slot actor and MCP
+    // verification-test tool rely on: a transient `ImageNotReady` is
+    // requeueable; a permanent `ImageNotReady` and any `Backend` error
+    // are terminal. The string-form preserved via `Display` is
+    // historical; structured fields are what callers actually match on.
+    #[test]
+    fn runtime_dispatch_error_discriminates_transient_vs_permanent() {
+        let transient = RuntimeDispatchError::ImageNotReady {
+            project_id: "p1".into(),
+            image_status: "building".into(),
+            tag: Some("reg/img:abc".into()),
+            transient: true,
+        };
+        assert!(transient.is_image_not_ready_transient());
+        assert!(!transient.is_image_not_ready_permanent());
+        // Display preserves the structured fields so an operator
+        // looking at logs can tell transient vs permanent apart without
+        // structured-log parsing.
+        let s = transient.to_string();
+        assert!(s.contains("transient: true"), "got: {s}");
+        assert!(s.contains("status: building"), "got: {s}");
+
+        let permanent = RuntimeDispatchError::ImageNotReady {
+            project_id: "p1".into(),
+            image_status: "none".into(),
+            tag: None,
+            transient: false,
+        };
+        assert!(!permanent.is_image_not_ready_transient());
+        assert!(permanent.is_image_not_ready_permanent());
+        let s = permanent.to_string();
+        assert!(s.contains("transient: false"), "got: {s}");
+
+        let backend = RuntimeDispatchError::Backend("kube apiserver 503".into());
+        assert!(!backend.is_image_not_ready_transient());
+        assert!(!backend.is_image_not_ready_permanent());
+        assert!(backend.to_string().contains("kube apiserver 503"));
+    }
 }

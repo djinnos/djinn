@@ -208,6 +208,7 @@ mod tests {
                 sha: "cafebabe".into(),
             },
             stages_completed: vec![RoleKind::Planner, RoleKind::Worker, RoleKind::Reviewer],
+            verification_run_id: None,
         };
         let event = WorkerEvent::TerminalReport(report);
 
