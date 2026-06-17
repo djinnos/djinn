@@ -1832,6 +1832,19 @@ async fn run_verify_test(test_id: &str) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/workspace"));
 
+    // Seed a private run target dir from the warm per-project base and point
+    // CARGO_TARGET_DIR at it, then reset tracked-file mtimes to commit times —
+    // identical to the real `run_verify_task` path so a test faithfully reflects
+    // (and benefits from) the warm cargo-artifact reuse a real verification gets.
+    // The guard tears the private dir down when this function returns.
+    let verify_target_run_dir = prepare_verify_target_dir(&run.project_id, test_id).await;
+    let _verify_target_guard = CargoTargetRunDirGuard::new(
+        test_id.to_string(),
+        run.project_id.clone(),
+        verify_target_run_dir,
+    );
+    djinn_workspace::normalize_mtimes_at(&project_root).await;
+
     // Synthetic commit id so verify_commit's pass-cache never collides with a
     // real task verification (which keys on the real commit + scoped commands).
     let synthetic_commit = format!("verify-test-{test_id}");
