@@ -644,6 +644,21 @@ impl CoordinatorActor {
         self.reap_idle_chat_sessions().await;
         self.detect_and_recover_stuck_filtered(None).await;
 
+        // Doctor framework integration (epic 4q1t, task 1lx0). Run only the
+        // cheap subset so cluster-facing on-demand checks (e.g. k8s.pod_leak)
+        // do not inflate every 30s tick. Failures are isolated by the helper
+        // and never panic or block the rest of the tick.
+        //
+        // The run_id is monotonic per-tick so a future `doctor_list_findings`
+        // call can scope its query back to one leader-tick invocation.
+        let doctor_run_id = format!("leader-tick-{}", self.prune_tick_counter.wrapping_add(1));
+        crate::doctor::leader_tick::run_cheap_doctor_checks(
+            &self.db,
+            &self.events_tx,
+            Some(&doctor_run_id),
+        )
+        .await;
+
         // Check memory pressure before dispatching.
         let memory_throttled = if let Some(mem) = crate::resource_monitor::MemoryStatus::read() {
             if mem.is_critical() {

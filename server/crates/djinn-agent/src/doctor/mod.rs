@@ -19,4 +19,5 @@
 
 #![allow(dead_code)]
 
+pub mod leader_tick;
 pub mod live_mover;
