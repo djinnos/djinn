@@ -232,6 +232,47 @@ describe("codeGraphStore", () => {
     });
   });
 
+  describe("expandedCommunityIds", () => {
+    it("defaults to an empty set", () => {
+      expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(0);
+    });
+
+    it("expandCommunity adds a stable community_id", () => {
+      useCodeGraphStore.getState().expandCommunity("auth");
+      expect(
+        useCodeGraphStore.getState().expandedCommunityIds.has("auth"),
+      ).toBe(true);
+    });
+
+    it("expandCommunity is idempotent", () => {
+      useCodeGraphStore.getState().expandCommunity("auth");
+      useCodeGraphStore.getState().expandCommunity("auth");
+      expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(1);
+    });
+
+    it("collapseCommunity removes a community_id", () => {
+      useCodeGraphStore.getState().expandCommunity("auth");
+      useCodeGraphStore.getState().collapseCommunity("auth");
+      expect(
+        useCodeGraphStore.getState().expandedCommunityIds.has("auth"),
+      ).toBe(false);
+    });
+
+    it("collapseCommunity is idempotent when not expanded", () => {
+      useCodeGraphStore.getState().collapseCommunity("auth");
+      expect(
+        useCodeGraphStore.getState().expandedCommunityIds.has("auth"),
+      ).toBe(false);
+    });
+
+    it("clearExpandedCommunities empties the set", () => {
+      useCodeGraphStore.getState().expandCommunity("auth");
+      useCodeGraphStore.getState().expandCommunity("api");
+      useCodeGraphStore.getState().clearExpandedCommunities();
+      expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(0);
+    });
+  });
+
   describe("reset", () => {
     it("returns every slice to its default", () => {
       const s = useCodeGraphStore.getState();
@@ -243,6 +284,7 @@ describe("codeGraphStore", () => {
       s.setHover("foo");
       s.toggleEdgeKind("Implements");
       s.setDepthFilter(1);
+      s.expandCommunity("auth");
 
       useCodeGraphStore.getState().reset();
       const after = useCodeGraphStore.getState();
@@ -258,6 +300,7 @@ describe("codeGraphStore", () => {
       expect(after.colorMode).toBe("topology");
       expect(after.complexityAvailable).toBe(false);
       expect(after.semanticZoomMode).toBe("auto");
+      expect(after.expandedCommunityIds.size).toBe(0);
       expect(after.selectedWorkspaceSlug).toBe("api");
     });
   });
