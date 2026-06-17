@@ -565,6 +565,11 @@ fn is_transient_error(error: &anyhow::Error) -> bool {
     })
 }
 
+// djinn:allow-oversize — the bulk of this file is the inline #[cfg(test)] suite
+// below. It is deliberately kept inline (not split into a sibling *_tests.rs):
+// memory_resolver_grep_guard skips test code by tracking the `#[cfg(test)] mod
+// tests {` brace block, and a #[path]-attached sibling file would be scanned as
+// production code, mis-flagging the resolve_memory_provider test call sites.
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
@@ -1536,6 +1541,20 @@ mod tests {
             },
             Expected {
                 id: "minimax-coding-plan",
+                fixed_family: Some(FormatFamily::Anthropic),
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: Some(64_000),
+            },
+            Expected {
+                id: "xiaomi-mimo",
+                fixed_family: Some(FormatFamily::Anthropic),
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: Some(64_000),
+            },
+            Expected {
+                id: "kimi-coding-plan",
                 fixed_family: Some(FormatFamily::Anthropic),
                 auth_shape: AuthShape::Bearer,
                 streaming: true,
