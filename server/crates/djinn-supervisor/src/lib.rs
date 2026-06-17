@@ -1748,33 +1748,6 @@ impl TaskRunSupervisor {
             TaskRunOutcome::LoopGuardTripped { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
         };
-        // On the cancellation path the host-bound RPC channel may already
-        // be torn down (the reader loop saw `Control(Cancel)` and the
-        // writer's `cancelled()` branch shut the write half).  In that
-        // case `update_task_run_status` returns a transport-level error
-        // and we must still produce an `Interrupted` `TaskRunReport` so
-        // the worker exits cleanly and the host's per-task-run dispatch
-        // can pair it with the `KubernetesRuntime::teardown` path.  When
-        // cancel is NOT set, an update_task_run_status failure stays
-        // fatal — that's a genuine RPC malfunction worth surfacing.
-        if let Err(e) = self
-            .services
-            .update_task_run_status(run_id.clone(), terminal_status)
-            .await
-        {
-            if self.services.cancel().is_cancelled() {
-                debug!(
-                    task_run_id = %run_id,
-                    error = %e,
-                    "update_task_run_status failed during cancellation; \
-                     proceeding with Interrupted report"
-                );
-            } else {
-                cleanup_cargo_target_run_dir(&run_id).await;
-                return Err(SupervisorError::UpdateTaskRunStatus(e));
-            }
-        }
-
         // IN-POD pre-PR verification (the double-compile fix). On a clean
         // `WorkerSubmitted` the worker has just committed to the task branch and
         // its private Cargo target dir (CARGO_TARGET_DIR) still holds the freshly
@@ -1823,6 +1796,47 @@ impl TaskRunSupervisor {
         } else {
             None
         };
+
+        // Flip `task_runs.status` to its terminal value ONLY AFTER the in-pod
+        // verification above has finished. The worker has already fired
+        // `submit_verification` (task → `verifying`) but the host has not yet
+        // received this report, so it has not spawned the host verification
+        // pipeline / registered the task in the `verifying_tasks` tracker. The
+        // coordinator's orphaned-`verifying` recovery sweep gates on task-run
+        // liveness (`task_runs.status = running AND ended_at IS NULL`) — so if we
+        // marked the run terminal BEFORE the (minutes-long) in-pod verify, that
+        // sweep would see no live run, hit its short grace, and recover the task
+        // back to `open` mid-verify — losing the verification result and looping
+        // the worker (observed: a task cycling worker→verifying→open repeatedly
+        // with `verification_failure_count = 0`). Keeping the run `Running`
+        // through in-pod verify keeps the liveness guard honest.
+        //
+        // On the cancellation path the host-bound RPC channel may already be torn
+        // down (the reader loop saw `Control(Cancel)` and the writer's
+        // `cancelled()` branch shut the write half). In that case
+        // `update_task_run_status` returns a transport-level error and we must
+        // still produce the report so the worker exits cleanly and the host's
+        // per-task-run dispatch can pair it with the
+        // `KubernetesRuntime::teardown` path. When cancel is NOT set, an
+        // `update_task_run_status` failure stays fatal — a genuine RPC
+        // malfunction worth surfacing.
+        if let Err(e) = self
+            .services
+            .update_task_run_status(run_id.clone(), terminal_status)
+            .await
+        {
+            if self.services.cancel().is_cancelled() {
+                debug!(
+                    task_run_id = %run_id,
+                    error = %e,
+                    "update_task_run_status failed during cancellation; \
+                     proceeding with Interrupted report"
+                );
+            } else {
+                cleanup_cargo_target_run_dir(&run_id).await;
+                return Err(SupervisorError::UpdateTaskRunStatus(e));
+            }
+        }
 
         cleanup_cargo_target_run_dir(&run_id).await;
 
