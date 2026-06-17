@@ -115,7 +115,11 @@ impl djinn_control_plane::bridge::RuntimeOps for RecordingRuntimeOps {
     async fn trigger_mirror_refresh(&self, _: &str) {}
     async fn apply_user_model_change(&self) {}
 
-    async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
+    async fn dispatch_verification_test(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<(), djinn_control_plane::bridge::RuntimeDispatchError> {
         Ok(())
     }
     async fn dispatch_verification(
@@ -124,7 +128,7 @@ impl djinn_control_plane::bridge::RuntimeOps for RecordingRuntimeOps {
         _: &str,
         _: &str,
         _: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), djinn_control_plane::bridge::RuntimeDispatchError> {
         Ok(())
     }
 
