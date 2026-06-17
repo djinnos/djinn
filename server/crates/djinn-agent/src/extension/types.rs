@@ -591,6 +591,17 @@ impl CodeGraphParams {
                 *opt = None;
             }
         }
+        // jc47: treat whitespace-only `current_head` the same as empty —
+        // chat-side LLMs occasionally emit `"  "` instead of `""` for unset
+        // fields, and we don't want a whitespace string to slip through and
+        // silently trigger staleness attachment against a meaningless caller
+        // commit. Trimmed-empty matches the contract documented on the field
+        // ("Empty / whitespace values are normalized to `None`").
+        fn clear_trimmed(opt: &mut Option<String>) {
+            if opt.as_deref().is_some_and(|s| s.trim().is_empty()) {
+                *opt = None;
+            }
+        }
         clear(&mut self.key);
         clear(&mut self.uid);
         clear(&mut self.name);
@@ -621,7 +632,7 @@ impl CodeGraphParams {
         clear(&mut self.level);
         clear(&mut self.target);
         clear(&mut self.tests);
-        clear(&mut self.current_head);
+        clear_trimmed(&mut self.current_head);
     }
 
     pub(super) fn resolved_offset(&self) -> usize {

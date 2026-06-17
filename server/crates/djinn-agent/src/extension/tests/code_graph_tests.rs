@@ -2243,8 +2243,7 @@ async fn code_graph_dispatch_neighbors_attaches_graph_staleness_when_caller_head
     .expect("neighbors params parse");
     params.normalize();
 
-    let value =
-        dispatch_with_staleness_stub(params, staleness_stub(Some("abc123"))).await;
+    let value = dispatch_with_staleness_stub(params, staleness_stub(Some("abc123"))).await;
 
     assert_eq!(value["key"], "symbol:root");
     let staleness = value
@@ -2267,8 +2266,7 @@ async fn code_graph_dispatch_neighbors_attaches_graph_staleness_when_caller_head
     .expect("neighbors params parse");
     params.normalize();
 
-    let value =
-        dispatch_with_staleness_stub(params, staleness_stub(Some("older-sha"))).await;
+    let value = dispatch_with_staleness_stub(params, staleness_stub(Some("older-sha"))).await;
 
     let staleness = value
         .get("graph_staleness")
@@ -2290,8 +2288,7 @@ async fn code_graph_dispatch_neighbors_omits_graph_staleness_without_caller_head
     .expect("neighbors params parse");
     params.normalize();
 
-    let value =
-        dispatch_with_staleness_stub(params, staleness_stub(Some("abc123"))).await;
+    let value = dispatch_with_staleness_stub(params, staleness_stub(Some("abc123"))).await;
 
     assert_eq!(value["key"], "symbol:root");
     assert!(
@@ -2317,8 +2314,7 @@ async fn code_graph_dispatch_neighbors_omits_graph_staleness_when_caller_head_bl
         "blank current_head must normalize to None"
     );
 
-    let value =
-        dispatch_with_staleness_stub(params, staleness_stub(Some("abc123"))).await;
+    let value = dispatch_with_staleness_stub(params, staleness_stub(Some("abc123"))).await;
 
     assert!(
         value.get("graph_staleness").is_none(),
@@ -2340,8 +2336,7 @@ async fn code_graph_dispatch_neighbors_graph_staleness_reports_unknown_when_cach
     .expect("neighbors params parse");
     params.normalize();
 
-    let value =
-        dispatch_with_staleness_stub(params, staleness_stub(None)).await;
+    let value = dispatch_with_staleness_stub(params, staleness_stub(None)).await;
 
     assert_eq!(value["key"], "symbol:root");
     let staleness = value

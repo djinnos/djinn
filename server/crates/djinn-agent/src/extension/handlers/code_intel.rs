@@ -279,10 +279,14 @@ pub(crate) async fn call_code_graph(
     // PR C2: pre-resolve key-bearing ops so the chat tool surfaces
     // `Ambiguous` / `NotFound` as structured JSON the model can act on,
     // instead of failing the call with a generic "not found" string.
-    if let Some(mut short_circuit) =
-        pre_resolve_chat_key(graph_ops.as_ref(), &ctx, &mut p).await?
-    {
-        attach_chat_graph_staleness(graph_ops.as_ref(), &ctx, caller_head.as_deref(), &mut short_circuit).await;
+    if let Some(mut short_circuit) = pre_resolve_chat_key(graph_ops.as_ref(), &ctx, &mut p).await? {
+        attach_chat_graph_staleness(
+            graph_ops.as_ref(),
+            &ctx,
+            caller_head.as_deref(),
+            &mut short_circuit,
+        )
+        .await;
         return Ok(short_circuit);
     }
 
@@ -303,7 +307,7 @@ pub(crate) async fn call_code_graph(
     );
     let timeout = code_graph_chat_dispatch_timeout();
     let inner = call_code_graph_inner(state, &mut p, &ctx, graph_ops.as_ref());
-    let mut result = {
+    let result = {
         use tracing::Instrument;
         tokio::time::timeout(timeout, inner)
             .instrument(span)
@@ -316,15 +320,12 @@ pub(crate) async fn call_code_graph(
                 ))
             })
     };
-    // wraw (jc47 mirror): on success, attach `graph_staleness` so the
-    // chat caller can see whether the served graph blob matches its
-    // current HEAD. Mirrors `attach_graph_staleness` on the
-    // control-plane side without forcing the chat extension to round
-    // trip through the typed `CodeGraphResponse` enum (the chat layer
-    // always returns `serde_json::Value`).
-    if let Ok(ref mut value) = result {
-        attach_chat_graph_staleness(graph_ops.as_ref(), &ctx, caller_head.as_deref(), value).await;
-    }
+    // Note: `graph_staleness` is now attached inside `call_code_graph_inner`
+    // on success when `p.current_head` is set. Tests that call
+    // `call_code_graph_inner` directly therefore observe the same chat-side
+    // response shape that end-to-end callers see. The short-circuit branch
+    // above also attaches staleness so both dispatch paths converge on the
+    // same additive field.
     let elapsed_ms = started.elapsed().as_millis() as u64;
     match &result {
         Ok(_) => tracing::info!(
@@ -1417,6 +1418,19 @@ pub(crate) async fn call_code_graph_inner(
             ));
         }
     };
+    // wraw (jc47 mirror): attach the additive `graph_staleness` object on
+    // the success path when the caller supplied a non-blank `current_head`.
+    // This intentionally runs inside `call_code_graph_inner` so unit tests
+    // that drive the chat dispatcher through this entry point observe the
+    // same response shape end-to-end callers do. The field is
+    // `skip_serializing_if` analogue here is "absent when caller didn't
+    // supply `current_head`" — see `attach_chat_graph_staleness`. The
+    // short-circuit path in `call_code_graph` attaches staleness
+    // independently because that path bypasses this function entirely.
+    let mut result = result;
+    if let Some(caller_head) = p.resolved_current_head() {
+        attach_chat_graph_staleness(graph_ops, ctx, Some(&caller_head), &mut result).await;
+    }
     Ok(result)
 }
 
