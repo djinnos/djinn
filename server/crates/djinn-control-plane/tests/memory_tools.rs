@@ -401,16 +401,50 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
     harness
         .call_tool(
             "memory_write",
-            json!({"project": project, "title": "Node A", "content": "links [[Node B]]", "type": "reference"}),
+            json!({"project": project, "title": "Node A", "content": "links [[Node B]] [[Node C]]", "type": "reference"}),
         )
         .await
         .expect("seed node A should dispatch");
+    harness
+        .call_tool(
+            "memory_write",
+            json!({"project": project, "title": "Node C", "content": "links [[Node B]] [[NonExistent]]", "type": "reference"}),
+        )
+        .await
+        .expect("seed node C should dispatch");
+    harness
+        .call_tool(
+            "memory_write",
+            json!({"project": project, "title": "Node D", "content": "isolated", "type": "reference"}),
+        )
+        .await
+        .expect("seed node D should dispatch");
 
     let graph = harness
         .call_tool("memory_graph", json!({"project": project}))
         .await
         .expect("memory_graph should dispatch");
     assert!(!graph["edges"].as_array().unwrap().is_empty());
+
+    let nodes = graph["nodes"].as_array().unwrap();
+    let node_c = nodes
+        .iter()
+        .find(|node| node["title"] == "Node C")
+        .expect("Node C should be present in graph");
+    assert_eq!(node_c["is_orphan"], false);
+    assert!(
+        node_c["broken_targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|target| target == "NonExistent")
+    );
+
+    let node_d = nodes
+        .iter()
+        .find(|node| node["title"] == "Node D")
+        .expect("Node D should be present in graph");
+    assert_eq!(node_d["is_orphan"], true);
 }
 
 #[tokio::test]
