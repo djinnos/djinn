@@ -1,4 +1,3 @@
-/* eslint-disable react-refresh/only-export-components -- harvesting helpers (`extractIdsFromToolResult`, `fuzzyResolveIds`, `harvestMessageToolCalls`, `isCodeGraphToolCallName`) are exported for focused unit tests. */
 /**
  * useChatToolCallHarvest — D5 producer for the `codeGraphStore.citationIds`
  * highlight layer.
@@ -29,7 +28,8 @@
 
 import { useEffect, useRef } from "react";
 
-import { fetchSnapshot, parseSnapshotResponse } from "@/api/codeGraph";
+import { fetchSnapshot } from "@/api/codeGraph";
+import { parseSnapshotResponse } from "@/lib/codeGraphAdapter";
 import { useChatStore, type ChatMessage } from "@/stores/chatStore";
 import { useCodeGraphStore } from "@/stores/codeGraphStore";
 
@@ -312,21 +312,18 @@ export function useChatToolCallHarvest(
       const messages = state.messagesBySession[sessionId] ?? [];
       if (messages.length === 0) return;
 
-      // Find the trailing assistant message(s) that haven't been
-      // processed yet. We diff on message id; if the last message
-      // id is unchanged we've already harvested it.
+      // Use the last-processed message id as a re-fire gate: if the
+      // trailing message id is unchanged there's no new content to
+      // harvest, so skip the snapshot fetch entirely.
       const lastId = lastProcessedMessageIdRef.current;
-      let startIndex = 0;
-      if (lastId !== null) {
-        const lastIndex = messages.findIndex((m) => m.id === lastId);
-        startIndex = lastIndex >= 0 ? lastIndex + 1 : 0;
-      }
+      const trailingId = messages[messages.length - 1]?.id ?? null;
+      if (lastId !== null && lastId === trailingId) return;
 
-      const newMessages = messages.slice(startIndex);
-      if (newMessages.length === 0) return;
-
+      // When there IS new content, harvest across the entire session
+      // so `citationIds` reflects the accumulated union of all
+      // code_graph tool results, not just the latest message.
       const harvested = new Set<string>();
-      for (const message of newMessages) {
+      for (const message of messages) {
         // We only act on assistant turns — user messages never carry
         // tool calls.
         if (message.role !== "assistant") continue;

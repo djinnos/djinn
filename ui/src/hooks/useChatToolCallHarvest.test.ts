@@ -136,9 +136,11 @@ function resetStores(): void {
   fetchSnapshotMock.mockResolvedValue(SNAPSHOT);
 }
 
-function mountHarvest(projectSlug: string | null = PROJECT) {
-  return renderHook(({ slug }: { slug: string | null }) =>
-    useChatToolCallHarvest({ projectSlug: slug }),
+function mountHarvest(slug: string | null = PROJECT) {
+  return renderHook(
+    ({ slug }: { slug: string | null }) =>
+      useChatToolCallHarvest({ projectSlug: slug }),
+    { initialProps: { slug } },
   );
 }
 
