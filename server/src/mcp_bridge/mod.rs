@@ -9,8 +9,8 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use djinn_control_plane::bridge::{
-    GitOps, ProvisionServiceRequest, ProvisionedService, RuntimeOps, SemanticQueryEmbedding,
-    TaskrunJobRef,
+    GitOps, ProvisionServiceRequest, ProvisionedService, RuntimeDispatchError, RuntimeOps,
+    SemanticQueryEmbedding, TaskrunJobRef,
 };
 use djinn_git::{GitActorHandle, GitError};
 
@@ -34,6 +34,32 @@ pub(crate) use self::snapshot::build_snapshot_payload;
 // ── AppState → RuntimeOps + GitOps + mcp_state() ─────────────────────────────
 
 use crate::server::AppState;
+
+/// Map a `djinn_runtime::WarmerError` (raised by the K8s graph warmer on
+/// the dispatch path) into the bridge-side [`RuntimeDispatchError`],
+/// preserving the structured `ImageNotReady` fields so callers (the
+/// agent slot actor and the MCP verification-test tool) can implement a
+/// bounded requeue without parsing strings.
+///
+/// Lives here (not in the `djinn-control-plane` bridge module) so the
+/// bridge stays free of a `djinn-runtime` dependency; the server binary
+/// already depends on both crates.
+fn map_warmer_error(e: djinn_runtime::WarmerError) -> RuntimeDispatchError {
+    match e {
+        djinn_runtime::WarmerError::ImageNotReady {
+            project_id,
+            image_status,
+            tag,
+            transient,
+        } => RuntimeDispatchError::ImageNotReady {
+            project_id,
+            image_status,
+            tag,
+            transient,
+        },
+        djinn_runtime::WarmerError::Backend(msg) => RuntimeDispatchError::Backend(msg),
+    }
+}
 
 #[async_trait]
 impl RuntimeOps for AppState {
@@ -70,14 +96,21 @@ impl RuntimeOps for AppState {
         &self,
         test_id: &str,
         project_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), RuntimeDispatchError> {
         // The K8s graph warmer owns the one-shot Job dispatcher + project-image
         // resolution; the in-process warmer's default impl errors (no kube).
-        self.graph_warmer()
+        // The structured `ImageNotReady` fields are preserved across the
+        // bridge so the MCP verification-test tool can requeue on transient
+        // not-ready conditions.
+        match self
+            .graph_warmer()
             .await
             .dispatch_verification_test(test_id, project_id)
             .await
-            .map_err(|e| e.to_string())
+        {
+            Ok(()) => Ok(()),
+            Err(e) => Err(map_warmer_error(e)),
+        }
     }
 
     async fn dispatch_verification(
@@ -86,14 +119,21 @@ impl RuntimeOps for AppState {
         project_id: &str,
         task_branch: &str,
         target_branch: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), RuntimeDispatchError> {
         // The K8s graph warmer owns the one-shot Job dispatcher + project-image
         // resolution; the in-process warmer's default impl errors (no kube).
-        self.graph_warmer()
+        // The structured `ImageNotReady` fields are preserved across the
+        // bridge so the agent slot actor can requeue on transient
+        // not-ready conditions instead of erroring the verification run.
+        match self
+            .graph_warmer()
             .await
             .dispatch_verification(run_id, project_id, task_branch, target_branch)
             .await
-            .map_err(|e| e.to_string())
+        {
+            Ok(()) => Ok(()),
+            Err(e) => Err(map_warmer_error(e)),
+        }
     }
 
     async fn provision_backing_service(

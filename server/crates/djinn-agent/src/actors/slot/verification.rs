@@ -407,6 +407,29 @@ async fn run_verification_on_host(
 /// compiles + runs the project's verification commands.
 const VERIFICATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Initial backoff for the image-readiness requeue loop in
+/// [`run_verification_in_pod`]. A short initial value (5s) lets a quick
+/// rebuild (typical mirror-fetch + image-controller round-trip) land before
+/// we burn a second DB read; the loop doubles up to a cap below.
+const IMAGE_READINESS_INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Maximum backoff between image-readiness retries. Capped at 60s so a long
+/// rebuild doesn't push the requeue cadence into multi-minute silent windows
+/// — the next tick still re-checks the dispatch image status within a
+/// minute.
+const IMAGE_READINESS_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Total bound on how long [`run_verification_in_pod`] will keep retrying
+/// dispatch while the catalog image is transiently `building` (or
+/// not-yet-assigned). After this elapsed time the verification is marked
+/// `error` with a clear message; the surrounding verification pipeline
+/// timeout (`MIN_PIPELINE_TIMEOUT_SECS`) is the outer bound, so 10 minutes
+/// here is well within the 1-hour pipeline budget. Sized to comfortably
+/// outlast a typical image rebuild (a few minutes; see
+/// `[[cases/plan-a-warm-cargo-base-reuse-validated-working-v0-6-11-0-6-12]]`)
+/// while still failing closed if the image genuinely never lands.
+const IMAGE_READINESS_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Production (Kubernetes) verification — dispatch a one-shot Job in the
 /// project's image and poll its `verification_runs` row.
 ///
@@ -441,6 +464,230 @@ fn project_verification_semaphore(project_id: &str) -> Arc<tokio::sync::Semaphor
         .clone()
 }
 
+/// Dispatch a verification Job, retrying on transient `ImageNotReady` until
+/// the bounded budget elapses or the image becomes ready.
+///
+/// The pre-fix behavior marked the `verification_runs` row as `error` the
+/// moment the catalog image was observed `building` — typically a few-second
+/// transient window during a routine rebuild (see [[ga7l]]). A verification
+/// should not terminally fail a task for a transient image condition; the
+/// whole point of having a shared catalog image is that the image is
+/// reusable, so a momentary mid-rebuild is not the verification's problem
+/// to surface.
+///
+/// Strategy: when the runtime returns `ImageNotReady { transient: true, .. }`
+/// we DO NOT mark the row as `error` — we leave it in `pending` and re-poll
+/// `resolve_dispatch_image` with exponential backoff (capped). When the
+/// image lands (catalog image is `ready` again) the dispatch is retried
+/// transparently. After [`IMAGE_READINESS_TOTAL_BUDGET`] the retry loop
+/// gives up and surfaces a clear terminal error: this preserves the
+/// backstop the acceptance criteria require ("a real, persistent
+/// missing-image still surfaces a clear error after the bounded wait").
+///
+/// Returns `Ok(())` on successful dispatch (the Job is created in the
+/// cluster). Returns `Err` (a clear terminal error) for:
+/// * `ImageNotReady { transient: false, .. }` (project has no catalog
+///   image assigned at all — operator must fix configuration),
+/// * `Backend(_)` (K8s API / dispatcher failure),
+/// * `ImageNotReady { transient: true, .. }` after the bounded budget
+///   elapses (image genuinely never landed in time).
+///
+/// The verification `_run_id` row is updated in place on the terminal
+/// failure path so the poll loop can observe a clear status without
+/// re-querying the row.
+/// Outcome of [`dispatch_verification_inner`]. The caller is responsible
+/// for persisting the row status if the outcome is [`DispatchOutcome::Error`].
+#[derive(Debug)]
+enum DispatchOutcome {
+    /// The dispatch succeeded — the Job is created in the cluster.
+    Dispatched,
+    /// A terminal error. The caller should mark the verification row as
+    /// `error` with this message, then propagate the error.
+    Error(String),
+}
+
+/// Inner retry loop for verification dispatch — pure control flow with no
+/// DB writes. The caller injects a `mark_error` callback so this function
+/// can be unit-tested without a live database pool (which is incompatible
+/// with `tokio::test(start_paused = true)` because sqlx's connection pool
+/// acquire timeout fires instantly when the clock is frozen).
+async fn dispatch_verification_inner<F, Fut>(
+    runtime_ops: &dyn djinn_control_plane::bridge::RuntimeOps,
+    run_id: &str,
+    project_id: &str,
+    task_branch: &str,
+    target_branch: &str,
+    mark_error: &mut F,
+) -> DispatchOutcome
+where
+    F: FnMut(&str) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    // First attempt — most verifications dispatch on the first try (image
+    // is already ready). Only the transient not-ready path takes the
+    // retry loop below.
+    match runtime_ops
+        .dispatch_verification(run_id, project_id, task_branch, target_branch)
+        .await
+    {
+        Ok(()) => DispatchOutcome::Dispatched,
+        Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
+            project_id: err_project_id,
+            image_status,
+            tag,
+            transient,
+        }) => {
+            let project_id_owned = err_project_id.clone();
+            if !transient {
+                // Permanent: project has no catalog image assigned. The
+                // operator needs to assign one. Mark the row errored
+                // immediately so the poll loop sees a clear terminal
+                // status and the surrounding pipeline surfaces a clear
+                // failure to the worker.
+                let msg = format!(
+                    "verification dispatch: project {err_project_id} has no catalog image assigned \
+                     (image_status: {image_status}); assign a catalog image before verifying"
+                );
+                mark_error(&msg).await;
+                return DispatchOutcome::Error(msg);
+            }
+            // Transient: catalog image is being rebuilt (or first-time
+            // assignment is pending). Requeue with backoff until the
+            // image is ready or the bounded budget elapses. The row
+            // stays in `pending` so the poll loop keeps waiting.
+            let started = std::time::Instant::now();
+            let mut backoff = IMAGE_READINESS_INITIAL_BACKOFF;
+            let mut attempt: u32 = 0;
+            loop {
+                if started.elapsed() >= IMAGE_READINESS_TOTAL_BUDGET {
+                    let msg = format!(
+                        "verification dispatch: project {err_project_id} image not ready after \
+                         {}s (last status: {image_status}{}); the catalog image is still \
+                         rebuilding; verify manually once it lands",
+                        IMAGE_READINESS_TOTAL_BUDGET.as_secs(),
+                        tag.as_deref()
+                            .map(|t| format!(", tag: {t}"))
+                            .unwrap_or_default()
+                    );
+                    mark_error(&msg).await;
+                    return DispatchOutcome::Error(msg);
+                }
+                attempt += 1;
+                tracing::info!(
+                    run_id = %run_id,
+                    project_id = %err_project_id,
+                    attempt = attempt,
+                    backoff_ms = backoff.as_millis() as u64,
+                    image_status = %image_status,
+                    "verification dispatch: image not ready, retrying"
+                );
+                tokio::time::sleep(backoff).await;
+                match runtime_ops
+                    .dispatch_verification(run_id, &project_id_owned, task_branch, target_branch)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            run_id = %run_id,
+                            project_id = %project_id,
+                            attempt = attempt,
+                            "verification dispatch: image became ready, dispatched"
+                        );
+                        return DispatchOutcome::Dispatched;
+                    }
+                    Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
+                        transient: false,
+                        ..
+                    }) => {
+                        // The image went from `building` to
+                        // "no catalog image assigned" mid-retry — same
+                        // permanent-failure path as above. Avoid
+                        // bouncing on the backoff loop.
+                        let msg = format!(
+                            "verification dispatch: project {err_project_id} has no catalog \
+                             image assigned (image_status: {image_status})"
+                        );
+                        mark_error(&msg).await;
+                        return DispatchOutcome::Error(msg);
+                    }
+                    Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
+                        image_status: new_status,
+                        ..
+                    }) => {
+                        // Still not ready (probably still building,
+                        // maybe just flipped to `failed`). Log and
+                        // continue backing off; the outer elapsed
+                        // check enforces the budget.
+                        tracing::debug!(
+                            run_id = %run_id,
+                            project_id = %err_project_id,
+                            attempt = attempt,
+                            image_status = %new_status,
+                            "verification dispatch: image still not ready; continuing backoff"
+                        );
+                    }
+                    Err(djinn_control_plane::bridge::RuntimeDispatchError::Backend(e)) => {
+                        let msg = format!(
+                            "verification dispatch: runtime backend error after {attempt} \
+                             requeue attempts: {e}"
+                        );
+                        mark_error(&msg).await;
+                        return DispatchOutcome::Error(msg);
+                    }
+                }
+                // Exponential backoff with cap. Keep doubling until we
+                // hit the cap; the outer elapsed check stops the loop
+                // regardless.
+                backoff = (backoff * 2).min(IMAGE_READINESS_MAX_BACKOFF);
+            }
+        }
+        Err(djinn_control_plane::bridge::RuntimeDispatchError::Backend(e)) => {
+            let msg = format!("verification dispatch failed: {e}");
+            mark_error(&msg).await;
+            DispatchOutcome::Error(msg)
+        }
+    }
+}
+
+async fn dispatch_verification_with_retry(
+    runtime_ops: &dyn djinn_control_plane::bridge::RuntimeOps,
+    run_id: &str,
+    project_id: &str,
+    task_branch: &str,
+    target_branch: &str,
+    run_repo: &djinn_db::VerificationRunRepository,
+) -> anyhow::Result<()> {
+    let run_id_owned = run_id.to_string();
+    let mut mark_error = |msg: &str| {
+        let run_id_owned = run_id_owned.clone();
+        let msg_owned = msg.to_string();
+        async move {
+            let _ = run_repo
+                .complete(
+                    &run_id_owned,
+                    djinn_db::VerificationRunStatus::ERROR,
+                    "[]",
+                    "[]",
+                    Some(&msg_owned),
+                )
+                .await;
+        }
+    };
+    match dispatch_verification_inner(
+        runtime_ops,
+        run_id,
+        project_id,
+        task_branch,
+        target_branch,
+        &mut mark_error,
+    )
+    .await
+    {
+        DispatchOutcome::Dispatched => Ok(()),
+        DispatchOutcome::Error(msg) => anyhow::bail!(msg),
+    }
+}
+
 async fn run_verification_in_pod(
     task: &djinn_core::models::Task,
     app_state: &AgentContext,
@@ -473,21 +720,22 @@ async fn run_verification_in_pod(
     // Dispatch the one-shot Job (project image → clone target → fetch+checkout
     // task branch → run verify_commit → write outcome to the row). On dispatch
     // failure mark the row errored so the poll loop sees a terminal state.
-    if let Err(e) = runtime_ops
-        .dispatch_verification(&run_id, &task.project_id, &task_branch, &target_branch)
-        .await
-    {
-        let _ = run_repo
-            .complete(
-                &run_id,
-                djinn_db::VerificationRunStatus::ERROR,
-                "[]",
-                "[]",
-                Some(&e),
-            )
-            .await;
-        anyhow::bail!("verification dispatch failed: {e}");
-    }
+    //
+    // `dispatch_verification_with_retry` handles the transient
+    // `ImageNotReady` requeue itself — including keeping the row in
+    // `pending` (NOT `error`) while it waits. Only persistent failures
+    // (permanent missing image, K8s backend error, bounded budget
+    // exhaustion) propagate out of this call and result in a terminal
+    // ERROR row + bail.
+    dispatch_verification_with_retry(
+        runtime_ops.as_ref(),
+        &run_id,
+        &task.project_id,
+        &task_branch,
+        &target_branch,
+        &run_repo,
+    )
+    .await?;
 
     // Poll the row until terminal. The outer pipeline timeout caps total wait.
     loop {
@@ -862,403 +1110,5 @@ fn format_verification_failure_feedback(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_helpers::{
-        agent_context_from_db, create_test_db, create_test_epic, create_test_project,
-        create_test_task, test_events,
-    };
-    use crate::verification::service::VerificationResult;
-    use djinn_core::commands::CommandResult;
-    use djinn_core::models::TransitionAction;
-    use djinn_db::{DispatchPauseRepository, DispatchPauseTarget, TaskRepository};
-    use std::time::Duration;
-    use tokio_util::sync::CancellationToken;
-
-    async fn tick_spawned_verification() {
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::ZERO).await;
-        tokio::task::yield_now().await;
-    }
-
-    async fn tick_spawned_verification_yield_only() {
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-    }
-
-    fn dispatch_pause() -> djinn_core::models::DispatchPause {
-        djinn_core::models::DispatchPause {
-            paused_by: "admin".to_owned(),
-            paused_at: "2026-06-12T00:00:00Z".to_owned(),
-            reason: "maintenance".to_owned(),
-            expires_at: None,
-        }
-    }
-
-    fn make_result(stdout: &str, stderr: &str) -> VerificationResult {
-        VerificationResult {
-            passed: false,
-            cached: false,
-            setup_results: vec![],
-            verification_results: vec![CommandResult {
-                name: "clippy".into(),
-                command: "cargo clippy --workspace -- -D warnings".into(),
-                exit_code: 101,
-                stdout: stdout.into(),
-                stderr: stderr.into(),
-                duration_ms: 5000,
-            }],
-            total_duration_ms: 5000,
-        }
-    }
-
-    #[test]
-    fn feedback_truncates_large_stderr() {
-        let huge_stderr = "e".repeat(10_000);
-        let result = make_result("", &huge_stderr);
-        let feedback = format_verification_failure_feedback(&result);
-
-        assert!(
-            feedback.len() < 7_000,
-            "feedback should be under 7k chars, got {}",
-            feedback.len()
-        );
-        assert!(feedback.contains("bytes omitted") || feedback.contains("truncated"));
-        assert!(feedback.contains("clippy"));
-        assert!(feedback.contains("cargo clippy --workspace -- -D warnings"));
-        assert!(feedback.contains("exit code 101"));
-    }
-
-    #[test]
-    fn feedback_not_truncated_when_small() {
-        let result = make_result("ok", "error[E0599]: something");
-        let feedback = format_verification_failure_feedback(&result);
-
-        assert!(!feedback.contains("omitted"));
-        assert!(feedback.contains("error[E0599]: something"));
-    }
-
-    #[test]
-    fn distill_keeps_error_lines_and_drops_noise() {
-        // A long build log where the actionable errors are buried in the middle.
-        let mut lines = vec!["   Compiling foo v0.1.0".to_string()];
-        for i in 0..500 {
-            lines.push(format!("   Compiling crate_{i} v0.1.0"));
-        }
-        lines.push("error[E0308]: mismatched types".to_string());
-        lines.push("   --> src/lib.rs:42:5".to_string());
-        lines.push("    |".to_string());
-        for i in 0..500 {
-            lines.push(format!("    warning noise filler line {i}"));
-        }
-        let text = lines.join("\n");
-
-        let distilled = distill_error_lines(&text);
-        // The buried compiler error and its context line survive.
-        assert!(distilled.contains("error[E0308]: mismatched types"));
-        assert!(distilled.contains("src/lib.rs:42:5"));
-        // The vast majority of plain "Compiling" noise is dropped.
-        assert!(
-            !distilled.contains("Compiling crate_250"),
-            "noise line should be dropped"
-        );
-        // And it stays well under the distillation cap (and the 16KB budget).
-        assert!(distilled.len() <= MAX_DISTILLED_CHARS + 200);
-    }
-
-    #[test]
-    fn distill_falls_back_to_truncation_when_no_error_lines() {
-        // No recognizable error tokens → fall back to head+tail truncation so we
-        // never lose everything.
-        let text = "a".repeat(10_000);
-        let distilled = distill_error_lines(&text);
-        assert!(distilled.len() < 7_000);
-        assert!(distilled.contains("truncated") || distilled.contains("omitted"));
-    }
-
-    #[test]
-    fn distill_empty_is_empty() {
-        assert_eq!(distill_error_lines(""), "");
-        assert_eq!(distill_error_lines("   \n  \n"), "");
-    }
-
-    #[test]
-    fn feedback_truncates_large_stdout() {
-        let huge_stdout = "o".repeat(10_000);
-        let result = make_result(&huge_stdout, "small error");
-        let feedback = format_verification_failure_feedback(&result);
-
-        assert!(feedback.contains("bytes omitted") || feedback.contains("truncated"));
-        assert!(feedback.len() < 7_000);
-    }
-
-    fn setup_verifying_task_with_count_blocking(
-        count: i64,
-    ) -> (TaskRepository, String, AgentContext) {
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("build runtime");
-                rt.block_on(async move {
-                    let db = create_test_db();
-                    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-                    let project = create_test_project(&db).await;
-                    let epic = create_test_epic(&db, &project.id).await;
-                    let task = create_test_task(&db, &project.id, &epic.id).await;
-                    let task_repo = TaskRepository::new(db.clone(), test_events());
-
-                    task_repo
-                        .transition(
-                            &task.id,
-                            TransitionAction::Start,
-                            "test",
-                            "system",
-                            None,
-                            None,
-                        )
-                        .await
-                        .expect("transition to in_progress");
-                    task_repo
-                        .transition(
-                            &task.id,
-                            TransitionAction::SubmitVerification,
-                            "test",
-                            "system",
-                            None,
-                            None,
-                        )
-                        .await
-                        .expect("transition to verifying");
-
-                    if count > 0 {
-                        task_repo
-                            .set_verification_failure_count(&task.id, count)
-                            .await
-                            .expect("set verification_failure_count");
-                    }
-
-                    (task_repo, task.id, app_state)
-                })
-            })
-            .join()
-            .expect("thread panicked")
-        })
-    }
-
-    async fn setup_verifying_task_with_count(count: i64) -> (TaskRepository, String, AgentContext) {
-        let db = create_test_db();
-        let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-        let project = create_test_project(&db).await;
-        let epic = create_test_epic(&db, &project.id).await;
-        let task = create_test_task(&db, &project.id, &epic.id).await;
-        let task_repo = TaskRepository::new(db.clone(), test_events());
-
-        task_repo
-            .transition(
-                &task.id,
-                TransitionAction::Start,
-                "test",
-                "system",
-                None,
-                None,
-            )
-            .await
-            .expect("transition to in_progress");
-        task_repo
-            .transition(
-                &task.id,
-                TransitionAction::SubmitVerification,
-                "test",
-                "system",
-                None,
-                None,
-            )
-            .await
-            .expect("transition to verifying");
-
-        if count > 0 {
-            task_repo
-                .set_verification_failure_count(&task.id, count)
-                .await
-                .expect("set verification_failure_count");
-        }
-
-        (task_repo, task.id, app_state)
-    }
-
-    #[test]
-    fn compute_pipeline_timeout_returns_minimum_floor() {
-        // Post-P8 cut-over the environment-config schema does not model a
-        // pipeline-level timeout, so every project gets the floor.
-        let timeout = compute_pipeline_timeout();
-        assert_eq!(timeout, Duration::from_secs(MIN_PIPELINE_TIMEOUT_SECS));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn spawn_verification_times_out_deterministically_and_releases_task() {
-        let (_task_repo, task_id, app_state) = setup_verifying_task_with_count_blocking(0);
-        let timeout = Duration::from_secs(5);
-
-        app_state.register_verification(&task_id);
-        let background = spawn_verification_with_timeout(
-            task_id.clone(),
-            app_state.clone(),
-            timeout,
-            std::future::pending::<anyhow::Result<()>>(),
-        );
-        tick_spawned_verification().await;
-
-        assert!(app_state.has_verification(&task_id));
-
-        tokio::time::advance(timeout - Duration::from_secs(1)).await;
-        tick_spawned_verification().await;
-        assert!(
-            app_state.has_verification(&task_id),
-            "should still be verifying before timeout"
-        );
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tick_spawned_verification().await;
-        background.await.expect("background task completed");
-
-        assert!(
-            !app_state.has_verification(&task_id),
-            "verification should be released after timeout"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn spawn_verification_defers_without_registering_when_global_pause_is_active() {
-        let (_task_repo, task_id, app_state) = setup_verifying_task_with_count(0).await;
-        let pause_repo =
-            DispatchPauseRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-        pause_repo
-            .pause(DispatchPauseTarget::global(), dispatch_pause())
-            .await
-            .expect("pause dispatch globally");
-
-        spawn_verification(
-            task_id.clone(),
-            "/unused/project/path".to_owned(),
-            app_state.clone(),
-        );
-        tick_spawned_verification_yield_only().await;
-        tick_spawned_verification_yield_only().await;
-
-        assert!(
-            !app_state.has_verification(&task_id),
-            "global dispatch pause must prevent registering/spawning host verification work"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn aborting_verification_task_releases_tracker_before_timeout() {
-        let (_task_repo, task_id, app_state) = setup_verifying_task_with_count_blocking(0);
-        let timeout = Duration::from_secs(60);
-
-        app_state.register_verification(&task_id);
-        let background = spawn_verification_with_timeout(
-            task_id.clone(),
-            app_state.clone(),
-            timeout,
-            std::future::pending::<anyhow::Result<()>>(),
-        );
-
-        tick_spawned_verification().await;
-        assert!(app_state.has_verification(&task_id));
-
-        background.abort();
-        // JoinError is expected when we just aborted the task — the only
-        // outcome we care about is the registration guard running. Drop the
-        // join error intentionally.
-        let _ = background.await;
-
-        assert!(!app_state.has_verification(&task_id));
-
-        tokio::time::advance(timeout - Duration::from_secs(1)).await;
-        tick_spawned_verification().await;
-        assert!(!app_state.has_verification(&task_id));
-    }
-
-    #[tokio::test]
-    async fn handle_verification_failure_first_failure_goes_open() {
-        let (task_repo, task_id, app_state) = setup_verifying_task_with_count(0).await;
-        let feedback = "first failure feedback";
-        handle_verification_failure(&task_id, feedback, &task_repo, &app_state).await;
-
-        let task = task_repo
-            .get(&task_id)
-            .await
-            .expect("get task")
-            .expect("task exists");
-        assert_eq!(task.status, "open");
-
-        let activity = task_repo
-            .list_activity(&task_id)
-            .await
-            .expect("list activity");
-        let verification_comment = activity
-            .iter()
-            .find(|e| e.actor_role == "verification" && e.event_type == "comment")
-            .expect("verification comment present");
-        let payload: serde_json::Value =
-            serde_json::from_str(&verification_comment.payload).expect("json payload");
-        assert_eq!(payload["body"], feedback);
-    }
-
-    #[tokio::test]
-    async fn handle_verification_failure_second_failure_still_goes_open() {
-        let (task_repo, task_id, app_state) = setup_verifying_task_with_count(1).await;
-        handle_verification_failure(&task_id, "second failure", &task_repo, &app_state).await;
-        let task = task_repo
-            .get(&task_id)
-            .await
-            .expect("get task")
-            .expect("task exists");
-        assert_eq!(task.status, "open");
-    }
-
-    #[tokio::test]
-    async fn handle_verification_failure_threshold_escalates_directly() {
-        let (task_repo, task_id, app_state) = setup_verifying_task_with_count(2).await;
-        handle_verification_failure(&task_id, "third failure", &task_repo, &app_state).await;
-        let task = task_repo
-            .get(&task_id)
-            .await
-            .expect("get task")
-            .expect("task exists");
-        assert_eq!(task.status, "needs_lead_intervention");
-
-        let activity = task_repo
-            .list_activity(&task_id)
-            .await
-            .expect("list activity");
-        let statuses: Vec<serde_json::Value> = activity
-            .iter()
-            .filter(|e| e.event_type == "status_changed")
-            .map(|e| serde_json::from_str(&e.payload).expect("status payload json"))
-            .collect();
-        // After setup, we should NOT see an intermediate open status
-        // when escalating directly to Lead; the transition should be verifying->needs_lead_intervention
-        assert!(!statuses.iter().any(|p| p["to_status"] == "open"));
-        assert!(
-            statuses
-                .iter()
-                .any(|p| p["to_status"] == "needs_lead_intervention")
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_verification_failure_past_threshold_escalates() {
-        let (task_repo, task_id, app_state) = setup_verifying_task_with_count(5).await;
-        handle_verification_failure(&task_id, "many failures", &task_repo, &app_state).await;
-        let task = task_repo
-            .get(&task_id)
-            .await
-            .expect("get task")
-            .expect("task exists");
-        assert_eq!(task.status, "needs_lead_intervention");
-    }
-}
+#[path = "verification_tests.rs"]
+mod tests;
