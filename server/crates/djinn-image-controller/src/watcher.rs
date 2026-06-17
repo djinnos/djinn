@@ -301,6 +301,19 @@ async fn handle_event(
             // gate clears without waiting for the next mirror-fetch tick.
             // Fire-and-forget: the warmer's own single-flight guard + DB
             // freshness check make duplicate calls cheap.
+            //
+            // Note: the warm coalescer (`K8sGraphWarmer::trigger`) now
+            // ALSO consults the cluster (apiserver) for any
+            // non-terminal warm Job for the same project — see
+            // `WarmJobLister`. This closes the cross-process race
+            // where a main-tip-advance trigger from `mirror_fetcher`
+            // and a post-build trigger from this watcher fire close
+            // together during a rolling update, and used to spawn
+            // two concurrent warm Jobs that lock-contended on
+            // `/cache/cargo-target/<project>`. The watcher is the
+            // second of the two entry points the cluster lister
+            // covers; we do not need to dedupe here because the
+            // warmer does it for us.
             if let Some(warmer) = graph_warmer {
                 warmer.trigger(&project_id).await;
                 info!(
@@ -419,6 +432,16 @@ async fn handle_image_event(
             // Fan graph warming out to every project on this shared image so
             // their per-project canonical graph (which runs inside the now-
             // ready image) is built and the dispatch gate clears.
+            //
+            // Each `warmer.trigger` call is a no-op if a non-terminal
+            // warm Job for the project already exists in the cluster
+            // (the `WarmJobLister` cluster check in
+            // `K8sGraphWarmer::trigger` is the cross-process source of
+            // truth), so this fan-out is safe to call for many
+            // projects back-to-back: the duplicates coalesce
+            // server-side rather than dispatching N warm Jobs that
+            // would each acquire the same `/cache/cargo-target/<project>`
+            // lock.
             if let Some(warmer) = graph_warmer {
                 match image_repo.projects_using(image_id).await {
                     Ok(project_ids) => {

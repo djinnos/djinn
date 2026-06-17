@@ -105,19 +105,14 @@ elif [ -f yarn.lock ]; then
 elif [ -f package-lock.json ]; then
   ( npm ci || npm install ) || true
 fi
-# Warm the cargo target cache from main so verification/task-run pods seed a
-# private run dir from it and recompile only their delta incrementally — the
-# CI-style fast path (cf. Swatinem/rust-cache: deps + main artifacts prebuilt,
-# restored clean, then incremental). Run the SAME work verification runs so the
-# base is actually reusable (matching fingerprints/artifacts). Gated on
-# Cargo.toml so non-Rust repos are untouched; `|| true` so a compile failure
-# never aborts the graph warm above. CARGO_INCREMENTAL=1 (from warm_cache_env_vars)
-# makes the base carry main's incremental state.
-if [ -f Cargo.toml ]; then
-  ( cargo clippy --workspace --all-targets --all-features \
-      || cargo build --workspace --all-targets ) || true
-  cargo test --workspace --all-targets --all-features --no-run || true
-fi
+# The cargo target base is warmed by `warm-graph` itself (in the worker), NOT
+# here: the worker normalizes tracked-file mtimes to commit times — the SAME
+# normalization verification applies before it compiles — then compiles the
+# cargo workspace into the warm base. Doing it in this shell wrapper (with
+# clone-time mtimes, and gated on a root `Cargo.toml` that djinn's `server/`
+# workspace doesn't have) produced a base whose cargo fingerprints never matched
+# verification's tree, so verification recompiled cold every run. See
+# `warm_cargo_target_base` in djinn-agent-worker.
 exec {bin} warm-graph "{project_id}"
 "#,
         mirror_path = mirror_path,
@@ -419,17 +414,13 @@ mod tests {
             cmd[2]
         );
         assert!(cmd[2].contains("pnpm install"));
-        // The warm pod pre-compiles the cargo target cache from main (gated on
-        // Cargo.toml) so verification/task-run pods reuse it incrementally.
-        // Must run the SAME work verification runs so the base is reusable.
+        // The cargo target base is warmed inside `warm-graph` (the worker), where
+        // mtimes are normalized to match verification — NOT in this shell wrapper.
+        // The old in-shell `cargo` step gated on a root `Cargo.toml` djinn's
+        // `server/` workspace lacks, so it never ran; guard against its return.
         assert!(
-            cmd[2].contains("if [ -f Cargo.toml ]"),
-            "warm must gate cargo compile on Cargo.toml: {}",
-            cmd[2]
-        );
-        assert!(
-            cmd[2].contains("cargo clippy --workspace --all-targets --all-features"),
-            "warm must run the same clippy verification runs: {}",
+            !cmd[2].contains("cargo clippy"),
+            "cargo warm must live in the worker, not the warm-Job shell: {}",
             cmd[2]
         );
 
@@ -472,9 +463,9 @@ mod tests {
             envs.get("CARGO_TARGET_DIR").copied(),
             Some("/cache/cargo-target/proj-xyz"),
         );
-        // Warm base is now incremental-enabled so it carries main's incremental
-        // compiler state for verification/task-run pods to reuse.
-        assert_eq!(envs.get("CARGO_INCREMENTAL").copied(), Some("1"));
+        // CARGO_INCREMENTAL=0: the repo pins rustc-wrapper=sccache, which forbids
+        // incremental. Reuse is cargo freshness over the warm base + sccache.
+        assert_eq!(envs.get("CARGO_INCREMENTAL").copied(), Some("0"));
         // We no longer force the sccache wrapper (it requires CARGO_INCREMENTAL=0
         // and disabled the incremental fast path).
         assert!(

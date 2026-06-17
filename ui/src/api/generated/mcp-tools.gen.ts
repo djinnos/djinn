@@ -2655,6 +2655,7 @@ export namespace MemoryAssociationsOutputSchema {
   }
   export interface MemoryAssociationEntry {
   co_access_count: number
+  kind?: string
   last_co_access: string
   note_permalink: string
   note_title: string
@@ -2994,12 +2995,14 @@ export namespace MemoryGraphOutputSchema {
    * A knowledge graph node (note with connection metadata).
    */
   export interface GraphNode {
+  broken_targets?: string[]
   /**
    * Total resolved edges incident to this node (inbound + outbound).
    */
   connection_count: number
   folder: string
   id: string
+  is_orphan?: boolean
   note_type: string
   permalink: string
   title: string

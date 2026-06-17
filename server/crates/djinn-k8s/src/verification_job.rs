@@ -344,8 +344,8 @@ mod tests {
         );
         assert_eq!(
             envs.get("CARGO_INCREMENTAL").copied(),
-            Some("1"),
-            "verification recompiles only its delta incrementally over the warm base"
+            Some("0"),
+            "verification reuses the warm base via cargo freshness + sccache (incremental=0; sccache forbids incremental)"
         );
         assert!(
             !envs.contains_key("RUSTC_WRAPPER"),

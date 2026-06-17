@@ -49,6 +49,13 @@ export type CodeGraphOperation =
   | "snapshot";
 
 /**
+ * Semantic zoom level for the `snapshot` op. Mirrors the server-side
+ * `SnapshotLevel { Symbol, Community }` enum. When omitted, the server
+ * defaults to `"symbol"` — existing callers keep that behavior.
+ */
+export type SnapshotLevel = "symbol" | "community";
+
+/**
  * Per-call extras. The autogen'd `CodeGraphInput` is one big union with an
  * `[k: string]: any` index signature, which makes `Pick<>`-derived helper
  * types unusable. We mirror the fields we touch here as plain optionals;
@@ -81,6 +88,8 @@ export interface CodeGraphArgs {
   key?: string;
   kind_filter?: string;
   kind_hint?: string;
+  /** Semantic zoom level for the `snapshot` op (`"symbol" | "community"`). */
+  level?: SnapshotLevel;
   limit?: number;
   max_depth?: number;
   max_files_per_commit?: number;
@@ -301,10 +310,20 @@ export function fetchSymbolsAt(
  * PR D2: full-graph snapshot capped by PageRank tier. Drives the
  * `/code-graph` UI render (Sigma + ForceAtlas2). The cap is applied
  * server-side; pass `nodeCap` to override the default of 2000.
+ *
+ * Pass `level` to request a community-level (`"community"`) snapshot —
+ * aggregated nodes representing clusters of symbols — instead of the
+ * default symbol-level view. When `level` is omitted the server default
+ * (`"symbol"`) applies, so existing callers keep current behavior.
  */
-export function fetchSnapshot(project: string, nodeCap?: number) {
+export function fetchSnapshot(
+  project: string,
+  nodeCap?: number,
+  level?: SnapshotLevel,
+) {
   return callCodeGraph(project, "snapshot", {
     ...(nodeCap !== undefined ? { limit: nodeCap } : {}),
+    ...(level !== undefined ? { level } : {}),
   });
 }
 
