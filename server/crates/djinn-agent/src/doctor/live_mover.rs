@@ -19,6 +19,8 @@
 //! The check is read-only: it does not dispatch, close, transition, or nudge
 //! any task.
 
+use std::sync::Arc;
+
 use djinn_core::doctor::{
     DoctorCheck, DoctorCheckCadence, DoctorResult, Finding, FindingSeverity, ResolverSnapshot,
 };
@@ -40,8 +42,7 @@ const ACTIVE_STATUSES: &[&str] = &["in_progress", "pr_review", "pr_draft"];
 /// actor. A production adapter (wired by T5 into the registry) will bridge to
 /// the coordinator's evidence collector via
 /// [`collect_live_mover_evidence_for`].
-#[allow(dead_code)]
-pub(crate) trait LiveMoverSource: Send + Sync {
+pub trait LiveMoverSource: Send + Sync {
     /// Return every active task the check should examine, along with its
     /// already-collected live-mover evidence. The check filters further by
     /// status (see [`ACTIVE_STATUSES`]) and applies the pure
@@ -51,7 +52,7 @@ pub(crate) trait LiveMoverSource: Send + Sync {
 
 /// One active task and its already-collected live-mover evidence.
 #[derive(Clone, Debug)]
-pub(crate) struct ActiveTask {
+pub struct ActiveTask {
     pub task_id: String,
     pub status: String,
     pub(crate) evidence: LiveMoverEvidence,
@@ -183,16 +184,20 @@ impl LiveMoverEvidenceJson {
 /// any task, and it never imports `supervisor_impl::pr` (per the
 /// `pitfalls/coupling-non-pr-diagnostics-to-pr-open-disposition-code`
 /// guardrail).
-pub(crate) struct LiveMoverPredicateCheck<'a> {
-    source: &'a dyn LiveMoverSource,
+///
+/// The check owns its source via [`std::sync::Arc`] so it can be stored in
+/// the global [`djinn_core::doctor::DoctorRegistry`], which requires
+/// `'static` trait objects.
+pub struct LiveMoverPredicateCheck {
+    source: Arc<dyn LiveMoverSource>,
 }
 
-impl<'a> LiveMoverPredicateCheck<'a> {
+impl LiveMoverPredicateCheck {
     /// Construct a check bound to a [`LiveMoverSource`]. In production the
     /// source is an adapter over the coordinator's evidence collector (see
     /// [`collect_live_mover_evidence_for`]); in tests it is an in-memory
     /// double.
-    pub(crate) fn new(source: &'a dyn LiveMoverSource) -> Self {
+    pub fn new(source: Arc<dyn LiveMoverSource>) -> Self {
         Self { source }
     }
 
@@ -243,7 +248,7 @@ impl<'a> LiveMoverPredicateCheck<'a> {
     }
 }
 
-impl<'a> DoctorCheck for LiveMoverPredicateCheck<'a> {
+impl DoctorCheck for LiveMoverPredicateCheck {
     fn name(&self) -> &'static str {
         "live_mover_predicate"
     }
@@ -332,7 +337,7 @@ mod tests {
     /// In-memory `LiveMoverSource` test double. The fabrication tests use it
     /// to stage specific divergence patterns and assert the check returns the
     /// expected finding shape. No live DB, no live actor.
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct MemoryLiveMoverSource {
         tasks: Vec<ActiveTask>,
     }
@@ -360,7 +365,7 @@ mod tests {
     }
 
     fn run_check(src: &MemoryLiveMoverSource) -> Vec<Finding> {
-        let check = LiveMoverPredicateCheck::new(src);
+        let check = LiveMoverPredicateCheck::new(Arc::new(src.clone()));
         check.run().expect("run succeeds")
     }
 
@@ -662,7 +667,7 @@ mod tests {
     #[test]
     fn check_name_and_description_are_stable() {
         let src = MemoryLiveMoverSource::default();
-        let check = LiveMoverPredicateCheck::new(&src);
+        let check = LiveMoverPredicateCheck::new(Arc::new(src));
         assert_eq!(check.name(), "live_mover_predicate");
         assert!(
             check.description().contains("live-mover"),
@@ -674,14 +679,14 @@ mod tests {
     #[test]
     fn check_cadence_is_cheap() {
         let src = MemoryLiveMoverSource::default();
-        let check = LiveMoverPredicateCheck::new(&src);
+        let check = LiveMoverPredicateCheck::new(Arc::new(src));
         assert_eq!(check.cadence(), DoctorCheckCadence::Cheap);
     }
 
     #[test]
     fn check_does_not_override_fix() {
         let src = MemoryLiveMoverSource::default();
-        let check = LiveMoverPredicateCheck::new(&src);
+        let check = LiveMoverPredicateCheck::new(Arc::new(src));
         let finding = Finding::new(
             FindingSeverity::Critical,
             "live_mover_predicate",
