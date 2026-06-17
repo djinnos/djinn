@@ -2655,6 +2655,7 @@ export namespace MemoryAssociationsOutputSchema {
   }
   export interface MemoryAssociationEntry {
   co_access_count: number
+  kind?: string
   last_co_access: string
   note_permalink: string
   note_title: string

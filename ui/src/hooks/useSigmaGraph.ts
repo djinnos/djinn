@@ -43,6 +43,19 @@ export interface SigmaReducerHooks {
   edgeReducer?: (id: string, attrs: Attributes) => Attributes;
 }
 
+export interface UseSigmaGraphOptions {
+  /**
+   * Optional post-layout callback invoked after the ForceAtlas2 supervisor has
+   * stopped (FA2 settled) but before the final noverlap pass and camera reset.
+   *
+   * Used by the memory graph canvas to run the per-community attraction pass.
+   * Graphs without clustered communities must treat the callback as a no-op:
+   * `applyPerCommunityAttraction` already early-returns when no community
+   * metadata is present, so callers can pass the same callback unconditionally.
+   */
+  postLayout?: (graph: Graph) => void;
+}
+
 export interface SigmaInstanceHandle {
   on: <E extends string>(
     event: E,
@@ -129,6 +142,7 @@ export function useSigmaGraph(
   containerRef: React.RefObject<HTMLDivElement | null>,
   graph: Graph | null,
   reducers?: SigmaReducerHooks,
+  options?: UseSigmaGraphOptions,
 ): UseSigmaGraphResult {
   const sigmaRef = useRef<Sigma | null>(null);
   const supervisorRef = useRef<FA2LayoutSupervisor | null>(null);
@@ -138,6 +152,15 @@ export function useSigmaGraph(
   useEffect(() => {
     reducersRef.current = reducers;
   }, [reducers]);
+
+  // Held in a ref so a new `options` identity (e.g. an inline object from the
+  // memory canvas) does not re-trigger the mount effect — only `graph`/
+  // `container` identity changes should re-mount Sigma. The stop-timer and
+  // `stopLayout` callbacks read the latest value at fire time.
+  const optionsRef = useRef<UseSigmaGraphOptions | undefined>(options);
+  useEffect(() => {
+    optionsRef.current = options;
+  }, [options]);
 
   const [ready, setReady] = useState(false);
   const [layoutRunning, setLayoutRunning] = useState(false);
@@ -394,6 +417,20 @@ export function useSigmaGraph(
           // graceful — supervisor may already be torn down by unmount
         }
         setLayoutRunning(false);
+        // Optional post-layout pass. The memory graph canvas runs the
+        // per-community attraction here: after FA2 has settled the topology
+        // but before the final noverlap cleanup / camera refit, so cluster
+        // pulls dominate over separation forces. The code graph canvas does
+        // not pass this option, so its layout path is unchanged.
+        const postLayout = optionsRef.current?.postLayout;
+        if (postLayout) {
+          try {
+            postLayout(graph);
+          } catch {
+            // Defensive: attraction failures (e.g. NaN coordinates after a
+            // supervisor race) must not corrupt the rest of the teardown.
+          }
+        }
         // Light noverlap pass for the final cleanup.
         try {
           noverlap.assign(graph, NOVERLAP_SETTINGS);
@@ -460,6 +497,17 @@ export function useSigmaGraph(
       }
     }
     if (graph) {
+      // Same post-layout ordering as the auto stop-timer: attraction pass
+      // runs after the supervisor stops and before noverlap. No-op for the
+      // code graph canvas, which doesn't supply a `postLayout` option.
+      const postLayout = optionsRef.current?.postLayout;
+      if (postLayout) {
+        try {
+          postLayout(graph);
+        } catch {
+          // ignore — see stop-timer comment
+        }
+      }
       try {
         noverlap.assign(graph, NOVERLAP_SETTINGS);
       } catch {
