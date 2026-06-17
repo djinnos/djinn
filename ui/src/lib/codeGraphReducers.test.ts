@@ -105,12 +105,25 @@ describe("pickHighlightMode", () => {
     expect(pickHighlightMode("a", v)).toBe("blast");
   });
 
-  it("tool highlight beats citation", () => {
+  // KNOWN BUG (verification task g293): the documented layer priority at
+  // codeGraphReducers.ts:14 ranks AI citations (#2) above tool-call
+  // results (#3), and the reducer zIndex values agree (citation:80 >
+  // tool:70). However `pickHighlightMode` currently checks
+  // `toolHighlightIds` (line 139) BEFORE `citationIds` (line 140), so a
+  // node surfaced by *both* a tool call and a citation renders as "tool"
+  // instead of "citation". This test pins the *desired* contract.
+  //
+  // It is declared `it.fails` so the suite stays green while flagging the
+  // regression: once the reducer ordering is fixed (swap the tool/citation
+  // checks), flip this back to a plain `it(...)`. See the follow-up task
+  // linked in the g293 activity log.
+  it.fails("citation layer wins over tool highlight (per comment at codeGraphReducers.ts:14)", () => {
     const v = viewWith({
-      toolHighlightIds: new Set(["a"]),
-      citationIds: new Set(["a"]),
+      citationIds: new Set(["alpha", "beta"]),
+      toolHighlightIds: new Set(["alpha", "beta"]),
     });
-    expect(pickHighlightMode("a", v)).toBe("tool");
+    expect(pickHighlightMode("alpha", v)).toBe("citation");
+    expect(pickHighlightMode("beta", v)).toBe("citation");
   });
 
   it("citation beats neighbor", () => {
