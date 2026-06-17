@@ -9,8 +9,9 @@ import {
 } from '@/stores/useProjectStore';
 import { MemoryExplorer } from '@/components/memory/MemoryExplorer';
 import { MemoryNoteDetail } from '@/components/memory/MemoryNoteDetail';
+import { MemoryGraphCanvas } from '@/components/memory/MemoryGraphCanvas';
 import { HugeiconsIcon } from '@hugeicons/react';
-import { Brain01Icon, ArrowDown01Icon, Tick02Icon } from '@hugeicons/core-free-icons';
+import { Brain01Icon, ArrowDown01Icon, Tick02Icon, ConnectIcon } from '@hugeicons/core-free-icons';
 import { cn } from '@/lib/utils';
 import {
   ModelSelector as SelectorRoot,
@@ -43,6 +44,7 @@ export function MemoryPage() {
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
+  const [view, setView] = useState<'list' | 'graph'>('list');
 
   const noteCache = useRef(new Map<string, MemoryReadOutput>());
   const searchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -185,23 +187,83 @@ export function MemoryPage() {
           </button>
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1">
-          <MemoryExplorer
-            notes={notes}
-            searchQuery={searchQuery}
-            onSearchChange={handleSearchChange}
-            searchResults={searchResults}
-            selectedNoteId={selectedNoteId}
-            onSelectNote={handleSelectNote}
-          />
-          <MemoryNoteDetail
-            note={selectedNote}
-            loading={detailLoading}
-            onNavigateToNote={handleNavigateToNote}
-          />
-        </div>
+        <>
+          <ViewToggle view={view} onChange={setView} />
+          {view === 'graph' ? (
+            <div className="min-h-0 flex-1">
+              <MemoryGraphCanvas projectSlug={projectSlug!} />
+            </div>
+          ) : (
+            <div className="flex min-h-0 flex-1">
+              <MemoryExplorer
+                notes={notes}
+                searchQuery={searchQuery}
+                onSearchChange={handleSearchChange}
+                searchResults={searchResults}
+                selectedNoteId={selectedNoteId}
+                onSelectNote={handleSelectNote}
+              />
+              <MemoryNoteDetail
+                note={selectedNote}
+                loading={detailLoading}
+                onNavigateToNote={handleNavigateToNote}
+              />
+            </div>
+          )}
+        </>
       )}
     </div>
+  );
+}
+
+function ViewToggle({
+  view,
+  onChange,
+}: {
+  view: 'list' | 'graph';
+  onChange: (view: 'list' | 'graph') => void;
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-1 border-b border-border/60 bg-background/40 px-4 py-1.5">
+      <ToggleChip
+        active={view === 'list'}
+        onClick={() => onChange('list')}
+      >
+        List
+      </ToggleChip>
+      <ToggleChip
+        active={view === 'graph'}
+        onClick={() => onChange('graph')}
+      >
+        <HugeiconsIcon icon={ConnectIcon} size={12} className="shrink-0" />
+        Graph
+      </ToggleChip>
+    </div>
+  );
+}
+
+function ToggleChip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors',
+        active
+          ? 'bg-white/[0.07] text-foreground'
+          : 'text-muted-foreground hover:bg-white/[0.04] hover:text-foreground',
+      )}
+    >
+      {children}
+    </button>
   );
 }
 

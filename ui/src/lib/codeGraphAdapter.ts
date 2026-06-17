@@ -17,7 +17,7 @@
 
 import Graph from "graphology";
 
-export type SnapshotNodeKind = "file" | "folder" | "symbol";
+export type SnapshotNodeKind = "file" | "folder" | "symbol" | "community";
 
 export interface SnapshotNode {
   id: string;
@@ -27,6 +27,15 @@ export interface SnapshotNode {
   file_path?: string;
   pagerank: number;
   community_id?: string;
+  /**
+   * Semantic-zoom community metadata (server `SnapshotNode` wire shape).
+   * Only populated for collapsed `kind: "community"` nodes emitted by a
+   * `level=community` snapshot. Symbol/file/folder nodes leave these
+   * undefined so the existing wire shape is unchanged.
+   */
+  member_count?: number;
+  internal_edge_count?: number;
+  workspace_kind?: string;
   workspace?: string;
   /**
    * True when included only to preserve a selected workspace's external edge
@@ -181,6 +190,19 @@ export function parseSnapshotResponse(value: unknown): SnapshotPayload | null {
           pagerank: Number(n.pagerank ?? 0),
           community_id:
             typeof n.community_id === "string" ? n.community_id : undefined,
+          member_count:
+            typeof n.member_count === "number" &&
+            Number.isFinite(n.member_count) &&
+            n.member_count >= 0
+              ? Math.floor(n.member_count)
+              : undefined,
+          internal_edge_count:
+            typeof n.internal_edge_count === "number" &&
+            Number.isFinite(n.internal_edge_count) &&
+            n.internal_edge_count >= 0
+              ? Math.floor(n.internal_edge_count)
+              : undefined,
+          workspace_kind: nonEmptyString(n.workspace_kind),
           workspace: nonEmptyString(n.workspace),
           workspace_context: n.workspace_context === true,
           cognitive:
@@ -218,7 +240,14 @@ function nonEmptyString(value: unknown): string | undefined {
 }
 
 function normalizeKind(value: unknown): SnapshotNodeKind {
-  if (value === "folder" || value === "file" || value === "symbol") return value;
+  if (
+    value === "folder" ||
+    value === "file" ||
+    value === "symbol" ||
+    value === "community"
+  ) {
+    return value;
+  }
   return "symbol";
 }
 
@@ -256,6 +285,50 @@ export function prettifyLabel(raw: string): string {
 // ── Mass scaling ────────────────────────────────────────────────────────────
 
 /**
+ * Bounded visual scale for collapsed community nodes based on their
+ * `member_count`. Communities aggregate many symbol-level nodes into one
+ * blob, so they should read larger than any individual symbol — but the
+ * scale must stay bounded so a 50k-member community doesn't swallow the
+ * canvas.
+ *
+ * Uses `log10(member_count + 1)` mapped into `[COMMUNITY_MIN_SIZE,
+ * COMMUNITY_MAX_SIZE]`. The +1 makes a 1-member community sit at the
+ * floor, and the log curve keeps a 10k-member community only ~4× the
+ * floor rather than 10k× it.
+ */
+export const COMMUNITY_MIN_SIZE = 12;
+export const COMMUNITY_MAX_SIZE = 60;
+const LOG10_MAX_MEMBER = Math.log10(10_000 + 1);
+
+export function communityNodeSize(memberCount: number | undefined): number {
+  const count =
+    typeof memberCount === "number" &&
+    Number.isFinite(memberCount) &&
+    memberCount > 0
+      ? memberCount
+      : 1;
+  const t = Math.min(Math.log10(count + 1) / LOG10_MAX_MEMBER, 1);
+  return COMMUNITY_MIN_SIZE + t * (COMMUNITY_MAX_SIZE - COMMUNITY_MIN_SIZE);
+}
+
+/**
+ * Bounded FA2 mass for collapsed community nodes. Communities act as
+ * heavy gravity wells (heavier than folders) so the collapsed graph
+ * spreads apart and the inter-community edges stay legible. Scaled with
+ * a bounded log curve so mass stays proportional to the visual size.
+ */
+export function communityNodeMass(memberCount: number | undefined): number {
+  const size = communityNodeSize(memberCount);
+  // Map the [12, 60] size band onto a [40, 120] mass band so communities
+  // outweigh folders (15) and project roots (50) without exploding FA2.
+  const min = 40;
+  const max = 120;
+  const t =
+    (size - COMMUNITY_MIN_SIZE) / (COMMUNITY_MAX_SIZE - COMMUNITY_MIN_SIZE);
+  return min + t * (max - min);
+}
+
+/**
  * Heavy structural masses act as gravity wells in FA2 — folders blast
  * apart and pull their files with them, producing the cluster spread
  * GitNexus relies on. Scaled with node count so 12k-node monorepos
@@ -264,6 +337,9 @@ export function prettifyLabel(raw: string): string {
 export function massForNode(node: SnapshotNode, nodeCount: number = 0): number {
   const baseMultiplier = nodeCount > 5000 ? 2 : nodeCount > 1000 ? 1.5 : 1;
 
+  if (node.kind === "community") {
+    return communityNodeMass(node.member_count);
+  }
   if (node.kind === "folder") {
     if (node.symbol_kind === "project" || /project/i.test(node.label)) {
       return 50 * baseMultiplier;
@@ -384,10 +460,17 @@ function workspaceBadge(workspace: string): string {
  *     module instead of one indigo band.
  *   - File: hash the parent directory so all files in a folder share a
  *     color. This is the lever that breaks up the blue file wall.
+ *   - Community: hash the stable `community_id` so each collapsed blob
+ *     gets a distinct, deterministic hue. Falls back to the label when
+ *     the id is absent (shouldn't happen for real server payloads).
  *   - Symbol: community_id (if F3 populated) → file_path's parent
  *     directory → fallback.
  */
 export function colorForNode(node: SnapshotNode): string {
+  if (node.kind === "community") {
+    if (node.community_id) return colorForCommunity(node.community_id);
+    return colorForCommunity(node.label || node.id);
+  }
   if (node.kind === "folder") {
     if (/project/i.test(node.label) || node.label === "" || !node.file_path) {
       return PROJECT_COLOR;
@@ -585,7 +668,10 @@ export function buildGraphFromSnapshot(
   }
 
   const structuralNodes = nodes.filter(
-    (n) => n.kind === "folder" || n.kind === "file",
+    (n) =>
+      n.kind === "folder" ||
+      n.kind === "file" ||
+      n.kind === "community",
   );
 
   // Cluster centers — golden-angle distributed; sqrt(idx) radius
@@ -765,6 +851,9 @@ function addNode(
     pagerank: node.pagerank,
     filePath: node.file_path,
     communityId: node.community_id,
+    memberCount: node.member_count,
+    internalEdgeCount: node.internal_edge_count,
+    workspaceKind: node.workspace_kind,
     workspace: node.workspace,
     workspaceColor,
     workspaceBadge: node.workspace ? workspaceBadge(node.workspace) : undefined,
@@ -789,12 +878,20 @@ function addNode(
  * Visual size with a hierarchy floor: structural nodes stay readable
  * even on huge graphs, symbols shrink toward 2px so they don't drown
  * the canvas. Pagerank then tilts within the per-kind band.
+ *
+ * Community nodes bypass the per-kind / density / pagerank path: their
+ * size is driven purely by the bounded member-count scale
+ * (`communityNodeSize`) so a collapsed graph reads as a handful of
+ * legible blobs rather than uniformly tiny dots.
  */
 function scaledNodeSize(
   node: SnapshotNode,
   pagerankNormalized: number,
   nodeCount: number,
 ): number {
+  if (node.kind === "community") {
+    return communityNodeSize(node.member_count);
+  }
   const base = baseNodeSize(node);
   const scaled = densityScale(base, nodeCount);
   return scaled + pagerankNormalized * Math.max(scaled * 0.6, 1.5);
