@@ -576,18 +576,13 @@ mod tests {
         assert_eq!(after_first_ids, vec![third.id.as_str(), second.id.as_str()]);
         assert!(!after_first_ids.contains(&first.id.as_str()));
 
-        // `since` strictly after the third finding's created_at → empty.
-        // Build a timestamp guaranteed to sort later than any persisted row.
-        let future = format!(
-            "{}.999Z",
-            third
-                .created_at
-                .trim_end_matches('Z')
-                .trim_end_matches(".000Z")
-        );
+        // `since` strictly after any persisted row → empty.
+        // Use a far-future timestamp guaranteed to sort lexicographically
+        // after any real wall-clock value (the column is a UTC ISO-8601
+        // VARCHAR compared as a string).
         let none = repo
             .list_recent(RecentDoctorFindings {
-                since: Some(future),
+                since: Some("2999-12-31T23:59:59.999Z".to_owned()),
                 ..Default::default()
             })
             .await
