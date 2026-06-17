@@ -327,3 +327,73 @@ describe("CodeGraphCanvas semantic zoom level selection", () => {
     expect(lastCall[2]).toBe("community");
   });
 });
+
+// ── Community expand / collapse state (semantic zoom) ─────────────────────
+
+describe("CodeGraphCanvas community expand/collapse state", () => {
+  it("store tracks expanded communities by stable community_id", () => {
+    useCodeGraphStore.getState().reset();
+    const { expandCommunity, collapseCommunity, expandedCommunityIds } =
+      useCodeGraphStore.getState();
+    expect(expandedCommunityIds.size).toBe(0);
+
+    expandCommunity("auth");
+    expect(useCodeGraphStore.getState().expandedCommunityIds.has("auth")).toBe(
+      true,
+    );
+
+    expandCommunity("api");
+    expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(2);
+
+    collapseCommunity("auth");
+    expect(
+      useCodeGraphStore.getState().expandedCommunityIds.has("auth"),
+    ).toBe(false);
+    expect(useCodeGraphStore.getState().expandedCommunityIds.has("api")).toBe(
+      true,
+    );
+  });
+
+  it("expandCommunity and collapseCommunity are idempotent", () => {
+    useCodeGraphStore.getState().reset();
+    const { expandCommunity, collapseCommunity } = useCodeGraphStore.getState();
+
+    expandCommunity("auth");
+    expandCommunity("auth");
+    expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(1);
+
+    collapseCommunity("auth");
+    collapseCommunity("auth");
+    expect(
+      useCodeGraphStore.getState().expandedCommunityIds.has("auth"),
+    ).toBe(false);
+  });
+
+  it("reset() clears expanded communities (project change)", () => {
+    const { expandCommunity, reset } = useCodeGraphStore.getState();
+    expandCommunity("auth");
+    expandCommunity("api");
+    expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(2);
+
+    reset();
+    expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(0);
+  });
+
+  it("clearExpandedCommunities empties the set", () => {
+    const { expandCommunity, clearExpandedCommunities } =
+      useCodeGraphStore.getState();
+    expandCommunity("auth");
+    expandCommunity("api");
+
+    clearExpandedCommunities();
+    expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(0);
+  });
+
+  it("isDoubleClick detects a double-click within the interval", async () => {
+    const { isDoubleClick } = await import("@/lib/codeGraphAdapter");
+    const prev = { nodeId: "community:auth", at: 1000 };
+    expect(isDoubleClick(prev, "community:auth", 1200)).toBe(true);
+    expect(isDoubleClick(prev, "community:auth", 1000)).toBe(true);
+    expect(isDoubleClick(prev, "community:api", 1200)).toBe(false);
+  });
+});

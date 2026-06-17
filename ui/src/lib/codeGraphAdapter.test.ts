@@ -3,17 +3,21 @@ import {
   COMMUNITY_COLORS,
   COMMUNITY_MAX_SIZE,
   COMMUNITY_MIN_SIZE,
+  DOUBLE_CLICK_INTERVAL_MS,
   PRECOMPUTED_LAYOUT_ATTRIBUTE,
   WORKSPACE_COLORS,
   buildGraphFromSnapshot,
+  collapseCommunityInSnapshot,
   colorForCommunity,
   colorForNode,
   colorForWorkspace,
   communityNodeMass,
   communityNodeSize,
   edgeStyleFor,
+  expandCommunityInSnapshot,
   filterSnapshotForWorkspace,
   hasPrecomputedCoordinates,
+  isDoubleClick,
   massForNode,
   parseSnapshotResponse,
   prettifyLabel,
@@ -1326,5 +1330,408 @@ describe("edgeStyleFor", () => {
   it("returns a neutral fallback for unknown kinds", () => {
     const fallback = edgeStyleFor("MysteryKind");
     expect(fallback.color).toBe("#4a4a5a");
+  });
+});
+
+// ── Community expand / collapse (semantic zoom) ─────────────────────────────
+
+/**
+ * Fixtures for expand/collapse: a community snapshot with 3 communities
+ * and a symbol snapshot where symbols are tagged with matching
+ * community_id values. The communities mirror the real server wire shape
+ * (stable community_id + member_count), and symbols carry community_id
+ * so the adapter can splice members.
+ */
+const expandCommunitySnapshot: SnapshotPayload = {
+  project_id: "proj-expand",
+  git_head: "abc",
+  generated_at: "2026-06-17T00:00:00Z",
+  truncated: false,
+  total_nodes: 3,
+  total_edges: 2,
+  node_cap: 10_000,
+  nodes: [
+    {
+      id: "community:auth",
+      kind: "community",
+      label: "auth",
+      pagerank: 0.5,
+      community_id: "auth",
+      member_count: 2,
+      internal_edge_count: 1,
+    },
+    {
+      id: "community:api",
+      kind: "community",
+      label: "api",
+      pagerank: 0.3,
+      community_id: "api",
+      member_count: 2,
+      internal_edge_count: 1,
+    },
+    {
+      id: "community:utils",
+      kind: "community",
+      label: "utils",
+      pagerank: 0.2,
+      community_id: "utils",
+      member_count: 1,
+    },
+  ],
+  edges: [
+    {
+      from: "community:auth",
+      to: "community:api",
+      kind: "SymbolReference",
+      confidence: 0.8,
+    },
+    {
+      from: "community:api",
+      to: "community:utils",
+      kind: "FileReference",
+      confidence: 0.6,
+    },
+  ],
+};
+
+const expandSymbolSnapshot: SnapshotPayload = {
+  project_id: "proj-expand",
+  git_head: "abc",
+  generated_at: "2026-06-17T00:00:00Z",
+  truncated: false,
+  total_nodes: 5,
+  total_edges: 3,
+  node_cap: 10_000,
+  nodes: [
+    // auth members
+    {
+      id: "sym:login",
+      kind: "symbol",
+      label: "login",
+      symbol_kind: "function",
+      pagerank: 0.5,
+      community_id: "auth",
+    },
+    {
+      id: "sym:logout",
+      kind: "symbol",
+      label: "logout",
+      symbol_kind: "function",
+      pagerank: 0.4,
+      community_id: "auth",
+    },
+    // api members
+    {
+      id: "sym:getUser",
+      kind: "symbol",
+      label: "getUser",
+      symbol_kind: "function",
+      pagerank: 0.3,
+      community_id: "api",
+    },
+    {
+      id: "sym:createUser",
+      kind: "symbol",
+      label: "createUser",
+      symbol_kind: "function",
+      pagerank: 0.2,
+      community_id: "api",
+    },
+    // utils member
+    {
+      id: "sym:formatDate",
+      kind: "symbol",
+      label: "formatDate",
+      symbol_kind: "function",
+      pagerank: 0.1,
+      community_id: "utils",
+    },
+  ],
+  edges: [
+    // intra-auth edge
+    {
+      from: "sym:login",
+      to: "sym:logout",
+      kind: "SymbolReference",
+      confidence: 0.9,
+    },
+    // intra-api edge
+    {
+      from: "sym:getUser",
+      to: "sym:createUser",
+      kind: "SymbolReference",
+      confidence: 0.85,
+    },
+    // cross-community edge (auth → api) — should NOT appear in the
+    // expanded snapshot because it's not intra-community.
+    {
+      from: "sym:login",
+      to: "sym:getUser",
+      kind: "FileReference",
+      confidence: 0.5,
+    },
+  ],
+};
+
+describe("isDoubleClick", () => {
+  it("returns false for the first click (no previous)", () => {
+    expect(isDoubleClick(null, "node-a", 1000)).toBe(false);
+  });
+
+  it("returns true for a second click on the same node within the interval", () => {
+    const prev = { nodeId: "node-a", at: 1000 };
+    expect(isDoubleClick(prev, "node-a", 1100)).toBe(true);
+  });
+
+  it("returns false when the second click hits a different node", () => {
+    const prev = { nodeId: "node-a", at: 1000 };
+    expect(isDoubleClick(prev, "node-b", 1100)).toBe(false);
+  });
+
+  it("returns false when the interval exceeds the threshold", () => {
+    const prev = { nodeId: "node-a", at: 1000 };
+    expect(
+      isDoubleClick(prev, "node-a", 1000 + DOUBLE_CLICK_INTERVAL_MS + 1),
+    ).toBe(false);
+  });
+
+  it("returns true at exactly the interval boundary (inclusive)", () => {
+    const prev = { nodeId: "node-a", at: 1000 };
+    expect(
+      isDoubleClick(prev, "node-a", 1000 + DOUBLE_CLICK_INTERVAL_MS),
+    ).toBe(true);
+  });
+
+  it("respects a custom interval override", () => {
+    const prev = { nodeId: "node-a", at: 1000 };
+    expect(isDoubleClick(prev, "node-a", 1050, 100)).toBe(true);
+    expect(isDoubleClick(prev, "node-a", 1200, 100)).toBe(false);
+  });
+});
+
+describe("expandCommunityInSnapshot", () => {
+  it("replaces the community node with its member symbol nodes", () => {
+    const expanded = expandCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expandSymbolSnapshot,
+      "auth",
+    );
+
+    const ids = expanded.nodes.map((n) => n.id);
+    expect(ids).not.toContain("community:auth");
+    expect(ids).toContain("sym:login");
+    expect(ids).toContain("sym:logout");
+    // Other communities are preserved.
+    expect(ids).toContain("community:api");
+    expect(ids).toContain("community:utils");
+  });
+
+  it("adds intra-community edges for the expanded community", () => {
+    const expanded = expandCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expandSymbolSnapshot,
+      "auth",
+    );
+
+    const memberEdge = expanded.edges.find(
+      (e) => e.from === "sym:login" && e.to === "sym:logout",
+    );
+    expect(memberEdge).toBeDefined();
+  });
+
+  it("drops cross-community edges touching the expanded community node", () => {
+    const expanded = expandCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expandSymbolSnapshot,
+      "auth",
+    );
+
+    // The original auth→api aggregated edge touched the expanded node.
+    const authApiEdge = expanded.edges.find(
+      (e) =>
+        e.from === "community:auth" && e.to === "community:api",
+    );
+    expect(authApiEdge).toBeUndefined();
+    // Cross-community symbol edges (login→getUser) are NOT intra-community,
+    // so they don't appear either.
+    const crossSymbolEdge = expanded.edges.find(
+      (e) => e.from === "sym:login" && e.to === "sym:getUser",
+    );
+    expect(crossSymbolEdge).toBeUndefined();
+  });
+
+  it("preserves aggregated inter-community edges for other communities", () => {
+    const expanded = expandCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expandSymbolSnapshot,
+      "auth",
+    );
+
+    const apiUtilsEdge = expanded.edges.find(
+      (e) =>
+        e.from === "community:api" && e.to === "community:utils",
+    );
+    expect(apiUtilsEdge).toBeDefined();
+  });
+
+  it("updates total_nodes and total_edges counts", () => {
+    const expanded = expandCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expandSymbolSnapshot,
+      "auth",
+    );
+
+    // 3 communities - auth + 2 auth members = 4 nodes
+    expect(expanded.total_nodes).toBe(4);
+    expect(expanded.nodes.length).toBe(4);
+    // 1 api→utils preserved + 1 intra-auth edge = 2 edges
+    expect(expanded.total_edges).toBe(2);
+    expect(expanded.edges.length).toBe(2);
+  });
+
+  it("produces a buildable graphology graph", () => {
+    const expanded = expandCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expandSymbolSnapshot,
+      "auth",
+    );
+    const graph = buildGraphFromSnapshot(expanded);
+    expect(graph.hasNode("sym:login")).toBe(true);
+    expect(graph.hasNode("sym:logout")).toBe(true);
+    expect(graph.hasNode("community:api")).toBe(true);
+    expect(graph.hasNode("community:auth")).toBe(false);
+  });
+
+  it("expands a different community by its stable community_id", () => {
+    const expanded = expandCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expandSymbolSnapshot,
+      "api",
+    );
+
+    const ids = expanded.nodes.map((n) => n.id);
+    expect(ids).not.toContain("community:api");
+    expect(ids).toContain("sym:getUser");
+    expect(ids).toContain("sym:createUser");
+    // auth and utils are preserved.
+    expect(ids).toContain("community:auth");
+    expect(ids).toContain("community:utils");
+  });
+});
+
+describe("collapseCommunityInSnapshot", () => {
+  it("restores the community node and removes its members", () => {
+    const expanded = expandCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expandSymbolSnapshot,
+      "auth",
+    );
+    const collapsed = collapseCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expanded,
+      "auth",
+    );
+
+    const ids = collapsed.nodes.map((n) => n.id);
+    expect(ids).toContain("community:auth");
+    expect(ids).not.toContain("sym:login");
+    expect(ids).not.toContain("sym:logout");
+    // Other communities preserved.
+    expect(ids).toContain("community:api");
+    expect(ids).toContain("community:utils");
+  });
+
+  it("restores aggregated inter-community edges including the collapsed community", () => {
+    const expanded = expandCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expandSymbolSnapshot,
+      "auth",
+    );
+    const collapsed = collapseCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expanded,
+      "auth",
+    );
+
+    // The auth→api edge was dropped on expand; collapse restores it.
+    const authApiEdge = collapsed.edges.find(
+      (e) =>
+        e.from === "community:auth" && e.to === "community:api",
+    );
+    expect(authApiEdge).toBeDefined();
+    // The api→utils edge is also present.
+    const apiUtilsEdge = collapsed.edges.find(
+      (e) =>
+        e.from === "community:api" && e.to === "community:utils",
+    );
+    expect(apiUtilsEdge).toBeDefined();
+  });
+
+  it("drops intra-community symbol edges for the collapsed community", () => {
+    const expanded = expandCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expandSymbolSnapshot,
+      "auth",
+    );
+    const collapsed = collapseCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expanded,
+      "auth",
+    );
+
+    const memberEdge = collapsed.edges.find(
+      (e) => e.from === "sym:login" && e.to === "sym:logout",
+    );
+    expect(memberEdge).toBeUndefined();
+  });
+
+  it("round-trips expand then collapse back to the original node set", () => {
+    const expanded = expandCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expandSymbolSnapshot,
+      "auth",
+    );
+    const collapsed = collapseCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expanded,
+      "auth",
+    );
+
+    expect(collapsed.nodes.map((n) => n.id).sort()).toEqual(
+      expandCommunitySnapshot.nodes.map((n) => n.id).sort(),
+    );
+    expect(collapsed.edges.map((e) => `${e.from}→${e.to}`).sort()).toEqual(
+      expandCommunitySnapshot.edges
+        .map((e) => `${e.from}→${e.to}`)
+        .sort(),
+    );
+  });
+
+  it("preserves other expanded communities when collapsing one", () => {
+    // Expand auth, then expand api on top.
+    const step1 = expandCommunityInSnapshot(
+      expandCommunitySnapshot,
+      expandSymbolSnapshot,
+      "auth",
+    );
+    const step2 = expandCommunityInSnapshot(
+      step1,
+      expandSymbolSnapshot,
+      "api",
+    );
+
+    // Collapse only auth — api should stay expanded.
+    const collapsed = collapseCommunityInSnapshot(
+      expandCommunitySnapshot,
+      step2,
+      "auth",
+    );
+
+    const ids = collapsed.nodes.map((n) => n.id);
+    expect(ids).toContain("community:auth");
+    expect(ids).not.toContain("sym:login");
+    // api members should still be present.
+    expect(ids).toContain("sym:getUser");
+    expect(ids).toContain("sym:createUser");
   });
 });
