@@ -261,11 +261,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
         norm_b += (b[i] as f64) * (b[i] as f64);
     }
     let denom = norm_a.sqrt() * norm_b.sqrt();
-    if denom == 0.0 {
-        0.0
-    } else {
-        dot / denom
-    }
+    if denom == 0.0 { 0.0 } else { dot / denom }
 }
 
 // ── Entity dedup ──────────────────────────────────────────────────────────────
@@ -293,7 +289,7 @@ impl EntityDedupState {
         if candidate_embedding.is_empty() {
             return None;
         }
-        for (_name, (note_id, embedding)) in &self.existing {
+        for (note_id, embedding) in self.existing.values() {
             if embedding.is_empty() {
                 continue;
             }
@@ -322,10 +318,10 @@ impl EntityDedupState {
         canonical_name: &str,
         candidate_embedding: Option<&[f32]>,
     ) -> Option<String> {
-        if let Some(emb) = candidate_embedding {
-            if let Some(id) = self.find_merge_target_by_embedding(emb) {
-                return Some(id);
-            }
+        if let Some(emb) = candidate_embedding
+            && let Some(id) = self.find_merge_target_by_embedding(emb)
+        {
+            return Some(id);
         }
         self.find_merge_target_by_name(canonical_name)
     }
@@ -333,10 +329,7 @@ impl EntityDedupState {
 
 /// Build the initial entity-dedup state by scanning existing `entity` notes
 /// in the project and loading their embeddings via the repository helper.
-async fn build_entity_dedup_state(
-    repo: &NoteRepository,
-    project_id: &str,
-) -> EntityDedupState {
+async fn build_entity_dedup_state(repo: &NoteRepository, project_id: &str) -> EntityDedupState {
     let mut existing = HashMap::new();
     if let Ok(entity_notes) = repo.list_compact(project_id, None, Some("entity"), 0).await {
         for compact in entity_notes {
@@ -357,11 +350,7 @@ async fn build_entity_dedup_state(
 // ── Wikilink dedup ────────────────────────────────────────────────────────────
 
 /// Check if a candidate edge pair already exists as an explicit wikilink.
-fn is_wikilink_duplicate(
-    pair_set: &HashSet<(String, String)>,
-    source: &str,
-    target: &str,
-) -> bool {
+fn is_wikilink_duplicate(pair_set: &HashSet<(String, String)>, source: &str, target: &str) -> bool {
     let (a, b) = if source <= target {
         (source.to_string(), target.to_string())
     } else {
@@ -464,13 +453,7 @@ fn slugify_name(s: &str) -> String {
         .trim()
         .to_lowercase()
         .chars()
-        .map(|c| {
-            if c.is_alphanumeric() {
-                c
-            } else {
-                '-'
-            }
-        })
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect();
     // Collapse runs of hyphens.
     while result.contains("--") {
@@ -695,19 +678,23 @@ async fn run_memory_enrichment_inner(
                     // Record provenance: derived_from edges from the entity to
                     // each note in the batch that mentions it.
                     for note in &batch_refs {
-                        if note.content.to_lowercase().contains(&canonical.to_lowercase())
-                            || note.title.to_lowercase().contains(&canonical.to_lowercase())
+                        let content_mentions = note
+                            .content
+                            .to_lowercase()
+                            .contains(&canonical.to_lowercase());
+                        let title_mentions = note
+                            .title
+                            .to_lowercase()
+                            .contains(&canonical.to_lowercase());
+                        if (content_mentions || title_mentions)
+                            && let Err(e) =
+                                note_repo.record_derived_from(&note_id, &note.id, 0.5).await
                         {
-                            if let Err(e) = note_repo
-                                .record_derived_from(&note_id, &note.id, 0.5)
-                                .await
-                            {
-                                tracing::debug!(
-                                    project_id = %project_id,
-                                    error = %e,
-                                    "memory_enrichment: derived_from edge write failed (non-fatal)"
-                                );
-                            }
+                            tracing::debug!(
+                                project_id = %project_id,
+                                error = %e,
+                                "memory_enrichment: derived_from edge write failed (non-fatal)"
+                            );
                         }
                     }
                     // Load the entity's embedding (if available) and check
@@ -723,21 +710,19 @@ async fn run_memory_enrichment_inner(
                     let entity_embedding = repo_get_embedding(&note_repo, &note_id).await;
                     if let Some(existing_id) =
                         entity_state.find_merge_target_by_embedding(&entity_embedding)
+                        && existing_id != note_id
                     {
-                        if existing_id != note_id {
-                            report.entity_merges += 1;
-                            tracing::debug!(
-                                project_id = %project_id,
-                                new_entity_id = %note_id,
-                                existing_entity_id = %existing_id,
-                                "memory_enrichment: post-persist embedding dedup merged new entity into existing"
-                            );
-                        }
+                        report.entity_merges += 1;
+                        tracing::debug!(
+                            project_id = %project_id,
+                            new_entity_id = %note_id,
+                            existing_entity_id = %existing_id,
+                            "memory_enrichment: post-persist embedding dedup merged new entity into existing"
+                        );
                     }
-                    entity_state.existing.insert(
-                        canonical.to_lowercase(),
-                        (note_id, entity_embedding),
-                    );
+                    entity_state
+                        .existing
+                        .insert(canonical.to_lowercase(), (note_id, entity_embedding));
                     report.entities.push(EnrichmentEntity {
                         canonical_name: canonical.to_string(),
                         aliases: llm_entity.aliases.clone(),
@@ -1100,9 +1085,10 @@ mod tests {
         let mut state = EntityDedupState {
             existing: HashMap::new(),
         };
-        state
-            .existing
-            .insert("circuit breaker".to_string(), ("note-1".to_string(), vec![]));
+        state.existing.insert(
+            "circuit breaker".to_string(),
+            ("note-1".to_string(), vec![]),
+        );
         assert_eq!(
             state.find_merge_target_by_name("Circuit Breaker"),
             Some("note-1".to_string())
@@ -1172,16 +1158,12 @@ mod tests {
         // Existing entity "alpha" with a fingerprint embedding.
         state.existing.insert(
             "alpha".to_string(),
-            (
-                "note-alpha".to_string(),
-                vec![1.0_f32, 0.0, 0.0, 0.0],
-            ),
+            ("note-alpha".to_string(), vec![1.0_f32, 0.0, 0.0, 0.0]),
         );
         // Existing entity "bravo" with no embedding.
-        state.existing.insert(
-            "bravo".to_string(),
-            ("note-bravo".to_string(), Vec::new()),
-        );
+        state
+            .existing
+            .insert("bravo".to_string(), ("note-bravo".to_string(), Vec::new()));
 
         // Embedding match: candidate with cosine 1.0 to "alpha" → match.
         let candidate = vec![1.0_f32, 0.0, 0.0, 0.0];
