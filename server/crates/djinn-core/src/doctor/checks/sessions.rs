@@ -667,3 +667,453 @@ mod tests {
         }
     }
 }
+
+// ===========================================================================
+// T3 — force_close_orphan_session
+// ===========================================================================
+//
+// `force_close` closes a task but does not evict the running
+// session/slot. A session left in `status = 'running'` after its task
+// has been `force_close`d is the open item from txr4 in
+// `cases/project-runaway-loop-second-strike-and-slot-wedge` — it
+// holds a dispatch slot until the zombie reaper finalizes it, and if
+// the reaper is briefly disabled / failing open, the slot stays wedged
+// indefinitely.
+//
+// This check is a *detector*: it flags the orphaned session but does
+// not close it, evict the slot, or delete any pod (per the epic's
+// "doctor verifies, doesn't replace" guardrail). The check is
+// additive to T1's `zombie_running_session` content above — T3 does
+// not modify any of T1's code.
+
+/// A read-only projection of the inputs the force-close-orphan check
+/// needs.
+///
+/// This is T3's own trait, disjoint from T1's [`CheckDb`] above. The
+/// fabrication tests use a pure in-memory double; a future adapter (in
+/// a follow-up epic) will provide an impl backed by `djinn_db`.
+pub trait ForceCloseCheckDb {
+    /// Sessions whose `status` is `running` AND whose owning task has
+    /// been `force_close`d. The check relies on the adapter to perform
+    /// the join (sessions ↔ tasks by `task_id`, filtering tasks whose
+    /// `close_reason == 'force_close'`); the fabrication test stages
+    /// the joined rows directly.
+    fn force_close_orphan_sessions(&self) -> Vec<ForceCloseOrphanSessionRow>;
+
+    /// `true` iff a live pod is currently reported for `task_id`. A
+    /// real impl bridges to the k8s client; the fabrication test
+    /// returns its staged value.
+    fn pod_present(&self, task_id: &str) -> bool;
+}
+
+/// A minimal projection of a `sessions` row left orphaned by a
+/// `force_close`. Only the fields the orphan check reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForceCloseOrphanSessionRow {
+    pub session_id: String,
+    pub task_id: String,
+    /// The session's status. Expected to be `running` (that is the
+    /// divergence); carried in the snapshot for the future fix path.
+    pub session_status: String,
+}
+
+/// Inputs the resolver consumes for one orphaned session.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForceCloseOrphanInputs {
+    pub session_id: String,
+    pub task_id: String,
+    /// The owning task's close reason. Always `force_close` for rows
+    /// this check examines, but carried explicitly so the snapshot is
+    /// self-describing.
+    pub task_close_reason: String,
+    pub session_status: String,
+    /// Whether a live pod is still reported for the task. `true` means
+    /// the orphaned session still has a backing pod consuming cluster
+    /// resources.
+    pub pod_present: bool,
+}
+
+/// Outputs the resolver returns. The fields are the *observed* truth
+/// the fix path will replay `resolve()` against.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForceCloseOrphanOutputs {
+    pub is_orphan: bool,
+    pub reason: ForceCloseOrphanReason,
+}
+
+/// Why the resolver concluded the session is or is not an orphan.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ForceCloseOrphanReason {
+    /// The session is `running` but its task has been `force_close`d.
+    /// The session/slot is orphaned.
+    Orphan,
+    /// The session is not `running` (it has already been finalized),
+    /// or the task's close reason is not `force_close`. No finding.
+    Healthy,
+}
+
+/// The shared resolver. Both `run()` and the (future) `fix()` call this
+/// so the snapshot's `inputs` can reproduce the snapshot's `outputs`
+/// exactly — the shared-resolver invariant from the doctor framework
+/// module docs.
+fn resolve_force_close_state(inputs: &ForceCloseOrphanInputs) -> ForceCloseOrphanOutputs {
+    // The session is an orphan iff it is still `running` and its task
+    // was `force_close`d. The adapter already filters to
+    // `close_reason == 'force_close'`, but the resolver re-checks so
+    // the snapshot is a faithful record of the decision.
+    let is_orphan = inputs.session_status == "running" && inputs.task_close_reason == "force_close";
+    ForceCloseOrphanOutputs {
+        is_orphan,
+        reason: if is_orphan {
+            ForceCloseOrphanReason::Orphan
+        } else {
+            ForceCloseOrphanReason::Healthy
+        },
+    }
+}
+
+/// `DoctorCheck` impl that flags sessions left in `status = 'running'`
+/// after the task they belong to has been `force_close`d.
+///
+/// The check is read-only. It does not close any session, evict any
+/// slot, delete any pod, or import `supervisor_impl::pr` — it mirrors
+/// the force-close orphan wedge as a detector (per the epic's "doctor
+/// verifies, doesn't replace" guardrail).
+pub struct ForceCloseOrphanSessionCheck<D: ForceCloseCheckDb> {
+    db: D,
+}
+
+impl<D: ForceCloseCheckDb> ForceCloseOrphanSessionCheck<D> {
+    /// Construct a check bound to a specific `ForceCloseCheckDb`
+    /// projection. In production this will be backed by a thin adapter
+    /// over `djinn_db::sessions` + `djinn_db::tasks`; in tests it is
+    /// backed by `MemoryForceCloseCheckDb`.
+    pub fn new(db: D) -> Self {
+        Self { db }
+    }
+
+    /// Resolve one orphaned-session candidate into a [`Finding`], if it
+    /// is an orphan. Kept private so the snapshot's `inputs`/`outputs`
+    /// fields are guaranteed to come from the *same*
+    /// `resolve_force_close_state()` call the checker used.
+    fn resolve(inputs: &ForceCloseOrphanInputs) -> Option<Finding> {
+        let outputs = resolve_force_close_state(inputs);
+        if !outputs.is_orphan {
+            return None;
+        }
+
+        let resolver_inputs_json =
+            serde_json::to_value(inputs).expect("ForceCloseOrphanInputs serializes");
+        let resolver_outputs_json =
+            serde_json::to_value(&outputs).expect("ForceCloseOrphanOutputs serializes");
+        let snapshot = ResolverSnapshot::new(
+            "resolve_force_close_orphan_session",
+            resolver_inputs_json.clone(),
+            resolver_outputs_json,
+        );
+
+        let evidence = json!({
+            "session_id": inputs.session_id,
+            "task_id": inputs.task_id,
+            "task_close_reason": inputs.task_close_reason,
+            "session_status": inputs.session_status,
+            "pod_present": inputs.pod_present,
+        });
+
+        let detail = format!(
+            "session '{}' is still `running` after task '{}' was `force_close`d; \
+             force_close does not evict the running session/slot, so the session \
+             holds a dispatch slot until the zombie reaper finalizes it — and if the \
+             reaper is briefly disabled / failing open, the slot stays wedged \
+             indefinitely (the open item from txr4)",
+            inputs.session_id, inputs.task_id,
+        );
+
+        let mut finding = Finding::new(
+            FindingSeverity::Critical,
+            "force_close_orphan_session",
+            snapshot,
+            detail,
+        );
+        finding = finding
+            .with_entity_id("session_id", inputs.session_id.clone())
+            .with_entity_id("task_id", inputs.task_id.clone())
+            .with_evidence(evidence);
+        Some(finding)
+    }
+}
+
+impl<D: ForceCloseCheckDb + Send + Sync> DoctorCheck for ForceCloseOrphanSessionCheck<D> {
+    fn name(&self) -> &'static str {
+        "force_close_orphan_session"
+    }
+
+    fn description(&self) -> &'static str {
+        "Flags sessions left in status=running after the task they belong \
+         to has been force_closed — force_close does not evict the running \
+         session/slot. The open item from txr4. No state mutation."
+    }
+
+    fn run(&self) -> DoctorResult<Vec<Finding>> {
+        let candidates = self.db.force_close_orphan_sessions();
+        let mut findings = Vec::new();
+        for row in candidates {
+            let pod_present = self.db.pod_present(&row.task_id);
+            let inputs = ForceCloseOrphanInputs {
+                session_id: row.session_id.clone(),
+                task_id: row.task_id.clone(),
+                task_close_reason: "force_close".to_owned(),
+                session_status: row.session_status.clone(),
+                pod_present,
+            };
+            if let Some(finding) = Self::resolve(&inputs) {
+                findings.push(finding);
+            }
+        }
+        Ok(findings)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T3 tests — force_close_orphan_session
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests_force_close {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// In-memory `ForceCloseCheckDb` test double for the
+    /// force-close-orphan check. Disjoint from T1's `MemoryCheckDb`.
+    #[derive(Default)]
+    struct MemoryForceCloseCheckDb {
+        sessions: Vec<ForceCloseOrphanSessionRow>,
+        /// `task_id -> pod_present` overrides. Missing entries default
+        /// to `false`.
+        pods: BTreeMap<String, bool>,
+    }
+
+    impl MemoryForceCloseCheckDb {
+        fn with_orphan_running_session() -> Self {
+            let mut db = Self::default();
+            db.sessions.push(ForceCloseOrphanSessionRow {
+                session_id: "sess-orphan".to_owned(),
+                task_id: "task-fc".to_owned(),
+                session_status: "running".to_owned(),
+            });
+            db.pods.insert("task-fc".to_owned(), true);
+            db
+        }
+
+        fn with_orphan_no_pod() -> Self {
+            let mut db = Self::default();
+            db.sessions.push(ForceCloseOrphanSessionRow {
+                session_id: "sess-orphan-nopod".to_owned(),
+                task_id: "task-fc2".to_owned(),
+                session_status: "running".to_owned(),
+            });
+            db
+        }
+
+        fn with_finalized_session() -> Self {
+            let mut db = Self::default();
+            db.sessions.push(ForceCloseOrphanSessionRow {
+                session_id: "sess-done".to_owned(),
+                task_id: "task-done".to_owned(),
+                session_status: "closed".to_owned(),
+            });
+            db
+        }
+    }
+
+    impl ForceCloseCheckDb for MemoryForceCloseCheckDb {
+        fn force_close_orphan_sessions(&self) -> Vec<ForceCloseOrphanSessionRow> {
+            self.sessions.clone()
+        }
+        fn pod_present(&self, task_id: &str) -> bool {
+            self.pods.get(task_id).copied().unwrap_or(false)
+        }
+    }
+
+    fn run_check(db: MemoryForceCloseCheckDb) -> Vec<Finding> {
+        let check = ForceCloseOrphanSessionCheck::new(db);
+        check.run().expect("run succeeds")
+    }
+
+    // -------------------------------------------------------------------
+    // Happy path
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn happy_path_no_finding() {
+        let findings = run_check(MemoryForceCloseCheckDb::default());
+        assert!(
+            findings.is_empty(),
+            "empty candidate list must produce no findings, got {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn happy_path_finalized_session_not_flagged() {
+        // A session whose status has moved past `running` is not an
+        // orphan even if the task was force_closed.
+        let findings = run_check(MemoryForceCloseCheckDb::with_finalized_session());
+        assert!(
+            findings.is_empty(),
+            "a finalized session must not be flagged, got {:?}",
+            findings
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Divergence
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn divergence_finding_shape() {
+        // The canonical orphan: a `running` session whose task was
+        // force_closed, with a live pod still present.
+        let findings = run_check(MemoryForceCloseCheckDb::with_orphan_running_session());
+        assert_eq!(findings.len(), 1, "exactly one orphan finding expected");
+        let finding = &findings[0];
+        assert_eq!(finding.severity, FindingSeverity::Critical);
+        assert_eq!(finding.check_name, "force_close_orphan_session");
+        assert_eq!(
+            finding.entity_ids.get("session_id").map(String::as_str),
+            Some("sess-orphan"),
+            "entity_ids must contain the divergent session id"
+        );
+        assert_eq!(
+            finding.entity_ids.get("task_id").map(String::as_str),
+            Some("task-fc"),
+            "entity_ids must contain the force-closed task id"
+        );
+        // Evidence must surface the reaper-relevant fields.
+        assert_eq!(finding.evidence["session_id"], "sess-orphan");
+        assert_eq!(finding.evidence["task_id"], "task-fc");
+        assert_eq!(finding.evidence["task_close_reason"], "force_close");
+        assert_eq!(finding.evidence["session_status"], "running");
+        assert_eq!(finding.evidence["pod_present"], true);
+
+        // Snapshot must be populated and re-runnable: feeding
+        // `snapshot.inputs` back into the same resolver reproduces
+        // `snapshot.outputs` exactly.
+        assert_eq!(
+            finding.resolver_snapshot.resolver,
+            "resolve_force_close_orphan_session"
+        );
+        let snapshot_inputs: ForceCloseOrphanInputs =
+            serde_json::from_value(finding.resolver_snapshot.inputs.clone())
+                .expect("snapshot inputs deserialize as ForceCloseOrphanInputs");
+        let replay_outputs = resolve_force_close_state(&snapshot_inputs);
+        let replay_outputs_json = serde_json::to_value(&replay_outputs).expect("outputs serialize");
+        assert_eq!(
+            replay_outputs_json, finding.resolver_snapshot.outputs,
+            "resolver snapshot must be reproducible from snapshot.inputs"
+        );
+        assert_eq!(snapshot_inputs.session_id, "sess-orphan");
+        assert_eq!(snapshot_inputs.task_id, "task-fc");
+        assert_eq!(snapshot_inputs.task_close_reason, "force_close");
+        assert_eq!(snapshot_inputs.session_status, "running");
+        assert!(snapshot_inputs.pod_present);
+    }
+
+    #[test]
+    fn divergence_orphan_without_pod_still_flagged() {
+        // The pod may already be gone (e.g. activeDeadline dropped it)
+        // but the session row is still `running` — still an orphan.
+        let findings = run_check(MemoryForceCloseCheckDb::with_orphan_no_pod());
+        assert_eq!(findings.len(), 1);
+        let finding = &findings[0];
+        assert_eq!(finding.evidence["pod_present"], false);
+    }
+
+    // -------------------------------------------------------------------
+    // Resolver purity / shared-resolver invariant
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn resolve_is_pure() {
+        let inputs = ForceCloseOrphanInputs {
+            session_id: "sess-x".to_owned(),
+            task_id: "task-x".to_owned(),
+            task_close_reason: "force_close".to_owned(),
+            session_status: "running".to_owned(),
+            pod_present: true,
+        };
+        let a = resolve_force_close_state(&inputs);
+        let b = resolve_force_close_state(&inputs);
+        assert_eq!(a, b);
+        assert!(a.is_orphan);
+        assert_eq!(a.reason, ForceCloseOrphanReason::Orphan);
+    }
+
+    #[test]
+    fn resolve_healthy_when_session_not_running() {
+        let inputs = ForceCloseOrphanInputs {
+            session_id: "sess-y".to_owned(),
+            task_id: "task-y".to_owned(),
+            task_close_reason: "force_close".to_owned(),
+            session_status: "closed".to_owned(),
+            pod_present: false,
+        };
+        let out = resolve_force_close_state(&inputs);
+        assert!(!out.is_orphan);
+        assert_eq!(out.reason, ForceCloseOrphanReason::Healthy);
+    }
+
+    #[test]
+    fn resolve_healthy_when_close_reason_not_force_close() {
+        let inputs = ForceCloseOrphanInputs {
+            session_id: "sess-z".to_owned(),
+            task_id: "task-z".to_owned(),
+            task_close_reason: "completed".to_owned(),
+            session_status: "running".to_owned(),
+            pod_present: false,
+        };
+        let out = resolve_force_close_state(&inputs);
+        assert!(!out.is_orphan);
+        assert_eq!(out.reason, ForceCloseOrphanReason::Healthy);
+    }
+
+    // -------------------------------------------------------------------
+    // Check name / description / default fix
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn check_name_and_description_are_stable() {
+        let check = ForceCloseOrphanSessionCheck::new(MemoryForceCloseCheckDb::default());
+        assert_eq!(check.name(), "force_close_orphan_session");
+        assert!(
+            check.description().contains("force_close"),
+            "description should mention force_close: got {:?}",
+            check.description()
+        );
+    }
+
+    #[test]
+    fn check_does_not_override_fix() {
+        // Per the design, T3's checks do not override `fix`; the
+        // default `Err(FixNotSupported)` from the framework is
+        // intentional. Asserting the trait default keeps that contract
+        // explicit.
+        let check = ForceCloseOrphanSessionCheck::new(MemoryForceCloseCheckDb::default());
+        let finding = Finding::new(
+            FindingSeverity::Critical,
+            "force_close_orphan_session",
+            ResolverSnapshot::new("resolve_force_close_orphan_session", json!({}), json!({})),
+            "synthetic",
+        );
+        let err = check
+            .fix(&finding)
+            .expect_err("default fix must return FixNotSupported");
+        match err {
+            crate::doctor::DoctorError::FixNotSupported { check } => {
+                assert_eq!(check, "force_close_orphan_session");
+            }
+            other => panic!("expected FixNotSupported, got {other:?}"),
+        }
+    }
+}
