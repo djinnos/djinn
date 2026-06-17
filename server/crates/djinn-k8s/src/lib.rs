@@ -24,8 +24,8 @@ pub use env_config::{
     env_config_volume_mount,
 };
 pub use graph_warmer::{
-    K8sGraphWarmer, KubeClientDispatcher, KubeClientJobWatcher, NoopJobWatcher, WarmJobDispatcher,
-    WarmJobWatcher,
+    K8sGraphWarmer, KubeClientDispatcher, KubeClientJobWatcher, KubeClientWarmJobLister,
+    NoopJobWatcher, NoopWarmJobLister, WarmJobDispatcher, WarmJobLister, WarmJobWatcher,
 };
 pub use runtime::KubernetesRuntime;
 pub use verification_job::build_verification_job;
