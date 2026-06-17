@@ -181,4 +181,96 @@ pub enum WarmerError {
     /// error or a graph pipeline failure).
     #[error("warmer backend error: {0}")]
     Backend(String),
+    /// The project's dispatch image is not currently `ready` — either the
+    /// assigned catalog image is mid-rebuild (`building`) or the project has
+    /// no catalog image selected yet (`none`). The caller can use the
+    /// `transient` flag to decide whether to requeue with backoff (catalog
+    /// image is being built / first-time selection pending) or to surface
+    /// the failure immediately (permanent configuration issue).
+    ///
+    /// `image_status` carries the raw `ProjectImageStatus` value
+    /// (`none` | `building` | `ready` | `failed`) so callers can log /
+    /// surface the underlying state. `tag` is the resolved image tag (when
+    /// known) so a poller can show "rebuilding X" rather than a generic
+    /// "no image" message.
+    #[error(
+        "project {project_id} image not ready (status: {image_status}, transient: {transient})"
+    )]
+    ImageNotReady {
+        project_id: String,
+        image_status: String,
+        /// Tag of the assigned catalog image, if any. `None` when the
+        /// project has no catalog image selected.
+        tag: Option<String>,
+        /// `true` when the missing image is expected to become ready
+        /// (catalog image is `building`, or the project is awaiting first
+        /// assignment); `false` when the project has no catalog image
+        /// selected at all and won't be dispatchable until an operator
+        /// assigns one.
+        transient: bool,
+    },
+}
+
+impl WarmerError {
+    /// True when this error represents a transient "image not ready"
+    /// condition that the caller may defer / requeue. False for any
+    /// hard backend failure or a permanently-missing image.
+    pub fn is_image_not_ready_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::ImageNotReady {
+                transient: true,
+                ..
+            }
+        )
+    }
+
+    /// True when this error represents a permanently-missing image (no
+    /// catalog image assigned, project needs configuration).
+    pub fn is_image_not_ready_permanent(&self) -> bool {
+        matches!(
+            self,
+            Self::ImageNotReady {
+                transient: false,
+                ..
+            }
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Pin the discriminator contract that the K8s graph warmer's
+    // `dispatch_verification_with_retry` and the MCP verification-test
+    // requeue both rely on. The structured `transient` flag is the
+    // single source of truth: callers MUST NOT parse the `Display`
+    // string to recover this classification.
+    #[test]
+    fn warmer_error_image_not_ready_transient_vs_permanent() {
+        let transient = WarmerError::ImageNotReady {
+            project_id: "p1".into(),
+            image_status: "building".into(),
+            tag: Some("reg/img:abc".into()),
+            transient: true,
+        };
+        assert!(transient.is_image_not_ready_transient());
+        assert!(!transient.is_image_not_ready_permanent());
+        assert!(transient.to_string().contains("transient: true"));
+
+        let permanent = WarmerError::ImageNotReady {
+            project_id: "p1".into(),
+            image_status: "none".into(),
+            tag: None,
+            transient: false,
+        };
+        assert!(!permanent.is_image_not_ready_transient());
+        assert!(permanent.is_image_not_ready_permanent());
+        assert!(permanent.to_string().contains("transient: false"));
+
+        let backend = WarmerError::Backend("kube apiserver 503".into());
+        assert!(!backend.is_image_not_ready_transient());
+        assert!(!backend.is_image_not_ready_permanent());
+    }
 }

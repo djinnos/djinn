@@ -701,14 +701,29 @@ impl CoordinatorActor {
             // supervisor fires `submit_verification`, but the host only
             // registers the pipeline in the tracker after the pod's
             // WorkerSubmitted report arrives and `spawn_verification` runs —
-            // a window of seconds on every run. A sweep tick landing inside
-            // it flipped freshly-verifying tasks straight back to `open`
-            // (observed: gx2q recovered 0.8s after entering verifying →
-            // spurious full worker redo). Only recover tasks that have sat
-            // in `verifying` well past any plausible report+spawn latency.
-            // Timestamps are `YYYY-MM-DDTHH:MM:SS.mmmZ` strings, lexically
-            // comparable — same cutoff idiom as `reap_stale_task_runs`.
-            const VERIFYING_RECOVERY_GRACE_SECS: i64 = 180;
+            // a window on every run. A sweep tick landing inside it flipped
+            // freshly-verifying tasks straight back to `open` (observed: gx2q
+            // recovered 0.8s after entering verifying → spurious full worker
+            // redo). Only recover tasks that have sat in `verifying` well past
+            // any plausible report+spawn latency. Timestamps are
+            // `YYYY-MM-DDTHH:MM:SS.mmmZ` strings, lexically comparable — same
+            // cutoff idiom as `reap_stale_task_runs`.
+            //
+            // IN-POD VERIFICATION (the double-compile fix): the worker now runs
+            // the verification pipeline ITSELF, inside the live task-run pod,
+            // BETWEEN entering `verifying` and emitting its report. So this
+            // window now includes the full verify wall-clock (clippy + test,
+            // fast via artifact reuse but still minutes on a big workspace) —
+            // NOT just report+spawn latency. The task-run row stays `running`
+            // and the worker holds its slot the whole time, so this is a LIVE
+            // task, not an orphan. The old 180s cutoff would reap it mid-verify
+            // and trigger a spurious worker redo (defeating the reuse). Widen
+            // the grace to the worker stall budget (30 min) — the same envelope
+            // we already trust a quiet-but-live worker session to occupy. A
+            // genuinely stuck verify is still backstopped by the host pipeline
+            // timeout (`compute_pipeline_timeout`, 3600s) once the report does
+            // arrive, and by the pod's K8s active-deadline.
+            const VERIFYING_RECOVERY_GRACE_SECS: i64 = 30 * 60;
             let cutoff = time::OffsetDateTime::now_utc()
                 - time::Duration::seconds(VERIFYING_RECOVERY_GRACE_SECS);
             let format = time::macros::format_description!(

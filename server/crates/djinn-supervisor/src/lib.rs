@@ -1775,6 +1775,55 @@ impl TaskRunSupervisor {
             }
         }
 
+        // IN-POD pre-PR verification (the double-compile fix). On a clean
+        // `WorkerSubmitted` the worker has just committed to the task branch and
+        // its private Cargo target dir (CARGO_TARGET_DIR) still holds the freshly
+        // compiled task delta — but it's about to be torn down by
+        // `cleanup_cargo_target_run_dir` directly below. Give the services impl a
+        // chance to verify the committed tree HERE, reusing those artifacts, so
+        // the host doesn't have to spin up a separate verify Job that re-seeds the
+        // warm base and recompiles the changed crates from scratch.
+        //
+        // `verify_committed_tree` defaults to `Ok(None)` (host/test runtimes and
+        // any impl that can't run in-pod verify): the host then dispatches the
+        // separate verify Job as before — the unchanged FALLBACK. Only the worker
+        // pod overrides it. A returned `Some(run_id)` is a terminal
+        // `verification_runs` row the host pipeline consumes directly.
+        let verification_run_id = if matches!(outcome, TaskRunOutcome::WorkerSubmitted)
+            && !self.services.cancel().is_cancelled()
+        {
+            match self.services.verify_committed_tree(&spec, &task).await {
+                Ok(maybe_id) => {
+                    if let Some(id) = maybe_id.as_deref() {
+                        info!(
+                            task_run_id = %run_id,
+                            verification_run_id = %id,
+                            "supervisor: in-pod verification ran; host will consume its result"
+                        );
+                    } else {
+                        info!(
+                            task_run_id = %run_id,
+                            "supervisor: in-pod verification not applicable; host will dispatch a verify Job (fallback)"
+                        );
+                    }
+                    maybe_id
+                }
+                Err(e) => {
+                    // Never fail the run on an in-pod verify hiccup — fall back to
+                    // the host-dispatched Job, which re-derives everything from the
+                    // durable task branch in the mirror.
+                    tracing::warn!(
+                        task_run_id = %run_id,
+                        error = %e,
+                        "supervisor: in-pod verification errored; falling back to host-dispatched verify Job"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         cleanup_cargo_target_run_dir(&run_id).await;
 
         info!(task_run_id = %run_id, ?outcome, "task-run finished");
@@ -1782,6 +1831,7 @@ impl TaskRunSupervisor {
             task_run_id: run_id,
             outcome,
             stages_completed: completed,
+            verification_run_id,
         })
     }
 
@@ -1821,6 +1871,9 @@ impl TaskRunSupervisor {
             task_run_id: run_id,
             outcome: TaskRunOutcome::Interrupted,
             stages_completed,
+            // Interrupted runs never reach the worker-submit point, so no in-pod
+            // verification ran.
+            verification_run_id: None,
         })
     }
 }

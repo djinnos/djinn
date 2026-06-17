@@ -215,7 +215,7 @@ impl McpState {
         &self,
         test_id: &str,
         project_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::bridge::RuntimeDispatchError> {
         self.runtime
             .dispatch_verification_test(test_id, project_id)
             .await
@@ -227,7 +227,7 @@ impl McpState {
         project_id: &str,
         task_branch: &str,
         target_branch: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::bridge::RuntimeDispatchError> {
         self.runtime
             .dispatch_verification(run_id, project_id, task_branch, target_branch)
             .await
@@ -344,7 +344,11 @@ pub mod stubs {
         }
         async fn trigger_graph_warm(&self, _: &str) {}
         async fn apply_user_model_change(&self) {}
-        async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
+        async fn dispatch_verification_test(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<(), crate::bridge::RuntimeDispatchError> {
             Ok(())
         }
         async fn dispatch_verification(
@@ -353,7 +357,7 @@ pub mod stubs {
             _: &str,
             _: &str,
             _: &str,
-        ) -> Result<(), String> {
+        ) -> Result<(), crate::bridge::RuntimeDispatchError> {
             Ok(())
         }
         async fn provision_backing_service(

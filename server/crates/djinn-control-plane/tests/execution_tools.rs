@@ -886,7 +886,7 @@ impl RuntimeOps for RecordingRuntimeOps {
         &self,
         _test_id: &str,
         _project_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), djinn_control_plane::bridge::RuntimeDispatchError> {
         Ok(())
     }
 
@@ -896,7 +896,7 @@ impl RuntimeOps for RecordingRuntimeOps {
         _project_id: &str,
         _task_branch: &str,
         _target_branch: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), djinn_control_plane::bridge::RuntimeDispatchError> {
         Ok(())
     }
 

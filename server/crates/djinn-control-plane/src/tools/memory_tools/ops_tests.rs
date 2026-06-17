@@ -59,7 +59,11 @@ mod tests {
         }
         async fn trigger_graph_warm(&self, _: &str) {}
         async fn apply_user_model_change(&self) {}
-        async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
+        async fn dispatch_verification_test(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<(), crate::bridge::RuntimeDispatchError> {
             Ok(())
         }
         async fn dispatch_verification(
@@ -68,7 +72,7 @@ mod tests {
             _: &str,
             _: &str,
             _: &str,
-        ) -> Result<(), String> {
+        ) -> Result<(), crate::bridge::RuntimeDispatchError> {
             Ok(())
         }
         async fn provision_backing_service(
@@ -120,7 +124,11 @@ mod tests {
         }
         async fn trigger_graph_warm(&self, _: &str) {}
         async fn apply_user_model_change(&self) {}
-        async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
+        async fn dispatch_verification_test(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<(), crate::bridge::RuntimeDispatchError> {
             Ok(())
         }
         async fn dispatch_verification(
@@ -129,7 +137,7 @@ mod tests {
             _: &str,
             _: &str,
             _: &str,
-        ) -> Result<(), String> {
+        ) -> Result<(), crate::bridge::RuntimeDispatchError> {
             Ok(())
         }
         async fn provision_backing_service(
