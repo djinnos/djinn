@@ -33,6 +33,7 @@ impl DjinnMcpServer {
             file: file.to_string(),
             coupled,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -109,6 +110,7 @@ impl DjinnMcpServer {
                 has_more: resp_has_more,
                 summary_only: pagination.summary_only.then_some(true),
                 next_step: None,
+                graph_staleness: None,
             },
         ))
     }
@@ -141,6 +143,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::CouplingHubs(CouplingHubsResponse {
             hubs,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -163,6 +166,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Churn(ChurnResponse {
             files,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -207,6 +211,7 @@ impl DjinnMcpServer {
             hits,
             workspace_hint: scope.hint,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -272,6 +277,7 @@ impl DjinnMcpServer {
             snapshot,
             workspace_hint: scope.hint,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 }
