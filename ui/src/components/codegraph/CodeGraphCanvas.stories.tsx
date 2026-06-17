@@ -10,9 +10,11 @@
  * full toolbar/highlight UX remains visible.
  */
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, userEvent, waitFor, within } from "storybook/test";
 
+import { CitationStatusBadge } from "./CodeGraphCanvas";
 import { GraphToolbar } from "./GraphToolbar";
 import {
   EMPTY_HIGHLIGHT_VIEW,
@@ -438,5 +440,93 @@ export const WorkspacesAndCrossWorkspaceEdge: Story = {
 export const SemanticZoomCommunity: Story = {
   args: {
     semanticZoomMode: "community",
+  },
+};
+
+// ── Multi-id citation badge story (g293) ──────────────────────────────────
+
+/**
+ * Drives the *real* `CitationStatusBadge` through the existing store seam
+ * (`setCitations`) so the multi-id text — "3 citations pinned" — is
+ * asserted against the production component, not a stub. A button lets the
+ * reviewer (and the Storybook `play` function) populate the citationIds
+ * interactively, mirroring how the chat-agent harvest
+ * (`useChatToolCallHarvest`) populates the store from a `code_graph` tool
+ * result.
+ */
+function CitationBadgeHarness() {
+  const setCitations = useCodeGraphStore((s) => s.setCitations);
+  const [applied, setApplied] = useState(false);
+  return (
+    <div
+      className="relative h-24 w-full overflow-hidden rounded-md border border-[#2d2d3d]"
+      style={{ background: "#0a0a10" }}
+    >
+      <CitationStatusBadge />
+      <div className="absolute bottom-3 left-1/2 -translate-x-1/2">
+        <button
+          type="button"
+          data-testid="populate-citations"
+          onClick={() => {
+            // 3 distinct symbol ids, as a `code_graph search` result would
+            // surface. `setCitations` is the same store action the chat
+            // harvest hook and the per-click CitationLink use.
+            setCitations(["sym::alpha", "sym::beta", "sym::gamma"]);
+            setApplied(true);
+          }}
+          className="rounded-full border border-blue-400/40 bg-blue-500/15 px-3 py-1 text-[11px] text-blue-200"
+        >
+          Populate 3 citations
+        </button>
+      </div>
+      {applied && (
+        <span data-testid="citations-applied-flag" className="sr-only">
+          applied
+        </span>
+      )}
+    </div>
+  );
+}
+
+const badgeMeta: Meta<typeof CitationBadgeHarness> = {
+  title: "CodeGraph/CodeGraphCanvas",
+  component: CitationBadgeHarness,
+  parameters: { layout: "centered" },
+};
+
+// `badgeMeta` shares the title with the default `meta` above; Storybook
+// merges all stories under one title. Keep the default export (the
+// StoryShell meta) so the existing stories are unaffected — this block is
+// only referenced to keep the type-checker happy about the unused `Meta`.
+void badgeMeta;
+
+type BadgeStory = StoryObj<typeof CitationBadgeHarness>;
+
+/**
+ * Pre-populates `citationIds` with a 3-id set via the existing `setCitations`
+ * store action and asserts the `CitationStatusBadge` renders the multi-id
+ * "3 citations pinned" text. The `play` function clicks the populate button
+ * (the same store seam the chat harvest uses) and checks the rendered badge.
+ */
+export const CitationBadgeMultiId: BadgeStory = {
+  render: () => <CitationBadgeHarness />,
+  play: async ({ canvasElement }) => {
+    // Start from a clean store so prior stories' state doesn't leak in.
+    useCodeGraphStore.getState().clearCitations();
+    const canvas = within(canvasElement);
+
+    // Before populating, the badge is absent (citationCount === 0 and no
+    // selection) — the component returns null.
+    expect(canvas.queryByTestId("citation-status")).toBeNull();
+
+    await userEvent.click(canvas.getByTestId("populate-citations"));
+
+    // The badge reacts to the store update. `setCitations` is synchronous
+    // (Zustand), but wrap in waitFor to let React flush the commit.
+    await waitFor(() => {
+      expect(canvas.getByTestId("citation-status")).toHaveTextContent(
+        "3 citations pinned",
+      );
+    });
   },
 };

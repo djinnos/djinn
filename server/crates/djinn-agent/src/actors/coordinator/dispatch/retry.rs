@@ -1,5 +1,6 @@
 use super::super::*;
 use super::DispatchOutcome;
+use super::model_under_user_cap;
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
 
@@ -667,6 +668,43 @@ impl CoordinatorActor {
             return;
         }
 
+        // Per-user, per-model concurrency cap: the planner escalation must
+        // consume the SAME shared per-(creator, model) budget as every other
+        // dispatch path (worker, reviewer, lead, architect). Without this a
+        // planner dispatch admitted in the same tick as worker dispatches can
+        // overshoot max_sessions (observed: 2 worker + 1 reviewer = 3 > cap 2).
+        // Filter to only models where the creator is under their cap, using a
+        // fresh DB + inflight-ledger snapshot so a just-recorded admission in
+        // this same tick is visible.
+        let model_ids: Vec<String> = if let Some(creator) = source_creator.as_deref() {
+            let running = self.effective_running_by_user_model().await;
+            let caps = djinn_db::UserSettingsRepository::new(self.db.clone())
+                .get(creator)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.max_sessions)
+                .unwrap_or_default();
+            let mut filtered: Vec<String> = Vec::new();
+            for m in &model_ids {
+                let cap = caps.get(m).copied().unwrap_or(1);
+                if model_under_user_cap(&running, creator, m, cap) {
+                    filtered.push(m.clone());
+                }
+            }
+            if filtered.is_empty() {
+                tracing::debug!(
+                    source_task_id = %source_task_id,
+                    creator,
+                    "CoordinatorActor: planner escalation deferred — creator at per-model concurrency cap"
+                );
+                return;
+            }
+            filtered
+        } else {
+            model_ids
+        };
+
         let Some(project_path) = self.project_path_for_id(project_id).await else {
             tracing::warn!(
                 project_id = %project_id,
@@ -765,6 +803,26 @@ impl CoordinatorActor {
                     },
                 );
                 self.dispatched += 1;
+                // Record the planner admission in the shared in-flight ledger
+                // so a same-tick dispatch of ANY role sees reduced capacity.
+                // The dispatched model is the first health-available candidate
+                // (the one try_dispatch_to_pool accepted).
+                let dispatched_model = model_ids
+                    .iter()
+                    .find(|m| {
+                        self.health
+                            .is_available(review_task.created_by_user_id.as_deref(), m)
+                    })
+                    .cloned();
+                if let Some(model) = dispatched_model {
+                    self.record_inflight_dispatch(
+                        &review_task.id,
+                        Some(&review_task.short_id),
+                        review_task.created_by_user_id.as_deref(),
+                        &model,
+                    )
+                    .await;
+                }
                 self.publish_status();
             }
             DispatchOutcome::AtCapacity => {

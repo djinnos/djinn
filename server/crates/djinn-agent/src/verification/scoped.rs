@@ -80,7 +80,19 @@ fn resolve_scoped_commands_from_config(
         return Vec::new();
     }
 
-    let changed_files = git_diff_changed_files(worktree_path, target_branch);
+    let changed_files = match git_diff_changed_files(worktree_path, target_branch) {
+        Some(files) => files,
+        None => {
+            // The changed-file set could not be determined (target ref missing,
+            // diff errored). NEVER skip — that's a false pass on the gate. Run
+            // every configured command conservatively.
+            tracing::warn!(
+                target_branch = %target_branch,
+                "resolve_scoped_commands: changed-file set undetermined; running ALL configured commands (conservative — never skip the gate)"
+            );
+            return all_commands_from_rules(rules);
+        }
+    };
     tracing::debug!(
         target_branch = %target_branch,
         changed_file_count = changed_files.len(),
@@ -119,72 +131,104 @@ fn resolve_scoped_commands_from_config(
 /// Best-effort: if `git merge-base` fails (e.g. unrelated histories), falls
 /// back to the two-dot `<target_branch>..HEAD` range. Returns an empty `Vec`
 /// on any diff error (e.g. the target branch doesn't exist yet).
-fn git_diff_changed_files(worktree_path: &Path, target_branch: &str) -> Vec<String> {
-    // Resolve the merge-base so the diff is scoped to this branch's own
-    // changes. Fall back to the raw target ref if merge-base can't be
-    // computed.
+/// Returns `Some(changed_files)` when the diff base was resolved (the list may
+/// be empty = genuinely no changes), or `None` when the changed-file set could
+/// NOT be determined (target ref missing, diff errored). `None` is critical:
+/// the caller must treat it as "run ALL configured commands" rather than "no
+/// changes" — otherwise verification is silently skipped (a false pass on the
+/// pre-PR gate).
+fn git_diff_changed_files(worktree_path: &Path, target_branch: &str) -> Option<Vec<String>> {
+    // Resolve the target to a ref that actually EXISTS in this worktree. The
+    // in-pod verification path reuses the worker's ephemeral clone, which has
+    // `origin/<target>` but NO local `<target>` branch — diffing against the
+    // bare `<target>` name fails ("Not a valid object name"), which previously
+    // yielded an empty changed-file set and SILENTLY SKIPPED all scoped
+    // verification (a false pass). Try `<target>`, then `origin/<target>`.
+    let resolved_target = [target_branch.to_string(), format!("origin/{target_branch}")]
+        .into_iter()
+        .find(|r| {
+            std::process::Command::new("git")
+                .args(["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")])
+                .current_dir(worktree_path)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        });
+    let Some(resolved_target) = resolved_target else {
+        tracing::warn!(
+            target_branch = %target_branch,
+            "resolve_scoped_commands: target ref not found (tried <target> and origin/<target>); cannot scope — caller runs all configured commands"
+        );
+        return None;
+    };
+
+    // Resolve the merge-base so the diff is scoped to this branch's own changes
+    // (three-dot semantics). Fall back to the resolved target ref itself.
     let base_ref = match std::process::Command::new("git")
-        .args(["merge-base", target_branch, "HEAD"])
+        .args(["merge-base", &resolved_target, "HEAD"])
         .current_dir(worktree_path)
         .output()
     {
         Ok(o) if o.status.success() => {
             let sha = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if sha.is_empty() {
-                target_branch.to_string()
+                resolved_target.clone()
             } else {
                 sha
             }
         }
-        Ok(o) => {
-            tracing::warn!(
-                target_branch = %target_branch,
-                stderr = %String::from_utf8_lossy(&o.stderr),
-                "resolve_scoped_commands: git merge-base failed; falling back to two-dot range"
-            );
-            target_branch.to_string()
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                target_branch = %target_branch,
-                "resolve_scoped_commands: git merge-base errored; falling back to two-dot range"
-            );
-            target_branch.to_string()
-        }
+        _ => resolved_target.clone(),
     };
 
-    let range = format!("{}..HEAD", base_ref);
+    let range = format!("{base_ref}..HEAD");
     let output = match std::process::Command::new("git")
         .args(["diff", "--name-only", &range])
         .current_dir(worktree_path)
         .output()
     {
-        Ok(o) => o,
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            tracing::warn!(
+                target_branch = %target_branch,
+                stderr = %String::from_utf8_lossy(&o.stderr),
+                "resolve_scoped_commands: git diff non-zero; cannot scope — caller runs all configured commands"
+            );
+            return None;
+        }
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 target_branch = %target_branch,
-                "resolve_scoped_commands: git diff failed"
+                "resolve_scoped_commands: git diff failed; cannot scope — caller runs all configured commands"
             );
-            return Vec::new();
+            return None;
         }
     };
 
-    if !output.status.success() {
-        tracing::warn!(
-            target_branch = %target_branch,
-            stderr = %String::from_utf8_lossy(&output.stderr),
-            "resolve_scoped_commands: git diff returned non-zero exit code"
-        );
-        return Vec::new();
-    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect(),
+    )
+}
 
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect()
+/// Every command across all rules, order-preserving + deduplicated. Used as the
+/// CONSERVATIVE fallback when the changed-file set can't be determined: better
+/// to over-run verification than to skip it (a false pass).
+fn all_commands_from_rules(rules: &[djinn_stack::environment::VerificationRule]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for rule in rules {
+        for cmd in &rule.commands {
+            let trimmed = cmd.trim();
+            if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// For each rule (in config order), check whether any changed file matches

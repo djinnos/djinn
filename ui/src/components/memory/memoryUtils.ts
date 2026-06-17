@@ -19,6 +19,10 @@ export const NOTE_TYPE_LABELS: Record<string, string> = {
   tech_spike: 'Tech Spikes',
   brief: 'Brief',
   roadmap: 'Roadmap',
+  // Enrichment-created note types (epic diei / task qp5s): recurring systems
+  // and decisions surfaced by the LLM enrichment pass.
+  entity: 'Entities',
+  claim: 'Claims',
 };
 
 /** Note types hidden from the UI. */
@@ -42,6 +46,10 @@ export const NOTE_TYPE_ORDER: string[] = [
   'competitive',
   'session',
   'reference',
+  // Enrichment-created note types (epic diei): surfaced after enrichment,
+  // so they sort at the tail alongside the other derived/reference types.
+  'entity',
+  'claim',
   'brief',
   'roadmap',
 ];

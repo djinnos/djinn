@@ -32,6 +32,12 @@ pub fn folder_for_type(note_type: &str) -> &'static str {
         // community; folder is unique so cluster docs are easy to list /
         // exclude from human-curated knowledge browsing.
         "cluster_doc" => "reference/clusters",
+        // diei (LLM enrichment pass): `entity` nodes record recurring systems /
+        // concepts and `claim` nodes record decisions the memory surfaces.
+        // Distinct subfolders keep them easy to list and to style separately
+        // in the Memory graph UI; `infer_note_type` round-trips the mapping.
+        "entity" => "reference/entities",
+        "claim" => "reference/claims",
         // Singletons live at the .djinn/ root, no subfolder.
         "brief" | "roadmap" => "",
         // Unknown types fall back to reference.
@@ -208,6 +214,10 @@ pub fn infer_note_type(permalink: &str) -> String {
         "design/journeys" => "journey",
         "design/specs" => "design_spec",
         "reference/repo-maps" => "repo_map",
+        // diei (LLM enrichment): round-trip the new entity/claim subfolders
+        // back to their canonical `note_type` strings.
+        "reference/entities" => "entity",
+        "reference/claims" => "claim",
         _ => "reference",
     }
     .to_string()

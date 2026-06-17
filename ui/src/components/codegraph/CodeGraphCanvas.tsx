@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- LARGE_GRAPH_THRESHOLD and shouldFallbackToCommunity are exported for focused unit tests. */
 /**
  * CodeGraphCanvas — main view: fetch → adapt → render → interact.
  *
@@ -17,30 +18,67 @@
  * matching.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ConnectIcon, AlertCircleIcon, RefreshIcon } from "@hugeicons/core-free-icons";
+import {
+  ConnectIcon,
+  AlertCircleIcon,
+  RefreshIcon,
+} from "@hugeicons/core-free-icons";
 
-import { fetchSnapshot } from "@/api/codeGraph";
+import { fetchSnapshot, type SnapshotLevel } from "@/api/codeGraph";
 import {
   buildGraphFromSnapshot,
+  expandCommunityInSnapshot,
   filterSnapshotForWorkspace,
+  isDoubleClick,
   parseSnapshotResponse,
   type SnapshotPayload,
 } from "@/lib/codeGraphAdapter";
 import { useSigmaGraph } from "@/hooks/useSigmaGraph";
 import { useGraphReducers } from "@/hooks/useGraphReducers";
-import {
-  selectCitationIds,
-  useCodeGraphStore,
-} from "@/stores/codeGraphStore";
+import { selectCitationIds, useCodeGraphStore } from "@/stores/codeGraphStore";
 import { RendererCapabilityDialog } from "./RendererCapabilityDialog";
 import { cn } from "@/lib/utils";
 
 type FetchState =
   | { status: "loading" }
   | { status: "error"; error: string }
-  | { status: "ready"; snapshot: SnapshotPayload };
+  | {
+      status: "ready";
+      snapshot: SnapshotPayload;
+      /** Semantic-zoom level that produced this snapshot. */
+      level: SnapshotLevel;
+    };
+
+/**
+ * Auto-semantic-zoom threshold. When `semanticZoomMode === "auto"`, the
+ * canvas starts with a symbol-level fetch; if the snapshot reports
+ * `truncated === true`, `total_nodes >= LARGE_GRAPH_THRESHOLD`, or
+ * `total_nodes > nodeCap`, it refetches the same project at
+ * `level="community"` so the user sees a handful of legible blobs
+ * instead of a truncated 10k-node graph. The value sits just below the
+ * server's default cap (10,000) so the collapse happens precisely when
+ * the user would otherwise hit the cap.
+ */
+export const LARGE_GRAPH_THRESHOLD = 8_000;
+
+/**
+ * Decide whether an initial symbol-level snapshot warrants a community
+ * fallback. Kept as a pure exported helper so focused tests can pin the
+ * boundary without rendering the canvas.
+ */
+export function shouldFallbackToCommunity(
+  snapshot: SnapshotPayload,
+  nodeCap: number,
+  threshold: number = LARGE_GRAPH_THRESHOLD,
+): boolean {
+  return (
+    snapshot.truncated ||
+    snapshot.total_nodes >= threshold ||
+    snapshot.total_nodes > nodeCap
+  );
+}
 
 interface CodeGraphCanvasProps {
   projectId: string;
@@ -73,16 +111,67 @@ export function CodeGraphCanvas({
   const selectedWorkspaceSlug = useCodeGraphStore(
     (s) => s.selectedWorkspaceSlug,
   );
+  const semanticZoomMode = useCodeGraphStore((s) => s.semanticZoomMode);
+  const expandedCommunityIds = useCodeGraphStore((s) => s.expandedCommunityIds);
+  const expandCommunity = useCodeGraphStore((s) => s.expandCommunity);
+  const collapseCommunity = useCodeGraphStore((s) => s.collapseCommunity);
+  const clearExpandedCommunities = useCodeGraphStore(
+    (s) => s.clearExpandedCommunities,
+  );
+
+  // Lazily-fetched symbol snapshot used to splice member nodes when a
+  // community is expanded. Held in state so the `visibleSnapshot` memo
+  // can read it during render (reading a ref during render violates the
+  // `react-hooks/refs` lint rule). The fetch promise is memoized in a
+  // ref so concurrent double-clicks share a single network request.
+  // The project this snapshot belongs to is tracked in a ref so the
+  // project-change effect can detect transitions and clear state.
+  const [symbolSnapshot, setSymbolSnapshot] = useState<SnapshotPayload | null>(
+    null,
+  );
+  const symbolSnapshotPromiseRef =
+    useRef<Promise<SnapshotPayload | null> | null>(null);
+  const symbolProjectRef = useRef<string | null>(null);
+
+  // Clears expansion state + symbol cache on project change so the
+  // next project starts from a clean slate.
+  useEffect(() => {
+    if (
+      symbolProjectRef.current !== null &&
+      symbolProjectRef.current !== projectId
+    ) {
+      clearExpandedCommunities();
+      setSymbolSnapshot(null);
+      symbolSnapshotPromiseRef.current = null;
+    }
+    symbolProjectRef.current = projectId;
+  }, [projectId, clearExpandedCommunities]);
 
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading" });
 
+    // Pick the *initial* fetch level from the toolbar mode.
+    //   - "community" → always start at community level
+    //   - "symbol"    → always start at symbol level
+    //   - "auto"      → start at symbol level, then conditionally
+    //                   refetch at community level when the snapshot
+    //                   is truncated or over the large-graph threshold.
+    const initialLevel: SnapshotLevel =
+      semanticZoomMode === "community" ? "community" : "symbol";
+
+    // Note: the cached symbol snapshot is intentionally NOT invalidated
+    // here. Expansion state (expandedCommunityIds in the store) must
+    // survive warm/refetch cycles, and since community_id is a stable
+    // sha256-of-members hash, the cached symbol snapshot remains valid
+    // across re-warms. The snapshot is only cleared on project change
+    // (see the symbolProjectRef effect above).
+
     (async () => {
       try {
-        const raw = await fetchSnapshot(projectId, nodeCap);
+        const raw = await fetchSnapshot(projectId, nodeCap, initialLevel);
         if (cancelled) return;
-        const snapshot = parseSnapshotResponse(raw);
+        let snapshot = parseSnapshotResponse(raw);
         if (!snapshot) {
           setState({
             status: "error",
@@ -91,7 +180,32 @@ export function CodeGraphCanvas({
           });
           return;
         }
-        setState({ status: "ready", snapshot });
+        let level = initialLevel;
+
+        // Auto mode: if the symbol snapshot was truncated / capped,
+        // refetch at community level so the user sees legible blobs
+        // rather than an incomplete 10k-node graph. Only symbol-starts
+        // can fall back; forced modes never change level.
+        if (
+          semanticZoomMode === "auto" &&
+          level === "symbol" &&
+          shouldFallbackToCommunity(snapshot, nodeCap)
+        ) {
+          const communityRaw = await fetchSnapshot(
+            projectId,
+            nodeCap,
+            "community",
+          );
+          if (cancelled) return;
+          const communitySnapshot = parseSnapshotResponse(communityRaw);
+          if (communitySnapshot) {
+            snapshot = communitySnapshot;
+            level = "community";
+          }
+        }
+
+        if (cancelled) return;
+        setState({ status: "ready", snapshot, level });
       } catch (err) {
         if (cancelled) return;
         setState({
@@ -104,12 +218,36 @@ export function CodeGraphCanvas({
     return () => {
       cancelled = true;
     };
-  }, [projectId, nodeCap, reloadKey]);
+  }, [projectId, nodeCap, reloadKey, semanticZoomMode]);
+
+  const effectiveLevel: SnapshotLevel =
+    state.status === "ready" ? state.level : "symbol";
 
   const visibleSnapshot = useMemo(() => {
     if (state.status !== "ready") return null;
-    return filterSnapshotForWorkspace(state.snapshot, selectedWorkspaceSlug);
-  }, [state, selectedWorkspaceSlug]);
+    const filtered = filterSnapshotForWorkspace(
+      state.snapshot,
+      selectedWorkspaceSlug,
+    );
+    // Apply community expansions: replace each expanded community node
+    // with its member symbol nodes from the cached symbol snapshot.
+    // Collapse is handled by simply omitting the community from the
+    // expanded set (the base `filtered` snapshot already has the
+    // community node). This keeps expansion state stable across
+    // snapshot re-renders because it's keyed by stable community_id.
+    if (
+      expandedCommunityIds.size === 0 ||
+      !symbolSnapshot ||
+      state.level !== "community"
+    ) {
+      return filtered;
+    }
+    let result = filtered;
+    for (const communityId of expandedCommunityIds) {
+      result = expandCommunityInSnapshot(result, symbolSnapshot, communityId);
+    }
+    return result;
+  }, [state, selectedWorkspaceSlug, expandedCommunityIds, symbolSnapshot]);
 
   const graph = useMemo(() => {
     if (!visibleSnapshot) return null;
@@ -119,9 +257,8 @@ export function CodeGraphCanvas({
   // The reducers hook needs the live Sigma handle to call refresh()
   // when store slices change. We init `null` and lift the handle from
   // the second pass of `useSigmaGraph`.
-  const [sigmaHandle, setSigmaHandle] = useState<
-    ReturnType<typeof useSigmaGraph>["sigma"]
-  >(null);
+  const [sigmaHandle, setSigmaHandle] =
+    useState<ReturnType<typeof useSigmaGraph>["sigma"]>(null);
   const { reducers, complexityThresholds } = useGraphReducers(
     graph,
     sigmaHandle,
@@ -152,13 +289,100 @@ export function CodeGraphCanvas({
 
   const setSelection = useCodeGraphStore((s) => s.setSelection);
   const setHover = useCodeGraphStore((s) => s.setHover);
+
+  // Ensure a symbol-level snapshot is cached for the current project so
+  // expand operations can splice member nodes without a per-click fetch.
+  // Returns the cached snapshot or null when unavailable. The promise is
+  // memoized in a ref so concurrent double-clicks share a single fetch.
+  // Wrapped in useCallback so it has a stable identity for the click
+  // handler effect's dependency array.
+  const ensureSymbolSnapshot =
+    useCallback((): Promise<SnapshotPayload | null> => {
+      if (symbolSnapshot) {
+        return Promise.resolve(symbolSnapshot);
+      }
+      if (symbolSnapshotPromiseRef.current) {
+        return symbolSnapshotPromiseRef.current;
+      }
+      const promise = (async () => {
+        try {
+          const raw = await fetchSnapshot(projectId, nodeCap, "symbol");
+          const parsed = parseSnapshotResponse(raw);
+          if (parsed) setSymbolSnapshot(parsed);
+          return parsed;
+        } catch {
+          return null;
+        }
+      })();
+      symbolSnapshotPromiseRef.current = promise;
+      promise.finally(() => {
+        symbolSnapshotPromiseRef.current = null;
+      });
+      return promise;
+    }, [symbolSnapshot, projectId, nodeCap]);
+
   useEffect(() => {
     if (!sigma) return;
+    // Timestamp/last-node guard around `clickNode` to detect double-clicks
+    // on community nodes. Sigma 3's double-click event surface varies by
+    // version, so we implement the guard directly: two `clickNode` events
+    // on the *same* node within DOUBLE_CLICK_INTERVAL_MS count as a
+    // double-click. Single-click selection still fires normally — the
+    // double-click action (expand/collapse) is layered on top and is a
+    // no-op for non-community nodes.
+    let lastClick: { nodeId: string; at: number } | null = null;
+
     const offClick = sigma.on("clickNode", ({ node }) => {
-      if (node) setSelection(node);
+      if (!node) return;
+      const now = Date.now();
+      const isDouble = isDoubleClick(lastClick, node, now);
+      lastClick = { nodeId: node, at: now };
+
+      if (isDouble) {
+        // Resolve the community_id for the clicked node. For community
+        // nodes this is the node attribute; for expanded member symbols
+        // it's the member's community_id (collapse path).
+        const attrs = sigma.getNodeAttributes(node);
+        const kind = attrs?.kind as string | undefined;
+        const communityId = (attrs?.communityId as string | undefined) ?? null;
+
+        if (kind === "community" && communityId) {
+          if (expandedCommunityIds.has(communityId)) {
+            // Already expanded — collapse it. (This shouldn't normally
+            // fire because the community node is removed on expand, but
+            // handle it defensively for partial render states.)
+            collapseCommunity(communityId);
+          } else {
+            // Expand: fetch the symbol snapshot if not cached, then
+            // mark the community as expanded. The visibleSnapshot memo
+            // applies the splice on the next render.
+            ensureSymbolSnapshot().then((snapshot) => {
+              if (snapshot) {
+                expandCommunity(communityId);
+              }
+            });
+          }
+        } else if (
+          kind === "symbol" &&
+          communityId &&
+          expandedCommunityIds.has(communityId)
+        ) {
+          // Collapse: the user double-clicked a member symbol of an
+          // expanded community. Restore the collapsed community node.
+          collapseCommunity(communityId);
+        }
+        // Reset the guard so a triple-click doesn't look like two
+        // separate double-clicks.
+        lastClick = null;
+        return;
+      }
+
+      // Normal single-click selection.
+      setSelection(node);
     });
     const offStage = sigma.on("clickStage", () => {
       setSelection(null);
+      lastClick = null;
     });
     const offEnter = sigma.on("enterNode", ({ node }) => {
       if (node) setHover(node);
@@ -176,7 +400,17 @@ export function CodeGraphCanvas({
       offEnter();
       offLeave();
     };
-  }, [sigma, setSelection, setHover]);
+  }, [
+    sigma,
+    setSelection,
+    setHover,
+    expandedCommunityIds,
+    expandCommunity,
+    collapseCommunity,
+    projectId,
+    nodeCap,
+    ensureSymbolSnapshot,
+  ]);
 
   const resetHighlights = useCodeGraphStore((s) => s.reset);
   useEffect(() => {
@@ -193,7 +427,11 @@ export function CodeGraphCanvas({
         className="absolute inset-0"
         style={{ cursor: "grab" }}
       />
-      <CanvasOverlay state={state} visibleSnapshot={visibleSnapshot} />
+      <CanvasOverlay
+        state={state}
+        visibleSnapshot={visibleSnapshot}
+        level={effectiveLevel}
+      />
       {layoutRunning && visibleSnapshot?.nodes.length ? (
         <LayoutOptimizingPill />
       ) : null}
@@ -207,7 +445,10 @@ function useAutoFocusOnCitations({
   ready,
   layoutRunning,
   sigma,
-}: Pick<ReturnType<typeof useSigmaGraph>, "ready" | "layoutRunning" | "sigma">) {
+}: Pick<
+  ReturnType<typeof useSigmaGraph>,
+  "ready" | "layoutRunning" | "sigma"
+>) {
   const citationIds = useCodeGraphStore(selectCitationIds);
 
   useEffect(() => {
@@ -225,12 +466,16 @@ function useAutoFocusOnCitations({
 function ComplexityLegend({
   thresholds,
 }: {
-  thresholds: { p33: number; p67: number; p90: number; sampleSize: number } | null;
+  thresholds: {
+    p33: number;
+    p67: number;
+    p90: number;
+    sampleSize: number;
+  } | null;
 }) {
   const colorMode = useCodeGraphStore((s) => s.colorMode);
   if (colorMode !== "complexity" || !thresholds) return null;
-  const fmt = (n: number) =>
-    Number.isInteger(n) ? `${n}` : n.toFixed(1);
+  const fmt = (n: number) => (Number.isInteger(n) ? `${n}` : n.toFixed(1));
   return (
     <div
       data-testid="complexity-legend"
@@ -281,7 +526,7 @@ function LayoutOptimizingPill() {
   );
 }
 
-function CitationStatusBadge() {
+export function CitationStatusBadge() {
   const selectionId = useCodeGraphStore((s) => s.selectionId);
   const citationCount = useCodeGraphStore((s) => s.citationIds.size);
   const clear = useCodeGraphStore((s) => s.clearCitations);
@@ -309,9 +554,11 @@ function CitationStatusBadge() {
 interface CanvasOverlayProps {
   state: FetchState;
   visibleSnapshot: SnapshotPayload | null;
+  /** Effective semantic-zoom level that produced the rendered snapshot. */
+  level: SnapshotLevel;
 }
 
-function CanvasOverlay({ state, visibleSnapshot }: CanvasOverlayProps) {
+function CanvasOverlay({ state, visibleSnapshot, level }: CanvasOverlayProps) {
   if (state.status === "loading") {
     return (
       <CenterCard>
@@ -331,9 +578,7 @@ function CanvasOverlay({ state, visibleSnapshot }: CanvasOverlayProps) {
         <p className="mt-3 text-sm font-medium text-zinc-200">
           Couldn&apos;t load the graph
         </p>
-        <p className="mt-1 max-w-sm text-xs text-zinc-400">
-          {state.error}
-        </p>
+        <p className="mt-1 max-w-sm text-xs text-zinc-400">{state.error}</p>
       </CenterCard>
     );
   }
@@ -353,6 +598,9 @@ function CanvasOverlay({ state, visibleSnapshot }: CanvasOverlayProps) {
 
   return (
     <div className="pointer-events-none absolute left-3 top-3 flex flex-col gap-1.5">
+      <Pill data-testid="semantic-zoom-level">
+        {level === "community" ? "Community view" : "Symbol view"}
+      </Pill>
       <Pill>
         {snapshot.nodes.length.toLocaleString()} nodes
         {snapshot.truncated && (
