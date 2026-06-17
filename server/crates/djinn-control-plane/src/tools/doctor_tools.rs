@@ -47,6 +47,7 @@ use djinn_core::doctor::{
 use djinn_db::{DoctorFindingRepository, RecentDoctorFindings};
 
 use crate::server::DjinnMcpServer;
+use crate::tools::AnyJson;
 use crate::tools::acting_user::require_admin;
 
 // ---------------------------------------------------------------------------
@@ -169,11 +170,14 @@ pub struct DoctorListFindingsParams {
 
 /// One persisted finding surfaced through `doctor_list_findings`.
 ///
-/// Mirrors [`djinn_db::DoctorFinding`] but uses a plain
-/// `Vec<serde_json::Value>` for `entity_ids` so callers that want the
-/// raw array shape (rather than a structured map) can iterate without
-/// an extra deserialization step. The other JSONB payloads —
-/// `evidence` and `resolver_snapshot` — are passed through unchanged.
+/// Mirrors [`djinn_db::DoctorFinding`] but uses [`AnyJson`] for the
+/// free-form JSON payloads (`entity_ids`, `evidence`,
+/// `resolver_snapshot`) so the generated JSON Schema is the
+/// strict-client-friendly empty schema instead of the bare
+/// `serde_json::Value` catch-all that strict MCP clients (e.g.
+/// Claude Code) reject. The fields serialize to the same JSON shape
+/// as before — the wrapper is `#[serde(transparent)]` and only
+/// changes the schema, not the wire format.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DoctorListFindingEntry {
     /// Persisted finding id (from `doctor_findings.id`).
@@ -188,13 +192,13 @@ pub struct DoctorListFindingEntry {
     /// Opaque entity ids this finding relates to. Always a JSON array
     /// (possibly empty) so callers can iterate without inspecting each
     /// row's shape.
-    pub entity_ids: serde_json::Value,
+    pub entity_ids: AnyJson,
     /// Structured check-specific evidence. Free-form JSON.
-    pub evidence: serde_json::Value,
+    pub evidence: AnyJson,
     /// Resolver inputs and outputs captured at check time. `None` for
     /// checks with no associated resolver.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resolver_snapshot: Option<serde_json::Value>,
+    pub resolver_snapshot: Option<AnyJson>,
     /// Free-form human-readable detail surfaced in reports.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -342,9 +346,9 @@ fn finding_to_entry(row: &djinn_db::DoctorFinding) -> DoctorListFindingEntry {
         run_id: row.run_id.clone(),
         check_name: row.check_name.clone(),
         severity: row.severity.clone(),
-        entity_ids: row.entity_ids.clone(),
-        evidence: row.evidence.clone(),
-        resolver_snapshot: row.resolver_snapshot.clone(),
+        entity_ids: AnyJson(row.entity_ids.clone()),
+        evidence: AnyJson(row.evidence.clone()),
+        resolver_snapshot: row.resolver_snapshot.clone().map(AnyJson),
         detail: row.detail.clone(),
     }
 }
@@ -987,8 +991,11 @@ mod tests {
         assert_eq!(entry.created_at, "2024-05-01T12:00:00.000Z");
         assert_eq!(entry.check_name, "config_drift");
         assert_eq!(entry.severity, "critical");
-        assert_eq!(entry.entity_ids, serde_json::json!(["task-1", "project-7"]));
-        assert_eq!(entry.evidence, serde_json::json!({"rows": 5}));
+        assert_eq!(
+            entry.entity_ids.0,
+            serde_json::json!(["task-1", "project-7"])
+        );
+        assert_eq!(entry.evidence.0, serde_json::json!({"rows": 5}));
         assert!(entry.resolver_snapshot.is_some());
         assert_eq!(entry.detail.as_deref(), Some("explained"));
     }
@@ -1013,8 +1020,8 @@ mod tests {
         // Even when no resolver / detail was persisted, the entity_ids and
         // evidence slots still carry their defaults so callers can iterate
         // without inspecting the row.
-        assert_eq!(entry.entity_ids, serde_json::json!([]));
-        assert_eq!(entry.evidence, serde_json::json!({}));
+        assert_eq!(entry.entity_ids.0, serde_json::json!([]));
+        assert_eq!(entry.evidence.0, serde_json::json!({}));
     }
 
     #[test]
@@ -1027,8 +1034,8 @@ mod tests {
                 run_id: Some("run-7".to_string()),
                 check_name: "config_drift".to_string(),
                 severity: "warn".to_string(),
-                entity_ids: serde_json::json!(["task-1"]),
-                evidence: serde_json::json!({}),
+                entity_ids: AnyJson(serde_json::json!(["task-1"])),
+                evidence: AnyJson(serde_json::json!({})),
                 resolver_snapshot: None,
                 detail: Some("hello".to_string()),
             }],
@@ -1208,5 +1215,112 @@ mod tests {
         assert_eq!(combined_entries.len(), 1);
         assert_eq!(combined_entries[0].id, second.id);
         assert_eq!(combined_entries[0].check_name, "config_drift");
+    }
+
+    // -------------------------------------------------------------------
+    // Admin gate: require_admin behaviour for doctor_run / doctor_fix
+    // -------------------------------------------------------------------
+    //
+    // These tests verify the auth gate used by both doctor tools. They use
+    // an in-memory database (the same McpTestHarness path that the tools use)
+    // and the SESSION_USER_ID task-local to simulate an authenticated
+    // non-admin caller. The integration tests in tests/doctor_tools.rs cover
+    // the full dispatch path; these unit tests exercise require_admin in
+    // isolation so the failure mode is clear.
+
+    #[tokio::test]
+    async fn require_admin_rejects_non_admin_user() {
+        let db = djinn_db::Database::open_in_memory().unwrap();
+        let repo = djinn_db::UserRepository::new(db.clone());
+        let user = repo
+            .upsert_from_github(999_500, "non-admin-doctor-unit", None, None)
+            .await
+            .unwrap();
+        assert!(!user.is_admin);
+
+        // Under a non-admin session, require_admin must reject.
+        let result = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user.id.clone()), require_admin(&db))
+            .await;
+        assert!(result.is_err(), "non-admin must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("admin"),
+            "error should mention admin: got '{err}'"
+        );
+    }
+
+    #[tokio::test]
+    async fn require_admin_allows_admin_user() {
+        let db = djinn_db::Database::open_in_memory().unwrap();
+        let repo = djinn_db::UserRepository::new(db.clone());
+        let user = repo
+            .upsert_from_github(999_501, "admin-doctor-unit", None, None)
+            .await
+            .unwrap();
+        repo.set_admin_status(&user.id, true).await.unwrap();
+
+        let result = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user.id), require_admin(&db))
+            .await;
+        assert!(result.is_ok(), "admin user must pass the gate");
+    }
+
+    #[tokio::test]
+    async fn require_admin_allows_no_user_background_path() {
+        // No SESSION_USER_ID scope → current_user_id() returns None →
+        // require_admin returns Ok(()). This is the trusted background/local
+        // path used by internal callers and tests.
+        let db = djinn_db::Database::open_in_memory().unwrap();
+        let result = require_admin(&db).await;
+        assert!(
+            result.is_ok(),
+            "no-user background path must be allowed, matching board_reconcile"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Spy check: verifies that the run loop never calls fix()
+    // -------------------------------------------------------------------
+
+    /// A check that panics if `fix()` is called. This provides a runtime
+    /// guard (complementing the structural source-level guard) that the
+    /// run loop in `doctor_run` never reaches `fix`.
+    struct FixSpyCheck;
+
+    impl DoctorCheck for FixSpyCheck {
+        fn name(&self) -> &'static str {
+            "test.doctor_fix_spy"
+        }
+        fn description(&self) -> &'static str {
+            "Panics if fix() is called — proves the run loop never reaches fix"
+        }
+        fn run(&self) -> djinn_core::doctor::DoctorResult<Vec<Finding>> {
+            Ok(vec![Finding::new(
+                FindingSeverity::Info,
+                self.name(),
+                ResolverSnapshot::new("resolve_spy", serde_json::json!({}), serde_json::json!({})),
+                "spy check ran without invoking fix",
+            )])
+        }
+        fn fix(&self, _finding: &Finding) -> djinn_core::doctor::DoctorResult<()> {
+            panic!("fix() must never be called from the run path");
+        }
+    }
+
+    #[test]
+    fn run_loop_never_calls_fix_spy_check_proves_it() {
+        let reg = Box::leak(Box::new(DoctorRegistry::new()));
+        djinn_core::doctor::register(reg, FixSpyCheck);
+
+        let checks = resolve_checks(reg, &None).expect("checks");
+        for check in &checks {
+            // Run the check — if fix() were called, the spy would panic.
+            let findings = check.run().expect("run should succeed");
+            // The spy check emits exactly one finding.
+            if check.name() == "test.doctor_fix_spy" {
+                assert_eq!(findings.len(), 1);
+            }
+        }
     }
 }

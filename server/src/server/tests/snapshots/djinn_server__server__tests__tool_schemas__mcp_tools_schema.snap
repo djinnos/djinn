@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 510
 expression: signatures
 ---
 [
@@ -1890,8 +1891,9 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "AnyJson": {},
         "DoctorListFindingEntry": {
-          "description": "One persisted finding surfaced through `doctor_list_findings`.\n\nMirrors [`djinn_db::DoctorFinding`] but uses a plain\n`Vec<serde_json::Value>` for `entity_ids` so callers that want the\nraw array shape (rather than a structured map) can iterate without\nan extra deserialization step. The other JSONB payloads —\n`evidence` and `resolver_snapshot` — are passed through unchanged.",
+          "description": "One persisted finding surfaced through `doctor_list_findings`.\n\nMirrors [`djinn_db::DoctorFinding`] but uses [`AnyJson`] for the\nfree-form JSON payloads (`entity_ids`, `evidence`,\n`resolver_snapshot`) so the generated JSON Schema is the\nstrict-client-friendly empty schema instead of the bare\n`serde_json::Value` catch-all that strict MCP clients (e.g.\nClaude Code) reject. The fields serialize to the same JSON shape\nas before — the wrapper is `#[serde(transparent)]` and only\nchanges the schema, not the wire format.",
           "properties": {
             "check_name": {
               "type": "string"
@@ -1906,9 +1908,11 @@ expression: signatures
               "type": "string"
             },
             "entity_ids": {
+              "$ref": "#/$defs/AnyJson",
               "description": "Opaque entity ids this finding relates to. Always a JSON array\n(possibly empty) so callers can iterate without inspecting each\nrow's shape."
             },
             "evidence": {
+              "$ref": "#/$defs/AnyJson",
               "description": "Structured check-specific evidence. Free-form JSON."
             },
             "id": {
@@ -1916,6 +1920,15 @@ expression: signatures
               "type": "string"
             },
             "resolver_snapshot": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnyJson"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
               "description": "Resolver inputs and outputs captured at check time. `None` for\nchecks with no associated resolver."
             },
             "run_id": {
