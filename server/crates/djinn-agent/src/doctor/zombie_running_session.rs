@@ -318,6 +318,31 @@ impl ZombieRunningSessionSource for SnapshotZombieRunningSessionSource {
     }
 }
 
+/// Build the concrete cheap `zombie_running_session` check from a coordinator
+/// state snapshot.
+///
+/// This is the importable seam the coordinator leader-tick helper uses: it
+/// collects the async DB/slot/RPC liveness signals once, then returns a
+/// synchronous [`DoctorCheck`] whose `run()` is hermetic and read-only. Pod
+/// liveness is deliberately represented by the snapshotted candidate state so
+/// tests can keep using the in-process coordinator fixture without a real k8s
+/// cluster.
+pub async fn check_from_coordinator_state(
+    db: &djinn_db::Database,
+    events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+    pool: &SlotPoolHandle,
+    rpc_registry: Option<Arc<ConnectionRegistry>>,
+) -> djinn_db::Result<ZombieRunningSessionCheck<SnapshotZombieRunningSessionSource>> {
+    let source = SnapshotZombieRunningSessionSource::from_coordinator_state(
+        db,
+        events_tx,
+        pool,
+        rpc_registry,
+    )
+    .await?;
+    Ok(ZombieRunningSessionCheck::new(source))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +419,22 @@ mod tests {
             "resolve_zombie_running_session"
         );
         assert_eq!(finding.resolver_snapshot.inputs["db_status"], "running");
+        assert_eq!(
+            finding.resolver_snapshot.inputs["live_state"]["slot_pool_has_session"],
+            false
+        );
+        assert_eq!(
+            finding.resolver_snapshot.inputs["live_state"]["slot_pool_session_present"],
+            false
+        );
+        assert_eq!(
+            finding.resolver_snapshot.inputs["live_state"]["worker_connected"],
+            false
+        );
+        assert_eq!(
+            finding.resolver_snapshot.inputs["live_state"]["pod_present"],
+            false
+        );
         assert_eq!(finding.resolver_snapshot.outputs["reason"], "zombie");
     }
 
