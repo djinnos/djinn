@@ -12,6 +12,7 @@ use crate::tools::credential_tools::{
 use crate::tools::dispatch_pause_tools::{
     DispatchPauseParams, DispatchPauseStatusParams, DispatchResumeParams,
 };
+use crate::tools::doctor_tools::{DoctorFixParams, DoctorRunParams};
 use crate::tools::epic_tools::{
     EpicBlockersParams, EpicCloseParams, EpicCountParams, EpicCreateParams, EpicDeleteParams,
     EpicListParams, EpicReadSourceParams, EpicReopenParams, EpicShowParams, EpicTasksParams,
@@ -161,6 +162,16 @@ impl DjinnMcpServer {
                     name, args,
                 )?))
                 .await,
+            ),
+            "doctor_run" => map_json(
+                name,
+                self.doctor_run(Parameters(decode_args::<DoctorRunParams>(name, args)?))
+                    .await,
+            ),
+            "doctor_fix" => map_json(
+                name,
+                self.doctor_fix(Parameters(decode_args::<DoctorFixParams>(name, args)?))
+                    .await,
             ),
             "epic_create" => map_json(
                 name,
