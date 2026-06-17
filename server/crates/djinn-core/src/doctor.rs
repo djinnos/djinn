@@ -506,6 +506,113 @@ pub fn run_cheap_subset(registry: &DoctorRegistry) -> DoctorResult<Vec<DoctorChe
     run_subset(registry, DoctorRunSubset::Cheap)
 }
 
+// ---------------------------------------------------------------------------
+// Cross-crate registry bridge (T5)
+// ---------------------------------------------------------------------------
+//
+// The seed-check wave spans two crates:
+//
+//   * `djinn-core::doctor::checks` owns the six pure-core checks
+//     (`zombie_running_session`, `slot_pool_divergence`,
+//     `force_close_orphan_session`, `task_run_k8s_leak`,
+//     `disposition_orphan`, `defer_forever`).
+//   * `djinn-agent::doctor::live_mover` owns `live_mover_predicate`,
+//     which consumes the agent-internal `LiveMoverSummary` API.
+//
+// The framework registry lives in `djinn-core` (so any caller can reach it
+// without depending on `djinn-agent`). The agent-side registration is
+// exposed as `djinn_agent::doctor::register_doctor_checks` and pushes the
+// `live_mover_predicate` check into whichever registry the caller hands
+// in. This split keeps the dependency direction one-way
+// (`djinn-agent -> djinn-core`) while still letting a coordinator-style
+// caller wire both halves of the seed-check suite through a single
+// registry.
+//
+// Note: the six `djinn-core` checks are generic over their `CheckDb`
+// implementation (`ZombieRunningSessionCheck<D>`, etc.), so there is no
+// no-argument `register_default_checks()` helper — the production caller
+// (and the smoke test) constructs each check against the live data
+// source. The empty [`register_default_checks`] helper below is provided
+// as a documented seam for future static registration if/when the seed
+// checks are simplified to non-generic wrappers.
+
+/// Register no seed checks. The six `djinn-core` checks are generic over
+/// their `CheckDb` implementation, so there is no reasonable no-argument
+/// factory. Production callers must construct each check against the
+/// relevant data source and call [`DoctorRegistry::register`] (or
+/// [`register`]) directly. The agent-side registration is exposed by
+/// `djinn_agent::doctor::register_doctor_checks`.
+///
+/// This stub exists so the cross-crate bridge has a single, discoverable
+/// name to point at: the production wiring calls both
+/// `djinn_core::doctor::register_default_checks(reg)` (no-op) and
+/// `djinn_agent::doctor::register_doctor_checks(reg, source)` to populate
+/// the registry.
+pub fn register_default_checks(_registry: &DoctorRegistry) {
+    // Intentionally empty — see the module docs above. The six
+    // djinn-core seed checks each take a different generic data source,
+    // so the caller is responsible for instantiating them.
+}
+
+/// Run a subset of registered checks and return their findings.
+///
+/// * `check_names == None` — run every registered check.
+/// * `check_names == Some(names)` — run only the named checks.
+///
+/// Returns one `(check_name, findings)` tuple per executed check (in the
+/// order they were registered). Unknown names in `Some(_)` produce a
+/// structured [`DoctorError::UnknownCheck`] error listing every unknown
+/// name. An empty `Some(&[])` is treated the same as `None`.
+///
+/// `doctor_run` calls each check's [`DoctorCheck::run`] only — it never
+/// invokes [`DoctorCheck::fix`]. That invariant is asserted by the smoke
+/// test's `doctor_run_does_not_call_fix` regression check.
+pub fn doctor_run(
+    registry: &DoctorRegistry,
+    check_names: Option<&[&str]>,
+) -> DoctorResult<Vec<(String, Vec<Finding>)>> {
+    // Resolve the requested subset. We materialise the checks via `get`
+    // so each `Arc` is cloned out of the registry without holding the
+    // lock during execution.
+    let checks: Vec<std::sync::Arc<dyn DoctorCheck>> = match check_names {
+        None => registry
+            .enumerate()
+            .into_iter()
+            .filter_map(|(name, _)| registry.get(name))
+            .collect(),
+        Some([]) => registry
+            .enumerate()
+            .into_iter()
+            .filter_map(|(name, _)| registry.get(name))
+            .collect(),
+        Some(names) => {
+            let mut checks = Vec::with_capacity(names.len());
+            let mut unknown: Vec<String> = Vec::new();
+            for name in names {
+                match registry.get(name) {
+                    Some(check) => checks.push(check),
+                    None => unknown.push((*name).to_string()),
+                }
+            }
+            if !unknown.is_empty() {
+                return Err(DoctorError::UnknownCheck(unknown.join(", ")));
+            }
+            checks
+        }
+    };
+
+    let mut results = Vec::with_capacity(checks.len());
+    for check in &checks {
+        let name = check.name();
+        // run() only — never fix(). The smoke test asserts this invariant.
+        let findings = check.run()?;
+        results.push((name.to_string(), findings));
+    }
+    Ok(results)
+}
+
+#[cfg(test)]
+mod smoke;
 #[cfg(test)]
 mod tests {
     use super::*;

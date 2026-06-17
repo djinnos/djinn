@@ -679,12 +679,7 @@ async fn warm_cargo_target_base(
     let clippy_ok = run_cargo_warm_step(
         project_id,
         &workspace_dir,
-        &[
-            "clippy",
-            "--workspace",
-            "--all-targets",
-            "--all-features",
-        ],
+        &["clippy", "--workspace", "--all-targets", "--all-features"],
         "clippy",
     )
     .await;
