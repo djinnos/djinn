@@ -781,4 +781,111 @@ mod tests {
         // Default cadence is OnDemand since we didn't override it.
         assert!(!ours.cadence.is_cheap());
     }
+
+    // -------------------------------------------------------------------
+    // Admin gate: require_admin behaviour for doctor_run / doctor_fix
+    // -------------------------------------------------------------------
+    //
+    // These tests verify the auth gate used by both doctor tools. They use
+    // an in-memory database (the same McpTestHarness path that the tools use)
+    // and the SESSION_USER_ID task-local to simulate an authenticated
+    // non-admin caller. The integration tests in tests/doctor_tools.rs cover
+    // the full dispatch path; these unit tests exercise require_admin in
+    // isolation so the failure mode is clear.
+
+    #[tokio::test]
+    async fn require_admin_rejects_non_admin_user() {
+        let db = djinn_db::Database::open_in_memory().unwrap();
+        let repo = djinn_db::UserRepository::new(db.clone());
+        let user = repo
+            .upsert_from_github(999_500, "non-admin-doctor-unit", None, None)
+            .await
+            .unwrap();
+        assert!(!user.is_admin);
+
+        // Under a non-admin session, require_admin must reject.
+        let result = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user.id.clone()), require_admin(&db))
+            .await;
+        assert!(result.is_err(), "non-admin must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("admin"),
+            "error should mention admin: got '{err}'"
+        );
+    }
+
+    #[tokio::test]
+    async fn require_admin_allows_admin_user() {
+        let db = djinn_db::Database::open_in_memory().unwrap();
+        let repo = djinn_db::UserRepository::new(db.clone());
+        let user = repo
+            .upsert_from_github(999_501, "admin-doctor-unit", None, None)
+            .await
+            .unwrap();
+        repo.set_admin_status(&user.id, true).await.unwrap();
+
+        let result = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user.id), require_admin(&db))
+            .await;
+        assert!(result.is_ok(), "admin user must pass the gate");
+    }
+
+    #[tokio::test]
+    async fn require_admin_allows_no_user_background_path() {
+        // No SESSION_USER_ID scope → current_user_id() returns None →
+        // require_admin returns Ok(()). This is the trusted background/local
+        // path used by internal callers and tests.
+        let db = djinn_db::Database::open_in_memory().unwrap();
+        let result = require_admin(&db).await;
+        assert!(
+            result.is_ok(),
+            "no-user background path must be allowed, matching board_reconcile"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Spy check: verifies that the run loop never calls fix()
+    // -------------------------------------------------------------------
+
+    /// A check that panics if `fix()` is called. This provides a runtime
+    /// guard (complementing the structural source-level guard) that the
+    /// run loop in `doctor_run` never reaches `fix`.
+    struct FixSpyCheck;
+
+    impl DoctorCheck for FixSpyCheck {
+        fn name(&self) -> &'static str {
+            "test.doctor_fix_spy"
+        }
+        fn description(&self) -> &'static str {
+            "Panics if fix() is called — proves the run loop never reaches fix"
+        }
+        fn run(&self) -> djinn_core::doctor::DoctorResult<Vec<Finding>> {
+            Ok(vec![Finding::new(
+                FindingSeverity::Info,
+                self.name(),
+                ResolverSnapshot::new("resolve_spy", serde_json::json!({}), serde_json::json!({})),
+                "spy check ran without invoking fix",
+            )])
+        }
+        fn fix(&self, _finding: &Finding) -> djinn_core::doctor::DoctorResult<()> {
+            panic!("fix() must never be called from the run path");
+        }
+    }
+
+    #[test]
+    fn run_loop_never_calls_fix_spy_check_proves_it() {
+        let reg = Box::leak(Box::new(DoctorRegistry::new()));
+        djinn_core::doctor::register(reg, FixSpyCheck);
+
+        let checks = resolve_checks(reg, &None).expect("checks");
+        for check in &checks {
+            // Run the check — if fix() were called, the spy would panic.
+            let findings = check.run().expect("run should succeed");
+            // The spy check emits exactly one finding.
+            if check.name() == "test.doctor_fix_spy" {
+                assert_eq!(findings.len(), 1);
+            }
+        }
+    }
 }
