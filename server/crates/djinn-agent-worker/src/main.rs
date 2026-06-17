@@ -511,6 +511,257 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
     destination_run_dir
 }
 
+/// Seed a private run target dir for a pre-PR verification run from the warm
+/// per-project base and point `CARGO_TARGET_DIR` at it, mirroring the task-run
+/// path (`prepare_cargo_target_dir`). Verification thereby reuses main's warm
+/// compiled artifacts and recompiles only the task's delta incrementally — no
+/// shared-base writes, no Cargo build-dir lock contention. The seed is
+/// best-effort: a missing/unusable warm base degrades to a cold private run dir
+/// rather than failing the verification.
+///
+/// Keyed on the verification `run_id` (unique per run) so concurrent
+/// verifications for the same project never share a target dir. Returns the
+/// chosen run dir so the caller can tear it down when the run completes.
+async fn prepare_verify_target_dir(project_id: &str, run_id: &str) -> PathBuf {
+    let source_base = warm_base_dir(project_id);
+    let run_dir = run_target_dir(run_id);
+    set_cargo_target_dir_for_children(&run_dir);
+
+    info!(
+        run_id,
+        project_id,
+        source_base = %source_base.display(),
+        destination_run_dir = %run_dir.display(),
+        "verify cargo target seed: preparing private run target dir"
+    );
+
+    let seed_source_base = source_base.clone();
+    let seed_destination_run_dir = run_dir.clone();
+    match tokio::task::spawn_blocking(move || {
+        seed_cargo_target_dir(seed_source_base, seed_destination_run_dir)
+    })
+    .await
+    {
+        Ok(Ok(result)) => {
+            if result.cold_started() {
+                warn!(
+                    run_id,
+                    project_id,
+                    destination_run_dir = %run_dir.display(),
+                    fallback_reason = result
+                        .fallback_reason
+                        .as_ref()
+                        .map(std::string::ToString::to_string)
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    "verify cargo target seed: falling back to cold private target dir"
+                );
+            } else {
+                info!(
+                    run_id,
+                    project_id,
+                    destination_run_dir = %run_dir.display(),
+                    seed_duration_ms = result.elapsed.as_millis(),
+                    linked_file_count = result.linked_file_count,
+                    copied_file_count = result.copied_file_count,
+                    "verify cargo target seed: seeded private run target dir"
+                );
+            }
+        }
+        Ok(Err(err)) => warn!(
+            run_id,
+            project_id,
+            error = %err,
+            "verify cargo target seed: proceeding with cold private target dir after setup error"
+        ),
+        Err(err) => warn!(
+            run_id,
+            project_id,
+            error = %err,
+            "verify cargo target seed: proceeding with cold private target dir after task failure"
+        ),
+    }
+
+    run_dir
+}
+
+/// Resolve the cargo workspace directory under `project_root`.
+///
+/// Prefers the project's `EnvironmentConfig` Rust workspace `root` (so a repo
+/// whose cargo workspace lives in a subdir — djinn's `server/` — is found
+/// without hardcoding). Falls back to a `Cargo.toml` at the project root or any
+/// single first-level subdir. Returns `None` when no cargo workspace exists
+/// (non-Rust repo) so the caller can skip the warm cleanly.
+///
+/// Must resolve to the SAME absolute dir verification compiles in. Verification
+/// runs its scoped commands (`cd server && cargo …`) from `DJINN_PROJECT_ROOT`,
+/// and both warm and verify clone to `/workspace/<sanitize_id(project)>`, so a
+/// dir like `<project_root>/server` lines up byte-for-byte across the two pods —
+/// a prerequisite for cargo fingerprints (which embed absolute source paths) to
+/// match and reuse to hit.
+fn resolve_cargo_workspace_dir(
+    project_root: &Path,
+    env_config: Option<&djinn_stack::environment::EnvironmentConfig>,
+) -> Option<PathBuf> {
+    // 1. EnvironmentConfig Rust workspace root (authoritative when present).
+    if let Some(cfg) = env_config {
+        for ws in &cfg.workspaces {
+            if ws.language.eq_ignore_ascii_case("rust") {
+                let dir = project_root.join(&ws.root);
+                if dir.join("Cargo.toml").is_file() {
+                    return Some(dir);
+                }
+            }
+        }
+    }
+
+    // 2. Cargo.toml at the project root.
+    if project_root.join("Cargo.toml").is_file() {
+        return Some(project_root.to_path_buf());
+    }
+
+    // 3. Cargo.toml one level down (djinn's `server/`).
+    if let Ok(entries) = std::fs::read_dir(project_root) {
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if dir.is_dir() && dir.join("Cargo.toml").is_file() {
+                return Some(dir);
+            }
+        }
+    }
+
+    None
+}
+
+/// Pre-compile the cargo workspace from `main` into the warm per-project target
+/// base so verification (and task-run) pods seed it and recompile only their
+/// delta incrementally instead of cold-building.
+///
+/// Runs the SAME work verification compiles (`cargo clippy --workspace
+/// --all-targets --all-features`, falling back to `cargo build`, then `cargo
+/// test --workspace --all-targets --all-features --no-run`) so the artifacts +
+/// fingerprints in the base actually match what verification produces. The warm
+/// pod's env already routes `CARGO_TARGET_DIR=/cache/cargo-target/<project>`
+/// (the warm base) with `CARGO_INCREMENTAL=1`, so these compiles write straight
+/// into the base.
+///
+/// Caller MUST have normalized tracked-file mtimes (`normalize_mtimes_at`)
+/// first: cargo freshness keys on file mtimes, and verification normalizes the
+/// same way before it compiles — without matching mtimes the base's fingerprints
+/// won't match verification's fresh clone and reuse never hits.
+///
+/// Best-effort throughout: a missing cargo workspace (non-Rust repo) or any
+/// compile failure logs and returns — it never fails the graph warm.
+async fn warm_cargo_target_base(
+    project_id: &str,
+    project_root: &Path,
+    env_config: Option<&djinn_stack::environment::EnvironmentConfig>,
+) {
+    let Some(workspace_dir) = resolve_cargo_workspace_dir(project_root, env_config) else {
+        info!(
+            project_id,
+            project_root = %project_root.display(),
+            "cargo warm: no cargo workspace found; skipping (non-Rust repo?)"
+        );
+        return;
+    };
+
+    let target_dir = std::env::var(CARGO_TARGET_DIR_ENV).unwrap_or_default();
+    info!(
+        project_id,
+        workspace_dir = %workspace_dir.display(),
+        cargo_target_dir = %target_dir,
+        "cargo warm: compiling main into the warm per-project target base"
+    );
+    let started = std::time::Instant::now();
+
+    // clippy is the heavier of verification's two passes and produces the same
+    // check artifacts; fall back to a plain build if clippy is unavailable.
+    let clippy_ok = run_cargo_warm_step(
+        project_id,
+        &workspace_dir,
+        &[
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+        ],
+        "clippy",
+    )
+    .await;
+    if !clippy_ok {
+        run_cargo_warm_step(
+            project_id,
+            &workspace_dir,
+            &["build", "--workspace", "--all-targets"],
+            "build (clippy fallback)",
+        )
+        .await;
+    }
+
+    // Compile (but don't run) the test harnesses so verification's
+    // `cargo test --no-run` reuses these artifacts.
+    run_cargo_warm_step(
+        project_id,
+        &workspace_dir,
+        &[
+            "test",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+            "--no-run",
+        ],
+        "test --no-run",
+    )
+    .await;
+
+    info!(
+        project_id,
+        workspace_dir = %workspace_dir.display(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "cargo warm: warm target base compile complete"
+    );
+}
+
+/// Run one `cargo <args>` step inside `workspace_dir` for the warm base.
+/// Returns `true` on success. Never panics; logs failures as warnings so a
+/// compile error can't abort the graph warm.
+async fn run_cargo_warm_step(
+    project_id: &str,
+    workspace_dir: &Path,
+    args: &[&str],
+    label: &str,
+) -> bool {
+    match tokio::process::Command::new("cargo")
+        .args(args)
+        .current_dir(workspace_dir)
+        .status()
+        .await
+    {
+        Ok(status) if status.success() => {
+            info!(project_id, step = label, "cargo warm: step succeeded");
+            true
+        }
+        Ok(status) => {
+            warn!(
+                project_id,
+                step = label,
+                code = ?status.code(),
+                "cargo warm: step failed (non-fatal; continuing warm)"
+            );
+            false
+        }
+        Err(err) => {
+            warn!(
+                project_id,
+                step = label,
+                error = %err,
+                "cargo warm: failed to spawn `cargo` (non-fatal; continuing warm)"
+            );
+            false
+        }
+    }
+}
+
 struct CargoTargetRunDirGuard {
     task_run_id: String,
     project_id: String,
@@ -1339,7 +1590,7 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
     // before the canonical-graph pipeline. An absent mount is fine — the
     // warm Pod runs without hooks, matching pre-cut-over behaviour.
     let env_config_path = PathBuf::from(lifecycle::ENV_CONFIG_MOUNT_FILE);
-    match lifecycle::load_environment_config(&env_config_path).await {
+    let env_config = match lifecycle::load_environment_config(&env_config_path).await {
         Ok(Some(cfg)) => {
             tracing::info!(
                 project_id,
@@ -1360,18 +1611,38 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
                     "pre_anything hook failed; continuing with warm-graph anyway"
                 );
             }
+            Some(cfg)
         }
-        Ok(None) => tracing::debug!(
-            project_id,
-            "no environment_config mounted at {} — continuing without hooks",
-            env_config_path.display()
-        ),
-        Err(e) => warn!(
-            project_id,
-            error = %format!("{e:#}"),
-            "environment_config present but failed to load; ignoring"
-        ),
-    }
+        Ok(None) => {
+            tracing::debug!(
+                project_id,
+                "no environment_config mounted at {} — continuing without hooks",
+                env_config_path.display()
+            );
+            None
+        }
+        Err(e) => {
+            warn!(
+                project_id,
+                error = %format!("{e:#}"),
+                "environment_config present but failed to load; ignoring"
+            );
+            None
+        }
+    };
+
+    // Warm the cargo target base from `main` so verification/task-run pods seed
+    // it and recompile only their delta incrementally. This runs in the worker
+    // (not the warm-Job shell) so we can normalize tracked-file mtimes to commit
+    // times FIRST — the SAME normalization verification applies before it
+    // compiles. Cargo freshness keys on mtimes, so without matching them the
+    // base's fingerprints would never match verification's fresh clone and reuse
+    // would never hit (the bug this fixes). `lifecycle_root` is
+    // `DJINN_PROJECT_ROOT` = the cloned `main` tree; `resolve_cargo_workspace_dir`
+    // lands on `<root>/server` — the exact dir verification's `cd server`
+    // compiles in. Best-effort: never fails the graph warm.
+    djinn_workspace::normalize_mtimes_at(&lifecycle_root).await;
+    warm_cargo_target_base(project_id, &lifecycle_root, env_config.as_ref()).await;
 
     // Architect-only warm path: this subcommand binary is dispatched
     // exclusively by `K8sGraphWarmer`, which is wired into the
@@ -1561,6 +1832,19 @@ async fn run_verify_test(test_id: &str) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/workspace"));
 
+    // Seed a private run target dir from the warm per-project base and point
+    // CARGO_TARGET_DIR at it, then reset tracked-file mtimes to commit times —
+    // identical to the real `run_verify_task` path so a test faithfully reflects
+    // (and benefits from) the warm cargo-artifact reuse a real verification gets.
+    // The guard tears the private dir down when this function returns.
+    let verify_target_run_dir = prepare_verify_target_dir(&run.project_id, test_id).await;
+    let _verify_target_guard = CargoTargetRunDirGuard::new(
+        test_id.to_string(),
+        run.project_id.clone(),
+        verify_target_run_dir,
+    );
+    djinn_workspace::normalize_mtimes_at(&project_root).await;
+
     // Synthetic commit id so verify_commit's pass-cache never collides with a
     // real task verification (which keys on the real commit + scoped commands).
     let synthetic_commit = format!("verify-test-{test_id}");
@@ -1649,9 +1933,22 @@ async fn run_verify_task(run_id: &str) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/workspace"));
 
+    // Seed a private run target dir from the warm per-project base and point
+    // CARGO_TARGET_DIR at it (mirrors the task-run path). Verification thereby
+    // reuses main's warm compiled artifacts and recompiles only the task delta
+    // incrementally instead of cold-building or churning the shared base. The
+    // guard tears the private dir down when this function returns.
+    let verify_target_run_dir = prepare_verify_target_dir(&run.project_id, run_id).await;
+    let _verify_target_guard = CargoTargetRunDirGuard::new(
+        run_id.to_string(),
+        run.project_id.clone(),
+        verify_target_run_dir,
+    );
+
     // Reset tracked-file mtimes to commit times so the verification build reuses
-    // the warm/verification-owned cargo target base for byte-identical crates.
-    // Best-effort; never fails verification.
+    // the warm cargo artifacts seeded above for byte-identical crates. Required
+    // for cargo freshness on a fresh clone. Best-effort; never fails
+    // verification.
     djinn_workspace::normalize_mtimes_at(&project_root).await;
 
     // Role/specialist `verification_command` override (absolute priority in
@@ -1667,8 +1964,8 @@ async fn run_verify_task(run_id: &str) -> Result<()> {
     )
     .await;
 
-    let commit_sha = verify_task_head_commit(&project_root)
-        .unwrap_or_else(|_| format!("verify-run-{run_id}"));
+    let commit_sha =
+        verify_task_head_commit(&project_root).unwrap_or_else(|_| format!("verify-run-{run_id}"));
 
     let outcome = djinn_agent::verification::service::verify_commit(
         &run.project_id,
@@ -1795,6 +2092,62 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::process::Command;
+
+    #[test]
+    fn resolve_cargo_workspace_prefers_env_config_rust_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("server")).expect("mkdir server");
+        std::fs::write(root.join("server/Cargo.toml"), "[workspace]\n").expect("write Cargo.toml");
+
+        let cfg = djinn_stack::environment::EnvironmentConfig {
+            workspaces: vec![djinn_stack::environment::Workspace {
+                slug: None,
+                name: None,
+                tags: vec![],
+                root: "server".into(),
+                language: "rust".into(),
+                toolchain: None,
+                version: None,
+                package_manager: None,
+            }],
+            ..Default::default()
+        };
+
+        let resolved = resolve_cargo_workspace_dir(root, Some(&cfg)).expect("resolve");
+        assert_eq!(resolved, root.join("server"));
+    }
+
+    #[test]
+    fn resolve_cargo_workspace_finds_subdir_without_env_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("server")).expect("mkdir server");
+        std::fs::write(root.join("server/Cargo.toml"), "[workspace]\n").expect("write Cargo.toml");
+
+        let resolved = resolve_cargo_workspace_dir(root, None).expect("resolve");
+        assert_eq!(resolved, root.join("server"));
+    }
+
+    #[test]
+    fn resolve_cargo_workspace_prefers_root_cargo_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write Cargo.toml");
+
+        let resolved = resolve_cargo_workspace_dir(root, None).expect("resolve");
+        assert_eq!(resolved, root.to_path_buf());
+    }
+
+    #[test]
+    fn resolve_cargo_workspace_none_for_non_rust_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::write(root.join("package.json"), "{}").expect("write package.json");
+
+        assert!(resolve_cargo_workspace_dir(root, None).is_none());
+    }
 
     #[derive(Default)]
     struct FakeGraphArtifactCache {
@@ -1929,6 +2282,7 @@ mod tests {
             }],
             processes: Vec::new(),
             route_exclusion_config: Default::default(),
+            layout_positions: BTreeMap::new(),
         };
         bincode::serialize(&artifact).expect("serialize graph artifact")
     }

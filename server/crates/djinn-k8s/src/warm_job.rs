@@ -105,6 +105,14 @@ elif [ -f yarn.lock ]; then
 elif [ -f package-lock.json ]; then
   ( npm ci || npm install ) || true
 fi
+# The cargo target base is warmed by `warm-graph` itself (in the worker), NOT
+# here: the worker normalizes tracked-file mtimes to commit times — the SAME
+# normalization verification applies before it compiles — then compiles the
+# cargo workspace into the warm base. Doing it in this shell wrapper (with
+# clone-time mtimes, and gated on a root `Cargo.toml` that djinn's `server/`
+# workspace doesn't have) produced a base whose cargo fingerprints never matched
+# verification's tree, so verification recompiled cold every run. See
+# `warm_cargo_target_base` in djinn-agent-worker.
 exec {bin} warm-graph "{project_id}"
 "#,
         mirror_path = mirror_path,
@@ -406,6 +414,15 @@ mod tests {
             cmd[2]
         );
         assert!(cmd[2].contains("pnpm install"));
+        // The cargo target base is warmed inside `warm-graph` (the worker), where
+        // mtimes are normalized to match verification — NOT in this shell wrapper.
+        // The old in-shell `cargo` step gated on a root `Cargo.toml` djinn's
+        // `server/` workspace lacks, so it never ran; guard against its return.
+        assert!(
+            !cmd[2].contains("cargo clippy"),
+            "cargo warm must live in the worker, not the warm-Job shell: {}",
+            cmd[2]
+        );
 
         let envs: BTreeMap<&str, &str> = container
             .env
@@ -446,7 +463,15 @@ mod tests {
             envs.get("CARGO_TARGET_DIR").copied(),
             Some("/cache/cargo-target/proj-xyz"),
         );
+        // CARGO_INCREMENTAL=0: the repo pins rustc-wrapper=sccache, which forbids
+        // incremental. Reuse is cargo freshness over the warm base + sccache.
         assert_eq!(envs.get("CARGO_INCREMENTAL").copied(), Some("0"));
+        // We no longer force the sccache wrapper (it requires CARGO_INCREMENTAL=0
+        // and disabled the incremental fast path).
+        assert!(
+            !envs.contains_key("RUSTC_WRAPPER"),
+            "warm pod must not force RUSTC_WRAPPER=sccache (disables incremental)"
+        );
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),
             Some("/cache/sccache/proj-xyz"),
