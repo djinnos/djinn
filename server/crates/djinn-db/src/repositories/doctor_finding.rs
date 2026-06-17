@@ -96,12 +96,27 @@ pub struct NewDoctorFinding {
 }
 
 /// Filter for `list_recent` — bounded, newest-first scans of the table.
+///
+/// Every filter is optional; an unset field means "no narrowing on that
+/// dimension". All filtering happens in SQL — callers never receive the
+/// unfiltered row set. The repository does not impose a default
+/// `since` cutoff (board/audit callers explicitly opt in to the time
+/// filter so a year-old run is still findable through the MCP
+/// `doctor_list_findings` surface).
 #[derive(Clone, Debug, Default)]
 pub struct RecentDoctorFindings {
     /// Optional run id filter (matches `run_id` exactly when set).
     pub run_id: Option<String>,
     /// Optional check name filter (matches `check_name` exactly when set).
     pub check_name: Option<String>,
+    /// Optional lower-bound timestamp filter. Rows with
+    /// `created_at < since` are excluded. The value is compared as a
+    /// string (the column is a UTC ISO-8601 `VARCHAR` — see
+    /// `61_doctor_findings.sql`), which is lexicographically equivalent
+    /// to a real time comparison for any value matching the schema's
+    /// `to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`
+    /// template.
+    pub since: Option<String>,
     /// Cap on the number of rows returned. `None` means "no explicit cap"
     /// (the repository still applies a defensive ceiling — see
     /// `MAX_RECENT_FINDINGS`).
@@ -192,8 +207,16 @@ impl DoctorFindingRepository {
         Ok(row.as_ref().map(row_to_finding))
     }
 
-    /// Newest-first scan, optionally filtered by `run_id` and/or
-    /// `check_name`. The `limit` is clamped to [`MAX_RECENT_FINDINGS`].
+    /// Newest-first scan, optionally filtered by `run_id`, `check_name`,
+    /// and/or a `since` lower-bound timestamp. The `limit` is clamped to
+    /// [`MAX_RECENT_FINDINGS`].
+    ///
+    /// All filters are applied in SQL; the repository never fetches
+    /// unfiltered rows and post-filters in memory. The `since` predicate
+    /// uses `created_at >= $n`, which is index-eligible via
+    /// `doctor_findings_created_at_idx` (and via
+    /// `doctor_findings_check_name_created_at_idx` when the call also
+    /// narrows on `check_name`).
     pub async fn list_recent(&self, query: RecentDoctorFindings) -> Result<Vec<DoctorFinding>> {
         self.db.ensure_initialized().await?;
 
@@ -204,8 +227,8 @@ impl DoctorFindingRepository {
 
         // Build the dynamic WHERE clause. The placeholders must be numbered
         // to match the bind order below (run_id first, then check_name,
-        // then the limit), so we compute the index for each optional
-        // filter explicitly.
+        // then since, then the limit), so we compute the index for each
+        // optional filter explicitly.
         let mut where_clauses: Vec<String> = Vec::new();
         let mut next_placeholder: usize = 1;
         if query.run_id.is_some() {
@@ -214,6 +237,10 @@ impl DoctorFindingRepository {
         }
         if query.check_name.is_some() {
             where_clauses.push(format!("check_name = ${next_placeholder}"));
+            next_placeholder += 1;
+        }
+        if query.since.is_some() {
+            where_clauses.push(format!("created_at >= ${next_placeholder}"));
             next_placeholder += 1;
         }
         let where_sql = if where_clauses.is_empty() {
@@ -234,6 +261,9 @@ impl DoctorFindingRepository {
         }
         if let Some(check_name) = query.check_name.as_deref() {
             q = q.bind(check_name);
+        }
+        if let Some(since) = query.since.as_deref() {
+            q = q.bind(since);
         }
         q = q.bind(limit as i64);
 
@@ -505,6 +535,78 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(small.len(), 7);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_recent_filters_by_since_lower_bound() {
+        let db = fresh_db();
+        let repo = DoctorFindingRepository::new(db);
+
+        // Two findings for the same check. The ms-resolution `created_at`
+        // (UUIDv7 timestamp + a tiny sleep) lets us derive a `since` that
+        // sits between them deterministically.
+        let first = repo
+            .insert(new_finding("config_drift", severity::INFO))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+        let second = repo
+            .insert(new_finding("config_drift", severity::WARN))
+            .await
+            .unwrap();
+        // A third finding for an unrelated check that should not affect the
+        // since-filtered scan.
+        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+        let third = repo
+            .insert(new_finding("zombie_reaper", severity::CRITICAL))
+            .await
+            .unwrap();
+
+        // `since` strictly after the first finding's created_at → the
+        // first one is excluded, but both subsequent rows survive.
+        let since = second.created_at.clone();
+        let after_first = repo
+            .list_recent(RecentDoctorFindings {
+                since: Some(since.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let after_first_ids: Vec<&str> = after_first.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(after_first_ids, vec![third.id.as_str(), second.id.as_str()]);
+        assert!(!after_first_ids.contains(&first.id.as_str()));
+
+        // `since` strictly after the third finding's created_at → empty.
+        // Build a timestamp guaranteed to sort later than any persisted row.
+        let future = format!(
+            "{}.999Z",
+            third
+                .created_at
+                .trim_end_matches('Z')
+                .trim_end_matches(".000Z")
+        );
+        let none = repo
+            .list_recent(RecentDoctorFindings {
+                since: Some(future),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(none.is_empty());
+
+        // `since` combined with `check_name` still applies both predicates
+        // (the second finding matches; the unrelated third does not).
+        let combined = repo
+            .list_recent(RecentDoctorFindings {
+                check_name: Some("config_drift".to_owned()),
+                since: Some(since),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].id, second.id);
+        assert_eq!(combined[0].check_name, "config_drift");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

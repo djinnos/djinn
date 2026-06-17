@@ -1855,6 +1855,132 @@ expression: signatures
     }
   },
   {
+    "name": "doctor_list_findings",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Parameters for `doctor_list_findings`.\n\nAll filters are optional; an unset field means \"no narrowing on that\ndimension\". The `check` filter matches `check_name` exactly. The\n`since` filter is a lower-bound timestamp — rows with\n`created_at < since` are excluded. The value should be a UTC\nISO-8601 string matching the schema's `created_at` template so the\nstring comparison the repository issues in SQL is also a valid\nchronological comparison.\n\n`limit` is `i64` (not `usize`) so the generated MCP JSON schema\nlands on `format: int64` instead of the nonstandard `uint` pinned\nby `tool_schemas::mcp_tools_list_schemas_do_not_use_nonstandard_uint_…`.\nThe repository's defensive ceiling (`MAX_RECENT_FINDINGS`) still\napplies, and any caller value above it is silently clamped.",
+      "properties": {
+        "check": {
+          "default": null,
+          "description": "Optional check name to narrow on (matches `check_name` exactly).",
+          "nullable": true,
+          "type": "string"
+        },
+        "limit": {
+          "default": null,
+          "description": "Optional cap on the number of findings returned. Clamped to\n`MAX_RECENT_FINDINGS` (the repository's defensive ceiling) when\nlarger. Defaults to the repository's defensive ceiling when\nomitted.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "since": {
+          "default": null,
+          "description": "Optional lower-bound timestamp filter. Rows with\n`created_at < since` are excluded. Defaults to \"no time\nfilter\" so callers can ask for \"the last N findings for\nthis check\" without a cutoff.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "DoctorListFindingsParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "DoctorListFindingEntry": {
+          "description": "One persisted finding surfaced through `doctor_list_findings`.\n\nMirrors [`djinn_db::DoctorFinding`] but uses a plain\n`Vec<serde_json::Value>` for `entity_ids` so callers that want the\nraw array shape (rather than a structured map) can iterate without\nan extra deserialization step. The other JSONB payloads —\n`evidence` and `resolver_snapshot` — are passed through unchanged.",
+          "properties": {
+            "check_name": {
+              "type": "string"
+            },
+            "created_at": {
+              "description": "Wall-clock UTC ISO-8601 timestamp the finding was recorded.",
+              "type": "string"
+            },
+            "detail": {
+              "description": "Free-form human-readable detail surfaced in reports.",
+              "nullable": true,
+              "type": "string"
+            },
+            "entity_ids": {
+              "description": "Opaque entity ids this finding relates to. Always a JSON array\n(possibly empty) so callers can iterate without inspecting each\nrow's shape."
+            },
+            "evidence": {
+              "description": "Structured check-specific evidence. Free-form JSON."
+            },
+            "id": {
+              "description": "Persisted finding id (from `doctor_findings.id`).",
+              "type": "string"
+            },
+            "resolver_snapshot": {
+              "description": "Resolver inputs and outputs captured at check time. `None` for\nchecks with no associated resolver."
+            },
+            "run_id": {
+              "description": "The run that produced this finding. `None` for ad-hoc inserts.",
+              "nullable": true,
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "created_at",
+            "check_name",
+            "severity",
+            "entity_ids",
+            "evidence"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for `doctor_list_findings`.",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "filtered_by_check": {
+          "description": "`true` when a filter was applied. Useful for the board / audit\nUI to display \"filtered by check X, since Y\" in the response.",
+          "type": "boolean"
+        },
+        "filtered_by_since": {
+          "description": "`true` when a `since` lower bound was applied.",
+          "type": "boolean"
+        },
+        "findings": {
+          "description": "Findings that match the request, newest-first. Empty when the\nfilter is too narrow or no findings have been recorded yet.",
+          "items": {
+            "$ref": "#/$defs/DoctorListFindingEntry"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "description": "The actual limit used by the query (after the repository\nclamped it to `MAX_RECENT_FINDINGS`).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "findings",
+        "filtered_by_check",
+        "filtered_by_since",
+        "limit"
+      ],
+      "title": "DoctorListFindingsResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "doctor_run",
     "read_only": false,
     "destructive": true,

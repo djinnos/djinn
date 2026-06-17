@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use djinn_core::doctor::{
     DoctorCheck, DoctorRegistry, Finding, FindingSeverity, ResolverSnapshot, registry,
 };
-use djinn_db::DoctorFindingRepository;
+use djinn_db::{DoctorFindingRepository, RecentDoctorFindings};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::acting_user::require_admin;
@@ -129,6 +129,92 @@ pub struct DoctorFixResponse {
     pub ok: bool,
     pub check_name: String,
     pub finding_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Parameters for `doctor_list_findings`.
+///
+/// All filters are optional; an unset field means "no narrowing on that
+/// dimension". The `check` filter matches `check_name` exactly. The
+/// `since` filter is a lower-bound timestamp — rows with
+/// `created_at < since` are excluded. The value should be a UTC
+/// ISO-8601 string matching the schema's `created_at` template so the
+/// string comparison the repository issues in SQL is also a valid
+/// chronological comparison.
+///
+/// `limit` is `i64` (not `usize`) so the generated MCP JSON schema
+/// lands on `format: int64` instead of the nonstandard `uint` pinned
+/// by `tool_schemas::mcp_tools_list_schemas_do_not_use_nonstandard_uint_…`.
+/// The repository's defensive ceiling (`MAX_RECENT_FINDINGS`) still
+/// applies, and any caller value above it is silently clamped.
+#[derive(Deserialize, JsonSchema)]
+pub struct DoctorListFindingsParams {
+    /// Optional check name to narrow on (matches `check_name` exactly).
+    #[serde(default)]
+    pub check: Option<String>,
+    /// Optional lower-bound timestamp filter. Rows with
+    /// `created_at < since` are excluded. Defaults to "no time
+    /// filter" so callers can ask for "the last N findings for
+    /// this check" without a cutoff.
+    #[serde(default)]
+    pub since: Option<String>,
+    /// Optional cap on the number of findings returned. Clamped to
+    /// `MAX_RECENT_FINDINGS` (the repository's defensive ceiling) when
+    /// larger. Defaults to the repository's defensive ceiling when
+    /// omitted.
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// One persisted finding surfaced through `doctor_list_findings`.
+///
+/// Mirrors [`djinn_db::DoctorFinding`] but uses a plain
+/// `Vec<serde_json::Value>` for `entity_ids` so callers that want the
+/// raw array shape (rather than a structured map) can iterate without
+/// an extra deserialization step. The other JSONB payloads —
+/// `evidence` and `resolver_snapshot` — are passed through unchanged.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DoctorListFindingEntry {
+    /// Persisted finding id (from `doctor_findings.id`).
+    pub id: String,
+    /// Wall-clock UTC ISO-8601 timestamp the finding was recorded.
+    pub created_at: String,
+    /// The run that produced this finding. `None` for ad-hoc inserts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub check_name: String,
+    pub severity: String,
+    /// Opaque entity ids this finding relates to. Always a JSON array
+    /// (possibly empty) so callers can iterate without inspecting each
+    /// row's shape.
+    pub entity_ids: serde_json::Value,
+    /// Structured check-specific evidence. Free-form JSON.
+    pub evidence: serde_json::Value,
+    /// Resolver inputs and outputs captured at check time. `None` for
+    /// checks with no associated resolver.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolver_snapshot: Option<serde_json::Value>,
+    /// Free-form human-readable detail surfaced in reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Response for `doctor_list_findings`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DoctorListFindingsResponse {
+    pub ok: bool,
+    /// Findings that match the request, newest-first. Empty when the
+    /// filter is too narrow or no findings have been recorded yet.
+    pub findings: Vec<DoctorListFindingEntry>,
+    /// `true` when a filter was applied. Useful for the board / audit
+    /// UI to display "filtered by check X, since Y" in the response.
+    pub filtered_by_check: bool,
+    /// `true` when a `since` lower bound was applied.
+    pub filtered_by_since: bool,
+    /// The actual limit used by the query (after the repository
+    /// clamped it to `MAX_RECENT_FINDINGS`).
+    pub limit: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -242,6 +328,25 @@ fn persisted_to_finding(row: &djinn_db::DoctorFinding) -> Result<Finding, String
         resolver_snapshot,
         detail: row.detail.clone().unwrap_or_default(),
     })
+}
+
+/// Project a persisted `DoctorFinding` row into the
+/// `doctor_list_findings` response DTO. The mapping is a direct copy of
+/// the public fields — the response type is intentionally narrow so the
+/// board / audit callers get a stable JSON shape that does not include
+/// repository-internal accounting.
+fn finding_to_entry(row: &djinn_db::DoctorFinding) -> DoctorListFindingEntry {
+    DoctorListFindingEntry {
+        id: row.id.clone(),
+        created_at: row.created_at.clone(),
+        run_id: row.run_id.clone(),
+        check_name: row.check_name.clone(),
+        severity: row.severity.clone(),
+        entity_ids: row.entity_ids.clone(),
+        evidence: row.evidence.clone(),
+        resolver_snapshot: row.resolver_snapshot.clone(),
+        detail: row.detail.clone(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +598,81 @@ impl DjinnMcpServer {
                 ok: false,
                 check_name,
                 finding_id,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+
+    /// List recent persisted doctor findings.
+    ///
+    /// Backs board / audit queries like "this check fired 4× this week":
+    /// the response returns the persisted `id`, `created_at`, `check_name`,
+    /// `severity`, structured `entity_ids`, `evidence`, `resolver_snapshot`,
+    /// and `detail` for every row that survives the optional `check` /
+    /// `since` / `limit` filters. Filtering happens in SQL — the
+    /// repository never returns the unfiltered row set.
+    ///
+    /// This path is admin-gated for symmetry with `doctor_run` /
+    /// `doctor_fix`; it does not run any checks, only reads from
+    /// `doctor_findings`.
+    #[tool(description = "Admin-only: list recent persisted doctor findings, \
+                       newest-first. Optional filters: `check` (exact check_name match), \
+                       `since` (UTC ISO-8601 lower-bound timestamp), `limit` (max rows; \
+                       clamped to MAX_RECENT_FINDINGS). Returns persisted ids, \
+                       timestamps, severity, entity ids, evidence, resolver_snapshot, \
+                       and detail. Does not run any checks.")]
+    pub async fn doctor_list_findings(
+        &self,
+        Parameters(p): Parameters<DoctorListFindingsParams>,
+    ) -> Json<DoctorListFindingsResponse> {
+        // Admin gate — mirrors doctor_run / doctor_fix.
+        if let Err(error) = require_admin(self.state.db()).await {
+            return Json(DoctorListFindingsResponse {
+                ok: false,
+                findings: Vec::new(),
+                filtered_by_check: false,
+                filtered_by_since: false,
+                limit: 0,
+                error: Some(error),
+            });
+        }
+
+        let filtered_by_check = p.check.is_some();
+        let filtered_by_since = p.since.is_some();
+
+        // `p.limit` is `i64` so the schema uses `format: int64`. The
+        // repository's `limit` is `usize` for in-memory arithmetic; a
+        // negative caller value is clamped to 0 (the repository then
+        // applies its defensive ceiling) so a misbehaving caller cannot
+        // crash the query.
+        let caller_limit: Option<usize> = p.limit.and_then(|n| usize::try_from(n).ok());
+        let repo = DoctorFindingRepository::new(self.state.db().clone());
+        let query = RecentDoctorFindings {
+            run_id: None,
+            check_name: p.check.clone(),
+            since: p.since.clone(),
+            limit: caller_limit,
+        };
+        let effective_limit = query
+            .limit
+            .unwrap_or(djinn_db::MAX_RECENT_FINDINGS)
+            .min(djinn_db::MAX_RECENT_FINDINGS) as i64;
+
+        match repo.list_recent(query).await {
+            Ok(rows) => Json(DoctorListFindingsResponse {
+                ok: true,
+                findings: rows.iter().map(finding_to_entry).collect(),
+                filtered_by_check,
+                filtered_by_since,
+                limit: effective_limit,
+                error: None,
+            }),
+            Err(e) => Json(DoctorListFindingsResponse {
+                ok: false,
+                findings: Vec::new(),
+                filtered_by_check,
+                filtered_by_since,
+                limit: effective_limit,
                 error: Some(e.to_string()),
             }),
         }
@@ -780,5 +960,253 @@ mod tests {
         assert_eq!(ours.description, "Test check for doctor tool wiring");
         // Default cadence is OnDemand since we didn't override it.
         assert!(!ours.cadence.is_cheap());
+    }
+
+    // -------------------------------------------------------------------
+    // doctor_list_findings — projection + response shape
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn finding_to_entry_copies_all_persisted_fields() {
+        let row = djinn_db::DoctorFinding {
+            id: "abc-123".to_string(),
+            run_id: Some("run-1".to_string()),
+            created_at: "2024-05-01T12:00:00.000Z".to_string(),
+            check_name: "config_drift".to_string(),
+            severity: "critical".to_string(),
+            entity_ids: serde_json::json!(["task-1", "project-7"]),
+            evidence: serde_json::json!({"rows": 5}),
+            resolver_snapshot: Some(
+                serde_json::json!({"resolver": "snap", "inputs": {}, "outputs": {}}),
+            ),
+            detail: Some("explained".to_string()),
+        };
+        let entry = finding_to_entry(&row);
+        assert_eq!(entry.id, "abc-123");
+        assert_eq!(entry.run_id.as_deref(), Some("run-1"));
+        assert_eq!(entry.created_at, "2024-05-01T12:00:00.000Z");
+        assert_eq!(entry.check_name, "config_drift");
+        assert_eq!(entry.severity, "critical");
+        assert_eq!(entry.entity_ids, serde_json::json!(["task-1", "project-7"]));
+        assert_eq!(entry.evidence, serde_json::json!({"rows": 5}));
+        assert!(entry.resolver_snapshot.is_some());
+        assert_eq!(entry.detail.as_deref(), Some("explained"));
+    }
+
+    #[test]
+    fn finding_to_entry_propagates_optional_fields_as_none() {
+        let row = djinn_db::DoctorFinding {
+            id: "abc-456".to_string(),
+            run_id: None,
+            created_at: "2024-05-02T00:00:00.000Z".to_string(),
+            check_name: "zombie_reaper".to_string(),
+            severity: "info".to_string(),
+            entity_ids: serde_json::json!([]),
+            evidence: serde_json::json!({}),
+            resolver_snapshot: None,
+            detail: None,
+        };
+        let entry = finding_to_entry(&row);
+        assert!(entry.run_id.is_none());
+        assert!(entry.resolver_snapshot.is_none());
+        assert!(entry.detail.is_none());
+        // Even when no resolver / detail was persisted, the entity_ids and
+        // evidence slots still carry their defaults so callers can iterate
+        // without inspecting the row.
+        assert_eq!(entry.entity_ids, serde_json::json!([]));
+        assert_eq!(entry.evidence, serde_json::json!({}));
+    }
+
+    #[test]
+    fn doctor_list_findings_response_serializes_required_fields() {
+        let resp = DoctorListFindingsResponse {
+            ok: true,
+            findings: vec![DoctorListFindingEntry {
+                id: "f-1".to_string(),
+                created_at: "2024-05-01T12:00:00.000Z".to_string(),
+                run_id: Some("run-7".to_string()),
+                check_name: "config_drift".to_string(),
+                severity: "warn".to_string(),
+                entity_ids: serde_json::json!(["task-1"]),
+                evidence: serde_json::json!({}),
+                resolver_snapshot: None,
+                detail: Some("hello".to_string()),
+            }],
+            filtered_by_check: true,
+            filtered_by_since: false,
+            limit: 50,
+            error: None,
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["filter_omitted"], serde_json::Value::Null); // sanity
+        assert_eq!(v["filtered_by_check"], true);
+        assert_eq!(v["filtered_by_since"], false);
+        assert_eq!(v["limit"], 50);
+        assert_eq!(v["findings"].as_array().unwrap().len(), 1);
+        assert_eq!(v["findings"][0]["id"], "f-1");
+        assert_eq!(v["findings"][0]["check_name"], "config_drift");
+        assert_eq!(v["findings"][0]["severity"], "warn");
+        assert_eq!(v["findings"][0]["detail"], "hello");
+        // error is skipped when None.
+        assert!(v.as_object().unwrap().get("error").is_none());
+        // resolver_snapshot is skipped when None.
+        assert!(
+            v["findings"][0]
+                .as_object()
+                .unwrap()
+                .get("resolver_snapshot")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn doctor_list_findings_response_serializes_error_path() {
+        let resp = DoctorListFindingsResponse {
+            ok: false,
+            findings: Vec::new(),
+            filtered_by_check: false,
+            filtered_by_since: false,
+            limit: 0,
+            error: Some("kaboom".to_string()),
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], "kaboom");
+        assert_eq!(v["findings"].as_array().unwrap().len(), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // doctor_list_findings — repository filter integration
+    //
+    // These tests run the SAME filter path the tool runs, but at the
+    // repository layer, so they don't depend on the admin gate or the
+    // `DjinnMcpServer` plumbing. The repository tests in
+    // `djinn-db` already cover the SQL filter mechanics; these tests
+    // additionally assert the projection and the new `since` filter
+    // surface end-to-end.
+    // -------------------------------------------------------------------
+
+    fn new_test_finding(check_name: &str, severity: &str) -> djinn_db::NewDoctorFinding {
+        djinn_db::NewDoctorFinding {
+            run_id: Some("list-test".to_owned()),
+            check_name: check_name.to_owned(),
+            severity: severity.to_owned(),
+            entity_ids: serde_json::json!(["entity-1"]),
+            evidence: serde_json::json!({"rows": 1}),
+            resolver_snapshot: Some(serde_json::json!({
+                "resolver": "snap",
+                "inputs": {},
+                "outputs": {}
+            })),
+            detail: Some(format!("detail for {check_name}")),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_findings_repository_filters_by_check_name_in_sql() {
+        let db = djinn_db::Database::open_in_memory().expect("in-memory db");
+        let repo = DoctorFindingRepository::new(db.clone());
+        repo.insert(new_test_finding("config_drift", "info"))
+            .await
+            .unwrap();
+        repo.insert(new_test_finding("config_drift", "warn"))
+            .await
+            .unwrap();
+        repo.insert(new_test_finding("zombie_reaper", "critical"))
+            .await
+            .unwrap();
+
+        // No filter → all three, newest first.
+        let all = repo
+            .list_recent(RecentDoctorFindings::default())
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 3);
+        // Convert through the same projection the tool uses.
+        let entries: Vec<_> = all.iter().map(finding_to_entry).collect();
+        assert!(entries.iter().all(|e| e.detail.is_some()));
+
+        // `check` filter narrows on `check_name` in SQL.
+        let drift = repo
+            .list_recent(RecentDoctorFindings {
+                check_name: Some("config_drift".to_owned()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let drift_entries: Vec<_> = drift.iter().map(finding_to_entry).collect();
+        assert_eq!(drift_entries.len(), 2);
+        assert!(drift_entries.iter().all(|e| e.check_name == "config_drift"));
+
+        // `limit` honors the explicit value and is preserved on the
+        // response DTO.
+        let small = repo
+            .list_recent(RecentDoctorFindings {
+                limit: Some(1),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(small.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_findings_repository_filters_by_since_in_sql() {
+        let db = djinn_db::Database::open_in_memory().expect("in-memory db");
+        let repo = DoctorFindingRepository::new(db.clone());
+        let first = repo
+            .insert(new_test_finding("config_drift", "info"))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+        let second = repo
+            .insert(new_test_finding("config_drift", "warn"))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+        let third = repo
+            .insert(new_test_finding("zombie_reaper", "critical"))
+            .await
+            .unwrap();
+
+        // `since` set to the second row's timestamp → only the second
+        // and third rows survive (both newer than `since`).
+        let after_first = repo
+            .list_recent(RecentDoctorFindings {
+                since: Some(second.created_at.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let entries: Vec<_> = after_first.iter().map(finding_to_entry).collect();
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec![third.id.as_str(), second.id.as_str()]);
+        assert!(!ids.contains(&first.id.as_str()));
+
+        // `since` set to a clearly-future timestamp → empty.
+        let future = "2999-01-01T00:00:00.000Z".to_owned();
+        let none = repo
+            .list_recent(RecentDoctorFindings {
+                since: Some(future),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(none.is_empty());
+
+        // `check` and `since` combine: only the second row matches both.
+        let combined = repo
+            .list_recent(RecentDoctorFindings {
+                check_name: Some("config_drift".to_owned()),
+                since: Some(second.created_at.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let combined_entries: Vec<_> = combined.iter().map(finding_to_entry).collect();
+        assert_eq!(combined_entries.len(), 1);
+        assert_eq!(combined_entries[0].id, second.id);
+        assert_eq!(combined_entries[0].check_name, "config_drift");
     }
 }
