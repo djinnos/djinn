@@ -35,6 +35,7 @@ impl DjinnMcpServer {
             file: file.to_string(),
             hits,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -78,6 +79,7 @@ impl DjinnMcpServer {
             affected_files: result.affected_files,
             unknown_files: result.unknown_files,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -151,6 +153,7 @@ impl DjinnMcpServer {
             DetectedChangesResponse {
                 detected_changes: filtered,
                 next_step,
+                graph_staleness: None,
             },
         ))
     }
@@ -190,6 +193,7 @@ impl DjinnMcpServer {
             symbols,
             workspace_hint: scope.hint,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -213,6 +217,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::BoundaryCheck(BoundaryCheckResponse {
             violations,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -234,6 +239,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Hotspots(HotspotsResponse {
             hotspots,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -259,6 +265,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Complexity(ComplexityResponse {
             complexity: result,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -286,6 +293,7 @@ impl DjinnMcpServer {
             RefactorCandidatesResponse {
                 refactor_candidates: candidates,
                 next_step: None,
+                graph_staleness: None,
             },
         ))
     }
@@ -300,6 +308,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::MetricsAt(MetricsAtResponse {
             metrics,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -324,6 +333,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::DeadSymbols(DeadSymbolsResponse {
             symbols,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -343,6 +353,7 @@ impl DjinnMcpServer {
             DeprecatedCallersResponse {
                 hits,
                 next_step: None,
+                graph_staleness: None,
             },
         ))
     }

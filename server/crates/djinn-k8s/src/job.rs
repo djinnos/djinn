@@ -550,29 +550,30 @@ pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     env
 }
 
-/// Cache env vars for warm Pods that intentionally populate the shared
-/// per-project cargo target base. Incremental compilation is ENABLED so the
-/// base carries main's incremental compiler state — verification/task-run pods
-/// seed a private run dir from it and recompile only their delta incrementally
-/// (CI-style warm cache, like Swatinem/rust-cache). The base is single-writer
-/// (warm pods are serialized per project), so incremental state is safe here.
+/// Cache env vars for warm Pods that populate the shared per-project cargo
+/// target base. `CARGO_INCREMENTAL=0` — repos that pin `rustc-wrapper = sccache`
+/// in `.cargo/config.toml` (djinn does) crash with "incremental compilation is
+/// prohibited" under `CARGO_INCREMENTAL=1`. Reuse here is sccache (cross-run
+/// rustc cache) PLUS cargo freshness: the warm compiles `main` (with
+/// `normalize_mtimes`) into the base + sccache, then verification seeds the base
+/// and — with matching commit-time mtimes — cargo marks unchanged crates Fresh
+/// and SKIPS them; the rest hit sccache. Freshness does not require incremental.
 pub(crate) fn warm_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     let mut env = cache_env_vars(project_id);
-    env.push(env_var("CARGO_INCREMENTAL", "1"));
+    env.push(env_var("CARGO_INCREMENTAL", "0"));
     env
 }
 
-/// Cache env vars for verification Pods. Like task-runs, verification reuses the
-/// warm per-project base as a read-only SEED: the worker (`run_verify_task`)
-/// seeds a private run target dir from the warm base and overrides
-/// `CARGO_TARGET_DIR` to point there before running `verify_commit`, so it
-/// recompiles only the task's delta incrementally and never writes the shared
-/// base or contends on Cargo's build-dir lock. We set `CARGO_TARGET_DIR` to the
-/// shared base here as the seed source + safe fallback, and enable
-/// `CARGO_INCREMENTAL` so the run dir's incremental recompile is fast.
+/// Cache env vars for verification Pods. Verification reuses the warm
+/// per-project base as a read-only SEED: the worker (`run_verify_task`) seeds a
+/// private run target dir from the warm base and overrides `CARGO_TARGET_DIR`
+/// to point there before running `verify_commit`, so it never writes the shared
+/// base or contends on Cargo's build-dir lock. `CARGO_INCREMENTAL=0` (sccache
+/// requires it — see `warm_cache_env_vars`); reuse is cargo freshness over the
+/// seeded base (unchanged crates Fresh→skipped) + sccache for what compiles.
 pub(crate) fn verify_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     let mut env = cache_env_vars(project_id);
-    env.push(env_var("CARGO_INCREMENTAL", "1"));
+    env.push(env_var("CARGO_INCREMENTAL", "0"));
     env
 }
 

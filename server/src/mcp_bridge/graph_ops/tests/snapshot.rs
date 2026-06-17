@@ -677,6 +677,7 @@ fn snapshot_payload_rescues_cross_workspace_endpoint_under_cap() {
         communities: vec![],
         processes: vec![],
         route_exclusion_config: Default::default(),
+        layout_positions: std::collections::BTreeMap::new(),
     });
     let ranking = RepoGraphRanking {
         nodes: graph
@@ -818,6 +819,7 @@ fn community_snapshot_aggregates_cross_workspace_edges() {
         ],
         processes: vec![],
         route_exclusion_config: Default::default(),
+        layout_positions: std::collections::BTreeMap::new(),
     });
     let ranking = RepoGraphRanking {
         nodes: graph
@@ -918,6 +920,7 @@ fn snapshot_payload_preserves_quiet_workspace_when_cap_allows() {
         communities: vec![],
         processes: vec![],
         route_exclusion_config: Default::default(),
+        layout_positions: std::collections::BTreeMap::new(),
     });
     let ranking = RepoGraphRanking {
         nodes: graph
@@ -1048,6 +1051,7 @@ fn snapshot_payload_populates_community_id_pr_f3() {
         communities: vec![],
         processes: vec![],
         route_exclusion_config: Default::default(),
+        layout_positions: std::collections::BTreeMap::new(),
     };
     // `from_artifact` does NOT run community detection (it
     // restores the persisted sidecar — empty here). To exercise
@@ -1116,6 +1120,347 @@ fn snapshot_payload_populates_community_id_pr_f3() {
     assert_ne!(
         auth_id, billing_id,
         "auth and billing clusters should not share community_id"
+    );
+}
+
+// ── 7e6o: precomputed layout coordinates on snapshot nodes ───────────
+
+/// 7e6o AC: symbol/file snapshots populate finite, non-all-zero
+/// coordinates from the warm-time graph layout cache for every emitted
+/// node. Builds a graph via the artifact seam (whose `from_artifact`
+/// backfills deterministic layout positions when the sidecar is empty)
+/// and verifies every emitted snapshot node carries finite, non-all-zero
+/// coordinates both on the struct and in serialized JSON.
+#[test]
+fn snapshot_symbol_nodes_carry_finite_layout_coordinates_7e6o() {
+    use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+    use djinn_graph::repo_graph::{
+        RankedRepoGraphNode, RepoDependencyGraph, RepoGraphArtifact, RepoGraphArtifactEdge,
+        RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoGraphRanking, RepoNodeKey,
+    };
+    use std::collections::BTreeMap;
+
+    let mk_node = |name: &str| RepoGraphNode {
+        id: RepoNodeKey::Symbol(name.to_string()),
+        kind: RepoGraphNodeKind::Symbol,
+        display_name: name.to_string(),
+        language: Some("rust".to_string()),
+        file_path: Some(PathBuf::from(format!("src/{name}.rs"))),
+        symbol: Some(name.to_string()),
+        symbol_kind: None,
+        is_external: false,
+        visibility: None,
+        signature: None,
+        documentation: vec![],
+        signature_parts: None,
+        is_test: false,
+        complexity: None,
+        workspace: Some("root".to_string()),
+        route_framework: None,
+        route_handler_symbol: None,
+    };
+
+    let graph = RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
+        version: djinn_graph::repo_graph::REPO_GRAPH_ARTIFACT_VERSION,
+        nodes: vec![mk_node("alpha"), mk_node("beta"), mk_node("gamma")],
+        edges: vec![
+            RepoGraphArtifactEdge {
+                source: 0,
+                target: 1,
+                kind: RepoGraphEdgeKind::SymbolReference,
+                weight: 1.0,
+                evidence_count: 1,
+                confidence: 0.9,
+                reason: None,
+                step: None,
+            },
+            RepoGraphArtifactEdge {
+                source: 1,
+                target: 2,
+                kind: RepoGraphEdgeKind::SymbolReference,
+                weight: 1.0,
+                evidence_count: 1,
+                confidence: 0.9,
+                reason: None,
+                step: None,
+            },
+        ],
+        symbol_ranges: BTreeMap::new(),
+        communities: vec![],
+        processes: vec![],
+        route_exclusion_config: Default::default(),
+        // Empty sidecar — from_artifact backfills via derive_layout_positions.
+        layout_positions: BTreeMap::new(),
+    });
+    let ranking = RepoGraphRanking {
+        nodes: graph
+            .graph()
+            .node_indices()
+            .enumerate()
+            .map(|(rank, node_index)| RankedRepoGraphNode {
+                node_index,
+                key: graph.node(node_index).id.clone(),
+                kind: graph.node(node_index).kind,
+                score: (10 - rank) as f64,
+                page_rank: (10 - rank) as f64,
+                structural_weight: 1.0,
+                inbound_edge_weight: 0.0,
+                outbound_edge_weight: 0.0,
+                is_entry_point: false,
+                entry_point_distance: None,
+                fused_rank: (10 - rank) as f64,
+            })
+            .collect(),
+    };
+
+    let payload = build_snapshot_payload(
+        &graph,
+        &ranking,
+        "proj-test".to_string(),
+        "deadbeef".to_string(),
+        "2026-04-28T00:00:00Z".to_string(),
+        &GraphExclusions::empty(),
+        None,
+        SnapshotLevel::Symbol,
+        2_000,
+    );
+    assert!(
+        !payload.nodes.is_empty(),
+        "fixture graph should emit at least one node"
+    );
+    let mut all_zero = true;
+    for node in &payload.nodes {
+        assert!(
+            node.x.is_finite(),
+            "node {} x should be finite, got {}",
+            node.id,
+            node.x
+        );
+        assert!(
+            node.y.is_finite(),
+            "node {} y should be finite, got {}",
+            node.id,
+            node.y
+        );
+        if node.x != 0.0 || node.y != 0.0 {
+            all_zero = false;
+        }
+    }
+    assert!(
+        !all_zero,
+        "at least one node should have a non-zero coordinate from the layout cache"
+    );
+
+    // Serialized JSON must carry explicit numeric x/y on every node.
+    let json = serde_json::to_value(&payload).expect("serialize payload");
+    for node_json in json
+        .get("nodes")
+        .and_then(|v| v.as_array())
+        .expect("nodes array")
+    {
+        let obj = node_json.as_object().expect("node object");
+        assert!(obj.contains_key("x"), "serialized node missing x: {obj:?}");
+        assert!(obj.contains_key("y"), "serialized node missing y: {obj:?}");
+        assert!(
+            obj["x"].as_f64().map(f64::is_finite).unwrap_or(false),
+            "serialized x should be a finite number: {obj:?}"
+        );
+        assert!(
+            obj["y"].as_f64().map(f64::is_finite).unwrap_or(false),
+            "serialized y should be a finite number: {obj:?}"
+        );
+    }
+}
+
+/// 7e6o AC: `level=community` snapshots populate deterministic finite
+/// coordinates for community aggregate nodes. Builds a two-community
+/// graph whose layout cache is seeded with known member positions so the
+/// centroid computation is verifiable, then checks the community nodes
+/// received the expected centroid coordinates.
+#[test]
+fn snapshot_community_nodes_carry_centroid_coordinates_7e6o() {
+    use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+    use djinn_graph::communities::Community;
+    use djinn_graph::layout::GraphLayoutPosition;
+    use djinn_graph::repo_graph::{
+        RankedRepoGraphNode, RepoDependencyGraph, RepoGraphArtifact, RepoGraphArtifactEdge,
+        RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoGraphRanking, RepoNodeKey,
+    };
+    use std::collections::BTreeMap;
+
+    let mk_node = |name: &str| RepoGraphNode {
+        id: RepoNodeKey::Symbol(name.to_string()),
+        kind: RepoGraphNodeKind::Symbol,
+        display_name: name.to_string(),
+        language: Some("rust".to_string()),
+        file_path: Some(PathBuf::from(format!("src/{name}.rs"))),
+        symbol: Some(name.to_string()),
+        symbol_kind: None,
+        is_external: false,
+        visibility: None,
+        signature: None,
+        documentation: vec![],
+        signature_parts: None,
+        is_test: false,
+        complexity: None,
+        workspace: Some("root".to_string()),
+        route_framework: None,
+        route_handler_symbol: None,
+    };
+
+    // Two communities: alpha = {node0, node1}, beta = {node2, node3}.
+    // Seed member positions with known values so the centroid is
+    // deterministic and verifiable.
+    let mut layout_positions: BTreeMap<String, GraphLayoutPosition> = BTreeMap::new();
+    // stable_uid for a Symbol node is "symbol:<symbol>"
+    layout_positions.insert(
+        "symbol:alpha_a".to_string(),
+        GraphLayoutPosition { x: 100.0, y: 200.0 },
+    );
+    layout_positions.insert(
+        "symbol:alpha_b".to_string(),
+        GraphLayoutPosition { x: 300.0, y: 400.0 },
+    );
+    layout_positions.insert(
+        "symbol:beta_c".to_string(),
+        GraphLayoutPosition { x: 500.0, y: 600.0 },
+    );
+    layout_positions.insert(
+        "symbol:beta_d".to_string(),
+        GraphLayoutPosition { x: 700.0, y: 800.0 },
+    );
+
+    let graph = RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
+        version: djinn_graph::repo_graph::REPO_GRAPH_ARTIFACT_VERSION,
+        nodes: vec![
+            mk_node("alpha_a"),
+            mk_node("alpha_b"),
+            mk_node("beta_c"),
+            mk_node("beta_d"),
+        ],
+        edges: vec![
+            RepoGraphArtifactEdge {
+                source: 0,
+                target: 1,
+                kind: RepoGraphEdgeKind::SymbolReference,
+                weight: 1.0,
+                evidence_count: 1,
+                confidence: 0.8,
+                reason: None,
+                step: None,
+            },
+            RepoGraphArtifactEdge {
+                source: 2,
+                target: 3,
+                kind: RepoGraphEdgeKind::SymbolReference,
+                weight: 1.0,
+                evidence_count: 1,
+                confidence: 0.8,
+                reason: None,
+                step: None,
+            },
+        ],
+        symbol_ranges: BTreeMap::new(),
+        communities: vec![
+            Community {
+                id: "community-alpha".to_string(),
+                label: "alpha".to_string(),
+                member_ids: vec![0, 1],
+                cohesion: 0.5,
+                symbol_count: 2,
+                keywords: vec![],
+            },
+            Community {
+                id: "community-beta".to_string(),
+                label: "beta".to_string(),
+                member_ids: vec![2, 3],
+                cohesion: 0.5,
+                symbol_count: 2,
+                keywords: vec![],
+            },
+        ],
+        processes: vec![],
+        route_exclusion_config: Default::default(),
+        // Non-empty seed — from_artifact will NOT backfill, preserving
+        // our known positions for the centroid check.
+        layout_positions,
+    });
+    let ranking = RepoGraphRanking {
+        nodes: graph
+            .graph()
+            .node_indices()
+            .enumerate()
+            .map(|(rank, node_index)| RankedRepoGraphNode {
+                node_index,
+                key: graph.node(node_index).id.clone(),
+                kind: graph.node(node_index).kind,
+                score: (10 - rank) as f64,
+                page_rank: (10 - rank) as f64,
+                structural_weight: 1.0,
+                inbound_edge_weight: 0.0,
+                outbound_edge_weight: 0.0,
+                is_entry_point: false,
+                entry_point_distance: None,
+                fused_rank: (10 - rank) as f64,
+            })
+            .collect(),
+    };
+
+    let payload = build_snapshot_payload(
+        &graph,
+        &ranking,
+        "proj-test".to_string(),
+        "deadbeef".to_string(),
+        "2026-04-28T00:00:00Z".to_string(),
+        &GraphExclusions::empty(),
+        None,
+        SnapshotLevel::Community,
+        1_000,
+    );
+
+    assert_eq!(payload.nodes.len(), 2, "should emit two community nodes");
+
+    let alpha = payload
+        .nodes
+        .iter()
+        .find(|n| n.id == "community-alpha")
+        .expect("community-alpha node");
+    let beta = payload
+        .nodes
+        .iter()
+        .find(|n| n.id == "community-beta")
+        .expect("community-beta node");
+
+    // Centroid of alpha = ((100+300)/2, (200+400)/2) = (200, 300)
+    assert!(alpha.x.is_finite() && alpha.y.is_finite());
+    assert!(
+        (alpha.x - 200.0).abs() < 1e-9,
+        "alpha centroid x should be 200, got {}",
+        alpha.x
+    );
+    assert!(
+        (alpha.y - 300.0).abs() < 1e-9,
+        "alpha centroid y should be 300, got {}",
+        alpha.y
+    );
+
+    // Centroid of beta = ((500+700)/2, (600+800)/2) = (600, 700)
+    assert!(beta.x.is_finite() && beta.y.is_finite());
+    assert!(
+        (beta.x - 600.0).abs() < 1e-9,
+        "beta centroid x should be 600, got {}",
+        beta.x
+    );
+    assert!(
+        (beta.y - 700.0).abs() < 1e-9,
+        "beta centroid y should be 700, got {}",
+        beta.y
+    );
+
+    // The two communities should not overlap (non-identical positions).
+    assert!(
+        (alpha.x - beta.x).abs() + (alpha.y - beta.y).abs() > 1.0,
+        "community centroids should be distinct"
     );
 }
 

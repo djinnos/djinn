@@ -68,7 +68,7 @@ const NOISY_EDGE_KINDS: ReadonlySet<string> = new Set([
  * `SnapshotNodeKind` (file/folder/symbol); `symbol_kind` discriminators
  * (function/method/class/...) live in {@link SYMBOL_KIND_FILTERS}.
  */
-export const NODE_KINDS = ["folder", "file", "symbol"] as const;
+export const NODE_KINDS = ["folder", "file", "symbol", "community"] as const;
 export type NodeKind = (typeof NODE_KINDS)[number];
 
 /**
@@ -126,6 +126,19 @@ export const DEFAULT_DEPTH = MAX_DEPTH;
 export type ColorMode = "topology" | "complexity";
 export const DEFAULT_COLOR_MODE: ColorMode = "topology";
 
+/**
+ * Semantic zoom mode for community-collapse behaviour.
+ *   - `"auto"` (default) — the canvas decides `symbol` vs `community`
+ *     based on the snapshot node-count threshold.
+ *   - `"symbol"` — force a symbol-level snapshot.
+ *   - `"community"` — force a community-level (collapsed) snapshot.
+ *
+ * This task only owns the state + toolbar control; the canvas fetch
+ * wiring lives in a sibling task.
+ */
+export type SemanticZoomMode = "auto" | "symbol" | "community";
+export const DEFAULT_SEMANTIC_ZOOM_MODE: SemanticZoomMode = "auto";
+
 export interface CodeGraphHighlightState {
   selectionId: string | null;
   citationIds: Set<string>;
@@ -151,6 +164,12 @@ export interface CodeGraphHighlightState {
    * be degenerate.
    */
   complexityAvailable: boolean;
+  /**
+   * Semantic zoom mode — `auto` lets the canvas choose symbol vs
+   * community based on the snapshot node threshold; `symbol`/`community`
+   * force the level. Default `"auto"`. See {@link SemanticZoomMode}.
+   */
+  semanticZoomMode: SemanticZoomMode;
   selectedWorkspaceSlug: string | null;
 }
 
@@ -174,6 +193,8 @@ export interface CodeGraphHighlightActions {
   setColorMode: (mode: ColorMode) => void;
   /** Iter 30: canvas reports whether complexity data is present in the snapshot. */
   setComplexityAvailable: (available: boolean) => void;
+  /** Set the semantic zoom mode override (auto/symbol/community). */
+  setSemanticZoomMode: (mode: SemanticZoomMode) => void;
   setSelectedWorkspaceSlug: (slug: string | null) => void;
   reset: () => void;
 }
@@ -207,6 +228,7 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   depthFilter: DEFAULT_DEPTH,
   colorMode: DEFAULT_COLOR_MODE,
   complexityAvailable: false,
+  semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
   selectedWorkspaceSlug: null,
 };
 
@@ -310,6 +332,10 @@ export const useCodeGraphStore = create<
     set({ selectedWorkspaceSlug: slug });
   },
 
+  setSemanticZoomMode: (mode) => {
+    set({ semanticZoomMode: mode });
+  },
+
   reset: () => {
     set((state) => ({
       ...INITIAL_STATE,
@@ -322,6 +348,7 @@ export const useCodeGraphStore = create<
       symbolKindFilters: defaultSymbolKindFilters(),
       colorMode: DEFAULT_COLOR_MODE,
       complexityAvailable: false,
+      semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
     }));
   },
 }));

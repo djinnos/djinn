@@ -30,7 +30,10 @@ import {
 } from "@/lib/codeGraphAdapter";
 import { useSigmaGraph } from "@/hooks/useSigmaGraph";
 import { useGraphReducers } from "@/hooks/useGraphReducers";
-import { useCodeGraphStore } from "@/stores/codeGraphStore";
+import {
+  selectCitationIds,
+  useCodeGraphStore,
+} from "@/stores/codeGraphStore";
 import { RendererCapabilityDialog } from "./RendererCapabilityDialog";
 import { cn } from "@/lib/utils";
 
@@ -136,7 +139,12 @@ export function CodeGraphCanvas({
     return () => setComplexityAvailable(false);
   }, [complexityThresholds, setComplexityAvailable]);
 
-  const { layoutRunning, sigma } = useSigmaGraph(containerRef, graph, reducers);
+  const { ready, layoutRunning, sigma } = useSigmaGraph(
+    containerRef,
+    graph,
+    reducers,
+  );
+  useAutoFocusOnCitations({ ready, layoutRunning, sigma });
 
   useEffect(() => {
     setSigmaHandle(sigma);
@@ -193,6 +201,19 @@ export function CodeGraphCanvas({
       <ComplexityLegend thresholds={complexityThresholds} />
     </div>
   );
+}
+
+function useAutoFocusOnCitations({
+  ready,
+  layoutRunning,
+  sigma,
+}: Pick<ReturnType<typeof useSigmaGraph>, "ready" | "layoutRunning" | "sigma">) {
+  const citationIds = useCodeGraphStore(selectCitationIds);
+
+  useEffect(() => {
+    if (!ready || layoutRunning || !sigma) return;
+    sigma.focusNodes(citationIds);
+  }, [citationIds, layoutRunning, ready, sigma]);
 }
 
 /**

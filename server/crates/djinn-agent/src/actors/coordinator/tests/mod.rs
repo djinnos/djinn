@@ -1050,6 +1050,50 @@ async fn live_mover_summary_handle_reports_no_mover_for_closed_task() {
     assert!(summary.reasons.is_empty());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collect_live_mover_evidence_for_bridge_round_trips_evidence() {
+    // T4's bridge: collect_live_mover_evidence_for delegates to the
+    // coordinator handle's live_mover_summary and reconstructs the
+    // LiveMoverEvidence. This test asserts the bridge round-trips the
+    // evidence struct: a task with an open PR + unresolved blockers produces
+    // a LiveMoverEvidence whose open_pr and unresolved_blockers fields are
+    // true.
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _project_path) =
+        create_simple_task(&db, &tx, "task", "bridge round-trips evidence").await;
+    let (blocking_task, _project_path) =
+        create_simple_task(&db, &tx, "task", "bridge round-trips blocker").await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    repo.add_blocker(&task.id, &blocking_task.id).await.unwrap();
+    let task = repo.set_status(&task.id, "pr_review").await.unwrap();
+    let task = repo
+        .set_pr_url(&task.id, "https://github.com/example/repo/pull/3")
+        .await
+        .unwrap();
+    let handle = spawn_coordinator(&db, &tx);
+
+    let evidence = crate::doctor::live_mover::collect_live_mover_evidence_for(&handle, &task.id)
+        .await
+        .unwrap();
+
+    // The bridge must reconstruct the evidence fields that the coordinator
+    // collected: open_pr + pr_poller_owned (pr_review + pr_url) +
+    // unresolved_blockers.
+    assert!(
+        evidence.open_pr,
+        "open_pr must be true for a task with a non-empty pr_url"
+    );
+    assert!(
+        evidence.pr_poller_owned,
+        "pr_poller_owned must be true for pr_review status with pr_url"
+    );
+    assert!(
+        evidence.unresolved_blockers,
+        "unresolved_blockers must be true when the task has an open blocker"
+    );
+}
+
 async fn create_simple_task(
     db: &Database,
     tx: &broadcast::Sender<DjinnEventEnvelope>,
