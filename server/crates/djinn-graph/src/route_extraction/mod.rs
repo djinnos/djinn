@@ -538,6 +538,7 @@ mod tests {
             communities: Vec::new(),
             processes: Vec::new(),
             route_exclusion_config: Default::default(),
+            layout_positions: BTreeMap::new(),
         })
     }
 
@@ -635,6 +636,7 @@ mod tests {
             communities: Vec::new(),
             processes: Vec::new(),
             route_exclusion_config: Default::default(),
+            layout_positions: BTreeMap::new(),
         })
     }
 

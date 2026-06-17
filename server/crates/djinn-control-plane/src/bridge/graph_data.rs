@@ -357,6 +357,17 @@ pub struct SnapshotNode {
     /// `code_graph tests=` server-side filter.
     #[serde(default)]
     pub is_test: bool,
+    /// Warm-time layout coordinate (x axis). Populated from the
+    /// djinn-graph deterministic community-aware layout cache so the
+    /// browser can render static positions without running ForceAtlas2.
+    /// Serialized as an explicit field on new snapshots; deserialized
+    /// with a `0.0` default so legacy payloads without coordinates are
+    /// still accepted at the bridge boundary.
+    #[serde(default)]
+    pub x: f64,
+    /// Warm-time layout coordinate (y axis). See [`SnapshotNode::x`].
+    #[serde(default)]
+    pub y: f64,
 }
 
 /// PR D2: snapshot edge — one entry in the `snapshot.edges` array.

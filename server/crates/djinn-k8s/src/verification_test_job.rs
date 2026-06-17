@@ -307,8 +307,8 @@ mod tests {
         );
         assert_eq!(
             envs.get("CARGO_INCREMENTAL").copied(),
-            Some("1"),
-            "warm base is now incremental-enabled so seeded run dirs recompile fast"
+            Some("0"),
+            "warm/verify base uses sccache (incremental=0); reuse is cargo freshness + sccache"
         );
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),

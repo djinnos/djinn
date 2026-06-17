@@ -47,6 +47,7 @@ describe("codeGraphStore", () => {
       expect(filters.folder).toBe(true);
       expect(filters.file).toBe(true);
       expect(filters.symbol).toBe(true);
+      expect(filters.community).toBe(true);
     });
 
     it("starts with noisy symbol kinds (variable/import/field/other) hidden", () => {
@@ -216,6 +217,21 @@ describe("codeGraphStore", () => {
     });
   });
 
+  describe("semanticZoomMode", () => {
+    it("defaults to auto", () => {
+      expect(useCodeGraphStore.getState().semanticZoomMode).toBe("auto");
+    });
+
+    it("setSemanticZoomMode updates the mode", () => {
+      useCodeGraphStore.getState().setSemanticZoomMode("symbol");
+      expect(useCodeGraphStore.getState().semanticZoomMode).toBe("symbol");
+      useCodeGraphStore.getState().setSemanticZoomMode("community");
+      expect(useCodeGraphStore.getState().semanticZoomMode).toBe("community");
+      useCodeGraphStore.getState().setSemanticZoomMode("auto");
+      expect(useCodeGraphStore.getState().semanticZoomMode).toBe("auto");
+    });
+  });
+
   describe("reset", () => {
     it("returns every slice to its default", () => {
       const s = useCodeGraphStore.getState();
@@ -241,6 +257,7 @@ describe("codeGraphStore", () => {
       expect(after.edgeKindFilters.FileReference).toBe(false);
       expect(after.colorMode).toBe("topology");
       expect(after.complexityAvailable).toBe(false);
+      expect(after.semanticZoomMode).toBe("auto");
       expect(after.selectedWorkspaceSlug).toBe("api");
     });
   });
