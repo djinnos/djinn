@@ -31,7 +31,7 @@ mod search;
 // `UpdateNoteIndexParams`, `ReindexSummary`, …) was deleted because notes
 // are no longer mirrored to disk.
 
-pub use association::NoteAssociationEntry;
+pub use association::{NoteAssociationEntry, NoteAssociationKind};
 pub use consolidation::{
     CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric,
     CreatedCanonicalConsolidatedNote, NoteConsolidationRepository,
