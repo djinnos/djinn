@@ -150,6 +150,125 @@ async fn create_supports_case_and_pitfall_note_types() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_supports_entity_and_claim_note_types() {
+    // diei (LLM enrichment) writes entity + claim rows via the existing
+    // `NoteRepository` lifecycle; verify both kinds round-trip through
+    // create / get / list with their `note_type` preserved and land in
+    // distinct, identifiable subfolders so the Memory graph UI can style
+    // them separately.
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    // Create an entity note (recurring system / concept surfaced by the
+    // enrichment pass).
+    let entity_note = repo
+        .create(
+            &project.id,
+            "Dispatch Gate",
+            "Recurring subsystem that gates dispatch.",
+            "entity",
+            r#"["enrichment","system"]"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(entity_note.note_type, "entity");
+    assert_eq!(entity_note.folder, "reference/entities");
+    assert_eq!(entity_note.permalink, "reference/entities/dispatch-gate");
+    assert_eq!(entity_note.storage, "db");
+
+    // Create a claim note (decision the memory records).
+    let claim_note = repo
+        .create(
+            &project.id,
+            "Use Circuit Breaker",
+            "Always pair the dispatch gate with a circuit breaker.",
+            "claim",
+            r#"["enrichment","decision"]"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(claim_note.note_type, "claim");
+    assert_eq!(claim_note.folder, "reference/claims");
+    assert_eq!(claim_note.permalink, "reference/claims/use-circuit-breaker");
+    assert_eq!(claim_note.storage, "db");
+
+    // `get` round-trips the canonical `note_type` exactly.
+    let fetched_entity = repo.get(&entity_note.id).await.unwrap().unwrap();
+    assert_eq!(fetched_entity.note_type, "entity");
+    assert_eq!(fetched_entity.folder, "reference/entities");
+
+    let fetched_claim = repo.get(&claim_note.id).await.unwrap().unwrap();
+    assert_eq!(fetched_claim.note_type, "claim");
+    assert_eq!(fetched_claim.folder, "reference/claims");
+
+    // `get_by_permalink` works for both (same lookup path the rest of the
+    // knowledge base uses).
+    let by_permalink_entity = repo
+        .get_by_permalink(&project.id, &entity_note.permalink)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_permalink_entity.id, entity_note.id);
+    assert_eq!(by_permalink_entity.note_type, "entity");
+
+    let by_permalink_claim = repo
+        .get_by_permalink(&project.id, &claim_note.permalink)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_permalink_claim.id, claim_note.id);
+    assert_eq!(by_permalink_claim.note_type, "claim");
+
+    // `list` scoped by folder returns enrichment rows alongside any other
+    // notes in `reference/entities` / `reference/claims` so the Memory
+    // browser surface can render them in their own sections.
+    let entity_section = repo
+        .list(&project.id, Some("reference/entities"))
+        .await
+        .unwrap();
+    assert!(
+        entity_section.iter().any(|n| n.id == entity_note.id),
+        "entity note missing from `list` under reference/entities: {entity_section:?}"
+    );
+    let claim_section = repo
+        .list(&project.id, Some("reference/claims"))
+        .await
+        .unwrap();
+    assert!(
+        claim_section.iter().any(|n| n.id == claim_note.id),
+        "claim note missing from `list` under reference/claims: {claim_section:?}"
+    );
+
+    // Unscoped `list` also returns them — they're regular notes.
+    let all_notes = repo.list(&project.id, None).await.unwrap();
+    assert!(
+        all_notes
+            .iter()
+            .any(|n| n.note_type == "entity" && n.id == entity_note.id)
+    );
+    assert!(
+        all_notes
+            .iter()
+            .any(|n| n.note_type == "claim" && n.id == claim_note.id)
+    );
+
+    // `infer_note_type` round-trips the new permalinks back to the canonical
+    // `note_type` strings — without this, `resolve` would mis-classify
+    // enrichment rows on the read path.
+    assert_eq!(
+        file_helpers::infer_note_type(&entity_note.permalink),
+        "entity"
+    );
+    assert_eq!(
+        file_helpers::infer_note_type(&claim_note.permalink),
+        "claim"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn db_backed_notes_round_trip_storage() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
