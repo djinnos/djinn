@@ -2,6 +2,7 @@ pub mod acting_user;
 pub mod agent_tools;
 pub mod credential_tools;
 pub mod dispatch_pause_tools;
+pub mod doctor_tools;
 pub mod epic_ops;
 pub mod epic_tools;
 pub mod execution_tools;
