@@ -407,6 +407,7 @@ mod tests {
             communities: vec![community("community-alpha", vec![0, 1])],
             processes: Vec::new(),
             route_exclusion_config: Default::default(),
+            layout_positions: BTreeMap::new(),
         }
     }
 
