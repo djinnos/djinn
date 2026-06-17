@@ -8,6 +8,12 @@ pub struct NoteAssociationEntry {
     pub note_permalink: String,
     pub note_title: String,
     pub weight: f64,
+    /// Association edge kind as stored on `note_associations.kind` (e.g. `"co_access"`).
+    /// Today the only value written is `"co_access"`; future wave-1 graph-typed edges
+    /// (builds_on / contradicts / supersedes / exemplifies) will widen the value set
+    /// — see Epic 2chl. Exposed here so the MCP `memory_associations` response can
+    /// carry it without a follow-up contract change.
+    pub kind: String,
     pub co_access_count: i64,
     pub last_co_access: String,
 }
@@ -232,6 +238,7 @@ impl NoteRepository {
                  CASE WHEN na.note_a_id = $1 THEN nb.permalink ELSE na_.permalink END AS "note_permalink!: String",
                  CASE WHEN na.note_a_id = $2 THEN nb.title    ELSE na_.title    END AS "note_title!: String",
                  na.weight,
+                 na.kind AS "kind!: String",
                  na.co_access_count,
                  na.last_co_access
              FROM note_associations na
