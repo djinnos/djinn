@@ -46,6 +46,22 @@ async fn note_status_archives_filters_and_restores_without_delete() {
     assert_eq!(active.status, djinn_memory::note_status::ACTIVE);
     assert_eq!(archived.status, djinn_memory::note_status::ACTIVE);
 
+    // Creating a note with an explicit non-default status must persist that
+    // status (regression guard: the INSERT must bind the caller-supplied
+    // status rather than always falling back to the column default).
+    let created_archived = repo
+        .create_with_status(
+            &project.id,
+            "Created Archived",
+            "body",
+            "reference",
+            Some(djinn_memory::note_status::ARCHIVED),
+            "[]",
+        )
+        .await
+        .unwrap();
+    assert_eq!(created_archived.status, djinn_memory::note_status::ARCHIVED);
+
     let archived = repo
         .update_status(&archived.id, djinn_memory::note_status::ARCHIVED)
         .await
@@ -61,8 +77,9 @@ async fn note_status_archives_filters_and_restores_without_delete() {
         .list_with_status(&project.id, None, Some(djinn_memory::note_status::ARCHIVED))
         .await
         .unwrap();
-    assert_eq!(archived_list.len(), 1);
-    assert_eq!(archived_list[0].id, archived.id);
+    assert_eq!(archived_list.len(), 2);
+    assert!(archived_list.iter().any(|n| n.id == archived.id));
+    assert!(archived_list.iter().any(|n| n.id == created_archived.id));
 
     let restored = repo
         .update_status(&archived.id, djinn_memory::note_status::ACTIVE)
