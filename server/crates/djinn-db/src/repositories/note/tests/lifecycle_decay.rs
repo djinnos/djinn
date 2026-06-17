@@ -249,16 +249,24 @@ async fn decay_iteration_cap_holds_under_large_fixture() {
     }
 }
 
+/// SQL defensive predicate: a note whose `last_accessed` is the empty string is
+/// treated as never accessed (and therefore stale). The column is
+/// `NOT NULL DEFAULT to_char(...)` so a true NULL is unreachable through the
+/// normal insert path, but the SQL still carries an `IS NULL` / `= ''` safety
+/// net to defend against hand-edited rows or future schema relaxations; this
+/// test exercises the empty-string branch which is reachable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn decay_null_last_accessed_is_treated_as_stale() {
+async fn decay_empty_last_accessed_is_treated_as_stale() {
     let (db, repo, project_id) = setup().await;
 
     let case = repo
         .create(&project_id, "Never Accessed Case", "body", "case", "[]")
         .await
         .unwrap();
-    // Set last_accessed to NULL to exercise the IS NULL branch.
-    sqlx::query("UPDATE notes SET last_accessed = NULL, confidence = 0.5 WHERE id = $1")
+    // Set last_accessed to the empty string to exercise the `= ''` branch of
+    // the staleness predicate. (A literal `NULL` cannot be stored because the
+    // column is `NOT NULL DEFAULT to_char(...)`.)
+    sqlx::query("UPDATE notes SET last_accessed = '', confidence = 0.5 WHERE id = $1")
         .bind(&case.id)
         .execute(db.pool())
         .await
@@ -269,7 +277,7 @@ async fn decay_null_last_accessed_is_treated_as_stale() {
         .await
         .unwrap();
 
-    assert_eq!(decayed, 1, "never-accessed note should be decayed");
+    assert_eq!(decayed, 1, "empty last_accessed note should be decayed");
 
     let confidence = note_confidence(&db, &case.id).await;
     assert!(confidence <= STALE_CITATION);
