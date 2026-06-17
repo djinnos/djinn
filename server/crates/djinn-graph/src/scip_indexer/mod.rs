@@ -20,6 +20,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+mod budget;
 mod indexing;
 pub mod workspaces;
 

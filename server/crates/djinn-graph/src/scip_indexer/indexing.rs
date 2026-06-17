@@ -264,6 +264,26 @@ pub(crate) async fn run_indexers_already_locked(
     .await
 }
 
+/// Compute the wall-clock timeout for a planned indexer command.
+///
+/// In the default production path (no active deadline, no prior timing), the
+/// budget model yields the indexer baseline which is combined with the legacy
+/// `SupportedIndexer::timeout()` cap via `max()`. This guarantees the shipped
+/// fixed-cap behavior is preserved exactly — the budget model only *raises*
+/// timeouts when workspace size / prior timing warrant it, and only *lowers*
+/// them when an active deadline is supplied (which the current flow does not
+/// do yet; the deadline/prior inputs are hooks for later integration tasks).
+fn budgeted_timeout_for_plan(plan: &PlannedIndexerCommand) -> std::time::Duration {
+    let size = super::budget::estimate_workspace_size(&plan.working_directory, plan.indexer);
+    let budget = super::budget::budget_for_indexer(plan.indexer, &size, None, None);
+
+    // Preserve the legacy fixed cap: `max(budget.per_invocation, timeout())`.
+    // This ensures equivalent behavior when no deadline/prior timing exists:
+    // the budget model may raise the timeout above the fixed cap (for large
+    // workspaces) but never lowers it below the shipped cap.
+    budget.per_invocation.max(plan.indexer.timeout())
+}
+
 pub(crate) async fn run_indexers(
     project_root: impl AsRef<Path>,
     output_root: impl AsRef<Path>,
@@ -308,9 +328,13 @@ pub(crate) async fn run_indexers(
     let futures: Vec<_> = plans
         .into_iter()
         .map(|plan| {
-            // Per-indexer cap: rust-analyzer needs minutes on a cold cache;
-            // the rest stay on the short default. See `SupportedIndexer::timeout`.
-            let timeout = plan.indexer.timeout();
+            // Compute a scaled budget for this workspace/indexer. When no
+            // active deadline or prior timing is available (the current
+            // production path), the budget is combined with the legacy
+            // `SupportedIndexer::timeout()` cap so runtime behavior stays
+            // equivalent — the budget model never shortens a timeout below
+            // the shipped fixed cap in the default case.
+            let timeout = budgeted_timeout_for_plan(&plan);
             let cmd = plan.build_command();
             async move {
                 let result = process::output_with_timeout(cmd, timeout).await;

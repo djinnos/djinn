@@ -11,6 +11,7 @@ use crate::repositories::test_support::{
 
 use super::*;
 
+mod association;
 mod consolidation_housekeeping;
 mod crud_storage;
 mod embeddings;
