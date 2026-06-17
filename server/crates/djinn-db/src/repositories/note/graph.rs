@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use djinn_memory::{ExtractedNoteAuditCategory, ExtractedNoteAuditFinding};
 
@@ -39,9 +39,25 @@ impl NoteRepository {
         .fetch_all(self.db.pool())
         .await?;
 
+        let orphans = self
+            .orphans(project_id, None)
+            .await?
+            .into_iter()
+            .map(|orphan| orphan.id)
+            .collect::<HashSet<_>>();
+        let broken = self.broken_links(project_id, None).await?.into_iter().fold(
+            HashMap::<String, Vec<String>>::new(),
+            |mut acc, link| {
+                acc.entry(link.source_id).or_default().push(link.raw_text);
+                acc
+            },
+        );
+
         let nodes = node_rows
             .into_iter()
             .map(|row| GraphNode {
+                is_orphan: orphans.contains(&row.id),
+                broken_targets: broken.get(&row.id).cloned().unwrap_or_default(),
                 id: row.id,
                 permalink: row.permalink,
                 title: row.title,

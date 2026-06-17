@@ -283,6 +283,10 @@ pub struct GraphNode {
     pub folder: String,
     /// Total resolved edges incident to this node (inbound + outbound).
     pub connection_count: i64,
+    #[serde(default)]
+    pub is_orphan: bool,
+    #[serde(default)]
+    pub broken_targets: Vec<String>,
 }
 
 /// A resolved wikilink edge between two notes.
