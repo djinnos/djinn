@@ -12,7 +12,7 @@
 
 import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, waitFor, within } from "storybook/test";
+import { expect, userEvent, waitFor, within } from "storybook/test";
 
 import { CitationStatusBadge } from "./CodeGraphCanvas";
 import { GraphToolbar } from "./GraphToolbar";
