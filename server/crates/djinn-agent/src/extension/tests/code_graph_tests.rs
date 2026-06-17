@@ -2374,12 +2374,18 @@ async fn code_graph_dispatch_describe_serde_direct_attaches_graph_staleness() {
                 key: "symbol:root".to_string(),
                 kind: "function".to_string(),
                 display_name: "root".to_string(),
-                file: "src/lib.rs".to_string(),
-                line: 42,
+                file: Some("src/lib.rs".to_string()),
+                start_line: Some(42),
+                end_line: Some(50),
                 signature: Some("fn root()".to_string()),
                 documentation: Some("entry".to_string()),
-                role: "definition".to_string(),
-                uid: "symbol:root".to_string(),
+                fan_in: 0,
+                fan_out: 0,
+                visibility: None,
+                is_external: false,
+                is_entry_point: false,
+                is_test: false,
+                complexity: None,
             }))
         }
         async fn status(
@@ -2682,21 +2688,37 @@ fn code_graph_params_current_head_blank_normalizes_to_none() {
     // aliases all parse cleanly. Blank / whitespace values normalize
     // to `None` so chat-side LLMs that emit every schema field as
     // `""` don't accidentally trigger staleness computation.
+    // (Note: serde aliases are mutually exclusive — sending two aliases
+    // in the same payload is a duplicate-field error, so each alias is
+    // tested independently.)
     let mut params: CodeGraphParams = serde_json::from_value(serde_json::json!({
         "operation": "neighbors",
         "key": "x",
-        "currentHead": "  ",
-        "caller_commit": "  abc  "
+        "current_head": "  "
     }))
-    .expect("current_head + aliases params parse");
+    .expect("current_head blank params parse");
     params.normalize();
     assert!(
         params.current_head.is_none(),
-        "blank currentHead alias must normalize to None: {:?}",
+        "blank current_head must normalize to None: {:?}",
         params.current_head
     );
     assert_eq!(params.current_head.as_deref(), None);
     assert_eq!(params.resolved_current_head(), None);
+
+    // Blank via camelCase alias
+    let mut params_blank_alias: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "key": "x",
+        "currentHead": "  "
+    }))
+    .expect("currentHead blank alias params parse");
+    params_blank_alias.normalize();
+    assert!(
+        params_blank_alias.current_head.is_none(),
+        "blank currentHead alias must normalize to None: {:?}",
+        params_blank_alias.current_head
+    );
 
     let mut params_alias: CodeGraphParams = serde_json::from_value(serde_json::json!({
         "operation": "neighbors",
