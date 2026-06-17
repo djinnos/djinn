@@ -25,7 +25,9 @@ import { ConnectIcon, AlertCircleIcon, RefreshIcon } from "@hugeicons/core-free-
 import { fetchSnapshot, type SnapshotLevel } from "@/api/codeGraph";
 import {
   buildGraphFromSnapshot,
+  expandCommunityInSnapshot,
   filterSnapshotForWorkspace,
+  isDoubleClick,
   parseSnapshotResponse,
   type SnapshotPayload,
 } from "@/lib/codeGraphAdapter";
@@ -109,6 +111,33 @@ export function CodeGraphCanvas({
     (s) => s.selectedWorkspaceSlug,
   );
   const semanticZoomMode = useCodeGraphStore((s) => s.semanticZoomMode);
+  const expandedCommunityIds = useCodeGraphStore(
+    (s) => s.expandedCommunityIds,
+  );
+  const expandCommunity = useCodeGraphStore((s) => s.expandCommunity);
+  const collapseCommunity = useCodeGraphStore((s) => s.collapseCommunity);
+  const clearExpandedCommunities = useCodeGraphStore(
+    (s) => s.clearExpandedCommunities,
+  );
+
+  // Lazily-fetched symbol snapshot used to splice member nodes when a
+  // community is expanded. Cached per-project in a ref so repeated
+  // expand/collapse cycles reuse the same fetch; cleared when the
+  // project changes (see the reset effect below).
+  const symbolSnapshotRef = useRef<SnapshotPayload | null>(null);
+  const symbolSnapshotPromiseRef = useRef<Promise<SnapshotPayload | null> | null>(null);
+  const symbolProjectRef = useRef<string | null>(null);
+
+  // Clears expansion state + symbol cache on project change so the
+  // next project starts from a clean slate.
+  useEffect(() => {
+    if (symbolProjectRef.current !== null && symbolProjectRef.current !== projectId) {
+      clearExpandedCommunities();
+      symbolSnapshotRef.current = null;
+      symbolSnapshotPromiseRef.current = null;
+    }
+    symbolProjectRef.current = projectId;
+  }, [projectId, clearExpandedCommunities]);
 
   useEffect(() => {
     let cancelled = false;
@@ -122,6 +151,13 @@ export function CodeGraphCanvas({
     //                   is truncated or over the large-graph threshold.
     const initialLevel: SnapshotLevel =
       semanticZoomMode === "community" ? "community" : "symbol";
+
+    // Note: the cached symbol snapshot is intentionally NOT invalidated
+    // here. Expansion state (expandedCommunityIds in the store) must
+    // survive warm/refetch cycles, and since community_id is a stable
+    // sha256-of-members hash, the cached symbol snapshot remains valid
+    // across re-warms. The snapshot is only cleared on project change
+    // (see the symbolProjectRef effect above).
 
     (async () => {
       try {
@@ -181,8 +217,30 @@ export function CodeGraphCanvas({
 
   const visibleSnapshot = useMemo(() => {
     if (state.status !== "ready") return null;
-    return filterSnapshotForWorkspace(state.snapshot, selectedWorkspaceSlug);
-  }, [state, selectedWorkspaceSlug]);
+    const filtered = filterSnapshotForWorkspace(
+      state.snapshot,
+      selectedWorkspaceSlug,
+    );
+    // Apply community expansions: replace each expanded community node
+    // with its member symbol nodes from the cached symbol snapshot.
+    // Collapse is handled by simply omitting the community from the
+    // expanded set (the base `filtered` snapshot already has the
+    // community node). This keeps expansion state stable across
+    // snapshot re-renders because it's keyed by stable community_id.
+    const symbolSnapshot = symbolSnapshotRef.current;
+    if (
+      expandedCommunityIds.size === 0 ||
+      !symbolSnapshot ||
+      state.level !== "community"
+    ) {
+      return filtered;
+    }
+    let result = filtered;
+    for (const communityId of expandedCommunityIds) {
+      result = expandCommunityInSnapshot(result, symbolSnapshot, communityId);
+    }
+    return result;
+  }, [state, selectedWorkspaceSlug, expandedCommunityIds]);
 
   const graph = useMemo(() => {
     if (!visibleSnapshot) return null;
@@ -225,13 +283,85 @@ export function CodeGraphCanvas({
 
   const setSelection = useCodeGraphStore((s) => s.setSelection);
   const setHover = useCodeGraphStore((s) => s.setHover);
+
+  // Ensure a symbol-level snapshot is cached for the current project so
+  // expand operations can splice member nodes without a per-click fetch.
+  // Returns the cached snapshot or null when unavailable. The promise is
+  // memoized in a ref so concurrent double-clicks share a single fetch.
+  const ensureSymbolSnapshot = (): Promise<SnapshotPayload | null> => {
+    if (symbolSnapshotRef.current) {
+      return Promise.resolve(symbolSnapshotRef.current);
+    }
+    if (symbolSnapshotPromiseRef.current) {
+      return symbolSnapshotPromiseRef.current;
+    }
+    const promise = (async () => {
+      try {
+        const raw = await fetchSnapshot(projectId, nodeCap, "symbol");
+        const parsed = parseSnapshotResponse(raw);
+        if (parsed) symbolSnapshotRef.current = parsed;
+        return parsed;
+      } catch {
+        return null;
+      }
+    })();
+    symbolSnapshotPromiseRef.current = promise;
+    promise.finally(() => {
+      symbolSnapshotPromiseRef.current = null;
+    });
+    return promise;
+  };
+
   useEffect(() => {
     if (!sigma) return;
+    // Timestamp/last-node guard around `clickNode` to detect double-clicks
+    // on community nodes. Sigma 3's double-click event surface varies by
+    // version, so we implement the guard directly: two `clickNode` events
+    // on the *same* node within DOUBLE_CLICK_INTERVAL_MS count as a
+    // double-click. Single-click selection still fires normally — the
+    // double-click action (expand/collapse) is layered on top and is a
+    // no-op for non-community nodes.
+    let lastClick: { nodeId: string; at: number } | null = null;
+
     const offClick = sigma.on("clickNode", ({ node }) => {
-      if (node) setSelection(node);
+      if (!node) return;
+      const now = Date.now();
+      const isDouble = isDoubleClick(lastClick, node, now);
+      lastClick = { nodeId: node, at: now };
+
+      if (isDouble) {
+        // Resolve the community_id for the clicked node. For community
+        // nodes this is the node attribute; for expanded member symbols
+        // it's the member's community_id (collapse path).
+        const attrs = sigma.getNodeAttributes(node);
+        const kind = attrs?.kind as string | undefined;
+        if (kind === "community") {
+          const communityId = (attrs?.communityId as string | undefined) ?? node;
+          if (expandedCommunityIds.has(communityId)) {
+            collapseCommunity(communityId);
+          } else {
+            // Expand: fetch the symbol snapshot if not cached, then
+            // mark the community as expanded. The visibleSnapshot memo
+            // applies the splice on the next render.
+            ensureSymbolSnapshot().then((symbolSnapshot) => {
+              if (symbolSnapshot) {
+                expandCommunity(communityId);
+              }
+            });
+          }
+        }
+        // Reset the guard so a triple-click doesn't look like two
+        // separate double-clicks.
+        lastClick = null;
+        return;
+      }
+
+      // Normal single-click selection.
+      setSelection(node);
     });
     const offStage = sigma.on("clickStage", () => {
       setSelection(null);
+      lastClick = null;
     });
     const offEnter = sigma.on("enterNode", ({ node }) => {
       if (node) setHover(node);
@@ -249,7 +379,16 @@ export function CodeGraphCanvas({
       offEnter();
       offLeave();
     };
-  }, [sigma, setSelection, setHover]);
+  }, [
+    sigma,
+    setSelection,
+    setHover,
+    expandedCommunityIds,
+    expandCommunity,
+    collapseCommunity,
+    projectId,
+    nodeCap,
+  ]);
 
   const resetHighlights = useCodeGraphStore((s) => s.reset);
   useEffect(() => {
