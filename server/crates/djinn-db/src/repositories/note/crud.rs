@@ -449,11 +449,32 @@ impl NoteRepository {
                 // string. Both columns are vestiges of the file-on-disk
                 // era, kept on the schema to avoid a migration in the same
                 // PR that does the cut-over. Drop them in a follow-up.
+                //
+                // `status` is bound explicitly when the caller supplied one;
+                // otherwise the column-level default (`'active'`) takes
+                // effect so callers that ignore lifecycle get the legacy
+                // behavior of "active by default".
+                let normalized_status: Option<String> = match status {
+                    Some(s) => {
+                        let normalized = djinn_memory::note_status::normalize(Some(s));
+                        if normalized.is_empty() {
+                            None
+                        } else {
+                            if !djinn_memory::note_status::is_valid(&normalized) {
+                                return Err(Error::InvalidData(format!(
+                                    "invalid note lifecycle status: {normalized}"
+                                )));
+                            }
+                            Some(normalized)
+                        }
+                    }
+                    None => None,
+                };
                 sqlx::query(
                     "INSERT INTO notes
                         (id, project_id, permalink, title, file_path,
-                         storage, note_type, folder, tags, content, retrieval_anchor, content_hash, scope_paths)
-                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, $7, $8, $9, $10, $11)"
+                         storage, note_type, folder, status, tags, content, retrieval_anchor, content_hash, scope_paths)
+                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, COALESCE($7, 'active'), $8, $9, $10, $11, $12)"
                 )
                 .bind(&id)
                 .bind(&project_id)
@@ -461,6 +482,7 @@ impl NoteRepository {
                 .bind(&title)
                 .bind(&note_type)
                 .bind(&folder)
+                .bind(&normalized_status)
                 .bind(&tags_json)
                 .bind(&content)
                 .bind(&retrieval_anchor)
