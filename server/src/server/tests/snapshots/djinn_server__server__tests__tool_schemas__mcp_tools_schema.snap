@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 510
 expression: signatures
 ---
 [
@@ -6342,6 +6341,13 @@ expression: signatures
         "GraphNode": {
           "description": "A knowledge graph node (note with connection metadata).",
           "properties": {
+            "broken_targets": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "connection_count": {
               "description": "Total resolved edges incident to this node (inbound + outbound).",
               "format": "int64",
@@ -6352,6 +6358,10 @@ expression: signatures
             },
             "id": {
               "type": "string"
+            },
+            "is_orphan": {
+              "default": false,
+              "type": "boolean"
             },
             "note_type": {
               "type": "string"
