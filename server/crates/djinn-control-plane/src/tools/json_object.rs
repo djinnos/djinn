@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// serde_json::Value generates `true` as its schema, which strict validators
 /// (like Claude Code's MCP client) reject. This wrapper emits
 /// `{"type": "object", "additionalProperties": true}` instead.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ObjectJson(pub serde_json::Map<String, serde_json::Value>);
 
@@ -49,7 +49,7 @@ pub fn json_object(value: serde_json::Value) -> Json<ObjectJson> {
 ///
 /// Use this in typed response/param structs wherever the field holds arbitrary
 /// JSON (e.g. `Vec<AnyJson>`, `Option<AnyJson>`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AnyJson(pub serde_json::Value);
 
