@@ -26,7 +26,7 @@ fn record_user_cap_utilization(user: &str, model: &str, used: u32, cap: u32) {
     djinn_telemetry::dispatch::set_user_cap_utilization(user, model, used, cap);
 }
 
-fn model_under_user_cap(
+pub(in crate::actors::coordinator) fn model_under_user_cap(
     running_by_user_model: &HashMap<(String, String), u32>,
     creator: &str,
     model: &str,
@@ -245,6 +245,98 @@ impl CoordinatorActor {
             Err(e) => {
                 tracing::warn!(error = %e, "CoordinatorActor: pool get_status failed during cap seed; keeping in-flight ledger as-is");
             }
+        }
+    }
+
+    /// Load the current effective per-`(creator, model)` running counts — DB seed
+    /// overlaid with the in-flight ledger via `max` — as a fresh snapshot.
+    ///
+    /// This is the shared source of truth for the per-user, per-model concurrency
+    /// cap. Both `dispatch_ready_tasks` (worker/reviewer/lead/architect wave) and
+    /// `dispatch_planner_escalation` (planner intervention dispatch) must use it so
+    /// no dispatch path can admit a session that overshoots the cap.
+    ///
+    /// Unlike `dispatch_ready_tasks` which seeds once per pass and bumps locally,
+    /// this method re-reads the DB + ledger each call. That's acceptable for the
+    /// planner escalation path (called at most a handful of times per tick), and
+    /// guarantees it never sees a stale snapshot after a just-recorded admission.
+    pub(in crate::actors::coordinator) async fn effective_running_by_user_model(
+        &mut self,
+    ) -> HashMap<(String, String), u32> {
+        let mut running: HashMap<(String, String), u32> = match SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        )
+        .count_active_by_user_and_model()
+        .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|(creator, model, cnt)| {
+                    creator.map(|c| ((c, model), u32::try_from(cnt).unwrap_or(0)))
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: per-user concurrency counts failed; proceeding without caps");
+                HashMap::new()
+            }
+        };
+        self.reconcile_inflight_dispatch_ledger().await;
+        overlay_inflight_ledger(&mut running, &self.inflight_dispatches);
+        running
+    }
+
+    /// Re-overlay the in-flight ledger onto the local per-pass
+    /// `running_by_user_model` map after a planner intervention dispatched a
+    /// new session inside the `dispatch_ready_tasks` loop.
+    ///
+    /// `dispatch_planner_escalation` records its admission into
+    /// `self.inflight_dispatches` via `record_inflight_dispatch`, but the
+    /// local `running_by_user_model` was seeded at the top of the pass and
+    /// won't reflect the new entry. Re-overlaying ensures the next task in
+    /// the same pass sees reduced capacity — closing the within-tick overshoot
+    /// gap between the worker wave and the planner intervention sweep.
+    async fn bump_local_cap_for_last_planner_admission(
+        &mut self,
+        running_by_user_model: &mut HashMap<(String, String), u32>,
+    ) {
+        overlay_inflight_ledger(running_by_user_model, &self.inflight_dispatches);
+    }
+
+    /// Record a successful dispatch admission of ANY role into the in-flight
+    /// ledger so the per-user, per-model cap reflects it immediately.
+    ///
+    /// This is the single shared admission-recording path. Both
+    /// `dispatch_ready_tasks` (worker/reviewer/lead/architect) and
+    /// `dispatch_planner_escalation` call it, so a just-dispatched session of
+    /// any role counts against the cap for a same-tick second admission
+    /// (the worker + reviewer overshoot gap).
+    pub(in crate::actors::coordinator) async fn record_inflight_dispatch(
+        &mut self,
+        task_id: &str,
+        task_short_id: Option<&str>,
+        creator: Option<&str>,
+        model: &str,
+    ) {
+        if let Some(c) = creator {
+            self.inflight_dispatches.insert(
+                task_id.to_string(),
+                (Some(c.to_string()), model.to_string()),
+            );
+            record_dispatch_live_state(
+                self.dispatch_cooldowns.len(),
+                self.inflight_dispatches.len(),
+            );
+            self.persist_durable_dispatch_state_update(
+                task_id,
+                task_short_id,
+                "inflight_ledger_insert",
+                DurableDispatchStateUpdate {
+                    inflight: Some(Some((Some(c.to_string()), model.to_string()))),
+                    ..Default::default()
+                },
+            )
+            .await;
         }
     }
 
@@ -913,6 +1005,14 @@ impl CoordinatorActor {
             // no-op (returns false) for non-worker roles, tasks under the
             // threshold, or tasks already routed at this reopen count.
             if role == "worker" && self.maybe_intervene_on_stuck_task(&task).await {
+                // The planner escalation dispatched a new session (under the
+                // same creator, potentially the same model). Bump the local
+                // per-(creator, model) count so a later task in THIS pass sees
+                // reduced capacity — the inflight ledger is already updated
+                // inside dispatch_planner_escalation, but the local
+                // running_by_user_model was seeded before this admission.
+                self.bump_local_cap_for_last_planner_admission(&mut running_by_user_model)
+                    .await;
                 continue;
             }
             // A task that is dispatch-ready again (no active session — guarded
@@ -974,6 +1074,12 @@ impl CoordinatorActor {
                                 &task.id,
                                 Some(&task.short_id),
                                 "cycling_planner_intervention_handoff_clear",
+                            )
+                            .await;
+                            // Bump local cap to reflect the planner session the
+                            // intervention just dispatched (same as Trigger A).
+                            self.bump_local_cap_for_last_planner_admission(
+                                &mut running_by_user_model,
                             )
                             .await;
                             continue;
@@ -1328,25 +1434,18 @@ impl CoordinatorActor {
                                 .copied()
                                 .unwrap_or(0),
                         );
-                        // Record in the in-flight ledger so the NEXT pass counts
-                        // this dispatch against the cap immediately — before its
-                        // `running` session row lands (pod boot lags 20-60s).
-                        // Reconciled against the live pool at the top of each
-                        // pass, so it drops out the moment the task completes.
-                        self.inflight_dispatches
-                            .insert(task.id.clone(), (Some(c.to_string()), used.clone()));
-                        record_dispatch_live_state(
-                            self.dispatch_cooldowns.len(),
-                            self.inflight_dispatches.len(),
-                        );
-                        self.persist_durable_dispatch_state_update(
+                        // Record in the in-flight ledger via the shared
+                        // admission helper so the NEXT pass (and the planner
+                        // escalation path) counts this dispatch against the
+                        // cap immediately — before its `running` session row
+                        // lands (pod boot lags 20-60s). Reconciled against
+                        // the live pool at the top of each pass, so it drops
+                        // out the moment the task completes.
+                        self.record_inflight_dispatch(
                             &task.id,
                             Some(&task.short_id),
-                            "inflight_ledger_insert",
-                            DurableDispatchStateUpdate {
-                                inflight: Some(Some((Some(c.to_string()), used.clone()))),
-                                ..Default::default()
-                            },
+                            Some(c),
+                            used,
                         )
                         .await;
                     }
@@ -2465,5 +2564,189 @@ mod inflight_ledger_tests {
         overlay_inflight_ledger(&mut running, &inflight);
         assert!(running.is_empty());
         assert!(take_dispatch_cap_observations().is_empty());
+    }
+
+    /// With cap N for a model and N running mixed-role sessions for the same
+    /// (creator, model), a further worker OR reviewer dispatch for that
+    /// (creator, model) is denied — verifying the per-(user, model) cap counts
+    /// ALL non-chat roles, not just workers.
+    ///
+    /// This is the acceptance-criteria test for the "2 worker + 1 reviewer = 3
+    /// > cap 2" overshoot: it seeds exactly cap sessions across mixed roles
+    /// (e.g. 1 worker + 1 reviewer for cap 2) and asserts neither a worker nor
+    /// a reviewer task can be admitted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mixed_role_cap_denies_n_plus_1_dispatch_worker_and_reviewer_variants() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+
+        // ── fixture: project, user, model selection, cap=2 ────────────────
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let project_path =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        std::fs::create_dir_all(&project_path).expect("create mixed-role fixture project dir");
+        let user = djinn_db::UserRepository::new(db.clone())
+            .upsert_from_github(
+                985_200,
+                "mixed-role-cap-user",
+                Some("mixed role cap user"),
+                None,
+            )
+            .await
+            .expect("create mixed-role fixture user");
+        let user_id = user.id.clone();
+
+        let settings = djinn_db::UserSettingsRepository::new(db.clone());
+        settings
+            .upsert_models(&user_id, &[WND1_STABLE_MODEL_ID.to_owned()])
+            .await
+            .expect("configure mixed-role fixture selected model");
+        // cap = 2
+        configure_wnd1_user_max_sessions(&db, &user_id, WND1_STABLE_MODEL_ID, 2).await;
+
+        // ── seed cap (2) running sessions with MIXED roles ────────────────
+        // One worker + one reviewer, both under the same creator and model.
+        // The DB seed count will show 2 running for (creator, model).
+        let task_repo =
+            djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let session_repo =
+            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        // Create two tasks (owned by the user) to attach sessions to.
+        let seeded_task_ids = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                let mut ids = Vec::new();
+                for i in 0..2 {
+                    let t = task_repo
+                        .create_in_project(
+                            &project.id,
+                            None,
+                            &format!("mixed-role seeded task {i}"),
+                            "",
+                            "",
+                            "task",
+                            i as i64,
+                            "worker",
+                            Some("closed"),
+                            Some("[]"),
+                        )
+                        .await
+                        .expect("seed mixed-role task");
+                    ids.push(t.id);
+                }
+                ids
+            })
+            .await;
+
+        // Create running sessions for these tasks with mixed agent types.
+        // The first is a "worker" session; the second is a "reviewer" session.
+        for (i, task_id) in seeded_task_ids.iter().enumerate() {
+            let agent_type = if i == 0 { "worker" } else { "reviewer" };
+            session_repo
+                .create(djinn_db::CreateSessionParams {
+                    project_id: &project.id,
+                    task_id: Some(task_id),
+                    model: WND1_STABLE_MODEL_ID,
+                    agent_type,
+                    metadata_json: None,
+                    task_run_id: None,
+                })
+                .await
+                .expect("create mixed-role running session");
+        }
+
+        // Verify the DB seed counts both roles.
+        let active_count = wnd1_active_count(
+            &djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop()),
+            &user_id,
+            WND1_STABLE_MODEL_ID,
+        )
+        .await;
+        assert_eq!(
+            active_count, 2,
+            "DB seed must count both worker and reviewer sessions for the cap"
+        );
+
+        // ── create ready tasks: one worker (open) + one reviewer (needs_task_review)
+        let ready_task_ids = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                let mut ids = Vec::new();
+                // Worker-variant: an open task → dispatches as "worker".
+                let worker_task = task_repo
+                    .create_in_project(
+                        &project.id,
+                        None,
+                        "mixed-role ready worker task",
+                        "",
+                        "",
+                        "task",
+                        10,
+                        "worker",
+                        Some("open"),
+                        Some("[]"),
+                    )
+                    .await
+                    .expect("create mixed-role ready worker task");
+                ids.push(("worker", worker_task.id));
+
+                // Reviewer-variant: a needs_task_review task → dispatches as "reviewer".
+                let reviewer_task = task_repo
+                    .create_in_project(
+                        &project.id,
+                        None,
+                        "mixed-role ready reviewer task",
+                        "",
+                        "",
+                        "task",
+                        5,
+                        "worker",
+                        Some("needs_task_review"),
+                        Some("[]"),
+                    )
+                    .await
+                    .expect("create mixed-role ready reviewer task");
+                ids.push(("reviewer", reviewer_task.id));
+                ids
+            })
+            .await;
+
+        // ── dispatch pass ─────────────────────────────────────────────────
+        let (runtime, _started_rx) = Wnd1ControlledRuntime::new();
+        let mut actor = wnd1_actor_for_tests(
+            &db,
+            &events_tx,
+            &runtime,
+            u32::try_from(WND1_READY_TASK_COUNT).unwrap(),
+        );
+        let dispatched_before = actor.dispatched;
+        actor.dispatch_ready_tasks(Some(&project.id)).await;
+
+        // ── assertions ────────────────────────────────────────────────────
+        // Neither the worker nor the reviewer variant should have dispatched:
+        // both creators are at cap 2 (1 worker + 1 reviewer already running).
+        assert_eq!(
+            actor.dispatched, dispatched_before,
+            "no dispatch should succeed when cap=2 is already saturated by mixed-role running sessions"
+        );
+
+        // The inflight ledger should not contain any new entries for the ready tasks.
+        for (_variant, task_id) in &ready_task_ids {
+            assert!(
+                !actor.inflight_dispatches.contains_key(task_id),
+                "ready task {task_id} must NOT be in the inflight ledger — it was denied by the cap"
+            );
+        }
+
+        // Running count must still be 2 (no new sessions).
+        let post_count = wnd1_active_count(
+            &djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop()),
+            &user_id,
+            WND1_STABLE_MODEL_ID,
+        )
+        .await;
+        assert_eq!(
+            post_count, 2,
+            "running session count must remain at cap=2 after a denied dispatch pass"
+        );
     }
 }
