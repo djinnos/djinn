@@ -166,8 +166,10 @@ impl RuntimeOps for StubRuntime {
         &self,
         _test_id: &str,
         _project_id: &str,
-    ) -> Result<(), String> {
-        Err("stub: RuntimeOps::dispatch_verification_test not implemented".into())
+    ) -> Result<(), crate::bridge::RuntimeDispatchError> {
+        Err(crate::bridge::RuntimeDispatchError::Backend(
+            "stub: RuntimeOps::dispatch_verification_test not implemented".into(),
+        ))
     }
     async fn dispatch_verification(
         &self,
@@ -175,8 +177,10 @@ impl RuntimeOps for StubRuntime {
         _project_id: &str,
         _task_branch: &str,
         _target_branch: &str,
-    ) -> Result<(), String> {
-        Err("stub: RuntimeOps::dispatch_verification not implemented".into())
+    ) -> Result<(), crate::bridge::RuntimeDispatchError> {
+        Err(crate::bridge::RuntimeDispatchError::Backend(
+            "stub: RuntimeOps::dispatch_verification not implemented".into(),
+        ))
     }
     async fn provision_backing_service(
         &self,

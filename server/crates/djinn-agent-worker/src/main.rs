@@ -679,12 +679,7 @@ async fn warm_cargo_target_base(
     let clippy_ok = run_cargo_warm_step(
         project_id,
         &workspace_dir,
-        &[
-            "clippy",
-            "--workspace",
-            "--all-targets",
-            "--all-features",
-        ],
+        &["clippy", "--workspace", "--all-targets", "--all-features"],
         "clippy",
     )
     .await;
@@ -1951,27 +1946,64 @@ async fn run_verify_task(run_id: &str) -> Result<()> {
     // verification.
     djinn_workspace::normalize_mtimes_at(&project_root).await;
 
+    // Resolve scoped commands + run `verify_commit` + write the terminal row.
+    // Shared with the IN-POD post-task verification path so both resolve and gate
+    // identically.
+    run_verification_into_run(
+        &db,
+        &repo,
+        run_id,
+        &run.project_id,
+        &target_branch,
+        &project_root,
+        &task,
+    )
+    .await;
+    Ok(())
+}
+
+/// Shared core of a pre-PR verification run: resolve the role override + scoped
+/// commands against `project_root` (already checked out to the committed task
+/// tree), run the SAME `verify_commit` pipeline the server runs, and write the
+/// terminal outcome (`passed`/`failed`/`error`) to the `verification_runs` row.
+///
+/// `CARGO_TARGET_DIR` is assumed to already point at the run's target dir (the
+/// separate-pod path seeds it from the warm base; the in-pod-after-task path
+/// reuses the worker's own already-compiled run dir). This function never seeds
+/// or tears down a target dir — that is the caller's concern.
+///
+/// Best-effort: any error is written to the row as `error` and logged; it never
+/// panics or propagates so the caller's teardown still runs.
+pub(crate) async fn run_verification_into_run(
+    db: &Database,
+    repo: &djinn_db::VerificationRunRepository,
+    run_id: &str,
+    project_id: &str,
+    target_branch: &str,
+    project_root: &Path,
+    task: &djinn_core::models::Task,
+) {
     // Role/specialist `verification_command` override (absolute priority in
     // resolve_scoped_commands), mirroring the server pipeline.
-    let role_cmd_override = verify_task_role_override(&db, &task).await;
+    let role_cmd_override = verify_task_role_override(db, task).await;
 
     let scoped_commands = djinn_agent::verification::scoped::resolve_scoped_commands(
-        &db,
-        Some(&run.project_id),
-        &project_root,
-        &target_branch,
+        db,
+        Some(project_id),
+        project_root,
+        target_branch,
         role_cmd_override.as_deref(),
     )
     .await;
 
     let commit_sha =
-        verify_task_head_commit(&project_root).unwrap_or_else(|_| format!("verify-run-{run_id}"));
+        verify_task_head_commit(project_root).unwrap_or_else(|_| format!("verify-run-{run_id}"));
 
     let outcome = djinn_agent::verification::service::verify_commit(
-        &run.project_id,
+        project_id,
         &commit_sha,
-        &project_root,
-        &db,
+        project_root,
+        db,
         &scoped_commands,
     )
     .await;
@@ -1987,10 +2019,14 @@ async fn run_verify_task(run_id: &str) -> Result<()> {
             } else {
                 djinn_db::VerificationRunStatus::FAILED
             };
-            repo.complete(run_id, status, &setup_json, &verify_json, None)
+            if let Err(e) = repo
+                .complete(run_id, status, &setup_json, &verify_json, None)
                 .await
-                .with_context(|| format!("write verification_run {run_id} result"))?;
-            info!(run_id, passed = result.passed, "verification run complete");
+            {
+                warn!(run_id, error = %format!("{e:#}"), "failed to write verification_run result");
+            } else {
+                info!(run_id, passed = result.passed, "verification run complete");
+            }
         }
         Err(e) => {
             let msg = format!("{e:#}");
@@ -2006,7 +2042,6 @@ async fn run_verify_task(run_id: &str) -> Result<()> {
             warn!(run_id, error = %msg, "verification run errored");
         }
     }
-    Ok(())
 }
 
 /// Resolve the role-level `verification_command` override for a task, mirroring
@@ -2042,6 +2077,120 @@ fn verify_task_head_commit(project_root: &Path) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Run `git <args>` synchronously in `dir`, returning an error on a non-zero
+/// exit. Used by the in-pod verify reset/clean integrity step (the worker
+/// already shells out to git via `std::process` elsewhere, so this avoids
+/// adding a `djinn-git` dependency just for two commands).
+fn run_git_in(dir: &Path, args: &[&str]) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .with_context(|| format!("spawn git {args:?} in {}", dir.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// Put `workspace_root` back into the EXACT committed state of the task branch's
+/// HEAD: `git reset --hard <HEAD>` then `git clean -fd`. The worker agent edits
+/// (and may leave a dirty index / untracked scratch files) in its ephemeral
+/// stage clone; verification must gate the COMMITTED tree, not that dirty
+/// workspace.
+///
+/// Deliberately does NOT touch `CARGO_TARGET_DIR` — it lives on the shared
+/// `/cache` PVC, OUTSIDE the workspace, so `git clean` (scoped to the worktree)
+/// never removes it and the worker's already-compiled artifacts survive for
+/// reuse. The HEAD commit is read first so the reset is anchored to the
+/// committed tip even if the index moved.
+fn reset_workspace_to_head(workspace_root: &Path) -> Result<String> {
+    let head = verify_task_head_commit(workspace_root)?;
+    run_git_in(workspace_root, &["reset", "--hard", &head])?;
+    // -f (force) -d (dirs); intentionally NOT -x, so ignored files stay (cargo
+    // config etc.). The worktree is the only thing cleaned — the cache PVC is
+    // mounted elsewhere.
+    run_git_in(workspace_root, &["clean", "-fd"])?;
+    Ok(head)
+}
+
+/// Run the pre-PR verification IN-PROCESS in the worker pod, reusing the
+/// worker's already-compiled Cargo artifacts.
+///
+/// Invoked by `WorkerSupervisorServices::verify_committed_tree` at the
+/// `WorkerSubmitted` hand-off — the worker has just committed to the task branch
+/// and its `CARGO_TARGET_DIR` (set process-wide in `prepare_cargo_target_dir`)
+/// still holds the freshly compiled task delta, and the supervisor's ephemeral
+/// stage clone at `workspace_root` is still live (the supervisor calls this
+/// BEFORE it tears the target dir down).
+///
+/// Control flow:
+///   1. `git reset --hard HEAD` + `git clean -fd` → gate the committed tree.
+///   2. `normalize_mtimes_at` → restore commit-time mtimes so cargo freshness
+///      holds against the already-compiled artifacts (no re-seed, no re-clone).
+///   3. create a `verification_runs` row, mark it running.
+///   4. `run_verification_into_run` resolves scoped commands + runs the SAME
+///      `verify_commit` pipeline the separate-pod path runs, writing the
+///      terminal outcome to that row.
+///
+/// Returns the `verification_runs.id` on success (terminal row written), or an
+/// error the caller treats as "fall back to the host-dispatched verify Job".
+/// Crucially it does NOT seed or tear down the Cargo target dir.
+pub(crate) async fn run_in_pod_verification(
+    db: &Database,
+    project_id: &str,
+    task: &djinn_core::models::Task,
+    workspace_root: &Path,
+) -> Result<String> {
+    // 1. Integrity: committed tree only.
+    let head = reset_workspace_to_head(workspace_root)
+        .with_context(|| format!("reset workspace {} to HEAD", workspace_root.display()))?;
+    info!(
+        project_id,
+        task_id = %task.id,
+        head = %head,
+        workspace = %workspace_root.display(),
+        "in-pod verification: workspace reset to committed HEAD"
+    );
+
+    // 2. Freshness: commit-time mtimes so the worker's compiled artifacts stay
+    //    Fresh under cargo (CARGO_TARGET_DIR already points at the worker run
+    //    dir — we deliberately do NOT seed or reset it).
+    djinn_workspace::normalize_mtimes_at(workspace_root).await;
+
+    // 3. Resolve the project's target branch + open the row.
+    let project_repo = djinn_db::ProjectRepository::new(db.clone(), EventBus::noop());
+    let target_branch = match project_repo.get_config(project_id).await {
+        Ok(Some(config)) => config.target_branch,
+        _ => "main".to_string(),
+    };
+
+    let run_id = uuid::Uuid::now_v7().to_string();
+    let repo = djinn_db::VerificationRunRepository::new(db.clone());
+    repo.create(&run_id, &task.id, project_id)
+        .await
+        .with_context(|| format!("create in-pod verification_run {run_id}"))?;
+    let _ = repo.mark_running(&run_id).await;
+
+    // 4. Resolve scoped commands + run verify_commit + write the terminal row
+    //    (shared with the separate-pod path so both gate identically).
+    run_verification_into_run(
+        db,
+        &repo,
+        &run_id,
+        project_id,
+        &target_branch,
+        workspace_root,
+        task,
+    )
+    .await;
+
+    Ok(run_id)
 }
 
 /// Replicates `AppState::minimal_for_warm_only`'s DB resolution — the
@@ -2577,6 +2726,163 @@ mod tests {
         assert!(
             captured.lock().unwrap().is_none(),
             "no-op checkpoint must leave the empty captured-path slot untouched"
+        );
+    }
+
+    /// Initialise a git repo at `dir` with one commit and return its HEAD sha.
+    fn init_repo_with_commit(dir: &Path) -> String {
+        git(dir, &["init", "-b", "main"]);
+        std::fs::write(dir.join("committed.txt"), "committed\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-m", "initial"]);
+        git(dir, &["rev-parse", "HEAD"]).trim().to_string()
+    }
+
+    /// `reset_workspace_to_head` must (a) discard tracked-file edits and (b)
+    /// remove untracked files/dirs, leaving the worktree byte-identical to the
+    /// committed HEAD — the integrity precondition for verifying the COMMITTED
+    /// tree rather than the worker's dirty workspace.
+    #[test]
+    fn reset_workspace_to_head_discards_dirty_tracked_and_untracked() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let head = init_repo_with_commit(dir);
+
+        // Dirty the committed file + drop untracked scratch (file AND dir).
+        std::fs::write(dir.join("committed.txt"), "DIRTY EDIT\n").unwrap();
+        std::fs::write(dir.join("scratch.txt"), "untracked\n").unwrap();
+        std::fs::create_dir_all(dir.join("target_scratch")).unwrap();
+        std::fs::write(dir.join("target_scratch/x"), "junk\n").unwrap();
+
+        let returned = reset_workspace_to_head(dir).expect("reset");
+        assert_eq!(returned, head, "must return the committed HEAD sha");
+
+        // Tracked file restored to committed contents.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("committed.txt")).unwrap(),
+            "committed\n",
+            "reset --hard must discard the dirty tracked edit"
+        );
+        // Untracked file + dir cleaned.
+        assert!(
+            !dir.join("scratch.txt").exists(),
+            "git clean -fd must remove untracked files"
+        );
+        assert!(
+            !dir.join("target_scratch").exists(),
+            "git clean -fd must remove untracked dirs"
+        );
+        // Tree is clean.
+        assert!(
+            git(dir, &["status", "--porcelain"]).trim().is_empty(),
+            "worktree must be clean after reset"
+        );
+    }
+
+    /// End-to-end of the in-pod verification helper against a project with no
+    /// verification rules (commands resolve empty → `verify_commit` passes
+    /// vacuously, so no toolchain is required). Asserts the THREE load-bearing
+    /// behaviors of the double-compile fix:
+    ///   1. it resets the workspace to the committed HEAD before verifying
+    ///      (dirty edit + untracked file gone),
+    ///   2. it does NOT touch `CARGO_TARGET_DIR` (the worker's artifacts must
+    ///      survive for reuse — it's on /cache, outside the workspace), and
+    ///   3. it writes a terminal `verification_runs` row and returns its id.
+    #[tokio::test]
+    async fn run_in_pod_verification_resets_reuses_target_and_writes_outcome() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        db.ensure_initialized().await.expect("init schema");
+
+        // Minimal board: project → epic → task.
+        let project_id = "proj-inpod";
+        djinn_db::ProjectRepository::new(db.clone(), EventBus::noop())
+            .create_with_id(project_id, "p", "owner", "repo")
+            .await
+            .expect("create project");
+        let epic = djinn_db::EpicRepository::new(db.clone(), EventBus::noop())
+            .create_for_project(
+                project_id,
+                djinn_db::repositories::epic::EpicCreateInput {
+                    title: "e",
+                    description: "",
+                    emoji: "x",
+                    color: "#fff",
+                    owner: "owner",
+                    memory_refs: None,
+                    status: None,
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                },
+            )
+            .await
+            .expect("create epic");
+        let task = djinn_db::TaskRepository::new(db.clone(), EventBus::noop())
+            .create(&epic.id, "t", "", "", "task", 0, "owner", None)
+            .await
+            .expect("create task");
+
+        // Workspace: committed tree + a dirty edit + an untracked file the verify
+        // must NOT see (it gates the committed tree).
+        let ws = tempfile::tempdir().expect("workspace");
+        let head = init_repo_with_commit(ws.path());
+        std::fs::write(ws.path().join("committed.txt"), "DIRTY\n").unwrap();
+        std::fs::write(ws.path().join("untracked.txt"), "scratch\n").unwrap();
+
+        // A sentinel "Cargo target dir" OUTSIDE the workspace (mirrors the
+        // worker's run dir on /cache). `run_in_pod_verification` deliberately
+        // never seeds or tears down a target dir — it only resets + cleans the
+        // WORKSPACE (`git clean` is worktree-scoped) — so this external dir must
+        // be left byte-for-byte intact. We do NOT mutate the process-global
+        // `CARGO_TARGET_DIR` env (that would race other parallel tests); the
+        // helper never reads it, so an untouched sibling dir proves the point.
+        let target = tempfile::tempdir().expect("target dir");
+        let sentinel = target.path().join("sentinel.rlib");
+        std::fs::write(&sentinel, b"precompiled-artifact").unwrap();
+
+        let run_id = run_in_pod_verification(&db, project_id, &task, ws.path())
+            .await
+            .expect("in-pod verification");
+
+        // (1) integrity: reset to committed HEAD happened.
+        assert_eq!(
+            git(ws.path(), &["rev-parse", "HEAD"]).trim(),
+            head,
+            "HEAD must be the committed tip"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("committed.txt")).unwrap(),
+            "committed\n",
+            "verify must run against the committed tree, not the dirty edit"
+        );
+        assert!(
+            !ws.path().join("untracked.txt").exists(),
+            "untracked scratch must be cleaned before verify"
+        );
+
+        // (2) external Cargo target dir untouched — artifacts survive for reuse.
+        assert!(
+            sentinel.exists(),
+            "in-pod verify must NOT delete the worker's Cargo target dir"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"precompiled-artifact",
+            "the target dir's contents must be left intact (no re-seed)"
+        );
+
+        // (3) terminal verification_runs row written for this task.
+        let row = djinn_db::VerificationRunRepository::new(db.clone())
+            .get(&run_id)
+            .await
+            .expect("get row")
+            .expect("row exists");
+        assert_eq!(row.task_id, task.id);
+        assert_eq!(row.project_id, project_id);
+        // No rules → vacuous pass.
+        assert_eq!(
+            row.status,
+            djinn_db::VerificationRunStatus::PASSED,
+            "a project with no verification rules passes vacuously"
         );
     }
 }
