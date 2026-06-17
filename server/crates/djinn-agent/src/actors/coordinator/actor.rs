@@ -653,6 +653,7 @@ impl CoordinatorActor {
         // call can scope its query back to one leader-tick invocation.
         let doctor_run_id = format!("leader-tick-{}", self.prune_tick_counter.wrapping_add(1));
         crate::doctor::leader_tick::run_cheap_doctor_checks(
+            djinn_core::doctor::registry(),
             &self.db,
             &self.events_tx,
             Some(&doctor_run_id),

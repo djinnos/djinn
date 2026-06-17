@@ -25,9 +25,7 @@
 
 use std::time::Instant as StdInstant;
 
-use djinn_core::doctor::{
-    Finding, FindingSeverity, registry as global_doctor_registry, run_cheap_subset,
-};
+use djinn_core::doctor::{DoctorRegistry, Finding, FindingSeverity, run_cheap_subset};
 use djinn_db::{DoctorFindingRepository, NewDoctorFinding};
 use serde_json::json;
 use tracing::{error, info, warn};
@@ -168,16 +166,20 @@ async fn record_activity_for_finding(repo: &djinn_db::TaskRepository, finding: &
 /// focused and unit-testable. Each step is best-effort: a failure in one
 /// check or one DB write is logged and the rest of the tick continues.
 ///
+/// `registry` is the [`DoctorRegistry`] to source cheap checks from. The
+/// production path passes [`registry()`]; tests pass a local
+/// [`DoctorRegistry`] they control.
+///
 /// `run_id` is stamped on every persisted finding so the operator can scope a
 /// subsequent `doctor_list_findings` query back to one leader-tick invocation.
 /// Pass `None` for ad-hoc invocations (tests).
 pub async fn run_cheap_doctor_checks(
+    registry: &DoctorRegistry,
     db: &djinn_db::Database,
     events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
     run_id: Option<&str>,
 ) {
     let started = StdInstant::now();
-    let registry = global_doctor_registry();
     let runs = match run_cheap_subset(registry) {
         Ok(runs) => runs,
         Err(error) => {
@@ -366,8 +368,9 @@ mod tests {
         let _ = djinn_telemetry::init();
         let db = fresh_db();
         let (events_tx, _events_rx) = broadcast::channel(16);
+        let registry = fresh_registry();
 
-        run_cheap_doctor_checks(&db, &events_tx, Some("leader-tick-test")).await;
+        run_cheap_doctor_checks(&registry, &db, &events_tx, Some("leader-tick-test")).await;
 
         let repo = DoctorFindingRepository::new(db.clone());
         let rows = repo
@@ -418,8 +421,9 @@ mod tests {
         let _ = djinn_telemetry::init();
         let db = fresh_db();
         let (events_tx, _events_rx) = broadcast::channel(16);
+        let registry = fresh_registry();
 
-        run_cheap_doctor_checks(&db, &events_tx, Some("leader-tick-activity")).await;
+        run_cheap_doctor_checks(&registry, &db, &events_tx, Some("leader-tick-activity")).await;
 
         let task_repo =
             djinn_db::TaskRepository::new(db.clone(), crate::events::event_bus_for(&events_tx));
