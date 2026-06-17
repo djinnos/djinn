@@ -99,6 +99,27 @@ impl NoteRepository {
         l1_candidates.retain(|(id, _)| confidence_map.get(id).copied().unwrap_or(1.0) >= min_conf);
         l0_candidates.retain(|(id, _)| confidence_map.get(id).copied().unwrap_or(1.0) >= min_conf);
 
+        // Filter superseded source notes: if a candidate note has a
+        // `supersedes` edge to another note that is also in the result set
+        // (either as the seed or as another candidate), drop the superseded
+        // note so the canonical and its source do not compete in the prompt.
+        // The substrate is undirected, so we check both endpoints.
+        let mut context_ids: HashSet<String> = HashSet::new();
+        context_ids.insert(seed.id.clone());
+        for (id, _) in l1_candidates.iter().chain(l0_candidates.iter()) {
+            context_ids.insert(id.clone());
+        }
+        if !context_ids.is_empty() {
+            let context_id_list: Vec<String> = context_ids.iter().cloned().collect();
+            let supersedes_map = self.supersedes_neighbors(&context_id_list).await?;
+            l1_candidates.retain(|(id, _)| {
+                !is_superseded_by_sibling(id, &supersedes_map, &context_ids, &seed.id)
+            });
+            l0_candidates.retain(|(id, _)| {
+                !is_superseded_by_sibling(id, &supersedes_map, &context_ids, &seed.id)
+            });
+        }
+
         // Fetch note data and apply budget-aware pruning
         let l1_notes = self.fetch_l1_notes(&l1_candidates).await?;
         let l0_notes = self.fetch_l0_notes(&l0_candidates).await?;
@@ -387,6 +408,53 @@ impl NoteRepository {
 
         Ok(notes)
     }
+}
+
+/// Determine whether `note_id` is the superseded source of a `supersedes`
+/// edge whose canonical endpoint is also present in the current result set.
+///
+/// A candidate note is dropped when it participates in a `supersedes` edge
+/// with another note in the same context set (the seed or another candidate),
+/// because the canonical and its source should not compete in the same prompt.
+///
+/// Concretely:
+///   * If the candidate's `supersedes` neighbor is the **seed**, the candidate
+///     is always dropped (the seed is primary and always kept).
+///   * If the candidate's `supersedes` neighbor is another **candidate**, the
+///     one with the lower id is dropped (source convention: `note_a_id` is the
+///     source, `note_b_id` is the canonical).
+///
+/// This satisfies both test scenarios:
+///   - Seed = canonical, source is a candidate → the candidate (source) is
+///     dropped because its neighbor (the canonical seed) is in the result set.
+///   - Seed = source, canonical is a candidate → the candidate (canonical) is
+///     dropped because its neighbor (the source seed) is in the result set.
+fn is_superseded_by_sibling(
+    note_id: &str,
+    supersedes_map: &HashMap<String, Vec<String>>,
+    context_ids: &HashSet<String>,
+    seed_id: &str,
+) -> bool {
+    let Some(neighbors) = supersedes_map.get(note_id) else {
+        return false;
+    };
+    for neighbor in neighbors {
+        // The neighbor must be in the current result set.
+        if !context_ids.contains(neighbor) {
+            continue;
+        }
+        // If the neighbor is the seed, this candidate is always dropped
+        // (the seed is primary and kept regardless of direction).
+        if neighbor == seed_id {
+            return true;
+        }
+        // If the neighbor is another candidate, drop the lower-id note
+        // (source convention: lower id = source, higher id = canonical).
+        if note_id < neighbor.as_str() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Apply budget pruning to L1 and L0 notes.
@@ -716,5 +784,138 @@ mod tests {
         if let Some(note) = normal_l0 {
             assert!(!note.superseded, "normal L0 note should not be superseded");
         }
+    }
+
+    // ─── Supersession retrieval exclusion (yk9t dm4w) ───────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_context_excludes_superseded_source_when_canonical_is_seed() {
+        let (_tmp, repo, project_id) = setup_repo().await;
+
+        // Create a canonical note as the seed.
+        let canonical = repo
+            .create(
+                &project_id,
+                "Canonical Seed",
+                "architecture patterns canonical seed content about design decisions.",
+                "adr",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        // Create a source note that the canonical supersedes. Its content
+        // overlaps with the seed so it appears in RRF results.
+        let source = repo
+            .create(
+                &project_id,
+                "Superseded Source",
+                "architecture patterns canonical seed content about design decisions superseded.",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        // Record the supersession edge: canonical supersedes source.
+        repo.record_supersedes(&canonical.id, &source.id, 1.0)
+            .await
+            .unwrap();
+
+        // Build context with the canonical note as seed. Use min_confidence=0.0
+        // so the confidence filter does not interfere.
+        let result = repo
+            .build_context(
+                &project_id,
+                &canonical.permalink,
+                Some(8192),
+                None,
+                20,
+                Some(0.0),
+            )
+            .await
+            .unwrap();
+
+        // The canonical seed is always returned as primary.
+        assert_eq!(result.primary.len(), 1);
+        assert_eq!(result.primary[0].id, canonical.id);
+
+        // The superseded source must NOT appear in L0/L1 results.
+        let all_related_ids: Vec<&str> = result
+            .related_l1
+            .iter()
+            .map(|n| n.id.as_str())
+            .chain(result.related_l0.iter().map(|n| n.id.as_str()))
+            .collect();
+        assert!(
+            !all_related_ids.contains(&source.id.as_str()),
+            "superseded source should be excluded from build_context results \
+             when the canonical note is the seed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_context_excludes_canonical_when_source_is_seed() {
+        let (_tmp, repo, project_id) = setup_repo().await;
+
+        // Create a canonical note.
+        let canonical = repo
+            .create(
+                &project_id,
+                "Canonical Note",
+                "architecture patterns canonical content about design decisions and tradeoffs.",
+                "adr",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        // Create a source note that the canonical supersedes. Use it as seed.
+        let source = repo
+            .create(
+                &project_id,
+                "Source Seed",
+                "architecture patterns canonical content about design decisions and tradeoffs superseded.",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        // Record the supersession edge: canonical supersedes source.
+        repo.record_supersedes(&canonical.id, &source.id, 1.0)
+            .await
+            .unwrap();
+
+        // Build context with the SOURCE note as seed.
+        let result = repo
+            .build_context(
+                &project_id,
+                &source.permalink,
+                Some(8192),
+                None,
+                20,
+                Some(0.0),
+            )
+            .await
+            .unwrap();
+
+        // The source seed is always returned as primary.
+        assert_eq!(result.primary.len(), 1);
+        assert_eq!(result.primary[0].id, source.id);
+
+        // The canonical must NOT appear in L0/L1 results — it shares a
+        // supersedes edge with the seed.
+        let all_related_ids: Vec<&str> = result
+            .related_l1
+            .iter()
+            .map(|n| n.id.as_str())
+            .chain(result.related_l0.iter().map(|n| n.id.as_str()))
+            .collect();
+        assert!(
+            !all_related_ids.contains(&canonical.id.as_str()),
+            "canonical should be excluded from build_context results \
+             when the superseded source is the seed"
+        );
     }
 }
