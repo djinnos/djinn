@@ -495,14 +495,34 @@ fn project_verification_semaphore(project_id: &str) -> Arc<tokio::sync::Semaphor
 /// The verification `_run_id` row is updated in place on the terminal
 /// failure path so the poll loop can observe a clear status without
 /// re-querying the row.
-async fn dispatch_verification_with_retry(
+/// Outcome of [`dispatch_verification_inner`]. The caller is responsible
+/// for persisting the row status if the outcome is [`DispatchOutcome::Error`].
+#[derive(Debug)]
+enum DispatchOutcome {
+    /// The dispatch succeeded — the Job is created in the cluster.
+    Dispatched,
+    /// A terminal error. The caller should mark the verification row as
+    /// `error` with this message, then propagate the error.
+    Error(String),
+}
+
+/// Inner retry loop for verification dispatch — pure control flow with no
+/// DB writes. The caller injects a `mark_error` callback so this function
+/// can be unit-tested without a live database pool (which is incompatible
+/// with `tokio::test(start_paused = true)` because sqlx's connection pool
+/// acquire timeout fires instantly when the clock is frozen).
+async fn dispatch_verification_inner<F, Fut>(
     runtime_ops: &dyn djinn_control_plane::bridge::RuntimeOps,
     run_id: &str,
     project_id: &str,
     task_branch: &str,
     target_branch: &str,
-    run_repo: &djinn_db::VerificationRunRepository,
-) -> anyhow::Result<()> {
+    mark_error: &mut F,
+) -> DispatchOutcome
+where
+    F: FnMut(&str) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     // First attempt — most verifications dispatch on the first try (image
     // is already ready). Only the transient not-ready path takes the
     // retry loop below.
@@ -510,7 +530,7 @@ async fn dispatch_verification_with_retry(
         .dispatch_verification(run_id, project_id, task_branch, target_branch)
         .await
     {
-        Ok(()) => Ok(()),
+        Ok(()) => DispatchOutcome::Dispatched,
         Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
             project_id: err_project_id,
             image_status,
@@ -528,16 +548,8 @@ async fn dispatch_verification_with_retry(
                     "verification dispatch: project {err_project_id} has no catalog image assigned \
                      (image_status: {image_status}); assign a catalog image before verifying"
                 );
-                let _ = run_repo
-                    .complete(
-                        run_id,
-                        djinn_db::VerificationRunStatus::ERROR,
-                        "[]",
-                        "[]",
-                        Some(&msg),
-                    )
-                    .await;
-                anyhow::bail!(msg);
+                mark_error(&msg).await;
+                return DispatchOutcome::Error(msg);
             }
             // Transient: catalog image is being rebuilt (or first-time
             // assignment is pending). Requeue with backoff until the
@@ -557,16 +569,8 @@ async fn dispatch_verification_with_retry(
                             .map(|t| format!(", tag: {t}"))
                             .unwrap_or_default()
                     );
-                    let _ = run_repo
-                        .complete(
-                            run_id,
-                            djinn_db::VerificationRunStatus::ERROR,
-                            "[]",
-                            "[]",
-                            Some(&msg),
-                        )
-                        .await;
-                    anyhow::bail!(msg);
+                    mark_error(&msg).await;
+                    return DispatchOutcome::Error(msg);
                 }
                 attempt += 1;
                 tracing::info!(
@@ -589,7 +593,7 @@ async fn dispatch_verification_with_retry(
                             attempt = attempt,
                             "verification dispatch: image became ready, dispatched"
                         );
-                        return Ok(());
+                        return DispatchOutcome::Dispatched;
                     }
                     Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
                         transient: false,
@@ -603,16 +607,8 @@ async fn dispatch_verification_with_retry(
                             "verification dispatch: project {err_project_id} has no catalog \
                              image assigned (image_status: {image_status})"
                         );
-                        let _ = run_repo
-                            .complete(
-                                run_id,
-                                djinn_db::VerificationRunStatus::ERROR,
-                                "[]",
-                                "[]",
-                                Some(&msg),
-                            )
-                            .await;
-                        anyhow::bail!(msg);
+                        mark_error(&msg).await;
+                        return DispatchOutcome::Error(msg);
                     }
                     Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
                         image_status: new_status,
@@ -635,16 +631,8 @@ async fn dispatch_verification_with_retry(
                             "verification dispatch: runtime backend error after {attempt} \
                              requeue attempts: {e}"
                         );
-                        let _ = run_repo
-                            .complete(
-                                run_id,
-                                djinn_db::VerificationRunStatus::ERROR,
-                                "[]",
-                                "[]",
-                                Some(&msg),
-                            )
-                            .await;
-                        anyhow::bail!(msg);
+                        mark_error(&msg).await;
+                        return DispatchOutcome::Error(msg);
                     }
                 }
                 // Exponential backoff with cap. Keep doubling until we
@@ -655,17 +643,48 @@ async fn dispatch_verification_with_retry(
         }
         Err(djinn_control_plane::bridge::RuntimeDispatchError::Backend(e)) => {
             let msg = format!("verification dispatch failed: {e}");
+            mark_error(&msg).await;
+            DispatchOutcome::Error(msg)
+        }
+    }
+}
+
+async fn dispatch_verification_with_retry(
+    runtime_ops: &dyn djinn_control_plane::bridge::RuntimeOps,
+    run_id: &str,
+    project_id: &str,
+    task_branch: &str,
+    target_branch: &str,
+    run_repo: &djinn_db::VerificationRunRepository,
+) -> anyhow::Result<()> {
+    let run_id_owned = run_id.to_string();
+    let mut mark_error = |msg: &str| {
+        let run_id_owned = run_id_owned.clone();
+        let msg_owned = msg.to_string();
+        async move {
             let _ = run_repo
                 .complete(
-                    run_id,
+                    &run_id_owned,
                     djinn_db::VerificationRunStatus::ERROR,
                     "[]",
                     "[]",
-                    Some(&msg),
+                    Some(&msg_owned),
                 )
                 .await;
-            anyhow::bail!(msg);
         }
+    };
+    match dispatch_verification_inner(
+        runtime_ops,
+        run_id,
+        project_id,
+        task_branch,
+        target_branch,
+        &mut mark_error,
+    )
+    .await
+    {
+        DispatchOutcome::Dispatched => Ok(()),
+        DispatchOutcome::Error(msg) => anyhow::bail!(msg),
     }
 }
 

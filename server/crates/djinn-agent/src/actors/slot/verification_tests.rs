@@ -412,8 +412,8 @@ async fn handle_verification_failure_past_threshold_escalates() {
 // returns `ImageNotReady { transient: true }` for the first N
 // attempts, then `Ok(())` once the image is "ready".
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
 
 /// A `RuntimeOps` mock that records every `dispatch_verification`
 /// call and replays a pre-scripted sequence of results. Used to
@@ -522,35 +522,43 @@ async fn dispatch_verification_requeues_on_transient_image_not_ready() {
     // true }`. The fix must keep the row in `pending` while the
     // requeue loop runs, and the dispatch must eventually succeed
     // once the runtime reports the image is ready.
-    let db = create_test_db();
-    let project = create_test_project(&db).await;
-    let run_repo = djinn_db::VerificationRunRepository::new(db.clone());
-    let run_id = "run-requeue-1";
-    run_repo
-        .create(run_id, "task-1", &project.id)
-        .await
-        .expect("create verification run row");
+    //
+    // This test calls `dispatch_verification_inner` directly with an
+    // in-memory `mark_error` callback, avoiding the sqlx connection
+    // pool which is incompatible with `start_paused = true` (the pool's
+    // internal acquire timeout fires instantly when the clock is frozen,
+    // causing spurious `PoolTimedOut` failures).
+
     // Three transient failures, then success.
     let runtime = RequeueingRuntimeOps::new(3);
     let call_count = runtime.call_count.clone();
 
-    // Run the retry helper. The mock sleeps are not involved —
-    // `start_paused` lets `tokio::time::sleep` complete instantly,
-    // and the exponential backoff stays bounded by the test wall
-    // clock.
-    let result = dispatch_verification_with_retry(
+    // `mark_error` captures any error message that the inner function
+    // tries to persist. On the transient→success path this should
+    // NEVER be called — the row stays in `pending`.
+    let captured_error = Arc::new(Mutex::new(None::<String>));
+    let captured_error_clone = captured_error.clone();
+    let mut mark_error = move |msg: &str| {
+        let captured_error_clone = captured_error_clone.clone();
+        let msg_owned = msg.to_string();
+        async move {
+            *captured_error_clone.lock().unwrap() = Some(msg_owned);
+        }
+    };
+
+    let outcome = dispatch_verification_inner(
         &runtime,
-        run_id,
-        &project.id,
+        "run-requeue-1",
+        "p1",
         "task/abc",
         "main",
-        &run_repo,
+        &mut mark_error,
     )
     .await;
 
     assert!(
-        result.is_ok(),
-        "dispatch_verification_with_retry must succeed once the image becomes ready, got {result:?}"
+        matches!(outcome, DispatchOutcome::Dispatched),
+        "dispatch must succeed once the image becomes ready, got {outcome:?}"
     );
     // 3 transient + 1 success = 4 calls. Use a >= bound to be
     // robust against the mock being called for any setup
@@ -560,23 +568,12 @@ async fn dispatch_verification_requeues_on_transient_image_not_ready() {
         n >= 4,
         "runtime must be polled at least 4 times (3 transient + 1 success), got {n}"
     );
-    // The row MUST still be `pending` — `dispatch_verification_with_retry`
-    // never marks the row errored on a transient not-ready;
-    // the worker writes the terminal status once it actually runs.
-    let row = run_repo
-        .get(run_id)
-        .await
-        .expect("get row")
-        .expect("row exists");
-    assert_eq!(
-        row.status,
-        djinn_db::VerificationRunStatus::PENDING,
-        "row must stay in `pending` while dispatch requeues (got {})",
-        row.status
-    );
+    // The mark_error callback MUST NOT have been called — the
+    // transient→success path never marks the row errored; the
+    // worker writes the terminal status once it actually runs.
     assert!(
-        row.error.is_none(),
-        "row must have no error while dispatch requeues"
+        captured_error.lock().unwrap().is_none(),
+        "mark_error must not be called on a transient→success path"
     );
 }
 
@@ -586,14 +583,9 @@ async fn dispatch_verification_marks_error_on_permanent_image_not_ready() {
     // assigned at all. The fix must mark the row errored
     // immediately so the surrounding pipeline surfaces a clear
     // failure to the worker (no requeue, no infinite wait).
-    let db = create_test_db();
-    let project = create_test_project(&db).await;
-    let run_repo = djinn_db::VerificationRunRepository::new(db.clone());
-    let run_id = "run-permanent-1";
-    run_repo
-        .create(run_id, "task-1", &project.id)
-        .await
-        .expect("create verification run row");
+    //
+    // Uses `dispatch_verification_inner` directly to avoid the sqlx
+    // connection pool, which is incompatible with `start_paused = true`.
 
     /// Always returns `ImageNotReady { transient: false, .. }` —
     /// i.e. a permanent "no catalog image" condition.
@@ -670,31 +662,33 @@ async fn dispatch_verification_marks_error_on_permanent_image_not_ready() {
         async fn cleanup_task_branches(&self, _: &str) {}
     }
 
-    let result = dispatch_verification_with_retry(
+    let captured_error = Arc::new(Mutex::new(None::<String>));
+    let captured_error_clone = captured_error.clone();
+    let mut mark_error = move |msg: &str| {
+        let captured_error_clone = captured_error_clone.clone();
+        let msg_owned = msg.to_string();
+        async move {
+            *captured_error_clone.lock().unwrap() = Some(msg_owned);
+        }
+    };
+
+    let outcome = dispatch_verification_inner(
         &PermanentRuntimeOps,
-        run_id,
-        &project.id,
+        "run-permanent-1",
+        "p1",
         "task/abc",
         "main",
-        &run_repo,
+        &mut mark_error,
     )
     .await;
-    assert!(result.is_err(), "permanent missing-image must bail");
-    // The row MUST be marked errored so the surrounding
-    // verification pipeline (and the poll loop in
-    // `run_verification_in_pod`) can observe a clear terminal
-    // status.
-    let row = run_repo
-        .get(run_id)
-        .await
-        .expect("get row")
-        .expect("row exists");
-    assert_eq!(
-        row.status,
-        djinn_db::VerificationRunStatus::ERROR,
-        "row must be marked errored on a permanent missing-image"
+    assert!(
+        matches!(outcome, DispatchOutcome::Error(_)),
+        "permanent missing-image must produce an error outcome"
     );
-    let err = row.error.unwrap_or_default();
+    // The mark_error callback MUST have been called so the surrounding
+    // verification pipeline (and the poll loop in
+    // `run_verification_in_pod`) can observe a clear terminal status.
+    let err = captured_error.lock().unwrap().clone().unwrap_or_default();
     assert!(
         err.contains("no catalog image assigned"),
         "error message must be actionable for an operator, got: {err}"
