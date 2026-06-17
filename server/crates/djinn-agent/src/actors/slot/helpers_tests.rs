@@ -57,10 +57,26 @@ fn provider_helpers_cover_branches() {
         format_family_for_provider("fireworks", "gpt-5.4"),
         FormatFamily::OpenAI
     );
+    // Xiaomi MiMo Token Plan is Anthropic-compatible; the dotted model id
+    // (`mimo-v2.5-pro`) must not perturb routing.
+    assert_eq!(
+        format_family_for_provider("xiaomi-mimo", "mimo-v2.5-pro"),
+        FormatFamily::Anthropic
+    );
 
     let anthropic = capabilities_for_provider("anthropic");
     assert!(anthropic.streaming);
     assert_eq!(anthropic.max_tokens_default, Some(64_000));
+
+    // Xiaomi MiMo gets Anthropic-style caps (streaming + default max_tokens).
+    let mimo = capabilities_for_provider("xiaomi-mimo");
+    assert!(mimo.streaming);
+    assert_eq!(mimo.max_tokens_default, Some(64_000));
+    // ...and Bearer auth (NOT the Anthropic-native x-api-key path).
+    assert!(matches!(
+        auth_method_for_provider("xiaomi-mimo", "tp-abc"),
+        AuthMethod::BearerToken(v) if v == "tp-abc"
+    ));
 
     let synthetic = capabilities_for_provider("synthetic-provider");
     assert!(!synthetic.streaming);

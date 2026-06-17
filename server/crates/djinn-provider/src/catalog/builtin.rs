@@ -225,6 +225,28 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         streaming: true,
         max_tokens_default: Some(64_000),
     },
+    // Anthropic-compatible. Present in models.dev (`xiaomi-mimo`, "Xiaomi MiMo
+    // Token Plan") with the Anthropic-compatible base_url + MiMo model list
+    // (mimo-v2.5-pro, mimo-v2.5); listed here so the env-var bootstrap upserts
+    // XIAOMI_MIMO_API_KEY into the vault. The Token Plan key has the `tp-xxxxx`
+    // format and authenticates via `Authorization: Bearer <tp-key>` (NOT the
+    // Anthropic-native `x-api-key` path). The default base_url is the SGP region
+    // (`https://token-plan-sgp.xiaomimimo.com/anthropic`); CN
+    // (`https://token-plan-cn.xiaomimimo.com/anthropic`) and AMS
+    // (`https://token-plan-ams.xiaomimimo.com/anthropic`) variants also exist.
+    BuiltinProvider {
+        id: "xiaomi-mimo",
+        display_name: "Xiaomi MiMo Token Plan",
+        required_env_vars: &["XIAOMI_MIMO_API_KEY"],
+        oauth_keys: &[],
+        docs_url: "https://platform.xiaomimimo.com",
+        merge_into: None,
+        auth_only: false,
+        format_rule: FormatRule::Fixed(FormatFamily::Anthropic),
+        auth_shape: AuthShape::Bearer,
+        streaming: true,
+        max_tokens_default: Some(64_000),
+    },
     // OpenAI-compatible. Present in models.dev (`opencode`, "OpenCode Zen") with
     // base_url https://opencode.ai/zen/v1 + model list (including the rotating
     // `*-free` models); listed here so the env-var bootstrap upserts
