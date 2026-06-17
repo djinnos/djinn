@@ -709,21 +709,40 @@ impl CoordinatorActor {
             // `YYYY-MM-DDTHH:MM:SS.mmmZ` strings, lexically comparable — same
             // cutoff idiom as `reap_stale_task_runs`.
             //
-            // IN-POD VERIFICATION (the double-compile fix): the worker now runs
-            // the verification pipeline ITSELF, inside the live task-run pod,
-            // BETWEEN entering `verifying` and emitting its report. So this
-            // window now includes the full verify wall-clock (clippy + test,
-            // fast via artifact reuse but still minutes on a big workspace) —
-            // NOT just report+spawn latency. The task-run row stays `running`
-            // and the worker holds its slot the whole time, so this is a LIVE
-            // task, not an orphan. The old 180s cutoff would reap it mid-verify
-            // and trigger a spurious worker redo (defeating the reuse). Widen
-            // the grace to the worker stall budget (30 min) — the same envelope
-            // we already trust a quiet-but-live worker session to occupy. A
-            // genuinely stuck verify is still backstopped by the host pipeline
-            // timeout (`compute_pipeline_timeout`, 3600s) once the report does
-            // arrive, and by the pod's K8s active-deadline.
-            const VERIFYING_RECOVERY_GRACE_SECS: i64 = 30 * 60;
+            // IN-POD VERIFICATION (the double-compile fix): the worker runs the
+            // verification pipeline ITSELF, inside the live task-run pod, BETWEEN
+            // entering `verifying` and emitting its report — so the task-run row
+            // stays `running` for the whole verify (clippy + test, minutes even
+            // when fast via artifact reuse), and the tracker has not registered
+            // it yet. That is a LIVE task, not an orphan. NEVER recover a
+            // verifying task while a task-run for it is still running: a hung
+            // in-pod verify is backstopped by the task-run's own stall reaper and
+            // the pod's K8s active-deadline. Only a verifying task with NO running
+            // task-run is a true orphan (its verify pod/Job died, or it's still
+            // in the brief pre-tracker window), and we recover it on a short
+            // grace. This gates on task-run liveness instead of a blunt timeout,
+            // so genuine orphans recover promptly while in-pod verifies of any
+            // duration are protected.
+            let has_live_run = djinn_db::TaskRunRepository::new(self.db.clone())
+                .list_for_task(&task.id)
+                .await
+                .map(|runs| {
+                    runs.iter().any(|r| {
+                        r.status == djinn_core::models::TaskRunStatus::Running.as_str()
+                            && r.ended_at.is_none()
+                    })
+                })
+                .unwrap_or(false);
+            if has_live_run {
+                continue;
+            }
+
+            // Short grace for true orphans: still skip the few-second window
+            // between `submit_verification` (task → `verifying`) and
+            // `spawn_verification` registering the pipeline in the tracker.
+            // Timestamps are `YYYY-MM-DDTHH:MM:SS.mmmZ` strings, lexically
+            // comparable — same cutoff idiom as `reap_stale_task_runs`.
+            const VERIFYING_RECOVERY_GRACE_SECS: i64 = 180;
             let cutoff = time::OffsetDateTime::now_utc()
                 - time::Duration::seconds(VERIFYING_RECOVERY_GRACE_SECS);
             let format = time::macros::format_description!(
