@@ -41,6 +41,17 @@ DJINN_TEST_DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:5433/postgres"
 # this env var ahead of DJINN_HOME and ~/.djinn. Override at command
 # line only when deliberately exercising the production vault.
 DJINN_VAULT_KEY_PATH = "/var/tmp/djinn-test-vault/vault.key"
+# Force-disable incremental compilation at the cargo level. The workspace
+# pins `rustc-wrapper = "sccache"` (see [build] above), and sccache rejects
+# incremental compilation ("increment compilation is prohibited"). The
+# `[profile.*]` settings below set `incremental = false` in profiles, but a
+# `CARGO_INCREMENTAL=1` env var (still injected by older deployed k8s job
+# definitions, see commit 74c88ac5) overrides those profile defaults. Using
+# `force = true` here makes cargo clamp `CARGO_INCREMENTAL` to "0" even when
+# the environment says "1", so verification pods that haven't been redeployed
+# with the fixed job definition still work. This is a no-op for local dev and
+# for pods that already inject `CARGO_INCREMENTAL=0` (same value).
+CARGO_INCREMENTAL = { value = "0", force = true }
 
 [profile.dev]
 incremental = false          # required for sccache effectiveness

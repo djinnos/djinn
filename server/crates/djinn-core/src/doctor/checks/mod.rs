@@ -5,5 +5,6 @@
 //! extend this file with their own `pub mod` lines, and T5 wires them into
 //! the framework registry.
 
+pub mod k8s;
 pub mod sessions;
 pub mod slots;
