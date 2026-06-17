@@ -50,6 +50,8 @@ export interface SigmaInstanceHandle {
   ) => () => void;
   refresh: () => void;
   getNodeAttributes: (id: string) => Attributes | null;
+  focusNode: (id: string) => void;
+  focusNodes: (ids: Iterable<string>) => void;
 }
 
 export interface UseSigmaGraphResult {
@@ -104,6 +106,12 @@ const NOVERLAP_SETTINGS = {
     expansion: 1.05,
   },
 };
+
+const FOCUS_DURATION_MS = 400;
+const FOCUS_NODE_RATIO = 0.5;
+const FOCUS_NODES_MARGIN = 1.5;
+const DEFAULT_MIN_CAMERA_RATIO = 0.002;
+const DEFAULT_MAX_CAMERA_RATIO = 50;
 
 // ── Color helpers for the custom hover paint ─────────────────────────────────
 
@@ -272,6 +280,84 @@ export function useSigmaGraph(
           return graph.getNodeAttributes(id);
         } catch {
           return null;
+        }
+      },
+      focusNode: (id) => {
+        if (killed) return;
+        try {
+          if (!graph.hasNode(id)) return;
+          const attrs = graph.getNodeAttributes(id);
+          const x = Number(attrs.x);
+          const y = Number(attrs.y);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+          sigmaInstance.getCamera().animate(
+            { x, y, ratio: FOCUS_NODE_RATIO },
+            { duration: FOCUS_DURATION_MS },
+          );
+        } catch {
+          // unmount race / graph mutation race — no-op
+        }
+      },
+      focusNodes: (ids) => {
+        if (killed) return;
+
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        let resolved = 0;
+
+        try {
+          for (const id of ids) {
+            if (!graph.hasNode(id)) continue;
+            const attrs = graph.getNodeAttributes(id);
+            const x = Number(attrs.x);
+            const y = Number(attrs.y);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x);
+            maxY = Math.max(maxY, y);
+            resolved += 1;
+          }
+
+          if (resolved === 0) return;
+
+          const bboxSize = Math.max(maxX - minX, maxY - minY);
+          const unclampedRatio = bboxSize * FOCUS_NODES_MARGIN;
+          // Sigma exposes configured settings via getSetting in runtime;
+          // fall back to the values configured above for tests/mocks.
+          const settingsReader = sigmaInstance as unknown as {
+            getSetting?: (key: string) => unknown;
+          };
+          const minSetting = Number(
+            settingsReader.getSetting?.("minCameraRatio"),
+          );
+          const maxSetting = Number(
+            settingsReader.getSetting?.("maxCameraRatio"),
+          );
+          const minRatio = Number.isFinite(minSetting)
+            ? minSetting
+            : DEFAULT_MIN_CAMERA_RATIO;
+          const maxRatio = Number.isFinite(maxSetting)
+            ? maxSetting
+            : DEFAULT_MAX_CAMERA_RATIO;
+          const ratio = Math.max(
+            minRatio,
+            Math.min(maxRatio, unclampedRatio),
+          );
+
+          sigmaInstance.getCamera().animate(
+            {
+              x: (minX + maxX) / 2,
+              y: (minY + maxY) / 2,
+              ratio,
+            },
+            { duration: FOCUS_DURATION_MS },
+          );
+        } catch {
+          // unmount race / graph mutation race — no-op
         }
       },
     });
