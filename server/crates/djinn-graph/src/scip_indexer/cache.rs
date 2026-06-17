@@ -5,7 +5,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -185,24 +185,76 @@ impl ScipCacheStore {
         fs::create_dir_all(&entry)
             .with_context(|| format!("create SCIP cache entry dir {}", entry.display()))?;
 
-        atomic_write_if_absent(&entry, "artifact.scip", &bytes)?;
-
-        // Concurrent writers race only on the first artifact publication. Build
-        // the manifest from the artifact that actually won that race so the
-        // entry cannot end up with artifact A and manifest B.
-        let stored_artifact = fs::read(entry.join("artifact.scip"))
-            .with_context(|| format!("read published artifact for key {}", key.as_str()))?;
-        let manifest = CacheManifest {
-            schema_version: SCHEMA_VERSION.to_string(),
-            key: key.as_str().to_string(),
-            artifact_sha256: hex_sha256(&stored_artifact),
-            artifact_len: stored_artifact.len() as u64,
-        };
-        let manifest_bytes =
-            serde_json::to_vec_pretty(&manifest).context("serialize cache manifest")?;
-
-        atomic_write_if_absent(&entry, "manifest.json", &manifest_bytes)?;
+        self.publish_artifact(key, &entry, &bytes)?;
         Ok(())
+    }
+
+    fn publish_artifact(&self, key: &ScipCacheKey, entry: &Path, bytes: &[u8]) -> Result<()> {
+        // Cache writes are non-mutating once a valid entry exists. Serialise
+        // first publication with a same-directory lock so artifact + manifest
+        // are installed together via temp-file-and-rename, and concurrent
+        // writers either observe the already-valid entry or repair a corrupt
+        // one without ever exposing a partial final file.
+        for _ in 0..200 {
+            if self.entry_is_valid(key, entry)? {
+                return Ok(());
+            }
+
+            match PublishLock::try_acquire(entry)? {
+                Some(_lock) => {
+                    let manifest = CacheManifest {
+                        schema_version: SCHEMA_VERSION.to_string(),
+                        key: key.as_str().to_string(),
+                        artifact_sha256: hex_sha256(bytes),
+                        artifact_len: bytes.len() as u64,
+                    };
+                    let manifest_bytes =
+                        serde_json::to_vec_pretty(&manifest).context("serialize cache manifest")?;
+
+                    atomic_write(entry, "artifact.scip", bytes)?;
+                    atomic_write(entry, "manifest.json", &manifest_bytes)?;
+                    return Ok(());
+                }
+                None => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+
+        if self.entry_is_valid(key, entry)? {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "timed out waiting for SCIP cache publication for key {}",
+                key.as_str()
+            )
+        }
+    }
+
+    fn entry_is_valid(&self, key: &ScipCacheKey, entry: &Path) -> Result<bool> {
+        let manifest_path = entry.join("manifest.json");
+        let artifact_path = entry.join("artifact.scip");
+        let manifest_bytes = match fs::read(&manifest_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| format!("read {}", manifest_path.display()));
+            }
+        };
+        let manifest: CacheManifest = match serde_json::from_slice(&manifest_bytes) {
+            Ok(manifest) => manifest,
+            Err(_) => return Ok(false),
+        };
+        if manifest.schema_version != SCHEMA_VERSION || manifest.key != key.as_str() {
+            return Ok(false);
+        }
+        let artifact = match fs::read(&artifact_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| format!("read {}", artifact_path.display()));
+            }
+        };
+        Ok(artifact.len() as u64 == manifest.artifact_len
+            && hex_sha256(&artifact) == manifest.artifact_sha256)
     }
 
     fn try_lookup(&self, key: &ScipCacheKey, output_path: &Path) -> Result<bool> {
@@ -281,27 +333,33 @@ fn version_override_env_name(indexer: SupportedIndexer) -> String {
     name
 }
 
-fn atomic_write_if_absent(dir: &Path, file_name: &str, bytes: &[u8]) -> Result<()> {
-    let final_path = dir.join(file_name);
-    if final_path.exists() {
-        return Ok(());
+struct PublishLock {
+    path: PathBuf,
+}
+
+impl PublishLock {
+    fn try_acquire(entry: &Path) -> Result<Option<Self>> {
+        let path = entry.join(".publish.lock");
+        match fs::create_dir(&path) {
+            Ok(()) => Ok(Some(Self { path })),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("create {}", path.display())),
+        }
     }
+}
+
+impl Drop for PublishLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.path);
+    }
+}
+
+fn atomic_write(dir: &Path, file_name: &str, bytes: &[u8]) -> Result<()> {
+    let final_path = dir.join(file_name);
     let temp_path = unique_temp_path(dir, file_name);
     fs::write(&temp_path, bytes).with_context(|| format!("write {}", temp_path.display()))?;
-    match fs::hard_link(&temp_path, &final_path) {
-        Ok(()) => {
-            let _ = fs::remove_file(&temp_path);
-            Ok(())
-        }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let _ = fs::remove_file(&temp_path);
-            Ok(())
-        }
-        Err(error) => {
-            let _ = fs::remove_file(&temp_path);
-            Err(error).with_context(|| format!("publish {}", final_path.display()))
-        }
-    }
+    fs::rename(&temp_path, &final_path)
+        .with_context(|| format!("rename {} to {}", temp_path.display(), final_path.display()))
 }
 
 fn atomic_replace(final_path: &Path, bytes: &[u8]) -> Result<()> {
@@ -525,6 +583,50 @@ mod tests {
         let output = tmp.path().join("planned/out/index.scip");
         assert_eq!(store.lookup(&key, &output), CacheLookup::Hit);
         assert_eq!(fs::read(&output).expect("read output"), b"scip bytes");
+    }
+
+    #[test]
+    fn cache_hit_skips_fake_runner_and_miss_can_be_stored() {
+        let tmp = tempdir_in_workspace();
+        let store = ScipCacheStore::new(tmp.path().join("cache"));
+        let key = base_ingredients().cache_key().expect("key");
+        let seed_artifact = tmp.path().join("seed.scip");
+        fs::write(&seed_artifact, b"cached").expect("write seed");
+        store
+            .store_artifact(&key, &seed_artifact)
+            .expect("store seed");
+
+        let mut fake_runner_invocations = 0;
+        let output = tmp.path().join("hit/out.scip");
+        if store.lookup(&key, &output) == CacheLookup::Miss {
+            fake_runner_invocations += 1;
+        }
+        assert_eq!(fake_runner_invocations, 0, "hit should not run indexer");
+        assert_eq!(fs::read(&output).expect("read cached output"), b"cached");
+
+        let mut changed = base_ingredients();
+        changed
+            .source_hashes
+            .insert("src/main.ts".to_string(), "changed-source".to_string());
+        let changed_key = changed.cache_key().expect("changed key");
+        let changed_output = tmp.path().join("miss/out.scip");
+        if store.lookup(&changed_key, &changed_output) == CacheLookup::Miss {
+            fake_runner_invocations += 1;
+            let runner_artifact = tmp.path().join("runner.scip");
+            fs::write(&runner_artifact, b"runner output").expect("write runner artifact");
+            store
+                .store_artifact(&changed_key, &runner_artifact)
+                .expect("store runner artifact");
+        }
+        assert_eq!(fake_runner_invocations, 1, "miss should run fake indexer");
+        assert_eq!(
+            store.lookup(&changed_key, &changed_output),
+            CacheLookup::Hit
+        );
+        assert_eq!(
+            fs::read(&changed_output).expect("read changed output"),
+            b"runner output"
+        );
     }
 
     #[test]
