@@ -580,14 +580,34 @@ pub(crate) fn verify_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
 /// Cache env vars for task-run Pods. The target dir is private to the canonical
 /// task run id, not the generated Kubernetes resource name, so task Pods avoid
 /// the shared Cargo build-dir lock while preserving the warm per-project base as
-/// a read-only seed source. Shared cache settings remain identical to
-/// warm/verification Pods.
+/// a read-only seed source.
+///
+/// Unlike warm/verification (one-shot, sccache + `CARGO_INCREMENTAL=0`), a
+/// task-run is an ITERATIVE worker loop: the agent edits a crate and re-runs
+/// `cargo check`/`clippy`/`test` many times. Incremental compilation is the right
+/// tool there — it recompiles only changed codegen units (seconds) instead of a
+/// full crate rebuild (~9min for a large crate like `djinn-agent`) every edit.
+/// We therefore force `CARGO_INCREMENTAL=1` and disable the sccache wrapper
+/// (`RUSTC_WRAPPER=""`) here — repos that pin `rustc-wrapper = "sccache"` in
+/// `.cargo/config.toml` (djinn does) otherwise crash with "incremental
+/// compilation is prohibited", which previously forced workers to disable
+/// sccache by hand and get NEITHER cache (cold full rebuilds every iteration).
+/// Safe vs the shared base: the warm base is built `CARGO_INCREMENTAL=0` so it
+/// carries no `incremental/` dir to hardlink — the run dir's incremental state is
+/// born fresh and private, so a worker's incremental writes can't corrupt the
+/// shared base. The seeded `.rlib`/`.rmeta` deps stay Fresh (cargo never mutates
+/// them in place). sccache reuse is moot here anyway: a crate the worker is
+/// editing is always a cache miss.
 fn task_run_cache_env_vars(project_id: &str, task_run_id: &str) -> Vec<EnvVar> {
     let mut env = common_cache_env_vars(project_id);
     env.push(env_var(
         "CARGO_TARGET_DIR",
         &cargo_target_run_dir(task_run_id).display().to_string(),
     ));
+    env.push(env_var("CARGO_INCREMENTAL", "1"));
+    // Override any `.cargo/config.toml` `rustc-wrapper = "sccache"`: sccache
+    // forbids incremental, and the iterative loop wants incremental.
+    env.push(env_var("RUSTC_WRAPPER", ""));
     env
 }
 
@@ -1052,6 +1072,16 @@ mod tests {
             envs.get("SQLX_OFFLINE").copied(),
             Some("true"),
             "build-in-pod has no DB; sqlx macros must use the committed .sqlx cache"
+        );
+        assert_eq!(
+            envs.get("CARGO_INCREMENTAL").copied(),
+            Some("1"),
+            "task-runs use incremental compilation for the iterative worker edit/compile loop"
+        );
+        assert_eq!(
+            envs.get("RUSTC_WRAPPER").copied(),
+            Some(""),
+            "task-runs disable the sccache wrapper (sccache forbids incremental)"
         );
     }
 
