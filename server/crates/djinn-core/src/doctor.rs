@@ -45,6 +45,33 @@ use thiserror::Error;
 
 pub mod checks;
 
+// Re-export the six `djinn-core` seed-check structs and their
+// canonical name constants so callers can reach them through the
+// framework module's top-level path (`djinn_core::doctor::Foo`) instead
+// of having to thread through the nested `checks::*` namespaces.
+//
+// The `djinn-agent`-side `live_mover_predicate` check is exported from
+// `djinn_agent::doctor` and is registered via
+// `djinn_agent::doctor::register_doctor_checks`; see the cross-crate
+// bridge section below.
+pub use checks::disposition::{
+    DEFER_FOREVER_DEFAULT_THRESHOLD_HOURS, DEFER_FOREVER_NAME, DISPOSITION_ORPHAN_NAME,
+    DeferForeverCheck, DispositionDb, DispositionOrphanCheck, TaskDispositionRow,
+};
+pub use checks::k8s::{
+    K8sJobListing, K8sLeakInputs, K8sLeakOutputs, K8sLeakReason, TaskRunK8sLeakCheck, TaskRunRow,
+};
+pub use checks::sessions::{
+    ForceCloseCheckDb, ForceCloseOrphanInputs, ForceCloseOrphanOutputs, ForceCloseOrphanReason,
+    ForceCloseOrphanSessionCheck, ForceCloseOrphanSessionRow, SessionRow,
+    SlotRow as SessionSlotRow, ZombieReason, ZombieRunningSessionCheck, ZombieSessionInputs,
+    ZombieSessionOutputs,
+};
+pub use checks::slots::{
+    DivergenceKind, SlotDivergenceInputs, SlotDivergenceOutputs, SlotPoolDivergenceCheck,
+    SlotRow as SlotsSlotRow,
+};
+
 /// Errors that a [`DoctorCheck`] can surface from `run` or `fix`.
 #[derive(Debug, Error)]
 pub enum DoctorError {
@@ -554,6 +581,28 @@ pub fn register_default_checks(_registry: &DoctorRegistry) {
     // so the caller is responsible for instantiating them.
 }
 
+/// The canonical names of the seven seed checks defined by the
+/// `Doctor: implement at least 6 seed checks from the incident list`
+/// epic (the six pure-core checks plus the agent-side
+/// `live_mover_predicate`).
+///
+/// Returned in the same stable, alphabetical order that the registry
+/// uses internally. This is a discoverable name list — the live
+/// `DoctorRegistry` may carry additional checks added by future
+/// epics; this list is the contract for the seven checks Wave 1
+/// committed to.
+pub fn seed_check_names() -> &'static [&'static str] {
+    &[
+        "defer_forever",
+        "disposition_orphan",
+        "force_close_orphan_session",
+        "live_mover_predicate",
+        "slot_pool_divergence",
+        "task_run_k8s_leak",
+        "zombie_running_session",
+    ]
+}
+
 /// Run a subset of registered checks and return their findings.
 ///
 /// * `check_names == None` — run every registered check.
@@ -619,6 +668,29 @@ mod tests {
 
     // T5 seed-check smoke test (lives at `doctor::tests::smoke`).
     mod smoke;
+
+    #[test]
+    fn seed_check_names_lists_seven_distinct_seed_checks_alphabetically() {
+        let names = seed_check_names();
+        assert_eq!(
+            names.len(),
+            7,
+            "expected exactly 7 seed check names (6 djinn-core + 1 djinn-agent), got {names:?}"
+        );
+        let expected = [
+            "defer_forever",
+            "disposition_orphan",
+            "force_close_orphan_session",
+            "live_mover_predicate",
+            "slot_pool_divergence",
+            "task_run_k8s_leak",
+            "zombie_running_session",
+        ];
+        assert_eq!(
+            *names, expected,
+            "seed check names must be stable and alphabetical"
+        );
+    }
 
     // -------------------------------------------------------------------
     // Sample shared-resolver check

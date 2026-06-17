@@ -23,6 +23,23 @@
 //!
 //! # Cross-crate design (decision log)
 //!
+//! T5 considered two options for the cross-crate registration bridge:
+//!
+//! - **Option 1 (chosen)**: `djinn-core::doctor` exposes a `DoctorRegistry`
+//!   type with `register(Arc<dyn DoctorCheck>)` and a `doctor_run(...)`
+//!   helper. `djinn-agent` registers its check via
+//!   `djinn_agent::doctor::register_doctor_checks(reg, source)`. The
+//!   control-plane wiring (`wo75` or its final-fix PR) calls both
+//!   `djinn_core::doctor::register_default_checks(reg)` (no-op; see the
+//!   docs on that function) and
+//!   `djinn_agent::doctor::register_doctor_checks(reg, source)` to
+//!   populate the registry before running.
+//! - **Option 2 (rejected)**: a single global `inventory`-style collect.
+//!   Less code, but more magic. Not adopted because the framework
+//!   registry is already an explicit, hand-rolled static — keeping
+//!   registration explicit preserves the `wo75`-style wired-init point
+//!   and the testability of `DoctorRegistry::new` in unit tests.
+//!
 //! The seed-check suite spans two crates: `djinn-core::doctor::checks`
 //! owns the six pure-core checks, and `djinn-agent::doctor::live_mover`
 //! owns `live_mover_predicate`. The framework registry lives in
