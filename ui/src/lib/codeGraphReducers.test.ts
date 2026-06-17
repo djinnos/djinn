@@ -216,6 +216,181 @@ describe("nodeReducer", () => {
     const outHi = nodeReducer("b", { color: "blue", size: 4 }, hi);
     expect(outLo.color).not.toBe(outHi.color);
   });
+
+  // Iter y3mf: zoom-adaptive PageRank-percentile label gate. The
+  // helper `shouldLabelAtZoom` lives in `./codeGraphLabels` and is
+  // exhaustively covered by `codeGraphLabels.test.ts`; these tests
+  // only assert that the reducer plumbs the view fields into the
+  // helper and strips `label` when the helper returns `false`.
+  it("strips label on a low-percentile node when zoomed out", () => {
+    const v = viewWith({
+      // Top 10% only at ZOOM_FAR → percentile 0.5 falls off.
+      pagerankPercentile: new Map([["mid", 0.5]]),
+      cameraRatio: 0.05,
+    });
+    const out = nodeReducer(
+      "mid",
+      { color: "blue", size: 4, label: "MidRankNode" },
+      v,
+    );
+    expect(out.label).toBeUndefined();
+  });
+
+  it("keeps the label on a high-percentile node at the same zoom", () => {
+    const v = viewWith({
+      pagerankPercentile: new Map([["top", 0.95]]),
+      cameraRatio: 0.05,
+    });
+    const out = nodeReducer(
+      "top",
+      { color: "blue", size: 4, label: "TopRankNode" },
+      v,
+    );
+    expect(out.label).toBe("TopRankNode");
+  });
+
+  it("relabels a mid-percentile node once the camera zooms in", () => {
+    const midView = viewWith({
+      pagerankPercentile: new Map([["mid", 0.5]]),
+      cameraRatio: 0.05,
+    });
+    const nearView = viewWith({
+      pagerankPercentile: new Map([["mid", 0.5]]),
+      cameraRatio: 2.0,
+    });
+    expect(
+      nodeReducer("mid", { color: "blue", size: 4, label: "Mid" }, midView)
+        .label,
+    ).toBeUndefined();
+    expect(
+      nodeReducer("mid", { color: "blue", size: 4, label: "Mid" }, nearView)
+        .label,
+    ).toBe("Mid");
+  });
+
+  it("treats nodes absent from the percentile map as fully eligible", () => {
+    // Snapshot has no `pagerank` data → empty map; the helper falls
+    // through to `true` and the existing label is preserved.
+    const v = viewWith({
+      pagerankPercentile: new Map(),
+      cameraRatio: 0.05,
+    });
+    const out = nodeReducer(
+      "no_rank",
+      { color: "blue", size: 4, label: "NoRank" },
+      v,
+    );
+    expect(out.label).toBe("NoRank");
+  });
+
+  it("treats cameraRatio = Infinity as 'show everything'", () => {
+    // Sigma hasn't reported a camera yet; first paint shouldn't be
+    // empty even for low-percentile nodes.
+    const v = viewWith({
+      pagerankPercentile: new Map([["low", 0.1]]),
+      cameraRatio: Infinity,
+    });
+    const out = nodeReducer(
+      "low",
+      { color: "blue", size: 4, label: "Low" },
+      v,
+    );
+    expect(out.label).toBe("Low");
+  });
+
+  it("preserves the focus label even when the gate would strip it", () => {
+    // Focus-mode nodes have their own label-preserving override that
+    // re-asserts `attrs.label` on top of `baseAttrs`, so the gate
+    // stripping `label` on `baseAttrs` doesn't propagate to the final
+    // output. The focal click target should always carry its label
+    // regardless of zoom.
+    const v = viewWith({
+      selectionId: "sel",
+      selectionNeighbors: new Set(["sel"]),
+      pagerankPercentile: new Map([["sel", 0.05]]),
+      cameraRatio: 0.05,
+    });
+    const out = nodeReducer(
+      "sel",
+      { color: "blue", size: 4, label: "Sel" },
+      v,
+    );
+    expect(out.highlighted).toBe(true);
+    expect(out.label).toBe("Sel");
+  });
+
+  it("preserves the neighbor label even when the gate would strip it", () => {
+    // 1-hop neighbor of the selection. The neighbor branch re-asserts
+    // `attrs.label` so the gate's strip doesn't reach the final
+    // output. Color stays amber-200 (the highlight override).
+    const v = viewWith({
+      selectionId: "sel",
+      selectionNeighbors: new Set(["sel", "nbr"]),
+      pagerankPercentile: new Map([["nbr", 0.2]]),
+      cameraRatio: 0.05,
+    });
+    const out = nodeReducer("nbr", { color: "blue", size: 4, label: "Nbr" }, v);
+    expect(out.color).toBe("#fde68a");
+    expect(out.label).toBe("Nbr");
+  });
+
+  it("preserves the citation label even when the gate would strip it", () => {
+    const v = viewWith({
+      citationIds: new Set(["c"]),
+      pagerankPercentile: new Map([["c", 0.1]]),
+      cameraRatio: 0.05,
+    });
+    const out = nodeReducer("c", { color: "blue", size: 4, label: "Cite" }, v);
+    expect(out.color).toBe("#38bdf8");
+    expect(out.label).toBe("Cite");
+  });
+
+  it("preserves the tool label even when the gate would strip it", () => {
+    const v = viewWith({
+      toolHighlightIds: new Set(["t"]),
+      pagerankPercentile: new Map([["t", 0.1]]),
+      cameraRatio: 0.05,
+    });
+    const out = nodeReducer("t", { color: "blue", size: 4, label: "Tool" }, v);
+    expect(out.color).toBe("#a78bfa");
+    expect(out.label).toBe("Tool");
+  });
+
+  it("preserves the blast label even when the gate would strip it", () => {
+    const v = viewWith({
+      blastRadiusFrontier: new Set(["b"]),
+      pagerankPercentile: new Map([["b", 0.1]]),
+      cameraRatio: 0.05,
+    });
+    const out = nodeReducer("b", { color: "blue", size: 4, label: "Blast" }, v);
+    expect(out.label).toBe("Blast");
+  });
+
+  it("preserves the hover label even when the gate would strip it", () => {
+    const v = viewWith({
+      hoverId: "h",
+      pagerankPercentile: new Map([["h", 0.1]]),
+      cameraRatio: 0.05,
+    });
+    const out = nodeReducer("h", { color: "blue", size: 4, label: "Hov" }, v);
+    expect(out.label).toBe("Hov");
+  });
+
+  it("dim branch still strips label at far zoom", () => {
+    // The `dim` branch overrides `label: undefined` itself, so a
+    // dimmed node at low zoom is label-stripped regardless of the
+    // gate. The gate's contribution is moot — but verifying the
+    // "doubly label-stripped" comment in the design.
+    const v = viewWith({
+      selectionId: "sel",
+      selectionNeighbors: new Set(["sel"]),
+      pagerankPercentile: new Map([["z", 0.1]]),
+      cameraRatio: 0.05,
+    });
+    const out = nodeReducer("z", { color: "blue", size: 4, label: "Z" }, v);
+    expect(out.color).toMatch(/rgba/);
+    expect(out.label).toBeUndefined();
+  });
 });
 
 describe("edgeReducer", () => {

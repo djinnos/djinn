@@ -23,6 +23,8 @@
  * untouched.
  */
 
+import { shouldLabelAtZoom } from "./codeGraphLabels";
+
 /**
  * Mirror of graphology's `Attributes` shape — graphology-types isn't
  * a direct dependency in this repo, so we widen-locally rather than
@@ -78,6 +80,19 @@ export interface HighlightView {
    * set when complexity data is unavailable.
    */
   complexityHaloIds: ReadonlySet<string>;
+  /**
+   * Iter y3mf: per-snapshot PageRank percentile map (id → [0, 1]).
+   * Empty when no nodes carry a `pagerank` attribute (older caches,
+   * fixtures). Drives the zoom-adaptive label-density gate.
+   */
+  pagerankPercentile: ReadonlyMap<string, number>;
+  /**
+   * Iter y3mf: current Sigma camera ratio (1.0 ≈ fit-to-frame).
+   * `Infinity` is the sentinel for "Sigma not yet bound" → first paint
+   * shows every label. Plumbed in by `useGraphReducers` from
+   * `SigmaInstanceHandle.getCameraRatio()`.
+   */
+  cameraRatio: number;
 }
 
 /** Bitset-style flag describing which highlight layer wins for a node. */
@@ -108,6 +123,8 @@ export const EMPTY_HIGHLIGHT_VIEW: HighlightView = {
   colorMode: "topology",
   complexityThresholds: null,
   complexityHaloIds: new Set<string>(),
+  pagerankPercentile: new Map<string, number>(),
+  cameraRatio: Infinity,
 };
 
 /**
@@ -281,6 +298,23 @@ export function nodeReducer(
     };
   }
 
+  // Iter y3mf: zoom-adaptive PageRank-percentile label gate. The
+  // decision helper is pure; `cameraRatio` is plumbed in from
+  // `useGraphReducers` via the HighlightView. Workspace-context nodes
+  // are already de-emphasized to `label: undefined` above, so this
+  // gate is a no-op for them. Highlight-mode branches
+  // (`focus` / `neighbor` / `citation` / ...) set their own labels on
+  // top of `baseAttrs`, so a selected/focused node always keeps its
+  // label regardless of zoom. The `dim` branch already strips
+  // `label`, so a dimmed node at low zoom is doubly label-stripped
+  // (still correct, no double-strip needed).
+  if (baseAttrs.label !== undefined) {
+    const percentile = view.pagerankPercentile.get(nodeId);
+    if (!shouldLabelAtZoom(percentile, view.cameraRatio)) {
+      baseAttrs = { ...baseAttrs, label: undefined };
+    }
+  }
+
   const mode = pickHighlightMode(nodeId, view);
   if (mode === "none") return baseAttrs;
 
@@ -290,6 +324,11 @@ export function nodeReducer(
         ...baseAttrs,
         color: COLOR_FOCUS,
         size: attrSize(attrs, 6) * 1.6,
+        // Preserve the original label even when the gate above
+        // stripped it — a selected/focused node should always carry
+        // its label regardless of zoom, otherwise the focal click
+        // target has no readable identifier at far-zoom.
+        label: attrs.label,
         zIndex: 100,
         highlighted: true,
       };
@@ -298,6 +337,7 @@ export function nodeReducer(
         ...baseAttrs,
         color: COLOR_NEIGHBOR,
         size: attrSize(attrs, 6) * 1.15,
+        label: attrs.label,
         zIndex: 60,
         highlighted: true,
       };
@@ -306,6 +346,7 @@ export function nodeReducer(
         ...baseAttrs,
         color: COLOR_CITATION,
         size: attrSize(attrs, 6) * 1.2,
+        label: attrs.label,
         zIndex: 80,
         highlighted: true,
       };
@@ -314,6 +355,7 @@ export function nodeReducer(
         ...baseAttrs,
         color: COLOR_TOOL,
         size: attrSize(attrs, 6) * 1.15,
+        label: attrs.label,
         zIndex: 70,
         highlighted: true,
       };
@@ -328,6 +370,7 @@ export function nodeReducer(
         ...baseAttrs,
         color: lerpHex(COLOR_BLAST_LO, COLOR_BLAST_HI, t),
         size: attrSize(attrs, 6) * (1.1 + 0.25 * t),
+        label: attrs.label,
         zIndex: 90,
         highlighted: true,
       };
@@ -337,6 +380,7 @@ export function nodeReducer(
         ...baseAttrs,
         color: COLOR_HOVER,
         size: attrSize(attrs, 6) * 1.15,
+        label: attrs.label,
         zIndex: 50,
         highlighted: true,
       };
