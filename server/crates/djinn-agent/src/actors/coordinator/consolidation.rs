@@ -97,6 +97,7 @@ async fn consolidate_clusters(
 
     let mut consolidated_note_count = 0_i64;
     let mut source_note_count = 0_i64;
+    let mut superseded_source_note_count = 0_i64;
 
     for cluster in qualifying_clusters.iter().copied() {
         let source_session_ids = repo
@@ -108,22 +109,25 @@ async fn consolidate_clusters(
             .collect::<Vec<_>>();
         let synthesized = synthesize_cluster(cluster);
 
-        repo.create_canonical_consolidated_note(CreateCanonicalConsolidatedNote {
-            project_id: &group.project_id,
-            note_type: &group.note_type,
-            title: &synthesized.title,
-            content: &synthesized.content,
-            tags: CONSOLIDATION_TAGS,
-            abstract_: synthesized.abstract_.as_deref(),
-            overview: synthesized.overview.as_deref(),
-            confidence: synthesized.confidence,
-            source_session_ids: &source_session_refs,
-            scope_paths: &synthesized.scope_paths,
-        })
-        .await?;
+        let created = repo
+            .create_canonical_consolidated_note(CreateCanonicalConsolidatedNote {
+                project_id: &group.project_id,
+                note_type: &group.note_type,
+                title: &synthesized.title,
+                content: &synthesized.content,
+                tags: CONSOLIDATION_TAGS,
+                abstract_: synthesized.abstract_.as_deref(),
+                overview: synthesized.overview.as_deref(),
+                confidence: synthesized.confidence,
+                source_session_ids: &source_session_refs,
+                scope_paths: &synthesized.scope_paths,
+                source_note_ids: &cluster.note_ids,
+            })
+            .await?;
 
         consolidated_note_count += 1;
         source_note_count += cluster.note_ids.len() as i64;
+        superseded_source_note_count += created.superseded_source_note_count as i64;
     }
 
     let completed_at = now_rfc3339();
@@ -136,6 +140,7 @@ async fn consolidate_clusters(
         consolidated_cluster_count: qualifying_clusters.len() as i64,
         consolidated_note_count,
         source_note_count,
+        superseded_source_note_count,
         started_at,
         completed_at: Some(&completed_at),
         error_message: None,
