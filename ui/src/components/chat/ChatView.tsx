@@ -9,6 +9,7 @@ import { toast } from '@/lib/toast';
 import { useChatStore, type ChatAttachment, type ChatMessage } from '@/stores/chatStore';
 import { useCodeGraphStore } from '@/stores/codeGraphStore';
 import { useIsAllProjects, useSelectedProject } from '@/stores/useProjectStore';
+import { useChatToolCallHarvest } from '@/hooks/useChatToolCallHarvest';
 import { ChatMessageBubble } from './ChatMessageBubble';
 import { ChatInput } from './ChatInput';
 import { ChatEmptyState } from './ChatEmptyState';
@@ -61,6 +62,12 @@ export function ChatView() {
   const thinkingStartTime = useChatStore((state) =>
     state.activeSessionId ? state.thinkingStartTimeBySession[state.activeSessionId] ?? null : null
   );
+
+  // D5 producer: harvest `code_graph` tool-call results out of finished
+  // assistant messages and feed the resolved symbol ids into the
+  // `codeGraphStore.citationIds` highlight layer. Mounted at the
+  // ChatView level so it survives message-list re-renders.
+  useChatToolCallHarvest({ projectSlug });
 
   const [abortController, setAbortController] = useState<AbortController | null>(null);
   type StreamingToolCall = { name: string; input?: unknown };
