@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- LARGE_GRAPH_THRESHOLD and shouldFallbackToCommunity are exported for focused unit tests. */
 /**
  * CodeGraphCanvas — main view: fetch → adapt → render → interact.
  *
@@ -21,7 +22,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ConnectIcon, AlertCircleIcon, RefreshIcon } from "@hugeicons/core-free-icons";
 
-import { fetchSnapshot } from "@/api/codeGraph";
+import { fetchSnapshot, type SnapshotLevel } from "@/api/codeGraph";
 import {
   buildGraphFromSnapshot,
   filterSnapshotForWorkspace,
@@ -40,7 +41,41 @@ import { cn } from "@/lib/utils";
 type FetchState =
   | { status: "loading" }
   | { status: "error"; error: string }
-  | { status: "ready"; snapshot: SnapshotPayload };
+  | {
+      status: "ready";
+      snapshot: SnapshotPayload;
+      /** Semantic-zoom level that produced this snapshot. */
+      level: SnapshotLevel;
+    };
+
+/**
+ * Auto-semantic-zoom threshold. When `semanticZoomMode === "auto"`, the
+ * canvas starts with a symbol-level fetch; if the snapshot reports
+ * `truncated === true`, `total_nodes >= LARGE_GRAPH_THRESHOLD`, or
+ * `total_nodes > nodeCap`, it refetches the same project at
+ * `level="community"` so the user sees a handful of legible blobs
+ * instead of a truncated 10k-node graph. The value sits just below the
+ * server's default cap (10,000) so the collapse happens precisely when
+ * the user would otherwise hit the cap.
+ */
+export const LARGE_GRAPH_THRESHOLD = 8_000;
+
+/**
+ * Decide whether an initial symbol-level snapshot warrants a community
+ * fallback. Kept as a pure exported helper so focused tests can pin the
+ * boundary without rendering the canvas.
+ */
+export function shouldFallbackToCommunity(
+  snapshot: SnapshotPayload,
+  nodeCap: number,
+  threshold: number = LARGE_GRAPH_THRESHOLD,
+): boolean {
+  return (
+    snapshot.truncated ||
+    snapshot.total_nodes >= threshold ||
+    snapshot.total_nodes > nodeCap
+  );
+}
 
 interface CodeGraphCanvasProps {
   projectId: string;
@@ -73,16 +108,26 @@ export function CodeGraphCanvas({
   const selectedWorkspaceSlug = useCodeGraphStore(
     (s) => s.selectedWorkspaceSlug,
   );
+  const semanticZoomMode = useCodeGraphStore((s) => s.semanticZoomMode);
 
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading" });
 
+    // Pick the *initial* fetch level from the toolbar mode.
+    //   - "community" → always start at community level
+    //   - "symbol"    → always start at symbol level
+    //   - "auto"      → start at symbol level, then conditionally
+    //                   refetch at community level when the snapshot
+    //                   is truncated or over the large-graph threshold.
+    const initialLevel: SnapshotLevel =
+      semanticZoomMode === "community" ? "community" : "symbol";
+
     (async () => {
       try {
-        const raw = await fetchSnapshot(projectId, nodeCap);
+        const raw = await fetchSnapshot(projectId, nodeCap, initialLevel);
         if (cancelled) return;
-        const snapshot = parseSnapshotResponse(raw);
+        let snapshot = parseSnapshotResponse(raw);
         if (!snapshot) {
           setState({
             status: "error",
@@ -91,7 +136,32 @@ export function CodeGraphCanvas({
           });
           return;
         }
-        setState({ status: "ready", snapshot });
+        let level = initialLevel;
+
+        // Auto mode: if the symbol snapshot was truncated / capped,
+        // refetch at community level so the user sees legible blobs
+        // rather than an incomplete 10k-node graph. Only symbol-starts
+        // can fall back; forced modes never change level.
+        if (
+          semanticZoomMode === "auto" &&
+          level === "symbol" &&
+          shouldFallbackToCommunity(snapshot, nodeCap)
+        ) {
+          const communityRaw = await fetchSnapshot(
+            projectId,
+            nodeCap,
+            "community",
+          );
+          if (cancelled) return;
+          const communitySnapshot = parseSnapshotResponse(communityRaw);
+          if (communitySnapshot) {
+            snapshot = communitySnapshot;
+            level = "community";
+          }
+        }
+
+        if (cancelled) return;
+        setState({ status: "ready", snapshot, level });
       } catch (err) {
         if (cancelled) return;
         setState({
@@ -104,7 +174,10 @@ export function CodeGraphCanvas({
     return () => {
       cancelled = true;
     };
-  }, [projectId, nodeCap, reloadKey]);
+  }, [projectId, nodeCap, reloadKey, semanticZoomMode]);
+
+  const effectiveLevel: SnapshotLevel =
+    state.status === "ready" ? state.level : "symbol";
 
   const visibleSnapshot = useMemo(() => {
     if (state.status !== "ready") return null;
@@ -193,7 +266,11 @@ export function CodeGraphCanvas({
         className="absolute inset-0"
         style={{ cursor: "grab" }}
       />
-      <CanvasOverlay state={state} visibleSnapshot={visibleSnapshot} />
+      <CanvasOverlay
+        state={state}
+        visibleSnapshot={visibleSnapshot}
+        level={effectiveLevel}
+      />
       {layoutRunning && visibleSnapshot?.nodes.length ? (
         <LayoutOptimizingPill />
       ) : null}
@@ -309,9 +386,15 @@ function CitationStatusBadge() {
 interface CanvasOverlayProps {
   state: FetchState;
   visibleSnapshot: SnapshotPayload | null;
+  /** Effective semantic-zoom level that produced the rendered snapshot. */
+  level: SnapshotLevel;
 }
 
-function CanvasOverlay({ state, visibleSnapshot }: CanvasOverlayProps) {
+function CanvasOverlay({
+  state,
+  visibleSnapshot,
+  level,
+}: CanvasOverlayProps) {
   if (state.status === "loading") {
     return (
       <CenterCard>
@@ -353,6 +436,9 @@ function CanvasOverlay({ state, visibleSnapshot }: CanvasOverlayProps) {
 
   return (
     <div className="pointer-events-none absolute left-3 top-3 flex flex-col gap-1.5">
+      <Pill data-testid="semantic-zoom-level">
+        {level === "community" ? "Community view" : "Symbol view"}
+      </Pill>
       <Pill>
         {snapshot.nodes.length.toLocaleString()} nodes
         {snapshot.truncated && (
