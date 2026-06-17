@@ -2994,12 +2994,14 @@ export namespace MemoryGraphOutputSchema {
    * A knowledge graph node (note with connection metadata).
    */
   export interface GraphNode {
+  broken_targets?: string[]
   /**
    * Total resolved edges incident to this node (inbound + outbound).
    */
   connection_count: number
   folder: string
   id: string
+  is_orphan?: boolean
   note_type: string
   permalink: string
   title: string
