@@ -613,9 +613,7 @@ async fn upsert_typed_association_writes_each_widened_kind() {
             .get_association_kind(&a, &b)
             .await
             .unwrap()
-            .unwrap_or_else(|| {
-                panic!("expected {kind_str} edge", kind_str = expected_kind_str)
-            });
+            .unwrap_or_else(|| panic!("expected {kind_str} edge", kind_str = expected_kind_str));
         assert_eq!(got_kind, *expected_kind_str, "kind mismatch for {kind:?}");
         assert!(
             (got_weight - *weight).abs() < 1e-12,
