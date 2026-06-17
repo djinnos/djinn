@@ -77,6 +77,7 @@ pub mod helpers;
 // and worktree orchestration have been deleted.
 pub(crate) mod lifecycle;
 pub(crate) mod llm_extraction;
+pub(crate) mod memory_enrichment;
 mod pool;
 pub(crate) mod reply_loop;
 #[cfg(test)]
