@@ -247,6 +247,31 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         streaming: true,
         max_tokens_default: Some(64_000),
     },
+    // Anthropic-compatible. Present in models.dev (`kimi-coding-plan`, "Kimi
+    // Coding Plan") with the Anthropic-compatible Kimi Code subscription
+    // endpoint + the `kimi-for-coding` model; listed here so the env-var
+    // bootstrap upserts KIMI_API_KEY into the vault. The subscription key
+    // authenticates via `Authorization: Bearer <key>` (NOT the Anthropic-native
+    // `x-api-key` path). The base_url is the Kimi Code coding endpoint
+    // (`https://api.kimi.com/coding/v1`), NOT the api.moonshot.ai pay-as-you-go
+    // API. NOTE: `kimi-for-coding` only routes to the newest K2.7 Code when
+    // Thinking/reasoning is enabled (otherwise it silently falls back to K2.6);
+    // the model is marked `reasoning: true` in snapshot.json, so the shared
+    // `default_reasoning_effort_for_model` policy auto-enables thinking for the
+    // Anthropic format family (reasoning_effort = Some(Medium)).
+    BuiltinProvider {
+        id: "kimi-coding-plan",
+        display_name: "Kimi Coding Plan",
+        required_env_vars: &["KIMI_API_KEY"],
+        oauth_keys: &[],
+        docs_url: "https://www.kimi.com/code/docs",
+        merge_into: None,
+        auth_only: false,
+        format_rule: FormatRule::Fixed(FormatFamily::Anthropic),
+        auth_shape: AuthShape::Bearer,
+        streaming: true,
+        max_tokens_default: Some(64_000),
+    },
     // OpenAI-compatible. Present in models.dev (`opencode`, "OpenCode Zen") with
     // base_url https://opencode.ai/zen/v1 + model list (including the rotating
     // `*-free` models); listed here so the env-var bootstrap upserts

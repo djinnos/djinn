@@ -1549,6 +1549,13 @@ mod tests {
                 max_tokens_default: Some(64_000),
             },
             Expected {
+                id: "kimi-coding-plan",
+                fixed_family: Some(FormatFamily::Anthropic),
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: Some(64_000),
+            },
+            Expected {
                 id: "opencode",
                 fixed_family: Some(FormatFamily::OpenAI),
                 auth_shape: AuthShape::Bearer,
