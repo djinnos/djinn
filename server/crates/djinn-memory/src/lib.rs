@@ -27,4 +27,4 @@ pub use note::{
     NoteDedupCandidate, NoteOverview, NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
     TypeRisk,
 };
-pub use note_association::{NoteAssociation, canonical_pair};
+pub use note_association::{NoteAssociation, association_kind, canonical_pair};

@@ -22,6 +22,7 @@ pub struct CreateConsolidationRunMetric<'a> {
     pub consolidated_cluster_count: i64,
     pub consolidated_note_count: i64,
     pub source_note_count: i64,
+    pub superseded_source_note_count: i64,
     pub started_at: &'a str,
     pub completed_at: Option<&'a str>,
     pub error_message: Option<&'a str>,
@@ -38,11 +39,39 @@ pub struct CreateCanonicalConsolidatedNote<'a> {
     pub confidence: f64,
     pub source_session_ids: &'a [&'a str],
     pub scope_paths: &'a str,
+    /// Cluster source note ids that the canonical note supersedes.
+    ///
+    /// When provided, a `kind = 'supersedes'` edge is recorded from the
+    /// canonical note to each source id after the canonical is created.
+    /// Legacy callers may pass `&[]` (or omit the field via `..Default::default()`)
+    /// to preserve the old behavior — no edges recorded, no error.
+    pub source_note_ids: &'a [String],
+}
+
+impl<'a> Default for CreateCanonicalConsolidatedNote<'a> {
+    fn default() -> Self {
+        Self {
+            project_id: "",
+            note_type: "",
+            title: "",
+            content: "",
+            tags: "[]",
+            abstract_: None,
+            overview: None,
+            confidence: 0.0,
+            source_session_ids: &[],
+            scope_paths: "[]",
+            source_note_ids: &[],
+        }
+    }
 }
 
 pub struct CreatedCanonicalConsolidatedNote {
     pub note: Note,
     pub provenance: Vec<ConsolidatedNoteProvenance>,
+    /// Number of `supersedes` edges recorded in this call. Zero when
+    /// `source_note_ids` is empty (legacy callers).
+    pub superseded_source_note_count: usize,
 }
 
 pub struct NoteConsolidationRepository {
@@ -210,6 +239,7 @@ impl NoteConsolidationRepository {
             confidence,
             source_session_ids,
             scope_paths,
+            source_note_ids,
         } = params;
 
         for session_id in source_session_ids {
@@ -249,11 +279,26 @@ impl NoteConsolidationRepository {
             provenance.push(self.add_provenance(&created.id, session_id).await?);
         }
 
+        // Record a `supersedes` edge from the canonical note to each source
+        // note id. Legacy callers pass an empty slice, in which case no edges
+        // are recorded and the count is zero.
+        let mut superseded_source_note_count = 0usize;
+        for source_id in source_note_ids {
+            note_repo
+                .record_supersedes(&created.id, source_id, 1.0)
+                .await?;
+            superseded_source_note_count += 1;
+        }
+
         let note = note_select_where_id!(&created.id)
             .fetch_one(self.db.pool())
             .await?;
 
-        Ok(CreatedCanonicalConsolidatedNote { note, provenance })
+        Ok(CreatedCanonicalConsolidatedNote {
+            note,
+            provenance,
+            superseded_source_note_count,
+        })
     }
 
     pub async fn resolve_source_session_ids(
@@ -519,26 +564,32 @@ impl NoteConsolidationRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
 
-        sqlx::query!(
+        // Runtime (non-macro) query: the `superseded_source_note_count` column
+        // is added by migration 63 and is not yet present in the offline `.sqlx`
+        // cache, so a compile-checked `query!` would fail under
+        // `SQLX_OFFLINE=true`.
+        sqlx::query(
             "INSERT INTO consolidation_run_metrics (
                 id, project_id, status, note_type,
                 scanned_note_count, candidate_cluster_count,
                 consolidated_cluster_count, consolidated_note_count,
-                source_note_count, started_at, completed_at, error_message
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-            id,
-            params.project_id,
-            params.status,
-            params.note_type,
-            params.scanned_note_count,
-            params.candidate_cluster_count,
-            params.consolidated_cluster_count,
-            params.consolidated_note_count,
-            params.source_note_count,
-            params.started_at,
-            params.completed_at,
-            params.error_message
+                source_note_count, superseded_source_note_count,
+                started_at, completed_at, error_message
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
+        .bind(&id)
+        .bind(params.project_id)
+        .bind(params.status)
+        .bind(params.note_type)
+        .bind(params.scanned_note_count)
+        .bind(params.candidate_cluster_count)
+        .bind(params.consolidated_cluster_count)
+        .bind(params.consolidated_note_count)
+        .bind(params.source_note_count)
+        .bind(params.superseded_source_note_count)
+        .bind(params.started_at)
+        .bind(params.completed_at)
+        .bind(params.error_message)
         .execute(self.db.pool())
         .await?;
 
@@ -555,25 +606,27 @@ impl NoteConsolidationRepository {
         let note_type = note_type.unwrap_or("");
         let limit = limit as i64;
 
-        sqlx::query_as!(
-            ConsolidationRunMetric,
-            r#"SELECT id, project_id, note_type, status AS "status!",
-                    CAST(scanned_note_count AS BIGINT) AS "scanned_note_count!: i64",
-                    CAST(candidate_cluster_count AS BIGINT) AS "candidate_cluster_count!: i64",
-                    CAST(consolidated_cluster_count AS BIGINT) AS "consolidated_cluster_count!: i64",
-                    CAST(consolidated_note_count AS BIGINT) AS "consolidated_note_count!: i64",
-                    CAST(source_note_count AS BIGINT) AS "source_note_count!: i64",
+        // NOTE: dynamic SQL — compile-time check not possible (new column not in
+        // offline cache + runtime note_type filter pattern).
+        sqlx::query_as::<_, ConsolidationRunMetric>(
+            r#"SELECT id, project_id, note_type, status,
+                    CAST(scanned_note_count AS BIGINT) AS scanned_note_count,
+                    CAST(candidate_cluster_count AS BIGINT) AS candidate_cluster_count,
+                    CAST(consolidated_cluster_count AS BIGINT) AS consolidated_cluster_count,
+                    CAST(consolidated_note_count AS BIGINT) AS consolidated_note_count,
+                    CAST(source_note_count AS BIGINT) AS source_note_count,
+                    CAST(superseded_source_note_count AS BIGINT) AS superseded_source_note_count,
                     started_at, completed_at, error_message
              FROM consolidation_run_metrics
              WHERE project_id = $1
                AND ($2 = '' OR note_type = $3)
              ORDER BY started_at DESC, id DESC
              LIMIT $4"#,
-            project_id,
-            note_type,
-            note_type,
-            limit
         )
+        .bind(project_id)
+        .bind(note_type)
+        .bind(note_type)
+        .bind(limit)
         .fetch_all(self.db.pool())
         .await
         .map_err(Into::into)
@@ -607,19 +660,21 @@ impl NoteConsolidationRepository {
     async fn get_run_metric(&self, id: &str) -> Result<ConsolidationRunMetric> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query_as!(
-            ConsolidationRunMetric,
-            r#"SELECT id, project_id, note_type, status AS "status!",
-                    CAST(scanned_note_count AS BIGINT) AS "scanned_note_count!: i64",
-                    CAST(candidate_cluster_count AS BIGINT) AS "candidate_cluster_count!: i64",
-                    CAST(consolidated_cluster_count AS BIGINT) AS "consolidated_cluster_count!: i64",
-                    CAST(consolidated_note_count AS BIGINT) AS "consolidated_note_count!: i64",
-                    CAST(source_note_count AS BIGINT) AS "source_note_count!: i64",
+        // NOTE: dynamic SQL — compile-time check not possible (new column not in
+        // offline cache).
+        sqlx::query_as::<_, ConsolidationRunMetric>(
+            r#"SELECT id, project_id, note_type, status,
+                    CAST(scanned_note_count AS BIGINT) AS scanned_note_count,
+                    CAST(candidate_cluster_count AS BIGINT) AS candidate_cluster_count,
+                    CAST(consolidated_cluster_count AS BIGINT) AS consolidated_cluster_count,
+                    CAST(consolidated_note_count AS BIGINT) AS consolidated_note_count,
+                    CAST(source_note_count AS BIGINT) AS source_note_count,
+                    CAST(superseded_source_note_count AS BIGINT) AS superseded_source_note_count,
                     started_at, completed_at, error_message
              FROM consolidation_run_metrics
              WHERE id = $1"#,
-            id
         )
+        .bind(id)
         .fetch_one(self.db.pool())
         .await
         .map_err(|err| match err {
