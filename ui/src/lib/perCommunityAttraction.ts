@@ -202,11 +202,20 @@ function pullTowardCenter(
   return { x, y };
 }
 
+function isMetadataMap(
+  metadataByNode: PerCommunityAttractionMetadata,
+): metadataByNode is ReadonlyMap<
+  string,
+  PerCommunityAttractionNodeMetadata | null | undefined
+> {
+  return metadataByNode instanceof Map;
+}
+
 function getMetadata(
   metadataByNode: PerCommunityAttractionMetadata,
   nodeId: string,
 ): PerCommunityAttractionNodeMetadata | null | undefined {
-  if (metadataByNode instanceof Map) {
+  if (isMetadataMap(metadataByNode)) {
     return metadataByNode.get(nodeId);
   }
   return metadataByNode[nodeId];
