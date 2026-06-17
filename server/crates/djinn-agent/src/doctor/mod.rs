@@ -21,6 +21,7 @@
 
 pub mod leader_tick;
 pub mod live_mover;
+pub mod zombie_running_session;
 
 use std::sync::Arc;
 
