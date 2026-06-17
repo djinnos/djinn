@@ -39,6 +39,7 @@ import {
   type HighlightView,
   type MinimalGraph,
 } from "@/lib/codeGraphReducers";
+import { computePagerankPercentiles } from "@/lib/codeGraphLabels";
 import {
   DEFAULT_DEPTH,
   useCodeGraphStore,
@@ -145,6 +146,16 @@ export function useGraphReducers(
     return topComplexityIds(pairs, TOP_COMPLEXITY_HALO_N);
   }, [graph]);
 
+  // ── Iter y3mf: PageRank percentile map for zoom-adaptive labels ─────────
+  // Computed once per graph identity. When the snapshot has no
+  // `pagerank` data the map is empty and `shouldLabelAtZoom` falls
+  // through to its `true` sentinel — so existing LOD behavior is
+  // preserved for older caches / fixtures.
+  const pagerankPercentile = useMemo<ReadonlyMap<string, number>>(() => {
+    if (!graph) return new Map();
+    return computePagerankPercentiles(graph);
+  }, [graph]);
+
   // ── Lazy depth-N BFS frontier (memoized) ───────────────────────────────
   const depthReachable = useMemo<ReadonlySet<string> | null>(() => {
     // Default depth = "no filtering". Skipping the BFS entirely is
@@ -181,6 +192,13 @@ export function useGraphReducers(
       colorMode,
       complexityThresholds,
       complexityHaloIds,
+      pagerankPercentile,
+      // Preserve the live camera value so re-syncs (e.g. on
+      // selection change) don't clobber the post-render value the
+      // `afterRender` effect just pushed in. The two are kept
+      // orthogonal: the store-mirror effect owns graph-derived
+      // fields, the camera effect owns the lens.
+      cameraRatio: viewRef.current.cameraRatio,
     };
     sigma?.refresh();
   }, [
@@ -199,6 +217,7 @@ export function useGraphReducers(
     colorMode,
     complexityThresholds,
     complexityHaloIds,
+    pagerankPercentile,
   ]);
 
   // ── Pulse phase (animated only when blast frontier is non-empty) ──────
@@ -223,6 +242,29 @@ export function useGraphReducers(
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, [blastRadiusFrontier, sigma]);
+
+  // ── Iter y3mf: mirror Sigma's camera ratio into the view ──────────────
+  // Sigma emits `afterRender` on every frame (the same hook the
+  // `pulsePhase` rAF loop ultimately drives). We read the camera
+  // ratio post-mutation and only call `refresh()` when it actually
+  // changes — Sigma already knows to repaint via its own internal
+  // camera state, the `refresh()` here is for the
+  // `nodeReducer` re-running the percentile gate.
+  useEffect(() => {
+    if (!sigma) return;
+    const off = sigma.on("afterRender", () => {
+      try {
+        const ratio = sigma.getCameraRatio();
+        if (ratio !== viewRef.current.cameraRatio) {
+          viewRef.current = { ...viewRef.current, cameraRatio: ratio };
+          sigma.refresh();
+        }
+      } catch {
+        // unmount race — no-op
+      }
+    });
+    return off;
+  }, [sigma]);
 
   // ── Stable reducer pair — closures read `viewRef` so the latest
   //    slice always wins without us re-creating the fns on every render.
