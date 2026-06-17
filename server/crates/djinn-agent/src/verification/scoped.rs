@@ -148,12 +148,7 @@ fn git_diff_changed_files(worktree_path: &Path, target_branch: &str) -> Option<V
         .into_iter()
         .find(|r| {
             std::process::Command::new("git")
-                .args([
-                    "rev-parse",
-                    "--verify",
-                    "--quiet",
-                    &format!("{r}^{{commit}}"),
-                ])
+                .args(["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")])
                 .current_dir(worktree_path)
                 .output()
                 .map(|o| o.status.success())
