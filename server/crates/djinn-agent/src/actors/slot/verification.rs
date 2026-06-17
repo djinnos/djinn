@@ -164,6 +164,21 @@ where
 /// 6. Cleans up the worktree
 /// 7. Triggers redispatch for the project
 pub(crate) fn spawn_verification(task_id: String, project_path: String, app_state: AgentContext) {
+    spawn_verification_with_in_pod_run(task_id, project_path, app_state, None);
+}
+
+/// Like [`spawn_verification`] but carries the optional `verification_runs.id`
+/// of an IN-POD verification the worker already ran (and wrote terminal) before
+/// its Cargo target dir was torn down. When present, the Kubernetes path
+/// CONSUMES that row directly instead of dispatching a second verify Job — the
+/// double-compile fix. `None` (or a non-terminal in-pod row) falls through to
+/// the standalone verification path (the separate verify Job).
+pub(crate) fn spawn_verification_with_in_pod_run(
+    task_id: String,
+    project_path: String,
+    app_state: AgentContext,
+    in_pod_run_id: Option<String>,
+) {
     let pipeline_timeout = compute_pipeline_timeout();
     // Detach a tiny admission task first so durable administrative dispatch
     // pauses are checked before registering or spawning the host verification
@@ -223,11 +238,13 @@ pub(crate) fn spawn_verification(task_id: String, project_path: String, app_stat
         let task_id_for_pipeline = task_id.clone();
         let project_path_for_pipeline = project_path.clone();
         let app_state_for_pipeline = app_state.clone();
+        let in_pod_run_id_for_pipeline = in_pod_run_id.clone();
         let pipeline = async move {
             run_verification_pipeline(
                 &task_id_for_pipeline,
                 &project_path_for_pipeline,
                 &app_state_for_pipeline,
+                in_pod_run_id_for_pipeline,
             )
             .await
         };
@@ -269,6 +286,7 @@ async fn run_verification_pipeline(
     task_id: &str,
     _project_path: &str,
     app_state: &AgentContext,
+    in_pod_run_id: Option<String>,
 ) -> anyhow::Result<()> {
     let task = load_task(task_id, app_state).await?;
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -281,9 +299,19 @@ async fn run_verification_pipeline(
     // task branch's tree, with `/cache` shared, and poll its `verification_runs`
     // row. On non-Kubernetes runtimes (dev/test) we keep the inline host path so
     // unit tests and local dev still work.
+    //
+    // FAST PATH: the worker already ran the verification IN-POD (reusing its
+    // freshly compiled artifacts) and shipped the terminal `verification_runs`
+    // row id on its report. Consume that row directly — no second pod, no
+    // re-seed, no re-compile. Falls through to dispatching a Job (the unchanged
+    // fallback) when the in-pod row is missing / non-terminal.
     let result = match crate::runtime_bridge::runtime_kind() {
         crate::runtime_bridge::RuntimeKind::Kubernetes => {
-            run_verification_in_pod(&task, app_state).await?
+            match consume_in_pod_verification_run(&task, in_pod_run_id.as_deref(), app_state).await
+            {
+                Some(result) => result,
+                None => run_verification_in_pod(&task, app_state).await?,
+            }
         }
         crate::runtime_bridge::RuntimeKind::Test => {
             run_verification_on_host(&task, app_state).await?
@@ -685,6 +713,97 @@ async fn dispatch_verification_with_retry(
     {
         DispatchOutcome::Dispatched => Ok(()),
         DispatchOutcome::Error(msg) => anyhow::bail!(msg),
+    }
+}
+
+/// FAST PATH: consume a terminal `verification_runs` row the worker wrote
+/// IN-POD (right after committing, reusing its already-compiled Cargo target
+/// dir). Returns `Some(result)` only when:
+///   - a `run_id` was carried on the worker's report,
+///   - the row exists and belongs to THIS task (guards against a stale id from a
+///     prior cycle re-running against the wrong task), and
+///   - the row reached a terminal state (`passed` / `failed`).
+///
+/// An `error` row, a missing/non-terminal row, or a task-id mismatch returns
+/// `None`, so the caller falls back to dispatching the separate verify Job
+/// (the unchanged path) — never silently passing a task whose in-pod verify
+/// errored.
+async fn consume_in_pod_verification_run(
+    task: &djinn_core::models::Task,
+    in_pod_run_id: Option<&str>,
+    app_state: &AgentContext,
+) -> Option<crate::verification::service::VerificationResult> {
+    let run_id = in_pod_run_id?;
+    let run_repo = djinn_db::VerificationRunRepository::new(app_state.db.clone());
+    let run = match run_repo.get(run_id).await {
+        Ok(Some(run)) => run,
+        Ok(None) => {
+            tracing::warn!(
+                task_id = %task.short_id,
+                run_id,
+                "in-pod verification row missing; dispatching verify Job (fallback)"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task.short_id,
+                run_id,
+                error = %e,
+                "failed to read in-pod verification row; dispatching verify Job (fallback)"
+            );
+            return None;
+        }
+    };
+
+    if run.task_id != task.id {
+        tracing::warn!(
+            task_id = %task.short_id,
+            run_id,
+            row_task_id = %run.task_id,
+            "in-pod verification row belongs to a different task; dispatching verify Job (fallback)"
+        );
+        return None;
+    }
+
+    match run.status.as_str() {
+        djinn_db::VerificationRunStatus::PASSED | djinn_db::VerificationRunStatus::FAILED => {
+            let passed = run.status == djinn_db::VerificationRunStatus::PASSED;
+            let setup_results: Vec<djinn_core::commands::CommandResult> =
+                serde_json::from_str(&run.setup_results).unwrap_or_default();
+            let verification_results: Vec<djinn_core::commands::CommandResult> =
+                serde_json::from_str(&run.verification_results).unwrap_or_default();
+            let total_duration_ms: u64 = setup_results
+                .iter()
+                .chain(verification_results.iter())
+                .map(|r| r.duration_ms)
+                .sum();
+            tracing::info!(
+                task_id = %task.short_id,
+                run_id,
+                passed,
+                "consuming in-pod verification result (reused worker artifacts; no second pod)"
+            );
+            Some(crate::verification::service::VerificationResult {
+                passed,
+                // The pod ran the commands; from the server's view this is a
+                // fresh result set, same as the Job-dispatch path.
+                cached: false,
+                setup_results,
+                verification_results,
+                total_duration_ms,
+            })
+        }
+        other => {
+            // `error`, `pending`, or `running` — don't trust it; re-run via Job.
+            tracing::warn!(
+                task_id = %task.short_id,
+                run_id,
+                status = other,
+                "in-pod verification row not in a usable terminal state; dispatching verify Job (fallback)"
+            );
+            None
+        }
     }
 }
 

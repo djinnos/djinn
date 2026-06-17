@@ -229,6 +229,118 @@ fn compute_pipeline_timeout_returns_minimum_floor() {
     assert_eq!(timeout, Duration::from_secs(MIN_PIPELINE_TIMEOUT_SECS));
 }
 
+/// FAST PATH: a terminal in-pod `verification_runs` row that belongs to the
+/// task is consumed directly (its per-command results reconstructed),
+/// skipping the separate verify Job — the double-compile fix.
+#[tokio::test]
+async fn consume_in_pod_run_returns_terminal_result() {
+    let db = create_test_db();
+    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+
+    let repo = djinn_db::VerificationRunRepository::new(db.clone());
+    let run_id = "vr-inpod-pass";
+    repo.create(run_id, &task.id, &project.id).await.unwrap();
+    let verify = r#"[{"name":"clippy","command":"cargo clippy","exit_code":0,"stdout":"","stderr":"","duration_ms":42}]"#;
+    repo.complete(
+        run_id,
+        djinn_db::VerificationRunStatus::PASSED,
+        "[]",
+        verify,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let result = consume_in_pod_verification_run(&task, Some(run_id), &app_state)
+        .await
+        .expect("terminal in-pod row must be consumed");
+    assert!(result.passed);
+    assert!(!result.cached);
+    assert_eq!(result.verification_results.len(), 1);
+    assert_eq!(result.total_duration_ms, 42);
+}
+
+/// FALLBACK selection: no in-pod run id on the report → `None` so the caller
+/// dispatches the separate verify Job (unchanged behavior).
+#[tokio::test]
+async fn consume_in_pod_run_none_when_no_run_id() {
+    let db = create_test_db();
+    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+
+    assert!(
+        consume_in_pod_verification_run(&task, None, &app_state)
+            .await
+            .is_none(),
+        "absent in-pod run id must fall back to the Job"
+    );
+}
+
+/// FALLBACK selection: an `error`/non-terminal row is NOT trusted — returns
+/// `None` so the caller re-runs via the Job rather than silently passing.
+#[tokio::test]
+async fn consume_in_pod_run_none_on_error_or_mismatch() {
+    let db = create_test_db();
+    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let other_task = create_test_task(&db, &project.id, &epic.id).await;
+
+    let repo = djinn_db::VerificationRunRepository::new(db.clone());
+
+    // (a) error row → not usable.
+    repo.create("vr-err", &task.id, &project.id).await.unwrap();
+    repo.complete(
+        "vr-err",
+        djinn_db::VerificationRunStatus::ERROR,
+        "[]",
+        "[]",
+        Some("boom"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        consume_in_pod_verification_run(&task, Some("vr-err"), &app_state)
+            .await
+            .is_none(),
+        "errored in-pod row must fall back to the Job"
+    );
+
+    // (b) missing row id → not usable.
+    assert!(
+        consume_in_pod_verification_run(&task, Some("does-not-exist"), &app_state)
+            .await
+            .is_none(),
+        "missing in-pod row must fall back to the Job"
+    );
+
+    // (c) terminal row that belongs to a DIFFERENT task → not usable.
+    repo.create("vr-other", &other_task.id, &project.id)
+        .await
+        .unwrap();
+    repo.complete(
+        "vr-other",
+        djinn_db::VerificationRunStatus::PASSED,
+        "[]",
+        "[]",
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        consume_in_pod_verification_run(&task, Some("vr-other"), &app_state)
+            .await
+            .is_none(),
+        "a row for another task must not satisfy this task's verification"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn spawn_verification_times_out_deterministically_and_releases_task() {
     let (_task_repo, task_id, app_state) = setup_verifying_task_with_count_blocking(0);
