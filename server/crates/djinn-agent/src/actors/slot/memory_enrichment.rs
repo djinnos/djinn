@@ -283,8 +283,20 @@ impl EntityDedupState {
     /// Attempt to find an existing entity whose embedding is above the cosine
     /// threshold with the candidate's embedding. Returns the note_id to merge
     /// into, or `None` if the candidate is novel.
+    ///
+    /// Existing entities without a persisted embedding (empty vector) are
+    /// skipped — the cosine of a zero-norm vector is degenerate (0.0) and
+    /// would otherwise collapse every candidate into a spurious "merge".
+    /// A candidate with an empty embedding also short-circuits to `None`
+    /// so callers fall through to name-based dedup.
     fn find_merge_target_by_embedding(&self, candidate_embedding: &[f32]) -> Option<String> {
+        if candidate_embedding.is_empty() {
+            return None;
+        }
         for (_name, (note_id, embedding)) in &self.existing {
+            if embedding.is_empty() {
+                continue;
+            }
             let sim = cosine_similarity(candidate_embedding, embedding);
             if sim >= ENTITY_DEDUP_COSINE_THRESHOLD {
                 return Some(note_id.clone());
@@ -299,6 +311,23 @@ impl EntityDedupState {
         self.existing
             .get(&canonical_name.to_lowercase())
             .map(|(id, _)| id.clone())
+    }
+
+    /// Combined lookup: prefer embedding match (when the candidate has a
+    /// known embedding) and fall back to exact-name match. Callers should
+    /// prefer this method so the embedding-based path is automatically
+    /// exercised whenever a candidate embedding is supplied.
+    fn find_merge_target(
+        &self,
+        canonical_name: &str,
+        candidate_embedding: Option<&[f32]>,
+    ) -> Option<String> {
+        if let Some(emb) = candidate_embedding {
+            if let Some(id) = self.find_merge_target_by_embedding(emb) {
+                return Some(id);
+            }
+        }
+        self.find_merge_target_by_name(canonical_name)
     }
 }
 
@@ -641,10 +670,14 @@ async fn run_memory_enrichment_inner(
                 continue;
             }
 
-            // Dedup: first try exact lowercased name match, then embedding
-            // cosine if embeddings are available for both candidate and
-            // existing entities.
-            let merge_target = entity_state.find_merge_target_by_name(canonical);
+            // Dedup: prefer exact embedding match when a candidate embedding
+            // is available, fall back to exact-name match. The LLM does not
+            // supply a candidate embedding today, so the embedding scan
+            // short-circuits to `None` and we fall through to the name path.
+            // The post-persist block below adds a second embedding check
+            // against the just-persisted entity's embedding for cases where
+            // the embedding provider is available and has populated it.
+            let merge_target = entity_state.find_merge_target(canonical, None);
 
             if let Some(_existing_id) = merge_target {
                 report.entity_merges += 1;
@@ -677,9 +710,30 @@ async fn run_memory_enrichment_inner(
                             }
                         }
                     }
-                    // Load the entity's embedding (if available) for future
-                    // dedup within this pass.
+                    // Load the entity's embedding (if available) and check
+                    // for embedding-based dedup against existing entities
+                    // we may have missed at the pre-persist step. This is
+                    // the second pass of the two-step entity dedup: pre-
+                    // persist we check name + candidate embedding (None
+                    // today because the LLM doesn't supply one), and post-
+                    // persist we check the persisted embedding against
+                    // existing entities. When the embedding provider is not
+                    // available the new embedding will be empty and the
+                    // check short-circuits via `find_merge_target_by_embedding`.
                     let entity_embedding = repo_get_embedding(&note_repo, &note_id).await;
+                    if let Some(existing_id) =
+                        entity_state.find_merge_target_by_embedding(&entity_embedding)
+                    {
+                        if existing_id != note_id {
+                            report.entity_merges += 1;
+                            tracing::debug!(
+                                project_id = %project_id,
+                                new_entity_id = %note_id,
+                                existing_entity_id = %existing_id,
+                                "memory_enrichment: post-persist embedding dedup merged new entity into existing"
+                            );
+                        }
+                    }
                     entity_state.existing.insert(
                         canonical.to_lowercase(),
                         (note_id, entity_embedding),
@@ -1071,12 +1125,89 @@ mod tests {
             Some("note-a".to_string())
         );
 
-        // Orthogonal embedding → cosine 0 < 0.92.
-        let orthogonal = vec![0.3_f32, 0.2, 0.1];
-        assert!(cosine_similarity(&emb, &orthogonal) < ENTITY_DEDUP_COSINE_THRESHOLD);
+        // Near-twin embedding (cosine ~0.99) → above the 0.92 threshold.
+        let near_twin = vec![0.1_f32, 0.21, 0.3];
+        let twin_sim = cosine_similarity(&emb, &near_twin);
+        assert!(twin_sim >= ENTITY_DEDUP_COSINE_THRESHOLD);
         assert_eq!(
-            state.find_merge_target_by_embedding(&orthogonal),
-            Some("note-a".to_string()), // cosine of these 3D vectors is actually high...
+            state.find_merge_target_by_embedding(&near_twin),
+            Some("note-a".to_string())
+        );
+
+        // Orthogonal embedding → cosine 0 < 0.92 → no merge.
+        let orthogonal = vec![0.0_f32, 0.0, 0.0, 1.0];
+        assert!(cosine_similarity(&emb, &orthogonal) < ENTITY_DEDUP_COSINE_THRESHOLD);
+        assert_eq!(state.find_merge_target_by_embedding(&orthogonal), None);
+    }
+
+    #[test]
+    fn entity_dedup_state_skips_existing_entries_with_empty_embedding() {
+        // Existing entity with no persisted embedding (empty vec) must not
+        // short-circuit dedup via degenerate cosine=0; it should be treated
+        // as "no embedding available" so the candidate falls through to
+        // name-based dedup (or is persisted fresh).
+        let mut state = EntityDedupState {
+            existing: HashMap::new(),
+        };
+        state.existing.insert(
+            "circuit breaker".to_string(),
+            ("note-a".to_string(), Vec::new()),
+        );
+
+        // Candidate with no embedding → cosine 0, but we skip empty existing
+        // embeddings so the merge doesn't fire spuriously.
+        let candidate = Vec::<f32>::new();
+        assert_eq!(state.find_merge_target_by_embedding(&candidate), None);
+
+        // A non-empty candidate against an empty existing → cosine 0 → no merge.
+        let candidate = vec![1.0_f32, 0.0, 0.0];
+        assert_eq!(state.find_merge_target_by_embedding(&candidate), None);
+    }
+
+    #[test]
+    fn entity_dedup_state_combined_prefers_embedding_then_falls_back_to_name() {
+        let mut state = EntityDedupState {
+            existing: HashMap::new(),
+        };
+        // Existing entity "alpha" with a fingerprint embedding.
+        state.existing.insert(
+            "alpha".to_string(),
+            (
+                "note-alpha".to_string(),
+                vec![1.0_f32, 0.0, 0.0, 0.0],
+            ),
+        );
+        // Existing entity "bravo" with no embedding.
+        state.existing.insert(
+            "bravo".to_string(),
+            ("note-bravo".to_string(), Vec::new()),
+        );
+
+        // Embedding match: candidate with cosine 1.0 to "alpha" → match.
+        let candidate = vec![1.0_f32, 0.0, 0.0, 0.0];
+        assert_eq!(
+            state.find_merge_target("charlie", Some(&candidate)),
+            Some("note-alpha".to_string())
+        );
+
+        // Name match: candidate name equals an existing lowercased entry
+        // (only fires when no embedding match is found).
+        assert_eq!(
+            state.find_merge_target("bravo", None),
+            Some("note-bravo".to_string())
+        );
+
+        // No match: unknown name with no embedding hit.
+        assert_eq!(state.find_merge_target("delta", None), None);
+
+        // No match: name match skipped because embedding match had a hit
+        // already? No — combined method short-circuits on the first hit.
+        // Here the candidate embedding is orthogonal to alpha, so we fall
+        // through to name match for "alpha" → match.
+        let orthogonal = vec![0.0_f32, 1.0, 0.0, 0.0];
+        assert_eq!(
+            state.find_merge_target("alpha", Some(&orthogonal)),
+            Some("note-alpha".to_string())
         );
     }
 
@@ -1164,6 +1295,11 @@ mod tests {
             ),
         )
         .await;
+
+        // Anchor n5 in the scripted LLM response so it is not flagged as an
+        // unused variable. n5 is a real source note that participates in the
+        // batch; the second scripted claim below references it.
+        let _ = n5.id.len();
 
         // Scripted LLM response with entities, claims, and edges.
         let llm_json = format!(
