@@ -612,12 +612,13 @@ pub fn doctor_run(
 }
 
 #[cfg(test)]
-mod smoke;
-#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::Arc;
+
+    // T5 seed-check smoke test (lives at `doctor::tests::smoke`).
+    mod smoke;
 
     // -------------------------------------------------------------------
     // Sample shared-resolver check
