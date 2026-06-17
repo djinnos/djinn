@@ -211,6 +211,85 @@ impl K8sGraphWarmer {
         }
     }
 
+    /// Resolve the image a verification Job should run in, honouring catalog
+    /// precedence (migration 46).
+    ///
+    /// Returns:
+    /// * `Ok(Some(pull_ref))` — image is `ready`, the caller's verification
+    ///   Pod should use this pull ref.
+    /// * `Err(WarmerError::ImageNotReady { transient: true, .. })` — the
+    ///   project's assigned catalog image is currently `building` (or the
+    ///   project is awaiting first-time selection). The caller can defer /
+    ///   requeue and retry once the image lands.
+    /// * `Err(WarmerError::ImageNotReady { transient: false, .. })` — the
+    ///   project has NO catalog image assigned at all. This is a permanent
+    ///   configuration issue; the caller should surface it as a clear error
+    ///   (do not retry / do not wedge the task).
+    /// * `Err(WarmerError::Backend(_))` — DB lookup failure (genuine
+    ///   transient infra error).
+    async fn resolve_verification_image(&self, project_id: &str) -> Result<String, WarmerError> {
+        let repo = ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop());
+        let dispatch = match repo.resolve_dispatch_image(project_id).await {
+            Ok(Some(img)) => img,
+            Ok(None) => {
+                // Unknown project id — treat as permanent (no catalog image
+                // assignment can exist for a non-existent project).
+                return Err(WarmerError::ImageNotReady {
+                    project_id: project_id.to_string(),
+                    image_status: "none".to_string(),
+                    tag: None,
+                    transient: false,
+                });
+            }
+            Err(e) => {
+                warn!(
+                    project_id,
+                    error = %e,
+                    "K8sGraphWarmer: resolve_dispatch_image failed"
+                );
+                return Err(WarmerError::Backend(format!(
+                    "resolve_dispatch_image({project_id}) failed: {e}"
+                )));
+            }
+        };
+        // `pull_ref()` is the single source of truth for "image ready +
+        // we have a tag to pull" — see `DispatchImage::pull_ref`. It
+        // returns `None` when `status != "ready"` OR when the row has no
+        // tag yet (e.g. a `building` row before the watcher stamped it).
+        if let Some(pull_ref) = dispatch.pull_ref() {
+            return Ok(pull_ref);
+        }
+        // No `pull_ref` → not ready. Classify by whether a catalog image
+        // is assigned (`from_catalog` set means one is; `None` means
+        // the project is unassigned — a permanent configuration issue).
+        let transient = dispatch.from_catalog.is_some();
+        let image_status = dispatch.status.clone();
+        let tag = dispatch.tag.clone();
+        // Distinguish "transient — requeue" from "permanent — surface
+        // immediately" in the log line so on-call can see at a glance
+        // which path triggered. Verification jobs use this to decide
+        // between backing off and erroring the run row.
+        if transient {
+            info!(
+                project_id,
+                image_status = %image_status,
+                "K8sGraphWarmer: project image not ready (transient); caller should requeue"
+            );
+        } else {
+            warn!(
+                project_id,
+                image_status = %image_status,
+                "K8sGraphWarmer: project has no catalog image assigned (permanent); caller should surface error"
+            );
+        }
+        Err(WarmerError::ImageNotReady {
+            project_id: project_id.to_string(),
+            image_status,
+            tag,
+            transient,
+        })
+    }
+
     /// Resolve the image the warm Job should run in, honouring catalog-image
     /// precedence (migration 46): a project on a shared catalog image warms
     /// inside that image; otherwise its own per-project build. Returns `None`
@@ -335,12 +414,11 @@ impl GraphWarmerService for K8sGraphWarmer {
         project_id: &str,
     ) -> Result<(), WarmerError> {
         // The test must run in the project's image (that's where the toolchain
-        // lives) — so the image must be built + ready first.
-        let image_tag = self.resolve_project_image_tag(project_id).await.ok_or_else(|| {
-            WarmerError::Backend(format!(
-                "project {project_id} has no ready image — build the image before testing verification"
-            ))
-        })?;
+        // lives) — so the image must be built + ready first. A transient
+        // "not ready" (catalog image mid-rebuild) is surfaced as
+        // `ImageNotReady { transient: true }` so the caller can requeue
+        // rather than fail the run row.
+        let image_tag = self.resolve_verification_image(project_id).await?;
         let job = crate::verification_test_job::build_verification_test_job(
             &self.config,
             project_id,
@@ -362,15 +440,11 @@ impl GraphWarmerService for K8sGraphWarmer {
         target_branch: &str,
     ) -> Result<(), WarmerError> {
         // Verification runs in the project's image (that's where the toolchain
-        // lives) — so the image must be built + ready first.
-        let image_tag = self
-            .resolve_project_image_tag(project_id)
-            .await
-            .ok_or_else(|| {
-                WarmerError::Backend(format!(
-                    "project {project_id} has no ready image — build the image before verifying"
-                ))
-            })?;
+        // lives) — so the image must be built + ready first. A transient
+        // "not ready" (catalog image mid-rebuild) is surfaced as
+        // `ImageNotReady { transient: true }` so the caller can requeue
+        // rather than terminally fail the verification run.
+        let image_tag = self.resolve_verification_image(project_id).await?;
         let job = crate::verification_job::build_verification_job(
             &self.config,
             project_id,
@@ -962,6 +1036,232 @@ mod tests {
         assert!(
             captured.lock().await.is_empty(),
             "must not dispatch a warm Job without a ready image"
+        );
+    }
+
+    // ── regression: image-not-ready on verification dispatch ─────────────────
+    //
+    // Pre-fix: a verification dispatch observed with the catalog image
+    // mid-rebuild (status `building`) was treated as a hard error and the
+    // verification_run row was terminally marked `error`. The fix routes
+    // the same condition through `WarmerError::ImageNotReady { transient:
+    // true, .. }` so the caller can requeue until the image lands.
+    //
+    // These tests pin the new contract: permanent missing-image
+    // (`from_catalog` is None) and transient missing-image
+    // (`from_catalog` set, status != ready) are both reported as
+    // `ImageNotReady` but with different `transient` flags so the
+    // caller chooses between requeue vs. surface-immediately.
+
+    use djinn_db::ImageRepository;
+
+    /// Seed a project with a catalog image in `building` status (assigned
+    /// but not yet ready — the exact mid-rebuild condition that triggered
+    /// the original bug report).
+    async fn seed_project_with_building_image(db: &Database, name: &str) -> String {
+        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = repo
+            .create(name, "test", name)
+            .await
+            .expect("create project");
+        let images = ImageRepository::new(db.clone());
+        let image_id = format!("img-{name}");
+        images
+            .create(&image_id, name, None, "{}")
+            .await
+            .expect("create catalog image");
+        // `mark_building` stamps status='building' and clears the tag so
+        // `pull_ref()` returns `None` (the resolver keys on `status ==
+        // ready`, not on the tag column).
+        images
+            .mark_building(&image_id, "config-hash-1")
+            .await
+            .expect("mark image building");
+        images
+            .set_project_image(&project.id, Some(&image_id))
+            .await
+            .expect("assign catalog image to project");
+        project.id
+    }
+
+    /// Seed a project with NO catalog image assigned at all (permanent
+    /// missing-image). The project's `selected_image_id` stays `NULL`
+    /// and `resolve_dispatch_image` returns the synthetic `none` row.
+    async fn seed_project_with_no_image(db: &Database, name: &str) -> String {
+        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = repo
+            .create(name, "test", name)
+            .await
+            .expect("create project");
+        // Do NOT call set_project_image — the column stays NULL.
+        project.id
+    }
+
+    #[tokio::test]
+    async fn resolve_verification_image_ready_returns_pull_ref() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let project_id = seed_project_with_ready_image(&db, "proj-rdy").await;
+        let warmer = K8sGraphWarmer::with_dispatcher(
+            test_config(),
+            db,
+            Arc::new(RecordingDispatcher::new("warm").0),
+            Arc::new(NoopJobWatcher),
+        );
+        let pull_ref = warmer
+            .resolve_verification_image(&project_id)
+            .await
+            .expect("ready image should resolve");
+        assert!(
+            pull_ref.contains("reg.example:5000/djinn-project-"),
+            "expected the project-tagged pull ref, got {pull_ref}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_verification_image_building_returns_transient() {
+        // Catalog image is assigned but mid-rebuild. The fix should
+        // surface this as `ImageNotReady { transient: true, .. }` so the
+        // caller requeues rather than erroring the verification run.
+        let db = Database::open_in_memory().expect("in-memory db");
+        let project_id = seed_project_with_building_image(&db, "proj-bld").await;
+        let warmer = K8sGraphWarmer::with_dispatcher(
+            test_config(),
+            db,
+            Arc::new(RecordingDispatcher::new("warm").0),
+            Arc::new(NoopJobWatcher),
+        );
+        let err = warmer
+            .resolve_verification_image(&project_id)
+            .await
+            .expect_err("building image must surface as ImageNotReady");
+        match err {
+            djinn_runtime::WarmerError::ImageNotReady {
+                transient,
+                image_status,
+                ..
+            } => {
+                assert!(transient, "building image must be flagged transient");
+                assert_eq!(image_status, djinn_db::ProjectImageStatus::BUILDING);
+            }
+            other => panic!("expected ImageNotReady, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_verification_image_unassigned_returns_permanent() {
+        // No catalog image assigned at all — a configuration issue the
+        // operator must fix. The fix surfaces this as
+        // `ImageNotReady { transient: false, .. }` so the caller
+        // surfaces a clear error (no requeue, no infinite wait).
+        let db = Database::open_in_memory().expect("in-memory db");
+        let project_id = seed_project_with_no_image(&db, "proj-none").await;
+        let warmer = K8sGraphWarmer::with_dispatcher(
+            test_config(),
+            db,
+            Arc::new(RecordingDispatcher::new("warm").0),
+            Arc::new(NoopJobWatcher),
+        );
+        let err = warmer
+            .resolve_verification_image(&project_id)
+            .await
+            .expect_err("missing image must surface as ImageNotReady");
+        match err {
+            djinn_runtime::WarmerError::ImageNotReady {
+                transient,
+                image_status,
+                ..
+            } => {
+                assert!(!transient, "unassigned image must be flagged permanent");
+                assert_eq!(image_status, djinn_db::ProjectImageStatus::NONE);
+            }
+            other => panic!("expected ImageNotReady, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_verification_with_building_image_does_not_create_job() {
+        // The pre-fix bug: `dispatch_verification` returned a `Backend`
+        // error string and the slot actor terminally errored the
+        // verification_run row. Post-fix: a `building` image raises
+        // `ImageNotReady { transient: true, .. }` and the dispatcher
+        // does NOT create a Job (the caller will retry once the image
+        // lands).
+        let db = Database::open_in_memory().expect("in-memory db");
+        let project_id = seed_project_with_building_image(&db, "proj-bld-disp").await;
+        let (dispatcher, captured, _count) = RecordingDispatcher::new("verify");
+        let warmer = K8sGraphWarmer::with_dispatcher(
+            test_config(),
+            db,
+            Arc::new(dispatcher),
+            Arc::new(NoopJobWatcher),
+        );
+        let err = warmer
+            .dispatch_verification("run-1", &project_id, "task/abc", "main")
+            .await
+            .expect_err("building image must surface as ImageNotReady");
+        assert!(
+            err.is_image_not_ready_transient(),
+            "dispatch_verification must surface transient ImageNotReady on a mid-rebuild image, got {err:?}"
+        );
+        assert!(
+            captured.lock().await.is_empty(),
+            "no verification Job must be created while the image is still building"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_verification_with_unassigned_image_is_permanent() {
+        // Permanent missing-image: `ImageNotReady { transient: false, .. }`.
+        // No requeue — the caller surfaces the configuration issue.
+        let db = Database::open_in_memory().expect("in-memory db");
+        let project_id = seed_project_with_no_image(&db, "proj-none-disp").await;
+        let (dispatcher, captured, _count) = RecordingDispatcher::new("verify");
+        let warmer = K8sGraphWarmer::with_dispatcher(
+            test_config(),
+            db,
+            Arc::new(dispatcher),
+            Arc::new(NoopJobWatcher),
+        );
+        let err = warmer
+            .dispatch_verification("run-1", &project_id, "task/abc", "main")
+            .await
+            .expect_err("unassigned image must surface as ImageNotReady");
+        assert!(
+            err.is_image_not_ready_permanent(),
+            "dispatch_verification must surface permanent ImageNotReady when no catalog image is assigned, got {err:?}"
+        );
+        assert!(
+            captured.lock().await.is_empty(),
+            "no verification Job must be created when the project has no catalog image"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_verification_test_reports_image_not_ready() {
+        // The `dispatch_verification_test` path is a sibling of
+        // `dispatch_verification` — the same fix applies. Pin the
+        // behavior so a future refactor doesn't accidentally re-introduce
+        // a `Backend` error string in this path.
+        let db = Database::open_in_memory().expect("in-memory db");
+        let project_id = seed_project_with_building_image(&db, "proj-test-bld").await;
+        let (dispatcher, captured, _count) = RecordingDispatcher::new("vtest");
+        let warmer = K8sGraphWarmer::with_dispatcher(
+            test_config(),
+            db,
+            Arc::new(dispatcher),
+            Arc::new(NoopJobWatcher),
+        );
+        let err = warmer
+            .dispatch_verification_test("test-1", &project_id)
+            .await
+            .expect_err("building image must surface as ImageNotReady");
+        assert!(
+            err.is_image_not_ready_transient(),
+            "dispatch_verification_test must surface transient ImageNotReady, got {err:?}"
+        );
+        assert!(
+            captured.lock().await.is_empty(),
+            "no verification-test Job must be created while the image is still building"
         );
     }
 }

@@ -33,6 +33,6 @@ pub use self::graph_data::{
 };
 pub use self::lsp_bridge::{LspOps, LspWarning};
 pub use self::runtime_bridge::{
-    ProvisionServiceRequest, ProvisionedService, RuntimeOps, TaskrunJobRef,
+    ProvisionServiceRequest, ProvisionedService, RuntimeDispatchError, RuntimeOps, TaskrunJobRef,
 };
 pub use self::slot_pool_bridge::{ModelPoolStatus, PoolStatus, RunningTaskInfo, SlotPoolOps};
