@@ -171,6 +171,85 @@ describe("buildMemoryGraph — color palette mapping", () => {
     expect(colorForNote("adr", true)).toBe(ORPHAN_OVERRIDE);
     expect(colorForNote("nope", false)).toBe(DEFAULT_COLOR);
   });
+
+  // ── Enrichment node types (epic diei: entity / claim) ─────────────────────
+  // These are the note_type values task qp5s established for LLM-enrichment
+  // nodes. They must render with a color distinct from each other and from
+  // every pre-existing palette hue so the graph can tell them apart.
+
+  it("maps enrichment `entity` and `claim` note types to distinct palette colors", () => {
+    const graph = buildMemoryGraph(
+      makePayload({
+        nodes: [
+          makeNode({ id: "entity-node", note_type: "entity" }),
+          makeNode({ id: "claim-node", note_type: "claim" }),
+        ],
+      }),
+    );
+    const entityColor = graph.getNodeAttributes("entity-node").color;
+    const claimColor = graph.getNodeAttributes("claim-node").color;
+
+    // Each maps to its own palette entry…
+    expect(entityColor).toBe(PALETTE.entity);
+    expect(claimColor).toBe(PALETTE.claim);
+    // …and the two are visually distinct from each other.
+    expect(entityColor).not.toBe(claimColor);
+  });
+
+  it("enrichment entity/claim colors are distinct from every pre-existing palette hue", () => {
+    const preExisting = new Set(
+      ["adr", "pattern", "case", "pitfall", "research", "reference"].map(
+        (t) => PALETTE[t],
+      ),
+    );
+    expect(preExisting.has(PALETTE.entity)).toBe(false);
+    expect(preExisting.has(PALETTE.claim)).toBe(false);
+  });
+
+  it("renders an entity node, a claim node, and an existing note type together without color collisions", () => {
+    const graph = buildMemoryGraph(
+      makePayload({
+        nodes: [
+          makeNode({ id: "a", note_type: "adr" }),
+          makeNode({ id: "e", note_type: "entity" }),
+          makeNode({ id: "c", note_type: "claim" }),
+        ],
+      }),
+    );
+    const colors = new Set([
+      graph.getNodeAttributes("a").color,
+      graph.getNodeAttributes("e").color,
+      graph.getNodeAttributes("c").color,
+    ]);
+    // All three distinct.
+    expect(colors.size).toBe(3);
+  });
+
+  it("preserves entity/claim note_type on the graphology node attribute copy-through", () => {
+    const graph = buildMemoryGraph(
+      makePayload({
+        nodes: [
+          makeNode({ id: "e", note_type: "entity" }),
+          makeNode({ id: "c", note_type: "claim" }),
+        ],
+      }),
+    );
+    expect(graph.getNodeAttributes("e").note_type).toBe("entity");
+    expect(graph.getNodeAttributes("c").note_type).toBe("claim");
+  });
+
+  it("overrides enrichment note types to ORPHAN_OVERRIDE when is_orphan is true", () => {
+    const graph = buildMemoryGraph(
+      makePayload({
+        nodes: [
+          makeNode({ id: "e", note_type: "entity", is_orphan: true }),
+          makeNode({ id: "c", note_type: "claim", is_orphan: true }),
+        ],
+      }),
+    );
+    expect(graph.getNodeAttributes("e").color).toBe(ORPHAN_OVERRIDE);
+    expect(graph.getNodeAttributes("c").color).toBe(ORPHAN_OVERRIDE);
+  });
 });
 
 // ── Size floor / ceiling ────────────────────────────────────────────────────

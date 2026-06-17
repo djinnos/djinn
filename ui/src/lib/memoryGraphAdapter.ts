@@ -92,6 +92,12 @@ export interface MemoryGraphEdgeAttrs {
  * Tailwind-400 hue that reads on the near-black canvas. Unknown types fall
  * back to `DEFAULT_COLOR`. Orphan nodes are overridden to `ORPHAN_OVERRIDE`
  * regardless of their type.
+ *
+ * The enrichment-created note types (`entity`, `claim`) — see epic diei /
+ * task qp5s — get distinct hues so they read as a separate class of node:
+ *   - `entity`: teal-400 — recurring systems / concepts surfaced by the
+ *     enrichment pass.
+ *   - `claim`: pink-400 — the decisions the memory records.
  */
 export const PALETTE: Readonly<Record<string, string>> = Object.freeze({
   adr: "#a78bfa", // violet-400
@@ -100,6 +106,8 @@ export const PALETTE: Readonly<Record<string, string>> = Object.freeze({
   pitfall: "#f87171", // red-400
   research: "#fbbf24", // amber-400
   reference: "#94a3b8", // slate-400
+  entity: "#2dd4bf", // teal-400 — enrichment-created recurring system
+  claim: "#f472b6", // pink-400 — enrichment-created decision
 });
 
 /** Fallback color for nodes whose `note_type` is not in the palette. */
