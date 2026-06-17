@@ -252,6 +252,13 @@ pub struct MemoryAssociationEntry {
     pub note_permalink: String,
     pub note_title: String,
     pub weight: f64,
+    /// Association edge kind as stored on `note_associations.kind` (e.g. `"co_access"`).
+    /// Today the only value written is `"co_access"`; future wave-1 graph-typed edges
+    /// (builds_on / contradicts / supersedes / exemplifies) will widen the value set
+    /// — see Epic 2chl. `#[serde(default)]` keeps older clients deserialising cleanly
+    /// until they adopt the new field.
+    #[serde(default)]
+    pub kind: String,
     pub co_access_count: i64,
     pub last_co_access: String,
 }
