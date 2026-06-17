@@ -20,9 +20,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { fetchMemoryGraph, buildClusteredMemoryGraph } from "@/lib/memoryGraphAdapter";
+import { buildClusteredMemoryGraph, parseMemoryGraphResponse } from "@/lib/memoryGraphAdapter";
 import { applyPerCommunityAttraction } from "@/lib/perCommunityAttraction";
 import { colorForCommunity } from "@/lib/codeGraphAdapter";
+import { callMcpTool } from "@/api/mcpClient";
 import { useSigmaGraph, type SigmaReducerHooks } from "@/hooks/useSigmaGraph";
 
 type ClusteredMemoryGraph = ReturnType<typeof buildClusteredMemoryGraph>;
@@ -49,8 +50,9 @@ export function MemoryGraphCanvas({ projectSlug }: MemoryGraphCanvasProps) {
 
     (async () => {
       try {
-        const payload = await fetchMemoryGraph(projectSlug);
+        const raw = await callMcpTool("memory_graph", { project: projectSlug });
         if (cancelled) return;
+        const payload = parseMemoryGraphResponse(raw);
         if (!payload) {
           setState({ status: "empty" });
           return;
