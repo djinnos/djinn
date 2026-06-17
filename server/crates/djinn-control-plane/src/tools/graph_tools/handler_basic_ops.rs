@@ -104,6 +104,7 @@ impl DjinnMcpServer {
             has_more: resp_has_more,
             summary_only: pagination.summary_only.then_some(true),
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -149,6 +150,7 @@ impl DjinnMcpServer {
             nodes,
             workspace_hint: scope.hint,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -164,6 +166,7 @@ impl DjinnMcpServer {
                 symbol: key.to_string(),
                 implementations,
                 next_step: None,
+                graph_staleness: None,
             },
         ))
     }
@@ -302,6 +305,7 @@ impl DjinnMcpServer {
             summary_only: pagination.summary_only.then_some(true),
             by_depth_counts,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -350,6 +354,7 @@ impl DjinnMcpServer {
             hits,
             workspace_hint: scope.hint,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -420,6 +425,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::QuerySubgraph(QuerySubgraphResponse {
             query_subgraph: result,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -445,6 +451,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::RouteMap(RouteMapResponse {
             route_map,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -468,6 +475,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::ShapeCheck(ShapeCheckResponse {
             shape_check,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -495,6 +503,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::ApiImpact(ApiImpactResponse {
             api_impact,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -514,6 +523,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Flow(FlowResponse {
             flow,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -564,6 +574,7 @@ impl DjinnMcpServer {
             cycles,
             workspace_hint: scope.hint,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -601,6 +612,7 @@ impl DjinnMcpServer {
             orphans,
             workspace_hint: scope.hint,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -625,6 +637,7 @@ impl DjinnMcpServer {
             path,
             workspace_hint: scope.hint,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -674,6 +687,7 @@ impl DjinnMcpServer {
             edges,
             workspace_hint: scope.hint,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -687,6 +701,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Describe(DescribeResponse {
             description,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -711,6 +726,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Context(ContextResponse {
             symbol_context,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -723,6 +739,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Status(StatusResponse {
             status,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 
@@ -735,6 +752,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Workspaces(WorkspacesResponse {
             result,
             next_step: None,
+            graph_staleness: None,
         }))
     }
 }

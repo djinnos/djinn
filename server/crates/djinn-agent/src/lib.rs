@@ -8,6 +8,7 @@
 
 pub(crate) mod commands;
 pub mod dispatch_pause;
+pub mod doctor;
 pub(crate) mod events;
 pub(crate) mod process;
 

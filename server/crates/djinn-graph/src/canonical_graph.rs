@@ -15,6 +15,7 @@ type CanonicalGraphBuildOutput = (
     Vec<u8>,
     Arc<crate::repo_graph::RepoGraphRanking>,
     Arc<CachedSccs>,
+    Arc<std::collections::BTreeMap<String, crate::layout::GraphLayoutPosition>>,
     u64,
     u64,
     u64,
@@ -54,6 +55,17 @@ pub struct CachedGraph {
     pub git_head: String,
     pub pagerank: Arc<crate::repo_graph::RepoGraphRanking>,
     pub sccs: Arc<CachedSccs>,
+    pub layout_positions:
+        Arc<std::collections::BTreeMap<String, crate::layout::GraphLayoutPosition>>,
+}
+
+impl CachedGraph {
+    pub fn layout_position_by_uid(
+        &self,
+        stable_uid: &str,
+    ) -> Option<crate::layout::GraphLayoutPosition> {
+        self.layout_positions.get(stable_uid).copied()
+    }
 }
 
 pub static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
@@ -61,7 +73,11 @@ pub static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
 
 pub fn derive_graph_caches(
     graph: &crate::repo_graph::RepoDependencyGraph,
-) -> (Arc<crate::repo_graph::RepoGraphRanking>, Arc<CachedSccs>) {
+) -> (
+    Arc<crate::repo_graph::RepoGraphRanking>,
+    Arc<CachedSccs>,
+    Arc<std::collections::BTreeMap<String, crate::layout::GraphLayoutPosition>>,
+) {
     use crate::repo_graph::RepoGraphNodeKind;
     let pagerank = Arc::new(graph.rank());
     let sccs = Arc::new(CachedSccs {
@@ -69,7 +85,8 @@ pub fn derive_graph_caches(
         file: graph.strongly_connected_components(Some(RepoGraphNodeKind::File), 2),
         symbol: graph.strongly_connected_components(Some(RepoGraphNodeKind::Symbol), 2),
     });
-    (pagerank, sccs)
+    let layout_positions = Arc::new(crate::layout::derive_layout_positions(graph));
+    (pagerank, sccs, layout_positions)
 }
 
 fn run_route_extraction_post_processor(
@@ -233,15 +250,14 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
 
     if let Ok(Some(row)) = cache_repo.get(project_id, &commit_sha).await {
         match load_cached_artifact(row.graph_blob).await {
-            Ok((graph, pagerank, sccs)) => {
+            Ok((graph, pagerank, sccs, layout_positions)) => {
                 install_as_canonical(
-                    ctx,
-                    project_id,
                     handle.path().to_path_buf(),
                     commit_sha.clone(),
                     graph.clone(),
                     pagerank,
                     sccs,
+                    layout_positions,
                 )
                 .await;
                 spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
@@ -275,15 +291,14 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     }
     if let Ok(Some(row)) = cache_repo.get(project_id, &commit_sha).await {
         match load_cached_artifact(row.graph_blob).await {
-            Ok((graph, pagerank, sccs)) => {
+            Ok((graph, pagerank, sccs, layout_positions)) => {
                 install_as_canonical(
-                    ctx,
-                    project_id,
                     handle.path().to_path_buf(),
                     commit_sha.clone(),
                     graph.clone(),
                     pagerank,
                     sccs,
+                    layout_positions,
                 )
                 .await;
                 spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
@@ -375,7 +390,8 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             let edge_count = graph.edge_count();
 
             let t_derive = std::time::Instant::now();
-            let (pagerank, sccs) = derive_graph_caches(&graph);
+            let (pagerank, sccs, layout_positions) = derive_graph_caches(&graph);
+            graph.set_layout_positions((*layout_positions).clone());
             let derive_ms = t_derive.elapsed().as_millis() as u64;
 
             let t_serial = std::time::Instant::now();
@@ -384,8 +400,17 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             let serial_ms = t_serial.elapsed().as_millis() as u64;
 
             Ok((
-                graph, serialized, pagerank, sccs, parse_ms, build_ms, derive_ms, serial_ms,
-                node_count, edge_count,
+                graph,
+                serialized,
+                pagerank,
+                sccs,
+                layout_positions,
+                parse_ms,
+                build_ms,
+                derive_ms,
+                serial_ms,
+                node_count,
+                edge_count,
             ))
         })
         .await
@@ -395,6 +420,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         serialized_blob,
         pagerank,
         sccs,
+        layout_positions,
         parse_ms,
         build_ms,
         derive_ms,
@@ -519,13 +545,12 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     // `ensure_canonical_graph` for the rationale.
 
     install_as_canonical(
-        ctx,
-        project_id,
         handle.path().to_path_buf(),
         commit_sha.clone(),
         graph.clone(),
         pagerank,
         sccs,
+        layout_positions,
     )
     .await;
     spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
@@ -779,14 +804,13 @@ pub async fn canonical_graph_count_commits_since(
     count_commits_since(project_root, pinned_commit).await
 }
 
-async fn install_as_canonical<C: WarmContext>(
-    _ctx: &C,
-    _project_id: &str,
+async fn install_as_canonical(
     project_path: PathBuf,
     git_head: String,
     graph: crate::repo_graph::RepoDependencyGraph,
     pagerank: Arc<crate::repo_graph::RepoGraphRanking>,
     sccs: Arc<CachedSccs>,
+    layout_positions: Arc<std::collections::BTreeMap<String, crate::layout::GraphLayoutPosition>>,
 ) {
     let mut cache = GRAPH_CACHE.write().await;
     *cache = Some(CachedGraph {
@@ -795,6 +819,7 @@ async fn install_as_canonical<C: WarmContext>(
         git_head,
         pagerank,
         sccs,
+        layout_positions,
     });
 }
 
@@ -805,14 +830,15 @@ async fn load_cached_artifact(
         crate::repo_graph::RepoDependencyGraph,
         Arc<crate::repo_graph::RepoGraphRanking>,
         Arc<CachedSccs>,
+        Arc<std::collections::BTreeMap<String, crate::layout::GraphLayoutPosition>>,
     ),
     String,
 > {
     tokio::task::spawn_blocking(move || -> Result<_, String> {
         let artifact = crate::repo_graph::deserialize_repo_graph_artifact_bincode(&blob)?;
         let graph = crate::repo_graph::RepoDependencyGraph::from_artifact(&artifact);
-        let (pagerank, sccs) = derive_graph_caches(&graph);
-        Ok((graph, pagerank, sccs))
+        let (pagerank, sccs, layout_positions) = derive_graph_caches(&graph);
+        Ok((graph, pagerank, sccs, layout_positions))
     })
     .await
     .map_err(|e| format!("spawn_blocking join: {e}"))?
@@ -866,22 +892,22 @@ pub async fn load_canonical_graph<C: WarmContext>(
     // partial writes) the same as "not warmed yet". The architect warm pass
     // will rewrite the row; surfacing the raw bincode error to the user is
     // never useful.
-    let (graph, pagerank, sccs) = load_cached_artifact(row.graph_blob).await.map_err(|e| {
-        tracing::warn!(
-            project_id = %project_id,
-            error = %e,
-            "load_canonical_graph: stale or unreadable graph_blob; reporting as not-warmed"
-        );
-        GRAPH_NOT_WARMED_ERR.to_string()
-    })?;
+    let (graph, pagerank, sccs, layout_positions) =
+        load_cached_artifact(row.graph_blob).await.map_err(|e| {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %e,
+                "load_canonical_graph: stale or unreadable graph_blob; reporting as not-warmed"
+            );
+            GRAPH_NOT_WARMED_ERR.to_string()
+        })?;
     install_as_canonical(
-        ctx,
-        project_id,
         index_tree_path,
         row.commit_sha,
         graph.clone(),
         pagerank.clone(),
         sccs.clone(),
+        layout_positions.clone(),
     )
     .await;
     Ok((graph, pagerank, sccs))
@@ -1574,7 +1600,7 @@ mod tests {
         let expected_node_count = {
             let graph = build_test_graph_fixture();
             let node_count = graph.node_count();
-            let (pagerank, sccs) = derive_graph_caches(&graph);
+            let (pagerank, sccs, layout_positions) = derive_graph_caches(&graph);
             let mut cache = GRAPH_CACHE.write().await;
             *cache = Some(CachedGraph {
                 graph,
@@ -1582,6 +1608,7 @@ mod tests {
                 git_head: stale_sha,
                 pagerank,
                 sccs,
+                layout_positions,
             });
             node_count
         };

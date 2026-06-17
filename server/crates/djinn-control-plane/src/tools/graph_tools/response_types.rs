@@ -2,6 +2,55 @@ use super::*;
 
 // ── Response types ──────────────────────────────────────────────────────────────
 
+/// jc47: per-query staleness indicator comparing the caller-supplied HEAD
+/// against the graph blob's pinned commit. Only populated when the caller
+/// passes `current_head` (see [`CodeGraphParams`]); absent otherwise so
+/// existing clients retain their previous response shape.
+///
+/// `is_stale` is `true` when the caller's commit differs from the cached
+/// graph commit (exact comparison after trimming). When the cached graph
+/// commit is missing or the status lookup fails, `is_stale` defaults to
+/// `false` (non-stale-safe) and `cached_commit` is `None` so a missing
+/// graph never blocks the query.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GraphStaleness {
+    /// The commit the cached graph blob was built from (`None` when the
+    /// graph cache has no pinned commit, e.g. un-warmed or status lookup
+    /// failed). Compare against `caller_commit` to determine staleness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_commit: Option<String>,
+    /// Echo of the caller-supplied commit (trimmed).
+    pub caller_commit: String,
+    /// `true` when `cached_commit` is present and differs from
+    /// `caller_commit`. `false` when they match or when `cached_commit`
+    /// is unknown (non-stale-safe default).
+    pub is_stale: bool,
+}
+
+impl GraphStaleness {
+    /// Compute staleness metadata from a caller-supplied commit and the
+    /// optional cached graph commit. The caller commit is trimmed; a
+    /// missing/blank cached commit yields `is_stale=false` (non-stale-safe).
+    pub(crate) fn compute(caller_commit: &str, cached_commit: Option<&str>) -> Self {
+        let trimmed_caller = caller_commit.trim();
+        match cached_commit.map(str::trim).filter(|c| !c.is_empty()) {
+            Some(cached) => {
+                let is_stale = cached != trimmed_caller;
+                GraphStaleness {
+                    cached_commit: Some(cached.to_string()),
+                    caller_commit: trimmed_caller.to_string(),
+                    is_stale,
+                }
+            }
+            None => GraphStaleness {
+                cached_commit: None,
+                caller_commit: trimmed_caller.to_string(),
+                is_stale: false,
+            },
+        }
+    }
+}
+
 // NOTE: previously `result: NeighborsResult` was `#[serde(flatten)]`, but
 // `NeighborsResult` is an untagged enum of `Vec<_>` variants — serde's flatten
 // adapter only accepts map-like types, so serialization failed at runtime with
@@ -47,6 +96,8 @@ pub struct NeighborsResponse {
     pub summary_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -56,6 +107,8 @@ pub struct RankedResponse {
     pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -64,6 +117,8 @@ pub struct ImplementationsResponse {
     pub implementations: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// PR C3 risk bucket for an `impact` query, derived from `direct_count`,
@@ -169,6 +224,8 @@ pub struct ImpactResponse {
     pub by_depth_counts: Option<std::collections::BTreeMap<String, usize>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -184,6 +241,8 @@ pub struct SearchResponse {
     pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -198,6 +257,8 @@ pub struct CyclesResponse {
     pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -207,6 +268,8 @@ pub struct OrphansResponse {
     pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -216,6 +279,8 @@ pub struct PathResponse {
     pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -230,6 +295,8 @@ pub struct EdgesResponse {
     pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -237,6 +304,8 @@ pub struct DescribeResponse {
     pub description: Option<SymbolDescription>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// PR C1: 360° symbol view emitted by `code_graph context`. The
@@ -248,6 +317,8 @@ pub struct ContextResponse {
     pub symbol_context: SymbolContext,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -256,6 +327,8 @@ pub struct StatusResponse {
     pub status: GraphStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `workspaces` op — graph-observed workspace slugs joined
@@ -266,6 +339,8 @@ pub struct WorkspacesResponse {
     pub result: WorkspacesResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `symbols_at` op — the queried file and every symbol
@@ -276,6 +351,8 @@ pub struct SymbolsAtResponse {
     pub hits: Vec<SymbolAtHit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `diff_touches` op — touched-symbol rollup plus the
@@ -287,6 +364,8 @@ pub struct DiffTouchesResponse {
     pub unknown_files: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `detect_changes` op (PR C4). The discriminator field
@@ -300,6 +379,8 @@ pub struct DetectedChangesResponse {
     /// (matches the A4 next-step convention).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `api_surface` op.
@@ -310,6 +391,8 @@ pub struct ApiSurfaceResponse {
     pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `boundary_check` op.
@@ -318,6 +401,8 @@ pub struct BoundaryCheckResponse {
     pub violations: Vec<BoundaryViolation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `hotspots` op.
@@ -326,6 +411,8 @@ pub struct HotspotsResponse {
     pub hotspots: Vec<HotspotEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Iter 28: response for the `complexity` op. The result is itself an
@@ -338,6 +425,8 @@ pub struct ComplexityResponse {
     pub complexity: ComplexityResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Iter 29: response for the `refactor_candidates` op. The discriminator
@@ -349,6 +438,8 @@ pub struct RefactorCandidatesResponse {
     pub refactor_candidates: Vec<RefactorCandidate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `metrics_at` op.
@@ -358,6 +449,8 @@ pub struct MetricsAtResponse {
     pub metrics: MetricsAtResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `dead_symbols` op.
@@ -366,6 +459,8 @@ pub struct DeadSymbolsResponse {
     pub symbols: Vec<DeadSymbolEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `deprecated_callers` op.
@@ -374,6 +469,8 @@ pub struct DeprecatedCallersResponse {
     pub hits: Vec<DeprecatedHit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `touches_hot_path` op.
@@ -384,6 +481,8 @@ pub struct TouchesHotPathResponse {
     pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `coupling` op.
@@ -393,6 +492,8 @@ pub struct CouplingResponse {
     pub coupled: Vec<CouplingEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `churn` op.
@@ -401,6 +502,8 @@ pub struct ChurnResponse {
     pub files: Vec<ChurnEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `coupling_hotspots` op — top file pairs ranked by
@@ -437,6 +540,8 @@ pub struct CouplingHotspotsResponse {
     pub summary_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// Response for the `coupling_hubs` op — files by cumulative coupling
@@ -446,6 +551,8 @@ pub struct CouplingHubsResponse {
     pub hubs: Vec<CouplingHubEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// PR C2: emitted when the dispatcher's pre-resolve pass returns
@@ -457,6 +564,8 @@ pub struct AmbiguousResponse {
     pub candidates: Vec<Candidate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 /// PR C2: emitted when neither the exact-match nor the name-search
@@ -468,6 +577,8 @@ pub struct NotFoundResponse {
     pub not_found: NotFoundDetail,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -492,6 +603,8 @@ pub struct SnapshotResponse {
     pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -499,6 +612,8 @@ pub struct QuerySubgraphResponse {
     pub query_subgraph: QuerySubgraphResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -506,6 +621,8 @@ pub struct RouteMapResponse {
     pub route_map: RouteMapResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -513,6 +630,8 @@ pub struct ShapeCheckResponse {
     pub shape_check: ShapeCheckResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -520,6 +639,8 @@ pub struct ApiImpactResponse {
     pub api_impact: ApiImpactResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -527,6 +648,8 @@ pub struct FlowResponse {
     pub flow: FlowResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
