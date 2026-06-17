@@ -358,7 +358,7 @@ function LayoutOptimizingPill() {
   );
 }
 
-function CitationStatusBadge() {
+export function CitationStatusBadge() {
   const selectionId = useCodeGraphStore((s) => s.selectionId);
   const citationCount = useCodeGraphStore((s) => s.citationIds.size);
   const clear = useCodeGraphStore((s) => s.clearCitations);
