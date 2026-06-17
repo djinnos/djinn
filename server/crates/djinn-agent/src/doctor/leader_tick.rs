@@ -1,0 +1,575 @@
+//! Leader-tick integration for the cheap doctor subset (epic 4q1t).
+//!
+//! The Doctor framework ([`djinn_core::doctor`]) exposes a pluggable registry of
+//! [`DoctorCheck`]s and a [`DoctorCheckCadence`] tag that separates "safe to run
+//! every coordinator tick" from "explicit on-demand". This module wires the
+//! cheap subset into the coordinator's existing 30s tick without going through
+//! the MCP `doctor_run` tool: it uses the framework's
+//! [`run_cheap_subset`] helper, persists every returned [`Finding`] through
+//! [`djinn_db::DoctorFindingRepository`], emits bounded-cardinality
+//! `djinn_doctor_findings{check}` and `djinn_doctor_run_duration_seconds{check}`
+//! metrics via [`djinn_telemetry::doctor`], and writes a board-visible activity
+//! entry for each `Critical` finding via [`djinn_db::TaskRepository::log_activity`].
+//!
+//! All failures (one bad check, one bad DB write, one bad activity entry) are
+//! logged and surfaced as tracing; they MUST NOT take the rest of the
+//! coordinator tick down — see the per-step `match`/`if let Err` blocks below.
+//!
+//! ## Tick placement
+//!
+//! The cheap-doctor tick is called from [`super::super::coordinator::actor`]
+//! immediately after the existing cheap reapers/backstops and before dispatch
+//! so a board-visible critical finding can race the dispatch decision for the
+//! same 30s window. It is intentionally a non-blocking observation: no
+//! dispatch, no fix, no state mutation outside of inserts.
+
+use std::time::Instant as StdInstant;
+
+use djinn_core::doctor::{DoctorRegistry, Finding, FindingSeverity, run_cheap_subset};
+use djinn_db::{DoctorFindingRepository, NewDoctorFinding};
+use serde_json::json;
+use tracing::{error, info, warn};
+
+/// Activity-event type written for board-visible critical doctor findings.
+///
+/// Matches the existing `task_outcome_confidence` precedent: stable
+/// snake_case identifier used by UI/feed consumers to filter the activity log.
+pub const DOCTOR_CRITICAL_FINDING_ACTIVITY: &str = "doctor_critical_finding";
+
+/// Activity-event type written for board-visible non-critical doctor findings.
+///
+/// Surfaces Warn/Info findings in the activity feed when the leader-tick path
+/// wants to make a divergence visible without bumping the Critical-flagged
+/// lane. Written with the same payload shape as the critical variant.
+pub const DOCTOR_FINDING_ACTIVITY: &str = "doctor_finding";
+
+/// Convert a single [`Finding`] into the repository insert DTO.
+///
+/// Mirrors the canonical shape used by the MCP `doctor_run` tool in
+/// `djinn-control-plane` so a row inserted from the leader tick is structurally
+/// indistinguishable from one inserted by an MCP caller (check name, severity,
+/// entity ids, evidence, resolver snapshot, detail all preserved).
+pub fn finding_to_new_row(finding: &Finding, run_id: Option<&str>) -> NewDoctorFinding {
+    let entity_ids = serde_json::to_value(&finding.entity_ids).unwrap_or_else(|_| json!([]));
+    let resolver_snapshot = serde_json::to_value(&finding.resolver_snapshot).ok();
+
+    NewDoctorFinding {
+        run_id: run_id.map(str::to_owned),
+        check_name: finding.check_name.clone(),
+        severity: finding.severity.as_str().to_owned(),
+        entity_ids,
+        evidence: finding.evidence.clone(),
+        resolver_snapshot,
+        detail: Some(finding.detail.clone()),
+    }
+}
+
+/// Best-effort task-id lookup for a finding, used to attach a board activity
+/// entry to the right task when one is known. Returns `None` for findings with
+/// no entity context (board-wide observation), in which case the activity
+/// entry is written with `task_id = NULL` (the activity_log column is
+/// nullable per the existing schema).
+pub fn finding_task_id(finding: &Finding) -> Option<String> {
+    // The canonical "task id" key the leader-tick path looks for. Checks are
+    // free to populate other keys (workspace, session, run) — those do not
+    // attach the activity entry to a specific task.
+    finding
+        .entity_ids
+        .get("task_id")
+        .cloned()
+        .or_else(|| finding.entity_ids.get("task").cloned())
+}
+
+/// Persist every finding returned by the cheap subset, in order. A per-finding
+/// failure is logged and the remaining findings are still attempted so one bad
+/// row cannot block the rest of the tick.
+async fn persist_findings(
+    repo: &DoctorFindingRepository,
+    run_id: Option<&str>,
+    findings: &[Finding],
+) {
+    for finding in findings {
+        let new = finding_to_new_row(finding, run_id);
+        match repo.insert(new).await {
+            Ok(persisted) => {
+                info!(
+                    finding_id = %persisted.id,
+                    check = %persisted.check_name,
+                    severity = %persisted.severity,
+                    "CoordinatorActor: persisted cheap doctor finding"
+                );
+            }
+            Err(error) => {
+                // Log + continue. We do NOT propagate so a single DB hiccup
+                // cannot silence the rest of the tick or its metrics.
+                warn!(
+                    check = %finding.check_name,
+                    severity = %finding.severity.as_str(),
+                    error = %error,
+                    "CoordinatorActor: failed to persist cheap doctor finding; continuing"
+                );
+            }
+        }
+    }
+}
+
+/// Write one board-visible activity entry for a [`Finding`].
+///
+/// The actor on the activity entry is fixed to `coordinator` / `system` (same
+/// convention as the existing stall-timeout entries) so operators can filter
+/// the activity log by actor. The `task_id` is `None` when the finding has no
+/// entity context — this is the documented "board-wide observation" case and
+/// matches `activity_log.task_id` being nullable.
+///
+/// A failure to write the activity entry is logged but never propagated; the
+/// tick must keep moving.
+async fn record_activity_for_finding(repo: &djinn_db::TaskRepository, finding: &Finding) {
+    let task_id = finding_task_id(finding);
+    let (event_type, kind_label) = if finding.severity == FindingSeverity::Critical {
+        (DOCTOR_CRITICAL_FINDING_ACTIVITY, "critical")
+    } else {
+        (DOCTOR_FINDING_ACTIVITY, finding.severity.as_str())
+    };
+
+    let payload = json!({
+        "check": finding.check_name,
+        "severity": finding.severity.as_str(),
+        "kind": kind_label,
+        "detail": finding.detail,
+        "entity_ids": finding.entity_ids,
+    })
+    .to_string();
+
+    if let Err(error) = repo
+        .log_activity(
+            task_id.as_deref(),
+            "coordinator",
+            "system",
+            event_type,
+            &payload,
+        )
+        .await
+    {
+        warn!(
+            check = %finding.check_name,
+            severity = %finding.severity.as_str(),
+            error = %error,
+            "CoordinatorActor: failed to write doctor finding activity entry; continuing"
+        );
+    }
+}
+
+/// Run the cheap doctor subset once, persisting findings and emitting metrics.
+///
+/// Exposed for tests via [`super::super::coordinator::actor`]; the actor's
+/// `run_tick` invokes this directly so the leader-tick integration stays
+/// focused and unit-testable. Each step is best-effort: a failure in one
+/// check or one DB write is logged and the rest of the tick continues.
+///
+/// `registry` is the [`DoctorRegistry`] to source cheap checks from. The
+/// production path passes [`registry()`]; tests pass a local
+/// [`DoctorRegistry`] they control.
+///
+/// `run_id` is stamped on every persisted finding so the operator can scope a
+/// subsequent `doctor_list_findings` query back to one leader-tick invocation.
+/// Pass `None` for ad-hoc invocations (tests).
+pub async fn run_cheap_doctor_checks(
+    registry: &DoctorRegistry,
+    db: &djinn_db::Database,
+    events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+    run_id: Option<&str>,
+) {
+    let started = StdInstant::now();
+    let runs = match run_cheap_subset(registry) {
+        Ok(runs) => runs,
+        Err(error) => {
+            // A registry-level error means every check failed to run; log
+            // once and exit so we don't spam the activity log.
+            error!(
+                error = %error,
+                "CoordinatorActor: cheap doctor subset failed to enumerate; skipping tick"
+            );
+            return;
+        }
+    };
+
+    if runs.is_empty() {
+        // Nothing cheap registered. Still record a tick stamp so the metric
+        // surface does not silently go stale.
+        info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "CoordinatorActor: cheap doctor subset had no registered checks"
+        );
+        return;
+    }
+
+    let finding_repo = DoctorFindingRepository::new(db.clone());
+    let task_repo =
+        djinn_db::TaskRepository::new(db.clone(), crate::events::event_bus_for(events_tx));
+
+    for run in &runs {
+        let check_name = run.check_name;
+        let findings_count = run.findings.len();
+        let run_started = StdInstant::now();
+
+        persist_findings(&finding_repo, run_id, &run.findings).await;
+
+        for finding in &run.findings {
+            // Every finding gets a board activity entry — Critical surfaces
+            // in the dedicated lane; Warn/Info still surface in the
+            // generic doctor-finding lane for observability.
+            record_activity_for_finding(&task_repo, finding).await;
+        }
+
+        let elapsed = run_started.elapsed();
+        // Metrics facade enforces the `check`-only label discipline.
+        djinn_telemetry::doctor::set_findings(check_name, findings_count);
+        djinn_telemetry::doctor::record_run_duration(check_name, elapsed);
+
+        info!(
+            check = check_name,
+            findings = findings_count,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "CoordinatorActor: cheap doctor check complete"
+        );
+    }
+
+    info!(
+        checks = runs.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "CoordinatorActor: cheap doctor tick complete"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_core::doctor::{
+        DoctorCheck, DoctorCheckCadence, DoctorRegistry, DoctorResult, Finding, FindingSeverity,
+        ResolverSnapshot,
+    };
+    use djinn_db::{Database, DoctorFindingRepository};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use tokio::sync::broadcast;
+
+    const TEST_CHECK_NAME: &str = "leader_tick.test";
+
+    struct FixtureCheck;
+
+    impl DoctorCheck for FixtureCheck {
+        fn name(&self) -> &'static str {
+            TEST_CHECK_NAME
+        }
+
+        fn description(&self) -> &'static str {
+            "Test check that emits one critical and one warn finding"
+        }
+
+        fn cadence(&self) -> DoctorCheckCadence {
+            DoctorCheckCadence::Cheap
+        }
+
+        fn run(&self) -> DoctorResult<Vec<Finding>> {
+            let mut critical = Finding::new(
+                FindingSeverity::Critical,
+                self.name(),
+                ResolverSnapshot::new(
+                    "resolve_fixture",
+                    json!({"observed": 0}),
+                    json!({"expected": 1, "should_fix": true}),
+                ),
+                "fixture critical divergence",
+            );
+            critical = critical
+                .with_entity_id("task_id", "task-fixture-1")
+                .with_entity_id("workspace_id", "ws-fixture")
+                .with_evidence(json!({"rows": 1}));
+
+            let warn = Finding::new(
+                FindingSeverity::Warn,
+                self.name(),
+                ResolverSnapshot::new(
+                    "resolve_fixture",
+                    json!({"observed": 2}),
+                    json!({"expected": 2, "should_fix": false}),
+                ),
+                "fixture warn observation",
+            )
+            .with_entity_id("task_id", "task-fixture-2")
+            .with_evidence(json!({"rows": 1}));
+
+            Ok(vec![critical, warn])
+        }
+    }
+
+    struct BoardWideCheck;
+
+    impl DoctorCheck for BoardWideCheck {
+        fn name(&self) -> &'static str {
+            "leader_tick.board_wide"
+        }
+
+        fn description(&self) -> &'static str {
+            "Check that emits a critical finding with no task entity"
+        }
+
+        fn cadence(&self) -> DoctorCheckCadence {
+            DoctorCheckCadence::Cheap
+        }
+
+        fn run(&self) -> DoctorResult<Vec<Finding>> {
+            Ok(vec![
+                Finding::new(
+                    FindingSeverity::Critical,
+                    self.name(),
+                    ResolverSnapshot::new("resolve_board", json!({}), json!({"should_fix": true})),
+                    "board-wide critical divergence",
+                )
+                .with_evidence(json!({"sample": 1})),
+            ])
+        }
+    }
+
+    struct ExpensiveCheck;
+
+    impl DoctorCheck for ExpensiveCheck {
+        fn name(&self) -> &'static str {
+            "leader_tick.expensive"
+        }
+
+        fn description(&self) -> &'static str {
+            "Check that is explicitly on-demand and must NOT run on the cheap tick"
+        }
+
+        fn run(&self) -> DoctorResult<Vec<Finding>> {
+            panic!("expensive check must not be invoked from the cheap leader-tick path");
+        }
+    }
+
+    fn fresh_db() -> Database {
+        Database::open_in_memory().expect("in-memory db")
+    }
+
+    fn fresh_registry() -> DoctorRegistry {
+        let registry = DoctorRegistry::new();
+        djinn_core::doctor::register(&registry, FixtureCheck);
+        djinn_core::doctor::register(&registry, BoardWideCheck);
+        djinn_core::doctor::register(&registry, ExpensiveCheck);
+        registry
+    }
+
+    fn entity_ids_of(finding: &Finding) -> BTreeMap<String, String> {
+        finding.entity_ids.clone()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_cheap_doctor_checks_persists_findings_and_emits_metrics() {
+        let _ = djinn_telemetry::init();
+        let db = fresh_db();
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let registry = fresh_registry();
+
+        run_cheap_doctor_checks(&registry, &db, &events_tx, Some("leader-tick-test")).await;
+
+        let repo = DoctorFindingRepository::new(db.clone());
+        let rows = repo
+            .list_recent(djinn_db::RecentDoctorFindings {
+                run_id: Some("leader-tick-test".to_owned()),
+                ..Default::default()
+            })
+            .await
+            .expect("list recent");
+
+        // Both cheap checks wrote findings; the expensive check did not run.
+        let check_names: std::collections::BTreeSet<&str> =
+            rows.iter().map(|row| row.check_name.as_str()).collect();
+        assert!(check_names.contains(TEST_CHECK_NAME));
+        assert!(check_names.contains("leader_tick.board_wide"));
+        assert!(
+            !check_names.contains("leader_tick.expensive"),
+            "expensive on-demand check must not run on the cheap tick"
+        );
+
+        // Three findings total: one critical + one warn (fixture), one critical (board).
+        assert_eq!(rows.len(), 3);
+
+        // The fixture check's run-duration metric was stamped with the stable
+        // check name label and no other labels.
+        let rendered = djinn_telemetry::render().expect("render");
+        let findings_line = rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_doctor_findings{") && line.contains(TEST_CHECK_NAME)
+            })
+            .expect("findings metric");
+        assert!(findings_line.ends_with(" 2"));
+        let duration_line = rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_doctor_run_duration_seconds{")
+                    && line.contains(TEST_CHECK_NAME)
+            })
+            .expect("duration metric");
+        // Stable-name-only label discipline.
+        assert_eq!(findings_line.matches('=').count(), 1);
+        assert_eq!(duration_line.matches('=').count(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_cheap_doctor_checks_writes_activity_entries_for_critical_findings() {
+        let _ = djinn_telemetry::init();
+        let db = fresh_db();
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let registry = fresh_registry();
+
+        run_cheap_doctor_checks(&registry, &db, &events_tx, Some("leader-tick-activity")).await;
+
+        let task_repo =
+            djinn_db::TaskRepository::new(db.clone(), crate::events::event_bus_for(&events_tx));
+
+        // The fixture's critical finding is tied to task-fixture-1, so the
+        // activity entry must be attached to that task with the
+        // `doctor_critical_finding` event type and the canonical payload
+        // shape (check / severity / detail / entity_ids).
+        let task_activity = task_repo
+            .list_activity("task-fixture-1")
+            .await
+            .expect("list task activity");
+        let critical = task_activity
+            .iter()
+            .find(|entry| entry.event_type == DOCTOR_CRITICAL_FINDING_ACTIVITY)
+            .expect("critical activity entry written");
+        let payload: serde_json::Value =
+            serde_json::from_str(&critical.payload).expect("payload is json");
+        assert_eq!(payload["check"], TEST_CHECK_NAME);
+        assert_eq!(payload["severity"], "critical");
+        assert_eq!(payload["kind"], "critical");
+        assert_eq!(payload["detail"], "fixture critical divergence");
+        assert_eq!(payload["entity_ids"]["task_id"], "task-fixture-1");
+        assert_eq!(payload["entity_ids"]["workspace_id"], "ws-fixture");
+        assert_eq!(critical.actor_id, "coordinator");
+        assert_eq!(critical.actor_role, "system");
+
+        // The fixture's warn finding is tied to task-fixture-2 and must use
+        // the generic `doctor_finding` event type with `kind = warn`.
+        let warn_activity = task_repo
+            .list_activity("task-fixture-2")
+            .await
+            .expect("list task activity");
+        let warn_entry = warn_activity
+            .iter()
+            .find(|entry| entry.event_type == DOCTOR_FINDING_ACTIVITY)
+            .expect("warn activity entry written");
+        let warn_payload: serde_json::Value =
+            serde_json::from_str(&warn_entry.payload).expect("payload is json");
+        assert_eq!(warn_payload["check"], TEST_CHECK_NAME);
+        assert_eq!(warn_payload["severity"], "warn");
+        assert_eq!(warn_payload["kind"], "warn");
+
+        // The board-wide critical finding has no task entity, so its
+        // activity entry MUST have task_id = NULL and event_type =
+        // `doctor_critical_finding` (operator-visible critical lane).
+        let board_activity = task_repo
+            .query_activity(djinn_db::ActivityQuery {
+                event_type: Some(DOCTOR_CRITICAL_FINDING_ACTIVITY.to_owned()),
+                ..Default::default()
+            })
+            .await
+            .expect("query activity");
+        let board_entry = board_activity
+            .iter()
+            .find(|entry| entry.payload.contains("leader_tick.board_wide"))
+            .expect("board activity entry");
+        assert!(board_entry.task_id.is_none());
+        let board_payload: serde_json::Value =
+            serde_json::from_str(&board_entry.payload).expect("payload is json");
+        assert_eq!(board_payload["check"], "leader_tick.board_wide");
+        assert_eq!(board_payload["severity"], "critical");
+    }
+
+    #[test]
+    fn finding_to_new_row_carries_structured_fields() {
+        let finding = Finding::new(
+            FindingSeverity::Warn,
+            "demo.test",
+            ResolverSnapshot::new(
+                "resolve",
+                json!({"observed": 1}),
+                json!({"expected": 2, "should_fix": true}),
+            ),
+            "demo detail",
+        )
+        .with_entity_id("task_id", "task-demo")
+        .with_evidence(json!({"rows": 3}));
+
+        let row = finding_to_new_row(&finding, Some("run-x"));
+        assert_eq!(row.check_name, "demo.test");
+        assert_eq!(row.severity, "warn");
+        assert_eq!(row.run_id.as_deref(), Some("run-x"));
+        assert_eq!(row.entity_ids, json!({"task_id": "task-demo"}));
+        assert_eq!(row.evidence, json!({"rows": 3}));
+        assert!(row.resolver_snapshot.is_some());
+        assert_eq!(row.detail.as_deref(), Some("demo detail"));
+    }
+
+    #[test]
+    fn finding_task_id_prefers_task_id_entity_key() {
+        let finding = Finding::new(
+            FindingSeverity::Info,
+            "demo.entity",
+            ResolverSnapshot::new("resolve", json!({}), json!({})),
+            "detail",
+        )
+        .with_entity_id("workspace_id", "ws-1")
+        .with_entity_id("task_id", "task-99");
+
+        assert_eq!(finding_task_id(&finding).as_deref(), Some("task-99"));
+    }
+
+    #[test]
+    fn finding_task_id_returns_none_for_board_wide_finding() {
+        let finding = Finding::new(
+            FindingSeverity::Critical,
+            "demo.board",
+            ResolverSnapshot::new("resolve", json!({}), json!({})),
+            "detail",
+        );
+        assert!(finding_task_id(&finding).is_none());
+
+        let mut with_workspace = finding.clone();
+        with_workspace = with_workspace.with_entity_id("workspace_id", "ws-1");
+        assert!(
+            finding_task_id(&with_workspace).is_none(),
+            "only the canonical task_id / task keys map to an activity row"
+        );
+
+        // Silence the unused-variable warning that comes from the entity_ids
+        // helper above being only used in tests.
+        let _ = entity_ids_of(&finding);
+    }
+
+    #[test]
+    fn expensive_check_is_excluded_from_cheap_subset() {
+        let registry = fresh_registry();
+        let cheap = registry.cheap_checks();
+        let names: std::collections::BTreeSet<&str> =
+            cheap.iter().map(|check| check.name()).collect();
+        assert!(names.contains(TEST_CHECK_NAME));
+        assert!(names.contains("leader_tick.board_wide"));
+        assert!(
+            !names.contains("leader_tick.expensive"),
+            "expensive on-demand check must be excluded from the cheap subset"
+        );
+    }
+
+    #[test]
+    fn cheap_doctor_tick_helper_handles_empty_registry_gracefully() {
+        let registry = DoctorRegistry::new();
+        let result = djinn_core::doctor::run_cheap_subset(&registry);
+        // An empty cheap subset is a valid run; the helper returns an empty
+        // vec of check results.
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+}
