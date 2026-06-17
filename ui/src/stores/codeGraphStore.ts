@@ -170,6 +170,13 @@ export interface CodeGraphHighlightState {
    * force the level. Default `"auto"`. See {@link SemanticZoomMode}.
    */
   semanticZoomMode: SemanticZoomMode;
+  /**
+   * Stable community ids that the user has expanded via double-click.
+   * Keyed by `community_id` (the server's sha256-of-members hash) so
+   * expansion state survives snapshot re-renders for the same project
+   * and is safely reset when the project changes (via `reset`).
+   */
+  expandedCommunityIds: Set<string>;
   selectedWorkspaceSlug: string | null;
 }
 
@@ -195,6 +202,18 @@ export interface CodeGraphHighlightActions {
   setComplexityAvailable: (available: boolean) => void;
   /** Set the semantic zoom mode override (auto/symbol/community). */
   setSemanticZoomMode: (mode: SemanticZoomMode) => void;
+  /**
+   * Mark a community as expanded (double-click). Idempotent: the stable
+   * `community_id` is stored so expansion survives snapshot re-renders.
+   */
+  expandCommunity: (communityId: string) => void;
+  /**
+   * Mark a community as collapsed (double-click on an expanded community).
+   * Idempotent.
+   */
+  collapseCommunity: (communityId: string) => void;
+  /** Clear all expanded communities (called on project change). */
+  clearExpandedCommunities: () => void;
   setSelectedWorkspaceSlug: (slug: string | null) => void;
   reset: () => void;
 }
@@ -229,6 +248,7 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   colorMode: DEFAULT_COLOR_MODE,
   complexityAvailable: false,
   semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
+  expandedCommunityIds: new Set<string>(),
   selectedWorkspaceSlug: null,
 };
 
@@ -336,6 +356,33 @@ export const useCodeGraphStore = create<
     set({ semanticZoomMode: mode });
   },
 
+  expandCommunity: (communityId) => {
+    if (!communityId) return;
+    set((state) => {
+      if (state.expandedCommunityIds.has(communityId)) return state;
+      const next = new Set(state.expandedCommunityIds);
+      next.add(communityId);
+      return { expandedCommunityIds: next };
+    });
+  },
+
+  collapseCommunity: (communityId) => {
+    if (!communityId) return;
+    set((state) => {
+      if (!state.expandedCommunityIds.has(communityId)) return state;
+      const next = new Set(state.expandedCommunityIds);
+      next.delete(communityId);
+      return { expandedCommunityIds: next };
+    });
+  },
+
+  clearExpandedCommunities: () => {
+    set((state) => {
+      if (state.expandedCommunityIds.size === 0) return state;
+      return { expandedCommunityIds: new Set() };
+    });
+  },
+
   reset: () => {
     set((state) => ({
       ...INITIAL_STATE,
@@ -349,6 +396,7 @@ export const useCodeGraphStore = create<
       colorMode: DEFAULT_COLOR_MODE,
       complexityAvailable: false,
       semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
+      expandedCommunityIds: new Set(),
     }));
   },
 }));

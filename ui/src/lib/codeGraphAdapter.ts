@@ -942,3 +942,207 @@ function densityScale(base: number, nodeCount: number): number {
   if (nodeCount > 1000) return Math.max(2.5, base * 0.8);
   return base;
 }
+
+// ── Community expand / collapse (semantic zoom) ───────────────────────────
+
+/**
+ * Maximum inter-click interval (ms) for two `clickNode` events to count
+ * as a double-click. Sigma 3 exposes a `doubleClickNode` event via its
+ * double-click captor, but the installed version's event surface varies;
+ * the canvas uses a timestamp/last-node guard around `clickNode` with
+ * this interval so behavior is deterministic regardless of version.
+ */
+export const DOUBLE_CLICK_INTERVAL_MS = 350;
+
+/**
+ * Pure double-click detector. Used by the canvas to implement the
+ * timestamp/last-node guard around `clickNode` (see the task design:
+ * "implement a timestamp/last-node guard around clickNode with a small
+ * interval"). Kept as a pure exported helper so focused tests can pin
+ * the interval + same-node requirement without rendering the canvas.
+ *
+ * Two clicks count as a double-click when:
+ *   - the second click hits the *same* node id as the first, and
+ *   - the interval between them is at most `interval` ms (default
+ *     {@link DOUBLE_CLICK_INTERVAL_MS}).
+ *
+ * Returns `true` for the second click and `false` for the first click
+ * (or any click outside the window / on a different node). The caller
+ * records the returned "last" tuple so consecutive single clicks on the
+ * same node outside the window don't accumulate.
+ */
+export function isDoubleClick(
+  prev: { nodeId: string; at: number } | null,
+  nodeId: string,
+  now: number,
+  interval: number = DOUBLE_CLICK_INTERVAL_MS,
+): boolean {
+  if (!prev) return false;
+  if (prev.nodeId !== nodeId) return false;
+  return now - prev.at <= interval;
+}
+
+/**
+ * Build a snapshot with a community replaced by its member symbol nodes.
+ *
+ * The caller supplies:
+ *   - `communitySnapshot`: the community-level snapshot (collapsed view)
+ *     that the canvas is currently rendering.
+ *   - `symbolSnapshot`: a symbol-level snapshot for the same project.
+ *   - `communityId`: the stable `community_id` of the community to expand.
+ *
+ * The helper:
+ *   1. Removes the community node identified by `communityId`.
+ *   2. Adds every symbol node from `symbolSnapshot` whose `community_id`
+ *      matches `communityId`.
+ *   3. Adds all symbol-level edges whose *both* endpoints are member
+ *      nodes of the expanded community (intra-community edges).
+ *   4. Preserves aggregated inter-community edges from the community
+ *      snapshot for all *other* communities. Edges touching the expanded
+ *      community node are dropped (the individual members now carry
+ *      those relationships, but exact member↔community edge mapping is
+ *      not available without a server community-scope parameter, so this
+ *      is the documented best-effort behavior).
+ *
+ * Edges whose endpoints are no longer present after the splice are
+ * dropped, exactly as `buildGraphFromSnapshot` does.
+ */
+export function expandCommunityInSnapshot(
+  communitySnapshot: SnapshotPayload,
+  symbolSnapshot: SnapshotPayload,
+  communityId: string,
+): SnapshotPayload {
+  const communityNode = findCommunityNode(communitySnapshot, communityId);
+  const communityNodeId = communityNode ? communityNode.id : communityId;
+
+  const members = symbolSnapshot.nodes.filter(
+    (n) => n.community_id === communityId,
+  );
+  const memberIds = new Set(members.map((n) => n.id));
+
+  const otherCommunities = communitySnapshot.nodes.filter(
+    (n) => n.id !== communityNodeId,
+  );
+
+  // Intra-community edges: both endpoints are members of the expanded community.
+  const memberEdges = symbolSnapshot.edges.filter(
+    (e) => memberIds.has(e.from) && memberIds.has(e.to),
+  );
+
+  // Inter-community edges for the *other* (still-collapsed) communities.
+  // Edges touching the expanded community node are dropped — the individual
+  // members now represent that community, but there's no server mapping
+  // from an aggregated edge back to specific member endpoints.
+  const otherCommunityEdges = communitySnapshot.edges.filter(
+    (e) => e.from !== communityNodeId && e.to !== communityNodeId,
+  );
+
+  const nodes = [...otherCommunities, ...members];
+  const edges = [...otherCommunityEdges, ...memberEdges];
+
+  return {
+    ...communitySnapshot,
+    nodes,
+    edges,
+    total_nodes: nodes.length,
+    total_edges: edges.length,
+  };
+}
+
+/**
+ * Build a snapshot with an expanded community collapsed back into its
+ * community node. Restores the original community node and the aggregated
+ * inter-community edges from the community-level snapshot.
+ *
+ * The caller supplies:
+ *   - `communitySnapshot`: the community-level snapshot (collapsed view).
+ *   - `expandedSnapshot`: the currently-rendered snapshot (community view
+ *     with one community expanded into members).
+ *   - `communityId`: the stable `community_id` of the community to collapse.
+ *
+ * The helper:
+ *   1. Removes every symbol node whose `community_id` matches `communityId`.
+ *   2. Re-inserts the original community node from `communitySnapshot`.
+ *   3. Restores the aggregated inter-community edges from
+ *      `communitySnapshot` (both edges between other communities and
+ *      edges touching the restored community node).
+ *   4. Drops symbol-level intra-community edges for the collapsed
+ *      community (they're now aggregated inside the restored node).
+ *
+ * Other still-expanded communities in `expandedSnapshot` are preserved
+ * so collapsing one community doesn't collapse siblings the user has
+ * also expanded.
+ */
+export function collapseCommunityInSnapshot(
+  communitySnapshot: SnapshotPayload,
+  expandedSnapshot: SnapshotPayload,
+  communityId: string,
+): SnapshotPayload {
+  const communityNode = findCommunityNode(communitySnapshot, communityId);
+  const nodeId = communityNode ? communityNode.id : communityId;
+
+  // Remove symbol members of the community being collapsed, and the
+  // expanded community node id if it somehow lingers.
+  const remainingNodes = expandedSnapshot.nodes.filter(
+    (n) => n.community_id !== communityId && n.id !== nodeId,
+  );
+
+  // Re-insert the original community node.
+  const nodes = communityNode
+    ? [...remainingNodes, communityNode]
+    : remainingNodes;
+  const nodeIdSet = new Set(nodes.map((n) => n.id));
+
+  // Restore aggregated inter-community edges from the community snapshot
+  // that are valid for the current node set.
+  const restoredEdges = communitySnapshot.edges.filter(
+    (e) => nodeIdSet.has(e.from) && nodeIdSet.has(e.to),
+  );
+
+  // Keep symbol-level edges for *other* still-expanded communities:
+  // drop edges touching any member of the collapsed community.
+  const memberIds = new Set(
+    expandedSnapshot.nodes
+      .filter((n) => n.community_id === communityId)
+      .map((n) => n.id),
+  );
+  const otherExpandedEdges = expandedSnapshot.edges.filter(
+    (e) => !memberIds.has(e.from) && !memberIds.has(e.to),
+  );
+
+  // Merge: restored community edges take precedence; add symbol edges
+  // for other expanded communities that aren't already represented.
+  const seen = new Set(
+    restoredEdges.map((e) => `${e.from}\u0000${e.to}\u0000${e.kind}`),
+  );
+  const edges = [...restoredEdges];
+  for (const e of otherExpandedEdges) {
+    const key = `${e.from}\u0000${e.to}\u0000${e.kind}`;
+    if (seen.has(key)) continue;
+    if (!nodeIdSet.has(e.from) || !nodeIdSet.has(e.to)) continue;
+    seen.add(key);
+    edges.push(e);
+  }
+
+  return {
+    ...communitySnapshot,
+    nodes,
+    edges,
+    total_nodes: nodes.length,
+    total_edges: edges.length,
+  };
+}
+
+/**
+ * Find the community node in a community-level snapshot whose stable
+ * `community_id` matches `communityId`. Returns the node (or `undefined`
+ * when no community node carries that id).
+ */
+function findCommunityNode(
+  snapshot: SnapshotPayload,
+  communityId: string,
+): SnapshotNode | undefined {
+  return snapshot.nodes.find(
+    (n) => n.kind === "community" && n.community_id === communityId,
+  );
+}

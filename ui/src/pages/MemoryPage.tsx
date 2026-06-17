@@ -135,6 +135,38 @@ export function MemoryPage() {
     [projectSlug, notes, handleSelectNote],
   );
 
+  // Open a note by permalink — called from the MemoryGraphCanvas node-click.
+  // Switches to the list view and fetches the note via the existing detail flow.
+  const handleSelectNoteByPermalink = useCallback(
+    (permalink: string) => {
+      if (!projectSlug) return;
+      setView('list');
+
+      // Try to find in the already-loaded list by permalink match.
+      const match = notes.find((n) => n.permalink === permalink);
+      if (match) {
+        handleSelectNote(match);
+        return;
+      }
+
+      // Fall back to memory_read by permalink.
+      setDetailLoading(true);
+      callMcpTool('memory_read', { project: projectSlug, identifier: permalink })
+        .then((result) => {
+          if (result.id) {
+            setSelectedNoteId(result.id);
+            setSelectedNote(result);
+            if (result.permalink) {
+              noteCache.current.set(result.permalink, result);
+            }
+          }
+        })
+        .catch(() => setSelectedNote(null))
+        .finally(() => setDetailLoading(false));
+    },
+    [projectSlug, notes, handleSelectNote],
+  );
+
   // Debounced search
   const handleSearchChange = useCallback(
     (query: string) => {
@@ -191,7 +223,10 @@ export function MemoryPage() {
           <ViewToggle view={view} onChange={setView} />
           {view === 'graph' ? (
             <div className="min-h-0 flex-1">
-              <MemoryGraphCanvas projectSlug={projectSlug!} />
+              <MemoryGraphCanvas
+                projectSlug={projectSlug!}
+                onSelectNote={handleSelectNoteByPermalink}
+              />
             </div>
           ) : (
             <div className="flex min-h-0 flex-1">
