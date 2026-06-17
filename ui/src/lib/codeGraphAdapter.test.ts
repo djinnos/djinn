@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   COMMUNITY_COLORS,
+  COMMUNITY_MAX_SIZE,
+  COMMUNITY_MIN_SIZE,
   PRECOMPUTED_LAYOUT_ATTRIBUTE,
   WORKSPACE_COLORS,
   buildGraphFromSnapshot,
   colorForCommunity,
   colorForNode,
   colorForWorkspace,
+  communityNodeMass,
+  communityNodeSize,
   edgeStyleFor,
   filterSnapshotForWorkspace,
   hasPrecomputedCoordinates,
@@ -175,6 +179,100 @@ describe("parseSnapshotResponse", () => {
     };
     const parsed = parseSnapshotResponse(wire);
     expect(parsed?.nodes[0]?.community_id).toBe("cluster-7");
+  });
+
+  it("preserves kind: 'community' instead of coercing to symbol", () => {
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [
+          {
+            id: "community:abc123",
+            kind: "community",
+            label: "auth-module",
+            pagerank: 0.9,
+            community_id: "abc123",
+            member_count: 42,
+            internal_edge_count: 17,
+            workspace_kind: "single",
+          },
+        ],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    expect(parsed?.nodes).toHaveLength(1);
+    const node = parsed?.nodes[0];
+    expect(node?.kind).toBe("community");
+    expect(node?.community_id).toBe("abc123");
+  });
+
+  it("parses community metadata (member_count, internal_edge_count, workspace_kind)", () => {
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [
+          {
+            id: "community:abc123",
+            kind: "community",
+            label: "auth-module",
+            pagerank: 0.9,
+            member_count: 128,
+            internal_edge_count: 512,
+            workspace_kind: "mixed",
+          },
+        ],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    const node = parsed?.nodes[0];
+    expect(node?.member_count).toBe(128);
+    expect(node?.internal_edge_count).toBe(512);
+    expect(node?.workspace_kind).toBe("mixed");
+  });
+
+  it("treats non-numeric / negative member_count as undefined", () => {
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [
+          {
+            id: "community:a",
+            kind: "community",
+            label: "a",
+            pagerank: 0,
+            member_count: "lots" as unknown as number,
+          },
+          {
+            id: "community:b",
+            kind: "community",
+            label: "b",
+            pagerank: 0,
+            member_count: -5,
+          },
+          {
+            id: "community:c",
+            kind: "community",
+            label: "c",
+            pagerank: 0,
+            internal_edge_count: Number.NaN,
+          },
+        ],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    expect(parsed?.nodes[0]?.member_count).toBeUndefined();
+    expect(parsed?.nodes[1]?.member_count).toBeUndefined();
+    expect(parsed?.nodes[2]?.internal_edge_count).toBeUndefined();
+  });
+
+  it("leaves community metadata undefined for symbol/file/folder nodes", () => {
+    const wire = { snapshot: fixtureSnapshot };
+    const parsed = parseSnapshotResponse(wire);
+    for (const node of parsed?.nodes ?? []) {
+      expect(node.member_count).toBeUndefined();
+      expect(node.internal_edge_count).toBeUndefined();
+      expect(node.workspace_kind).toBeUndefined();
+    }
   });
 
   it("preserves non-empty workspace tags on nodes when present", () => {
@@ -981,6 +1079,235 @@ describe("colorForNode", () => {
   it("colorForCommunity always returns a color from the 12-hue palette", () => {
     for (const cid of ["a", "b", "c", "test", "cluster-99", "longer-id-here"]) {
       expect(COMMUNITY_COLORS).toContain(colorForCommunity(cid));
+    }
+  });
+});
+
+// ── Community node parsing & rendering (semantic zoom) ──────────────────────
+
+const communitySnapshot: SnapshotPayload = {
+  project_id: "proj-test",
+  git_head: "deadbeef",
+  generated_at: "2026-06-16T00:00:00Z",
+  truncated: false,
+  total_nodes: 3,
+  total_edges: 2,
+  node_cap: 10_000,
+  nodes: [
+    {
+      id: "community:auth",
+      kind: "community",
+      label: "auth",
+      pagerank: 0.5,
+      community_id: "auth",
+      member_count: 120,
+      internal_edge_count: 340,
+      workspace_kind: "single",
+    },
+    {
+      id: "community:api",
+      kind: "community",
+      label: "api",
+      pagerank: 0.3,
+      community_id: "api",
+      member_count: 5000,
+      internal_edge_count: 12_000,
+      workspace_kind: "mixed",
+    },
+    {
+      id: "community:utils",
+      kind: "community",
+      label: "utils",
+      pagerank: 0.2,
+      community_id: "utils",
+      member_count: 8,
+      internal_edge_count: 3,
+    },
+  ],
+  edges: [
+    {
+      from: "community:auth",
+      to: "community:api",
+      kind: "SymbolReference",
+      confidence: 0.8,
+    },
+    {
+      from: "community:api",
+      to: "community:utils",
+      kind: "FileReference",
+      confidence: 0.6,
+    },
+  ],
+};
+
+describe("communityNodeSize", () => {
+  it("returns near the minimum size for a 1-member community", () => {
+    // log10(1+1)=log10(2)≈0.3, so a 1-member community sits slightly
+    // above the floor but well within the lower quarter of the band.
+    expect(communityNodeSize(1)).toBeGreaterThanOrEqual(COMMUNITY_MIN_SIZE);
+    expect(communityNodeSize(1)).toBeLessThan(
+      COMMUNITY_MIN_SIZE + (COMMUNITY_MAX_SIZE - COMMUNITY_MIN_SIZE) * 0.25,
+    );
+  });
+
+  it("returns near the minimum size for undefined member count", () => {
+    expect(communityNodeSize(undefined)).toBeGreaterThanOrEqual(
+      COMMUNITY_MIN_SIZE,
+    );
+    expect(communityNodeSize(undefined)).toBeLessThan(
+      COMMUNITY_MIN_SIZE + (COMMUNITY_MAX_SIZE - COMMUNITY_MIN_SIZE) * 0.25,
+    );
+  });
+
+  it("grows monotonically with member count", () => {
+    const small = communityNodeSize(10);
+    const medium = communityNodeSize(100);
+    const large = communityNodeSize(1000);
+    expect(medium).toBeGreaterThan(small);
+    expect(large).toBeGreaterThan(medium);
+  });
+
+  it("stays bounded within [COMMUNITY_MIN_SIZE, COMMUNITY_MAX_SIZE]", () => {
+    expect(communityNodeSize(0)).toBeGreaterThanOrEqual(COMMUNITY_MIN_SIZE);
+    expect(communityNodeSize(1)).toBeGreaterThanOrEqual(COMMUNITY_MIN_SIZE);
+    expect(communityNodeSize(100)).toBeLessThanOrEqual(COMMUNITY_MAX_SIZE);
+    expect(communityNodeSize(10_000)).toBeLessThanOrEqual(COMMUNITY_MAX_SIZE);
+    expect(communityNodeSize(1_000_000)).toBeLessThanOrEqual(COMMUNITY_MAX_SIZE);
+  });
+});
+
+describe("communityNodeMass", () => {
+  it("is heavier than a folder (15) so collapsed blobs spread apart", () => {
+    expect(communityNodeMass(1)).toBeGreaterThan(15);
+  });
+
+  it("grows with member count but stays bounded", () => {
+    const small = communityNodeMass(10);
+    const large = communityNodeMass(10_000);
+    expect(large).toBeGreaterThan(small);
+    expect(large).toBeLessThanOrEqual(120);
+  });
+});
+
+describe("massForNode (community)", () => {
+  it("routes community nodes through the member-count mass scale", () => {
+    const node: SnapshotNode = {
+      id: "community:x",
+      kind: "community",
+      label: "x",
+      pagerank: 0,
+      member_count: 500,
+    };
+    expect(massForNode(node)).toBe(communityNodeMass(500));
+  });
+
+  it("community mass is independent of nodeCount multiplier", () => {
+    const node: SnapshotNode = {
+      id: "community:x",
+      kind: "community",
+      label: "x",
+      pagerank: 0,
+      member_count: 100,
+    };
+    // Unlike file/folder/symbol, community mass does not scale with
+    // nodeCount — the member_count already encodes the graph size.
+    expect(massForNode(node, 10)).toBe(massForNode(node, 50_000));
+  });
+});
+
+describe("colorForNode (community)", () => {
+  it("colors community nodes by their stable community_id", () => {
+    const node: SnapshotNode = {
+      id: "community:auth",
+      kind: "community",
+      label: "auth",
+      pagerank: 0,
+      community_id: "auth",
+    };
+    expect(colorForNode(node)).toBe(colorForCommunity("auth"));
+  });
+
+  it("falls back to hashing the label when community_id is absent", () => {
+    const node: SnapshotNode = {
+      id: "community:auth",
+      kind: "community",
+      label: "auth-fallback",
+      pagerank: 0,
+    };
+    expect(colorForNode(node)).toBe(colorForCommunity("auth-fallback"));
+    expect(COMMUNITY_COLORS).toContain(colorForNode(node));
+  });
+});
+
+describe("buildGraphFromSnapshot (community)", () => {
+  it("emits one graphology node per community with stable attributes", () => {
+    const graph = buildGraphFromSnapshot(communitySnapshot);
+    expect(graph.order).toBe(3);
+
+    const auth = graph.getNodeAttributes("community:auth");
+    expect(auth.kind).toBe("community");
+    expect(auth.communityId).toBe("auth");
+    expect(auth.memberCount).toBe(120);
+    expect(auth.internalEdgeCount).toBe(340);
+    expect(auth.workspaceKind).toBe("single");
+  });
+
+  it("renders community nodes visibly larger than symbol/file nodes", () => {
+    const graph = buildGraphFromSnapshot(communitySnapshot);
+    const communitySize = graph.getNodeAttribute("community:api", "size") as number;
+
+    // Build a comparable symbol-level snapshot to get a symbol size.
+    const symbolGraph = buildGraphFromSnapshot(fixtureSnapshot);
+    const symbolSize = symbolGraph.getNodeAttribute(
+      "symbol:scip-rust . . . User#",
+      "size",
+    ) as number;
+
+    expect(communitySize).toBeGreaterThan(symbolSize);
+  });
+
+  it("sizes community nodes by bounded member-count scale", () => {
+    const graph = buildGraphFromSnapshot(communitySnapshot);
+    const small = graph.getNodeAttribute("community:utils", "size") as number; // 8 members
+    const large = graph.getNodeAttribute("community:api", "size") as number; // 5000 members
+
+    expect(large).toBeGreaterThan(small);
+    // Both within the bounded band.
+    expect(small).toBeGreaterThanOrEqual(COMMUNITY_MIN_SIZE);
+    expect(large).toBeLessThanOrEqual(COMMUNITY_MAX_SIZE);
+  });
+
+  it("forwards community mass onto graphology node attributes", () => {
+    const graph = buildGraphFromSnapshot(communitySnapshot);
+    const mass = graph.getNodeAttribute("community:auth", "mass") as number;
+    expect(mass).toBe(communityNodeMass(120));
+  });
+
+  it("renders aggregated inter-community edges without dropping them", () => {
+    const graph = buildGraphFromSnapshot(communitySnapshot);
+    expect(graph.size).toBe(2);
+    const edge = graph
+      .edges()
+      .find(
+        (e) =>
+          graph.source(e) === "community:auth" &&
+          graph.target(e) === "community:api",
+      );
+    expect(edge).toBeDefined();
+  });
+
+  it("colors community nodes from the 12-hue palette", () => {
+    const graph = buildGraphFromSnapshot(communitySnapshot);
+    for (const id of graph.nodes()) {
+      const color = graph.getNodeAttribute(id, "color") as string;
+      expect(COMMUNITY_COLORS).toContain(color);
+    }
+  });
+
+  it("preserves kind: 'community' on the graphology node (not coerced to symbol)", () => {
+    const graph = buildGraphFromSnapshot(communitySnapshot);
+    for (const id of graph.nodes()) {
+      expect(graph.getNodeAttribute(id, "kind")).toBe("community");
     }
   });
 });

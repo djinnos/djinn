@@ -5651,6 +5651,11 @@ expression: signatures
               "format": "int64",
               "type": "integer"
             },
+            "kind": {
+              "default": "",
+              "description": "Association edge kind as stored on `note_associations.kind` (e.g. `\"co_access\"`).\nToday the only value written is `\"co_access\"`; future wave-1 graph-typed edges\n(builds_on / contradicts / supersedes / exemplifies) will widen the value set\n— see Epic 2chl. `#[serde(default)]` keeps older clients deserialising cleanly\nuntil they adopt the new field.",
+              "type": "string"
+            },
             "last_co_access": {
               "type": "string"
             },
