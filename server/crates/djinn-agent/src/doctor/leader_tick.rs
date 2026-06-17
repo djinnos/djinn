@@ -251,6 +251,8 @@ mod tests {
     use djinn_db::{Database, DoctorFindingRepository};
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::broadcast;
 
     const TEST_CHECK_NAME: &str = "leader_tick.test";
@@ -344,6 +346,37 @@ mod tests {
 
         fn run(&self) -> DoctorResult<Vec<Finding>> {
             panic!("expensive check must not be invoked from the cheap leader-tick path");
+        }
+    }
+
+    /// Variant of [`ExpensiveCheck`] that increments a shared counter instead
+    /// of panicking when invoked. The end-to-end regression test uses this so
+    /// it can distinguish "never invoked" (counter == 0) from "invoked but
+    /// silently no-op'd" (counter > 0) — a panic would also surface that
+    /// condition, but the counter provides a stronger positive assertion and
+    /// does not depend on panic unwinding.
+    struct CountingExpensiveCheck {
+        invocations: Arc<AtomicUsize>,
+    }
+
+    impl CountingExpensiveCheck {
+        fn new(invocations: Arc<AtomicUsize>) -> Self {
+            Self { invocations }
+        }
+    }
+
+    impl DoctorCheck for CountingExpensiveCheck {
+        fn name(&self) -> &'static str {
+            "leader_tick.expensive.counter"
+        }
+
+        fn description(&self) -> &'static str {
+            "On-demand check that bumps a shared counter when invoked"
+        }
+
+        fn run(&self) -> DoctorResult<Vec<Finding>> {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
         }
     }
 
@@ -571,5 +604,239 @@ mod tests {
         // vec of check results.
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    /// End-to-end regression for acceptance criterion 3 of task `yl2p`:
+    /// a registered on-demand (expensive) check MUST NOT be executed by the
+    /// cheap leader-tick path and MUST NOT leave any finding row or metric
+    /// sample behind.
+    ///
+    /// The test asserts all three side-effect channels together so a future
+    /// regression in any one of them is caught by a single focused failure:
+    ///
+    /// 1. `run()` is never invoked — proved via the shared `AtomicUsize`
+    ///    counter handed to [`CountingExpensiveCheck`].
+    /// 2. No `doctor_findings` row is persisted for the expensive check.
+    /// 3. No `djinn_doctor_findings{check="<expensive>"}` or
+    ///    `djinn_doctor_run_duration_seconds{check="<expensive>"}` sample
+    ///    appears in the rendered Prometheus output.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn leader_tick_excludes_expensive_check_end_to_end() {
+        let _ = djinn_telemetry::init();
+        let db = fresh_db();
+        let (events_tx, _events_rx) = broadcast::channel(16);
+
+        // Build a registry that pairs the cheap fixture check (so the leader
+        // tick has at least one cheap run to do) with a counting expensive
+        // check that records every invocation.
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let registry = DoctorRegistry::new();
+        djinn_core::doctor::register(&registry, FixtureCheck);
+        djinn_core::doctor::register(
+            &registry,
+            CountingExpensiveCheck::new(Arc::clone(&invocations)),
+        );
+
+        run_cheap_doctor_checks(
+            &registry,
+            &db,
+            &events_tx,
+            Some("leader-tick-expensive-exclusion"),
+        )
+        .await;
+
+        // (1) The expensive check's `run()` was never invoked.
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "expensive on-demand check must not be invoked from the cheap leader-tick path",
+        );
+
+        // (2) No `doctor_findings` row was written for the expensive check.
+        let finding_repo = DoctorFindingRepository::new(db.clone());
+        let rows = finding_repo
+            .list_recent(djinn_db::RecentDoctorFindings {
+                run_id: Some("leader-tick-expensive-exclusion".to_owned()),
+                ..Default::default()
+            })
+            .await
+            .expect("list recent");
+        let check_names: std::collections::BTreeSet<&str> =
+            rows.iter().map(|row| row.check_name.as_str()).collect();
+        assert!(check_names.contains(TEST_CHECK_NAME));
+        assert!(
+            !check_names.contains("leader_tick.expensive.counter"),
+            "expensive check must not produce any doctor_findings row, got check names {check_names:?}",
+        );
+
+        // (3) The rendered Prometheus output contains no sample line for the
+        // expensive check on either metric. The doctor gauges are not
+        // initialized to zero in `register_metrics`, so an absent label
+        // combination proves neither `set_findings` nor
+        // `set_run_duration_seconds` was called for it.
+        let rendered = djinn_telemetry::render().expect("render");
+        let expensive_findings_line = rendered.lines().find(|line| {
+            line.starts_with("djinn_doctor_findings{")
+                && line.contains("leader_tick.expensive.counter")
+        });
+        assert!(
+            expensive_findings_line.is_none(),
+            "expensive check must not produce a djinn_doctor_findings sample, got line {:?}",
+            expensive_findings_line,
+        );
+        let expensive_duration_line = rendered.lines().find(|line| {
+            line.starts_with("djinn_doctor_run_duration_seconds{")
+                && line.contains("leader_tick.expensive.counter")
+        });
+        assert!(
+            expensive_duration_line.is_none(),
+            "expensive check must not produce a djinn_doctor_run_duration_seconds sample, got line {:?}",
+            expensive_duration_line,
+        );
+    }
+
+    /// Focused assertion for the rendered Prometheus surface (acceptance
+    /// criterion 2 of task `yl2p`): the cheap-check `djinn_doctor_findings`
+    /// and `djinn_doctor_run_duration_seconds` samples carry ONLY the stable
+    /// `check` label and are not contaminated with severity, entity, or
+    /// histogram bucket labels.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn leader_tick_rendered_metrics_carry_only_check_label() {
+        let _ = djinn_telemetry::init();
+        let db = fresh_db();
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let registry = fresh_registry();
+
+        run_cheap_doctor_checks(
+            &registry,
+            &db,
+            &events_tx,
+            Some("leader-tick-label-discipline"),
+        )
+        .await;
+
+        let rendered = djinn_telemetry::render().expect("render");
+
+        let findings_line = rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_doctor_findings{") && line.contains(TEST_CHECK_NAME)
+            })
+            .expect("findings metric must be rendered for the cheap check");
+        assert!(
+            findings_line.contains(&format!("check=\"{TEST_CHECK_NAME}\"")),
+            "findings line must carry the stable check label exactly: {findings_line}",
+        );
+        assert_eq!(
+            findings_line.matches('=').count(),
+            1,
+            "findings line must carry only the check label (one '=' per Prometheus label): {findings_line}",
+        );
+
+        let duration_line = rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_doctor_run_duration_seconds{")
+                    && line.contains(TEST_CHECK_NAME)
+            })
+            .expect("run-duration metric must be rendered for the cheap check");
+        assert!(
+            duration_line.contains(&format!("check=\"{TEST_CHECK_NAME}\"")),
+            "duration line must carry the stable check label exactly: {duration_line}",
+        );
+        assert_eq!(
+            duration_line.matches('=').count(),
+            1,
+            "duration line must carry only the check label (one '=' per Prometheus label): {duration_line}",
+        );
+
+        // No severity / entity / workspace / histogram bucket labels.
+        for forbidden in ["severity=", "entity=", "workspace=", "le=", "bucket="] {
+            assert!(
+                !findings_line.contains(forbidden),
+                "findings line must not carry '{forbidden}' label: {findings_line}",
+            );
+            assert!(
+                !duration_line.contains(forbidden),
+                "duration line must not carry '{forbidden}' label: {duration_line}",
+            );
+        }
+
+        // The duration sample must be a non-negative finite f64; the
+        // `findings` gauge must be a non-negative finite number.
+        let duration_value: f64 = duration_line
+            .rsplit(' ')
+            .next()
+            .expect("duration sample has a value")
+            .parse()
+            .expect("duration sample is numeric");
+        assert!(
+            duration_value.is_finite() && duration_value >= 0.0,
+            "duration sample must be a non-negative finite number, got {duration_value}",
+        );
+
+        let findings_value: f64 = findings_line
+            .rsplit(' ')
+            .next()
+            .expect("findings sample has a value")
+            .parse()
+            .expect("findings sample is numeric");
+        assert!(
+            findings_value.is_finite() && findings_value >= 0.0,
+            "findings sample must be a non-negative finite number, got {findings_value}",
+        );
+    }
+
+    /// Cross-channel invariant for acceptance criteria 1 and 2: the
+    /// `djinn_doctor_findings{check}` gauge must match the actual number of
+    /// `doctor_findings` rows persisted for that check in the same tick run.
+    /// A drift between the metric and the persistence layer would silently
+    /// mislead operators querying the Prometheus surface.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn leader_tick_findings_metric_matches_persisted_row_count() {
+        let _ = djinn_telemetry::init();
+        let db = fresh_db();
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let registry = fresh_registry();
+
+        let run_id = "leader-tick-metric-vs-persistence";
+        run_cheap_doctor_checks(&registry, &db, &events_tx, Some(run_id)).await;
+
+        let finding_repo = DoctorFindingRepository::new(db.clone());
+        let rows = finding_repo
+            .list_recent(djinn_db::RecentDoctorFindings {
+                run_id: Some(run_id.to_owned()),
+                check_name: Some(TEST_CHECK_NAME.to_owned()),
+                ..Default::default()
+            })
+            .await
+            .expect("list recent");
+
+        let persisted_count = rows.len();
+        assert!(
+            persisted_count > 0,
+            "fixture check must have emitted findings"
+        );
+
+        let rendered = djinn_telemetry::render().expect("render");
+        let findings_line = rendered
+            .lines()
+            .find(|line| {
+                line.starts_with("djinn_doctor_findings{")
+                    && line.contains(&format!("check=\"{TEST_CHECK_NAME}\""))
+            })
+            .expect("findings metric must be rendered for the cheap check");
+        let metric_value: f64 = findings_line
+            .rsplit(' ')
+            .next()
+            .expect("findings sample has a value")
+            .parse()
+            .expect("findings sample is numeric");
+        assert_eq!(
+            metric_value as usize, persisted_count,
+            "djinn_doctor_findings{{check=\"{TEST_CHECK_NAME}\"}} ({metric_value}) must equal \
+             the number of doctor_findings rows persisted for that check in the same \
+             leader-tick run ({persisted_count})",
+        );
     }
 }
