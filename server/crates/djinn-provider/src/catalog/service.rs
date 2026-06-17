@@ -498,6 +498,28 @@ mod tests {
         }
     }
 
+    /// Xiaomi MiMo Token Plan ships with dotted model ids (`mimo-v2.5-pro`).
+    /// These must round-trip as `xiaomi-mimo/mimo-v2.5-pro` without the catalog
+    /// split logic mangling the dot (cf. the Fireworks multi-segment 404 bug).
+    #[test]
+    fn xiaomi_mimo_dotted_model_id_round_trips() {
+        let catalog = CatalogService::new();
+        let models = catalog.list_models("xiaomi-mimo");
+        assert_eq!(
+            models.len(),
+            2,
+            "xiaomi-mimo should expose mimo-v2.5-pro + mimo-v2.5; got {models:?}"
+        );
+        for full in ["xiaomi-mimo/mimo-v2.5-pro", "xiaomi-mimo/mimo-v2.5"] {
+            let found = catalog
+                .find_model(full)
+                .unwrap_or_else(|| panic!("should resolve dotted full id {full}"));
+            assert_eq!(found.provider_id, "xiaomi-mimo");
+            // The dot in `v2.5` must survive intact.
+            assert_eq!(format!("xiaomi-mimo/{}", found.id), full);
+        }
+    }
+
     #[test]
     fn find_model_returns_none_for_bad_id() {
         let catalog = CatalogService::new();

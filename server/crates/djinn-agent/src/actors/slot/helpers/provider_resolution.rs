@@ -8,7 +8,15 @@ pub fn format_family_for_provider(
     let lower = provider_id.to_lowercase();
     // MiniMax (incl. the coding-plan providers) only exposes an
     // Anthropic-compatible endpoint (`https://api.minimax.io/anthropic/v1`).
-    if lower.contains("anthropic") || lower.contains("minimax") {
+    // Xiaomi MiMo (`xiaomi-mimo`) likewise routes through its
+    // Anthropic-compatible Token Plan endpoint; `mimo` catches the provider id.
+    // Kimi Coding Plan (`kimi-coding-plan`) speaks the Anthropic wire format via
+    // the Kimi Code subscription endpoint; `kimi` catches the provider id.
+    if lower.contains("anthropic")
+        || lower.contains("minimax")
+        || lower.contains("mimo")
+        || lower.contains("kimi")
+    {
         FormatFamily::Anthropic
     } else if lower.contains("google") || lower.contains("gemini") || lower.contains("vertex") {
         FormatFamily::Google
@@ -51,7 +59,10 @@ pub fn capabilities_for_provider(
             streaming: false,
             max_tokens_default: None,
         }
-    } else if lower.contains("anthropic") {
+    } else if lower.contains("anthropic") || lower.contains("mimo") || lower.contains("kimi") {
+        // Xiaomi MiMo (`xiaomi-mimo`) and Kimi Coding Plan (`kimi-coding-plan`)
+        // speak the Anthropic wire format, which requires a default
+        // `max_tokens`; mirror the Anthropic caps.
         ProviderCapabilities {
             streaming: true,
             max_tokens_default: Some(64_000),

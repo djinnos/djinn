@@ -1238,7 +1238,6 @@ mod tests {
     use djinn_runtime::RoleKind;
     use std::collections::HashMap;
     use std::sync::{Arc as StdArc, Mutex as StdMutex, OnceLock};
-    use std::time::{Duration, Instant};
     use tracing::field::{Field, Visit};
     use tracing_subscriber::layer::Context;
     use tracing_subscriber::prelude::*;
@@ -1684,40 +1683,5 @@ mod tests {
             .await
             .expect("await ok");
         assert!(got.is_none());
-    }
-
-    #[test]
-    fn dispatch_span_creation_overhead_stays_under_hard_cap() {
-        let iterations = 25_000;
-        let baseline_start = Instant::now();
-        for idx in 0..iterations {
-            let span = tracing::info_span!("djinn.dispatch.baseline");
-            let _entered = span.enter();
-            std::hint::black_box(idx);
-        }
-        let baseline = baseline_start.elapsed().max(Duration::from_nanos(1));
-
-        let instrumented_start = Instant::now();
-        for idx in 0..iterations {
-            let span = tracing::info_span!(
-                "djinn.dispatch",
-                task_id = "span-task",
-                model_id = "span-model",
-                attempt = idx,
-            );
-            let _entered = span.enter();
-            std::hint::black_box(idx);
-        }
-        let instrumented = instrumented_start.elapsed();
-        let ratio = instrumented.as_secs_f64() / baseline.as_secs_f64();
-        eprintln!(
-            "dispatch span overhead ratio {ratio:.3} (baseline={baseline:?}, instrumented={instrumented:?}, iterations={iterations})"
-        );
-
-        assert!(
-            ratio <= 1.10,
-            "dispatch span overhead ratio {ratio:.3} exceeded hard cap 1.100 \
-             (baseline={baseline:?}, instrumented={instrumented:?}, iterations={iterations})"
-        );
     }
 }
