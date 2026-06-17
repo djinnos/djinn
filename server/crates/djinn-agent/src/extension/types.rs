@@ -561,6 +561,19 @@ pub(super) struct CodeGraphParams {
     /// here so agent schema/params remain additive-compatible.
     #[serde(default)]
     pub tests: Option<String>,
+    /// jc47: caller's current HEAD / git commit SHA. When supplied, every
+    /// successful `code_graph` response includes an additive
+    /// `graph_staleness` object comparing this commit against the cached
+    /// graph blob's pinned commit (only populated when the chat
+    /// dispatcher's `current_head` is non-empty; absent otherwise so
+    /// existing callers retain their previous response shape). Empty /
+    /// whitespace values are normalized to `None` so chat-side LLMs that
+    /// emit every field as `""` don't accidentally trigger staleness
+    /// computation. `caller_commit` and `currentHead` are accepted as
+    /// aliases. Behavior is serve-stale-with-flag only: never blocks
+    /// query execution, never auto-triggers graph re-warming.
+    #[serde(default, alias = "caller_commit", alias = "currentHead")]
+    pub current_head: Option<String>,
 }
 
 impl CodeGraphParams {
@@ -575,6 +588,17 @@ impl CodeGraphParams {
     pub(super) fn normalize(&mut self) {
         fn clear(opt: &mut Option<String>) {
             if opt.as_deref().is_some_and(str::is_empty) {
+                *opt = None;
+            }
+        }
+        // jc47: treat whitespace-only `current_head` the same as empty —
+        // chat-side LLMs occasionally emit `"  "` instead of `""` for unset
+        // fields, and we don't want a whitespace string to slip through and
+        // silently trigger staleness attachment against a meaningless caller
+        // commit. Trimmed-empty matches the contract documented on the field
+        // ("Empty / whitespace values are normalized to `None`").
+        fn clear_trimmed(opt: &mut Option<String>) {
+            if opt.as_deref().is_some_and(|s| s.trim().is_empty()) {
                 *opt = None;
             }
         }
@@ -608,6 +632,7 @@ impl CodeGraphParams {
         clear(&mut self.level);
         clear(&mut self.target);
         clear(&mut self.tests);
+        clear_trimmed(&mut self.current_head);
     }
 
     pub(super) fn resolved_offset(&self) -> usize {
@@ -616,6 +641,18 @@ impl CodeGraphParams {
 
     pub(super) fn resolved_page_limit(&self, default: usize) -> usize {
         self.page_limit.unwrap_or(default).clamp(1, 1000)
+    }
+
+    /// jc47: caller-supplied `current_head` trimmed to a real value.
+    /// Returns `None` when the field is missing or only whitespace, so
+    /// the chat dispatcher's staleness attachment can short-circuit
+    /// cleanly without re-validating at every op site.
+    pub(super) fn resolved_current_head(&self) -> Option<String> {
+        self.current_head
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
     }
 
     /// Normalize public resolver aliases to the legacy `key` + `kind_hint`
