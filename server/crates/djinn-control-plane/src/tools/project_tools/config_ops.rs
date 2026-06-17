@@ -3,6 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::lifecycle_ops::resolve_project;
+use crate::bridge::RuntimeDispatchError;
 use crate::server::DjinnMcpServer;
 use crate::tools::ObjectJson;
 use djinn_db::ProjectRepository;
@@ -741,26 +742,164 @@ impl DjinnMcpServer {
             });
         }
         // Dispatch the one-shot Job (project image → clone → run candidate
-        // commands → write outcome to the row). On dispatch failure, mark the
-        // row errored so a poller sees a terminal state.
-        if let Err(err) = self
+        // commands → write outcome to the row). On dispatch failure:
+        // * `ImageNotReady { transient: true, .. }` — the catalog image is
+        //   mid-rebuild; requeue with backoff until it's ready or the
+        //   bounded budget elapses. The row stays in `pending` so a
+        //   poller keeps waiting and the operator sees a clear
+        //   "dispatched, waiting for image" status.
+        // * `ImageNotReady { transient: false, .. }` — the project has
+        //   no catalog image assigned; this is a permanent config
+        //   problem, mark the row errored immediately.
+        // * `Backend(_)` — K8s API / runtime failure, mark the row
+        //   errored immediately.
+        match self
             .state
             .dispatch_verification_test(&test_id, &project_id)
             .await
         {
-            let _ = test_repo
-                .complete(
-                    &test_id,
-                    djinn_db::VerificationTestStatus::ERROR,
-                    "[]",
-                    Some(&err),
-                )
-                .await;
-            return Json(ProjectVerificationTestResponse {
-                status: "error".into(),
-                error: Some(format!("dispatch: {err}")),
-                test_id: Some(test_id),
-            });
+            Ok(()) => {}
+            Err(RuntimeDispatchError::ImageNotReady {
+                project_id: pid,
+                image_status,
+                tag,
+                transient,
+            }) => {
+                if !transient {
+                    // Permanent: project has no catalog image assigned.
+                    let msg = format!(
+                        "project {pid} has no catalog image assigned (image_status: \
+                         {image_status}); cannot dispatch verification test"
+                    );
+                    let _ = test_repo
+                        .complete(
+                            &test_id,
+                            djinn_db::VerificationTestStatus::ERROR,
+                            "[]",
+                            Some(&msg),
+                        )
+                        .await;
+                    return Json(ProjectVerificationTestResponse {
+                        status: "error".into(),
+                        error: Some(format!("dispatch: {msg}")),
+                        test_id: Some(test_id),
+                    });
+                }
+                // Transient: bounded requeue. Mirror the agent slot
+                // actor's behavior — exponential backoff, capped, with
+                // an overall budget. The row stays in `pending` so a
+                // poller continues to wait. If the bounded budget
+                // elapses we mark the row errored with a clear
+                // message.
+                let started = std::time::Instant::now();
+                let mut backoff = std::time::Duration::from_secs(5);
+                let max_backoff = std::time::Duration::from_secs(60);
+                let budget = std::time::Duration::from_secs(600);
+                let mut attempt: u32 = 0;
+                let mut last_status = image_status.clone();
+                let mut ok = false;
+                let mut perm_failure: Option<String> = None;
+                while started.elapsed() < budget {
+                    attempt += 1;
+                    tracing::info!(
+                        test_id = %test_id,
+                        project_id = %pid,
+                        attempt = attempt,
+                        backoff_ms = backoff.as_millis() as u64,
+                        image_status = %last_status,
+                        "verification-test dispatch: image not ready, retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    match self
+                        .state
+                        .dispatch_verification_test(&test_id, &project_id)
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!(
+                                test_id = %test_id,
+                                project_id = %pid,
+                                attempt = attempt,
+                                "verification-test dispatch: image became ready, dispatched"
+                            );
+                            ok = true;
+                            break;
+                        }
+                        Err(RuntimeDispatchError::ImageNotReady {
+                            image_status: new_status,
+                            transient: true,
+                            ..
+                        }) => {
+                            last_status = new_status;
+                        }
+                        Err(RuntimeDispatchError::ImageNotReady {
+                            image_status: new_status,
+                            transient: false,
+                            ..
+                        }) => {
+                            perm_failure = Some(format!(
+                                "project {pid} has no catalog image assigned (image_status: \
+                                 {new_status}); cannot dispatch verification test"
+                            ));
+                            break;
+                        }
+                        Err(RuntimeDispatchError::Backend(e)) => {
+                            perm_failure = Some(format!(
+                                "verification-test dispatch: runtime backend error after \
+                                 {attempt} requeue attempts: {e}"
+                            ));
+                            break;
+                        }
+                    }
+                    backoff = (backoff * 2).min(max_backoff);
+                }
+                if ok {
+                    // Row stays in `pending`; the Job will write its
+                    // outcome to the row as it runs. The poller
+                    // continues to observe a `pending` (then
+                    // `running`/`passed`/`failed`) status.
+                } else {
+                    let msg = perm_failure.unwrap_or_else(|| {
+                        format!(
+                            "verification-test dispatch: project {pid} image not ready after \
+                             {}s (last status: {last_status}{}); the catalog image is still \
+                             rebuilding; verify manually once it lands",
+                            budget.as_secs(),
+                            tag.as_deref()
+                                .map(|t| format!(", tag: {t}"))
+                                .unwrap_or_default()
+                        )
+                    });
+                    let _ = test_repo
+                        .complete(
+                            &test_id,
+                            djinn_db::VerificationTestStatus::ERROR,
+                            "[]",
+                            Some(&msg),
+                        )
+                        .await;
+                    return Json(ProjectVerificationTestResponse {
+                        status: "error".into(),
+                        error: Some(format!("dispatch: {msg}")),
+                        test_id: Some(test_id),
+                    });
+                }
+            }
+            Err(RuntimeDispatchError::Backend(err)) => {
+                let _ = test_repo
+                    .complete(
+                        &test_id,
+                        djinn_db::VerificationTestStatus::ERROR,
+                        "[]",
+                        Some(&err),
+                    )
+                    .await;
+                return Json(ProjectVerificationTestResponse {
+                    status: "error".into(),
+                    error: Some(format!("dispatch: {err}")),
+                    test_id: Some(test_id),
+                });
+            }
         }
         Json(ProjectVerificationTestResponse {
             status: "ok".into(),

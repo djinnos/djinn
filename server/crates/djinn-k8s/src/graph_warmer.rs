@@ -332,6 +332,85 @@ impl K8sGraphWarmer {
         }
     }
 
+    /// Resolve the image a verification Job should run in, honouring catalog
+    /// precedence (migration 46).
+    ///
+    /// Returns:
+    /// * `Ok(Some(pull_ref))` — image is `ready`, the caller's verification
+    ///   Pod should use this pull ref.
+    /// * `Err(WarmerError::ImageNotReady { transient: true, .. })` — the
+    ///   project's assigned catalog image is currently `building` (or the
+    ///   project is awaiting first-time selection). The caller can defer /
+    ///   requeue and retry once the image lands.
+    /// * `Err(WarmerError::ImageNotReady { transient: false, .. })` — the
+    ///   project has NO catalog image assigned at all. This is a permanent
+    ///   configuration issue; the caller should surface it as a clear error
+    ///   (do not retry / do not wedge the task).
+    /// * `Err(WarmerError::Backend(_))` — DB lookup failure (genuine
+    ///   transient infra error).
+    async fn resolve_verification_image(&self, project_id: &str) -> Result<String, WarmerError> {
+        let repo = ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop());
+        let dispatch = match repo.resolve_dispatch_image(project_id).await {
+            Ok(Some(img)) => img,
+            Ok(None) => {
+                // Unknown project id — treat as permanent (no catalog image
+                // assignment can exist for a non-existent project).
+                return Err(WarmerError::ImageNotReady {
+                    project_id: project_id.to_string(),
+                    image_status: "none".to_string(),
+                    tag: None,
+                    transient: false,
+                });
+            }
+            Err(e) => {
+                warn!(
+                    project_id,
+                    error = %e,
+                    "K8sGraphWarmer: resolve_dispatch_image failed"
+                );
+                return Err(WarmerError::Backend(format!(
+                    "resolve_dispatch_image({project_id}) failed: {e}"
+                )));
+            }
+        };
+        // `pull_ref()` is the single source of truth for "image ready +
+        // we have a tag to pull" — see `DispatchImage::pull_ref`. It
+        // returns `None` when `status != "ready"` OR when the row has no
+        // tag yet (e.g. a `building` row before the watcher stamped it).
+        if let Some(pull_ref) = dispatch.pull_ref() {
+            return Ok(pull_ref);
+        }
+        // No `pull_ref` → not ready. Classify by whether a catalog image
+        // is assigned (`from_catalog` set means one is; `None` means
+        // the project is unassigned — a permanent configuration issue).
+        let transient = dispatch.from_catalog.is_some();
+        let image_status = dispatch.status.clone();
+        let tag = dispatch.tag.clone();
+        // Distinguish "transient — requeue" from "permanent — surface
+        // immediately" in the log line so on-call can see at a glance
+        // which path triggered. Verification jobs use this to decide
+        // between backing off and erroring the run row.
+        if transient {
+            info!(
+                project_id,
+                image_status = %image_status,
+                "K8sGraphWarmer: project image not ready (transient); caller should requeue"
+            );
+        } else {
+            warn!(
+                project_id,
+                image_status = %image_status,
+                "K8sGraphWarmer: project has no catalog image assigned (permanent); caller should surface error"
+            );
+        }
+        Err(WarmerError::ImageNotReady {
+            project_id: project_id.to_string(),
+            image_status,
+            tag,
+            transient,
+        })
+    }
+
     /// Resolve the image the warm Job should run in, honouring catalog-image
     /// precedence (migration 46): a project on a shared catalog image warms
     /// inside that image; otherwise its own per-project build. Returns `None`
@@ -476,12 +555,11 @@ impl GraphWarmerService for K8sGraphWarmer {
         project_id: &str,
     ) -> Result<(), WarmerError> {
         // The test must run in the project's image (that's where the toolchain
-        // lives) — so the image must be built + ready first.
-        let image_tag = self.resolve_project_image_tag(project_id).await.ok_or_else(|| {
-            WarmerError::Backend(format!(
-                "project {project_id} has no ready image — build the image before testing verification"
-            ))
-        })?;
+        // lives) — so the image must be built + ready first. A transient
+        // "not ready" (catalog image mid-rebuild) is surfaced as
+        // `ImageNotReady { transient: true }` so the caller can requeue
+        // rather than fail the run row.
+        let image_tag = self.resolve_verification_image(project_id).await?;
         let job = crate::verification_test_job::build_verification_test_job(
             &self.config,
             project_id,
@@ -503,15 +581,11 @@ impl GraphWarmerService for K8sGraphWarmer {
         target_branch: &str,
     ) -> Result<(), WarmerError> {
         // Verification runs in the project's image (that's where the toolchain
-        // lives) — so the image must be built + ready first.
-        let image_tag = self
-            .resolve_project_image_tag(project_id)
-            .await
-            .ok_or_else(|| {
-                WarmerError::Backend(format!(
-                    "project {project_id} has no ready image — build the image before verifying"
-                ))
-            })?;
+        // lives) — so the image must be built + ready first. A transient
+        // "not ready" (catalog image mid-rebuild) is surfaced as
+        // `ImageNotReady { transient: true }` so the caller can requeue
+        // rather than terminally fail the verification run.
+        let image_tag = self.resolve_verification_image(project_id).await?;
         let job = crate::verification_job::build_verification_job(
             &self.config,
             project_id,
@@ -824,610 +898,5 @@ impl GraphWarmerService for K8sGraphWarmer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use djinn_core::events::EventBus;
-    use djinn_db::RepoGraphCacheInsert;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    type CapturedJobs = Arc<Mutex<Vec<(String, Job)>>>;
-
-    struct RecordingDispatcher {
-        captured: CapturedJobs,
-        count: Arc<AtomicUsize>,
-        name_prefix: String,
-    }
-
-    impl RecordingDispatcher {
-        fn new(prefix: &str) -> (Self, CapturedJobs, Arc<AtomicUsize>) {
-            let captured: CapturedJobs = Arc::new(Mutex::new(Vec::new()));
-            let count = Arc::new(AtomicUsize::new(0));
-            (
-                Self {
-                    captured: captured.clone(),
-                    count: count.clone(),
-                    name_prefix: prefix.to_string(),
-                },
-                captured,
-                count,
-            )
-        }
-    }
-
-    #[async_trait]
-    impl WarmJobDispatcher for RecordingDispatcher {
-        async fn dispatch(&self, namespace: &str, job: Job) -> Result<String, String> {
-            let idx = self.count.fetch_add(1, Ordering::SeqCst);
-            self.captured
-                .lock()
-                .await
-                .push((namespace.to_string(), job.clone()));
-            Ok(job
-                .metadata
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("{}-{idx}", self.name_prefix)))
-        }
-    }
-
-    /// A watcher that blocks on a [`Notify`] until the test decides the
-    /// watched Job has completed. Uses a permit-bearing [`Notify`] so a
-    /// `notify_one` issued before the watcher has started awaiting still
-    /// lands — which matches how we expect the production watcher to
-    /// observe a Job that terminated before the poll loop spun up.
-    struct ControlledWatcher {
-        release: Arc<Notify>,
-    }
-
-    #[async_trait]
-    impl WarmJobWatcher for ControlledWatcher {
-        async fn wait_terminal(&self, _namespace: &str, _job_name: &str) {
-            self.release.notified().await;
-        }
-    }
-
-    /// Seed a project assigned a READY catalog image; returns the DB-assigned
-    /// project id (a uuid — `ProjectRepository::create` ignores the `name`
-    /// for the primary-key slot and mints its own uuid). Tests key their
-    /// `trigger` / `await_fresh` calls on this returned id.
-    ///
-    /// Dispatch image resolution is catalog-only since the "build once, share"
-    /// refactor (`resolve_dispatch_image` reads `projects.selected_image_id`
-    /// → the `images` catalog table); the legacy per-project `set_project_image`
-    /// columns are no longer consulted. So we create a catalog `images` row,
-    /// mark it ready with the expected content-addressed tag (no digest, so
-    /// `pull_ref` returns the tag verbatim), and assign it to the project.
-    async fn seed_project_with_ready_image(db: &Database, name: &str) -> String {
-        use djinn_db::ImageRepository;
-        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        let project = repo
-            .create(name, "test", name)
-            .await
-            .expect("create project");
-
-        let images = ImageRepository::new(db.clone());
-        let image_id = format!("img-{name}");
-        images
-            .create(&image_id, name, None, "{}")
-            .await
-            .expect("create catalog image");
-        let tag = format!(
-            "reg.example:5000/djinn-project-{}:abc123def456",
-            &project.id
-        );
-        images
-            .mark_ready(&image_id, &tag, None)
-            .await
-            .expect("mark image ready");
-        images
-            .set_project_image(&project.id, Some(&image_id))
-            .await
-            .expect("assign catalog image to project");
-        project.id
-    }
-
-    fn test_config() -> KubernetesConfig {
-        KubernetesConfig::for_testing()
-    }
-
-    #[tokio::test]
-    async fn trigger_dispatches_job_with_expected_labels_and_image() {
-        let db = Database::open_in_memory().expect("in-memory db");
-        let project_id = seed_project_with_ready_image(&db, "proj-trigger").await;
-
-        let (dispatcher, captured, _count) = RecordingDispatcher::new("warm");
-        let warmer = K8sGraphWarmer::with_dispatcher(
-            test_config(),
-            db,
-            Arc::new(dispatcher),
-            Arc::new(NoopJobWatcher),
-        );
-
-        warmer.trigger(&project_id).await;
-        // NoopJobWatcher returns instantly and the spawned watcher removes
-        // the in-flight entry. Give tokio a scheduling breather so the
-        // spawn completes before the assertion — the Notify wakeup happens
-        // in a spawned task.
-        tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        let captured = captured.lock().await;
-        assert_eq!(captured.len(), 1, "expected exactly one Job dispatched");
-        let (ns, job) = &captured[0];
-        assert_eq!(ns, "djinn");
-        let labels = job.metadata.labels.as_ref().expect("labels");
-        assert_eq!(
-            labels.get(crate::warm_job::LABEL_WARM).map(String::as_str),
-            Some("true")
-        );
-        // Project id label is sanitized (lowercased + disallowed-char swap)
-        // so the raw UUID v7 round-trips unchanged (`[0-9a-f-]`).
-        assert_eq!(
-            labels
-                .get(crate::warm_job::LABEL_PROJECT_ID)
-                .map(String::as_str),
-            Some(project_id.as_str())
-        );
-        let container = &job
-            .spec
-            .as_ref()
-            .expect("spec")
-            .template
-            .spec
-            .as_ref()
-            .expect("pod")
-            .containers[0];
-        assert_eq!(
-            container.image.as_deref(),
-            Some(format!("reg.example:5000/djinn-project-{}:abc123def456", project_id).as_str())
-        );
-    }
-
-    #[tokio::test]
-    async fn trigger_coalesces_duplicate_calls_for_same_project() {
-        let db = Database::open_in_memory().expect("in-memory db");
-        let project_id = seed_project_with_ready_image(&db, "proj-dedup").await;
-
-        let release = Arc::new(Notify::new());
-        let (dispatcher, captured, _count) = RecordingDispatcher::new("warm");
-        let warmer = K8sGraphWarmer::with_dispatcher(
-            test_config(),
-            db,
-            Arc::new(dispatcher),
-            Arc::new(ControlledWatcher {
-                release: release.clone(),
-            }),
-        );
-
-        warmer.trigger(&project_id).await;
-        // Let the spawned watcher task start awaiting the Notify before
-        // we attempt coalesced duplicate triggers below — this also
-        // means release.notify_one() during cleanup has a guaranteed
-        // consumer.
-        for _ in 0..10 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        warmer.trigger(&project_id).await; // should be a no-op
-        warmer.trigger(&project_id).await; // still a no-op
-
-        assert_eq!(
-            captured.lock().await.len(),
-            1,
-            "subsequent triggers must coalesce while the first is in flight"
-        );
-
-        // Release the watcher and poll until the in-flight entry clears.
-        // `notify_one` stores a permit if there's no current waiter, so
-        // the release is robust against the spawned task not having
-        // reached `notified().await` yet.
-        release.notify_one();
-        for _ in 0..100 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            if !warmer.in_flight.lock().await.contains_key(&project_id) {
-                break;
-            }
-        }
-        assert!(
-            !warmer.in_flight.lock().await.contains_key(&project_id),
-            "watcher should have dropped the in-flight entry after release"
-        );
-
-        // After completion, a fresh trigger should dispatch again.
-        warmer.trigger(&project_id).await;
-        assert_eq!(
-            captured.lock().await.len(),
-            2,
-            "post-completion re-trigger should dispatch a second Job"
-        );
-    }
-
-    #[tokio::test]
-    async fn await_fresh_returns_instantly_when_cache_entry_is_recent() {
-        let db = Database::open_in_memory().expect("in-memory db");
-        let project_id = seed_project_with_ready_image(&db, "proj-fresh").await;
-
-        // Seed a cache row the warmer will see as fresh — matching the
-        // commit SHA resolvable via the mirror (the discover helper bails
-        // out here because no mirror exists, returning None → cache
-        // considered stale). To exercise the "fresh hit" path we bypass
-        // discover by forcing the await to hit the `Notify` fast path via
-        // an already-in-flight slot that completes quickly.
-        //
-        // This specific test asserts the near-instant behaviour when the
-        // Notify resolves without the timeout kicking in.
-        let (dispatcher, _captured, _count) = RecordingDispatcher::new("warm");
-        let warmer = K8sGraphWarmer::with_dispatcher(
-            test_config(),
-            db.clone(),
-            Arc::new(dispatcher),
-            Arc::new(NoopJobWatcher),
-        );
-
-        let started = Instant::now();
-        warmer
-            .await_fresh(&project_id, Duration::from_secs(60), Duration::from_secs(1))
-            .await
-            .expect("await_fresh returns Ok");
-        // NoopJobWatcher fires Notify immediately so await should complete
-        // in well under the 1s timeout.
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "await_fresh returned after {:?}",
-            started.elapsed()
-        );
-
-        // Independently assert the cache-freshness probe handles a recent
-        // row without blowing up.
-        let cache = RepoGraphCacheRepository::new(db);
-        cache
-            .upsert(RepoGraphCacheInsert {
-                project_id: &project_id,
-                commit_sha: "0000000000000000000000000000000000000000",
-                graph_blob: b"graph",
-            })
-            .await
-            .expect("upsert cache");
-    }
-
-    #[tokio::test]
-    async fn await_fresh_times_out_without_deadlocking_when_warm_is_slow() {
-        let db = Database::open_in_memory().expect("in-memory db");
-        let project_id = seed_project_with_ready_image(&db, "proj-slow").await;
-
-        // ControlledWatcher never releases → Notify never fires → caller
-        // must hit the timeout backstop and return Ok.
-        let release = Arc::new(Notify::new());
-        let (dispatcher, _captured, _count) = RecordingDispatcher::new("warm");
-        let warmer = K8sGraphWarmer::with_dispatcher(
-            test_config(),
-            db,
-            Arc::new(dispatcher),
-            Arc::new(ControlledWatcher { release }),
-        );
-
-        let started = Instant::now();
-        warmer
-            .await_fresh(
-                &project_id,
-                Duration::from_secs(60),
-                Duration::from_millis(200),
-            )
-            .await
-            .expect("await_fresh returns Ok on timeout");
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed >= Duration::from_millis(150),
-            "timeout should observe at least the requested window; got {elapsed:?}"
-        );
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "timeout should not hang; got {elapsed:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn trigger_skips_when_project_has_no_ready_image() {
-        let db = Database::open_in_memory().expect("in-memory db");
-        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        let project = repo
-            .create("proj-noimg", "test", "proj-noimg")
-            .await
-            .expect("create project");
-        // No set_project_image → status stays `none`.
-
-        let (dispatcher, captured, _count) = RecordingDispatcher::new("warm");
-        let warmer = K8sGraphWarmer::with_dispatcher(
-            test_config(),
-            db,
-            Arc::new(dispatcher),
-            Arc::new(NoopJobWatcher),
-        );
-        warmer.trigger(&project.id).await;
-        assert!(
-            captured.lock().await.is_empty(),
-            "must not dispatch a warm Job without a ready image"
-        );
-    }
-
-    // ── Cross-process / cluster-side dedupe tests ─────────────────────────
-    //
-    // Regression coverage for the double-warm bug: the in-process
-    // `in_flight` map only serialises triggers within ONE server
-    // process, so a Job that survived a server restart, or one created
-    // by a parallel pod during a rolling update, is invisible to the
-    // per-process guard. The `WarmJobLister` is the cross-process
-    // source of truth; the tests below exercise that path with a
-    // programmable mock so we can simulate the "another process owns
-    // the Job" state without standing up a live apiserver.
-
-    /// Programmable cluster lister: tests pre-load the answer (true →
-    /// cluster has an in-flight warm; false → empty), and the lister
-    /// records every call so the test can assert that the dedupe path
-    /// was exercised.
-    struct ProgrammableLister {
-        answer: Arc<tokio::sync::Mutex<bool>>,
-        calls: Arc<Mutex<Vec<(String, String)>>>,
-    }
-
-    /// Recorded call list. Aliased so the `new` constructor signature
-    /// stays readable at the clippy complexity budget — the
-    /// `Arc<Mutex<Vec<...>>` would otherwise be a deeply-nested
-    /// generic that clippy lints under `type_complexity`.
-    type ProgrammableListerCalls = Arc<Mutex<Vec<(String, String)>>>;
-
-    impl ProgrammableLister {
-        fn new(
-            initial_answer: bool,
-        ) -> (Self, Arc<tokio::sync::Mutex<bool>>, ProgrammableListerCalls) {
-            let answer = Arc::new(tokio::sync::Mutex::new(initial_answer));
-            let calls: ProgrammableListerCalls = Arc::new(Mutex::new(Vec::new()));
-            (
-                Self {
-                    answer: answer.clone(),
-                    calls: calls.clone(),
-                },
-                answer,
-                calls,
-            )
-        }
-    }
-
-    #[async_trait]
-    impl WarmJobLister for ProgrammableLister {
-        async fn has_in_flight_warm(&self, namespace: &str, project_id: &str) -> bool {
-            self.calls
-                .lock()
-                .await
-                .push((namespace.to_string(), project_id.to_string()));
-            *self.answer.lock().await
-        }
-    }
-
-    /// Thread-safe variant of [`ProgrammableLister`] used in tests
-    /// that flip the answer from a non-async test thread. The
-    /// shared-state `std::sync::Mutex` is the right tool here: a
-    /// `tokio::sync::Mutex` would block the runtime worker pool if
-    /// held across a non-async section. The lister still records
-    /// calls in the same `tokio::sync::Mutex<Vec<…>>` it shares with
-    /// the production path.
-    struct ScriptedLister {
-        answer: Arc<std::sync::Mutex<bool>>,
-        calls: Arc<Mutex<Vec<(String, String)>>>,
-    }
-
-    #[async_trait]
-    impl WarmJobLister for ScriptedLister {
-        async fn has_in_flight_warm(&self, namespace: &str, project_id: &str) -> bool {
-            self.calls
-                .lock()
-                .await
-                .push((namespace.to_string(), project_id.to_string()));
-            *self.answer.lock().expect("answer poisoned")
-        }
-    }
-
-    /// Snapshot the current length of a `CapturedJobs` vec. Split out
-    /// from the inline `captured.lock().await.len()` so the assertion
-    /// sites read at one level of indentation.
-    async fn captured_len(captured: &CapturedJobs) -> usize {
-        captured.lock().await.len()
-    }
-
-    #[tokio::test]
-    async fn trigger_coalesces_when_cluster_already_has_warm_for_project() {
-        // Simulates the production scenario: a previous server process
-        // left a warm Job in the cluster (rolling update, server
-        // restart, parallel pod), and the new process boots with an
-        // empty in-process `in_flight` map. Without the cluster-side
-        // dedupe the trigger would dispatch a duplicate Job and
-        // contend on `/cache/cargo-target/<project>`. With the lister
-        // the duplicate is coalesced.
-        let db = Database::open_in_memory().expect("in-memory db");
-        let project_id = seed_project_with_ready_image(&db, "proj-cluster-dedupe").await;
-
-        // `NoopJobWatcher` (not `ControlledWatcher`) because the test
-        // path that DOES dispatch a Job (the follow-up trigger after
-        // flipping the lister to "empty") would otherwise leak a
-        // spawned watcher task on a Notify this test never releases.
-        // The watcher is irrelevant to what we assert — we only
-        // care about the dispatch count.
-        let (dispatcher, captured, _count) = RecordingDispatcher::new("warm");
-        let (lister, lister_answer, lister_calls) =
-            ProgrammableLister::new(/* answer = */ true);
-
-        let warmer = K8sGraphWarmer::with_dispatcher_and_lister(
-            test_config(),
-            db,
-            Arc::new(dispatcher),
-            Arc::new(NoopJobWatcher),
-            Some(Arc::new(lister)),
-        );
-
-        warmer.trigger(&project_id).await;
-        // No Job may have been dispatched — the cluster lister reported
-        // an in-flight warm, so the trigger must coalesce without ever
-        // touching `dispatcher.dispatch`.
-        assert!(
-            captured_len(&captured).await == 0,
-            "trigger must coalesce when cluster has a non-terminal warm Job; got {} dispatches",
-            captured_len(&captured).await
-        );
-
-        // The lister MUST have been consulted at least once. (Production
-        // consults it twice — once before the slot insert, once after —
-        // to close the cross-process race; both observations land in
-        // the recorded call list. We assert ≥ 1 here so the test is
-        // robust to a future tightening of the re-check window.)
-        {
-            let calls = lister_calls.lock().await;
-            assert!(
-                !calls.is_empty(),
-                "lister must be consulted before dispatch (no consultation = cross-process dedupe disabled)"
-            );
-            for (ns, pid) in calls.iter() {
-                assert_eq!(ns, "djinn");
-                assert_eq!(pid, &project_id);
-            }
-        }
-
-        // Flipping the lister's answer to `false` and re-triggering
-        // must dispatch normally — proves the coalesce was conditional
-        // on the cluster state, not a permanent skip.
-        *lister_answer.lock().await = false;
-        warmer.trigger(&project_id).await;
-        tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        assert_eq!(
-            captured_len(&captured).await,
-            1,
-            "with the cluster empty, trigger must dispatch a Job"
-        );
-    }
-
-    #[tokio::test]
-    async fn trigger_dedupes_concurrent_triggers_via_cluster_lister() {
-        // This is the regression test for the bug: a main-tip-advance
-        // trigger (e.g. from `mirror_fetcher`) and an image-ready
-        // trigger (from `image_build_watcher`) firing within the same
-        // window must produce exactly ONE warm Job, not two. We
-        // simulate the cross-process race by:
-        //
-        //  1. Priming the cluster lister to report "in-flight" on the
-        //     first observations (another process owns the Job).
-        //  2. Spawning two `trigger` calls concurrently and asserting
-        //     that both coalesce (no Job dispatched).
-        //  3. Flipping the lister to "empty" and re-triggering to
-        //     confirm the dispatcher is reachable and dispatches
-        //     exactly one Job.
-        let db = Database::open_in_memory().expect("in-memory db");
-        let project_id = seed_project_with_ready_image(&db, "proj-double-warm").await;
-
-        // `NoopJobWatcher` (not `ControlledWatcher`) because the test
-        // path that DOES dispatch a Job (the follow-up trigger after
-        // flipping the lister to "empty") would otherwise hang the
-        // spawned watcher task on a Notify this test never releases.
-        // The watcher is irrelevant to what we assert — we only
-        // care about the dispatch count.
-        let (dispatcher, captured, _count) = RecordingDispatcher::new("warm");
-
-        // Answer: "yes" (cluster has an in-flight warm) until the
-        // test thread clears it. The first trigger to observe the
-        // "yes" coalesces; any concurrent trigger also observes
-        // "yes" and coalesces.
-        let answer = Arc::new(std::sync::Mutex::new(true));
-        let calls: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
-        let lister = ScriptedLister {
-            answer: answer.clone(),
-            calls: calls.clone(),
-        };
-
-        let warmer = std::sync::Arc::new(K8sGraphWarmer::with_dispatcher_and_lister(
-            test_config(),
-            db,
-            Arc::new(dispatcher),
-            Arc::new(NoopJobWatcher),
-            Some(Arc::new(lister)),
-        ));
-
-        // Fire two triggers concurrently. Both must coalesce.
-        let warmer_a = warmer.clone();
-        let warmer_b = warmer.clone();
-        let pid_a = project_id.clone();
-        let pid_b = project_id.clone();
-        let t_a = tokio::spawn(async move { warmer_a.trigger(&pid_a).await });
-        let t_b = tokio::spawn(async move { warmer_b.trigger(&pid_b).await });
-        t_a.await.expect("trigger a");
-        t_b.await.expect("trigger b");
-
-        assert_eq!(
-            captured_len(&captured).await,
-            0,
-            "no Job may be dispatched while the lister reports an in-flight warm"
-        );
-
-        // The lister MUST have observed at least two calls (one per
-        // trigger) so the dedupe path was actually exercised — a
-        // future refactor that accidentally short-circuits the
-        // lister call would still pass the dispatch-count assertion
-        // and silently re-introduce the cross-process race.
-        assert!(
-            calls.lock().await.len() >= 2,
-            "lister must be consulted for every trigger (got {} calls, want >= 2)",
-            calls.lock().await.len()
-        );
-
-        // After flipping the lister to "no" (the survivor is now
-        // visible in the cluster OR has completed), a fresh trigger
-        // must dispatch exactly one Job.
-        *answer.lock().expect("answer poisoned") = false;
-        warmer.trigger(&project_id).await;
-        tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        assert_eq!(
-            captured_len(&captured).await,
-            1,
-            "follow-up trigger must dispatch exactly one Job"
-        );
-    }
-
-    /// The freshness gate (`cache_has_current_commit`) is preserved by
-    /// this fix: a project whose canonical graph is already current
-    /// for the origin/main tip must still short-circuit BEFORE the
-    /// cluster lister is consulted. This test asserts the weaker
-    /// invariant that an empty cache does dispatch and the lister is
-    /// consulted — the freshness gate is exercised in the non-mocked
-    /// `trigger_dispatches_job_with_expected_labels_and_image` test
-    /// above, where `discover_mirror_main_tip` returns None and the
-    /// gate falls open.
-    #[tokio::test]
-    async fn trigger_consults_lister_before_dispatching_with_empty_cluster() {
-        let db = Database::open_in_memory().expect("in-memory db");
-        let project_id = seed_project_with_ready_image(&db, "proj-lister-observed").await;
-
-        let (dispatcher, captured, _count) = RecordingDispatcher::new("warm");
-        let (lister, _answer, calls) = ProgrammableLister::new(/* answer = */ false);
-
-        let warmer = K8sGraphWarmer::with_dispatcher_and_lister(
-            test_config(),
-            db,
-            Arc::new(dispatcher),
-            Arc::new(NoopJobWatcher),
-            Some(Arc::new(lister)),
-        );
-
-        warmer.trigger(&project_id).await;
-        tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Cluster is empty → dispatch proceeds, Job is created.
-        assert_eq!(captured_len(&captured).await, 1);
-        // And the lister WAS consulted (the dedupe path is wired in
-        // — a future refactor that accidentally bypasses the lister
-        // would still pass the dispatch count assertion and silently
-        // re-introduce the cross-process race).
-        assert!(
-            !calls.lock().await.is_empty(),
-            "lister must be consulted even when the cluster is empty (to keep the dedupe path exercised)"
-        );
-    }
-}
+#[path = "graph_warmer_tests.rs"]
+mod tests;

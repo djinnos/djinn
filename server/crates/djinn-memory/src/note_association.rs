@@ -61,6 +61,24 @@ pub fn canonical_pair<'a>(note_id_1: &'a str, note_id_2: &'a str) -> (&'a str, &
     }
 }
 
+/// String constants for the `note_associations.kind` column (migration 35 F5
+/// substrate).  Use these instead of bare literals so the set of valid kinds is
+/// discoverable in one place.
+///
+/// Kinds:
+/// * [`association_kind::CO_ACCESS`]    – implicit Hebbian co-access edge.
+/// * [`association_kind::DERIVED_FROM`] – provenance: note created from another.
+/// * [`association_kind::SUPERSEDES`]   – canonical consolidated note supersedes
+///   its source notes (yk9t dm4w).
+pub mod association_kind {
+    /// Implicit Hebbian co-access association (ADR-023).
+    pub const CO_ACCESS: &str = "co_access";
+    /// Provenance edge: note was created *from* another.
+    pub const DERIVED_FROM: &str = "derived_from";
+    /// Supersession edge: a canonical consolidated note replaces its source.
+    pub const SUPERSEDES: &str = "supersedes";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
