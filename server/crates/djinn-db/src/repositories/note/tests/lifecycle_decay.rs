@@ -16,8 +16,8 @@ use crate::STALE_CITATION;
 use crate::database::Database;
 use crate::repositories::note::NoteRepository;
 use crate::repositories::note::scoring::CONFIDENCE_FLOOR;
-use crate::repositories::note::scoring::bayesian_update;
 use crate::repositories::note::scoring::STALE_DECAY_SIGNAL;
+use crate::repositories::note::scoring::bayesian_update;
 use crate::repositories::test_support::{event_bus_for, make_project};
 
 /// Default decay window used by the tests (matches the module default of 30
@@ -213,7 +213,13 @@ async fn decay_iteration_cap_holds_under_large_fixture() {
     let mut note_ids = Vec::with_capacity(100);
     for i in 0..100u32 {
         let note = repo
-            .create(&project_id, &format!("Stale Case {i}"), "body", "case", "[]")
+            .create(
+                &project_id,
+                &format!("Stale Case {i}"),
+                "body",
+                "case",
+                "[]",
+            )
             .await
             .unwrap();
         patch_note(&db, &note.id, OLD_LAST_ACCESSED, 0.5, None).await;
@@ -320,16 +326,19 @@ async fn decay_does_not_over_decay_already_below_threshold() {
     );
 }
 
-/// Sanity: a single Bayesian decay step with STALE_DECAY_SIGNAL from 0.5 moves
-/// the posterior downward but stays above the floor. This documents the
-/// expected convergence behaviour that the iteration cap relies on.
+/// Sanity: a single Bayesian decay step with `STALE_DECAY_SIGNAL` (0.15) from
+/// 0.5 lands below `STALE_CITATION` (0.3) but above the floor. This documents
+/// the per-step convergence behaviour that the iteration cap relies on.
+///
+/// Math: `(0.5 * 0.15) / (0.5 * 0.15 + 0.5 * 0.85) = 0.075 / 0.5 = 0.15`.
 #[test]
 fn single_decay_step_from_half_moves_downward_within_bounds() {
     let prior = 0.5_f64;
     let posterior = bayesian_update(prior, STALE_DECAY_SIGNAL);
     assert!(posterior < prior, "decay must reduce confidence");
     assert!(posterior >= CONFIDENCE_FLOOR);
-    // One step from 0.5 with signal 0.15 should not yet reach STALE_CITATION;
-    // multiple ticks are needed.
-    assert!(posterior > STALE_CITATION, "one step is not enough from 0.5");
+    // One step from 0.5 with signal 0.15 already lands at 0.15 (below
+    // STALE_CITATION 0.3), so the per-tick iteration cap is rarely needed in
+    // practice for an injection-eligible note.
+    assert!(posterior <= STALE_CITATION);
 }

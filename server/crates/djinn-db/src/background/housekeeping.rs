@@ -76,7 +76,10 @@ impl HousekeepingTickReport {
             .iter()
             .map(|report| report.repaired_broken_wikilinks)
             .sum();
-        let total_decayed_notes = project_reports.iter().map(|report| report.decayed_notes).sum();
+        let total_decayed_notes = project_reports
+            .iter()
+            .map(|report| report.decayed_notes)
+            .sum();
 
         Self {
             project_reports,

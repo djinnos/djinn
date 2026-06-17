@@ -31,8 +31,8 @@ use sqlx::Row;
 
 use crate::error::DbResult as Result;
 
-use super::scoring::{CONFIDENCE_FLOOR, STALE_CITATION, STALE_DECAY_SIGNAL, bayesian_update};
 use super::NoteRepository;
+use super::scoring::{CONFIDENCE_FLOOR, STALE_CITATION, STALE_DECAY_SIGNAL, bayesian_update};
 
 /// Env var overriding the global decay window (days). Default 30.
 pub(crate) const DECAY_WINDOW_ENV: &str = "DJINN_LIFECYCLE_DECAY_WINDOW_DAYS";
@@ -187,12 +187,11 @@ impl NoteRepository {
 /// caller-provided `decay_window_days` (itself usually the env-derived default
 /// read by the housekeeping tick) is used.
 pub(crate) fn parse_decay_window_days(caller_default: u32) -> u32 {
-    if let Ok(raw) = std::env::var(DECAY_WINDOW_ENV) {
-        if let Ok(parsed) = raw.parse::<u32>() {
-            if parsed > 0 {
-                return parsed;
-            }
-        }
+    if let Ok(raw) = std::env::var(DECAY_WINDOW_ENV)
+        && let Ok(parsed) = raw.parse::<u32>()
+        && parsed > 0
+    {
+        return parsed;
     }
     if caller_default > 0 {
         caller_default
