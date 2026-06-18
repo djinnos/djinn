@@ -67,7 +67,7 @@ pub(super) fn tool_request_planner() -> RmcpTool {
 pub(super) fn tool_role_amend_prompt() -> RmcpTool {
     RmcpTool::new(
         "agent_amend_prompt".to_string(),
-        "Planner-owned, evidence-based amendment path for machine-managed learned_prompt updates. Use only after agent-effectiveness evidence (agent_metrics, repeated reviewer/lead feedback, or repeated task failures) shows a stable specialist-agent pattern; this is audited in learned_prompt_history and is not a substitute for human/project system_prompt_extensions. Only specialist worker/reviewer agents are eligible; default roles and non-worker/reviewer roles must not be amended. Append concise observed-pattern + behavioral-correction text; provide metrics_snapshot when available so the evaluator can compare before/after outcomes."
+        "Planner-owned, evidence-based amendment path for machine-managed learned_prompt updates; not a general prompt editor. Use only after agent-effectiveness evidence (agent_metrics, repeated reviewer/lead feedback, or repeated task failures) shows a stable specialist-agent pattern; this is audited in learned_prompt_history and is not a substitute for human/project system_prompt_extensions. Only specialist worker/reviewer agents are eligible; default roles and non-worker/reviewer roles must not be amended. Append concise observed-pattern + behavioral-correction text; provide metrics_snapshot when available so the evaluator can compare before/after outcomes."
             .to_string(),
         object!({
             "type": "object",

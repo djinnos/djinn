@@ -767,6 +767,16 @@ async fn agent_amend_prompt_accepts_specialist_worker_and_reviewer() {
     .expect("metrics_before json");
     assert_eq!(metrics_before["completed_task_count"], serde_json::json!(3));
     assert_eq!(metrics_before["success_rate"], serde_json::json!(0.67));
+
+    let reviewer_history = repo
+        .get_history(&reviewer.id)
+        .await
+        .expect("reviewer history");
+    assert_eq!(reviewer_history.len(), 1);
+    assert_eq!(
+        reviewer_history[0].metrics_before.as_deref(),
+        Some("{\"completed_task_count\":3,\"success_rate\":0.67}")
+    );
 }
 
 #[tokio::test]
@@ -850,6 +860,18 @@ async fn agent_amend_prompt_rejects_default_and_non_worker_reviewer_targets() {
             .expect("lead still exists")
             .learned_prompt
             .is_none()
+    );
+    assert!(
+        repo.get_history(&default_worker.id)
+            .await
+            .expect("default worker history")
+            .is_empty()
+    );
+    assert!(
+        repo.get_history(&lead.id)
+            .await
+            .expect("lead history")
+            .is_empty()
     );
 }
 
