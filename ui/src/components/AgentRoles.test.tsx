@@ -70,6 +70,7 @@ const makeAgent = (overrides: Partial<Agent>): Agent => ({
   mcp_servers: [],
   skills: [],
   model_preference: null,
+  verification_command: null,
   is_default: false,
   learned_prompt: null,
   ...overrides,
@@ -294,6 +295,51 @@ describe("AgentRoles", () => {
 
     expect(await screen.findByText("Careful Reviewer")).toBeInTheDocument();
     expect(screen.getByText("Reviews high-risk backend changes")).toBeInTheDocument();
+  });
+
+  it("edits default-agent instructions without submitting immutable identity fields", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAgents).mockResolvedValue([defaultWorker]);
+    vi.mocked(updateAgent).mockResolvedValue({
+      ...defaultWorker,
+      system_prompt_extensions: ["Prefer small, focused changes.", "Run focused tests."],
+      verification_command: "pnpm test AgentRoles.test.tsx",
+    });
+
+    render(<AgentRoles />);
+
+    const defaultsSection = await screen.findByRole("region", { name: "Project defaults" });
+    await user.click(within(defaultsSection).getByRole("button", { name: "Edit instructions" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Edit default Worker instructions" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Identity fields are immutable/i)).toBeInTheDocument();
+    expect(screen.getByText("Default Worker")).toBeInTheDocument();
+    expect(screen.getByText("Project default")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Task Reviewer" })).not.toBeInTheDocument();
+
+    const instructions = screen.getByLabelText("Default instructions");
+    await user.type(instructions, "\nRun focused tests.");
+    await user.type(screen.getByLabelText("Verification command"), "pnpm test AgentRoles.test.tsx");
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(updateAgent).toHaveBeenCalledWith("default-worker", {
+        system_prompt_extensions: ["Prefer small, focused changes.", "Run focused tests."],
+        mcp_servers: ["github"],
+        skills: ["rust-review"],
+        verification_command: "pnpm test AgentRoles.test.tsx",
+      });
+    });
+
+    const payload = vi.mocked(updateAgent).mock.calls[0][1];
+    expect(payload).not.toHaveProperty("name");
+    expect(payload).not.toHaveProperty("description");
+    expect(payload).not.toHaveProperty("base_role");
+    expect(payload).not.toHaveProperty("is_default");
   });
 
   it("renders an error state when the initial role load fails", async () => {

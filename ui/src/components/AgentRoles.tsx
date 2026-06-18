@@ -97,17 +97,29 @@ export function AgentRoles() {
     }
   };
 
-  const handleUpdate = async (id: string, data: Omit<CreateAgentRequest, "project_id">) => {
+  const handleUpdate = async (
+    role: Agent,
+    data: Omit<CreateAgentRequest, "project_id">,
+  ) => {
     setEditBusy(true);
     try {
-      const updated = await updateAgent(id, {
-        name: data.name,
-        description: data.description,
+      const safeConfiguration = {
         system_prompt_extensions: data.system_prompt_extensions,
         mcp_servers: data.mcp_servers,
         skills: data.skills,
-      });
-      setRoles((prev) => prev.map((r) => (r.id === id ? updated : r)));
+        verification_command: data.verification_command,
+      };
+      const updated = await updateAgent(
+        role.id,
+        role.is_default
+          ? safeConfiguration
+          : {
+              name: data.name,
+              description: data.description,
+              ...safeConfiguration,
+            },
+      );
+      setRoles((prev) => prev.map((r) => (r.id === role.id ? updated : r)));
       setEditingId(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update agent");
@@ -159,13 +171,15 @@ export function AgentRoles() {
             system_prompt_extensions: editingRole.system_prompt_extensions,
             mcp_servers: editingRole.mcp_servers,
             skills: editingRole.skills,
+            verification_command: editingRole.verification_command,
           }}
           fixedBaseRole={editingRole.base_role}
+          isDefaultEdit={editingRole.is_default}
           submitLabel="Save"
           isBusy={editBusy}
           availableMcpServers={availableMcpServers}
           availableSkills={availableSkills}
-          onSubmit={(data) => void handleUpdate(editingRole.id, data)}
+          onSubmit={(data) => void handleUpdate(editingRole, data)}
           onCancel={() => setEditingId(null)}
         />
       </div>
