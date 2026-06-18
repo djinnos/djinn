@@ -16,8 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 use djinn_core::message::{ContentBlock, Message, Role};
 use djinn_db::{
-    CreateSessionParams, EpicCreateInput, EpicRepository, NoteDedupCandidate, NoteRepository,
-    ProjectRepository, SessionRepository, TaskRepository,
+    CreateSessionParams, EpicCreateInput, EpicRepository, NoteConsolidationRepository,
+    NoteDedupCandidate, NoteRepository, ProjectRepository, SessionRepository, TaskRepository,
 };
 
 use crate::actors::slot::llm_extraction::{
@@ -1181,5 +1181,157 @@ async fn llm_extraction_treats_empty_anchor_as_missing() {
     assert!(
         notes[0].retrieval_anchor.is_none(),
         "whitespace-only anchor must persist as null, not empty string"
+    );
+}
+
+// ─── Session-level metric round-trip tests (9aig) ─────────────────────────
+// These tests exercise the full session pipeline: run_llm_extraction_with_provider
+// → write_extraction_metric → consolidation_run_metrics → health(). They verify
+// that the admission gate's drop count is observable end-to-end, not just at
+// the repository layer.
+
+/// AC3: After running a session whose gate drops at least one candidate,
+/// `health()` returns a non-zero sum for `admission_dropped_note_count`.
+///
+/// This is a session-level test: it runs `run_llm_extraction_with_provider` with
+/// an underspecified pattern candidate that the admission gate drops, then
+/// asserts the health report surfaces a non-zero admission-dropped counter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_with_gate_drops_surfaces_nonzero_admission_dropped_in_health() {
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 1,
+        errors: 0,
+        tools_used: 2,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    // An underspecified pattern that the admission gate must drop (too short,
+    // missing ADR-054 sections).
+    let provider = Arc::new(FakeProvider::text(
+        r#"{"cases":[],"patterns":[{"title":"Temporary Working Spec Note","content":"Recommended approach for this task: keep a temporary hypothesis about the current migration and maybe investigate the next step later so the team can continue the session. Why it works: it preserves context during the current task, but it is still temporary and should not become durable memory.","scope_paths":["server/crates/djinn-agent/src/actors/slot"]}],"pitfalls":[]}"#,
+    ));
+
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    // Verify the admission gate dropped the candidate.
+    let stored_json =
+        SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
+            .get_event_taxonomy_json(&fixture.session_id)
+            .await
+            .expect("query session event_taxonomy after gate drop");
+    let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
+        .expect("deserialize stored taxonomy after gate drop");
+    assert_eq!(
+        stored_taxonomy.extraction_quality.admission_dropped,
+        Some(1),
+        "session should record 1 admission drop"
+    );
+
+    // Verify the metric row was written with a non-zero admission_dropped count.
+    let consolidation_repo = NoteConsolidationRepository::new(fixture.db.clone());
+    let metrics = consolidation_repo
+        .list_run_metrics(&fixture.project.id, Some("extraction"), 10)
+        .await
+        .expect("list run metrics");
+    assert!(
+        !metrics.is_empty(),
+        "at least one extraction metric row should exist"
+    );
+    assert!(
+        metrics.iter().any(|m| m.admission_dropped_note_count > 0),
+        "metric row should record a non-zero admission_dropped_note_count"
+    );
+
+    // Verify health() surfaces the non-zero sum.
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let health = note_repo
+        .health(&fixture.project.id)
+        .await
+        .expect("health report");
+    assert!(
+        health.admission_dropped_note_count > 0,
+        "health report should surface non-zero admission_dropped_note_count, got {}",
+        health.admission_dropped_note_count
+    );
+}
+
+/// AC4: A session with zero admission drops writes
+/// `admission_dropped_note_count = 0` in the metric row; the field is never
+/// NULL at write time.
+///
+/// This is a session-level test: it runs `run_llm_extraction_with_provider` with
+/// valid ADR-054 candidates that pass the admission gate, then asserts the
+/// emitted metric row has `admission_dropped_note_count = 0` (not NULL).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_with_zero_gate_drops_writes_zero_admission_dropped_metric() {
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 3,
+        errors: 2,
+        tools_used: 6,
+        notes_read: 1,
+        notes_written: 2,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    // Valid ADR-054 candidates that pass the admission gate.
+    let provider = fake_extraction_provider();
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    // Verify notes were written (i.e. the gate did not drop them).
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+    assert!(
+        notes.len() >= 3,
+        "valid ADR-054 candidates should pass the admission gate; got {} notes",
+        notes.len()
+    );
+
+    // Verify the metric row records zero admission drops.
+    let consolidation_repo = NoteConsolidationRepository::new(fixture.db.clone());
+    let metrics = consolidation_repo
+        .list_run_metrics(&fixture.project.id, Some("extraction"), 10)
+        .await
+        .expect("list run metrics");
+    assert!(
+        !metrics.is_empty(),
+        "at least one extraction metric row should exist even with zero drops"
+    );
+    let metric = &metrics[0];
+    assert_eq!(
+        metric.admission_dropped_note_count, 0,
+        "zero-drop session should write admission_dropped_note_count = 0"
+    );
+
+    // Verify the column is NOT NULL by raw-querying the row.
+    let raw: i64 = sqlx::query_scalar(
+        "SELECT admission_dropped_note_count FROM consolidation_run_metrics WHERE id = $1",
+    )
+    .bind(&metric.id)
+    .fetch_one(fixture.db.pool())
+    .await
+    .expect("raw query admission_dropped_note_count");
+    assert_eq!(raw, 0, "admission_dropped_note_count must NOT be NULL");
+
+    // Verify health() reports zero when the only metric row has zero drops.
+    let health = note_repo
+        .health(&fixture.project.id)
+        .await
+        .expect("health report");
+    assert_eq!(
+        health.admission_dropped_note_count, 0,
+        "health should report zero admission drops for a zero-drop session"
     );
 }
