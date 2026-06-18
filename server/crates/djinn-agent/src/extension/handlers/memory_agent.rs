@@ -319,7 +319,7 @@ pub(super) async fn call_agent_metrics(
     }))
 }
 
-pub(super) async fn call_agent_amend_prompt(
+pub(crate) async fn call_agent_amend_prompt(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     project_path: &str,
