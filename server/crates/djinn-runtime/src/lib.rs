@@ -38,9 +38,7 @@ pub use spec::{
     TaskRunReport, TaskRunSpec, role_sequence,
 };
 pub use stream::{BiStream, StreamEvent, StreamFrame};
-pub use warmer::{
-    BackingServiceConn, BackingServiceRequest, GraphWarmerService, TaskrunJobRef, WarmerError,
-};
+pub use warmer::{GraphWarmerService, TaskrunJobRef, WarmerError};
 pub use wire::{ControlMsg, MAX_FRAME_BYTES, WorkerEvent, WorkspaceRef, read_frame, write_frame};
 
 #[cfg(any(test, feature = "test-runtime"))]

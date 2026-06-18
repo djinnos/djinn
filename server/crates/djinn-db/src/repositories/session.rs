@@ -1,5 +1,6 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
+use djinn_core::models::provider::Pricing;
 use djinn_core::models::{SessionRecord, SessionStatus};
 use serde_json::Value;
 
@@ -24,6 +25,15 @@ pub struct CreateSessionParams<'a> {
     /// Link this session to a task-run row (Phase 1 supervisor path). `None`
     /// preserves the pre-supervisor behaviour where sessions are standalone.
     pub task_run_id: Option<&'a str>,
+    /// Optional start-time pricing snapshot resolved by the agent host from
+    /// the catalog.  When `Some`, the four per-million rate snapshot columns
+    /// are populated; when `None` the snapshot columns (and `cost_usd`) stay
+    /// `NULL` — uncatalogued/unpriced sessions are never treated as free.
+    ///
+    /// Owned by the agent layer (`djinn-agent` performs the catalog lookup and
+    /// passes plain pricing data here) so `djinn-db` has no dependency on
+    /// `djinn-provider`.
+    pub pricing: Option<&'a Pricing>,
 }
 
 impl SessionRepository {
@@ -45,15 +55,23 @@ impl SessionRepository {
         sqlx::query!(
             "INSERT INTO sessions
                 (id, project_id, task_id, model_id, agent_type, status,
-                 created_by_user_id, task_run_id)
-             VALUES ($1, $2, $3, $4, $5, 'running', $6, $7)",
+                 created_by_user_id, task_run_id,
+                 input_price_per_million_snapshot,
+                 output_price_per_million_snapshot,
+                 cache_read_price_per_million_snapshot,
+                 cache_write_price_per_million_snapshot)
+             VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8, $9, $10, $11)",
             id,
             params.project_id,
             params.task_id,
             params.model,
             params.agent_type,
             created_by_user_id,
-            params.task_run_id
+            params.task_run_id,
+            params.pricing.map(|p| p.input_per_million),
+            params.pricing.map(|p| p.output_per_million),
+            params.pricing.map(|p| p.cache_read_per_million),
+            params.pricing.map(|p| p.cache_write_per_million),
         )
         .execute(self.db.pool())
         .await?;
@@ -1059,6 +1077,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1071,6 +1090,7 @@ mod tests {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: None,
+            pricing: None,
         })
         .await
         .unwrap();
@@ -1182,6 +1202,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1217,6 +1238,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1270,6 +1292,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1299,6 +1322,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1353,6 +1377,80 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_persists_pricing_snapshot_when_priced() {
+        use djinn_core::models::provider::Pricing;
+
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let pricing = Pricing {
+            input_per_million: 1.5,
+            output_per_million: 6.0,
+            cache_read_per_million: 0.15,
+            cache_write_per_million: 1.875,
+        };
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&pricing),
+            })
+            .await
+            .unwrap();
+
+        // Snapshot columns must reflect the pricing passed at creation.
+        assert_eq!(created.input_price_per_million_snapshot, Some(1.5));
+        assert_eq!(created.output_price_per_million_snapshot, Some(6.0));
+        assert_eq!(created.cache_read_price_per_million_snapshot, Some(0.15));
+        assert_eq!(created.cache_write_price_per_million_snapshot, Some(1.875));
+
+        // cost_usd must remain NULL at creation — token counts are still zero,
+        // cost recomputation belongs to later token-write paths.
+        assert!(created.cost_usd.is_none());
+
+        // Round-trip via repo.get to confirm the projection carries the values.
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.input_price_per_million_snapshot, Some(1.5));
+        assert_eq!(fetched.output_price_per_million_snapshot, Some(6.0));
+        assert_eq!(fetched.cache_read_price_per_million_snapshot, Some(0.15));
+        assert_eq!(fetched.cache_write_price_per_million_snapshot, Some(1.875));
+        assert!(fetched.cost_usd.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_leaves_snapshot_null_when_unpriced() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        // Uncatalogued/unpriced session — pricing is None.
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "uncatalogued/model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .unwrap();
+
+        // All snapshot fields and cost_usd must be NULL, never zero/free.
+        assert!(created.input_price_per_million_snapshot.is_none());
+        assert!(created.output_price_per_million_snapshot.is_none());
+        assert!(created.cache_read_price_per_million_snapshot.is_none());
+        assert!(created.cache_write_price_per_million_snapshot.is_none());
+        assert!(created.cost_usd.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_sets_parked_reason_without_clobbering_on_none() {
         let db = test_db();
         let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
@@ -1366,6 +1464,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1414,6 +1513,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1446,6 +1546,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1503,6 +1604,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1515,6 +1617,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1528,6 +1631,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1540,6 +1644,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1621,6 +1726,7 @@ mod tests {
                 agent_type: "planner",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1634,6 +1740,7 @@ mod tests {
                 agent_type: "planner",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1647,6 +1754,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1660,6 +1768,7 @@ mod tests {
                 agent_type: "planner",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1713,6 +1822,7 @@ mod tests {
                 agent_type: "planner",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1841,6 +1951,7 @@ mod tests {
                 agent_type: "planner",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();

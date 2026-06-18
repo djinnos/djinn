@@ -106,7 +106,6 @@ export function AgentRoles() {
         system_prompt_extensions: data.system_prompt_extensions,
         mcp_servers: data.mcp_servers,
         skills: data.skills,
-        verification_command: data.verification_command,
       });
       setRoles((prev) => prev.map((r) => (r.id === id ? updated : r)));
       setEditingId(null);
@@ -160,7 +159,6 @@ export function AgentRoles() {
             system_prompt_extensions: editingRole.system_prompt_extensions,
             mcp_servers: editingRole.mcp_servers,
             skills: editingRole.skills,
-            verification_command: editingRole.verification_command,
           }}
           fixedBaseRole={editingRole.base_role}
           submitLabel="Save"

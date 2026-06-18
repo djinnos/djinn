@@ -361,6 +361,7 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(run_id),
+            pricing: None,
         })
         .await
         .unwrap();
