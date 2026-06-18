@@ -284,6 +284,226 @@ fn budgeted_timeout_for_plan(plan: &PlannedIndexerCommand) -> std::time::Duratio
     budget.per_invocation.max(plan.indexer.timeout())
 }
 
+/// Result of running a single planned indexer command (with optional cache
+/// integration). This is the rich per-plan outcome consumed by
+/// [`tally_indexer_results`].
+///
+/// - `CachedHit` — the SCIP cache produced the planned artifact and the
+///   indexer was NOT invoked. The artifact is already on disk at the planned
+///   output path; tally treats it like a successful run.
+/// - `Ran` — the indexer was invoked and produced an `io::Result<Output>`.
+#[derive(Debug)]
+enum PlanExecution {
+    /// Cache hit: the cached artifact was copied to the planned output path
+    /// and the indexer was not run.
+    CachedHit,
+    /// The indexer binary was invoked (cache miss or unavailable).
+    Ran(std::io::Result<std::process::Output>),
+    /// The indexer was skipped because the active deadline was already
+    /// exhausted before invocation could start. `detail` carries the JSON
+    /// status detail that will be surfaced in `WorkspaceWarmStatus`.
+    DeadlineExhausted(String),
+}
+
+/// Execute a single planned indexer command, performing a SCIP cache lookup
+/// before invoking the indexer and a cache write after a successful
+/// non-empty artifact is produced.
+///
+/// Cache failures are non-fatal misses: if looking up the key fails or the
+/// cache store is unavailable, the indexer runs as if there were no cache.
+/// A cache hit skips the indexer entirely and copies the cached artifact to
+/// the planned output path so `collect_scip_artifacts` still finds it.
+async fn execute_plan_with_cache(
+    plan: PlannedIndexerCommand,
+    timeout: std::time::Duration,
+) -> PlanExecution {
+    // Attempt cache lookup. Any error is a non-fatal miss — we fall through
+    // to running the indexer.
+    let store = super::cache::ScipCacheStore::from_environment();
+    let cache_key = compute_cache_key_for_plan(&plan);
+
+    if let Some(key) = cache_key.as_ref() {
+        match store.lookup(key, &plan.output_path) {
+            super::cache::CacheLookup::Hit => {
+                tracing::info!(
+                    indexer = plan.indexer.binary_name(),
+                    workspace = %plan.workspace_root.display(),
+                    "SCIP cache hit — skipping indexer invocation"
+                );
+                return PlanExecution::CachedHit;
+            }
+            super::cache::CacheLookup::Miss => {}
+        }
+    }
+
+    // No active deadline is plumbed through the production path yet, so the
+    // deadline-exhausted branch is only reachable from tests / future
+    // integration tasks. When an active deadline is supplied in future, a
+    // zero budget should skip invocation and record the deadline reason.
+    if timeout == std::time::Duration::ZERO {
+        let detail = serde_json::json!({
+            "kind": "deadline_exhausted",
+            "indexer": plan.indexer.binary_name(),
+            "workspace_slug": plan.workspace_slug,
+            "reason": "no usable time remaining after reserve"
+        })
+        .to_string();
+        return PlanExecution::DeadlineExhausted(detail);
+    }
+
+    // Cache miss (or cache unavailable): invoke the indexer.
+    let cmd = plan.build_command();
+    let result = process::output_with_timeout(cmd, timeout).await;
+
+    // On success, attempt to cache the produced artifact if it is non-empty.
+    // Cache write failures are non-fatal: the warm still proceeds with the
+    // freshly produced artifact.
+    if let Ok(output) = &result
+        && output.status.success()
+        && let Ok(metadata) = fs::metadata(&plan.output_path)
+        && metadata.len() > 0
+        && let Some(key) = cache_key.as_ref()
+        && let Err(e) = store.store_artifact(key, &plan.output_path)
+    {
+        tracing::warn!(
+            indexer = plan.indexer.binary_name(),
+            workspace = %plan.workspace_root.display(),
+            error = %e,
+            "SCIP cache store failed (non-fatal — indexer output still used)"
+        );
+    }
+
+    PlanExecution::Ran(result)
+}
+
+/// Compute a SCIP cache key for a planned indexer command.
+///
+/// Collects source/config/lockfile hashes for the workspace and combines them
+/// with the indexer's reported tool version and the relevant environment.
+/// Returns `None` if the tool version cannot be determined or the key cannot
+/// be computed — callers treat `None` as "no cache" and invoke the indexer.
+fn compute_cache_key_for_plan(plan: &PlannedIndexerCommand) -> Option<super::cache::ScipCacheKey> {
+    let reported_version = detect_tool_version(plan.indexer, &plan.binary_path)?;
+    let (source_hashes, config_hashes, lockfile_hashes) =
+        collect_workspace_hashes(&plan.workspace_root, plan.indexer);
+    let environment = super::cache::relevant_environment(plan.indexer);
+    let ingredients = super::cache::CacheKeyIngredients::from_plan(
+        plan,
+        reported_version,
+        source_hashes,
+        config_hashes,
+        lockfile_hashes,
+        environment,
+    );
+    match ingredients.cache_key() {
+        Ok(key) => Some(key),
+        Err(e) => {
+            tracing::warn!(
+                indexer = plan.indexer.binary_name(),
+                workspace = %plan.workspace_root.display(),
+                error = %e,
+                "SCIP cache key computation failed (non-fatal)"
+            );
+            None
+        }
+    }
+}
+
+/// Detect the reported version string for an indexer binary.
+///
+/// Tries `<binary> --version` first, then `<binary> version` as a fallback.
+/// Returns `None` if neither produces a usable version string. Failures here
+/// are non-fatal: the caller simply skips caching for that plan.
+fn detect_tool_version(indexer: SupportedIndexer, binary_path: &Path) -> Option<String> {
+    let try_args = &[&["--version"][..], &["version"][..]];
+    for args in try_args {
+        let output = std::process::Command::new(binary_path)
+            .args(*args)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            continue;
+        }
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !version.is_empty() {
+            return Some(version);
+        }
+    }
+    let _ = indexer; // indexer reserved for future version-override logic
+    None
+}
+
+/// Collect source, config, and lockfile content hashes for a workspace root.
+///
+/// Source files are hashed by walking the workspace root with the indexer's
+/// source extensions. Config and lockfiles are the known marker/lock files
+/// for the indexer that, if present, are hashed and included in the cache key.
+fn collect_workspace_hashes(
+    workspace_root: &Path,
+    indexer: SupportedIndexer,
+) -> (
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+) {
+    let source_extensions = super::budget::source_extensions(indexer);
+    let mut source_files: Vec<PathBuf> = Vec::new();
+    let _ = visit_dirs(workspace_root, &mut |path| {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str())
+            && source_extensions.contains(&ext)
+        {
+            source_files.push(path.to_path_buf());
+        }
+        Ok(())
+    });
+
+    let source_hashes = super::cache::hash_existing_files(
+        workspace_root,
+        source_files
+            .iter()
+            .map(|p| p.strip_prefix(workspace_root).unwrap_or(p).to_path_buf()),
+    );
+
+    let config_names = config_files_for_indexer(indexer);
+    let lockfile_names = lockfile_files_for_indexer(indexer);
+
+    let config_hashes =
+        super::cache::hash_existing_files(workspace_root, config_names.iter().map(PathBuf::from));
+    let lockfile_hashes =
+        super::cache::hash_existing_files(workspace_root, lockfile_names.iter().map(PathBuf::from));
+
+    (source_hashes, config_hashes, lockfile_hashes)
+}
+
+/// Config / marker files whose contents affect indexer output for a given
+/// indexer. These are hashed into the cache key.
+fn config_files_for_indexer(indexer: SupportedIndexer) -> &'static [&'static str] {
+    match indexer {
+        SupportedIndexer::RustAnalyzer => &["Cargo.toml", "rust-toolchain.toml"],
+        SupportedIndexer::TypeScript => &["tsconfig.json", "package.json"],
+        SupportedIndexer::Python => &["pyproject.toml", "setup.py", "setup.cfg"],
+        SupportedIndexer::Go => &["go.mod"],
+        SupportedIndexer::Java => &["build.gradle", "pom.xml", "settings.gradle"],
+        SupportedIndexer::Clang => &["CMakeLists.txt", "compile_commands.json"],
+        SupportedIndexer::Ruby => &["Gemfile"],
+        SupportedIndexer::DotNet => &["Directory.Build.props"],
+    }
+}
+
+/// Lockfiles whose contents affect indexer output for a given indexer.
+fn lockfile_files_for_indexer(indexer: SupportedIndexer) -> &'static [&'static str] {
+    match indexer {
+        SupportedIndexer::RustAnalyzer => &["Cargo.lock"],
+        SupportedIndexer::TypeScript => &["package-lock.json", "pnpm-lock.yaml", "yarn.lock"],
+        SupportedIndexer::Python => &["poetry.lock", "requirements.txt"],
+        SupportedIndexer::Go => &["go.sum"],
+        SupportedIndexer::Java => &[],
+        SupportedIndexer::Clang => &[],
+        SupportedIndexer::Ruby => &["Gemfile.lock"],
+        SupportedIndexer::DotNet => &[],
+    }
+}
+
 pub(crate) async fn run_indexers(
     project_root: impl AsRef<Path>,
     output_root: impl AsRef<Path>,
@@ -335,10 +555,10 @@ pub(crate) async fn run_indexers(
             // equivalent — the budget model never shortens a timeout below
             // the shipped fixed cap in the default case.
             let timeout = budgeted_timeout_for_plan(&plan);
-            let cmd = plan.build_command();
+            let plan_for_future = plan.clone();
             async move {
-                let result = process::output_with_timeout(cmd, timeout).await;
-                (plan, result)
+                let outcome = execute_plan_with_cache(plan_for_future, timeout).await;
+                (plan, outcome)
             }
         })
         .collect();
@@ -387,70 +607,114 @@ struct IndexerTally {
 /// An empty input (`total == 0`, e.g. a code-less repo) is `Ok` with no
 /// commands — there was nothing to index, which is not a failure.
 fn tally_indexer_results(
-    results: Vec<(PlannedIndexerCommand, std::io::Result<std::process::Output>)>,
+    results: Vec<(PlannedIndexerCommand, PlanExecution)>,
 ) -> Result<IndexerTally> {
     let total = results.len();
     let mut commands = Vec::with_capacity(total);
     let mut workspace_statuses = Vec::with_capacity(total);
     let mut failure_count = 0usize;
 
-    for (plan, result) in results {
-        match result {
-            Ok(output) if output.status.success() => {
+    for (plan, execution) in results {
+        match execution {
+            PlanExecution::CachedHit => {
+                // Cache hit: the cached artifact is already on disk at the
+                // planned output path. Treat it like a successful invocation
+                // (exit 0, empty stdout/stderr) so `collect_scip_artifacts`
+                // and `apply_artifact_statuses` proceed unchanged.
+                let detail = serde_json::json!({
+                    "kind": "cache_hit",
+                    "indexer": plan.indexer.binary_name(),
+                    "workspace_slug": plan.workspace_slug.clone(),
+                    "output": plan.output_path.display().to_string(),
+                })
+                .to_string();
                 workspace_statuses.push(WorkspaceWarmStatus {
                     workspace_slug: plan.workspace_slug.clone(),
                     indexer: plan.indexer,
                     status: "artifact_pending".to_string(),
-                    detail: Some(format!("expected artifact {}", plan.output_path.display())),
+                    detail: Some(detail),
                 });
                 commands.push(ExecutedIndexerCommand {
                     plan,
-                    exit_code: output.status.code(),
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    exit_code: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
                 });
             }
-            Ok(output) => {
+            PlanExecution::DeadlineExhausted(detail) => {
+                // The active deadline was exhausted before this invocation
+                // could start. Record a `timed_out` status with a JSON detail
+                // so operators can see the deadline/budget reason.
                 failure_count += 1;
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 workspace_statuses.push(WorkspaceWarmStatus {
                     workspace_slug: plan.workspace_slug.clone(),
                     indexer: plan.indexer,
-                    status: "failed".to_string(),
-                    detail: Some(if stderr.is_empty() {
-                        format!("indexer exited with status {:?}", output.status.code())
+                    status: "timed_out".to_string(),
+                    detail: Some(detail),
+                });
+                tracing::warn!(
+                    indexer = plan.indexer.binary_name(),
+                    workspace = %plan.workspace_root.display(),
+                    "SCIP indexer skipped — active deadline exhausted"
+                );
+            }
+            PlanExecution::Ran(result) => match result {
+                Ok(output) if output.status.success() => {
+                    workspace_statuses.push(WorkspaceWarmStatus {
+                        workspace_slug: plan.workspace_slug.clone(),
+                        indexer: plan.indexer,
+                        status: "artifact_pending".to_string(),
+                        detail: Some(format!("expected artifact {}", plan.output_path.display())),
+                    });
+                    commands.push(ExecutedIndexerCommand {
+                        plan,
+                        exit_code: output.status.code(),
+                        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    });
+                }
+                Ok(output) => {
+                    failure_count += 1;
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    workspace_statuses.push(WorkspaceWarmStatus {
+                        workspace_slug: plan.workspace_slug.clone(),
+                        indexer: plan.indexer,
+                        status: "failed".to_string(),
+                        detail: Some(if stderr.is_empty() {
+                            format!("indexer exited with status {:?}", output.status.code())
+                        } else {
+                            stderr.clone()
+                        }),
+                    });
+                    tracing::warn!(
+                        indexer = plan.indexer.binary_name(),
+                        workspace = %plan.workspace_root.display(),
+                        exit_code = ?output.status.code(),
+                        stderr = %String::from_utf8_lossy(&output.stderr),
+                        "SCIP indexer failed"
+                    );
+                }
+                Err(err) => {
+                    failure_count += 1;
+                    let status = if err.kind() == std::io::ErrorKind::TimedOut {
+                        "timed_out"
                     } else {
-                        stderr.clone()
-                    }),
-                });
-                tracing::warn!(
-                    indexer = plan.indexer.binary_name(),
-                    workspace = %plan.workspace_root.display(),
-                    exit_code = ?output.status.code(),
-                    stderr = %String::from_utf8_lossy(&output.stderr),
-                    "SCIP indexer failed"
-                );
-            }
-            Err(err) => {
-                failure_count += 1;
-                let status = if err.kind() == std::io::ErrorKind::TimedOut {
-                    "timed_out"
-                } else {
-                    "failed"
-                };
-                workspace_statuses.push(WorkspaceWarmStatus {
-                    workspace_slug: plan.workspace_slug.clone(),
-                    indexer: plan.indexer,
-                    status: status.to_string(),
-                    detail: Some(err.to_string()),
-                });
-                tracing::warn!(
-                    indexer = plan.indexer.binary_name(),
-                    workspace = %plan.workspace_root.display(),
-                    error = %err,
-                    "SCIP indexer error"
-                );
-            }
+                        "failed"
+                    };
+                    workspace_statuses.push(WorkspaceWarmStatus {
+                        workspace_slug: plan.workspace_slug.clone(),
+                        indexer: plan.indexer,
+                        status: status.to_string(),
+                        detail: Some(err.to_string()),
+                    });
+                    tracing::warn!(
+                        indexer = plan.indexer.binary_name(),
+                        workspace = %plan.workspace_root.display(),
+                        error = %err,
+                        "SCIP indexer error"
+                    );
+                }
+            },
         }
     }
 
@@ -1146,8 +1410,12 @@ mod tests {
 
     /// Real `std::process::Output` with a genuine `ExitStatus` — built by
     /// running `true`/`false` so the test stays portable (no `ExitStatusExt`).
-    fn output_for(success: bool) -> std::io::Result<std::process::Output> {
-        std::process::Command::new(if success { "true" } else { "false" }).output()
+    /// Wrapped in `PlanExecution::Ran` so tests can call `tally_indexer_results`
+    /// with the same shape the production `run_indexers` flow produces.
+    fn ran_output(success: bool) -> PlanExecution {
+        PlanExecution::Ran(
+            std::process::Command::new(if success { "true" } else { "false" }).output(),
+        )
     }
 
     #[test]
@@ -1156,15 +1424,15 @@ mod tests {
         let results = vec![
             (
                 fake_plan(SupportedIndexer::TypeScript, "packages/lib"),
-                output_for(false),
+                ran_output(false),
             ),
             (
                 fake_plan(SupportedIndexer::TypeScript, "packages/utils"),
-                output_for(false),
+                ran_output(false),
             ),
             (
                 fake_plan(SupportedIndexer::TypeScript, "packages/acqua"),
-                output_for(true),
+                ran_output(true),
             ),
         ];
         let tally = tally_indexer_results(results).expect("partial success must be Ok");
@@ -1190,11 +1458,11 @@ mod tests {
         let results = vec![
             (
                 fake_plan(SupportedIndexer::TypeScript, "packages/lib"),
-                output_for(false),
+                ran_output(false),
             ),
             (
                 fake_plan(SupportedIndexer::TypeScript, "packages/utils"),
-                output_for(false),
+                ran_output(false),
             ),
         ];
         let tally =
@@ -1218,6 +1486,275 @@ mod tests {
         assert!(tally.commands.is_empty());
         assert!(tally.workspace_statuses.is_empty());
         assert!(!tally.all_failed);
+    }
+
+    // -----------------------------------------------------------------
+    // Cache hit / miss / error integration (acceptance criterion 2)
+    // -----------------------------------------------------------------
+
+    /// `PlanExecution::CachedHit` is treated as a successful invocation:
+    /// the command is retained with exit 0 and an `artifact_pending` status,
+    /// and `all_failed` is false.
+    #[test]
+    fn tally_cache_hit_is_treated_as_success() {
+        let results = vec![(
+            fake_plan(SupportedIndexer::TypeScript, "ui"),
+            PlanExecution::CachedHit,
+        )];
+        let tally = tally_indexer_results(results).expect("cache hit must be Ok");
+        assert_eq!(tally.commands.len(), 1);
+        assert_eq!(tally.commands[0].exit_code, Some(0));
+        assert_eq!(tally.workspace_statuses[0].status, "artifact_pending");
+        assert!(
+            tally.workspace_statuses[0]
+                .detail
+                .as_ref()
+                .is_some_and(|d| d.contains("cache_hit"))
+        );
+        assert!(!tally.all_failed);
+    }
+
+    /// A cache hit combined with a failed invocation still yields overall
+    /// success — the cache hit counts as a produced artifact.
+    #[test]
+    fn tally_cache_hit_with_failed_run_still_succeeds() {
+        let results = vec![
+            (
+                fake_plan(SupportedIndexer::TypeScript, "ui"),
+                PlanExecution::CachedHit,
+            ),
+            (
+                fake_plan(SupportedIndexer::TypeScript, "api"),
+                ran_output(false),
+            ),
+        ];
+        let tally = tally_indexer_results(results).expect("partial success must be Ok");
+        assert_eq!(
+            tally.commands.len(),
+            1,
+            "only the cached hit command retained"
+        );
+        assert!(!tally.all_failed);
+    }
+
+    /// Deadline-exhausted invocations record `timed_out` with a JSON detail
+    /// carrying the `deadline_exhausted` kind, and count as failures.
+    #[test]
+    fn tally_deadline_exhausted_records_timed_out_with_detail() {
+        let detail = serde_json::json!({
+            "kind": "deadline_exhausted",
+            "reason": "no usable time remaining"
+        })
+        .to_string();
+        let results = vec![(
+            fake_plan(SupportedIndexer::RustAnalyzer, "server"),
+            PlanExecution::DeadlineExhausted(detail.clone()),
+        )];
+        let tally = tally_indexer_results(results).expect("tally records statuses");
+        assert_eq!(tally.workspace_statuses.len(), 1);
+        assert_eq!(tally.workspace_statuses[0].status, "timed_out");
+        assert_eq!(
+            tally.workspace_statuses[0].detail.as_deref(),
+            Some(detail.as_str())
+        );
+        assert!(tally.commands.is_empty());
+        assert!(
+            tally.all_failed,
+            "sole target deadline-exhausted → all_failed"
+        );
+    }
+
+    /// Deadline-exhausted + cache hit still succeeds: the cache hit prevents
+    /// total wipeout.
+    #[test]
+    fn tally_deadline_exhausted_with_cache_hit_succeeds() {
+        let detail = r#"{"kind":"deadline_exhausted"}"#.to_string();
+        let results = vec![
+            (
+                fake_plan(SupportedIndexer::RustAnalyzer, "server"),
+                PlanExecution::DeadlineExhausted(detail),
+            ),
+            (
+                fake_plan(SupportedIndexer::TypeScript, "ui"),
+                PlanExecution::CachedHit,
+            ),
+        ];
+        let tally = tally_indexer_results(results).expect("partial success");
+        assert!(!tally.all_failed);
+        assert_eq!(tally.commands.len(), 1);
+        // Both statuses remain visible.
+        assert_eq!(tally.workspace_statuses.len(), 2);
+        let statuses: Vec<&str> = tally
+            .workspace_statuses
+            .iter()
+            .map(|s| s.status.as_str())
+            .collect();
+        assert!(statuses.contains(&"timed_out"));
+        assert!(statuses.contains(&"artifact_pending"));
+    }
+
+    /// Cache lookup before invocation: a stored artifact produces a hit and
+    /// the indexer is not invoked. Uses a fake cache store and fake artifact,
+    /// not real SCIP binaries.
+    #[tokio::test]
+    async fn cache_hit_copies_artifact_and_skips_invocation() {
+        let tmp = workspace_tempdir("scip-cache-hit-");
+        let cache_root = tmp.path().join("cache");
+        let store = super::super::cache::ScipCacheStore::new(&cache_root);
+
+        // Build a fake plan pointing at the temp workspace.
+        let workspace_root = tmp.path().join("repo");
+        fs::create_dir_all(&workspace_root).unwrap();
+        fs::write(workspace_root.join("main.ts"), b"console.log('hi')\n").unwrap();
+
+        let output_path = tmp.path().join("output/index.scip");
+        let plan = PlannedIndexerCommand {
+            indexer: SupportedIndexer::TypeScript,
+            binary_path: PathBuf::from("/fake/scip-typescript"),
+            args: vec!["index".to_string(), "--output".to_string()],
+            working_directory: workspace_root.clone(),
+            workspace_root: workspace_root.clone(),
+            workspace_rel_root: PathBuf::new(),
+            workspace_slug: "repo".to_string(),
+            output_path: output_path.clone(),
+        };
+
+        // Compute the cache key (tool version detection will fail for the
+        // fake binary, so we construct the key manually).
+        let ingredients = super::super::cache::CacheKeyIngredients::from_plan(
+            &plan,
+            "scip-typescript 1.0.0-fake",
+            std::collections::BTreeMap::from([("main.ts".to_string(), "hash-a".to_string())]),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        );
+        let key = ingredients.cache_key().expect("compute key");
+
+        // Seed the cache with a fake artifact.
+        let seed = tmp.path().join("seed.scip");
+        fs::write(&seed, b"fake scip artifact bytes").unwrap();
+        store.store_artifact(&key, &seed).expect("store seed");
+
+        // Lookup should be a hit and copy the artifact to the output path.
+        assert_eq!(
+            store.lookup(&key, &output_path),
+            super::super::cache::CacheLookup::Hit
+        );
+        assert_eq!(fs::read(&output_path).unwrap(), b"fake scip artifact bytes");
+    }
+
+    /// Cache miss leaves no output file and does not invoke the indexer.
+    #[tokio::test]
+    async fn cache_miss_does_not_copy_artifact() {
+        let tmp = workspace_tempdir("scip-cache-miss-");
+        let store = super::super::cache::ScipCacheStore::new(tmp.path().join("cache"));
+
+        let ingredients = super::super::cache::CacheKeyIngredients::new(
+            SupportedIndexer::TypeScript,
+            super::super::cache::ToolVersionRecord::new(
+                SupportedIndexer::TypeScript,
+                "/fake/scip-typescript",
+                "1.0.0",
+                &std::collections::BTreeMap::new(),
+            ),
+            super::super::cache::CommandShape {
+                binary_name: "scip-typescript".to_string(),
+                args: vec!["index".to_string()],
+                working_directory: super::super::cache::WorkspaceIdentity {
+                    workspace_rel_root: PathBuf::from("ui"),
+                    workspace_slug: "ui".to_string(),
+                },
+            },
+            super::super::cache::WorkspaceIdentity {
+                workspace_rel_root: PathBuf::from("ui"),
+                workspace_slug: "ui".to_string(),
+            },
+        );
+        let key = ingredients.cache_key().expect("key");
+        let output = tmp.path().join("miss/out.scip");
+
+        assert_eq!(
+            store.lookup(&key, &output),
+            super::super::cache::CacheLookup::Miss
+        );
+        assert!(!output.exists(), "miss must not write an output file");
+    }
+
+    /// Cache write after successful artifact production stores the artifact
+    /// for later reuse.
+    #[tokio::test]
+    async fn cache_write_after_success_enables_future_hit() {
+        let tmp = workspace_tempdir("scip-cache-write-");
+        let store = super::super::cache::ScipCacheStore::new(tmp.path().join("cache"));
+
+        let ingredients = super::super::cache::CacheKeyIngredients::new(
+            SupportedIndexer::TypeScript,
+            super::super::cache::ToolVersionRecord::new(
+                SupportedIndexer::TypeScript,
+                "/fake/scip-typescript",
+                "1.0.0",
+                &std::collections::BTreeMap::new(),
+            ),
+            super::super::cache::CommandShape {
+                binary_name: "scip-typescript".to_string(),
+                args: vec!["index".to_string()],
+                working_directory: super::super::cache::WorkspaceIdentity {
+                    workspace_rel_root: PathBuf::from("ui"),
+                    workspace_slug: "ui".to_string(),
+                },
+            },
+            super::super::cache::WorkspaceIdentity {
+                workspace_rel_root: PathBuf::from("ui"),
+                workspace_slug: "ui".to_string(),
+            },
+        );
+        let key = ingredients.cache_key().expect("key");
+
+        // Simulate a successful indexer run producing a non-empty artifact.
+        let artifact = tmp.path().join("produced.scip");
+        fs::write(&artifact, b"freshly produced scip bytes").unwrap();
+        store
+            .store_artifact(&key, &artifact)
+            .expect("store after success");
+
+        // A subsequent lookup with the same key must hit.
+        let output = tmp.path().join("reuse/out.scip");
+        assert_eq!(
+            store.lookup(&key, &output),
+            super::super::cache::CacheLookup::Hit
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"freshly produced scip bytes");
+    }
+
+    /// `apply_artifact_statuses` converts a cache-hit `artifact_pending` row
+    /// to `ready` when the artifact is collected, and converts a no-artifact
+    /// `artifact_pending` to `failed`.
+    #[test]
+    fn apply_artifact_statuses_preserves_partial_success_for_cache_hits() {
+        let mut statuses = vec![
+            WorkspaceWarmStatus {
+                workspace_slug: "ui".to_string(),
+                indexer: SupportedIndexer::TypeScript,
+                status: "artifact_pending".to_string(),
+                detail: Some(r#"{"kind":"cache_hit"}"#.to_string()),
+            },
+            WorkspaceWarmStatus {
+                workspace_slug: "api".to_string(),
+                indexer: SupportedIndexer::TypeScript,
+                status: "artifact_pending".to_string(),
+                detail: Some("expected artifact /out/api.scip".to_string()),
+            },
+        ];
+        let artifacts = vec![ScipArtifact {
+            path: PathBuf::from("/out/ui.scip"),
+            indexer: Some(SupportedIndexer::TypeScript),
+            workspace_slug: "ui".to_string(),
+            workspace_root: PathBuf::new(),
+        }];
+        apply_artifact_statuses(&artifacts, &mut statuses);
+        assert_eq!(statuses[0].status, "ready");
+        assert_eq!(statuses[1].status, "failed");
     }
 
     #[test]

@@ -11,10 +11,10 @@ use scip::types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::scip_indexer::ScipArtifact;
+use crate::scip_indexer::{ScipArtifact, cache};
 
 /// Normalized SCIP payload ready for graph construction without exposing protobuf details.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParsedScipIndex {
     pub workspace_slug: String,
     pub metadata: ScipMetadata,
@@ -22,7 +22,7 @@ pub struct ParsedScipIndex {
     pub external_symbols: Vec<ScipSymbol>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ScipMetadata {
     pub project_root: Option<String>,
     pub tool_name: Option<String>,
@@ -30,7 +30,7 @@ pub struct ScipMetadata {
 }
 
 /// A source file and the structural symbol data SCIP reported for it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScipFile {
     pub language: String,
     pub relative_path: PathBuf,
@@ -41,7 +41,7 @@ pub struct ScipFile {
 }
 
 /// A normalized occurrence of a symbol in a file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScipOccurrence {
     pub symbol: String,
     pub range: ScipRange,
@@ -52,7 +52,7 @@ pub struct ScipOccurrence {
 }
 
 /// Expanded source range. SCIP stores 3- or 4-element packed ranges.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScipRange {
     pub start_line: i32,
     pub start_character: i32,
@@ -71,7 +71,7 @@ pub struct ScipRange {
 /// or indexer emits parameter / return-type fields. Per the plan
 /// contract: NEVER regex the markdown — leave `signature_parts: None`
 /// when structured proto fields are absent.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ScipSymbol {
     pub symbol: String,
     pub kind: Option<ScipSymbolKind>,
@@ -206,14 +206,14 @@ impl ScipVisibility {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScipRelationship {
     pub source_symbol: String,
     pub target_symbol: String,
     pub kinds: BTreeSet<ScipRelationshipKind>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ScipRelationshipKind {
     Reference,
     Implementation,
@@ -221,7 +221,7 @@ pub enum ScipRelationshipKind {
     Definition,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ScipSymbolRole {
     Definition,
     Import,
@@ -262,25 +262,74 @@ pub enum ScipSymbolKind {
 }
 
 pub fn parse_scip_artifacts(artifacts: &[ScipArtifact]) -> Result<Vec<ParsedScipIndex>> {
+    parse_scip_artifacts_with_cache_reuse(artifacts, false)
+}
+
+pub fn parse_scip_artifacts_with_cache_reuse(
+    artifacts: &[ScipArtifact],
+    cache_reuse_enabled: bool,
+) -> Result<Vec<ParsedScipIndex>> {
+    let store = cache_reuse_enabled.then(cache::ScipCacheStore::from_environment);
     artifacts
         .iter()
-        .map(|artifact| {
-            let mut parsed = parse_scip_file(&artifact.path, artifact.workspace_slug.clone())?;
-            // SCIP document paths are relative to the directory the indexer
-            // ran in (the workspace root), NOT the repo root. Re-root them
-            // here so every node `file_path` downstream is repo-relative —
-            // otherwise complexity attachment, route extraction, and every
-            // op that joins paths onto the project root (`symbols_at`,
-            // `diff_touches`, file_glob filters) silently misses files in
-            // sub-workspaces.
-            if !artifact.workspace_root.as_os_str().is_empty() {
-                for file in &mut parsed.files {
-                    file.relative_path = artifact.workspace_root.join(&file.relative_path);
-                }
-            }
-            Ok(parsed)
-        })
+        .map(|artifact| parse_scip_artifact(artifact, store.as_ref()))
         .collect()
+}
+
+fn parse_scip_artifact(
+    artifact: &ScipArtifact,
+    cache_store: Option<&cache::ScipCacheStore>,
+) -> Result<ParsedScipIndex> {
+    let mut parsed = if let Some(store) = cache_store {
+        parse_scip_artifact_with_cache(artifact, store)?
+    } else {
+        parse_scip_file(&artifact.path, artifact.workspace_slug.clone())?
+    };
+    apply_artifact_context(&mut parsed, artifact);
+    Ok(parsed)
+}
+
+fn parse_scip_artifact_with_cache(
+    artifact: &ScipArtifact,
+    store: &cache::ScipCacheStore,
+) -> Result<ParsedScipIndex> {
+    let bytes = fs::read(&artifact.path)
+        .with_context(|| format!("read SCIP file {}", artifact.path.display()))?;
+    let file_content_hash = cache::content_hash(&bytes);
+    let scip_version = cache::scip_version_for_indexer(artifact.indexer);
+    let key = cache::parse_cache_key(file_content_hash, scip_version)?;
+
+    if let Some(cached) = store.load_bytes(&key)? {
+        let mut parsed: ParsedScipIndex =
+            bincode::deserialize(&cached).context("deserialize cached parsed SCIP artifact")?;
+        parsed.workspace_slug.clone_from(&artifact.workspace_slug);
+        return Ok(parsed);
+    }
+
+    let mut parsed = parse_scip_bytes_with_workspace(&bytes, artifact.workspace_slug.clone())
+        .with_context(|| format!("parse SCIP file {}", artifact.path.display()))?;
+    let mut cacheable = parsed.clone();
+    cacheable.workspace_slug.clear();
+    let encoded =
+        bincode::serialize(&cacheable).context("serialize parsed SCIP artifact cache entry")?;
+    store.store_bytes(&key, &encoded)?;
+    parsed.workspace_slug.clone_from(&artifact.workspace_slug);
+    Ok(parsed)
+}
+
+fn apply_artifact_context(parsed: &mut ParsedScipIndex, artifact: &ScipArtifact) {
+    parsed.workspace_slug.clone_from(&artifact.workspace_slug);
+    // SCIP document paths are relative to the directory the indexer ran in
+    // (the workspace root), NOT the repo root. Re-root them here so every
+    // node `file_path` downstream is repo-relative — otherwise complexity
+    // attachment, route extraction, and every op that joins paths onto the
+    // project root (`symbols_at`, `diff_touches`, file_glob filters)
+    // silently misses files in sub-workspaces.
+    if !artifact.workspace_root.as_os_str().is_empty() {
+        for file in &mut parsed.files {
+            file.relative_path = artifact.workspace_root.join(&file.relative_path);
+        }
+    }
 }
 
 pub fn parse_scip_file(
@@ -884,8 +933,21 @@ fn map_symbol_kind(kind: Option<symbol_information::Kind>) -> Option<ScipSymbolK
 #[cfg(test)]
 mod tests {
     use super::*;
+    use petgraph::visit::EdgeRef;
     use protobuf::{EnumOrUnknown, MessageField, SpecialFields};
     use scip::types::{ToolInfo, symbol_information};
+
+    fn tempdir_in_target(prefix: &str) -> tempfile::TempDir {
+        let base = std::env::current_dir()
+            .expect("current dir")
+            .join("target")
+            .join("test-tmp");
+        fs::create_dir_all(&base).expect("create test tempdir base");
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(base)
+            .expect("create test tempdir")
+    }
 
     fn fixture_index_bytes() -> Vec<u8> {
         let mut index = Index::new();
@@ -946,6 +1008,55 @@ mod tests {
         });
 
         index.write_to_bytes().expect("encode fixture index")
+    }
+
+    fn cross_file_call_index_bytes() -> Vec<u8> {
+        let mut index = Index::new();
+        let foo_symbol = "scip-rust . . . foo().".to_string();
+        let bar_symbol = "scip-rust . . . bar().".to_string();
+
+        let mut foo_doc = Document::new();
+        foo_doc.language = "rust".to_string();
+        foo_doc.relative_path = "src/foo.rs".to_string();
+        foo_doc.occurrences = vec![Occurrence {
+            range: vec![0, 7, 10],
+            symbol: foo_symbol.clone(),
+            symbol_roles: 1,
+            ..Occurrence::new()
+        }];
+        foo_doc.symbols = vec![SymbolInformation {
+            symbol: foo_symbol.clone(),
+            display_name: "foo".to_string(),
+            kind: EnumOrUnknown::new(symbol_information::Kind::Function),
+            ..SymbolInformation::new()
+        }];
+
+        let mut bar_doc = Document::new();
+        bar_doc.language = "rust".to_string();
+        bar_doc.relative_path = "src/bar.rs".to_string();
+        bar_doc.occurrences = vec![
+            Occurrence {
+                range: vec![0, 7, 10],
+                symbol: bar_symbol.clone(),
+                symbol_roles: 1,
+                ..Occurrence::new()
+            },
+            Occurrence {
+                range: vec![1, 4, 7],
+                symbol: foo_symbol,
+                symbol_roles: 8,
+                ..Occurrence::new()
+            },
+        ];
+        bar_doc.symbols = vec![SymbolInformation {
+            symbol: bar_symbol,
+            display_name: "bar".to_string(),
+            kind: EnumOrUnknown::new(symbol_information::Kind::Function),
+            ..SymbolInformation::new()
+        }];
+
+        index.documents = vec![foo_doc, bar_doc];
+        index.write_to_bytes().expect("encode cross-file index")
     }
 
     #[test]
@@ -1216,6 +1327,48 @@ mod tests {
             PathBuf::from("src/lib.rs"),
         );
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn cached_parse_preserves_cross_file_call_edges() {
+        let tmp = tempdir_in_target("scip-parse-cache-");
+        let artifact_path = tmp.path().join("cross-file.scip");
+        fs::write(&artifact_path, cross_file_call_index_bytes()).expect("write cross-file fixture");
+        let artifact = ScipArtifact {
+            workspace_slug: "root".to_string(),
+            path: artifact_path,
+            indexer: None,
+            workspace_root: PathBuf::new(),
+        };
+
+        let cold_parsed = vec![parse_scip_artifact(&artifact, None).expect("cold parse")];
+        let cold_graph = crate::repo_graph::RepoDependencyGraph::build(&cold_parsed);
+
+        let store = cache::ScipCacheStore::new(tmp.path().join("parse-cache"));
+        let cached_first = parse_scip_artifact(&artifact, Some(&store)).expect("populate cache");
+        let cached_second = parse_scip_artifact(&artifact, Some(&store)).expect("reuse cache");
+        assert_eq!(cached_first, cached_second);
+        let cached_graph = crate::repo_graph::RepoDependencyGraph::build(&[cached_second]);
+
+        assert_eq!(cold_graph.to_artifact(), cached_graph.to_artifact());
+        assert_cross_file_call_edge(&cached_graph);
+    }
+
+    fn assert_cross_file_call_edge(graph: &crate::repo_graph::RepoDependencyGraph) {
+        let caller_file = graph
+            .file_node("src/bar.rs")
+            .expect("caller file should exist");
+        let callee_file = graph
+            .file_node("src/foo.rs")
+            .expect("callee file should exist");
+        let has_file_reference = graph.graph().edges(caller_file).any(|edge| {
+            edge.target() == callee_file
+                && edge.weight().kind == crate::repo_graph::RepoGraphEdgeKind::FileReference
+        });
+        assert!(
+            has_file_reference,
+            "cached whole-graph build must retain the cross-file call/reference edge"
+        );
     }
 
     #[test]
