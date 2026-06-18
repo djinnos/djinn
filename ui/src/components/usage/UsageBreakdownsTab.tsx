@@ -21,10 +21,10 @@ import {
 import { cn } from "@/lib/utils";
 import {
   EM_DASH,
+  formatAverageReopens,
   formatBucket,
   formatCompactNumber,
   formatCurrency,
-  formatDecimal,
   formatInteger,
   formatPercent,
   totalTokens,
@@ -153,7 +153,7 @@ function BreakdownTable({ config }: { config: BreakdownConfig }) {
                         <MetricText value={formatCurrency(row.cost)} />
                         <MetricText value={formatCurrency(row.cost_per_task)} />
                         <MetricText value={formatPercent(row.success_rate)} />
-                        <MetricText value={formatDecimal(row.avg_reopens)} />
+                        <MetricText value={formatAverageReopens(row.avg_reopens)} />
                         <MetricText value={formatInteger(row.task_count)} />
                         <MetricText value={formatCompactNumber(row.tokens_in + row.tokens_out)} detail={`${formatCompactNumber(row.tokens_in)} in · ${formatCompactNumber(row.tokens_out)} out`} />
                       </div>

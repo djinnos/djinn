@@ -3,9 +3,9 @@ import type { UsageAnalyticsResponse, UsageModelEffectiveness } from "@/api/anal
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import {
+  formatAverageReopens,
   formatCompactNumber,
   formatCurrency,
-  formatDecimal,
   formatInteger,
   formatPercent,
   totalTokens,
@@ -34,7 +34,7 @@ const METRICS: MetricSpec[] = [
   {
     key: "avg_reopens",
     label: "Avg reopens",
-    format: formatDecimal,
+    format: formatAverageReopens,
     lowerIsBetter: true,
   },
 ];
