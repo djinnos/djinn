@@ -5,7 +5,7 @@ import { Settings02Icon, ShieldUserIcon, UserGroupIcon } from '@hugeicons/core-f
 import { usersQueryOptions } from '@/api/queryOptions';
 import { setUserRole, userDisplayName, type OrgUser } from '@/api/users';
 import { InlineError } from '@/components/InlineError';
-import { UserConfigDialog, ServiceBadge } from '@/components/UserConfigDialog';
+import { UserConfigDialog } from '@/components/UserConfigDialog';
 import { useAuthUser } from '@/components/AuthGate';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -80,8 +80,8 @@ function UserRow({ user }: { user: OrgUser }) {
   const isSelf = me?.id === user.id;
   const queryClient = useQueryClient();
   const role = user.role ?? 'proposer';
-  // Admins manage others' roles — not their own, not the service user.
-  const canManageRole = !!me?.isAdmin && !user.is_service && !isSelf;
+  // Admins manage others' roles — not their own.
+  const canManageRole = !!me?.isAdmin && !isSelf;
 
   const changeRole = async (newRole: string) => {
     const key = ['users', 'list'] as const;
@@ -115,7 +115,6 @@ function UserRow({ user }: { user: OrgUser }) {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium text-foreground">{displayName}</span>
-          {user.is_service && <ServiceBadge />}
           {user.is_admin && (
             <Badge variant="secondary" className="gap-1">
               <HugeiconsIcon icon={ShieldUserIcon} size={12} />
@@ -125,9 +124,7 @@ function UserRow({ user }: { user: OrgUser }) {
           {user.is_member_of_org && (
             <Badge variant="outline">Org member</Badge>
           )}
-          {!user.is_service && !user.is_admin && (
-            <Badge variant="outline" className="capitalize">{role}</Badge>
-          )}
+          {!user.is_admin && <Badge variant="outline" className="capitalize">{role}</Badge>}
         </div>
         <p className="truncate text-xs text-muted-foreground">@{user.github_login}</p>
       </div>
@@ -145,7 +142,7 @@ function UserRow({ user }: { user: OrgUser }) {
         </Select>
       )}
 
-      {!user.is_service && user.last_seen_at && (
+      {user.last_seen_at && (
         <span className="shrink-0 text-xs text-muted-foreground" title={user.last_seen_at}>
           Last seen {relativeTime(user.last_seen_at)}
         </span>
