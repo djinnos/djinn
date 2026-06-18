@@ -91,6 +91,8 @@ async fn run_tick(state: &AppState) {
         else {
             continue;
         };
+        // Route through the root-scoped workspace API so periodic maintenance
+        // cannot gc an arbitrary path derived from project metadata.
         match djinn_workspace::gc_project_clone_under(
             &clone_gc.projects_root,
             &clone_gc.owner,
