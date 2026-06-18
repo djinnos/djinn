@@ -953,6 +953,26 @@ async fn process_extracted_note(
     note: &ExtractedNote,
     extraction_quality: &mut super::session_extraction::ExtractionQuality,
 ) {
+    // ── ADR-054 admission gate ─────────────────────────────────────────────
+    // Check note quality BEFORE novelty judging and BEFORE create_extracted_note.
+    // Underspecified notes are dropped immediately — they never consume an LLM
+    // novelty call and never enter the knowledge base.
+    if matches!(note_type, "case" | "pattern" | "pitfall") {
+        let quality = assess_note_quality(note_type, &note.content);
+        if quality.is_underspecified {
+            tracing::warn!(
+                note_type = %note_type,
+                title = %note.title,
+                session_id = %extraction_context.session_id,
+                project_id = %extraction_context.project_id,
+                reasons = %quality.reasons.join(", "),
+                "llm_extraction: dropping underspecified note at admission gate"
+            );
+            extraction_quality.admission_dropped += 1;
+            return;
+        }
+    }
+
     let novelty = match novelty_decision(extraction_context, note_type, note).await {
         Ok(result) => result,
         Err(e) => {
