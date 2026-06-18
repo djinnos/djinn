@@ -18,9 +18,10 @@ export const BASE_ROLE_LABELS: Record<BaseRole, string> = {
   reviewer: "Task Reviewer",
   lead: "Lead",
   planner: "Planner",
+  architect: "Architect",
 };
 
-export const BASE_ROLES: BaseRole[] = ["worker", "reviewer", "lead", "planner"];
+export const BASE_ROLES: BaseRole[] = ["worker", "reviewer", "lead", "planner", "architect"];
 
 export interface AgentFormProps {
   initial?: Partial<Omit<CreateAgentRequest, "project_id">>;

@@ -751,8 +751,8 @@ export type CredentialDeleteOutput = CredentialDeleteOutputSchema.CredentialDele
 export namespace CredentialListInputSchema {
   export interface CredentialListInput {
   /**
-   * Admin-only: act on behalf of this user id (e.g. the automation service
-   * user). Non-admins must omit it.
+   * Admin-only: act on behalf of this user id (e.g. another user to
+   * configure). Non-admins must omit it.
    */
   target_user_id?: string
   [k: string]: any
@@ -799,8 +799,8 @@ export namespace CredentialSetInputSchema {
    */
   provider_id: string
   /**
-   * Admin-only: act on behalf of this user id (e.g. the automation service
-   * user). Non-admins must omit it.
+   * Admin-only: act on behalf of this user id (e.g. another user to
+   * configure). Non-admins must omit it.
    */
   target_user_id?: string
   [k: string]: any
@@ -5402,8 +5402,8 @@ export type ProposalUpdateOutput = ProposalUpdateOutputSchema.ProposalUpdateOutp
 export namespace ProviderCatalogInputSchema {
   export interface ProviderCatalogInput {
   /**
-   * Admin-only: act on behalf of this user id (e.g. the automation service
-   * user). Non-admins must omit it.
+   * Admin-only: act on behalf of this user id (e.g. another user to
+   * configure). Non-admins must omit it.
    */
   target_user_id?: string
   [k: string]: any
@@ -5449,8 +5449,8 @@ export type ProviderCatalogOutput = ProviderCatalogOutputSchema.ProviderCatalogO
 export namespace ProviderConnectedInputSchema {
   export interface ProviderConnectedInput {
   /**
-   * Admin-only: act on behalf of this user id (e.g. the automation service
-   * user). Non-admins must omit it.
+   * Admin-only: act on behalf of this user id (e.g. another user to
+   * configure). Non-admins must omit it.
    */
   target_user_id?: string
   [k: string]: any
@@ -5617,8 +5617,8 @@ export type ProviderModelsOutput = ProviderModelsOutputSchema.ProviderModelsOutp
 export namespace ProviderModelsConnectedInputSchema {
   export interface ProviderModelsConnectedInput {
   /**
-   * Admin-only: act on behalf of this user id (e.g. the automation service
-   * user). Non-admins must omit it.
+   * Admin-only: act on behalf of this user id (e.g. another user to
+   * configure). Non-admins must omit it.
    */
   target_user_id?: string
   [k: string]: any
@@ -5661,8 +5661,8 @@ export namespace ProviderOauthStartInputSchema {
    */
   provider_id: string
   /**
-   * Admin-only: act on behalf of this user id (e.g. the automation service
-   * user). Non-admins must omit it.
+   * Admin-only: act on behalf of this user id (e.g. another user to
+   * configure). Non-admins must omit it.
    */
   target_user_id?: string
   [k: string]: any
@@ -6918,8 +6918,8 @@ export type ToolchainVersionsOutput = ToolchainVersionsOutputSchema.ToolchainVer
 export namespace UserSettingsGetInputSchema {
   export interface UserSettingsGetInput {
   /**
-   * Admin-only: act on behalf of this user id (e.g. the automation service
-   * user). Non-admins must omit it.
+   * Admin-only: act on behalf of this user id (e.g. another user to
+   * configure). Non-admins must omit it.
    */
   target_user_id?: string
   [k: string]: any
@@ -6985,8 +6985,8 @@ export namespace UserSettingsSetInputSchema {
    */
   models?: string[]
   /**
-   * Admin-only: act on behalf of this user id (e.g. the automation service
-   * user). Non-admins must omit it.
+   * Admin-only: act on behalf of this user id (e.g. another user to
+   * configure). Non-admins must omit it.
    */
   target_user_id?: string
   [k: string]: any

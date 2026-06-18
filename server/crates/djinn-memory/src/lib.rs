@@ -24,7 +24,7 @@ pub use note::{
     BrokenLink, BrokenLinkRepair, BuildContextResponse, ContradictionCandidate,
     ExtractedNoteAuditCategory, ExtractedNoteAuditFinding, ExtractedNoteAuditReport, GitLogEntry,
     GraphEdge, GraphNode, GraphResponse, HealthReport, Note, NoteAbstract, NoteCompact,
-    NoteDedupCandidate, NoteOverview, NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
-    TypeRisk,
+    NoteDedupCandidate, NoteOverview, NoteQualityAssessment, NoteSearchResult, OrphanNote,
+    ReindexSummary, StaleFolder, TypeRisk,
 };
 pub use note_association::{NoteAssociation, association_kind, canonical_pair};

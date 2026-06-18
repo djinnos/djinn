@@ -32,8 +32,8 @@ use std::sync::Arc;
 
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{
-    NoteRepository, ProjectRepository, SessionRepository, TaskRepository, folder_for_type,
-    permalink_for,
+    NoteRepository, ProjectRepository, SessionRepository, TaskRepository, assess_note_quality,
+    folder_for_type, permalink_for,
 };
 use djinn_provider::provider::{LlmProvider, TelemetryMeta, create_provider};
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider_for_user};
@@ -252,36 +252,6 @@ fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars
 }
 
 const MIN_DURABLE_WORDS: usize = 16;
-
-const PATTERN_REQUIRED_SECTIONS: &[&str] = &[
-    "## Context",
-    "## Problem shape",
-    "## Recommended approach",
-    "## Why it works",
-    "## Tradeoffs / limits",
-    "## When to use",
-    "## When not to use",
-    "## Related",
-];
-
-const PITFALL_REQUIRED_SECTIONS: &[&str] = &[
-    "## Trigger / smell",
-    "## Failure mode",
-    "## Observable symptoms",
-    "## Prevention",
-    "## Recovery",
-    "## Related",
-];
-
-const CASE_REQUIRED_SECTIONS: &[&str] = &[
-    "## Situation",
-    "## Constraint",
-    "## Approach taken",
-    "## Result",
-    "## Why it worked / failed",
-    "## Reusable lesson",
-    "## Related",
-];
 
 // ── JSON response shape ───────────────────────────────────────────────────────
 
@@ -685,7 +655,7 @@ async fn run_llm_extraction_inner(
         Box::new(ArcProvider(p))
     } else {
         // Resolve the memory model the way DISPATCH does — act as the task's
-        // creator (the automations / owning user) so extraction uses THEIR
+        // creator (the owning user) so extraction uses THEIR
         // configured model + credential, like other system-initiated LLM work. The
         // session already ran on `session.model_id` for this user, so resolving
         // it under the creator's `SESSION_USER_ID` scope reuses the proven
@@ -1352,7 +1322,11 @@ fn assess_quality_gate(
     let generality = has_generality(note);
     let durability = has_durability(note);
     let type_fit = matches_type_semantics(note_type, note);
-    let required_structure = has_required_structure(note_type, note);
+    // The ADR-054 structural gate now delegates to the shared
+    // `assess_note_quality` classifier (the single source of truth shared with
+    // `extracted_note_audit`), so the gate and corpus audit cannot drift.
+    let quality = assess_note_quality(note_type, &note.content);
+    let required_structure = !quality.is_underspecified;
     let novelty_assessment = novelty.assessment;
 
     let mut reasons = Vec::new();
@@ -1397,32 +1371,6 @@ fn assess_quality_gate(
         outcome,
         reasons,
     }
-}
-
-fn has_required_structure(note_type: &str, note: &ExtractedNote) -> bool {
-    required_sections(note_type)
-        .map(|sections| note_contains_sections_in_order(&note.content, sections))
-        .unwrap_or(false)
-}
-
-fn required_sections(note_type: &str) -> Option<&'static [&'static str]> {
-    match note_type {
-        "pattern" => Some(PATTERN_REQUIRED_SECTIONS),
-        "pitfall" => Some(PITFALL_REQUIRED_SECTIONS),
-        "case" => Some(CASE_REQUIRED_SECTIONS),
-        _ => None,
-    }
-}
-
-fn note_contains_sections_in_order(content: &str, sections: &[&str]) -> bool {
-    let mut cursor = 0;
-    for section in sections {
-        let Some(found_at) = content[cursor..].find(section) else {
-            return false;
-        };
-        cursor += found_at + section.len();
-    }
-    true
 }
 
 fn has_specificity(note: &ExtractedNote) -> bool {

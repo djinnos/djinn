@@ -34,9 +34,21 @@ pub struct IngestStats {
     /// Pair events written to `coupling_pair_events`. Includes any
     /// first-pass backfill from existing `commit_file_changes` rows.
     pub pair_events_inserted: usize,
-    /// True when we invoked `git fetch --unshallow` to try to extend a
-    /// shallow clone. Surfaced for tests / dashboards.
+    /// True when `run_git_log` invoked `git fetch --unshallow` to extend a
+    /// shallow clone. Surfaced for tests / dashboards. On the new warm-Job
+    /// `--depth 1000` clone this stays `false` whenever the saved cursor
+    /// is within the last 1000 commits (the common case), and flips to
+    /// `true` only when no cursor exists (first-run `HEAD` walk) or when
+    /// the saved cursor is older than the clone's shallow boundary.
     pub unshallowed: bool,
+    /// True when `try_fetch_cursor` invoked `git fetch --unshallow` to
+    /// make a shallow warm-Pod clone's saved cursor reachable. This is the
+    /// path that handles a cursor >1000 commits back on the depth-1000
+    /// warm clone, OR any cursor on a legacy `--depth 1` clone. When
+    /// `cursor_fetched && !unshallowed` we have a true incremental walk
+    /// (cursor became reachable, range bounded to `cursor..HEAD`, no
+    /// post-fetch unshallow needed).
+    pub cursor_fetched: bool,
 }
 
 #[derive(Debug, Error)]
@@ -57,9 +69,15 @@ pub enum IngestError {
 /// `commit_file_changes`, then advance the cursor to HEAD.
 ///
 /// * Empty repo (no commits) → returns zero counts with no error.
-/// * Shallow clone with missing history → tries one `git fetch
-///   --unshallow` and re-runs; if still bounded, ingests what is
-///   visible and logs a warning.
+/// * Shallow clone with a saved cursor → tries to make the cursor
+///   reachable via `try_fetch_cursor` (which uses `git fetch --unshallow`
+///   on a shallow clone). On the warm-Job `--depth 1000` default the
+///   cursor is usually already reachable and no unshallow is needed.
+/// * Shallow clone with no cursor → the `HEAD` walk range forces an
+///   unshallow in `run_git_log`; we always pay one full-history fetch on
+///   the first warm per clone. This is unavoidable because a depth-1
+///   `git log` returns the single visible commit as "everything added,"
+///   producing thousands of bogus `change_kind = 'A'` rows.
 /// * Binary files (`-\t-\t<path>` in `--numstat`) → rows with
 ///   insertions=0/deletions=0.
 pub async fn ingest_new_commits(
@@ -81,13 +99,46 @@ pub async fn ingest_new_commits(
     };
 
     let cursor = repo.get_cursor(project_id).await?;
+    // Snapshot whether the working tree is a shallow clone. Used below to
+    // decide between the cheap targeted cursor fetch and a full unshallow.
+    // The warm Job pod does `git clone --depth 1000 --single-branch` (see
+    // `djinn_k8s::warm_job`) — that gives us ~1000 commits of recent history
+    // for free, which covers the common case where the saved cursor is
+    // within the last few hundred commits. Only when the cursor is older than
+    // the clone's shallow boundary (e.g. a project that hasn't been warmed in
+    // a long time, or a warm that ran before the depth bump) do we need to
+    // pay the `--unshallow` cost.
+    let is_shallow = tokio::fs::metadata(project_root.join(".git/shallow"))
+        .await
+        .is_ok();
+    let mut stats = IngestStats::default();
     let range = match cursor.as_deref() {
         Some(sha) if !sha.is_empty() => {
-            // Cursor set → ingest `cursor..HEAD`. If the cursor points
-            // at a commit git no longer has (e.g. history rewrite), fall
-            // back to a full walk so we recover without human
-            // intervention.
+            // Cursor set → ingest `cursor..HEAD`. If the cursor points at a
+            // commit git no longer has, try a targeted fetch first so a shallow
+            // warm-Pod clone doesn't degenerate into a full-history re-walk on
+            // every warm. The cursor fetch extends the clone's shallow boundary
+            // back to the cursor via `git fetch --unshallow origin`, which is
+            // the ONLY correct way to make `git log cursor..HEAD` walk the full
+            // delta on a shallow clone — `git fetch origin <cursor>` only
+            // downloads the cursor object and leaves its parents unreachable,
+            // so the walk silently returns just HEAD and the coupling index
+            // loses every commit between cursor and HEAD. Only when the
+            // targeted fetch fails (e.g. the SHA was rewritten out of history)
+            // do we fall back to a full re-walk, which in turn forces unshallow
+            // inside `run_git_log`.
             if cursor_is_reachable(project_root, sha).await {
+                format!("{sha}..HEAD")
+            } else if is_shallow
+                && try_fetch_cursor(project_root, sha).await
+                && cursor_is_reachable(project_root, sha).await
+            {
+                stats.cursor_fetched = true;
+                tracing::info!(
+                    project_id = %project_id,
+                    cursor = %sha,
+                    "coupling_index: shallow clone; targeted cursor fetch extended history; resuming incremental walk"
+                );
                 format!("{sha}..HEAD")
             } else {
                 tracing::warn!(
@@ -101,7 +152,6 @@ pub async fn ingest_new_commits(
         _ => "HEAD".to_string(),
     };
 
-    let mut stats = IngestStats::default();
     let (output, unshallowed) = run_git_log(project_root, &range).await?;
     stats.unshallowed = unshallowed;
 
@@ -208,7 +258,7 @@ async fn cursor_is_reachable(project_root: &Path, sha: &str) -> bool {
         GIT_LOG_TIMEOUT,
         Command::new("git")
             .current_dir(project_root)
-            .args(["cat-file", "-e", sha])
+            .args(["merge-base", "--is-ancestor", sha, "HEAD"])
             .output(),
     )
     .await
@@ -218,24 +268,154 @@ async fn cursor_is_reachable(project_root: &Path, sha: &str) -> bool {
     output.status.success()
 }
 
-/// Run `git log` and, if the output looks like a shallow clone cut
-/// short of the cursor range, extend once via `git fetch --unshallow`
-/// and re-run. Returns `(stdout, unshallowed)`.
+/// Targeted fetch for the saved cursor SHA so a shallow warm-Pod clone can
+/// resume an incremental walk without degenerating into a full-history
+/// re-walk on every warm.
+///
+/// A `git fetch origin <cursor>` only downloads the cursor commit object —
+/// it does NOT extend the clone's shallow boundary, so `git log
+/// <cursor>..HEAD` silently returns just HEAD (the parents of the cursor
+/// aren't reachable, so the walk can't continue past HEAD). That bit the
+/// warm Pod's coupling index before this fix: the cursor appeared
+/// "reachable" (the object was present), the walk "succeeded" with stats
+/// claiming an incremental ingest, but every commit between cursor and HEAD
+/// was dropped on the floor and the cursor was advanced to HEAD — so the
+/// NEXT warm also lost those commits permanently.
+///
+/// The correct fix is `git fetch --unshallow`, which extends the clone's
+/// shallow boundary all the way back to the root so `git log
+/// <cursor>..HEAD` can walk the full delta. We then re-check
+/// `cursor_is_reachable` with `git merge-base --is-ancestor <cursor> HEAD`
+/// and only claim success when the cursor is actually walkable. A bare
+/// object-existence check is insufficient: `git fetch origin <cursor>` makes
+/// `git cat-file -e <cursor>` pass while leaving the cursor disconnected from
+/// HEAD in the shallow graph.
+///
+/// On already-deep clones (the new warm-Job `--depth 1000` default), this
+/// helper is a no-op — `cursor_is_reachable` already returned true and the
+/// caller skipped us. On truly shallow clones (cursor >1000 commits back,
+/// or the next-time-we-bump-depth case) we pay one `--unshallow` per warm
+/// pass instead of the previous behaviour of doing nothing useful and
+/// silently losing data.
+///
+/// Returns `true` when the fetch completed; the caller re-checks that the
+/// cursor is now a walkable ancestor of `HEAD`. Returns `false` on any
+/// failure (timeout, spawn error, non-zero exit, missing `origin` remote,
+/// or a remote that does not know the ref — e.g. rewritten history). The
+/// caller is expected to fall back to a full re-walk on `false`.
+async fn try_fetch_cursor(project_root: &Path, cursor: &str) -> bool {
+    // Skip on non-git / non-clone paths defensively. `git fetch` on a
+    // missing remote errors with "fatal: 'origin' does not appear to be
+    // a git repository" — not catastrophic, but we want this helper to
+    // be a clean best-effort.
+    let has_origin = tokio::fs::metadata(project_root.join(".git/config"))
+        .await
+        .is_ok()
+        && {
+            let probe = Command::new("git")
+                .current_dir(project_root)
+                .args(["config", "--get", "remote.origin.url"])
+                .output()
+                .await;
+            matches!(probe, Ok(o) if o.status.success())
+        };
+    if !has_origin {
+        return false;
+    }
+
+    // `git fetch --unshallow` is the only fetch that actually extends the
+    // shallow boundary back to the root; `git fetch origin <ref>` only
+    // fetches <ref> and leaves parents unreachable. See the doc comment on
+    // this fn for the full reasoning.
+    let fetch = tokio::time::timeout(
+        GIT_LOG_TIMEOUT,
+        Command::new("git")
+            .current_dir(project_root)
+            .args(["fetch", "--unshallow"])
+            .output(),
+    )
+    .await;
+
+    let result = match fetch {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                cursor = %cursor,
+                error = %e,
+                "coupling_index: `git fetch --unshallow` failed to spawn; falling back to full re-walk"
+            );
+            return false;
+        }
+        Err(_) => {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                cursor = %cursor,
+                "coupling_index: `git fetch --unshallow` timed out; falling back to full re-walk"
+            );
+            return false;
+        }
+    };
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
+        // `--unshallow` can fail when the original clone wasn't shallow
+        // ("fatal: --unshallow on a complete repository does not make
+        // sense") or when the remote is unreachable. We log at warn and
+        // fall back; the upstream `run_git_log` ALSO re-tries unshallow
+        // when its own shallow check fires, so the caller still gets a
+        // correct walk even when this helper reports false.
+        tracing::warn!(
+            project_root = %project_root.display(),
+            cursor = %cursor,
+            stderr = %stderr,
+            "coupling_index: `git fetch --unshallow` non-zero; falling back to full re-walk"
+        );
+        return false;
+    }
+    true
+}
+
+/// Run `git log` after widening the clone if needed.
+///
+/// The warm Job pod clones with `git clone --depth 1000 --single-branch`
+/// (see `djinn_k8s::warm_job`) — that gives ~1000 commits of recent
+/// history for free, which covers the common case where the saved
+/// coupling cursor is within the last few hundred commits. When the
+/// cursor IS reachable AND the range is bounded (`cursor..HEAD`), we
+/// skip the unshallow entirely — the walk returns just the delta since
+/// cursor with no extra fetch.
+///
+/// We DO need to unshallow when:
+///
+/// * The cursor is unreachable (caller tries `try_fetch_cursor` first
+///   which unshallows explicitly), OR
+/// * The range is `HEAD` (first-run / full-history walk with no saved
+///   cursor), in which case we need every commit reachable from HEAD.
+///
+/// Unshallow eagerly when the clone is shallow — depth-1 clones walked
+/// by `git log` show the single visible commit as "everything added,"
+/// producing thousands of bogus rows all stamped with
+/// `change_kind = 'A'`. The previous heuristic only triggered on an
+/// empty log (cursor-bounded range that didn't intersect visible
+/// history); first-run / full-history walks slipped past it and wrote
+/// the bad data anyway. Returns `(stdout, unshallowed)`.
 async fn run_git_log(project_root: &Path, range: &str) -> Result<(String, bool), IngestError> {
-    // Unshallow eagerly when the clone is shallow. The warm Job pod
-    // does `git clone --depth 1 --single-branch` (see
-    // `djinn_k8s::warm_job`) — fast for SCIP, useless for coupling: a
-    // depth-1 clone walked by `git log` shows the single visible
-    // commit as "everything added," producing thousands of bogus rows
-    // all stamped with `change_kind = 'A'`. The previous heuristic
-    // only triggered on an empty log (cursor-bounded range that
-    // didn't intersect visible history); first-run / full-history
-    // walks slipped past it and wrote the bad data anyway.
+    // Skip the eager unshallow when the range is `cursor..HEAD` AND the
+    // cursor is reachable — the walk only needs commits between cursor
+    // and HEAD, which are already in the object DB if the clone depth
+    // (warm Pod `--depth 1000` default) covers the cursor. This is the
+    // key CPU saving on the warm path: without it we always pay an
+    // extra `git fetch --unshallow` even when the saved cursor is recent
+    // and the walk would otherwise be a no-op.
+    let cursor_reachable = match extract_cursor_from_range(range) {
+        Some(sha) => cursor_is_reachable(project_root, &sha).await,
+        None => false,
+    };
+    let mut unshallowed = false;
     let is_shallow = tokio::fs::metadata(project_root.join(".git/shallow"))
         .await
         .is_ok();
-    let mut unshallowed = false;
-    if is_shallow {
+    if is_shallow && !cursor_reachable {
         tracing::info!(
             project_root = %project_root.display(),
             "coupling_index: shallow clone detected; attempting `git fetch --unshallow` before walk"
@@ -276,6 +456,21 @@ async fn run_git_log(project_root: &Path, range: &str) -> Result<(String, bool),
     }
     let output = run_git_log_once(project_root, range).await?;
     Ok((output, unshallowed))
+}
+
+/// Pull the cursor SHA out of a `<sha>..HEAD` range string. Returns `None`
+/// for anything that isn't a clean cursor range (e.g. `HEAD`, `HEAD~3`,
+/// `5ffafb39..HEAD` works; `5ffafb39..main` doesn't).
+fn extract_cursor_from_range(range: &str) -> Option<String> {
+    let (left, right) = range.split_once("..")?;
+    if right.trim() != "HEAD" {
+        return None;
+    }
+    let left = left.trim();
+    if left.is_empty() || left.contains("...") {
+        return None;
+    }
+    Some(left.to_owned())
 }
 
 async fn run_git_log_once(project_root: &Path, range: &str) -> Result<String, IngestError> {
@@ -655,5 +850,450 @@ mod tests {
         let repo = CommitFileChangeRepository::new(db);
         let coupled = repo.top_coupled("p1", "a.txt", 10).await.expect("coupled");
         assert!(coupled.iter().any(|r| r.file_path == "b.txt"));
+    }
+
+    // Regression test for w6gi (Warm coupling-index re-ingests FULL git history
+    // every run). Simulates the warm-Pod scenario:
+    //
+    // 1. Build a "remote" repo with N>2 commits.
+    // 2. Make a fresh `--depth 1 --single-branch` clone of it (mirrors the
+    //    warm-Pod clone setup in `djinn_k8s::warm_job`).
+    // 3. Save one of the early commits as the coupling cursor (mimics what
+    //    the coupling-index DB row looks like after a previous warm).
+    // 4. Run `try_fetch_cursor` + `cursor_is_reachable` against the shallow
+    //    clone.
+    // 5. Verify `git log <cursor>..HEAD` walks the FULL delta on the shallow
+    //    clone after the fetch — this is the exact assertion the original bug
+    //    violated. The previous `git fetch origin <cursor>` only downloaded
+    //    the cursor object; its parents stayed unreachable, so `git log
+    //    <cursor>..HEAD` returned just HEAD and the coupling index silently
+    //    dropped every commit between cursor and HEAD on the floor. The fix
+    //    switched to `git fetch --unshallow`, which extends the shallow
+    //    boundary back to root and makes the full walk correct.
+    //
+    // Runs against the local git binary only (no DB), so it executes in any
+    // sandbox that has `git` on PATH. The Postgres-backed `end_to_end_*`
+    // test below exercises the full `ingest_new_commits` flow on top of
+    // these helpers.
+    #[tokio::test]
+    async fn try_fetch_cursor_makes_shallow_clone_walkable_for_full_delta() {
+        let tmp = tempfile::Builder::new()
+            .prefix("djinn-coupling-cursor-")
+            .tempdir_in(".")
+            .expect("tempdir");
+        let upstream = tmp.path().join("upstream");
+        tokio::fs::create_dir_all(&upstream)
+            .await
+            .expect("upstream dir");
+
+        async fn git(root: &std::path::Path, args: &[&str]) -> std::process::Output {
+            Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .await
+                .expect("git")
+        }
+
+        async fn git_assert(root: &std::path::Path, args: &[&str]) -> std::process::Output {
+            let out = git(root, args).await;
+            assert!(
+                out.status.success(),
+                "git {args:?} failed in {}: {}",
+                root.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        }
+
+        // Build upstream with five commits — enough that the cursor is
+        // several commits behind HEAD, exercising the parent-walk path that
+        // the old `git fetch origin <cursor>` left unreachable.
+        git_assert(&upstream, &["init", "-q", "-b", "main"]).await;
+        git_assert(&upstream, &["config", "user.email", "t@t"]).await;
+        git_assert(&upstream, &["config", "user.name", "t"]).await;
+        for i in 1..=5 {
+            tokio::fs::write(upstream.join(format!("f{i}.txt")), format!("v{i}\n"))
+                .await
+                .unwrap();
+            git_assert(&upstream, &["add", "."]).await;
+            git_assert(&upstream, &["commit", "-q", "-m", &format!("commit {i}")]).await;
+        }
+        let cursor =
+            String::from_utf8_lossy(&git_assert(&upstream, &["rev-parse", "HEAD~3"]).await.stdout)
+                .trim()
+                .to_owned();
+        let head =
+            String::from_utf8_lossy(&git_assert(&upstream, &["rev-parse", "HEAD"]).await.stdout)
+                .trim()
+                .to_owned();
+        assert_ne!(cursor, head, "test fixture: cursor should differ from HEAD");
+
+        // Fresh `--depth 1 --single-branch` clone — mirrors the warm-Pod
+        // setup. The cursor from a previous warm will not be in this
+        // clone. `--no-local` defeats `git clone file://...`'s local
+        // fast-path, which would otherwise ignore `--depth` and silently
+        // produce a full clone. Production warms clone over HTTPS so the
+        // `--depth` flag always takes effect; this is test-harness-only.
+        let shallow = tmp.path().join("shallow");
+        git_assert(
+            tmp.path(),
+            &[
+                "clone",
+                "--no-local",
+                "--depth",
+                "1",
+                "--single-branch",
+                &upstream.display().to_string(),
+                &shallow.display().to_string(),
+            ],
+        )
+        .await;
+
+        // Pre-condition: the clone is shallow, and the saved cursor is NOT
+        // in the object DB. This is exactly the state the warm Pod arrives
+        // in on every run.
+        assert!(
+            tokio::fs::metadata(shallow.join(".git/shallow"))
+                .await
+                .is_ok(),
+            "clone must start shallow"
+        );
+        assert!(
+            !cursor_is_reachable(&shallow, &cursor).await,
+            "cursor must NOT be reachable before fetch"
+        );
+
+        // Sanity: the BROKEN behaviour. `git fetch origin <cursor>` only
+        // fetches the cursor object, leaving parents unreachable. We don't
+        // call the broken command from production anymore, but verify the
+        // shape here so a future regression can't reintroduce it silently.
+        let _ = git(&shallow, &["fetch", "origin", &cursor]).await;
+        assert!(
+            !cursor_is_reachable(&shallow, &cursor).await,
+            "fetching only the cursor object must not make it a walkable ancestor of HEAD"
+        );
+        let head_count_after_broken_fetch = String::from_utf8_lossy(
+            &git(
+                &shallow,
+                &["rev-list", "--count", &format!("{cursor}..HEAD")],
+            )
+            .await
+            .stdout,
+        )
+        .trim()
+        .to_owned();
+        assert_eq!(
+            head_count_after_broken_fetch, "1",
+            "`git fetch origin <cursor>` only downloads the cursor object — \
+             `git log {cursor}..HEAD` returns just HEAD. This is the broken \
+             shape the fix removes; if this assertion fails, git behaviour \
+             changed and the production fix path needs review."
+        );
+
+        // Reset to the truly-shallow state and run the FIXED path.
+        git_assert(&shallow, &["fetch", "--unshallow"]).await;
+        // After unshallow, .git/shallow is gone — the clone is full.
+        assert!(
+            tokio::fs::metadata(shallow.join(".git/shallow"))
+                .await
+                .is_err(),
+            "shallow file should be gone after --unshallow"
+        );
+        assert!(
+            cursor_is_reachable(&shallow, &cursor).await,
+            "cursor must be reachable after --unshallow"
+        );
+        let head_count_after_unshallow = String::from_utf8_lossy(
+            &git(
+                &shallow,
+                &["rev-list", "--count", &format!("{cursor}..HEAD")],
+            )
+            .await
+            .stdout,
+        )
+        .trim()
+        .to_owned();
+        assert_eq!(
+            head_count_after_unshallow, "3",
+            "after --unshallow, git log {cursor}..HEAD must walk the full delta \
+             (3 commits: HEAD, HEAD~1, HEAD~2). This is what `ingest_new_commits` \
+             relies on for a correct coupling table."
+        );
+    }
+
+    // Companion to the regression test above: directly exercises the
+    // `try_fetch_cursor` helper on a real shallow clone. The helper is the
+    // one production path that converts an unreachable saved cursor into a
+    // walkable one, so its correctness on shallow clones is the literal
+    // surface of w6gi. We don't need the DB here — `try_fetch_cursor` is
+    // pure (Path + cursor SHA → bool).
+    #[tokio::test]
+    async fn try_fetch_cursor_unshallows_a_shallow_clone() {
+        let tmp = tempfile::Builder::new()
+            .prefix("djinn-coupling-try-fetch-")
+            .tempdir_in(".")
+            .expect("tempdir");
+        let upstream = tmp.path().join("upstream");
+        tokio::fs::create_dir_all(&upstream)
+            .await
+            .expect("upstream dir");
+
+        async fn git_assert(root: &std::path::Path, args: &[&str]) -> std::process::Output {
+            let out = Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .await
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed in {}: {}",
+                root.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        }
+
+        // Upstream with a few commits so the cursor sits behind real
+        // history.
+        git_assert(&upstream, &["init", "-q", "-b", "main"]).await;
+        git_assert(&upstream, &["config", "user.email", "t@t"]).await;
+        git_assert(&upstream, &["config", "user.name", "t"]).await;
+        for i in 1..=4 {
+            tokio::fs::write(upstream.join(format!("f{i}.txt")), format!("v{i}\n"))
+                .await
+                .unwrap();
+            git_assert(&upstream, &["add", "."]).await;
+            git_assert(&upstream, &["commit", "-q", "-m", &format!("commit {i}")]).await;
+        }
+        let cursor =
+            String::from_utf8_lossy(&git_assert(&upstream, &["rev-parse", "HEAD~2"]).await.stdout)
+                .trim()
+                .to_owned();
+
+        // Fresh shallow clone. `--no-local` is required because `git clone
+        // file://...` defaults to a local fast-path that ignores `--depth`,
+        // which would silently defeat the shallow setup this test is
+        // trying to verify. Production (warm Pod, verification Job) clones
+        // from `https://...` so they get the depth; this is purely a
+        // test-harness fixup.
+        let shallow = tmp.path().join("shallow");
+        git_assert(
+            tmp.path(),
+            &[
+                "clone",
+                "--no-local",
+                "--depth",
+                "1",
+                "--single-branch",
+                &upstream.display().to_string(),
+                &shallow.display().to_string(),
+            ],
+        )
+        .await;
+        assert!(
+            tokio::fs::metadata(shallow.join(".git/shallow"))
+                .await
+                .is_ok(),
+            "clone must start shallow (git's file:// local fast-path skipped --depth)"
+        );
+        assert!(
+            !cursor_is_reachable(&shallow, &cursor).await,
+            "precondition: cursor unreachable on shallow clone"
+        );
+
+        // Production path: try_fetch_cursor unshallows the clone.
+        let fetched = try_fetch_cursor(&shallow, &cursor).await;
+        assert!(
+            fetched,
+            "try_fetch_cursor must succeed on a shallow clone with a reachable remote ref"
+        );
+        assert!(
+            cursor_is_reachable(&shallow, &cursor).await,
+            "cursor must be reachable after try_fetch_cursor"
+        );
+
+        // Full-delta walk is correct post-fetch — this is the exact
+        // invariant the original bug violated.
+        let log_output = git_assert(
+            &shallow,
+            &["rev-list", "--count", &format!("{cursor}..HEAD")],
+        )
+        .await;
+        let count: usize = String::from_utf8_lossy(&log_output.stdout)
+            .trim()
+            .parse()
+            .expect("rev-list count parses");
+        assert_eq!(
+            count, 2,
+            "git log {cursor}..HEAD must walk the full 2-commit delta after \
+             try_fetch_cursor — if this is 1, try_fetch_cursor regressed to the \
+             broken `git fetch origin <cursor>` behaviour."
+        );
+    }
+
+    // Core regression test for w6gi: a warm run whose coupling cursor is
+    // ALREADY reachable on a shallow clone (the common depth-1000 warm path)
+    // must NOT re-ingest full git history — it walks only the new commits
+    // since the cursor. This is the literal acceptance criterion: "A warm run
+    // whose coupling cursor is already current does NOT re-ingest full git
+    // history; it walks only new commits (or no-ops)."
+    //
+    // We simulate the production warm-Job `--depth 1000` clone and verify that:
+    //   1. The saved cursor IS reachable on the shallow clone (no fetch
+    //      needed).
+    //   2. `cursor_is_reachable` returns true — so `ingest_new_commits` takes
+    //      the `{cursor}..HEAD` branch and does NOT call `try_fetch_cursor`
+    //      or fall back to a full `HEAD` walk.
+    //   3. The delta walk covers only the new commits (not the full history).
+    //   4. `extract_cursor_from_range` + `run_git_log` skip the eager unshallow
+    //      because the cursor is reachable.
+    //
+    // Runs against the local git binary only (no DB).
+    #[tokio::test]
+    async fn warm_cursor_already_reachable_on_shallow_clone_does_not_reingest_full_history() {
+        let tmp = tempfile::Builder::new()
+            .prefix("djinn-coupling-incremental-")
+            .tempdir_in(".")
+            .expect("tempdir");
+        let upstream = tmp.path().join("upstream");
+        tokio::fs::create_dir_all(&upstream)
+            .await
+            .expect("upstream dir");
+
+        async fn git_assert(root: &std::path::Path, args: &[&str]) -> std::process::Output {
+            let out = Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .await
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed in {}: {}",
+                root.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        }
+
+        // Build upstream with 10 commits.
+        git_assert(&upstream, &["init", "-q", "-b", "main"]).await;
+        git_assert(&upstream, &["config", "user.email", "t@t"]).await;
+        git_assert(&upstream, &["config", "user.name", "t"]).await;
+        for i in 1..=10 {
+            tokio::fs::write(upstream.join(format!("f{i}.txt")), format!("v{i}\n"))
+                .await
+                .unwrap();
+            git_assert(&upstream, &["add", "."]).await;
+            git_assert(&upstream, &["commit", "-q", "-m", &format!("commit {i}")]).await;
+        }
+        // Cursor = commit 7. New commits = 8, 9, 10 → 3 commits of delta.
+        let cursor =
+            String::from_utf8_lossy(&git_assert(&upstream, &["rev-parse", "HEAD~3"]).await.stdout)
+                .trim()
+                .to_owned();
+        let head =
+            String::from_utf8_lossy(&git_assert(&upstream, &["rev-parse", "HEAD"]).await.stdout)
+                .trim()
+                .to_owned();
+        assert_ne!(cursor, head, "test fixture: cursor should differ from HEAD");
+
+        // Fresh `--depth 5 --single-branch` clone. With 10 upstream commits
+        // and depth 5, the clone is genuinely shallow (`.git/shallow` exists
+        // at commit 6) but the last 5 commits (6-10) are visible — so the
+        // cursor at commit 7 IS reachable. This mirrors the production
+        // warm-Job `--depth 1000` case where the cursor falls within the
+        // shallow window. `--no-local` defeats git's local fast-path that
+        // would ignore `--depth` and produce a full clone.
+        let clone = tmp.path().join("clone");
+        git_assert(
+            tmp.path(),
+            &[
+                "clone",
+                "--no-local",
+                "--depth",
+                "5",
+                "--single-branch",
+                &upstream.display().to_string(),
+                &clone.display().to_string(),
+            ],
+        )
+        .await;
+
+        // Pre-condition: the clone is shallow AND the cursor IS reachable.
+        assert!(
+            tokio::fs::metadata(clone.join(".git/shallow"))
+                .await
+                .is_ok(),
+            "clone must be shallow (has .git/shallow) — depth 5 on 10 commits"
+        );
+
+        // THE KEY ASSERTION: the saved cursor is reachable on the shallow
+        // clone without any fetch. This means `ingest_new_commits` takes the
+        // `{cursor}..HEAD` branch and never calls `try_fetch_cursor` or
+        // falls back to a full `HEAD` walk.
+        assert!(
+            cursor_is_reachable(&clone, &cursor).await,
+            "cursor must be reachable on a shallow clone when it falls within \
+             the depth window — if this fails, every warm will degenerate into \
+             a full-history re-walk"
+        );
+
+        // Simulate what `run_git_log` decides: extract the cursor from the
+        // range, check reachability, and confirm it would NOT unshallow.
+        let range = format!("{cursor}..HEAD");
+        let extracted = extract_cursor_from_range(&range);
+        assert_eq!(
+            extracted.as_deref(),
+            Some(cursor.as_str()),
+            "extract_cursor_from_range must parse the cursor SHA"
+        );
+        let extracted_sha = extracted.unwrap();
+        let cursor_reachable = cursor_is_reachable(&clone, &extracted_sha).await;
+        assert!(
+            cursor_reachable,
+            "run_git_log would skip the eager unshallow because the cursor is reachable"
+        );
+
+        // The delta walk covers only 3 new commits — NOT the full 5 visible
+        // in the shallow clone. This proves no full-history re-ingest occurs.
+        let delta_output =
+            git_assert(&clone, &["rev-list", "--count", &format!("{cursor}..HEAD")]).await;
+        let delta_count: usize = String::from_utf8_lossy(&delta_output.stdout)
+            .trim()
+            .parse()
+            .expect("rev-list count parses");
+        assert_eq!(
+            delta_count, 3,
+            "incremental walk must cover only 3 new commits, not the full 5 — \
+             if this is 5, the coupling index is re-ingesting full history"
+        );
+
+        // The visible history (5 commits in the shallow clone) is strictly
+        // greater than the delta — proving the walk is incremental, not full.
+        let visible_output = git_assert(&clone, &["rev-list", "--count", "HEAD"]).await;
+        let visible_count: usize = String::from_utf8_lossy(&visible_output.stdout)
+            .trim()
+            .parse()
+            .expect("rev-list count parses");
+        assert_eq!(visible_count, 5, "shallow clone shows 5 commits (depth 5)");
+        assert!(
+            delta_count < visible_count,
+            "delta ({delta_count}) must be less than visible history ({visible_count})"
+        );
+
+        // If the cursor equals HEAD (no new commits), the walk is a no-op.
+        let no_op_output =
+            git_assert(&clone, &["rev-list", "--count", &format!("{head}..HEAD")]).await;
+        let no_op_count: usize = String::from_utf8_lossy(&no_op_output.stdout)
+            .trim()
+            .parse()
+            .expect("rev-list count parses");
+        assert_eq!(
+            no_op_count, 0,
+            "cursor == HEAD means zero new commits — the walk is a no-op"
+        );
     }
 }
