@@ -350,9 +350,24 @@ pub(in crate::actors::coordinator) fn is_advisory_check_name(name: &str) -> bool
 /// (merge-gating).
 ///
 /// - When `required_contexts` is `Some` (we read the branch's required status
-///   checks from branch protection — the source of truth), keep only failed
-///   checks whose name matches a required context. Anything not required is
-///   advisory and must not trigger a rework.
+///   checks from branch protection / rulesets — the source of truth), keep:
+///   1. failed checks whose name matches a required context directly, AND
+///   2. failed checks that belong to the **same workflow run** as any required
+///      failing check (same `/actions/runs/{id}/` in their `html_url`).
+///
+///   Rule (2) is the fix for aggregate gating checks. Repos increasingly gate
+///   `main` on a single *aggregate* status (e.g. a `Quality Gate` job whose
+///   `needs:` list fans out to `Server Clippy` / `Server Test` / …). Only the
+///   aggregate is listed as a required context; the constituent jobs that
+///   actually failed (and that a code diff CAN fix) are *not*. GitHub reports
+///   every job in that workflow run as its own check-run sharing one run id, so
+///   when a required aggregate is red we treat the failing jobs in its run as
+///   the real blockers. This is general — it keys off "shares a run with a
+///   failing required check," never a hardcoded job-name list.
+///
+///   Anything that is neither required nor part of a required run is advisory
+///   (Vercel previews, an optional bot gate in its own workflow, …) and must
+///   not trigger a rework.
 /// - When `required_contexts` is `None` (branch protection unreadable), fall
 ///   back to the name-pattern heuristic: keep failed checks that are *not*
 ///   recognised as advisory. This is intentionally conservative — an unknown
@@ -362,11 +377,28 @@ pub(in crate::actors::coordinator) fn blocking_failed_checks<'a>(
     required_contexts: Option<&[String]>,
 ) -> Vec<&'a CheckRun> {
     match required_contexts {
-        Some(required) => failed
-            .iter()
-            .filter(|cr| required.iter().any(|ctx| ctx == &cr.name))
-            .copied()
-            .collect(),
+        Some(required) => {
+            let is_required = |cr: &CheckRun| required.iter().any(|ctx| ctx == &cr.name);
+
+            // The workflow-run ids that contain at least one failing *required*
+            // check. The jobs of an aggregate gate live in this same run, so any
+            // failing check sharing one of these run ids is a genuine blocker.
+            let required_run_ids: std::collections::HashSet<u64> = failed
+                .iter()
+                .filter(|cr| is_required(cr))
+                .filter_map(|cr| parse_actions_run_id(&cr.html_url))
+                .collect();
+
+            failed
+                .iter()
+                .filter(|cr| {
+                    is_required(cr)
+                        || parse_actions_run_id(&cr.html_url)
+                            .is_some_and(|rid| required_run_ids.contains(&rid))
+                })
+                .copied()
+                .collect()
+        }
         None => failed
             .iter()
             .filter(|cr| !is_advisory_check_name(&cr.name))
@@ -511,11 +543,19 @@ pub(in crate::actors::coordinator) fn build_ci_failure_sections(
     (sections, ci_jobs)
 }
 
-/// Render the informational section listing failed checks that are NOT
-/// required (advisory/preview/optional bot gates). These never drive a rework
-/// on their own — the section exists so the worker spawned for a *legitimate*
-/// reopen (required check failed / reviewer requested changes) knows about
-/// them without treating them as blockers to loop on.
+/// Render the informational section listing failed checks that are NOT part of
+/// any required workflow run (advisory/preview integrations in their own
+/// workflows — Vercel deploy previews, optional bot gates, etc.). These are not
+/// keeping the *required* gate red, so a code diff cannot un-block the merge by
+/// fixing them; they ride along purely as context for the worker spawned by a
+/// legitimate reopen (a required check failed / reviewer requested changes).
+///
+/// IMPORTANT: this section must only ever list checks that are genuinely outside
+/// the required gate's workflow run(s). The failing jobs *inside* a required
+/// aggregate gate (e.g. `Server Clippy` under `Quality Gate`) are blockers — see
+/// [`blocking_failed_checks`] — and must never be demoted into this section,
+/// because that would tell the worker to ignore the very job keeping the
+/// required check red.
 pub(in crate::actors::coordinator) fn advisory_checks_section(
     advisory_failed: &[&CheckRun],
 ) -> Option<String> {
@@ -530,10 +570,11 @@ pub(in crate::actors::coordinator) fn advisory_checks_section(
         })
         .collect();
     Some(format!(
-        "\n**Non-required checks also failing (informational):**\n{}\n\
-         _These checks do not gate merging and did not trigger this rework. \
-         Do not loop on them — only address one if your change is clearly its \
-         cause._",
+        "\n**Other failing checks outside the required gate (informational):**\n{}\n\
+         _These checks run in their own workflows, separate from the required \
+         merge gate, so fixing them will not by itself un-block the merge. They \
+         are listed for context. The required checks above are what gate \
+         merging — make those green._",
         lines.join("\n")
     ))
 }

@@ -370,10 +370,13 @@ fn advisory_section_lists_checks_and_disclaims_blocking() {
     let sentinel = check("Sentinel");
     let e2e = check("Partner E2E");
     let section = advisory_checks_section(&[&sentinel, &e2e]).expect("section");
-    assert!(section.contains("Non-required checks also failing"));
+    assert!(section.contains("Other failing checks outside the required gate"));
     assert!(section.contains("Sentinel (failure)"));
     assert!(section.contains("Partner E2E (failure)"));
-    assert!(section.contains("do not gate merging"));
+    // The section must never tell the worker the required gate is ignorable.
+    assert!(!section.contains("do not gate merging"));
+    assert!(!section.to_lowercase().contains("do not loop"));
+    assert!(section.contains("make those green") || section.contains("gate merging"));
 }
 
 #[test]
@@ -458,6 +461,61 @@ fn blocking_filter_heuristic_drops_only_advisory() {
     let failed = vec![&preview, &vercel];
     let blocking = blocking_failed_checks(&failed, None);
     assert!(blocking.is_empty());
+}
+
+#[test]
+fn blocking_filter_includes_failing_jobs_of_required_aggregate_run() {
+    // Reproduces task b29n / PR #718: `main` requires only the aggregate
+    // `Quality Gate` status, whose run fans out to `Server Clippy` etc. The
+    // aggregate is red because `Server Clippy` failed. GitHub reports every job
+    // of that workflow run as its own check-run sharing ONE run id, but only
+    // `Quality Gate` is in the required-contexts list. The failing constituent
+    // jobs (which a diff CAN fix) must be treated as blockers, not advisory.
+    let gate = check_run("Quality Gate", 27708614687);
+    let clippy = check_run("Server Clippy", 27708614687);
+    let size_guard = check_run("Server Size Guard", 27708614687);
+    // A genuinely-advisory failure in a *different* workflow run.
+    let vercel = check_run("Vercel – portal", 99999);
+    let failed = vec![&gate, &clippy, &size_guard, &vercel];
+
+    // Only the aggregate is required.
+    let required = vec!["Quality Gate".to_string()];
+    let blocking = blocking_failed_checks(&failed, Some(&required));
+
+    let names: std::collections::HashSet<&str> =
+        blocking.iter().map(|cr| cr.name.as_str()).collect();
+    assert!(
+        names.contains("Quality Gate"),
+        "the required aggregate itself is blocking"
+    );
+    assert!(
+        names.contains("Server Clippy"),
+        "a failing job inside the required aggregate's run must be a blocker, \
+         not advisory — this is the b29n bug"
+    );
+    assert!(
+        names.contains("Server Size Guard"),
+        "every failing job in the required run is a blocker"
+    );
+    assert!(
+        !names.contains("Vercel – portal"),
+        "a failure in a separate (non-required) workflow run stays advisory"
+    );
+    assert_eq!(blocking.len(), 3);
+}
+
+#[test]
+fn blocking_filter_required_run_with_no_failing_jobs_keeps_only_required() {
+    // Sanity: if only the required aggregate failed (no constituent job check-
+    // run present), it remains the lone blocker — the run-grouping never
+    // over-collects.
+    let gate = check_run("Quality Gate", 555);
+    let unrelated = check_run("Some Other Workflow", 777);
+    let failed = vec![&gate, &unrelated];
+    let required = vec!["Quality Gate".to_string()];
+    let blocking = blocking_failed_checks(&failed, Some(&required));
+    assert_eq!(blocking.len(), 1);
+    assert_eq!(blocking[0].name, "Quality Gate");
 }
 
 fn github_http_error(
