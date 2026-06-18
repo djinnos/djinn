@@ -13,8 +13,6 @@ import { userDisplayName, type OrgUser } from "@/api/users";
 import { ModelSection } from "@/components/userConfig/ModelSection";
 import { ProviderSection } from "@/components/userConfig/ProviderSection";
 
-export { ServiceBadge } from "@/components/userConfig/ServiceBadge";
-
 interface UserConfigDialogProps {
   /** The automation service user — its `id` is threaded as `target_user_id`. */
   user: OrgUser;
