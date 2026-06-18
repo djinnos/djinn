@@ -24,6 +24,8 @@ mod budget;
 pub(crate) mod cache;
 mod indexing;
 pub mod workspaces;
+#[cfg(test)]
+mod warm_cost_regression;
 
 pub(crate) use indexing::{append_graph_cache_shrink_warning, run_indexers_already_locked};
 pub use workspaces::workspace_slug;
