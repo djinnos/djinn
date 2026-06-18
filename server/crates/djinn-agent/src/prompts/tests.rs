@@ -932,3 +932,141 @@ fn tools_section_injected_into_rendered_prompt() {
         "planner prompt should contain agent_amend_prompt — it moved here per ADR-051"
     );
 }
+
+// ── Learned-prompt amendment guidance (zr1e) ─────────────────────────────
+
+/// The Planner prompt must carry explicit guidance for evidence-based
+/// `learned_prompt` amendments, covering triggers, evidence requirements,
+/// eligible roles, amendment shape, and evaluator follow-up semantics.
+/// See decision `design/zr1e-roadmap`.
+#[test]
+fn planner_prompt_contains_learned_prompt_amendment_guidance() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Planner, &task, &ctx);
+
+    // The section heading must be present.
+    assert!(
+        prompt.contains("Learned-prompt amendments"),
+        "planner prompt should have an explicit learned-prompt amendment section"
+    );
+
+    // learned_prompt is machine-managed; human customization is system_prompt_extensions.
+    assert!(
+        prompt.contains("machine-managed"),
+        "planner prompt must label learned_prompt as machine-managed"
+    );
+    assert!(
+        prompt.contains("system_prompt_extensions"),
+        "planner prompt must route human customization to system_prompt_extensions"
+    );
+
+    // Triggers: rare, evidence-based, agent-effectiveness grooming.
+    assert!(
+        prompt.contains("agent-effectiveness grooming"),
+        "planner prompt must scope amendments to agent-effectiveness grooming"
+    );
+    assert!(
+        prompt.contains("repeated, stable"),
+        "planner prompt must require a repeated, stable failure pattern"
+    );
+
+    // Evidence requirements — at least one of the named evidence sources.
+    assert!(
+        prompt.contains("agent_metrics"),
+        "planner prompt must list agent_metrics as valid evidence"
+    );
+    assert!(
+        prompt.contains("reviewer or Lead feedback"),
+        "planner prompt must list repeated reviewer/lead feedback as valid evidence"
+    );
+    assert!(
+        prompt.contains("verification/reopen patterns"),
+        "planner prompt must list verification/reopen patterns as valid evidence"
+    );
+    assert!(
+        prompt.contains("Session reflections"),
+        "planner prompt must list session reflections as valid evidence"
+    );
+
+    // Eligible roles: specialist worker/reviewer only.
+    assert!(
+        prompt.contains("specialist agents"),
+        "planner prompt must restrict amendments to specialist agents"
+    );
+    assert!(
+        prompt.contains("NOT eligible"),
+        "planner prompt must call out ineligible roles explicitly"
+    );
+    assert!(
+        prompt.contains("lead") && prompt.contains("planner") && prompt.contains("architect"),
+        "planner prompt must list lead, planner, and architect as ineligible amendment targets"
+    );
+
+    // Amendment shape: concise, behavioral, metrics snapshot.
+    assert!(
+        prompt.contains("concise, behavioral"),
+        "planner prompt must require concise, behavioral amendment text"
+    );
+    assert!(
+        prompt.contains("metrics_snapshot"),
+        "planner prompt must mention the metrics_snapshot parameter for audit"
+    );
+
+    // Evaluator follow-up semantics: confirm / probation / discard.
+    assert!(
+        prompt.contains("confirms"),
+        "planner prompt must explain that the evaluator confirms successful amendments"
+    );
+    assert!(
+        prompt.contains("probation"),
+        "planner prompt must explain that ambiguous amendments stay on probation"
+    );
+    assert!(
+        prompt.contains("discarded and reverted"),
+        "planner prompt must explain that regressions are discarded and reverted"
+    );
+
+    // The Planner must not self-confirm/discard — the coordinator evaluator does.
+    assert!(
+        prompt.contains("You do not confirm or discard amendments yourself"),
+        "planner prompt must make clear the Planner proposes, the evaluator disposes"
+    );
+}
+
+/// The amendment guidance must appear in every Planner mode (the section is in
+/// the top-level planner.md template, injected for all issue types), not just
+/// one workflow. Spot-check decomposition, intervention, and proposal modes.
+#[test]
+fn planner_learned_prompt_guidance_present_across_modes() {
+    let ctx = make_ctx();
+
+    for issue_type in ["planning", "review", "epic_breakdown", "task"] {
+        let mut task = make_task();
+        task.issue_type = issue_type.into();
+        let prompt = render_prompt(AgentType::Planner, &task, &ctx);
+        assert!(
+            prompt.contains("Learned-prompt amendments"),
+            "planner prompt for issue_type={issue_type} should include the learned-prompt amendment section"
+        );
+    }
+}
+
+/// Architect must NOT carry the learned-prompt amendment guidance or the
+/// `agent_amend_prompt` tool — that ownership moved to the Planner per ADR-051.
+/// This guards the "preserving Architect non-ownership" criterion.
+#[test]
+fn architect_prompt_omits_learned_prompt_amendment_guidance_and_tool() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Architect, &task, &ctx);
+
+    assert!(
+        !prompt.contains("Learned-prompt amendments"),
+        "architect prompt must NOT contain the learned-prompt amendment section — it is Planner-owned per ADR-051"
+    );
+    assert!(
+        !prompt.contains("`agent_amend_prompt("),
+        "architect prompt must NOT contain agent_amend_prompt tool — it is Planner-owned per ADR-051"
+    );
+}
