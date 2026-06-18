@@ -127,6 +127,33 @@ impl CacheKeyIngredients {
         }
     }
 
+    pub(crate) fn from_plan(
+        plan: &PlannedIndexerCommand,
+        reported_version: impl Into<String>,
+        source_hashes: BTreeMap<String, String>,
+        config_hashes: BTreeMap<String, String>,
+        lockfile_hashes: BTreeMap<String, String>,
+        environment: BTreeMap<String, String>,
+    ) -> Self {
+        let tool_version = ToolVersionRecord::new(
+            plan.indexer,
+            plan.binary_path.clone(),
+            reported_version,
+            &environment,
+        );
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            indexer: plan.indexer,
+            tool_version,
+            command: CommandShape::from_plan(plan),
+            workspace: WorkspaceIdentity::from_plan(plan),
+            source_hashes,
+            config_hashes,
+            lockfile_hashes,
+            environment,
+        }
+    }
+
     pub(crate) fn cache_key(&self) -> Result<ScipCacheKey> {
         let bytes = serde_json::to_vec(self).context("serialize SCIP cache key ingredients")?;
         Ok(ScipCacheKey(hex_sha256(&bytes)))
@@ -490,29 +517,14 @@ mod tests {
         let plan = fake_plan(PathBuf::from("/run/one/out/index.scip"));
         let mut env = BTreeMap::new();
         env.insert("NODE_ENV".to_string(), "production".to_string());
-        let tool = ToolVersionRecord::new(
-            plan.indexer,
-            plan.binary_path.clone(),
+        CacheKeyIngredients::from_plan(
+            &plan,
             "scip-typescript 1.2.3",
-            &env,
-        );
-        let mut ingredients = CacheKeyIngredients::new(
-            plan.indexer,
-            tool,
-            CommandShape::from_plan(&plan),
-            WorkspaceIdentity::from_plan(&plan),
-        );
-        ingredients
-            .source_hashes
-            .insert("src/main.ts".to_string(), "source-a".to_string());
-        ingredients
-            .config_hashes
-            .insert("tsconfig.json".to_string(), "config-a".to_string());
-        ingredients
-            .lockfile_hashes
-            .insert("pnpm-lock.yaml".to_string(), "lock-a".to_string());
-        ingredients.environment = env;
-        ingredients
+            BTreeMap::from([("src/main.ts".to_string(), "source-a".to_string())]),
+            BTreeMap::from([("tsconfig.json".to_string(), "config-a".to_string())]),
+            BTreeMap::from([("pnpm-lock.yaml".to_string(), "lock-a".to_string())]),
+            env,
+        )
     }
 
     fn key(ingredients: &CacheKeyIngredients) -> String {
