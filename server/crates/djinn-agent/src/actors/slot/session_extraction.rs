@@ -198,6 +198,10 @@ pub struct ExtractionQuality {
     pub downgraded: u32,
     #[serde(default)]
     pub discarded: u32,
+    /// Notes dropped by the ADR-054 admission gate (underspecified structure)
+    /// before novelty judging or persistence.
+    #[serde(default)]
+    pub admission_dropped: u32,
 }
 
 // ── Tool name classification ──────────────────────────────────────────────────
@@ -1029,6 +1033,7 @@ mod tests {
                 merged: 0,
                 downgraded: 0,
                 discarded: 0,
+                admission_dropped: 0,
             },
         };
         let json = serde_json::to_string(&tax).unwrap();

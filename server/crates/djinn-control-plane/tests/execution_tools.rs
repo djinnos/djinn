@@ -582,6 +582,7 @@ impl RealPoolKillHarness {
                     agent_type: "worker",
                     metadata_json: None,
                     task_run_id: Some(task_run_id),
+                    pricing: None,
                 })
                 .await
                 .expect("session create should succeed");
@@ -897,17 +898,6 @@ impl RuntimeOps for RecordingRuntimeOps {
         _task_branch: &str,
         _target_branch: &str,
     ) -> Result<(), djinn_control_plane::bridge::RuntimeDispatchError> {
-        Ok(())
-    }
-
-    async fn provision_backing_service(
-        &self,
-        _req: djinn_control_plane::bridge::ProvisionServiceRequest,
-    ) -> Result<djinn_control_plane::bridge::ProvisionedService, String> {
-        Err("not used".to_string())
-    }
-
-    async fn release_backing_service(&self, _instance_id: &str) -> Result<(), String> {
         Ok(())
     }
 

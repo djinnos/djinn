@@ -1,12 +1,17 @@
 import { Button } from '@/components/ui/button';
-import { StepLog } from '@/components/StepLog';
-import type { VerificationRun } from '@/stores/verificationStore';
+import { StepLog, type StepLogEntry, type StepLogStatus } from '@/components/StepLog';
 import { Refresh01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
+type HealthCheckRun = {
+  status: StepLogStatus;
+  startedAt?: string;
+  steps: StepLogEntry[];
+};
+
 interface HealthCheckPanelProps {
   projectName: string;
-  run: VerificationRun | null;
+  run: HealthCheckRun | null;
   open: boolean;
   onClose: () => void;
 }

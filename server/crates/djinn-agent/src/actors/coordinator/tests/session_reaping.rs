@@ -164,6 +164,7 @@ async fn zombie_zero_token_session_is_reaped_on_db_truth() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(run_id),
+            pricing: None,
         })
         .await
         .unwrap();
@@ -253,6 +254,7 @@ async fn young_zero_token_session_is_not_reaped() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: None,
+            pricing: None,
         })
         .await
         .unwrap();
@@ -310,6 +312,7 @@ async fn connected_worker_past_hard_cap_is_not_reaped() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(run_id),
+            pricing: None,
         })
         .await
         .unwrap();
@@ -406,6 +409,7 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(run_id),
+            pricing: None,
         })
         .await
         .unwrap();
@@ -533,6 +537,7 @@ async fn reap_zombie_session_with_no_slot_mapping_still_tears_down_taskrun_job()
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(run_id),
+            pricing: None,
         })
         .await
         .unwrap();
@@ -608,6 +613,7 @@ async fn reap_zombie_session_continues_recovery_when_teardown_fails() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(run_id),
+            pricing: None,
         })
         .await
         .unwrap();
@@ -672,6 +678,7 @@ async fn reap_zombie_session_without_task_run_id_is_reaped_without_teardown() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: None,
+            pricing: None,
         })
         .await
         .unwrap();
@@ -789,6 +796,7 @@ async fn cargo_target_run_dir_sweep_retains_live_and_deletes_orphans() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(&live_session_guard_run_id),
+            pricing: None,
         })
         .await
         .unwrap();
@@ -864,6 +872,7 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(live_run_id),
+            pricing: None,
         })
         .await
         .unwrap();
@@ -876,6 +885,7 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(finalized_run_id),
+            pricing: None,
         })
         .await
         .unwrap();
@@ -911,6 +921,7 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(interrupted_run_id),
+            pricing: None,
         })
         .await
         .unwrap();

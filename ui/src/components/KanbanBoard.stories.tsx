@@ -79,11 +79,6 @@ const tasksFixture: Task[] = [
     duration_seconds: 300,
   }),
 
-  // In Flight — verifying
-  makeTask("t-6", "Run integration test suite", "verifying", 1, "Priya", "epic-foundation", ["ci"], "2026-03-01T11:15:00.000Z", {
-    duration_seconds: 480,
-  }),
-
   // In Flight — review
   makeTask("t-3", "Refine empty states", "needs_task_review", 2, "Mina", "epic-ux", ["ui"], "2026-03-01T11:20:00.000Z", {
     duration_seconds: 1860,
