@@ -7,6 +7,7 @@ use petgraph::visit::EdgeRef;
 
 use super::bridges::{CoordinatorBridge, LspBridge, SlotPoolBridge};
 use super::graph_neighbors::format_node_key;
+use super::memory_enrichment::MemoryEnrichmentBridge;
 use super::{RepoGraphBridge, shared};
 use crate::server::AppState;
 
@@ -42,7 +43,16 @@ impl AppState {
             .pool_sync()
             .map(|p| Arc::new(SlotPoolBridge(p)) as Arc<dyn SlotPoolOps>);
 
-        djinn_control_plane::McpState::new(
+        // Memory enrichment bridge: the agent owns the algorithm, the
+        // server closes the loop between `djinn-control-plane` (the
+        // consumer) and `djinn-agent` (the algorithm owner). `with_enrichment`
+        // takes the bridge as `Option<Arc<dyn MemoryEnrichmentOps>>`; the
+        // production wiring is always `Some`, while test harnesses that
+        // don't want to plumb the bridge pass `None`.
+        let enrichment_ops: Arc<dyn djinn_control_plane::bridge::MemoryEnrichmentOps> =
+            Arc::new(MemoryEnrichmentBridge::new(self.db().clone()));
+
+        djinn_control_plane::McpState::with_enrichment(
             self.db().clone(),
             self.event_bus(),
             self.catalog().clone(),
@@ -55,6 +65,7 @@ impl AppState {
             Arc::new(self.clone()),
             Arc::new(self.clone()),
             Arc::new(RepoGraphBridge::new(self.clone())),
+            Some(enrichment_ops),
         )
     }
 }
