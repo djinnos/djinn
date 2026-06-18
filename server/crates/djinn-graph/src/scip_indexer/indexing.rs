@@ -332,6 +332,25 @@ struct PartitionCacheSummary {
     misses: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartitionOutcomeStatus {
+    Produced,
+    Failed,
+    TimedOut,
+}
+
+#[derive(Debug)]
+struct PartitionOutcome {
+    unit: PartitionUnit,
+    plan: PlannedIndexerCommand,
+    status: PartitionOutcomeStatus,
+    cache_hit: bool,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    detail: String,
+}
+
 trait GoPackageLister {
     fn list_packages(&self, working_directory: &Path) -> Result<Vec<String>>;
 }
@@ -461,107 +480,166 @@ async fn execute_partitioned_plan(plan: PlannedIndexerCommand) -> PlanExecution 
         .unwrap_or(budget.per_invocation)
         .max(Duration::from_secs(1));
     let mut remaining_budget = budget.total;
-    let mut commands = Vec::new();
-    let mut quarantined = Vec::new();
-    let mut cache = PartitionCacheSummary::default();
-    let mut produced = 0usize;
-    let mut timed_out = 0usize;
-    let mut failed = 0usize;
     let total_count = units.len();
+    let mut outcomes = Vec::with_capacity(total_count);
 
     for unit in units {
         if remaining_budget == Duration::ZERO {
-            timed_out += 1;
-            quarantined.push(serde_json::json!({
-                "scope": unit.scope,
-                "label": unit.label,
-                "status": "timed_out",
-                "detail": "cumulative partition budget exhausted",
-            }));
+            let partition_plan = partition_plan(&plan, &unit);
+            outcomes.push(PartitionOutcome {
+                unit,
+                plan: partition_plan,
+                status: PartitionOutcomeStatus::TimedOut,
+                cache_hit: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                detail: "cumulative partition budget exhausted".to_string(),
+            });
             continue;
         }
         let timeout = per_partition_timeout.min(remaining_budget);
         let partition_plan = partition_plan(&plan, &unit);
         match execute_workspace_plan_with_cache_with_stats(partition_plan.clone(), timeout).await {
             (PlanExecution::CachedHit, hit) => {
-                if hit {
-                    cache.hits += 1;
-                } else {
-                    cache.misses += 1;
-                }
-                produced += 1;
-                commands.push(ExecutedIndexerCommand {
+                outcomes.push(PartitionOutcome {
+                    unit,
                     plan: partition_plan,
+                    status: PartitionOutcomeStatus::Produced,
+                    cache_hit: hit,
                     exit_code: Some(0),
                     stdout: String::new(),
                     stderr: String::new(),
+                    detail: String::new(),
                 });
             }
             (PlanExecution::Ran(Ok(output)), hit) if output.status.success() => {
-                if hit {
-                    cache.hits += 1;
-                } else {
-                    cache.misses += 1;
-                }
                 if fs::metadata(&partition_plan.output_path)
                     .map(|m| m.len() > 0)
                     .unwrap_or(false)
                 {
-                    produced += 1;
-                    commands.push(ExecutedIndexerCommand {
+                    outcomes.push(PartitionOutcome {
+                        unit,
                         plan: partition_plan,
+                        status: PartitionOutcomeStatus::Produced,
+                        cache_hit: hit,
                         exit_code: output.status.code(),
                         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                        detail: String::new(),
                     });
                 } else {
-                    failed += 1;
-                    quarantined.push(serde_json::json!({"scope": unit.scope, "label": unit.label, "status": "failed", "detail": "indexer exited successfully but produced no SCIP artifact"}));
+                    outcomes.push(PartitionOutcome {
+                        unit,
+                        plan: partition_plan,
+                        status: PartitionOutcomeStatus::Failed,
+                        cache_hit: hit,
+                        exit_code: output.status.code(),
+                        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                        detail: "indexer exited successfully but produced no SCIP artifact"
+                            .to_string(),
+                    });
                 }
             }
             (PlanExecution::Ran(Ok(output)), hit) => {
-                if hit {
-                    cache.hits += 1;
-                } else {
-                    cache.misses += 1;
-                }
-                failed += 1;
-                quarantined.push(serde_json::json!({
-                    "scope": unit.scope,
-                    "label": unit.label,
-                    "status": "failed",
-                    "detail": String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                    "exit_code": output.status.code(),
-                }));
+                outcomes.push(PartitionOutcome {
+                    unit,
+                    plan: partition_plan,
+                    status: PartitionOutcomeStatus::Failed,
+                    cache_hit: hit,
+                    exit_code: output.status.code(),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                });
             }
             (PlanExecution::Ran(Err(err)), hit) => {
-                if hit {
-                    cache.hits += 1;
-                } else {
-                    cache.misses += 1;
-                }
                 let status = if err.kind() == std::io::ErrorKind::TimedOut {
-                    timed_out += 1;
-                    "timed_out"
+                    PartitionOutcomeStatus::TimedOut
                 } else {
-                    failed += 1;
-                    "failed"
+                    PartitionOutcomeStatus::Failed
                 };
-                quarantined.push(serde_json::json!({"scope": unit.scope, "label": unit.label, "status": status, "detail": err.to_string()}));
+                outcomes.push(PartitionOutcome {
+                    unit,
+                    plan: partition_plan,
+                    status,
+                    cache_hit: hit,
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    detail: err.to_string(),
+                });
             }
             _ => {}
         }
         remaining_budget = remaining_budget.saturating_sub(timeout);
     }
 
+    summarize_partition_outcomes(&plan, outcomes, &budget, remaining_budget, total_count)
+}
+
+fn summarize_partition_outcomes(
+    plan: &PlannedIndexerCommand,
+    outcomes: Vec<PartitionOutcome>,
+    budget: &super::budget::IndexerBudget,
+    remaining_budget: Duration,
+    total_count: usize,
+) -> PlanExecution {
+    let mut commands = Vec::new();
+    let mut quarantined = Vec::new();
+    let mut cache = PartitionCacheSummary::default();
+    let mut produced = 0usize;
+    let mut timed_out = 0usize;
+    let mut failed = 0usize;
+
+    for outcome in outcomes {
+        if outcome.cache_hit {
+            cache.hits += 1;
+        } else {
+            cache.misses += 1;
+        }
+
+        match outcome.status {
+            PartitionOutcomeStatus::Produced => {
+                produced += 1;
+                commands.push(ExecutedIndexerCommand {
+                    plan: outcome.plan,
+                    exit_code: outcome.exit_code.or(Some(0)),
+                    stdout: outcome.stdout,
+                    stderr: outcome.stderr,
+                });
+            }
+            PartitionOutcomeStatus::Failed => {
+                failed += 1;
+                quarantined.push(serde_json::json!({
+                    "scope": outcome.unit.scope,
+                    "label": outcome.unit.label,
+                    "status": "failed",
+                    "detail": outcome.detail,
+                    "exit_code": outcome.exit_code,
+                }));
+            }
+            PartitionOutcomeStatus::TimedOut => {
+                timed_out += 1;
+                quarantined.push(serde_json::json!({
+                    "scope": outcome.unit.scope,
+                    "label": outcome.unit.label,
+                    "status": "timed_out",
+                    "detail": outcome.detail,
+                }));
+            }
+        }
+    }
+
     let failure_count = failed + timed_out;
     let status = partition_workspace_status(produced, failed, timed_out, total_count);
     let detail = quarantine_detail_json(
-        &plan,
+        plan,
         &quarantined,
         produced,
         &cache,
-        &budget,
+        budget,
         remaining_budget,
         total_count,
     );
@@ -1860,6 +1938,76 @@ mod tests {
         }
     }
 
+    fn partition_test_budget(
+        indexer: SupportedIndexer,
+        partition_count: usize,
+    ) -> super::super::budget::IndexerBudget {
+        super::super::budget::budget_for_indexer(
+            indexer,
+            &super::super::budget::WorkspaceSizeHint {
+                source_file_count: partition_count,
+                source_bytes: 128,
+                partition_count,
+            },
+            None,
+            None,
+        )
+    }
+
+    fn partition_outcome(
+        parent: &PlannedIndexerCommand,
+        unit: PartitionUnit,
+        status: PartitionOutcomeStatus,
+    ) -> PartitionOutcome {
+        let plan = partition_plan(parent, &unit);
+        PartitionOutcome {
+            unit,
+            plan,
+            status,
+            cache_hit: false,
+            exit_code: match status {
+                PartitionOutcomeStatus::Produced => Some(0),
+                PartitionOutcomeStatus::Failed => Some(1),
+                PartitionOutcomeStatus::TimedOut => None,
+            },
+            stdout: String::new(),
+            stderr: if status == PartitionOutcomeStatus::Failed {
+                "partition failed".to_string()
+            } else {
+                String::new()
+            },
+            detail: match status {
+                PartitionOutcomeStatus::Produced => String::new(),
+                PartitionOutcomeStatus::Failed => "partition failed".to_string(),
+                PartitionOutcomeStatus::TimedOut => "partition timed out".to_string(),
+            },
+        }
+    }
+
+    fn partition_summary(
+        plan: &PlannedIndexerCommand,
+        units: Vec<PartitionUnit>,
+        statuses: Vec<PartitionOutcomeStatus>,
+    ) -> PartitionExecutionSummary {
+        let total_count = units.len();
+        let budget = partition_test_budget(plan.indexer, total_count);
+        let outcomes = units
+            .into_iter()
+            .zip(statuses)
+            .map(|(unit, status)| partition_outcome(plan, unit, status))
+            .collect();
+        match summarize_partition_outcomes(
+            plan,
+            outcomes,
+            &budget,
+            Duration::from_secs(5),
+            total_count,
+        ) {
+            PlanExecution::Partitioned(summary) => summary,
+            other => panic!("expected partition summary, got {other:?}"),
+        }
+    }
+
     #[test]
     fn go_package_partitions_are_discovered_through_fakeable_lister() {
         let plan = fake_plan(SupportedIndexer::Go, "repo");
@@ -1925,6 +2073,185 @@ mod tests {
         );
         assert_eq!(partition_workspace_status(0, 2, 0, 2), "failed");
         assert_eq!(partition_workspace_status(0, 0, 2, 2), "timed_out");
+    }
+
+    #[test]
+    fn go_partition_execution_outcomes_cover_success_quarantine_and_wipeout() {
+        let plan = fake_plan(SupportedIndexer::Go, "repo");
+        let units = go_partition_units(
+            &plan,
+            &FakeGoLister(vec!["./cmd/api".to_string(), "./pkg/lib".to_string()]),
+        )
+        .expect("go partitions");
+
+        let success = partition_summary(
+            &plan,
+            units.clone(),
+            vec![
+                PartitionOutcomeStatus::Produced,
+                PartitionOutcomeStatus::Produced,
+            ],
+        );
+        assert_eq!(success.status, "artifact_pending");
+        assert_eq!(
+            success.commands.len(),
+            2,
+            "both Go packages produced SCIP output"
+        );
+        assert_eq!(success.failure_count, 0);
+        let success_detail: serde_json::Value =
+            serde_json::from_str(&success.detail).expect("success detail");
+        assert_eq!(success_detail["scope"], "go_package");
+        assert_eq!(success_detail["produced_artifact_count"], 2);
+
+        let partial_failure = partition_summary(
+            &plan,
+            units.clone(),
+            vec![
+                PartitionOutcomeStatus::Produced,
+                PartitionOutcomeStatus::Failed,
+            ],
+        );
+        assert_eq!(partial_failure.status, "ready_with_quarantine");
+        assert_eq!(partial_failure.commands.len(), 1);
+        let partial_detail: serde_json::Value =
+            serde_json::from_str(&partial_failure.detail).expect("partial detail");
+        assert_eq!(partial_detail["quarantined_units"][0]["label"], "./pkg/lib");
+        assert_eq!(partial_detail["quarantined_units"][0]["status"], "failed");
+
+        let partial_timeout = partition_summary(
+            &plan,
+            units.clone(),
+            vec![
+                PartitionOutcomeStatus::Produced,
+                PartitionOutcomeStatus::TimedOut,
+            ],
+        );
+        assert_eq!(partial_timeout.status, "ready_with_quarantine");
+        let timeout_detail: serde_json::Value =
+            serde_json::from_str(&partial_timeout.detail).expect("timeout detail");
+        assert_eq!(
+            timeout_detail["quarantined_units"][0]["status"],
+            "timed_out"
+        );
+
+        let failed_wipeout = partition_summary(
+            &plan,
+            units.clone(),
+            vec![
+                PartitionOutcomeStatus::Failed,
+                PartitionOutcomeStatus::Failed,
+            ],
+        );
+        assert_eq!(failed_wipeout.status, "failed");
+        assert_eq!(failed_wipeout.commands.len(), 0);
+        assert_eq!(failed_wipeout.failure_count, 2);
+
+        let timeout_wipeout = partition_summary(
+            &plan,
+            units,
+            vec![
+                PartitionOutcomeStatus::TimedOut,
+                PartitionOutcomeStatus::TimedOut,
+            ],
+        );
+        assert_eq!(timeout_wipeout.status, "timed_out");
+        assert_eq!(timeout_wipeout.commands.len(), 0);
+        assert_eq!(timeout_wipeout.failure_count, 2);
+    }
+
+    #[test]
+    fn clang_partition_execution_outcomes_cover_tu_success_quarantine_and_wipeout() {
+        let tmp = workspace_tempdir("clang-execution-");
+        let workspace = tmp.path().join("repo");
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::write(
+            workspace.join("compile_commands.json"),
+            serde_json::to_vec(&vec![
+                serde_json::json!({"directory": workspace, "command": "cc -c a.cc", "file": "a.cc"}),
+                serde_json::json!({"directory": workspace, "command": "cc -c b.cc", "file": "src/b.cc"}),
+            ])
+            .unwrap(),
+        )
+        .expect("compdb");
+        let mut plan = fake_plan(SupportedIndexer::Clang, "repo");
+        plan.working_directory = workspace;
+        plan.output_path = tmp.path().join("out/repo-cpp-root.scip");
+        let units = clang_partition_units(&plan).expect("clang units");
+
+        let success = partition_summary(
+            &plan,
+            units.clone(),
+            vec![
+                PartitionOutcomeStatus::Produced,
+                PartitionOutcomeStatus::Produced,
+            ],
+        );
+        assert_eq!(success.status, "artifact_pending");
+        assert_eq!(
+            success.commands.len(),
+            2,
+            "both translation units produced SCIP output"
+        );
+        let success_detail: serde_json::Value =
+            serde_json::from_str(&success.detail).expect("success detail");
+        assert_eq!(success_detail["scope"], "clang_translation_unit");
+        assert_eq!(success_detail["produced_artifact_count"], 2);
+
+        let partial_failure = partition_summary(
+            &plan,
+            units.clone(),
+            vec![
+                PartitionOutcomeStatus::Produced,
+                PartitionOutcomeStatus::Failed,
+            ],
+        );
+        assert_eq!(partial_failure.status, "ready_with_quarantine");
+        assert_eq!(partial_failure.commands.len(), 1);
+        let partial_detail: serde_json::Value =
+            serde_json::from_str(&partial_failure.detail).expect("partial detail");
+        assert_eq!(partial_detail["quarantined_units"][0]["label"], "src/b.cc");
+        assert_eq!(partial_detail["quarantined_units"][0]["status"], "failed");
+
+        let partial_timeout = partition_summary(
+            &plan,
+            units.clone(),
+            vec![
+                PartitionOutcomeStatus::Produced,
+                PartitionOutcomeStatus::TimedOut,
+            ],
+        );
+        assert_eq!(partial_timeout.status, "ready_with_quarantine");
+        let timeout_detail: serde_json::Value =
+            serde_json::from_str(&partial_timeout.detail).expect("timeout detail");
+        assert_eq!(
+            timeout_detail["quarantined_units"][0]["status"],
+            "timed_out"
+        );
+
+        let failed_wipeout = partition_summary(
+            &plan,
+            units.clone(),
+            vec![
+                PartitionOutcomeStatus::Failed,
+                PartitionOutcomeStatus::Failed,
+            ],
+        );
+        assert_eq!(failed_wipeout.status, "failed");
+        assert_eq!(failed_wipeout.commands.len(), 0);
+        assert_eq!(failed_wipeout.failure_count, 2);
+
+        let timeout_wipeout = partition_summary(
+            &plan,
+            units,
+            vec![
+                PartitionOutcomeStatus::TimedOut,
+                PartitionOutcomeStatus::TimedOut,
+            ],
+        );
+        assert_eq!(timeout_wipeout.status, "timed_out");
+        assert_eq!(timeout_wipeout.commands.len(), 0);
+        assert_eq!(timeout_wipeout.failure_count, 2);
     }
 
     #[test]
