@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COALESCE(s.created_by_user_id, t.created_by_user_id) AS creator,\n                      s.model_id AS \"model_id!\",\n                      COUNT(*) AS \"cnt!\"\n                 FROM sessions s\n                 LEFT JOIN tasks t ON t.id = s.task_id\n                WHERE s.status = 'running'\n                  AND s.agent_type <> 'chat'\n                  AND (t.status IS NULL OR t.status <> 'verifying')\n                GROUP BY COALESCE(s.created_by_user_id, t.created_by_user_id), s.model_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "creator",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "model_id!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "cnt!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      false,
+      null
+    ]
+  },
+  "hash": "bf70c0927b3192154d4db87b7baa975dde908032f27dd38dad51cc7cef6c3a61"
+}
