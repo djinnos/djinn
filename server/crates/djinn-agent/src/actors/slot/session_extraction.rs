@@ -198,6 +198,12 @@ pub struct ExtractionQuality {
     pub downgraded: u32,
     #[serde(default)]
     pub discarded: u32,
+    /// Number of candidates dropped at the ADR-054 admission gate (post-dedup,
+    /// pre-novelty) because `assess_note_quality` reported `is_underspecified`.
+    /// The admission gate lives inside `run_llm_extraction_inner` and never
+    /// affects human-authored memory writes.
+    #[serde(default)]
+    pub admission_dropped: u32,
 }
 
 // ── Tool name classification ──────────────────────────────────────────────────
@@ -1029,6 +1035,7 @@ mod tests {
                 merged: 0,
                 downgraded: 0,
                 discarded: 0,
+                admission_dropped: 0,
             },
         };
         let json = serde_json::to_string(&tax).unwrap();

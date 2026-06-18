@@ -737,7 +737,15 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
     let provider = Arc::new(FakeProvider::script(vec![
         vec![
             djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
-                text: r#"{"cases":[{"title":"Duplicate Semantic Note","content":"Fix flaky semantic duplicate tests by injecting dedup candidates and comparing stable summaries."}],"patterns":[],"pitfalls":[]}"#.to_string(),
+                text: serde_json::json!({
+                    "cases": [{
+                        "title": "Duplicate Semantic Note",
+                        "content": "## Situation\nA semantic duplicate test exercises the novelty path and needs a stable case body. The body must satisfy the ADR-054 admission gate so the duplicate path is reached.\n\n## Constraint\nThe novelty judge must be reached for a complete ADR-054 candidate; the existing seam depends on the candidate passing the gate first.\n\n## Approach taken\nInject a stable candidate seam and keep the comparison summary explicit in the extraction flow so the duplicate path is exercised.\n\n## Result\nThe case flows into the novelty judge and the duplicate path boosts the existing note's confidence as expected.\n\n## Why it worked / failed\nThe seam removes unstable inputs that would otherwise change the durable body across runs and cause the gate to drop the candidate.\n\n## Reusable lesson\nStable candidate seams are required to exercise the novelty/dedup path deterministically across repeated runs.\n\n## Related\n- semantic dedup\n- admission gate"
+                    }],
+                    "patterns": [],
+                    "pitfalls": []
+                })
+                .to_string(),
             }),
             djinn_provider::provider::StreamEvent::Done,
         ],
@@ -847,7 +855,11 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
+async fn llm_extraction_admission_gate_drops_pattern_with_no_required_sections() {
+    // The admission gate now runs before the working-spec fallback. A pattern
+    // that is missing the required ADR-054 sections and would previously have
+    // been downgraded into a per-task working spec is now dropped entirely —
+    // it must not be persisted at confidence 0.5 and cleaned later.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
 
@@ -862,7 +874,7 @@ async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
     };
 
     let provider = Arc::new(FakeProvider::text(
-        r#"{"cases":[],"patterns":[{"title":"Temporary Working Spec Note","content":"Recommended approach for this task: keep a temporary hypothesis about the current migration and maybe investigate the next step later so the team can continue the session. Why it works: it preserves context during the current task, but it is still temporary and should not become durable memory.","scope_paths":["server/crates/djinn-agent/src/actors/slot"]}],"pitfalls":[]}"#,
+        r#"{"cases":[],"patterns":[{"title":"Underspecified Pattern Dropped","content":"Recommended approach for this task: keep a temporary hypothesis about the current migration and maybe investigate the next step later so the team can continue the session. Why it works: it preserves context during the current task, but it is still temporary and should not become durable memory.","scope_paths":["server/crates/djinn-agent/src/actors/slot"]}],"pitfalls":[]}"#,
     ));
 
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
@@ -872,50 +884,29 @@ async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-    assert_eq!(
-        notes.len(),
-        1,
-        "downgraded note should be retained as a working spec"
-    );
-    let working_spec = &notes[0];
-    assert_eq!(working_spec.note_type, "design");
-    assert_eq!(
-        working_spec.title,
-        format!("Working Spec {}", fixture.task.short_id)
-    );
-    assert!(working_spec.content.contains("## Active objective"));
-    assert!(working_spec.content.contains("## Relevant scope"));
-    assert!(working_spec.content.contains("## Constraints"));
-    assert!(working_spec.content.contains("## Current hypotheses"));
-    assert!(working_spec.content.contains("## Open questions"));
-    assert!(working_spec.content.contains("Temporary Working Spec Note"));
-    assert!(working_spec.content.contains("task-scoped working context"));
-    assert!(working_spec.content.contains(&fixture.session_id));
-    assert!(working_spec.folder.starts_with("design"));
-
-    let durable_notes: Vec<_> = notes
-        .iter()
-        .filter(|note| matches!(note.note_type.as_str(), "case" | "pattern" | "pitfall"))
-        .collect();
     assert!(
-        durable_notes.is_empty(),
-        "downgraded notes should not become durable extracted notes"
+        notes.is_empty(),
+        "admission gate must drop the underspecified pattern without writing any note (no working-spec fallback for malformed ADR-054 structure)"
     );
 
     let stored_json =
         SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
             .get_event_taxonomy_json(&fixture.session_id)
             .await
-            .expect("query session event_taxonomy after downgrade");
+            .expect("query session event_taxonomy after admission drop");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
-        .expect("deserialize stored taxonomy after downgrade");
+        .expect("deserialize stored taxonomy after admission drop");
     assert_eq!(stored_taxonomy.extraction_quality.extracted, 1);
-    assert_eq!(stored_taxonomy.extraction_quality.downgraded, 1);
+    assert_eq!(stored_taxonomy.extraction_quality.admission_dropped, 1);
+    assert_eq!(stored_taxonomy.extraction_quality.downgraded, 0);
     assert_eq!(stored_taxonomy.extraction_quality.written, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn llm_extraction_downgrades_note_missing_required_adr_054_sections() {
+async fn llm_extraction_admission_gate_drops_pattern_missing_adr_054_sections() {
+    // The admission gate now runs before the working-spec fallback. A pattern
+    // that is missing the required ADR-054 sections and would previously have
+    // been downgraded into a per-task working spec is now dropped entirely.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
 
@@ -940,49 +931,21 @@ async fn llm_extraction_downgrades_note_missing_required_adr_054_sections() {
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-    assert_eq!(
-        notes.len(),
-        1,
-        "notes missing ADR-054 sections should be routed into the working-spec fallback"
-    );
-
-    let working_spec = &notes[0];
-    assert_eq!(working_spec.note_type, "design");
-    assert_eq!(
-        working_spec.title,
-        format!("Working Spec {}", fixture.task.short_id)
-    );
-    assert!(working_spec.content.contains("## Active objective"));
-    assert!(working_spec.content.contains("## Relevant scope"));
-    assert!(working_spec.content.contains("## Constraints"));
-    assert!(working_spec.content.contains("## Current hypotheses"));
-    assert!(working_spec.content.contains("## Open questions"));
-    assert!(working_spec.content.contains("Unstructured Pattern Note"));
     assert!(
-        working_spec
-            .content
-            .contains("missing_required_adr_054_sections")
-    );
-    assert!(working_spec.content.contains(&fixture.session_id));
-
-    let durable_notes: Vec<_> = notes
-        .iter()
-        .filter(|note| matches!(note.note_type.as_str(), "case" | "pattern" | "pitfall"))
-        .collect();
-    assert!(
-        durable_notes.is_empty(),
-        "notes missing ADR-054 sections should not become durable extracted notes"
+        notes.is_empty(),
+        "admission gate must drop the pattern missing ADR-054 sections without writing a working spec"
     );
 
     let stored_json =
         SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
             .get_event_taxonomy_json(&fixture.session_id)
             .await
-            .expect("query session event_taxonomy after template downgrade");
+            .expect("query session event_taxonomy after admission drop");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
-        .expect("deserialize stored taxonomy after template downgrade");
+        .expect("deserialize stored taxonomy after admission drop");
     assert_eq!(stored_taxonomy.extraction_quality.extracted, 1);
-    assert_eq!(stored_taxonomy.extraction_quality.downgraded, 1);
+    assert_eq!(stored_taxonomy.extraction_quality.admission_dropped, 1);
+    assert_eq!(stored_taxonomy.extraction_quality.downgraded, 0);
     assert_eq!(stored_taxonomy.extraction_quality.written, 0);
 }
 
@@ -1185,7 +1148,9 @@ async fn llm_extraction_persists_note_without_anchor_when_model_omits_applies_wh
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn llm_extraction_treats_empty_anchor_as_missing() {
     // An applies_when that is whitespace-only or empty must not break extraction
-    // and must be persisted as null (treated as missing).
+    // and must be persisted as null (treated as missing). The case body is
+    // built from the full ADR-054 section set so the admission gate (a separate
+    // concern) does not also drop the candidate and obscure the anchor test.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
 
@@ -1201,7 +1166,7 @@ async fn llm_extraction_treats_empty_anchor_as_missing() {
     let json = serde_json::json!({
         "cases": [{
             "title": "Whitespace Anchor Case",
-            "content": "## Situation\nA case that emits a whitespace-only anchor must still be persisted under a deterministic constraint. The constraint is that the durable lesson must remain visible across future tasks. The approach taken is to ignore the blank anchor and treat it as missing. The result is the note persists with a null anchor. The reusable lesson is that empty retrieval hooks should not break the write path. ## Related\n- anchor normalization",
+            "content": "## Situation\nA case that emits a whitespace-only anchor must still be persisted under a deterministic constraint.\n\n## Constraint\nThe durable lesson must remain visible across future tasks and the anchor slot must tolerate blank values from the model.\n\n## Approach taken\nIgnore the blank anchor and treat it as missing while keeping the durable body intact for retrieval.\n\n## Result\nThe note persists with a null anchor slot and the body remains durable for future readers.\n\n## Why it worked / failed\nThe anchor slot is optional in storage, so normalizing empty values to None does not break the write path.\n\n## Reusable lesson\nEmpty retrieval hooks should not break the write path; treat them as missing and persist as null.\n\n## Related\n- anchor normalization\n- admission gate",
             "applies_when": "   \n  "
         }],
         "patterns": [],
@@ -1220,5 +1185,745 @@ async fn llm_extraction_treats_empty_anchor_as_missing() {
     assert!(
         notes[0].retrieval_anchor.is_none(),
         "whitespace-only anchor must persist as null, not empty string"
+    );
+}
+
+// ─── ADR-054 admission gate: focused tests ────────────────────────────────────
+//
+// These tests cover the deterministic behavior of the extraction admission gate
+// introduced by [[u7h3]]. The gate runs in `process_extracted_note` BEFORE the
+// novelty judge and BEFORE `create_db_note_with_scope_and_retrieval_anchor`; a
+// candidate that the shared `assess_note_quality` classifier (mofg) reports as
+// `is_underspecified` is dropped with a `tracing::warn!` and increments the
+// per-run `admission_dropped` counter. Passing candidates continue through the
+// novelty judge and the `DUPLICATE_CONFIDENCE_SIGNAL` dedup path unchanged.
+//
+// Reference: server/crates/djinn-db/src/repositories/note/note_quality.rs is
+// the single source of truth for the gate's `is_underspecified` decision.
+
+/// Build a full ADR-054 case body that passes the gate: all 7 required
+/// `## {section}` headings in canonical order, > 220 chars, ≥ 3 paragraphs,
+/// and no underspecified markers.
+fn complete_case_body() -> String {
+    [
+        "## Situation",
+        "A deterministic extraction path needs a stable case body to reach the durable note slot.",
+        "",
+        "## Constraint",
+        "Future tasks need a case that satisfies the gate and reaches retrieval with full provenance.",
+        "",
+        "## Approach taken",
+        "Build the case from the canonical ADR-054 section set and pass it through the existing durable write path.",
+        "",
+        "## Result",
+        "The case is persisted at confidence 0.5 with the session provenance footer appended to the body.",
+        "",
+        "## Why it worked / failed",
+        "Stable body construction lets the gate focus on durability signals rather than noisy variations in tone.",
+        "",
+        "## Reusable lesson",
+        "Stable ADR-054 case bodies are required for the durable case write path to accept the candidate and route retrieval correctly.",
+        "",
+        "## Related",
+        "- admission gate",
+        "- durable extraction",
+    ]
+    .join("\n")
+}
+
+/// Build a case body that has all the same shape as [`complete_case_body`]
+/// but is missing the `## Reusable lesson` heading and its body line. Used
+/// to isolate the missing-sections signal from the too-short-body and
+/// low-paragraph signals.
+fn case_body_missing_reusable_lesson() -> String {
+    let full_body = complete_case_body();
+    let lines: Vec<&str> = full_body.lines().collect();
+    let mut pruned_lines: Vec<&str> = Vec::new();
+    let mut skip_next = false;
+    for line in lines {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if line == "## Reusable lesson" {
+            // Skip the heading and the body line that immediately follows it.
+            skip_next = true;
+            continue;
+        }
+        pruned_lines.push(line);
+    }
+    pruned_lines.join("\n")
+}
+
+/// Build a pitfall with all required sections in order but only two `\n\n`
+/// paragraphs (i.e. one continuous block between sections). Padding past the
+/// 220-character floor isolates the paragraph-density signal.
+fn low_paragraph_pitfall_body() -> String {
+    [
+        "## Trigger / smell\n## Failure mode\n## Observable symptoms\n## Prevention\n## Recovery\n## Related",
+        "Combined body that is long enough to clear the 220-character floor for durable memory so only the paragraph-density signal fires here. This pitfall note still only has two paragraphs total which is below the three-paragraph minimum required for a durable note body.",
+    ]
+    .join("\n\n")
+}
+
+/// Resolve the `ExtractionQuality` counters persisted on the session's
+/// `event_taxonomy` row after a `run_llm_extraction_*` call. The session's
+/// `event_taxonomy` is the per-run metric row for the extraction path; the
+/// `admission_dropped` field on it is the per-run admission-dropped counter
+/// that the gate task produces and the metric task persists.
+async fn extraction_quality_for(
+    db: &djinn_db::Database,
+    session_id: &str,
+) -> super::session_extraction::ExtractionQuality {
+    let stored_json = SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+        .get_event_taxonomy_json(session_id)
+        .await
+        .expect("query session event_taxonomy");
+    serde_json::from_str(
+        stored_json
+            .as_deref()
+            .expect("taxonomy persisted after gate test"),
+    )
+    .expect("deserialize stored taxonomy after gate test")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_gate_passes_complete_case_note() {
+    // A complete ADR-054 candidate (all 7 headings in order, > 220 chars,
+    // ≥ 3 paragraphs, applies_when set, scope_paths set) must pass the gate
+    // and produce exactly one durable case note with anchor and scope_paths
+    // preserved.
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 2,
+        errors: 1,
+        tools_used: 4,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    let case_content = complete_case_body();
+    let json = serde_json::json!({
+        "cases": [{
+            "title": "Complete Admitted Case",
+            "content": case_content,
+            "applies_when": "When refactoring the call-site under latency pressure.",
+            "scope_paths": ["src/db/"]
+        }],
+        "patterns": [],
+        "pitfalls": []
+    })
+    .to_string();
+    let provider = Arc::new(FakeProvider::text(&json));
+
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+    let cases: Vec<_> = notes.iter().filter(|n| n.note_type == "case").collect();
+    assert_eq!(
+        cases.len(),
+        1,
+        "complete ADR-054 case must produce one durable note (one create call observed)"
+    );
+    let created = cases[0];
+    assert_eq!(created.title, "Complete Admitted Case");
+    assert_eq!(
+        created.retrieval_anchor.as_deref(),
+        Some("When refactoring the call-site under latency pressure."),
+        "applies_when must reach retrieval_anchor unchanged through the create call"
+    );
+    assert_eq!(
+        created.parsed_scope_paths(),
+        vec!["src/db/".to_string()],
+        "scope_paths must reach the persisted note unchanged"
+    );
+    assert!(
+        created.content.contains("## Reusable lesson"),
+        "durable body must contain the full ADR-054 section set"
+    );
+    assert!(created.content.contains("## Situation"));
+
+    let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
+    assert_eq!(stored.extracted, 1, "candidate counted as extracted");
+    assert_eq!(
+        stored.admission_dropped, 0,
+        "complete candidate must not be dropped at the gate"
+    );
+    assert_eq!(stored.written, 1, "complete candidate must be written");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_gate_drops_case_missing_required_section() {
+    // A case that is missing the `## Reusable lesson` heading must be dropped
+    // at the gate: zero durable case notes, zero working-spec notes, and
+    // admission_dropped == 1 on the run-metric row.
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 2,
+        errors: 1,
+        tools_used: 4,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    // Build a case that is missing the `## Reusable lesson` section. We
+    // remove the `## Reusable lesson` heading and its body line directly so
+    // the test fixture is unambiguous about which section is missing.
+    let full_body = complete_case_body();
+    let lines: Vec<&str> = full_body.lines().collect();
+    let mut pruned_lines: Vec<&str> = Vec::new();
+    let mut skip_next = false;
+    for line in lines {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if line == "## Reusable lesson" {
+            // Skip the heading and the body line that immediately follows it.
+            skip_next = true;
+            continue;
+        }
+        pruned_lines.push(line);
+    }
+    let body = pruned_lines.join("\n");
+    assert!(
+        !body.contains("## Reusable lesson"),
+        "test fixture must omit the Reusable lesson section"
+    );
+    assert!(
+        body.contains("## Related"),
+        "test fixture must keep the trailing Related section"
+    );
+
+    let json = serde_json::json!({
+        "cases": [{
+            "title": "Case Missing Reusable Lesson",
+            "content": body,
+            "applies_when": "When the case is missing the reusable lesson section."
+        }],
+        "patterns": [],
+        "pitfalls": []
+    })
+    .to_string();
+    let provider = Arc::new(FakeProvider::text(&json));
+
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+    assert!(
+        notes.is_empty(),
+        "case missing ## Reusable lesson must be dropped at the gate (no create call)"
+    );
+
+    let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
+    assert_eq!(stored.extracted, 1);
+    assert_eq!(
+        stored.admission_dropped, 1,
+        "run-metric row must record the drop"
+    );
+    assert_eq!(stored.written, 0);
+    assert_eq!(
+        stored.downgraded, 0,
+        "dropped candidates must not flow into the working-spec fallback"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_gate_drops_short_body_note() {
+    // A case with all required headings but a body shorter than 220 chars
+    // must be dropped at the gate. The fixture keeps every `## {section}`
+    // heading (in order) so the missing-sections signal does NOT fire — only
+    // the too-short-body signal does.
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 2,
+        errors: 1,
+        tools_used: 4,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    // All 7 case headings, with a body that is well under 220 chars.
+    let short_body = "## Situation\nshort.\n## Constraint\nshort.\n## Approach taken\nshort.\n## Result\nshort.\n## Why it worked / failed\nshort.\n## Reusable lesson\nshort.\n## Related\n- short.";
+    assert!(
+        short_body.chars().count() < 220,
+        "fixture must be short enough to trip the too-short-body signal"
+    );
+
+    let json = serde_json::json!({
+        "cases": [{
+            "title": "Short Body Case",
+            "content": short_body
+        }],
+        "patterns": [],
+        "pitfalls": []
+    })
+    .to_string();
+    let provider = Arc::new(FakeProvider::text(&json));
+
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+    assert!(
+        notes.is_empty(),
+        "short-body case must be dropped at the gate (no create call)"
+    );
+
+    let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
+    assert_eq!(stored.extracted, 1);
+    assert_eq!(
+        stored.admission_dropped, 1,
+        "run-metric must record the drop"
+    );
+    assert_eq!(stored.written, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_gate_drops_low_paragraph_note() {
+    // A pitfall with all required headings in order and a body long enough to
+    // clear the 220-char floor but only two `\n\n`-delimited paragraphs must
+    // be dropped at the gate. The fixture isolates the paragraph-density
+    // signal from the too-short-body signal.
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 2,
+        errors: 1,
+        tools_used: 4,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    let body = low_paragraph_pitfall_body();
+    assert!(
+        body.chars().count() >= 220,
+        "fixture must clear the 220-char floor so only the paragraph signal fires"
+    );
+
+    let json = serde_json::json!({
+        "cases": [],
+        "patterns": [],
+        "pitfalls": [{
+            "title": "Low Paragraph Pitfall",
+            "content": body
+        }]
+    })
+    .to_string();
+    let provider = Arc::new(FakeProvider::text(&json));
+
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+    assert!(
+        notes.is_empty(),
+        "low-paragraph pitfall must be dropped at the gate (no create call)"
+    );
+
+    let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
+    assert_eq!(stored.extracted, 1);
+    assert_eq!(
+        stored.admission_dropped, 1,
+        "run-metric must record the drop for the low-paragraph pitfall"
+    );
+    assert_eq!(stored.written, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_gate_preserves_applies_when_and_scope_paths() {
+    // A passing candidate with an applies_when and scope_paths must reach
+    // `create_db_note_with_scope_and_retrieval_anchor` unchanged. The gate
+    // runs first and only inspects the body — it must not perturb the
+    // retrieval_anchor or scope_paths the model returned.
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 2,
+        errors: 1,
+        tools_used: 4,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    let json = serde_json::json!({
+        "cases": [{
+            "title": "Anchored Passing Case",
+            "content": complete_case_body(),
+            "applies_when": "When refactoring the call-site under latency pressure.",
+            "scope_paths": ["src/db/"]
+        }],
+        "patterns": [],
+        "pitfalls": []
+    })
+    .to_string();
+    let provider = Arc::new(FakeProvider::text(&json));
+
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+    let cases: Vec<_> = notes.iter().filter(|n| n.note_type == "case").collect();
+    assert_eq!(cases.len(), 1, "one durable case must be created");
+    let created = cases[0];
+    assert_eq!(
+        created.retrieval_anchor.as_deref(),
+        Some("When refactoring the call-site under latency pressure."),
+        "applies_when must reach retrieval_anchor unchanged through the create call"
+    );
+    assert_eq!(
+        created.parsed_scope_paths(),
+        vec!["src/db/".to_string()],
+        "scope_paths must reach the persisted note unchanged"
+    );
+
+    let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
+    assert_eq!(
+        stored.admission_dropped, 0,
+        "passing candidate must not be dropped"
+    );
+    assert_eq!(stored.written, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_gate_preserves_novelty_dedup() {
+    // A passing candidate that the novelty judge reports as `AlreadyKnown`
+    // must NOT create a new note; the existing note's confidence is updated
+    // via the existing `DUPLICATE_CONFIDENCE_SIGNAL` path. The gate runs
+    // first and only inspects the body — it must not disturb the dedup
+    // signal. Drop counter for this candidate must remain 0.
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+
+    let existing = note_repo
+        .create_db_note(
+            &fixture.project.id,
+            "Existing Anchor Target",
+            "Existing content",
+            "case",
+            "[]",
+        )
+        .await
+        .expect("create existing note");
+    note_repo
+        .set_confidence(&existing.id, 0.5)
+        .await
+        .expect("set starting confidence");
+    let starting_confidence = note_repo
+        .get(&existing.id)
+        .await
+        .expect("get existing before run")
+        .expect("existing note before run")
+        .confidence;
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 2,
+        errors: 1,
+        tools_used: 4,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    let provider = Arc::new(FakeProvider::script(vec![
+        vec![
+            djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
+                text: serde_json::json!({
+                    "cases": [{
+                        "title": "Passing Duplicate Case",
+                        "content": complete_case_body(),
+                        "applies_when": "When the dedup path is reached for a complete case.",
+                        "scope_paths": ["src/db/"]
+                    }],
+                    "patterns": [],
+                    "pitfalls": []
+                })
+                .to_string(),
+            }),
+            djinn_provider::provider::StreamEvent::Done,
+        ],
+        vec![
+            djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
+                text: format!(
+                    r#"{{"decision":"already_known","existing_note_id":"{}"}}"#,
+                    existing.id
+                ),
+            }),
+            djinn_provider::provider::StreamEvent::Done,
+        ],
+    ]));
+
+    // Override the candidate lookup to surface the existing note as the only
+    // semantic-duplicate candidate, so the novelty judge picks it.
+    let _ = SEMANTIC_DUPLICATE_CANDIDATE_ID.set(existing.id.clone());
+    let lookup: fn(&str, &str, &str, &str) -> Vec<djinn_db::NoteDedupCandidate> =
+        |_project_id, _folder, _note_type, _candidate_abstract| {
+            let id = SEMANTIC_DUPLICATE_CANDIDATE_ID
+                .get()
+                .expect("semantic duplicate candidate id configured")
+                .clone();
+            vec![NoteDedupCandidate {
+                id,
+                permalink: "cases/existing-anchor-target".to_string(),
+                title: "Existing Anchor Target".to_string(),
+                folder: "cases".to_string(),
+                note_type: "case".to_string(),
+                abstract_: Some("Existing case for the gate-passing dedup test.".to_string()),
+                overview: Some(
+                    "An existing case is the dedup target for a passing candidate.".to_string(),
+                ),
+                score: 1.0,
+            }]
+        };
+
+    run_llm_extraction_with_provider_and_candidate_lookup(
+        fixture.session_id.clone(),
+        taxonomy,
+        ctx,
+        provider,
+        lookup,
+    )
+    .await;
+
+    let notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+    let case_notes: Vec<_> = notes.iter().filter(|n| n.note_type == "case").collect();
+    assert_eq!(
+        case_notes.len(),
+        1,
+        "dedup must NOT create a new case; only the existing note remains"
+    );
+    assert_eq!(case_notes[0].id, existing.id);
+
+    let updated_existing = note_repo
+        .get(&existing.id)
+        .await
+        .expect("get existing after run")
+        .expect("existing note after run");
+    assert!(
+        updated_existing.confidence > starting_confidence,
+        "DUPLICATE_CONFIDENCE_SIGNAL must boost the existing note's confidence"
+    );
+
+    let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
+    assert_eq!(
+        stored.admission_dropped, 0,
+        "passing candidate must not be dropped at the gate"
+    );
+    assert_eq!(stored.merged, 1, "dedup must increment the merged counter");
+    assert_eq!(stored.novelty_skipped, 1);
+    assert_eq!(stored.written, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_gate_increments_metric_for_each_drop() {
+    // A mixed batch of 5 candidates (3 complete, 1 missing a section, 1
+    // short-body) must produce 3 durable notes and an `admission_dropped`
+    // counter of 2.
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 4,
+        errors: 2,
+        tools_used: 8,
+        notes_read: 0,
+        notes_written: 3,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    // Two of the three "complete" cases are intentionally not in this list —
+    // the third is the short-body case whose `## Situation` body alone clears
+    // the 220-char floor is too tricky to construct without also tripping the
+    // missing-sections signal, so we cover the 3-complete + 1-missing +
+    // 1-short mix with one section-missing and one short-body drop.
+    let complete_pattern_body = [
+        "## Context",
+        "A pattern that satisfies the gate and reaches durable storage.",
+        "",
+        "## Problem shape",
+        "Unstable inputs make the durable write path flaky across repeated runs.",
+        "",
+        "## Recommended approach",
+        "Inject a stable candidate seam and keep the comparison summary explicit.",
+        "",
+        "## Why it works",
+        "The seam isolates the durable body from noisy inputs and preserves reuse across future tasks.",
+        "",
+        "## Tradeoffs / limits",
+        "Adds test scaffolding; only helps when the comparison boundary is well understood.",
+        "",
+        "## When to use",
+        "When the durable pattern must reach retrieval deterministically across repeated runs.",
+        "",
+        "## When not to use",
+        "Do not use when the comparison boundary is still changing or the workflow is exploratory.",
+        "",
+        "## Related",
+        "- durable extraction",
+    ]
+    .join("\n");
+    let json = serde_json::json!({
+        "cases": [
+            {
+                "title": "Complete Case A",
+                "content": complete_case_body(),
+                "applies_when": "When case A is the durable precedent.",
+                "scope_paths": ["src/a/"]
+            },
+            {
+                "title": "Complete Case B",
+                "content": complete_case_body(),
+                "applies_when": "When case B is the durable precedent.",
+                "scope_paths": ["src/b/"]
+            },
+            {
+                "title": "Case Missing Section",
+                "content": case_body_missing_reusable_lesson(),
+                "applies_when": "When a case omits the reusable lesson."
+            }
+        ],
+        "patterns": [
+            {
+                "title": "Complete Pattern A",
+                "content": complete_pattern_body,
+                "applies_when": "When durable pattern retrieval must be deterministic.",
+                "scope_paths": ["src/pattern/"]
+            }
+        ],
+        "pitfalls": [
+            {
+                "title": "Short Pitfall",
+                "content": "## Trigger / smell\nx\n## Failure mode\nx\n## Observable symptoms\nx\n## Prevention\nx\n## Recovery\nx\n## Related\nx"
+            }
+        ]
+    })
+    .to_string();
+    let provider = Arc::new(FakeProvider::text(&json));
+
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+    // 3 complete candidates (case A, case B, pattern A) must reach durable
+    // storage; the missing-section case and the short pitfall must be dropped.
+    let durable_count = notes
+        .iter()
+        .filter(|n| matches!(n.note_type.as_str(), "case" | "pattern" | "pitfall"))
+        .count();
+    assert_eq!(
+        durable_count, 3,
+        "exactly 3 candidates (case A, case B, pattern A) must be written; 2 are dropped"
+    );
+
+    let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
+    assert_eq!(
+        stored.extracted, 5,
+        "all 5 unique candidates counted as extracted"
+    );
+    assert_eq!(
+        stored.admission_dropped, 2,
+        "run-metric admission_dropped must equal 2 (missing section + short body)"
+    );
+    assert_eq!(
+        stored.written, 3,
+        "exactly 3 candidates reach the durable write path"
+    );
+    assert_eq!(
+        stored.downgraded, 0,
+        "no working-spec fallback for dropped candidates"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_gate_does_not_affect_human_writes() {
+    // The gate lives inside `run_llm_extraction_inner`. A non-extraction call
+    // to `note_repo.create_db_note_with_scope_and_retrieval_anchor` is
+    // outside the gate's scope and must be unaffected: it writes the note
+    // directly with the supplied anchor and scope_paths and the gate's
+    // `admission_dropped` counter remains at zero because no extraction run
+    // happens in this test.
+    let fixture = make_fixture().await;
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+
+    let created = note_repo
+        .create_db_note_with_scope_and_retrieval_anchor(
+            &fixture.project.id,
+            "Human Authored Note",
+            "## Some\nHuman-written body that does NOT satisfy the ADR-054 gate; human writes are not gated.",
+            "reference",
+            "[]",
+            "[\"src/manual/\"]",
+            Some("Human-authored retrieval anchor."),
+        )
+        .await
+        .expect("human-authored note creates regardless of the gate");
+
+    assert_eq!(created.title, "Human Authored Note");
+    assert_eq!(
+        created.retrieval_anchor.as_deref(),
+        Some("Human-authored retrieval anchor.")
+    );
+    assert_eq!(
+        created.parsed_scope_paths(),
+        vec!["src/manual/".to_string()]
+    );
+
+    // No `run_llm_extraction_*` call happens in this test, so the
+    // `event_taxonomy` for this session does not exist and there is no
+    // `admission_dropped` counter to consult. The above note creation IS
+    // the assertion: the gate's logic is not applied to this path.
+    let session_repo =
+        SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let stored_json = session_repo
+        .get_event_taxonomy_json(&fixture.session_id)
+        .await
+        .expect("query session event_taxonomy");
+    assert!(
+        stored_json.is_none(),
+        "no extraction run means no admission_dropped counter is written"
     );
 }

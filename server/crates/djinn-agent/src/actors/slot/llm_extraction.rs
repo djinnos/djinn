@@ -953,6 +953,30 @@ async fn process_extracted_note(
     note: &ExtractedNote,
     extraction_quality: &mut super::session_extraction::ExtractionQuality,
 ) {
+    // ── ADR-054 admission gate ──────────────────────────────────────────────
+    // Runs BEFORE the novelty judge and BEFORE `create_extracted_note`. A
+    // candidate that fails the structural gate is dropped without a novelty
+    // LLM call, without a working-spec fallback, and without any note write
+    // (neither `case`/`pattern`/`pitfall` nor `design` working spec). The
+    // `is_underspecified` decision is delegated to the shared
+    // `assess_note_quality` classifier so this gate and the corpus audit
+    // (graph.rs::extracted_note_audit) cannot drift. The gate is scoped to
+    // `run_llm_extraction_inner`; human-authored memory writes are
+    // unaffected.
+    let gate = assess_note_quality(note_type, &note.content);
+    if gate.is_underspecified {
+        extraction_quality.admission_dropped += 1;
+        tracing::warn!(
+            session_id = %extraction_context.session_id,
+            project_id = %extraction_context.project_id,
+            note_type = %note_type,
+            title = %note.title,
+            reasons = ?gate.reasons,
+            "llm_extraction: dropping underspecified note at admission gate"
+        );
+        return;
+    }
+
     let novelty = match novelty_decision(extraction_context, note_type, note).await {
         Ok(result) => result,
         Err(e) => {
