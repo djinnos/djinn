@@ -564,10 +564,19 @@ fn detect_graph_cache_shrink_warning(
     workspace_statuses: &[crate::scip_indexer::WorkspaceWarmStatus],
 ) -> Option<GraphCacheShrinkWarning> {
     let previous_blob = previous_blob?;
-    if workspace_statuses
-        .iter()
-        .any(|status| matches!(status.status.as_str(), "failed" | "timed_out"))
-    {
+    // Suppress shrink warnings whenever the warm explains a node-count drop:
+    // `failed`/`timed_out` rows mean an indexer could not produce an artifact,
+    // and `ready_with_quarantine` means a below-workspace partition was
+    // quarantined while the rest of the workspace succeeded — both are
+    // expected causes of a smaller graph and should not append a misleading
+    // synthetic `graph-cache` warning row. Only an *unexplained* shrink with
+    // no such status still emits the warning.
+    if workspace_statuses.iter().any(|status| {
+        matches!(
+            status.status.as_str(),
+            "failed" | "timed_out" | "ready_with_quarantine"
+        )
+    }) {
         return None;
     }
 
@@ -1294,6 +1303,34 @@ mod tests {
             detect_graph_cache_shrink_warning(Some(&blob), 700, &[warm_status("timed_out")]),
             None
         );
+    }
+
+    #[test]
+    fn shrink_decision_ignores_ready_with_quarantine_workspace() {
+        // `ready_with_quarantine` means a below-workspace partition was
+        // quarantined while the rest succeeded — the smaller graph is
+        // explained and must not append a misleading shrink warning.
+        let blob = graph_artifact_blob_with_nodes(1_000);
+
+        assert_eq!(
+            detect_graph_cache_shrink_warning(
+                Some(&blob),
+                700,
+                &[warm_status("ready_with_quarantine")]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn shrink_decision_warns_on_unexplained_shrink_with_only_ready() {
+        // Only `ready` statuses (no quarantine/explanation) → shrink is
+        // unexplained and the warning MUST fire.
+        let blob = graph_artifact_blob_with_nodes(1_000);
+
+        let warning = detect_graph_cache_shrink_warning(Some(&blob), 700, &[warm_status("ready")])
+            .expect("warning decision");
+        assert_eq!(warning.delta, 300);
     }
 
     #[test]
