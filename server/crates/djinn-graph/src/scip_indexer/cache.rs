@@ -236,6 +236,14 @@ impl ScipCacheStore {
         Self { root: root.into() }
     }
 
+    /// Return the root directory of this cache store.
+    ///
+    /// Used by [`crate::warm_sentinel`] to derive the sentinel state
+    /// directory.
+    pub(crate) fn cache_root(&self) -> &Path {
+        &self.root
+    }
+
     pub(crate) fn lookup(&self, key: &ScipCacheKey, output_path: &Path) -> CacheLookup {
         match self.try_lookup(key, output_path) {
             Ok(true) => CacheLookup::Hit,

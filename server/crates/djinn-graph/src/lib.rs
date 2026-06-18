@@ -37,6 +37,7 @@ pub mod repo_graph;
 pub mod route_extraction;
 pub mod scip_indexer;
 pub mod scip_parser;
+pub mod warm_sentinel;
 pub mod ykcg_parity;
 
 pub use repo_graph::stable_node_uid;
