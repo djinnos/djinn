@@ -5,8 +5,7 @@
  * system_packages / env all live on the image now), not per-project config.
  * This page therefore exposes:
  *   1. A catalog-image picker (the primary control, in the header).
- *   2. A Verification tab (project-scoped rules via VerificationEditor).
- *   3. A Code-graph workspaces editor (per-project SCIP path→language map),
+ *   2. A Code-graph workspaces editor (per-project SCIP path→language map),
  *      persisted into `environment_config.workspaces`.
  *
  * The old per-project Form / Raw JSON language+package editors are gone.
@@ -33,7 +32,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   type EnvironmentConfig,
   type Workspace,
@@ -44,7 +42,6 @@ import {
 import { useProjects } from "@/stores/useProjectStore";
 import { showToast } from "@/lib/toast";
 import { ProjectImagePicker } from "@/components/images/ProjectImagePicker";
-import { VerificationEditor } from "@/components/verification/VerificationEditor";
 
 const LANGUAGE_LABELS: Record<string, string> = {
   rust: "Rust",
@@ -68,7 +65,6 @@ export function ProjectEnvironmentPage() {
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [mode, setMode] = useState<"verification" | "workspaces">("verification");
 
   const load = useCallback(async () => {
     if (!projectId) return;
@@ -143,61 +139,44 @@ export function ProjectEnvironmentPage() {
               {project?.name ? <span className="text-muted-foreground"> · {project.name}</span> : null}
             </h1>
             <p className="text-xs text-muted-foreground">
-              A project's runtime image comes from a shared catalog image. Verification and code-graph
-              workspaces stay per-project.
+              A project's runtime image comes from a shared catalog image. Code-graph workspaces stay
+              per-project.
             </p>
           </div>
         </div>
         <div className="flex items-center gap-3">
           <ProjectImagePicker projectId={projectId} initialImageId={selectedImageId} />
-          {mode === "workspaces" && (
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-8 gap-1.5 text-xs"
-                onClick={() => void load()}
-                disabled={saving}
-              >
-                <HugeiconsIcon icon={RefreshIcon} size={14} />
-                Reload
-              </Button>
-              <Button
-                size="sm"
-                className="h-8 gap-1.5 text-xs"
-                onClick={() => void handleSaveWorkspaces()}
-                disabled={saving}
-              >
-                {saving ? (
-                  <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
-                ) : (
-                  <HugeiconsIcon icon={FloppyDiskIcon} size={14} />
-                )}
-                {saving ? "Saving…" : "Save"}
-              </Button>
-            </div>
-          )}
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 gap-1.5 text-xs"
+              onClick={() => void load()}
+              disabled={saving}
+            >
+              <HugeiconsIcon icon={RefreshIcon} size={14} />
+              Reload
+            </Button>
+            <Button
+              size="sm"
+              className="h-8 gap-1.5 text-xs"
+              onClick={() => void handleSaveWorkspaces()}
+              disabled={saving}
+            >
+              {saving ? (
+                <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
+              ) : (
+                <HugeiconsIcon icon={FloppyDiskIcon} size={14} />
+              )}
+              {saving ? "Saving…" : "Save"}
+            </Button>
+          </div>
         </div>
       </header>
 
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto flex max-w-4xl flex-col gap-4">
-          <Tabs
-            value={mode}
-            onValueChange={(v) => typeof v === "string" && setMode(v as "verification" | "workspaces")}
-            className="flex flex-col"
-          >
-            <TabsList className="w-fit">
-              <TabsTrigger value="verification">Verification</TabsTrigger>
-              <TabsTrigger value="workspaces">Workspaces</TabsTrigger>
-            </TabsList>
-            <TabsContent value="verification" className="mt-4">
-              <VerificationEditor projectId={projectId} />
-            </TabsContent>
-            <TabsContent value="workspaces" className="mt-4">
-              <WorkspacesEditor workspaces={workspaces} onChange={setWorkspaces} />
-            </TabsContent>
-          </Tabs>
+          <WorkspacesEditor workspaces={workspaces} onChange={setWorkspaces} />
         </div>
       </div>
     </div>
