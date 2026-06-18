@@ -3,17 +3,17 @@ import { screen, waitFor, within, render, userEvent } from "@/test/test-utils";
 import { UserConfigDialog } from "@/components/UserConfigDialog";
 import type { OrgUser } from "@/api/users";
 import {
-  fetchAutomationCatalog,
-  fetchAutomationConnectedModels,
-  fetchAutomationConnectedProviders,
-  fetchAutomationModelSelection,
-  saveAutomationModelSelection,
-  setAutomationCredential,
-  startAutomationOAuth,
-  type AutomationModel,
+  fetchUserCatalog,
+  fetchUserConnectedModels,
+  fetchUserConnectedProviders,
+  fetchUserModelSelection,
+  saveUserModelSelection,
+  setUserCredential,
+  startUserOAuth,
+  type UserModel,
   type CatalogProvider,
   type ConnectedProvider,
-} from "@/api/automationConfig";
+} from "@/api/userConfig";
 import { showToast } from "@/lib/toast";
 
 vi.mock("@/api/serverUrl", () => ({
@@ -29,14 +29,14 @@ vi.mock("@/lib/toast", () => ({
   },
 }));
 
-vi.mock("@/api/automationConfig", () => ({
-  fetchAutomationCatalog: vi.fn(),
-  fetchAutomationConnectedProviders: vi.fn(),
-  fetchAutomationConnectedModels: vi.fn(),
-  fetchAutomationModelSelection: vi.fn(),
-  saveAutomationModelSelection: vi.fn(),
-  setAutomationCredential: vi.fn(),
-  startAutomationOAuth: vi.fn(),
+vi.mock("@/api/userConfig", () => ({
+  fetchUserCatalog: vi.fn(),
+  fetchUserConnectedProviders: vi.fn(),
+  fetchUserConnectedModels: vi.fn(),
+  fetchUserModelSelection: vi.fn(),
+  saveUserModelSelection: vi.fn(),
+  setUserCredential: vi.fn(),
+  startUserOAuth: vi.fn(),
 }));
 
 class MockEventSource {
@@ -51,10 +51,10 @@ class MockEventSource {
   }
 }
 
-const automationUser: OrgUser = {
-  id: "automation-user-1",
-  github_login: "djinn-automation",
-  github_name: "Djinn Automation",
+const targetUser: OrgUser = {
+  id: "target-user-1",
+  github_login: "target-user",
+  github_name: "Target User",
   github_avatar_url: null,
   is_member_of_org: true,
   is_admin: false,
@@ -86,7 +86,7 @@ function provider(overrides: Partial<CatalogProvider> & Pick<CatalogProvider, "i
   };
 }
 
-function model(overrides: Partial<AutomationModel> & Pick<AutomationModel, "id" | "name" | "provider_id">): AutomationModel {
+function model(overrides: Partial<UserModel> & Pick<UserModel, "id" | "name" | "provider_id">): UserModel {
   return {
     attachment: false,
     context_window: 200_000,
@@ -122,30 +122,30 @@ const connectedProviders: ConnectedProvider[] = [
   }) as ConnectedProvider,
 ];
 
-const connectedModels: AutomationModel[] = [
+const connectedModels: UserModel[] = [
   model({ id: "openai/gpt-5", name: "GPT-5", provider_id: "openai" }),
   model({ id: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6", provider_id: "anthropic" }),
 ];
 
 function mockSuccessfulLoads() {
-  vi.mocked(fetchAutomationCatalog).mockResolvedValue(catalog);
-  vi.mocked(fetchAutomationConnectedProviders).mockResolvedValue(connectedProviders);
-  vi.mocked(fetchAutomationConnectedModels).mockResolvedValue(connectedModels);
-  vi.mocked(fetchAutomationModelSelection).mockResolvedValue({
+  vi.mocked(fetchUserCatalog).mockResolvedValue(catalog);
+  vi.mocked(fetchUserConnectedProviders).mockResolvedValue(connectedProviders);
+  vi.mocked(fetchUserConnectedModels).mockResolvedValue(connectedModels);
+  vi.mocked(fetchUserModelSelection).mockResolvedValue({
     models: ["openai/gpt-5"],
     maxSessions: { "openai/gpt-5": 3 },
   });
-  vi.mocked(saveAutomationModelSelection).mockResolvedValue({
+  vi.mocked(saveUserModelSelection).mockResolvedValue({
     models: ["openai/gpt-5"],
     maxSessions: { "openai/gpt-5": 3 },
   });
-  vi.mocked(setAutomationCredential).mockResolvedValue(undefined);
-  vi.mocked(startAutomationOAuth).mockResolvedValue({ kind: "connected" });
+  vi.mocked(setUserCredential).mockResolvedValue(undefined);
+  vi.mocked(startUserOAuth).mockResolvedValue({ kind: "connected" });
 }
 
 function renderDialog() {
   return render(
-    <UserConfigDialog user={automationUser} open={true} onOpenChange={vi.fn()} />,
+    <UserConfigDialog user={targetUser} open={true} onOpenChange={vi.fn()} />,
   );
 }
 
@@ -157,12 +157,12 @@ describe("UserConfigDialog", () => {
     mockSuccessfulLoads();
   });
 
-  it("renders provider and model configuration for the automation user", async () => {
+  it("renders provider and model configuration for the target user", async () => {
     renderDialog();
 
-    expect(screen.getByRole("heading", { name: /configure automation/i })).toBeInTheDocument();
-    expect(screen.getByText(/Djinn Automation/)).toBeInTheDocument();
-    expect(screen.getByText(/can't sign in, so you configure it here/i)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /configure user/i })).toBeInTheDocument();
+    expect(screen.getByText(/Target User/)).toBeInTheDocument();
+    expect(screen.getByText(/Configure this user's providers/i)).toBeInTheDocument();
 
     expect(await screen.findByRole("button", { name: /reconnect/i })).toBeInTheDocument();
     expect(screen.getAllByText("OpenAI")).not.toHaveLength(0);
@@ -172,7 +172,7 @@ describe("UserConfigDialog", () => {
     expect(screen.getByLabelText(/provider/i)).toBeInTheDocument();
     expect(await screen.findByRole("option", { name: "Anthropic" })).toBeInTheDocument();
     expect(screen.getByLabelText(/api key/i)).toBeDisabled();
-    expect(screen.getByText(/Stored encrypted and owned by the automation user/i)).toBeInTheDocument();
+    expect(screen.getByText(/Stored encrypted and owned by this user/i)).toBeInTheDocument();
 
     expect(await screen.findByText("GPT-5")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Models" })).toBeInTheDocument();
@@ -181,10 +181,10 @@ describe("UserConfigDialog", () => {
     expect(screen.getByDisplayValue("3")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /add model/i })).toBeInTheDocument();
 
-    expect(fetchAutomationCatalog).toHaveBeenCalledWith(automationUser.id);
-    expect(fetchAutomationConnectedProviders).toHaveBeenCalledWith(automationUser.id);
-    expect(fetchAutomationConnectedModels).toHaveBeenCalledWith(automationUser.id);
-    expect(fetchAutomationModelSelection).toHaveBeenCalledWith(automationUser.id);
+    expect(fetchUserCatalog).toHaveBeenCalledWith(targetUser.id);
+    expect(fetchUserConnectedProviders).toHaveBeenCalledWith(targetUser.id);
+    expect(fetchUserConnectedModels).toHaveBeenCalledWith(targetUser.id);
+    expect(fetchUserModelSelection).toHaveBeenCalledWith(targetUser.id);
   });
 
   it("stores an API key for the selected provider and resets the form", async () => {
@@ -200,8 +200,8 @@ describe("UserConfigDialog", () => {
     await user.click(screen.getByRole("button", { name: /^connect$/i }));
 
     await waitFor(() => {
-      expect(setAutomationCredential).toHaveBeenCalledWith({
-        targetUserId: automationUser.id,
+      expect(setUserCredential).toHaveBeenCalledWith({
+        targetUserId: targetUser.id,
         providerId: "anthropic",
         keyName: "ANTHROPIC_API_KEY",
         apiKey: "sk-ant-test-key",
@@ -209,15 +209,15 @@ describe("UserConfigDialog", () => {
     });
 
     expect(showToast.success).toHaveBeenCalledWith("Provider connected", {
-      description: "Anthropic key stored for automation.",
+      description: "Anthropic key stored for this user.",
     });
     await waitFor(() => expect(providerSelect).toHaveValue(""));
     expect(screen.getByLabelText(/^api key/i)).toHaveValue("");
   });
 
   it("starts ChatGPT OAuth and shows the device-code state", async () => {
-    vi.mocked(fetchAutomationConnectedProviders).mockResolvedValue([]);
-    vi.mocked(startAutomationOAuth).mockResolvedValue({
+    vi.mocked(fetchUserConnectedProviders).mockResolvedValue([]);
+    vi.mocked(startUserOAuth).mockResolvedValue({
       kind: "pending",
       pending: {
         userCode: "ABCD-EFGH",
@@ -233,7 +233,7 @@ describe("UserConfigDialog", () => {
     await user.click(await screen.findByRole("button", { name: /continue with chatgpt/i }));
 
     await waitFor(() => {
-      expect(startAutomationOAuth).toHaveBeenCalledWith(automationUser.id, "openai");
+      expect(startUserOAuth).toHaveBeenCalledWith(targetUser.id, "openai");
     });
     expect(screen.getByText(/Open the sign-in page and enter this code/i)).toBeInTheDocument();
     expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
@@ -249,19 +249,19 @@ describe("UserConfigDialog", () => {
   });
 
   it("shows a friendly inline error when model selection fails to load", async () => {
-    vi.mocked(fetchAutomationModelSelection).mockRejectedValue(
-      new Error("Failed to load automation settings"),
+    vi.mocked(fetchUserModelSelection).mockRejectedValue(
+      new Error("Failed to load user settings"),
     );
 
     renderDialog();
 
-    expect(await screen.findByText("Failed to load automation settings")).toBeInTheDocument();
+    expect(await screen.findByText("Failed to load user settings")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
     expect(screen.getByText("Providers")).toBeInTheDocument();
     expect(screen.getByText("Connect with an API key")).toBeInTheDocument();
 
     const modelsSection = screen.getByRole("heading", { name: "Models" }).closest("section");
     expect(modelsSection).not.toBeNull();
-    expect(within(modelsSection as HTMLElement).getByText("Failed to load automation settings")).toBeInTheDocument();
+    expect(within(modelsSection as HTMLElement).getByText("Failed to load user settings")).toBeInTheDocument();
   });
 });

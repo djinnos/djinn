@@ -14,7 +14,7 @@ import { ModelSection } from "@/components/userConfig/ModelSection";
 import { ProviderSection } from "@/components/userConfig/ProviderSection";
 
 interface UserConfigDialogProps {
-  /** The automation service user — its `id` is threaded as `target_user_id`. */
+  /** The target user — its `id` is threaded as `target_user_id`. */
   user: OrgUser;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -29,13 +29,13 @@ export function UserConfigDialog({ user, open, onOpenChange }: UserConfigDialogP
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <HugeiconsIcon icon={SparklesIcon} size={18} className="text-primary" />
-            Configure automation
+            Configure user
           </DialogTitle>
           <DialogDescription>
             Manage credentials and model selection for{" "}
             <span className="font-medium text-foreground">{userDisplayName(user)}</span>
-            {" "}— the non-human service account that runs system-initiated work. It
-            can't sign in, so you configure it here on its behalf.
+            . Configure this user&apos;s providers, models, and credentials on
+            their behalf.
           </DialogDescription>
         </DialogHeader>
 

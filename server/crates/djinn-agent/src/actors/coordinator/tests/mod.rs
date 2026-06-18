@@ -1303,6 +1303,7 @@ async fn planner_intervention_markers(
 }
 
 mod dispatch_flow;
+mod doctor_zombie_e2e;
 mod intervention;
 mod pause_is_not_fault;
 mod session_reaping;
