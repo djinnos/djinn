@@ -10,30 +10,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import { getAgentIdentity } from "@/lib/agentIdentity";
-import { StepLog } from "@/components/StepLog";
-import {
-  Test,
-  TestError,
-  TestErrorStack,
-  TestResults,
-  TestResultsContent,
-  TestResultsDuration,
-  TestResultsHeader,
-  TestResultsProgress,
-  TestResultsSummary,
-  TestSuite,
-  TestSuiteContent,
-  TestSuiteName,
-} from "@/components/ai-elements/test-results";
-import type { SetupVerificationView } from "@/lib/setupVerificationView";
 import type {
   TimelineEntry,
   ChatMessage,
-  SystemDivider,
   CommandBlock,
   CommentBlock,
   ContentBlock,
-  VerificationBlock,
   LoopGuardTrippedBlock,
   BudgetParkBlock,
 } from "@/hooks/useSessionMessages";
@@ -384,86 +366,7 @@ function ResultCard({ entry }: { entry: CommandBlock }) {
   );
 }
 
-// ── Verification block (historical step results from activity log) ──────────
-
-function VerificationCard({ entry }: { entry: VerificationBlock }) {
-  const phases = new Set(entry.steps.map((s) => s.phase));
-  const hasMultiplePhases = phases.size > 1;
-
-  // Group steps by phase for TestSuite sections
-  const groupedByPhase = hasMultiplePhases
-    ? Array.from(
-        entry.steps.reduce((map, step) => {
-          const group = map.get(step.phase) ?? [];
-          group.push(step);
-          map.set(step.phase, group);
-          return map;
-        }, new Map<string, typeof entry.steps>())
-      )
-    : [[phases.values().next().value as string, entry.steps] as const];
-
-  const passed = entry.steps.filter((s) => s.passed).length;
-  const failed = entry.steps.filter((s) => !s.passed).length;
-  const total = entry.steps.length;
-
-  return (
-    <div className="my-2">
-      <TestResults
-        summary={{
-          passed,
-          failed,
-          skipped: 0,
-          total,
-          duration: entry.totalDurationMs,
-        }}
-      >
-        <TestResultsHeader>
-          <TestResultsSummary />
-          <TestResultsDuration />
-        </TestResultsHeader>
-        <div className="border-b px-4 py-3">
-          <TestResultsProgress />
-        </div>
-        <TestResultsContent>
-          {groupedByPhase.map(([phase, steps]) => {
-            const suiteStatus = steps.every((s) => s.passed) ? "passed" : "failed";
-            const label = phase === "setup" ? "Setup" : "Verification";
-            return (
-              <TestSuite key={phase} defaultOpen={suiteStatus === "failed" || steps.length <= 5} name={label} status={suiteStatus}>
-                <TestSuiteName />
-                <TestSuiteContent>
-                  {steps.map((step, idx) =>
-                    !step.passed && step.stderr ? (
-                      <div key={idx}>
-                        <Test
-                          name={step.command}
-                          status="failed"
-                          duration={step.durationMs}
-                        />
-                        <TestError>
-                          <TestErrorStack>{step.stderr}</TestErrorStack>
-                        </TestError>
-                      </div>
-                    ) : (
-                      <Test
-                        key={idx}
-                        name={step.command}
-                        status={step.passed ? "passed" : "failed"}
-                        duration={step.durationMs}
-                      />
-                    )
-                  )}
-                </TestSuiteContent>
-              </TestSuite>
-            );
-          })}
-        </TestResultsContent>
-      </TestResults>
-    </div>
-  );
-}
-
-// ── Command block (setup/verification output) ───────────────────────────────
+// ── Command block output ───────────────────────────────────────────────────
 
 function splitOutput(body: string): { stdout: string; stderr: string } {
   const stderrIdx = body.indexOf("stderr:");
@@ -489,7 +392,7 @@ function CommandRow({ entry }: { entry: CommandBlock }) {
   const [expanded, setExpanded] = useState(!entry.passed);
   const { stdout, stderr } = entry.body ? splitOutput(entry.body) : { stdout: "", stderr: "" };
   const hasOutput = !!(stdout || stderr);
-  const label = entry.name === "setup" ? "Setup" : entry.name === "verification" ? "Verification" : entry.name;
+  const label = entry.name === "setup" ? "Setup" : entry.name;
 
   return (
     <div className="my-2 overflow-hidden rounded-lg border border-border">
@@ -687,7 +590,6 @@ interface SessionThreadProps {
   loading: boolean;
   error: string | null;
   activeAgentType?: string;
-  setupVerification?: SetupVerificationView;
 }
 
 export function SessionThread({
@@ -697,7 +599,6 @@ export function SessionThread({
   loading,
   error,
   activeAgentType,
-  setupVerification,
 }: SessionThreadProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -737,30 +638,8 @@ export function SessionThread({
         switch (entry.kind) {
           case "message":
             return <MessageBlock key={idx} entry={entry} />;
-          case "divider": {
-            // Hide divider text, but render StepLog at the last verification transition
-            if (!setupVerification?.hasData) return null;
-            const isVerificationTransition = entry.label.includes("Verifying") || entry.label.includes("Review");
-            const isLastOfKind = isVerificationTransition && !timeline.slice(idx + 1).some(
-              (e) => e.kind === "divider" && (
-                (e as SystemDivider).label.includes("Verifying") ||
-                (e as SystemDivider).label.includes("Review")
-              )
-            );
-            if (!isLastOfKind) return null;
-            return (
-              <div key={idx} className="my-2">
-                <StepLog
-                  steps={setupVerification.steps}
-                  status={setupVerification.status}
-                  originalDurationMs={setupVerification.totalDuration}
-                  emphasizedStepId={setupVerification.failedStepId}
-                />
-              </div>
-            );
-          }
-          case "verification":
-            return <VerificationCard key={idx} entry={entry} />;
+          case "divider":
+            return null;
           case "command":
             return entry.name === "result"
               ? <ResultCard key={idx} entry={entry} />

@@ -96,10 +96,7 @@ pub use repositories::{
         ProposalRepository, ProposalUpdateInput,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
-    service::{
-        ServiceInstance, ServiceInstanceRepository, ServiceInstanceStatus, ServicePolicyRepository,
-        ServicePreset, ServicePresetRepository,
-    },
+    service::{ServicePreset, ServicePresetRepository},
     session::{CreateSessionParams, SessionRepository},
     session_auth::{CreateUserAuthSession, SessionAuthRepository, UserAuthSessionRecord},
     session_message::SessionMessageRepository,

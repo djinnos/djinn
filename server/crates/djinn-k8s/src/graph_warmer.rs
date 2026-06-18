@@ -29,13 +29,9 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use djinn_db::{Database, ProjectRepository, RepoGraphCacheRepository};
-use djinn_runtime::{
-    BackingServiceConn, BackingServiceRequest, GraphWarmerService, TaskrunJobRef, WarmerError,
-};
+use djinn_runtime::{GraphWarmerService, TaskrunJobRef, WarmerError};
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::{Pod, Service};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::api::{Api, DeleteParams, ListParams, PostParams};
+use kube::api::{Api, ListParams, PostParams};
 use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info, warn};
 
@@ -431,22 +427,6 @@ impl K8sGraphWarmer {
         }
     }
 
-    /// Best-effort ownerReference to a task-run Job (`djinn-taskrun-<id>`) so a
-    /// provisioned backing service is garbage-collected when the task ends.
-    /// `None` if the Job can't be found — the label/TTL reaper is the backstop.
-    async fn task_run_owner_ref(&self, task_run_id: &str) -> Option<OwnerReference> {
-        let client = self.client.clone()?;
-        let job_name = format!("djinn-taskrun-{task_run_id}");
-        let jobs: Api<Job> = Api::namespaced(client, &self.config.namespace);
-        match jobs.get(&job_name).await {
-            Ok(job) => job
-                .metadata
-                .uid
-                .map(|uid| crate::secret::job_owner_reference(&job_name, &uid)),
-            Err(_) => None,
-        }
-    }
-
     /// Check the `repo_graph_cache` for any row whose `built_at` is within
     /// `ttl` of now. Returns `true` on a hit. Uses the row's stored
     /// timestamp string (ISO-8601 UTC); parse failures fall through as
@@ -586,6 +566,10 @@ impl GraphWarmerService for K8sGraphWarmer {
         // `ImageNotReady { transient: true }` so the caller can requeue
         // rather than terminally fail the verification run.
         let image_tag = self.resolve_verification_image(project_id).await?;
+        // Inject the project image's declared backing services as native
+        // sidecars so verification runs the same tests against the same
+        // services the worker had (best-effort — never blocks the run).
+        let services = crate::sidecar::resolve_image_services(&self.db, project_id).await;
         let job = crate::verification_job::build_verification_job(
             &self.config,
             project_id,
@@ -593,86 +577,13 @@ impl GraphWarmerService for K8sGraphWarmer {
             run_id,
             task_branch,
             target_branch,
+            &services,
         );
         self.dispatcher
             .dispatch(&self.config.namespace, job)
             .await
             .map(|_| ())
             .map_err(WarmerError::Backend)
-    }
-
-    async fn provision_backing_service(
-        &self,
-        req: BackingServiceRequest,
-    ) -> Result<BackingServiceConn, WarmerError> {
-        let spec = crate::backing_service::BackingServiceSpec {
-            service_type: req.service_type.clone(),
-            image: req.image.clone(),
-            port: req.port,
-            env: req.env.clone(),
-            cpu_request: req.cpu_request.clone(),
-            memory_request: req.memory_request.clone(),
-            cpu_limit: req.cpu_limit.clone(),
-            memory_limit: req.memory_limit.clone(),
-        };
-        let client = self.client.clone().ok_or_else(|| {
-            WarmerError::Backend(
-                "backing-service provisioning requires a live kube client".to_string(),
-            )
-        })?;
-        // ownerRef the task-run Job so the Pod + Service GC with the task.
-        let owner = self.task_run_owner_ref(&req.task_run_id).await;
-        let ns = self.config.namespace.clone();
-        let svc = crate::backing_service::build_backing_service_service(
-            &self.config,
-            &spec,
-            &req.instance_id,
-            &req.task_run_id,
-            owner.clone(),
-        );
-        let pod = crate::backing_service::build_backing_service_pod(
-            &self.config,
-            &spec,
-            &req.instance_id,
-            &req.task_run_id,
-            owner,
-        );
-        Api::<Service>::namespaced(client.clone(), &ns)
-            .create(&PostParams::default(), &svc)
-            .await
-            .map_err(|e| WarmerError::Backend(format!("create service: {e}")))?;
-        Api::<Pod>::namespaced(client.clone(), &ns)
-            .create(&PostParams::default(), &pod)
-            .await
-            .map_err(|e| WarmerError::Backend(format!("create pod: {e}")))?;
-        let (pod_name, service_name) =
-            crate::backing_service::backing_service_names(&req.instance_id);
-        let conn_string = crate::backing_service::render_conn_string(
-            &req.conn_template,
-            &self.config,
-            &req.instance_id,
-            req.port,
-        );
-        Ok(BackingServiceConn {
-            pod_name,
-            service_name,
-            conn_string,
-        })
-    }
-
-    async fn release_backing_service(&self, instance_id: &str) -> Result<(), WarmerError> {
-        let (pod_name, service_name) = crate::backing_service::backing_service_names(instance_id);
-        let Some(client) = self.client.clone() else {
-            return Ok(());
-        };
-        let ns = self.config.namespace.clone();
-        let _ = Api::<Pod>::namespaced(client.clone(), &ns)
-            .delete(&pod_name, &DeleteParams::default())
-            .await;
-        let _ = Api::<Service>::namespaced(client.clone(), &ns)
-            .delete(&service_name, &DeleteParams::default())
-            .await;
-        Ok(())
     }
 
     async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), WarmerError> {
