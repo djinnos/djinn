@@ -54,6 +54,26 @@ export interface UsageTimeSeriesPoint {
   task_count: number;
   /** Optional dimension key (model, project, agent_type) when grouped. */
   group_key?: string;
+  /** Optional model dimension supplied by grouped overview responses. */
+  model?: string;
+  /** Optional project dimension supplied by grouped overview responses. */
+  project_id?: string;
+  project_name?: string;
+  /** Optional agent role / type dimension supplied by grouped overview responses. */
+  agent_type?: string;
+  agent_role?: string;
+}
+
+export interface UsageModelSplit {
+  model: string;
+  cost: number | null;
+  tokens_in?: number;
+  tokens_out?: number;
+  total_tokens?: number;
+  task_count?: number;
+  success_rate?: number | null;
+  avg_reopens?: number | null;
+  cost_per_task?: number | null;
 }
 
 export interface UsageBreakdownRow {
@@ -66,6 +86,13 @@ export interface UsageBreakdownRow {
   success_rate: number | null;
   avg_reopens: number | null;
   cost_per_task: number | null;
+  model_split?: UsageModelSplit[];
+  time_series?: UsageTimeSeriesPoint[];
+  url?: string | null;
+  task_id?: string | null;
+  task_url?: string | null;
+  proposal_id?: string | null;
+  proposal_url?: string | null;
 }
 
 export interface UsageModelEffectiveness {
@@ -76,6 +103,11 @@ export interface UsageModelEffectiveness {
   cost_per_task: number | null;
   total_cost: number | null;
   total_tokens: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  session_count?: number;
+  completed_task_count?: number;
+  reopen_count?: number;
 }
 
 export interface UsageProjectModelCell {
