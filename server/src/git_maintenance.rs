@@ -17,12 +17,13 @@
 //! mirror gc is taken under the same per-project `MirrorManager` lock as the
 //! 60s fetch, so it never races a concurrent fetch or clone.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::time::MissedTickBehavior;
 
 use djinn_db::ProjectRepository;
-use djinn_workspace::MirrorError;
+use djinn_workspace::{GcGuardError, MirrorError};
 
 use crate::server::AppState;
 
@@ -84,26 +85,21 @@ async fn run_tick(state: &AppState) {
 
         // 2. Working clone (`$DJINN_HOME/projects/{owner}/{repo}`). Skip
         //    GitHub-less projects and any whose clone isn't on disk yet.
-        if project.github_owner.is_empty() || project.github_repo.is_empty() {
+        let projects_root = djinn_core::paths::projects_root();
+        let Some(clone_gc) =
+            clone_gc_request(&projects_root, &project.github_owner, &project.github_repo)
+        else {
             continue;
-        }
-        let clone = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
-        if !clone.join(".git").exists() {
-            continue;
-        }
+        };
         match djinn_workspace::gc_project_clone_under(
-            &djinn_core::paths::projects_root(),
-            &project.github_owner,
-            &project.github_repo,
+            &clone_gc.projects_root,
+            &clone_gc.owner,
+            &clone_gc.repo,
         )
         .await
         {
             Ok(()) => gc_clones += 1,
-            Err(err) => tracing::warn!(
-                project_id = %project.id,
-                error = %err,
-                "git_maintenance: clone gc failed"
-            ),
+            Err(err) => warn_clone_gc_error(&project.id, &err),
         }
     }
 
@@ -113,6 +109,57 @@ async fn run_tick(state: &AppState) {
         gc_clones,
         "git_maintenance: tick complete"
     );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectCloneGcRequest {
+    projects_root: PathBuf,
+    owner: String,
+    repo: String,
+}
+
+fn clone_gc_request(
+    projects_root: &Path,
+    owner: &str,
+    repo: &str,
+) -> Option<ProjectCloneGcRequest> {
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+
+    // Deliberately derive the presence check from the same root and path
+    // segments handed to the guarded gc API below. Do not canonicalize or
+    // sanitize here: traversal/symlink escapes must still reach the guard so
+    // they are refused as unsafe paths rather than silently bypassing root
+    // validation in the maintenance loop.
+    let clone = projects_root.join(owner).join(repo);
+    if !clone.join(".git").exists() {
+        return None;
+    }
+
+    Some(ProjectCloneGcRequest {
+        projects_root: projects_root.to_path_buf(),
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+    })
+}
+
+fn warn_clone_gc_error(project_id: &str, err: &GcGuardError) {
+    match err {
+        GcGuardError::Git(_) => tracing::warn!(
+            project_id = %project_id,
+            error = %err,
+            "git_maintenance: clone gc command failed"
+        ),
+        GcGuardError::InvalidSegment(_)
+        | GcGuardError::RootIo { .. }
+        | GcGuardError::RepoIo { .. }
+        | GcGuardError::OutsideRoot { .. } => tracing::warn!(
+            project_id = %project_id,
+            error = %err,
+            "git_maintenance: refused unsafe clone gc path"
+        ),
+    }
 }
 
 fn parse_interval(raw: Option<&str>) -> Duration {
@@ -126,6 +173,7 @@ fn parse_interval(raw: Option<&str>) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn interval_uses_positive_override_else_default() {
@@ -142,5 +190,52 @@ mod tests {
             parse_interval(Some("not-a-number")),
             Duration::from_secs(DEFAULT_INTERVAL_SECS)
         );
+    }
+
+    #[test]
+    fn clone_gc_request_skips_githubless_and_absent_clones() {
+        let root = TempDir::new().unwrap();
+
+        assert_eq!(clone_gc_request(root.path(), "", "repo"), None);
+        assert_eq!(clone_gc_request(root.path(), "owner", ""), None);
+        assert_eq!(clone_gc_request(root.path(), "owner", "repo"), None);
+    }
+
+    #[test]
+    fn clone_gc_request_uses_projects_root_owner_and_repo_for_present_clone() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("owner").join("repo").join(".git")).unwrap();
+
+        assert_eq!(
+            clone_gc_request(root.path(), "owner", "repo"),
+            Some(ProjectCloneGcRequest {
+                projects_root: root.path().to_path_buf(),
+                owner: "owner".to_string(),
+                repo: "repo".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn clone_gc_request_does_not_hide_traversal_from_guard() {
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(outside.path().join("repo").join(".git")).unwrap();
+
+        let traversal_owner = format!(
+            "../{}",
+            outside.path().file_name().unwrap().to_string_lossy()
+        );
+        let request = clone_gc_request(root.path(), &traversal_owner, "repo")
+            .expect("existing traversal-shaped clone should reach guarded gc");
+
+        let err = djinn_workspace::gc_project_clone_under(
+            &request.projects_root,
+            &request.owner,
+            &request.repo,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, GcGuardError::InvalidSegment(_)));
     }
 }
