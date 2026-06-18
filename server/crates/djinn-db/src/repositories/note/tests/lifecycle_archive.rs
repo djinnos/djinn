@@ -381,7 +381,10 @@ async fn archive_sweep_archived_notes_are_hidden_from_retrieval_but_listable_by_
         "active peer proves the retrieval query itself still returns live notes"
     );
 
-    let default_list = repo.list_compact(&project_id, None, None, 0, None).await.unwrap();
+    let default_list = repo
+        .list_compact(&project_id, None, None, 0, None)
+        .await
+        .unwrap();
     assert!(
         default_list.iter().all(|note| note.id != archived.id),
         "default compact list is active-only and should hide archived notes"

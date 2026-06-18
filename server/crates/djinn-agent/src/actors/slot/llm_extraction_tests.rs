@@ -923,14 +923,15 @@ async fn llm_extraction_admission_gate_drops_pattern_missing_adr_054_sections() 
     };
 
     let provider = Arc::new(FakeProvider::text(
-        &serde_json::json!({
+        serde_json::json!({
             "cases": [],
             "patterns": [{
                 "title": "Unstructured Pattern Note",
                 "content": "Reusable approach: keep extraction deterministic across future tasks by isolating unstable inputs and documenting why the pattern helps."
             }],
             "pitfalls": []
-        }).to_string(),
+        })
+        .to_string(),
     ));
 
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
