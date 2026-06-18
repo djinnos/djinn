@@ -70,7 +70,7 @@ pub(crate) async fn acting_caps(db: &Database) -> Result<Option<ActingCaps>, Str
 /// Resolve the effective user for an admin "act-as" operation. `None` target →
 /// the acting user (`current_user_id()`). `Some(t)` → requires the caller to be
 /// admin and returns `t`, letting an admin read/write another user's per-user
-/// config (e.g. the automation service user, which can't self-configure).
+/// config (e.g. another target user that can't self-configure).
 pub(crate) async fn resolve_effective_user(
     db: &Database,
     target_user_id: Option<&str>,

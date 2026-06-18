@@ -23,8 +23,8 @@ pub struct CredentialSetInput {
     /// default). Defaults to `false`.
     #[serde(default)]
     pub org_shared: bool,
-    /// Admin-only: act on behalf of this user id (e.g. the automation service
-    /// user). Non-admins must omit it.
+    /// Admin-only: act on behalf of this user id (e.g. another user to
+    /// configure). Non-admins must omit it.
     #[serde(default)]
     pub target_user_id: Option<String>,
 }
@@ -42,8 +42,8 @@ pub struct CredentialSetResponse {
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct CredentialListInput {
-    /// Admin-only: act on behalf of this user id (e.g. the automation service
-    /// user). Non-admins must omit it.
+    /// Admin-only: act on behalf of this user id (e.g. another user to
+    /// configure). Non-admins must omit it.
     #[serde(default)]
     pub target_user_id: Option<String>,
 }
@@ -124,7 +124,7 @@ impl DjinnMcpServer {
         } else {
             // Non-org_shared: stamp the credential to the effective user. With
             // no `target_user_id` this is the acting user; an admin may target
-            // another user (e.g. the automation service user).
+            // another user (e.g. a target user to configure).
             let effective = match acting_user::resolve_effective_user(
                 self.state.db(),
                 input.target_user_id.as_deref(),

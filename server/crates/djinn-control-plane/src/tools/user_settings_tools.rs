@@ -16,8 +16,8 @@ use djinn_db::UserSettingsRepository;
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 pub struct UserSettingsGetParams {
-    /// Admin-only: act on behalf of this user id (e.g. the automation service
-    /// user). Non-admins must omit it.
+    /// Admin-only: act on behalf of this user id (e.g. another user to
+    /// configure). Non-admins must omit it.
     #[serde(default)]
     pub target_user_id: Option<String>,
 }
@@ -61,8 +61,8 @@ pub struct UserSettingsSetParams {
     /// 1 per model). Omit to keep the current value.
     #[schemars(with = "Option<std::collections::HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
-    /// Admin-only: act on behalf of this user id (e.g. the automation service
-    /// user). Non-admins must omit it.
+    /// Admin-only: act on behalf of this user id (e.g. another user to
+    /// configure). Non-admins must omit it.
     #[serde(default)]
     pub target_user_id: Option<String>,
 }
