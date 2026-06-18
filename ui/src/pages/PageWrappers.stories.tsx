@@ -89,7 +89,7 @@ const tasksFixture: Task[] = [
     active_session: { model_id: "claude-3.5-sonnet", started_at: new Date(Date.now() - 720_000).toISOString() },
     duration_seconds: 300,
   }),
-  makeTask("t-6", "Run integration test suite", "verifying", 1, "Priya", "epic-foundation", ["ci"], "2026-03-01T11:15:00.000Z", {
+  makeTask("t-6", "Run integration test suite", "in_progress", 1, "Priya", "epic-foundation", ["ci"], "2026-03-01T11:15:00.000Z", {
     duration_seconds: 480,
   }),
   makeTask("t-3", "Refine empty states", "needs_task_review", 2, "Mina", "epic-ux", ["ui"], "2026-03-01T11:20:00.000Z", {
