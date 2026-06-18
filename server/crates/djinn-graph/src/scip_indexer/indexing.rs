@@ -3,8 +3,10 @@ use anyhow::{Context, Result, anyhow};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::process;
+use serde::{Deserialize, Serialize};
 
 use super::workspaces::{discover_workspaces, visit_dirs};
 use super::{
@@ -303,6 +305,58 @@ enum PlanExecution {
     /// exhausted before invocation could start. `detail` carries the JSON
     /// status detail that will be surfaced in `WorkspaceWarmStatus`.
     DeadlineExhausted(String),
+    /// Go/Clang below-workspace partitioned run summary.
+    Partitioned(PartitionExecutionSummary),
+}
+
+#[derive(Debug)]
+struct PartitionExecutionSummary {
+    commands: Vec<ExecutedIndexerCommand>,
+    status: String,
+    detail: String,
+    failure_count: usize,
+    total_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PartitionUnit {
+    scope: String,
+    label: String,
+    args: Vec<String>,
+    output_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PartitionCacheSummary {
+    hits: usize,
+    misses: usize,
+}
+
+trait GoPackageLister {
+    fn list_packages(&self, working_directory: &Path) -> Result<Vec<String>>;
+}
+
+struct CommandGoPackageLister;
+
+impl GoPackageLister for CommandGoPackageLister {
+    fn list_packages(&self, working_directory: &Path) -> Result<Vec<String>> {
+        let output = std::process::Command::new("go")
+            .arg("list")
+            .arg("./...")
+            .current_dir(working_directory)
+            .output()
+            .with_context(|| format!("run go list under {}", working_directory.display()))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            anyhow::bail!("go list failed: {stderr}");
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
+    }
 }
 
 /// Execute a single planned indexer command, performing a SCIP cache lookup
@@ -317,6 +371,9 @@ async fn execute_plan_with_cache(
     plan: PlannedIndexerCommand,
     timeout: std::time::Duration,
 ) -> PlanExecution {
+    if matches!(plan.indexer, SupportedIndexer::Go | SupportedIndexer::Clang) {
+        return execute_partitioned_plan(plan).await;
+    }
     // Attempt cache lookup. Any error is a non-fatal miss — we fall through
     // to running the indexer.
     let store = super::cache::ScipCacheStore::from_environment();
@@ -374,6 +431,368 @@ async fn execute_plan_with_cache(
     }
 
     PlanExecution::Ran(result)
+}
+
+async fn execute_partitioned_plan(plan: PlannedIndexerCommand) -> PlanExecution {
+    let units = match partition_units_for_plan(&plan, &CommandGoPackageLister) {
+        Ok(units) if !units.is_empty() => units,
+        Ok(_) | Err(_) => {
+            let timeout = budgeted_timeout_for_plan(&plan);
+            return execute_workspace_plan_with_cache(plan, timeout).await;
+        }
+    };
+
+    let mut size = super::budget::estimate_workspace_size(&plan.working_directory, plan.indexer);
+    size.partition_count = units.len();
+    let budget = super::budget::budget_for_indexer(plan.indexer, &size, None, None);
+    if budget.total == Duration::ZERO {
+        let detail = serde_json::json!({
+            "kind": "deadline_exhausted",
+            "indexer": plan.indexer.binary_name(),
+            "workspace_slug": plan.workspace_slug,
+            "reason": budget.reason,
+        })
+        .to_string();
+        return PlanExecution::DeadlineExhausted(detail);
+    }
+
+    let per_partition_timeout = budget
+        .per_partition
+        .unwrap_or(budget.per_invocation)
+        .max(Duration::from_secs(1));
+    let mut remaining_budget = budget.total;
+    let mut commands = Vec::new();
+    let mut quarantined = Vec::new();
+    let mut cache = PartitionCacheSummary::default();
+    let mut produced = 0usize;
+    let mut timed_out = 0usize;
+    let mut failed = 0usize;
+    let total_count = units.len();
+
+    for unit in units {
+        if remaining_budget == Duration::ZERO {
+            timed_out += 1;
+            quarantined.push(serde_json::json!({
+                "scope": unit.scope,
+                "label": unit.label,
+                "status": "timed_out",
+                "detail": "cumulative partition budget exhausted",
+            }));
+            continue;
+        }
+        let timeout = per_partition_timeout.min(remaining_budget);
+        let partition_plan = partition_plan(&plan, &unit);
+        match execute_workspace_plan_with_cache_with_stats(partition_plan.clone(), timeout).await {
+            (PlanExecution::CachedHit, hit) => {
+                if hit {
+                    cache.hits += 1;
+                } else {
+                    cache.misses += 1;
+                }
+                produced += 1;
+                commands.push(ExecutedIndexerCommand {
+                    plan: partition_plan,
+                    exit_code: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            (PlanExecution::Ran(Ok(output)), hit) if output.status.success() => {
+                if hit {
+                    cache.hits += 1;
+                } else {
+                    cache.misses += 1;
+                }
+                if fs::metadata(&partition_plan.output_path)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false)
+                {
+                    produced += 1;
+                    commands.push(ExecutedIndexerCommand {
+                        plan: partition_plan,
+                        exit_code: output.status.code(),
+                        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    });
+                } else {
+                    failed += 1;
+                    quarantined.push(serde_json::json!({"scope": unit.scope, "label": unit.label, "status": "failed", "detail": "indexer exited successfully but produced no SCIP artifact"}));
+                }
+            }
+            (PlanExecution::Ran(Ok(output)), hit) => {
+                if hit {
+                    cache.hits += 1;
+                } else {
+                    cache.misses += 1;
+                }
+                failed += 1;
+                quarantined.push(serde_json::json!({
+                    "scope": unit.scope,
+                    "label": unit.label,
+                    "status": "failed",
+                    "detail": String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                    "exit_code": output.status.code(),
+                }));
+            }
+            (PlanExecution::Ran(Err(err)), hit) => {
+                if hit {
+                    cache.hits += 1;
+                } else {
+                    cache.misses += 1;
+                }
+                let status = if err.kind() == std::io::ErrorKind::TimedOut {
+                    timed_out += 1;
+                    "timed_out"
+                } else {
+                    failed += 1;
+                    "failed"
+                };
+                quarantined.push(serde_json::json!({"scope": unit.scope, "label": unit.label, "status": status, "detail": err.to_string()}));
+            }
+            _ => {}
+        }
+        remaining_budget = remaining_budget.saturating_sub(timeout);
+    }
+
+    let failure_count = failed + timed_out;
+    let status = partition_workspace_status(produced, failed, timed_out, total_count);
+    let detail = quarantine_detail_json(
+        &plan,
+        &quarantined,
+        produced,
+        &cache,
+        &budget,
+        remaining_budget,
+        total_count,
+    );
+    PlanExecution::Partitioned(PartitionExecutionSummary {
+        commands,
+        status,
+        detail,
+        failure_count,
+        total_count,
+    })
+}
+
+async fn execute_workspace_plan_with_cache(
+    plan: PlannedIndexerCommand,
+    timeout: Duration,
+) -> PlanExecution {
+    execute_workspace_plan_with_cache_with_stats(plan, timeout)
+        .await
+        .0
+}
+
+async fn execute_workspace_plan_with_cache_with_stats(
+    plan: PlannedIndexerCommand,
+    timeout: Duration,
+) -> (PlanExecution, bool) {
+    let store = super::cache::ScipCacheStore::from_environment();
+    let cache_key = compute_cache_key_for_plan(&plan);
+    if let Some(key) = cache_key.as_ref()
+        && store.lookup(key, &plan.output_path) == super::cache::CacheLookup::Hit
+    {
+        return (PlanExecution::CachedHit, true);
+    }
+    if timeout == Duration::ZERO {
+        let detail = serde_json::json!({
+            "kind": "deadline_exhausted",
+            "indexer": plan.indexer.binary_name(),
+            "workspace_slug": plan.workspace_slug,
+            "reason": "no usable time remaining after reserve"
+        })
+        .to_string();
+        return (PlanExecution::DeadlineExhausted(detail), false);
+    }
+    let cmd = plan.build_command();
+    let result = process::output_with_timeout(cmd, timeout).await;
+    if let Ok(output) = &result
+        && output.status.success()
+        && let Ok(metadata) = fs::metadata(&plan.output_path)
+        && metadata.len() > 0
+        && let Some(key) = cache_key.as_ref()
+    {
+        let _ = store.store_artifact(key, &plan.output_path);
+    }
+    (PlanExecution::Ran(result), false)
+}
+
+fn partition_workspace_status(
+    produced: usize,
+    failed: usize,
+    timed_out: usize,
+    total: usize,
+) -> String {
+    (if produced > 0 && failed + timed_out > 0 {
+        "ready_with_quarantine"
+    } else if produced > 0 {
+        "artifact_pending"
+    } else if timed_out > 0 && timed_out >= failed && failed + timed_out == total {
+        "timed_out"
+    } else {
+        "failed"
+    })
+    .to_string()
+}
+
+fn quarantine_detail_json(
+    plan: &PlannedIndexerCommand,
+    quarantined: &[serde_json::Value],
+    produced: usize,
+    cache: &PartitionCacheSummary,
+    budget: &super::budget::IndexerBudget,
+    remaining_budget: Duration,
+    total_count: usize,
+) -> String {
+    serde_json::json!({
+        "kind": "quarantine_v1",
+        "scope": match plan.indexer { SupportedIndexer::Go => "go_package", SupportedIndexer::Clang => "clang_translation_unit", _ => "workspace" },
+        "workspace_slug": plan.workspace_slug,
+        "indexer": plan.indexer.binary_name(),
+        "quarantined_units": quarantined,
+        "produced_artifact_count": produced,
+        "partition_count": total_count,
+        "cache": { "hits": cache.hits, "misses": cache.misses },
+        "budget": {
+            "total_ms": budget.total.as_millis(),
+            "per_partition_ms": budget.per_partition.unwrap_or(budget.per_invocation).as_millis(),
+            "remaining_ms": remaining_budget.as_millis(),
+            "reason": budget.reason,
+        }
+    }).to_string()
+}
+
+fn partition_plan(plan: &PlannedIndexerCommand, unit: &PartitionUnit) -> PlannedIndexerCommand {
+    let mut cloned = plan.clone();
+    cloned.args = unit.args.clone();
+    cloned.output_path = unit.output_path.clone();
+    cloned
+}
+
+fn partition_units_for_plan(
+    plan: &PlannedIndexerCommand,
+    go_lister: &dyn GoPackageLister,
+) -> Result<Vec<PartitionUnit>> {
+    match plan.indexer {
+        SupportedIndexer::Go => go_partition_units(plan, go_lister),
+        SupportedIndexer::Clang => clang_partition_units(plan),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn go_partition_units(
+    plan: &PlannedIndexerCommand,
+    go_lister: &dyn GoPackageLister,
+) -> Result<Vec<PartitionUnit>> {
+    let packages = go_lister.list_packages(&plan.working_directory)?;
+    Ok(packages
+        .into_iter()
+        .map(|package| {
+            let output_path = partition_output_path(plan, &package);
+            PartitionUnit {
+                scope: "go_package".to_string(),
+                label: package.clone(),
+                args: vec![
+                    "index".to_string(),
+                    "-o".to_string(),
+                    output_path.to_string_lossy().into_owned(),
+                    package,
+                ],
+                output_path,
+            }
+        })
+        .collect())
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct CompileCommand {
+    directory: String,
+    command: Option<String>,
+    arguments: Option<Vec<String>>,
+    file: String,
+}
+
+fn clang_partition_units(plan: &PlannedIndexerCommand) -> Result<Vec<PartitionUnit>> {
+    let compdb = plan.working_directory.join("compile_commands.json");
+    let bytes = fs::read(&compdb).with_context(|| format!("read {}", compdb.display()))?;
+    let commands: Vec<CompileCommand> =
+        serde_json::from_slice(&bytes).context("parse compile_commands.json")?;
+    let temp_dir = plan
+        .output_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("clang-partitions")
+        .join(&plan.workspace_slug);
+    fs::create_dir_all(&temp_dir).with_context(|| format!("create {}", temp_dir.display()))?;
+    let mut units = Vec::new();
+    for command in commands {
+        let label = command.file.clone();
+        let output_path = partition_output_path(plan, &label);
+        let compdb_path = temp_dir.join(format!(
+            "{}.compile_commands.json",
+            sanitize_partition_label(&label)
+        ));
+        fs::write(
+            &compdb_path,
+            serde_json::to_vec_pretty(&vec![command.clone()])?,
+        )?;
+        units.push(PartitionUnit {
+            scope: "clang_translation_unit".to_string(),
+            label,
+            args: vec![
+                "--compdb-path".to_string(),
+                compdb_path.to_string_lossy().into_owned(),
+                "--index-output-path".to_string(),
+                output_path.to_string_lossy().into_owned(),
+            ],
+            output_path,
+        });
+    }
+    Ok(units)
+}
+
+fn partition_output_path(plan: &PlannedIndexerCommand, label: &str) -> PathBuf {
+    let stem = plan
+        .output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("index");
+    let parent = plan.output_path.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!("{stem}-{}.scip", sanitize_partition_label(label)))
+}
+
+fn sanitize_partition_label(label: &str) -> String {
+    let mut out: String = label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    out.trim_matches('-')
+        .chars()
+        .take(80)
+        .collect::<String>()
+        .if_empty_then("unit")
+}
+
+trait EmptyDefault {
+    fn if_empty_then(self, default: &str) -> String;
+}
+impl EmptyDefault for String {
+    fn if_empty_then(self, default: &str) -> String {
+        if self.is_empty() {
+            default.to_string()
+        } else {
+            self
+        }
+    }
 }
 
 /// Compute a SCIP cache key for a planned indexer command.
@@ -616,6 +1035,20 @@ fn tally_indexer_results(
 
     for (plan, execution) in results {
         match execution {
+            PlanExecution::Partitioned(summary) => {
+                failure_count += summary.failure_count;
+                let has_success = !summary.commands.is_empty();
+                commands.extend(summary.commands);
+                workspace_statuses.push(WorkspaceWarmStatus {
+                    workspace_slug: plan.workspace_slug.clone(),
+                    indexer: plan.indexer,
+                    status: summary.status,
+                    detail: Some(summary.detail),
+                });
+                if !has_success && summary.failure_count == 0 {
+                    failure_count += summary.total_count;
+                }
+            }
             PlanExecution::CachedHit => {
                 // Cache hit: the cached artifact is already on disk at the
                 // planned output path. Treat it like a successful invocation
@@ -727,10 +1160,11 @@ fn tally_indexer_results(
         );
     }
 
+    let all_failed = total > 0 && commands.is_empty();
     Ok(IndexerTally {
         commands,
         workspace_statuses,
-        all_failed: total > 0 && failure_count == total,
+        all_failed,
     })
 }
 
@@ -1416,6 +1850,122 @@ mod tests {
         PlanExecution::Ran(
             std::process::Command::new(if success { "true" } else { "false" }).output(),
         )
+    }
+
+    struct FakeGoLister(Vec<String>);
+
+    impl GoPackageLister for FakeGoLister {
+        fn list_packages(&self, _working_directory: &Path) -> Result<Vec<String>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn go_package_partitions_are_discovered_through_fakeable_lister() {
+        let plan = fake_plan(SupportedIndexer::Go, "repo");
+        let units = go_partition_units(
+            &plan,
+            &FakeGoLister(vec!["./cmd/api".to_string(), "./pkg/lib".to_string()]),
+        )
+        .expect("go partitions");
+
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].label, "./cmd/api");
+        assert_eq!(
+            units[0].args,
+            vec![
+                "index".to_string(),
+                "-o".to_string(),
+                PathBuf::from("repo/out-cmd-api.scip")
+                    .to_string_lossy()
+                    .into_owned(),
+                "./cmd/api".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn clang_partitions_write_filtered_compilation_databases() {
+        let tmp = workspace_tempdir("clang-partitions-");
+        let workspace = tmp.path().join("repo");
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::write(
+            workspace.join("compile_commands.json"),
+            serde_json::to_vec(&vec![
+                serde_json::json!({"directory": workspace, "command": "cc -c a.cc", "file": "a.cc"}),
+                serde_json::json!({"directory": workspace, "arguments": ["cc", "-c", "b.cc"], "file": "src/b.cc"}),
+            ])
+            .unwrap(),
+        )
+        .expect("compdb");
+        let mut plan = fake_plan(SupportedIndexer::Clang, "repo");
+        plan.working_directory = workspace;
+        plan.output_path = tmp.path().join("out/repo-cpp-root.scip");
+
+        let units = clang_partition_units(&plan).expect("clang units");
+        assert_eq!(units.len(), 2);
+        assert!(units[0].args.contains(&"--index-output-path".to_string()));
+        let compdb_arg = units[0].args[1].clone();
+        let filtered: Vec<CompileCommand> =
+            serde_json::from_slice(&fs::read(compdb_arg).expect("filtered compdb")).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].file, "a.cc");
+    }
+
+    #[test]
+    fn partition_tally_surfaces_ready_with_quarantine_and_total_wipeout() {
+        let success_plan = fake_plan(SupportedIndexer::Go, "repo/pkg-a");
+        let partial = PartitionExecutionSummary {
+            commands: vec![ExecutedIndexerCommand {
+                plan: success_plan,
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            }],
+            status: "ready_with_quarantine".to_string(),
+            detail: serde_json::json!({
+                "kind": "quarantine_v1",
+                "scope": "go_package",
+                "quarantined_units": [{"label":"./pkg/b","status":"timed_out"}],
+                "produced_artifact_count": 1,
+                "cache": {"hits": 0, "misses": 2},
+                "budget": {"total_ms": 60000, "per_partition_ms": 30000}
+            })
+            .to_string(),
+            failure_count: 1,
+            total_count: 2,
+        };
+        let tally = tally_indexer_results(vec![(
+            fake_plan(SupportedIndexer::Go, "repo"),
+            PlanExecution::Partitioned(partial),
+        )])
+        .expect("partial partition tally");
+        assert!(!tally.all_failed);
+        assert_eq!(tally.workspace_statuses[0].status, "ready_with_quarantine");
+        assert!(
+            tally.workspace_statuses[0]
+                .detail
+                .as_ref()
+                .unwrap()
+                .contains("quarantine_v1")
+        );
+
+        let wipeout = PartitionExecutionSummary {
+            commands: Vec::new(),
+            status: "timed_out".to_string(),
+            detail:
+                serde_json::json!({"kind":"quarantine_v1","quarantined_units":[{"label":"a.cc"}]})
+                    .to_string(),
+            failure_count: 2,
+            total_count: 2,
+        };
+        let tally = tally_indexer_results(vec![(
+            fake_plan(SupportedIndexer::Clang, "repo"),
+            PlanExecution::Partitioned(wipeout),
+        )])
+        .expect("wipeout tally");
+        assert!(tally.all_failed);
+        assert_eq!(tally.workspace_statuses[0].status, "timed_out");
     }
 
     #[test]
