@@ -1,4 +1,5 @@
 use super::*;
+use crate::extension::handlers::call_agent_amend_prompt;
 
 #[tokio::test]
 async fn write_rejects_symlink_escape_outside_worktree() {
@@ -773,10 +774,18 @@ async fn agent_amend_prompt_accepts_specialist_worker_and_reviewer() {
         .await
         .expect("reviewer history");
     assert_eq!(reviewer_history.len(), 1);
+    let reviewer_metrics: serde_json::Value = serde_json::from_str(
+        reviewer_history[0]
+            .metrics_before
+            .as_deref()
+            .expect("reviewer metrics_before logged"),
+    )
+    .expect("reviewer metrics_before json");
     assert_eq!(
-        reviewer_history[0].metrics_before.as_deref(),
-        Some("{\"completed_task_count\":3,\"success_rate\":0.67}")
+        reviewer_metrics["completed_task_count"],
+        serde_json::json!(3)
     );
+    assert_eq!(reviewer_metrics["success_rate"], serde_json::json!(0.67));
 }
 
 #[tokio::test]
@@ -790,22 +799,10 @@ async fn agent_amend_prompt_rejects_default_and_non_worker_reviewer_targets() {
     let repo = djinn_db::AgentRepository::new(db.clone(), EventBus::noop());
 
     let default_worker = repo
-        .create_for_project(
-            &project.id,
-            djinn_db::AgentCreateInput {
-                name: "Default worker role",
-                base_role: "worker",
-                description: "Default worker",
-                system_prompt_extensions: "Use system_prompt_extensions for default instructions",
-                model_preference: None,
-                verification_command: None,
-                mcp_servers: None,
-                skills: None,
-                is_default: true,
-            },
-        )
+        .get_default_for_base_role(&project.id, "worker")
         .await
-        .expect("create default worker");
+        .expect("get default worker")
+        .expect("default worker fixture");
     let lead = repo
         .create_for_project(
             &project.id,
