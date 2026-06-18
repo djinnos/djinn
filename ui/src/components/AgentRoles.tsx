@@ -131,6 +131,8 @@ export function AgentRoles() {
 
   // Full-page form takeover for create/edit
   const editingRole = editingId ? roles.find((r) => r.id === editingId) : null;
+  const projectDefaults = roles.filter((role) => role.is_default);
+  const specialists = roles.filter((role) => !role.is_default);
 
   if (isCreating) {
     return (
@@ -186,34 +188,87 @@ export function AgentRoles() {
         <div>
           <h2 className="text-lg font-semibold">Agent Roles</h2>
           <p className="text-sm text-muted-foreground">
-            Manage specialist roles that extend base agent behaviour.
+            Customize project-default agents used automatically by Djinn, or create
+            task-routed specialists for targeted work.
           </p>
         </div>
-        {isAdmin && (
-          <Button onClick={() => setIsCreating(true)}>New Specialist</Button>
-        )}
       </div>
 
       {error && <InlineError message={error} onRetry={() => void loadRoles()} />}
 
-      {roles.length === 0 && !isCreating ? (
-        <div className="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
-          No roles configured yet. Create a specialist to extend a base role.
+      <section aria-labelledby="project-defaults-heading" className="space-y-3">
+        <div className="space-y-1">
+          <h3 id="project-defaults-heading" className="text-base font-semibold">
+            Project defaults
+          </h3>
+          <p className="text-sm text-muted-foreground">
+            These agents are used automatically for worker, planner, lead, reviewer,
+            and architect dispatch. Edit their instructions to customize the default
+            behavior for this project.
+          </p>
         </div>
-      ) : (
-        <div className="grid grid-cols-5 gap-3">
-          {roles.map((role) => (
-            <AgentCard
-              key={role.id}
-              role={role}
-              onEdit={() => setEditingId(role.id)}
-              onDelete={() => void handleDelete(role.id)}
-              isDeleting={deletingId === role.id}
-              canEdit={isAdmin}
-            />
-          ))}
+
+        {projectDefaults.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border p-6 text-sm text-muted-foreground">
+            No project-default agents are available yet.
+          </div>
+        ) : (
+          <div className="grid grid-cols-5 gap-3">
+            {projectDefaults.map((role) => (
+              <AgentCard
+                key={role.id}
+                role={role}
+                onEdit={() => setEditingId(role.id)}
+                onDelete={() => void handleDelete(role.id)}
+                isDeleting={deletingId === role.id}
+                canEdit={isAdmin}
+                editLabel="Edit instructions"
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section aria-labelledby="specialists-heading" className="space-y-3">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1">
+            <h3 id="specialists-heading" className="text-base font-semibold">
+              Specialists
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              Specialists run only when a task routes to that specialist agent type
+              or name. New Specialist creates specialist-only agents; use Project
+              defaults above to customize automatic dispatch.
+            </p>
+          </div>
+          {isAdmin && (
+            <Button className="shrink-0" onClick={() => setIsCreating(true)}>
+              New Specialist
+            </Button>
+          )}
         </div>
-      )}
+
+        {specialists.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border p-6 text-sm text-muted-foreground">
+            No specialists configured yet. Create a specialist only when tasks should
+            explicitly route to a custom agent type or name; this does not edit
+            project defaults.
+          </div>
+        ) : (
+          <div className="grid grid-cols-5 gap-3">
+            {specialists.map((role) => (
+              <AgentCard
+                key={role.id}
+                role={role}
+                onEdit={() => setEditingId(role.id)}
+                onDelete={() => void handleDelete(role.id)}
+                isDeleting={deletingId === role.id}
+                canEdit={isAdmin}
+              />
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
