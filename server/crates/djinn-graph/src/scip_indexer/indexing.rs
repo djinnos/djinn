@@ -1913,6 +1913,65 @@ mod tests {
     }
 
     #[test]
+    fn go_partition_status_covers_success_quarantine_and_wipeout() {
+        assert_eq!(partition_workspace_status(2, 0, 0, 2), "artifact_pending");
+        assert_eq!(
+            partition_workspace_status(1, 1, 0, 2),
+            "ready_with_quarantine"
+        );
+        assert_eq!(
+            partition_workspace_status(1, 0, 1, 2),
+            "ready_with_quarantine"
+        );
+        assert_eq!(partition_workspace_status(0, 2, 0, 2), "failed");
+        assert_eq!(partition_workspace_status(0, 0, 2, 2), "timed_out");
+    }
+
+    #[test]
+    fn clang_partition_detail_records_quarantine_cache_and_budget() {
+        let tmp = workspace_tempdir("clang-detail-");
+        let mut plan = fake_plan(SupportedIndexer::Clang, "repo");
+        plan.output_path = tmp.path().join("out/repo-cpp-root.scip");
+        let budget = super::super::budget::budget_for_indexer(
+            SupportedIndexer::Clang,
+            &super::super::budget::WorkspaceSizeHint {
+                source_file_count: 2,
+                source_bytes: 128,
+                partition_count: 2,
+            },
+            None,
+            None,
+        );
+        let cache = PartitionCacheSummary { hits: 1, misses: 1 };
+        let detail = quarantine_detail_json(
+            &plan,
+            &[serde_json::json!({
+                "scope": "clang_translation_unit",
+                "label": "src/b.cc",
+                "status": "timed_out",
+                "detail": "partition timeout",
+            })],
+            1,
+            &cache,
+            &budget,
+            Duration::from_secs(5),
+            2,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&detail).expect("detail json");
+
+        assert_eq!(parsed["kind"], "quarantine_v1");
+        assert_eq!(parsed["scope"], "clang_translation_unit");
+        assert_eq!(parsed["quarantined_units"][0]["label"], "src/b.cc");
+        assert_eq!(parsed["quarantined_units"][0]["status"], "timed_out");
+        assert_eq!(parsed["produced_artifact_count"], 1);
+        assert_eq!(parsed["partition_count"], 2);
+        assert_eq!(parsed["cache"]["hits"], 1);
+        assert_eq!(parsed["cache"]["misses"], 1);
+        assert!(parsed["budget"]["total_ms"].as_u64().unwrap() > 0);
+        assert!(parsed["budget"]["per_partition_ms"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
     fn partition_tally_surfaces_ready_with_quarantine_and_total_wipeout() {
         let success_plan = fake_plan(SupportedIndexer::Go, "repo/pkg-a");
         let partial = PartitionExecutionSummary {
