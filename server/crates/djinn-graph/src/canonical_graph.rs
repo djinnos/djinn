@@ -31,6 +31,40 @@ const GRAPH_CACHE_SHRINK_MIN_ABSOLUTE_DELTA: usize = 100;
 /// so small repositories do not warn on normal day-to-day edits.
 const GRAPH_CACHE_SHRINK_MIN_PERCENT: f64 = 0.10;
 
+/// Environment flag name for the cache-reuse toggle seam.
+///
+/// Read inside [`ensure_canonical_graph`] (and exposed via
+/// [`cache_reuse_enabled`]) so the future cache-reuse path
+/// (`r8x9` / `35mc`) has a single, grep-able wire to bind to. The
+/// flag is intentionally **off by default** — no fast path is trusted
+/// until the `incremental == full` equivalence test in
+/// `server/crates/djinn-graph/tests/incremental_parity.rs` passes on
+/// this exact code path. Accepts the same truthy strings as
+/// [`cache_reuse_enabled_from_var`] (i.e. unset / `0` / `false` / `no`
+/// / `off` are all treated as "reuse disabled").
+pub const DJINN_GRAPH_CACHE_REUSE_FLAG: &str = "DJINN_GRAPH_CACHE_REUSE";
+
+/// Returns `true` when the cache-reuse toggle is engaged for the next
+/// `ensure_canonical_graph` call.
+///
+/// Default: `false` (reuse disabled). This matches the
+/// `DJINN_DB_ACCESS_DETECTION` / `DJINN_ROUTE_DETECTION` precedent —
+/// rollout-only opt-in flags, never on by default.
+pub fn cache_reuse_enabled() -> bool {
+    cache_reuse_enabled_from_var(std::env::var(DJINN_GRAPH_CACHE_REUSE_FLAG).ok().as_deref())
+}
+
+/// Pure helper for tests/callers that already resolved the env var.
+pub fn cache_reuse_enabled_from_var(value: Option<&str>) -> bool {
+    match value {
+        Some(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        ),
+        None => false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct GraphCacheShrinkWarning {
     old_node_count: usize,
@@ -214,6 +248,21 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     String,
 > {
     use djinn_db::{RepoGraphCacheInsert, RepoGraphCacheRepository};
+
+    // Cache-reuse toggle seam (read once at entry, before the
+    // indexer fan-out).  The future cache-reuse path (`r8x9` / `35mc`)
+    // will branch on this flag.  Today the value is honoured only as a
+    // trace log so the `incremental == full` equivalence test from
+    // `mc41` (`imx6`) can pin the seam before any reuse logic is
+    // bound to it.  Default = false (reuse disabled) so no fast path
+    // is trusted by accident.
+    let cache_reuse = cache_reuse_enabled();
+    tracing::info!(
+        project_id = %project_id,
+        cache_reuse_enabled = cache_reuse,
+        env_flag = DJINN_GRAPH_CACHE_REUSE_FLAG,
+        "ensure_canonical_graph: cache-reuse toggle resolved (no-op stub — re-parse path always taken)"
+    );
 
     let mut handle = crate::index_tree::IndexTree::ensure(project_id, project_root)
         .await
@@ -1072,7 +1121,7 @@ pub fn normalize_graph_query_paths(project_path: &str) -> (PathBuf, PathBuf) {
     (project_root, index_tree_path)
 }
 
-#[cfg(test)]
+#[doc(hidden)]
 pub async fn clear_test_caches() {
     let mut cache = GRAPH_CACHE.write().await;
     *cache = None;
@@ -1926,6 +1975,116 @@ mod tests {
         assert!(
             result.is_ok(),
             "declared overlay must not block the run; got {result:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Cache-reuse toggle seam (`mc41` / `imx6`).
+    //
+    // The `cache_reuse_enabled` helper reads `DJINN_GRAPH_CACHE_REUSE`
+    // and defaults to `false`.  The future cache-reuse path
+    // (`r8x9` / `35mc`) binds to this helper.  These tests pin the
+    // default-off contract and the env-flag name in-tree so a
+    // refactor can't silently change the seam.
+    // -------------------------------------------------------------------
+
+    /// Mirror of the `cache_reuse_seam_defaults_to_disabled_and_honours_env_flag`
+    /// integration test, kept in-tree so the canonical_graph test
+    /// module exercises the helper directly.  The two tests assert
+    /// the same contract; if either drifts, the other is a tripwire.
+    #[test]
+    fn cache_reuse_seam_defaults_to_disabled_in_tree() {
+        // Unset / empty string / explicit-disable values all return false.
+        for raw in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("off"),
+        ] {
+            assert!(
+                !cache_reuse_enabled_from_var(raw),
+                "cache_reuse_enabled_from_var({raw:?}) must be false (default-off contract)"
+            );
+        }
+        // Truthy values return true.
+        for raw in [
+            Some("1"),
+            Some("true"),
+            Some("yes"),
+            Some("on"),
+            Some(" 1 "),
+        ] {
+            assert!(
+                cache_reuse_enabled_from_var(raw),
+                "cache_reuse_enabled_from_var({raw:?}) must be true"
+            );
+        }
+        // The env-flag name is the one pinned in the spike / task AC.
+        assert_eq!(DJINN_GRAPH_CACHE_REUSE_FLAG, "DJINN_GRAPH_CACHE_REUSE");
+    }
+
+    /// Sanity check: the warm path's no-op cache-reuse seam doesn't
+    /// change observable behavior when the toggle is at its default
+    /// (off).  This complements the integration test in
+    /// `tests/incremental_parity.rs` — that test exercises the
+    /// end-to-end warm-path twice; this test pins the "no-op stub"
+    /// semantic at the warm API's own call site.
+    #[tokio::test]
+    async fn ensure_canonical_graph_resolves_cache_reuse_toggle_at_default_off() {
+        let tmp = workspace_tempdir("canonical-graph-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create(
+                "test-cache-reuse-default",
+                "test",
+                "test-cache-reuse-default",
+            )
+            .await
+            .expect("create project");
+
+        let head_out = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&project_root)
+            .output()
+            .await
+            .unwrap();
+        let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+        let graph = build_test_graph_fixture();
+        let blob = bincode::serialize(&graph.to_artifact()).expect("serialize fixture graph");
+        RepoGraphCacheRepository::new(db.clone())
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: &head_sha,
+                graph_blob: &blob,
+            })
+            .await
+            .expect("seed cache");
+
+        // The toggle is at its default-off state (no env var set).
+        // The warm cache-hits the seeded blob; the result must be
+        // identical to a graph built from that blob.
+        let result = ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "warm at default-off toggle must succeed (no-op seam); got {result:?}"
+        );
+        let (_handle, returned_graph) = result.unwrap();
+        assert_eq!(
+            returned_graph.node_count(),
+            graph.node_count(),
+            "default-off cache-reuse must not change the warm's output shape"
         );
     }
 }
