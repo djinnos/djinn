@@ -38,11 +38,6 @@ use super::scoring::{CONFIDENCE_FLOOR, STALE_CITATION, STALE_DECAY_SIGNAL, bayes
 pub(crate) const DECAY_WINDOW_ENV: &str = "DJINN_LIFECYCLE_DECAY_WINDOW_DAYS";
 /// Default decay window applied when the env override is absent or invalid.
 pub(crate) const DEFAULT_DECAY_WINDOW_DAYS: u32 = 30;
-/// Env var overriding the global archive-candidate access window (days).
-/// Default 60. The archive sweep runs after decay in the housekeeping tick
-/// and only flips `active` → `archived` for ADR-054 `archive_candidate`
-/// extracted notes that are also older than this window by `last_accessed`.
-pub(crate) const ARCHIVE_WINDOW_ENV: &str = "DJINN_LIFECYCLE_ARCHIVE_WINDOW_DAYS";
 /// Default archive-candidate access window applied when the env override is
 /// absent or invalid. Distinct from the decay window so operators can tune
 /// decay and archive cadences independently.
@@ -293,29 +288,6 @@ pub(crate) fn parse_decay_window_days(caller_default: u32) -> u32 {
         caller_default
     } else {
         DEFAULT_DECAY_WINDOW_DAYS
-    }
-}
-
-/// Resolve the effective archive-candidate access window. The env override
-/// ([`ARCHIVE_WINDOW_ENV`]) wins when set to a positive value; otherwise the
-/// caller-provided `archive_window_days` (itself usually the env-derived
-/// default read by the housekeeping tick) is used.
-///
-/// This intentionally mirrors [`parse_decay_window_days`]: decay and archive
-/// share a positive-integer `u32` day-window with the same env-override
-/// semantics, but they are tuned independently because the archive sweep is
-/// stricter (no recent access) than the decay sweep (any stale extracted note).
-pub(crate) fn parse_archive_window_days(caller_default: u32) -> u32 {
-    if let Ok(raw) = std::env::var(ARCHIVE_WINDOW_ENV)
-        && let Ok(parsed) = raw.parse::<u32>()
-        && parsed > 0
-    {
-        return parsed;
-    }
-    if caller_default > 0 {
-        caller_default
-    } else {
-        DEFAULT_ARCHIVE_WINDOW_DAYS
     }
 }
 

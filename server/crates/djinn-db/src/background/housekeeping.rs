@@ -17,16 +17,11 @@ const HOUSEKEEPING_INTERVAL_ENV: &str = "DJINN_HOUSEKEEPING_INTERVAL_SECS";
 /// housekeeping sweep when [`ARCHIVE_WINDOW_ENV`] is absent or invalid.
 /// Distinct from the decay window so decay and archive cadences can be tuned
 /// independently — archive is strictly stricter (no recent access).
-const DEFAULT_ARCHIVE_WINDOW_DAYS: u32 =
-    crate::repositories::note::lifecycle::DEFAULT_ARCHIVE_WINDOW_DAYS;
-/// Env-var name consumed by [`parse_archive_window_days`]. The constant is
-/// re-exported here so unit tests can `set_var`/`remove_var` it without
-/// reaching into the lifecycle module; it is also referenced in the
-/// [`parse_archive_window_days`] docstring to keep the env-override
-/// documentation colocated with the housekeeping call site.
-#[allow(dead_code)]
-const ARCHIVE_WINDOW_ENV: &str =
-    crate::repositories::note::lifecycle::ARCHIVE_WINDOW_ENV;
+const DEFAULT_ARCHIVE_WINDOW_DAYS: u32 = 60;
+/// Env-var name consumed by [`parse_archive_window_days`] for the housekeeping
+/// archive sweep. Kept in this module so the scheduler wiring owns the
+/// operator-facing knob it passes to `archive_audit_candidates`.
+const ARCHIVE_WINDOW_ENV: &str = "DJINN_LIFECYCLE_ARCHIVE_WINDOW_DAYS";
 /// Env-gated opt-in: when set to "1" (true), the periodic housekeeping tick
 /// also runs a one-shot dry-run retrieval-anchor backfill report (proposal
 /// counts and proposed anchors, no writes). Apply mode is never invoked
@@ -241,16 +236,18 @@ fn parse_housekeeping_interval(raw: Option<&str>) -> Duration {
 }
 
 /// Read [`ARCHIVE_WINDOW_ENV`] and return a positive `u32` window in days,
-/// falling back to `caller_default` (itself the env-anchored default) when
-/// the env var is unset or invalid. The repository-layer
-/// [`crate::repositories::note::lifecycle::parse_archive_window_days`] does
-/// the same resolution one more time, so this helper exists primarily so the
-/// housekeeping module can:
-///   1. Document the env-override pattern colocated with the call site.
-///   2. Expose a unit-testable parser for the housekeeping tick without
-///      reaching into the lifecycle module's internals.
+/// falling back to `caller_default` (or [`DEFAULT_ARCHIVE_WINDOW_DAYS`] if the
+/// caller accidentally passes zero) when the env var is unset or invalid.
+/// This mirrors the existing housekeeping env-override pattern: resolve the
+/// operator-facing configuration at the tick boundary, then pass the concrete
+/// value into the repository sweep.
 fn parse_archive_window_days(caller_default: u32) -> u32 {
-    crate::repositories::note::lifecycle::parse_archive_window_days(caller_default)
+    std::env::var(ARCHIVE_WINDOW_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .or_else(|| (caller_default > 0).then_some(caller_default))
+        .unwrap_or(DEFAULT_ARCHIVE_WINDOW_DAYS)
 }
 
 fn housekeeping_ticker(interval: Duration) -> Interval {
@@ -355,8 +352,9 @@ async fn run_project_housekeeping(
     // hourly scheduler — no new tick is added here. The repository call
     // performs a reversible `active` → `archived` status flip only; it
     // never hard-deletes note rows. The window is resolved from
-    // `DJINN_LIFECYCLE_ARCHIVE_WINDOW_DAYS` (default 60) inside the
-    // repository call, matching the env-override pattern used by decay.
+    // `DJINN_LIFECYCLE_ARCHIVE_WINDOW_DAYS` (default 60) here at the
+    // housekeeping boundary, matching the env-override pattern used by the
+    // other tick configuration.
     let archived_notes = note_repo
         .archive_audit_candidates(
             &project.id,
