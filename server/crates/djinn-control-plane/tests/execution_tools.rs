@@ -900,17 +900,6 @@ impl RuntimeOps for RecordingRuntimeOps {
         Ok(())
     }
 
-    async fn provision_backing_service(
-        &self,
-        _req: djinn_control_plane::bridge::ProvisionServiceRequest,
-    ) -> Result<djinn_control_plane::bridge::ProvisionedService, String> {
-        Err("not used".to_string())
-    }
-
-    async fn release_backing_service(&self, _instance_id: &str) -> Result<(), String> {
-        Ok(())
-    }
-
     async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String> {
         self.teardown_calls
             .lock()
