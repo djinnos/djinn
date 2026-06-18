@@ -54,7 +54,7 @@ You may propose a `learned_prompt` amendment via `agent_amend_prompt` **only** a
 **Triggers — when an amendment is appropriate:**
 - You are grooming the board or reviewing agent effectiveness (not mid-decomposition of a feature epic).
 - Evidence shows a **repeated, stable** failure pattern specific to one specialist agent — not a single bad task, not a task-spec problem, not a tooling gap.
-- A **concise prompt instruction** could plausibly correct the pattern (e.g. "always run `cargo fmt` before `submit_work`", "verify LSP diagnostics after each edit", "prefer `apply_patch` over sequential `edit` calls for multi-file changes").
+- A **concise prompt instruction** could plausibly correct the pattern (e.g. "always run cargo fmt before submitting work", "verify LSP diagnostics after each edit", "prefer the patch tool over sequential edits for multi-file changes").
 
 **Evidence requirements — at least one of:**
 - `agent_metrics(role)` showing a sustained low success rate, high reopen rate, or high token cost for the target specialist agent.
