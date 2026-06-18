@@ -848,11 +848,11 @@ impl TaskRunSupervisor {
                     // its branch wasn't durable, so the host routed a redo rather
                     // than a reviewer-only resume). `start` is legal ONLY from
                     // `open`, so on the redo it no-op'd and the task stayed at
-                    // `needs_task_review` — the post-worker `submit_verification`
+                    // `needs_task_review` — the post-worker `submit_task_review`
                     // (legal only from `in_progress`) then also no-op'd and
-                    // verification was skipped before review (task u4fx). Walk
+                    // review was skipped before review (task u4fx). Walk
                     // `resume_worker` (needs_task_review → in_progress) on the
-                    // redo so `submit_verification` succeeds, exactly like the
+                    // redo so `submit_task_review` succeeds, exactly like the
                     // NewTask path.
                     RoleKind::Worker => {
                         if matches!(spec.flow, SupervisorFlow::ReviewResponse) {
@@ -1115,19 +1115,11 @@ impl TaskRunSupervisor {
                                 "supervisor: pushed task_branch to mirror after stage (durable)"
                             );
                         }
-                        // Worker finished cleanly → submit_verification
-                        // (in_progress → verifying). The run ends after this
-                        // stage (the worker-only sequence has no reviewer leg);
-                        // the HOST then spawns the slot-free verification
-                        // pipeline against the durable task_branch. Verification
-                        // green moves verifying → needs_task_review (which the
-                        // coordinator re-dispatches as a reviewer-only
-                        // ReviewResume), verification red releases the task for
-                        // worker rework — so verification runs BETWEEN the
-                        // worker and the reviewer, as designed. (Previously this
-                        // fired `submit_task_review` and an in-pod reviewer leg
-                        // ran back-to-back, so verification only happened later
-                        // at the pre-PR gate — the bug this rewiring fixes.)
+                        // Worker finished cleanly → submit_task_review
+                        // (in_progress → needs_task_review). The run ends after
+                        // this stage (the worker-only sequence has no reviewer
+                        // leg); the HOST then dispatches a reviewer-only
+                        // ReviewResume when the task reaches needs_task_review.
                         // Architect has no analogous transition in the current
                         // state machine.
                         //
@@ -1142,13 +1134,13 @@ impl TaskRunSupervisor {
                                 tracing::debug!(
                                     task_run_id = %run_id,
                                     task_id = %spec.task_id,
-                                    "supervisor: run cancelled — skipping submit_verification (task stays in_progress for redispatch)"
+                                    "supervisor: run cancelled — skipping submit_task_review (task stays in_progress for redispatch)"
                                 );
                             } else if let Err(e) = self
                                 .services
                                 .transition_task(
                                     spec.task_id.clone(),
-                                    "submit_verification".into(),
+                                    "submit_task_review".into(),
                                     None,
                                 )
                                 .await
@@ -1157,7 +1149,7 @@ impl TaskRunSupervisor {
                                     task_run_id = %run_id,
                                     task_id = %spec.task_id,
                                     error = %e,
-                                    "supervisor: post-worker submit_verification transition skipped"
+                                    "supervisor: post-worker submit_task_review transition skipped"
                                 );
                             }
                         }
@@ -1680,16 +1672,13 @@ impl TaskRunSupervisor {
                             ),
                         },
                         // Worker-only flows (NewTask / ReviewResponse /
-                        // ConflictRetry) end at the worker stage: verification
-                        // runs BEFORE the reviewer now, so there is NO PR to
-                        // open here. The worker already fired `submit_verification`
-                        // (in_progress → verifying) above; signal the host with a
-                        // `WorkerSubmitted` outcome so it spawns the slot-free
-                        // verification pipeline. Detect "the last stage was the
-                        // worker" rather than enumerating the flows so a future
+                        // ConflictRetry) end at the worker stage. The worker
+                        // already fired `submit_task_review` (in_progress →
+                        // needs_task_review) above; signal the host with a
+                        // `WorkerSubmitted` outcome so it can dispatch a
+                        // reviewer-only ReviewResume. Detect "the last stage was
+                        // the worker" rather than enumerating the flows so a future
                         // flow that ends at the worker inherits the right path.
-                        // The PR is opened later, after a reviewer-only
-                        // ReviewResume run that a green verification re-dispatches.
                         SupervisorFlow::NewTask
                         | SupervisorFlow::ReviewResponse
                         | SupervisorFlow::ConflictRetry
@@ -1699,7 +1688,7 @@ impl TaskRunSupervisor {
                                 task_run_id = %run_id,
                                 task_id = %spec.task_id,
                                 flow = ?spec.flow,
-                                "supervisor: worker stage complete; task submitted to verification (no PR opened here)"
+                                "supervisor: worker stage complete; task submitted for review (no PR opened here)"
                             );
                             TaskRunOutcome::WorkerSubmitted
                         }
@@ -1739,92 +1728,33 @@ impl TaskRunSupervisor {
             TaskRunOutcome::PrOpened { .. } | TaskRunOutcome::Closed { .. } => {
                 TaskRunStatus::Completed
             }
-            // The worker stage genuinely succeeded and handed off to the
-            // verification pipeline; the task-run itself completed cleanly.
+            // The worker stage genuinely succeeded and handed off for review;
+            // the task-run itself completed cleanly.
             TaskRunOutcome::WorkerSubmitted => TaskRunStatus::Completed,
             TaskRunOutcome::Escalated { .. } => TaskRunStatus::Completed,
             TaskRunOutcome::Parked { .. } => TaskRunStatus::Completed,
             TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::LoopGuardTripped { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
-        };
-        // IN-POD pre-PR verification (the double-compile fix). On a clean
-        // `WorkerSubmitted` the worker has just committed to the task branch and
-        // its private Cargo target dir (CARGO_TARGET_DIR) still holds the freshly
-        // compiled task delta — but it's about to be torn down by
-        // `cleanup_cargo_target_run_dir` directly below. Give the services impl a
-        // chance to verify the committed tree HERE, reusing those artifacts, so
-        // the host doesn't have to spin up a separate verify Job that re-seeds the
-        // warm base and recompiles the changed crates from scratch.
-        //
-        // `verify_committed_tree` defaults to `Ok(None)` (host/test runtimes and
-        // any impl that can't run in-pod verify): the host then dispatches the
-        // separate verify Job as before — the unchanged FALLBACK. Only the worker
-        // pod overrides it. A returned `Some(run_id)` is a terminal
-        // `verification_runs` row the host pipeline consumes directly.
-        let verification_run_id = if matches!(outcome, TaskRunOutcome::WorkerSubmitted)
-            && !self.services.cancel().is_cancelled()
-        {
-            match self.services.verify_committed_tree(&spec, &task).await {
-                Ok(maybe_id) => {
-                    if let Some(id) = maybe_id.as_deref() {
-                        info!(
-                            task_run_id = %run_id,
-                            verification_run_id = %id,
-                            "supervisor: in-pod verification ran; host will consume its result"
-                        );
-                    } else {
-                        info!(
-                            task_run_id = %run_id,
-                            "supervisor: in-pod verification not applicable; host will dispatch a verify Job (fallback)"
-                        );
-                    }
-                    maybe_id
-                }
-                Err(e) => {
-                    // Never fail the run on an in-pod verify hiccup — fall back to
-                    // the host-dispatched Job, which re-derives everything from the
-                    // durable task branch in the mirror.
-                    tracing::warn!(
-                        task_run_id = %run_id,
-                        error = %e,
-                        "supervisor: in-pod verification errored; falling back to host-dispatched verify Job"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
+                };
 
-        // Flip `task_runs.status` to its terminal value ONLY AFTER the in-pod
-        // verification above has finished. The worker has already fired
-        // `submit_verification` (task → `verifying`) but the host has not yet
-        // received this report, so it has not spawned the host verification
-        // pipeline / registered the task in the `verifying_tasks` tracker. The
-        // coordinator's orphaned-`verifying` recovery sweep gates on task-run
-        // liveness (`task_runs.status = running AND ended_at IS NULL`) — so if we
-        // marked the run terminal BEFORE the (minutes-long) in-pod verify, that
-        // sweep would see no live run, hit its short grace, and recover the task
-        // back to `open` mid-verify — losing the verification result and looping
-        // the worker (observed: a task cycling worker→verifying→open repeatedly
-        // with `verification_failure_count = 0`). Keeping the run `Running`
-        // through in-pod verify keeps the liveness guard honest.
-        //
-        // On the cancellation path the host-bound RPC channel may already be torn
-        // down (the reader loop saw `Control(Cancel)` and the writer's
-        // `cancelled()` branch shut the write half). In that case
-        // `update_task_run_status` returns a transport-level error and we must
-        // still produce the report so the worker exits cleanly and the host's
-        // per-task-run dispatch can pair it with the
-        // `KubernetesRuntime::teardown` path. When cancel is NOT set, an
-        // `update_task_run_status` failure stays fatal — a genuine RPC
-        // malfunction worth surfacing.
-        if let Err(e) = self
+                // Flip `task_runs.status` to its terminal value. The worker has already
+                // fired `submit_task_review` (task → `needs_task_review`) above.
+                //
+                // On the cancellation path the host-bound RPC channel may already be torn
+                // down (the reader loop saw `Control(Cancel)` and the writer's
+                // `cancelled()` branch shut the write half). In that case
+                // `update_task_run_status` returns a transport-level error and we must
+                // still produce the report so the worker exits cleanly and the host's
+                // per-task-run dispatch can pair it with the
+                // `KubernetesRuntime::teardown` path. When cancel is NOT set, an
+                // `update_task_run_status` failure stays fatal — a genuine RPC
+                // malfunction worth surfacing.
+                if let Err(e) = self
             .services
             .update_task_run_status(run_id.clone(), terminal_status)
             .await
-        {
+                {
             if self.services.cancel().is_cancelled() {
                 debug!(
                     task_run_id = %run_id,
@@ -1836,61 +1766,61 @@ impl TaskRunSupervisor {
                 cleanup_cargo_target_run_dir(&run_id).await;
                 return Err(SupervisorError::UpdateTaskRunStatus(e));
             }
-        }
+                }
 
-        cleanup_cargo_target_run_dir(&run_id).await;
+                cleanup_cargo_target_run_dir(&run_id).await;
 
-        info!(task_run_id = %run_id, ?outcome, "task-run finished");
-        Ok(TaskRunReport {
+                info!(task_run_id = %run_id, ?outcome, "task-run finished");
+                Ok(TaskRunReport {
             task_run_id: run_id,
             outcome,
             stages_completed: completed,
-            verification_run_id,
-        })
-    }
-
-    /// Best-effort terminal status write for an early-cancelled run.
-    ///
-    /// Called from `run` when a host-bound RPC fails *during* an active
-    /// cancellation, before the supervisor would otherwise reach the
-    /// stage for-loop's natural cancel-check (and therefore before the
-    /// trailing `update_task_run_status` at the bottom of `run`).  The
-    /// helper always attempts the terminal RPC so the host's
-    /// `task_runs.status` row flips to `interrupted` regardless of which
-    /// stage tripped the cancel.  A failure on this last RPC is
-    /// swallowed — the cancellation IS the success, and a transport
-    /// error here just means the host's per-task-run dispatch will fall
-    /// back to its Job-status polling path.
-    async fn finalize_interrupted(
-        &self,
-        run_id: String,
-        stages_completed: Vec<RoleKind>,
-    ) -> Result<TaskRunReport, SupervisorError> {
-        if let Err(e) = self
-            .services
-            .update_task_run_status(run_id.clone(), TaskRunStatus::Interrupted)
-            .await
-        {
-            debug!(
-                task_run_id = %run_id,
-                error = %e,
-                "finalize_interrupted: update_task_run_status failed; \
-                 host will fall back to Job-status polling"
-            );
-        }
-        cleanup_cargo_target_run_dir(&run_id).await;
-
-        info!(task_run_id = %run_id, "task-run interrupted (early-cancel path)");
-        Ok(TaskRunReport {
-            task_run_id: run_id,
-            outcome: TaskRunOutcome::Interrupted,
-            stages_completed,
-            // Interrupted runs never reach the worker-submit point, so no in-pod
-            // verification ran.
             verification_run_id: None,
-        })
-    }
-}
+                })
+            }
+
+                /// Best-effort terminal status write for an early-cancelled run.
+                ///
+                /// Called from `run` when a host-bound RPC fails *during* an active
+                /// cancellation, before the supervisor would otherwise reach the
+                /// stage for-loop's natural cancel-check (and therefore before the
+                /// trailing `update_task_run_status` at the bottom of `run`).  The
+                /// helper always attempts the terminal RPC so the host's
+                /// `task_runs.status` row flips to `interrupted` regardless of which
+                /// stage tripped the cancel.  A failure on this last RPC is
+                /// swallowed — the cancellation IS the success, and a transport
+                /// error here just means the host's per-task-run dispatch will fall
+                /// back to its Job-status polling path.
+                async fn finalize_interrupted(
+            &self,
+            run_id: String,
+            stages_completed: Vec<RoleKind>,
+                ) -> Result<TaskRunReport, SupervisorError> {
+            if let Err(e) = self
+                .services
+                .update_task_run_status(run_id.clone(), TaskRunStatus::Interrupted)
+                .await
+            {
+                debug!(
+                    task_run_id = %run_id,
+                    error = %e,
+                    "finalize_interrupted: update_task_run_status failed; \
+                     host will fall back to Job-status polling"
+                );
+            }
+            cleanup_cargo_target_run_dir(&run_id).await;
+
+            info!(task_run_id = %run_id, "task-run interrupted (early-cancel path)");
+            Ok(TaskRunReport {
+                task_run_id: run_id,
+                outcome: TaskRunOutcome::Interrupted,
+                stages_completed,
+                // Interrupted runs never reach the worker-submit point, so no in-pod
+                // verification ran.
+                verification_run_id: None,
+            })
+                }
+            }
 
 async fn cleanup_cargo_target_run_dir(task_run_id: &str) {
     let started = Instant::now();
@@ -3038,7 +2968,7 @@ mod tests {
     /// level. The transition failure is logged on the host side; the
     /// worker pod treats it as best-effort, matching the policy used
     /// by every other transition call in this loop
-    /// (`PlannerClose`, `LeadEscalate`, `submit_verification`, etc.).
+    /// (`PlannerClose`, `LeadEscalate`, `submit_task_review`, etc.).
     #[tokio::test]
     async fn planner_escalate_close_transition_failure_still_surfaces_closed() {
         let outcome = apply_planner_escalate_route(

@@ -496,10 +496,3 @@ imagePipeline:
   # Jobs; no template in this chart references it directly — the controller
   # reads it from env and plugs it into the Job PodSpec at dispatch time.
   builderImage: "ghcr.io/djinnos/djinn-image-builder:latest"
-
-# On-demand backing services (Phase C). The feature itself is gated server-side
-# by DJINN_BACKING_SERVICES_ENABLED (default off); this only controls the
-# NetworkPolicy that isolates the service Pods. Enable both together.
-backingServices:
-  networkPolicy:
-    enabled: false

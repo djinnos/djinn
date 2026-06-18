@@ -22,8 +22,10 @@ impl ImageStatus {
     pub const FAILED: &'static str = "failed";
 }
 
-/// A row of `images`. JSON fields (`config`, `allowed_service_presets`) are
-/// returned as raw text; callers parse against `djinn-stack`.
+/// A row of `images`. The JSON `config` field is returned as raw text; callers
+/// parse it against `djinn-stack`. The set of injected backing services lives in
+/// the `image_service_presets` junction (see [`ImageRepository::list_service_presets`]),
+/// not on the row.
 #[derive(Clone, Debug)]
 pub struct Image {
     pub id: String,
@@ -35,7 +37,6 @@ pub struct Image {
     pub registry_digest: Option<String>,
     pub status: String,
     pub last_error: Option<String>,
-    pub allowed_service_presets: String,
 }
 
 fn map_image(r: &sqlx::postgres::PgRow) -> Image {
@@ -49,13 +50,11 @@ fn map_image(r: &sqlx::postgres::PgRow) -> Image {
         registry_digest: r.get("registry_digest"),
         status: r.get("status"),
         last_error: r.get("last_error"),
-        allowed_service_presets: r.get("allowed_service_presets"),
     }
 }
 
 const SELECT_COLS: &str = r#"id, name, description,
-    config::text AS config, config_hash, tag, registry_digest, status, last_error,
-    allowed_service_presets::text AS allowed_service_presets"#;
+    config::text AS config, config_hash, tag, registry_digest, status, last_error"#;
 
 pub struct ImageRepository {
     db: Database,
@@ -148,18 +147,6 @@ impl ImageRepository {
         Ok(())
     }
 
-    pub async fn set_allowed_service_presets(&self, id: &str, presets_json: &str) -> Result<()> {
-        self.db.ensure_initialized().await?;
-        let presets: serde_json::Value = serde_json::from_str(presets_json)
-            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
-        sqlx::query("UPDATE images SET allowed_service_presets = $2::jsonb WHERE id = $1")
-            .bind(id)
-            .bind(presets)
-            .execute(self.db.pool())
-            .await?;
-        Ok(())
-    }
-
     // ── controller-facing build status transitions ──────────────────────────
 
     pub async fn mark_building(&self, id: &str, config_hash: &str) -> Result<()> {
@@ -204,12 +191,13 @@ impl ImageRepository {
         Ok(())
     }
 
-    // ── allowed service presets (capability; junction table, migration 47) ──
+    // ── injected backing services (junction table, migration 66) ────────────
 
-    /// Preset ids this image's tasks may request.
-    pub async fn list_allowed_presets(&self, image_id: &str) -> Result<Vec<String>> {
+    /// Service-preset ids injected as native sidecars into every Pod that runs
+    /// this image.
+    pub async fn list_service_presets(&self, image_id: &str) -> Result<Vec<String>> {
         self.db.ensure_initialized().await?;
-        let rows = sqlx::query("SELECT preset_id FROM image_allowed_presets WHERE image_id = $1")
+        let rows = sqlx::query("SELECT preset_id FROM image_service_presets WHERE image_id = $1")
             .bind(image_id)
             .fetch_all(self.db.pool())
             .await?;
@@ -219,17 +207,17 @@ impl ImageRepository {
             .collect())
     }
 
-    /// Replace the image's allowed-preset set wholesale.
-    pub async fn set_allowed_presets(&self, image_id: &str, preset_ids: &[String]) -> Result<()> {
+    /// Replace the image's injected-service set wholesale.
+    pub async fn set_service_presets(&self, image_id: &str, preset_ids: &[String]) -> Result<()> {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
-        sqlx::query("DELETE FROM image_allowed_presets WHERE image_id = $1")
+        sqlx::query("DELETE FROM image_service_presets WHERE image_id = $1")
             .bind(image_id)
             .execute(&mut *tx)
             .await?;
         for preset_id in preset_ids {
             sqlx::query(
-                "INSERT INTO image_allowed_presets (image_id, preset_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                "INSERT INTO image_service_presets (image_id, preset_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
             )
             .bind(image_id)
             .bind(preset_id)
@@ -238,18 +226,6 @@ impl ImageRepository {
         }
         tx.commit().await?;
         Ok(())
-    }
-
-    pub async fn is_preset_allowed(&self, image_id: &str, preset_id: &str) -> Result<bool> {
-        self.db.ensure_initialized().await?;
-        let row = sqlx::query(
-            "SELECT 1 AS ok FROM image_allowed_presets WHERE image_id = $1 AND preset_id = $2",
-        )
-        .bind(image_id)
-        .bind(preset_id)
-        .fetch_optional(self.db.pool())
-        .await?;
-        Ok(row.is_some())
     }
 
     // ── project ↔ image selection ───────────────────────────────────────────

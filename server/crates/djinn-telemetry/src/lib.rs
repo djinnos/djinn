@@ -24,6 +24,9 @@ const PR_POLLER_TRACKED: &str = "djinn_pr_poller_tracked";
 const MERGE_FAILURES_TOTAL: &str = "djinn_merge_failures_total";
 const DOCTOR_FINDINGS: &str = "djinn_doctor_findings";
 const DOCTOR_RUN_DURATION_SECONDS: &str = "djinn_doctor_run_duration_seconds";
+const CARGO_SEED_HIT_TOTAL: &str = "djinn_cargo_seed_hit_total";
+const CARGO_SEED_COLD_TOTAL: &str = "djinn_cargo_seed_cold_total";
+const CARGO_WARM_BASE_FRESHNESS_SECONDS: &str = "djinn_cargo_warm_base_freshness_seconds";
 const SLOT_POOL_STATES: [&str; 2] = ["free", "busy"];
 const JIT_PITFALL_HINTS_TOTAL: &str = "djinn_jit_pitfall_hints_total";
 const JIT_PITFALL_OUTCOMES: [&str; 7] = [
@@ -145,6 +148,37 @@ pub mod doctor {
     /// Convenience wrapper for callers measuring with `std::time::Duration`.
     pub fn record_run_duration(check: &str, duration: std::time::Duration) {
         set_run_duration_seconds(check, duration.as_secs_f64());
+    }
+}
+
+pub mod cargo_cache {
+    pub const SEED_HIT_TOTAL: &str = super::CARGO_SEED_HIT_TOTAL;
+    pub const SEED_COLD_TOTAL: &str = super::CARGO_SEED_COLD_TOTAL;
+    pub const WARM_BASE_FRESHNESS_SECONDS: &str = super::CARGO_WARM_BASE_FRESHNESS_SECONDS;
+
+    /// Increment the Cargo target warm-base seed hit counter for a project.
+    pub fn record_seed_hit(project_id: &str) {
+        metrics::counter!(super::CARGO_SEED_HIT_TOTAL, "project_id" => project_id.to_owned())
+            .increment(1);
+    }
+
+    /// Increment the Cargo target cold-start fallback counter for a project and reason.
+    pub fn record_seed_cold(project_id: &str, fallback_reason: &str) {
+        metrics::counter!(
+            super::CARGO_SEED_COLD_TOTAL,
+            "project_id" => project_id.to_owned(),
+            "fallback_reason" => fallback_reason.to_owned()
+        )
+        .increment(1);
+    }
+
+    /// Set the elapsed age/freshness gauge for a just-produced warm Cargo base.
+    pub fn record_warm_base_freshness(project_id: &str, age_secs: f64) {
+        metrics::gauge!(
+            super::CARGO_WARM_BASE_FRESHNESS_SECONDS,
+            "project_id" => project_id.to_owned()
+        )
+        .set(age_secs);
     }
 }
 
@@ -281,6 +315,18 @@ fn register_metrics() {
     metrics::describe_gauge!(
         DOCTOR_RUN_DURATION_SECONDS,
         "Doctor check run duration in seconds for the most recent recorded run. The only label is the stable DoctorCheck::name() value as check."
+    );
+    metrics::describe_counter!(
+        CARGO_SEED_HIT_TOTAL,
+        "Cargo target warm-base seed successes partitioned by project id."
+    );
+    metrics::describe_counter!(
+        CARGO_SEED_COLD_TOTAL,
+        "Cargo target seed fallbacks to a cold private run target dir partitioned by project id and fallback reason."
+    );
+    metrics::describe_gauge!(
+        CARGO_WARM_BASE_FRESHNESS_SECONDS,
+        "Seconds elapsed while producing the most recent warm Cargo target base for a project."
     );
 }
 
@@ -531,6 +577,74 @@ mod tests {
                 std::time::Duration::from_millis(250),
             );
         });
+        assert_sync_unit(|| cargo_cache::record_seed_hit("project-sync"));
+        assert_sync_unit(|| cargo_cache::record_seed_cold("project-sync", "base_missing"));
+        assert_sync_unit(|| cargo_cache::record_warm_base_freshness("project-sync", 1.0));
+    }
+
+    #[test]
+    fn cargo_seed_hit_counter_renders_project_label() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let project_id = "project-seed-hit-test";
+        cargo_cache::record_seed_hit(project_id);
+
+        let rendered = render().unwrap();
+        let sample = rendered_sample(
+            &rendered,
+            cargo_cache::SEED_HIT_TOTAL,
+            &[("project_id", project_id)],
+        );
+        assert!(
+            sample.ends_with(" 1"),
+            "unexpected seed-hit sample: {sample}"
+        );
+    }
+
+    #[test]
+    fn cargo_seed_cold_counter_renders_fallback_reason_label() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let project_id = "project-seed-cold-test";
+        let fallback_reason = "base target dir is missing";
+        cargo_cache::record_seed_cold(project_id, fallback_reason);
+
+        let rendered = render().unwrap();
+        let sample = rendered_sample(
+            &rendered,
+            cargo_cache::SEED_COLD_TOTAL,
+            &[
+                ("project_id", project_id),
+                ("fallback_reason", fallback_reason),
+            ],
+        );
+        assert!(
+            sample.ends_with(" 1"),
+            "unexpected seed-cold sample: {sample}"
+        );
+    }
+
+    #[test]
+    fn cargo_warm_base_freshness_gauge_renders_positive_value() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let project_id = "project-warm-freshness-test";
+        cargo_cache::record_warm_base_freshness(project_id, 2.5);
+
+        let rendered = render().unwrap();
+        let sample = rendered_sample(
+            &rendered,
+            cargo_cache::WARM_BASE_FRESHNESS_SECONDS,
+            &[("project_id", project_id)],
+        );
+        let value = sample
+            .rsplit_once(' ')
+            .and_then(|(_, value)| value.parse::<f64>().ok())
+            .expect("freshness gauge sample should end with a number");
+        assert!(value > 0.0, "freshness gauge must be positive: {sample}");
     }
 
     #[test]

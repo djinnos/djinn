@@ -9,8 +9,7 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use djinn_control_plane::bridge::{
-    GitOps, ProvisionServiceRequest, ProvisionedService, RuntimeDispatchError, RuntimeOps,
-    SemanticQueryEmbedding, TaskrunJobRef,
+    GitOps, RuntimeDispatchError, RuntimeOps, SemanticQueryEmbedding, TaskrunJobRef,
 };
 use djinn_git::{GitActorHandle, GitError};
 
@@ -134,44 +133,6 @@ impl RuntimeOps for AppState {
             Ok(()) => Ok(()),
             Err(e) => Err(map_warmer_error(e)),
         }
-    }
-
-    async fn provision_backing_service(
-        &self,
-        req: ProvisionServiceRequest,
-    ) -> Result<ProvisionedService, String> {
-        let rt_req = djinn_runtime::BackingServiceRequest {
-            instance_id: req.instance_id,
-            task_run_id: req.task_run_id,
-            service_type: req.service_type,
-            image: req.image,
-            port: req.port,
-            env: req.env,
-            cpu_request: req.cpu_request,
-            memory_request: req.memory_request,
-            cpu_limit: req.cpu_limit,
-            memory_limit: req.memory_limit,
-            conn_template: req.conn_template,
-        };
-        let conn = self
-            .graph_warmer()
-            .await
-            .provision_backing_service(rt_req)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(ProvisionedService {
-            pod_name: conn.pod_name,
-            service_name: conn.service_name,
-            conn_string: conn.conn_string,
-        })
-    }
-
-    async fn release_backing_service(&self, instance_id: &str) -> Result<(), String> {
-        self.graph_warmer()
-            .await
-            .release_backing_service(instance_id)
-            .await
-            .map_err(|e| e.to_string())
     }
 
     async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String> {

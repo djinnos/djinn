@@ -54,9 +54,6 @@ export function AgentForm({
   );
   const [mcpServers, setMcpServers] = useState<string[]>(initial?.mcp_servers ?? []);
   const [skills, setSkills] = useState<string[]>(initial?.skills ?? []);
-  const [verificationCommand, setVerificationCommand] = useState(
-    initial?.verification_command ?? "",
-  );
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -70,7 +67,6 @@ export function AgentForm({
         .filter(Boolean),
       mcp_servers: mcpServers,
       skills,
-      verification_command: verificationCommand.trim() || null,
     });
   };
 
@@ -293,23 +289,6 @@ export function AgentForm({
               })}
             </div>
           )}
-        </div>
-
-        {/* Verification command */}
-        <div className="space-y-2">
-          <Label htmlFor="role-verification" className="text-xs text-muted-foreground block">
-            Verification command
-          </Label>
-          <Input
-            id="role-verification"
-            placeholder="e.g. cargo test -- --nocapture"
-            value={verificationCommand}
-            onChange={(e) => setVerificationCommand(e.target.value)}
-            className="font-mono text-sm"
-          />
-          <p className="text-xs text-muted-foreground/60">
-            Custom command to verify this agent's work. Leave empty to use project defaults.
-          </p>
         </div>
       </div>
     </form>
