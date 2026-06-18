@@ -39,6 +39,16 @@ export function formatDecimal(value: number | null | undefined): string {
   }).format(value);
 }
 
+export function formatAverageReopens(value: number | null | undefined): string {
+  return formatDecimal(value);
+}
+
+export function formatDeltaPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined) return EM_DASH;
+  const pct = Math.abs(value) <= 1 ? value * 100 : value;
+  return `${pct > 0 ? "+" : ""}${pct.toFixed(Math.abs(pct) < 10 ? 1 : 0)}%`;
+}
+
 export function formatBucket(date: string): string {
   const parsed = new Date(date);
   if (Number.isNaN(parsed.getTime())) return date;
