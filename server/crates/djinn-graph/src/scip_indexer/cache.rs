@@ -131,6 +131,12 @@ impl CacheKeyIngredients {
         let bytes = serde_json::to_vec(self).context("serialize SCIP cache key ingredients")?;
         Ok(ScipCacheKey(hex_sha256(&bytes)))
     }
+
+    #[cfg(test)]
+    fn with_schema_version(mut self, schema_version: impl Into<String>) -> Self {
+        self.schema_version = schema_version.into();
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -333,6 +339,66 @@ fn version_override_env_name(indexer: SupportedIndexer) -> String {
     name
 }
 
+fn relevant_environment_from_env(
+    indexer: SupportedIndexer,
+    mut get_env: impl FnMut(&str) -> Option<String>,
+) -> BTreeMap<String, String> {
+    let mut names = vec![
+        "BUNDLE_GEMFILE".to_string(),
+        "CARGO_BUILD_JOBS".to_string(),
+        "DOTNET_ROOT".to_string(),
+        "GOMODCACHE".to_string(),
+        "GONOSUMDB".to_string(),
+        "GOPRIVATE".to_string(),
+        "GRADLE_USER_HOME".to_string(),
+        "JAVA_HOME".to_string(),
+        "MAVEN_OPTS".to_string(),
+        "NODE_ENV".to_string(),
+        "NPM_CONFIG_USERCONFIG".to_string(),
+        "PIP_EXTRA_INDEX_URL".to_string(),
+        "PIP_INDEX_URL".to_string(),
+        "PNPM_HOME".to_string(),
+        "RUSTUP_TOOLCHAIN".to_string(),
+    ];
+    names.push(version_override_env_name(indexer));
+    names.sort();
+    names.dedup();
+
+    names
+        .into_iter()
+        .filter_map(|name| get_env(&name).map(|value| (name, value)))
+        .collect()
+}
+
+pub(crate) fn relevant_environment(indexer: SupportedIndexer) -> BTreeMap<String, String> {
+    relevant_environment_from_env(indexer, |name| env::var(name).ok())
+}
+
+pub(crate) fn hash_file(path: &Path) -> Result<String> {
+    let bytes =
+        fs::read(path).with_context(|| format!("read {} for SCIP cache hash", path.display()))?;
+    Ok(hex_sha256(&bytes))
+}
+
+pub(crate) fn hash_existing_files(
+    root: &Path,
+    relative_paths: impl IntoIterator<Item = impl AsRef<Path>>,
+) -> BTreeMap<String, String> {
+    let mut hashes = BTreeMap::new();
+    for relative_path in relative_paths {
+        let relative_path = relative_path.as_ref();
+        if relative_path.is_absolute() {
+            continue;
+        }
+        let absolute_path = root.join(relative_path);
+        let Ok(hash) = hash_file(&absolute_path) else {
+            continue;
+        };
+        hashes.insert(relative_path.to_string_lossy().replace('\\', "/"), hash);
+    }
+    hashes
+}
+
 struct PublishLock {
     path: PathBuf,
 }
@@ -490,6 +556,52 @@ mod tests {
         let mut second = first.clone();
         second.command = CommandShape::from_plan(&plan);
         assert_eq!(key(&first), key(&second));
+    }
+
+    #[test]
+    fn cache_key_changes_on_schema_version_bump() {
+        let base = base_ingredients();
+        let bumped = base.clone().with_schema_version("v2");
+        assert_ne!(key(&base), key(&bumped));
+    }
+
+    #[test]
+    fn relevant_environment_collects_only_cache_affecting_names() {
+        let env = relevant_environment_from_env(SupportedIndexer::TypeScript, |name| match name {
+            "NODE_ENV" => Some("production".to_string()),
+            "SCIP_TYPESCRIPT_VERSION" => Some("5.5.0".to_string()),
+            "PATH" => Some("/bin".to_string()),
+            _ => None,
+        });
+
+        assert_eq!(env.get("NODE_ENV"), Some(&"production".to_string()));
+        assert_eq!(
+            env.get("SCIP_TYPESCRIPT_VERSION"),
+            Some(&"5.5.0".to_string())
+        );
+        assert!(
+            !env.contains_key("PATH"),
+            "absolute PATH should not affect keys"
+        );
+    }
+
+    #[test]
+    fn hash_existing_files_hashes_relative_inputs_and_ignores_missing() {
+        let tmp = tempdir_in_workspace();
+        let source = tmp.path().join("src/main.ts");
+        fs::create_dir_all(source.parent().expect("source parent")).expect("create source dir");
+        fs::write(&source, b"console.log('hello')\n").expect("write source");
+
+        let hashes = hash_existing_files(
+            tmp.path(),
+            [PathBuf::from("src/main.ts"), PathBuf::from("missing.ts")],
+        );
+
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(
+            hashes.get("src/main.ts"),
+            Some(&hash_file(&source).expect("hash source"))
+        );
     }
 
     #[test]
