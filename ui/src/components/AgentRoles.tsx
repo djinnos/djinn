@@ -140,6 +140,12 @@ export function AgentRoles() {
     }
   };
 
+  const handleLearnedPromptCleared = (id: string) => {
+    setRoles((prev) =>
+      prev.map((role) => (role.id === id ? { ...role, learned_prompt: null } : role)),
+    );
+  };
+
   // Full-page form takeover for create/edit
   const editingRole = editingId ? roles.find((r) => r.id === editingId) : null;
   const projectDefaults = roles.filter((role) => role.is_default);
@@ -179,6 +185,9 @@ export function AgentRoles() {
           isBusy={editBusy}
           availableMcpServers={availableMcpServers}
           availableSkills={availableSkills}
+          learnedPromptRole={editingRole}
+          canClearLearnedPrompt={isAdmin}
+          onLearnedPromptCleared={() => handleLearnedPromptCleared(editingRole.id)}
           onSubmit={(data) => void handleUpdate(editingRole, data)}
           onCancel={() => setEditingId(null)}
         />
@@ -235,6 +244,7 @@ export function AgentRoles() {
                 isDeleting={deletingId === role.id}
                 canEdit={isAdmin}
                 editLabel="Edit instructions"
+                onLearnedPromptCleared={() => handleLearnedPromptCleared(role.id)}
               />
             ))}
           </div>
@@ -276,6 +286,7 @@ export function AgentRoles() {
                 onDelete={() => void handleDelete(role.id)}
                 isDeleting={deletingId === role.id}
                 canEdit={isAdmin}
+                onLearnedPromptCleared={() => handleLearnedPromptCleared(role.id)}
               />
             ))}
           </div>

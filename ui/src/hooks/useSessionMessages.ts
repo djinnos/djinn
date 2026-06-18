@@ -3,7 +3,7 @@
  *
  * Returns a merged timeline of:
  *  - Session messages from the DB (via task_timeline MCP tool)
- *  - Activity log entries (status changes, verification, comments)
+ *  - Activity log entries (status changes, comments)
  *  - Live streaming deltas from SSE (session.message events)
  */
 
@@ -99,24 +99,6 @@ export interface CommentBlock {
   timestamp: string;
 }
 
-export interface VerificationStep {
-  command: string;
-  phase: "setup" | "verification";
-  passed: boolean;
-  exitCode?: number;
-  stdout?: string;
-  stderr?: string;
-  durationMs?: number;
-}
-
-export interface VerificationBlock {
-  kind: "verification";
-  steps: VerificationStep[];
-  passed: boolean;
-  totalDurationMs: number;
-  timestamp: string;
-}
-
 export interface StreamingDelta {
   kind: "streaming";
   sessionId: string;
@@ -154,7 +136,6 @@ export type TimelineEntry =
   | SystemDivider
   | CommandBlock
   | CommentBlock
-  | VerificationBlock
   | StreamingDelta
   | LoopGuardTrippedBlock
   | BudgetParkBlock;
@@ -228,7 +209,6 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
 
       // Build timeline entries
       const entries: TimelineEntry[] = [];
-      const pendingCommandRuns: Array<{ steps: VerificationStep[]; timestamp: string }> = [];
 
       // Add session messages (already sorted by timestamp from server)
       for (const msg of result.messages ?? []) {
@@ -285,24 +265,22 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
           }
         } else if (entry.event_type === "commands_run") {
           const payload = entry.payload as Record<string, unknown>;
-          const phase = (payload?.phase as string) ?? "verification";
           const commands = payload?.commands as Array<Record<string, unknown>> | undefined;
 
           if (commands?.length) {
-            const steps: VerificationStep[] = commands.map((cmd) => {
+            for (const cmd of commands) {
               const name = (cmd.name as string) || (cmd.command as string) || "unknown";
               const exitCode = cmd.exit_code as number | undefined;
-              return {
-                command: name,
-                phase: phase as "setup" | "verification",
+              entries.push({
+                kind: "command",
+                name,
+                body: ((cmd.stdout as string) || (cmd.stderr as string) || "").trim(),
                 passed: exitCode === 0,
                 exitCode: exitCode ?? undefined,
-                stdout: (cmd.stdout as string) || undefined,
-                stderr: (cmd.stderr as string) || undefined,
-                durationMs: cmd.duration_ms as number | undefined,
-              };
-            });
-            pendingCommandRuns.push({ steps, timestamp: entry.timestamp });
+                command: name,
+                timestamp: entry.timestamp,
+              });
+            }
           }
         } else if (entry.event_type === "verification" || entry.event_type === "setup") {
           const body = ((entry.payload as Record<string, unknown>)?.body as string) ?? "";
@@ -341,54 +319,6 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
           }
         }
       }
-
-      // Group commands_run events into verification blocks.
-      // A setup event followed by a verification event (within 60s) = one cycle.
-      // Consecutive events with the same phase = separate cycles.
-      if (pendingCommandRuns.length > 0) {
-        pendingCommandRuns.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-
-        let i = 0;
-        while (i < pendingCommandRuns.length) {
-          const current = pendingCommandRuns[i];
-          const currentPhases = new Set(current.steps.map((s) => s.phase));
-
-          // Check if next event is a different phase within 60s (same cycle)
-          const next = pendingCommandRuns[i + 1];
-          const nextPhases = next ? new Set(next.steps.map((s) => s.phase)) : null;
-          const timeDiff = next
-            ? new Date(next.timestamp).getTime() - new Date(current.timestamp).getTime()
-            : Infinity;
-
-          const shouldMerge = next
-            && timeDiff <= 60_000
-            && !setsOverlap(currentPhases, nextPhases!);
-
-          if (shouldMerge) {
-            const allSteps = [...current.steps, ...next!.steps];
-            const totalDuration = allSteps.reduce((sum, s) => sum + (s.durationMs ?? 0), 0);
-            entries.push({
-              kind: "verification",
-              steps: allSteps,
-              passed: allSteps.every((s) => s.passed),
-              totalDurationMs: totalDuration,
-              timestamp: current.timestamp,
-            });
-            i += 2;
-          } else {
-            const totalDuration = current.steps.reduce((sum, s) => sum + (s.durationMs ?? 0), 0);
-            entries.push({
-              kind: "verification",
-              steps: current.steps,
-              passed: current.steps.every((s) => s.passed),
-              totalDurationMs: totalDuration,
-              timestamp: current.timestamp,
-            });
-            i += 1;
-          }
-        }
-      }
-
 
       // Sort by timestamp
       entries.sort((a, b) => {
@@ -476,18 +406,12 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
 const STATUS_LABELS: Record<string, string> = {
   open: "Open",
   in_progress: "Coding",
-  verifying: "Verifying",
   needs_task_review: "Review",
   in_task_review: "Reviewing",
   needs_lead_intervention: "Lead Intervention",
   in_lead_intervention: "Lead Intervening",
   closed: "Done",
 };
-
-function setsOverlap(a: Set<string>, b: Set<string>): boolean {
-  for (const v of a) if (b.has(v)) return true;
-  return false;
-}
 
 function formatStatus(status: string): string {
   return STATUS_LABELS[status] ?? status;
