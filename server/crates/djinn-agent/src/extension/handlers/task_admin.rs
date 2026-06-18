@@ -3,6 +3,77 @@ use crate::knowledge_promotion::{
     KnowledgeCleanupReason, KnowledgePromotionDecision, apply_task_knowledge_decision,
 };
 
+/// True when an issue_type goes through the full PR/merge lifecycle (and so a
+/// "done" close should correspond to a real merge to the base branch).
+fn issue_type_uses_full_lifecycle(issue_type: &str) -> bool {
+    matches!(issue_type, "task" | "bug" | "feature" | "decomposition")
+}
+
+/// Decide whether an agent-driven `force_close` must be refused because the task
+/// holds committed-but-unmerged work. Returns `Some(error_message)` to refuse,
+/// `None` to allow. Pure so it can be unit-tested without a DB.
+///
+/// Two cases, both for full-lifecycle worker tasks with no `merge_commit_sha`:
+///
+/// 1. **No replacements at all** — a bare-reason force-close that would mark the
+///    task done without it ever merging or being decomposed. (Original guard.)
+/// 2. **Open PR but unmerged** (task b29n / PR #718) — even *with*
+///    replacement_task_ids, a task whose PR is open but hasn't merged must not be
+///    force-closed. The `replacement_task_ids` exemption exists for genuine
+///    decomposition (where the replacement carries the work forward), but the
+///    planner abused it to declare an approved-but-unmerged PR "superseded": the
+///    required `Quality Gate` was red, the code never reached `main`, and the
+///    "replacement" (CI hygiene) did not carry the original code. Downstream
+///    tasks then broke against missing symbols. An open, unmerged PR means the
+///    work is real and committed but blocked from landing — it must be driven to
+///    merge (or its PR explicitly closed), not silently abandoned.
+///
+/// Tasks whose PR never opened (`pr_url` is `None`/empty) can still be
+/// force-closed via replacement_task_ids — that is legitimate decomposition. The
+/// coordinator's pr_poller loop-breaking escalation is unaffected because it
+/// transitions through the repository directly, not this tool handler.
+fn force_close_unmerged_block(
+    issue_type: &str,
+    merge_commit_sha: Option<&str>,
+    pr_url: Option<&str>,
+    has_replacements: bool,
+    short_id: &str,
+) -> Option<String> {
+    if !issue_type_uses_full_lifecycle(issue_type) {
+        return None;
+    }
+    let has_merge_sha = merge_commit_sha.is_some_and(|s| !s.is_empty());
+    if has_merge_sha {
+        return None;
+    }
+    let has_open_pr = pr_url.is_some_and(|u| !u.is_empty());
+
+    if has_open_pr {
+        return Some(format!(
+            "task '{short_id}' (issue_type={issue_type}) has an open PR ({pr}) but no \
+             merge_commit_sha — force_close is not allowed, even with replacement_task_ids. The \
+             work is committed to a PR branch but has NOT merged to the base branch (often because \
+             a required check is red), so closing it would abandon the code and break downstream \
+             tasks that depend on it. Drive the PR to merge (fix the failing required checks), or \
+             close the PR on GitHub first if the work is genuinely being abandoned. Do not declare \
+             an unmerged PR 'done'/'superseded'.",
+            pr = pr_url.unwrap_or(""),
+        ));
+    }
+
+    if !has_replacements {
+        return Some(format!(
+            "task '{short_id}' (issue_type={issue_type}) has no merge_commit_sha and no \
+             replacement_task_ids — force_close with a bare reason is not allowed for worker \
+             tasks. Either provide replacement_task_ids (decomposition) or wait for the PR to open \
+             + merge. If the work genuinely landed on a different branch/PR, set merge_commit_sha \
+             first via the supervisor PR-merge flow."
+        ));
+    }
+
+    None
+}
+
 pub(super) async fn call_task_transition(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -73,32 +144,19 @@ pub(super) async fn call_task_transition(
             }));
         }
 
-        // Worker tasks (issue_type=task/bug/feature) must produce a real merged PR
-        // before they can be closed. The planner/lead patrol previously used a
-        // bare "reason" to mass-close tasks whose reviewer just approved them but
-        // whose PR never actually opened — making it look like the wave landed
-        // when nothing reached the remote. Block that path explicitly: if the
-        // task is a full-lifecycle issue_type AND merge_commit_sha is null AND
-        // no replacement_task_ids are provided, refuse the force_close.
-        let task_uses_full_lifecycle = matches!(
-            task.issue_type.as_str(),
-            "task" | "bug" | "feature" | "decomposition"
-        );
-        let has_merge_sha = task
-            .merge_commit_sha
-            .as_ref()
-            .is_some_and(|s| !s.is_empty());
-        if task_uses_full_lifecycle && !has_merge_sha && !has_replacements {
-            return Ok(serde_json::json!({
-                "error": format!(
-                    "task '{}' (issue_type={}) has no merge_commit_sha and no replacement_task_ids — \
-                     force_close with a bare reason is not allowed for worker tasks. Either provide \
-                     replacement_task_ids (decomposition) or wait for the PR to open + merge. If the \
-                     work genuinely landed on a different branch/PR, set merge_commit_sha first via \
-                     the supervisor PR-merge flow.",
-                    task.short_id, task.issue_type
-                )
-            }));
+        // Worker tasks must produce a real merged PR before they can be closed
+        // as done. See `force_close_unmerged_block` for the two guarded cases
+        // (no-merge-sha-no-replacements, and open-PR-but-unmerged). Both stem
+        // from the planner faking a "landed/superseded" status for work that
+        // never reached the base branch.
+        if let Some(err) = force_close_unmerged_block(
+            &task.issue_type,
+            task.merge_commit_sha.as_deref(),
+            task.pr_url.as_deref(),
+            has_replacements,
+            &task.short_id,
+        ) {
+            return Ok(serde_json::json!({ "error": err }));
         }
 
         // Validate replacement task IDs if provided (skip empty arrays)
@@ -324,4 +382,99 @@ pub(super) async fn call_task_blocked_list(
         })
         .collect();
     Ok(serde_json::json!({ "tasks": tasks }))
+}
+
+#[cfg(test)]
+mod force_close_guard_tests {
+    use super::force_close_unmerged_block;
+
+    #[test]
+    fn merged_task_is_allowed() {
+        // A real merge SHA → work landed → closing is fine regardless of PR/reps.
+        assert!(
+            force_close_unmerged_block(
+                "task",
+                Some("3249dce5"),
+                Some("https://github.com/o/r/pull/718"),
+                false,
+                "b29n",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn open_pr_unmerged_blocked_even_with_replacements() {
+        // The exact b29n / PR #718 abuse: approved but unmerged PR, planner
+        // force-closes as "superseded" with a CI-hygiene replacement task. Must
+        // be refused even though replacements are provided.
+        let err = force_close_unmerged_block(
+            "task",
+            None,
+            Some("https://github.com/djinnos/djinn/pull/718"),
+            true, // has replacement zgaq
+            "b29n",
+        )
+        .expect("open unmerged PR must block force_close");
+        assert!(err.contains("open PR"));
+        assert!(err.contains("not merged") || err.contains("NOT merged"));
+        assert!(err.contains("even with replacement_task_ids"));
+    }
+
+    #[test]
+    fn open_pr_unmerged_blocked_without_replacements() {
+        let err = force_close_unmerged_block(
+            "feature",
+            None,
+            Some("https://github.com/o/r/pull/9"),
+            false,
+            "abcd",
+        )
+        .expect("open unmerged PR must block");
+        assert!(err.contains("open PR"));
+    }
+
+    #[test]
+    fn no_pr_no_replacements_blocked() {
+        // Original guard: bare-reason close of a never-PR'd worker task.
+        let err = force_close_unmerged_block("bug", None, None, false, "abcd")
+            .expect("bare-reason close must block");
+        assert!(err.contains("no merge_commit_sha and no replacement_task_ids"));
+    }
+
+    #[test]
+    fn no_pr_with_replacements_allowed() {
+        // Legitimate decomposition: PR never opened, replacement carries work.
+        assert!(
+            force_close_unmerged_block("task", None, None, true, "abcd").is_none(),
+            "decomposition of a never-PR'd task is allowed via replacements"
+        );
+    }
+
+    #[test]
+    fn empty_pr_url_treated_as_no_pr() {
+        // An empty pr_url string must not count as an open PR.
+        assert!(
+            force_close_unmerged_block("task", None, Some(""), true, "abcd").is_none(),
+            "empty pr_url is not an open PR; decomposition stays allowed"
+        );
+        let err = force_close_unmerged_block("task", None, Some(""), false, "abcd")
+            .expect("empty pr_url + no replacements still hits the bare-reason guard");
+        assert!(err.contains("no merge_commit_sha and no replacement_task_ids"));
+    }
+
+    #[test]
+    fn non_lifecycle_issue_type_is_exempt() {
+        // Spikes / chores etc. don't go through the PR/merge lifecycle.
+        assert!(
+            force_close_unmerged_block(
+                "spike",
+                None,
+                Some("https://github.com/o/r/pull/1"),
+                false,
+                "abcd",
+            )
+            .is_none()
+        );
+    }
 }
