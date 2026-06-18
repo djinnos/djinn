@@ -55,16 +55,29 @@ pub fn required_sections(note_type: &str) -> &'static [&'static str] {
 }
 
 /// Return the required sections that are absent *or out of canonical order* in
-/// `content`. Sections are matched as markdown headings (`## {section}`); a
-/// section is reported missing unless every earlier required heading precedes
-/// it, so swapping two headings flags the later one as missing.
+/// `content`. Sections are matched as exact level-two markdown headings
+/// (`## {section}`); a section is reported missing unless every earlier required
+/// heading precedes it, so swapping two headings flags the later one as missing.
 pub fn missing_required_sections(content: &str, required: &[&str]) -> Vec<String> {
+    let heading_positions = content
+        .lines()
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            Some((start, line.trim_end()))
+        })
+        .filter(|(_, line)| line.starts_with("## "))
+        .collect::<Vec<_>>();
+
     let mut cursor = 0usize;
     let mut missing = Vec::new();
     for section in required {
         let heading = format!("## {section}");
-        match content[cursor..].find(&heading) {
-            Some(found_at) => cursor += found_at + heading.len(),
+        match heading_positions
+            .iter()
+            .find(|(position, line)| *position >= cursor && *line == heading)
+        {
+            Some((position, line)) => cursor = position + line.len(),
             None => missing.push((*section).to_string()),
         }
     }
