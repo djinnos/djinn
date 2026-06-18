@@ -677,6 +677,50 @@ pub(crate) async fn run_supervisor_dispatch(
                 "supervisor dispatch: failed to finalize session row after infra death"
             ),
         }
+
+        // BUG 1 re-attach: in the in-pod verification design the worker writes a
+        // terminal `verification_runs` row (and persists its `WorkerSubmitted`
+        // report) BEFORE the pod can die out-of-band. When the pod is TTL-GC'd
+        // the report frame is no longer buffered on `events_rx`, so the streamed
+        // report is gone and we fall back to the `Interrupted` teardown stub
+        // below — whose outcome is NOT `WorkerSubmitted`, so the host
+        // verification pipeline never gets armed and the task is left `verifying`
+        // with no pipeline. The coordinator's stuck-`verifying` sweep then resets
+        // it `verifying → open`, discarding completed-and-verified work.
+        //
+        // Detect that case at the seam: if a USABLE terminal in-pod
+        // `verification_runs` row exists for this task, re-arm the slot-free host
+        // pipeline against it directly. `spawn_verification_with_in_pod_run`
+        // consumes the existing row (idempotent against the unchanged commit) —
+        // exactly what the clean `WorkerSubmitted` path does below. We do this
+        // BEFORE the teardown-stub fallback so the re-attach wins the race with
+        // the coordinator sweep.
+        match djinn_db::VerificationRunRepository::new(app_state.db.clone())
+            .latest_terminal_for_task(&task.id)
+            .await
+        {
+            Ok(Some(run_id)) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    verification_run_id = %run_id,
+                    "supervisor dispatch: infra death after in-pod verification wrote terminal row; \
+                     re-arming host verification pipeline instead of discarding the run"
+                );
+                crate::actors::slot::verification::spawn_verification_with_in_pod_run(
+                    task.id.clone(),
+                    project_path.clone(),
+                    app_state.clone(),
+                    Some(run_id),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "supervisor dispatch: failed to look up in-pod verification row after infra death; \
+                 leaving recovery to the coordinator sweep"
+            ),
+        }
     }
 
     match (report_result, teardown) {
@@ -766,10 +810,13 @@ pub(crate) async fn run_supervisor_dispatch(
             //     coordinator's throttle→stall intent).
             //   - Failure   → `record_failure` (auth/invalid/5xx/invalid-output:
             //     gentler, trips only after repeats — a one-off may be transient).
-            // ContextOverflow / EmptyCompletion / Transport and untyped errors
-            // classified to `None` in `stage.rs` and are deliberately NOT fed
-            // (reactive compaction / empty-turn backoff / one-off blip handle
-            // those; non-provider errors must not over-trip the breaker).
+            // A hard `Transport` death folds into `Failure` in `stage.rs` so a
+            // model that dies instantly on every dispatch trips the gentle
+            // consecutive-failure breaker (a one-off blip is absorbed by the next
+            // successful run's `record_success`). ContextOverflow / EmptyCompletion
+            // and untyped errors still classify to `None` and are deliberately NOT
+            // fed (reactive compaction / empty-turn backoff handle those;
+            // non-provider errors must not over-trip the breaker).
             if let Some(class) = provider_failure_class_for_report(&report) {
                 let (is_throttle, retry_after_ms) = match class {
                     djinn_runtime::ProviderFailureClass::Throttle { retry_after_ms } => {
