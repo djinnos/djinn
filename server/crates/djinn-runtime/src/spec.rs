@@ -276,8 +276,10 @@ pub struct TaskRunSpec {
 /// (`supervisor_runner.rs`) maps the class back onto `record_failure` /
 /// `record_stall` using the task creator's scope. Only the classes the breaker
 /// actually acts on are represented — failures the breaker deliberately ignores
-/// (ContextOverflow, EmptyCompletion, Transport) and untyped/legacy errors carry
-/// `None` so they never trip it.
+/// (ContextOverflow, EmptyCompletion) and untyped/legacy errors carry `None` so
+/// they never trip it. A hard `Transport` death folds into `Failure` (gentle
+/// consecutive-failure breaker) so a model that dies instantly on every dispatch
+/// auto-disables instead of being re-selected forever.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderFailureClass {
     /// Auth / persistent-invalid-request / invalid-output / 5xx provider
