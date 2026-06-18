@@ -57,17 +57,18 @@ fn provider_helpers_cover_branches() {
         format_family_for_provider("fireworks", "gpt-5.4"),
         FormatFamily::OpenAI
     );
-    // Xiaomi MiMo Token Plan is Anthropic-compatible; the dotted model id
-    // (`mimo-v2.5-pro`) must not perturb routing.
+    // Xiaomi MiMo Token Plan (SGP) is OpenAI-compatible (models.dev-native
+    // `xiaomi-token-plan-sgp`); it must route to OpenAI via the default arm. The
+    // dotted model id (`mimo-v2.5-pro`) must not perturb routing.
     assert_eq!(
-        format_family_for_provider("xiaomi-mimo", "mimo-v2.5-pro"),
-        FormatFamily::Anthropic
+        format_family_for_provider("xiaomi-token-plan-sgp", "mimo-v2.5-pro"),
+        FormatFamily::OpenAI
     );
-    // Kimi Coding Plan is Anthropic-compatible via the Kimi Code subscription
+    // Kimi for Coding is Anthropic-compatible via the Kimi Code subscription
     // endpoint; the `kimi` provider-id substring must route to Anthropic (not
     // the OpenAI fallback).
     assert_eq!(
-        format_family_for_provider("kimi-coding-plan", "kimi-for-coding"),
+        format_family_for_provider("kimi-for-coding", "k2p7"),
         FormatFamily::Anthropic
     );
 
@@ -75,24 +76,24 @@ fn provider_helpers_cover_branches() {
     assert!(anthropic.streaming);
     assert_eq!(anthropic.max_tokens_default, Some(64_000));
 
-    // Xiaomi MiMo gets Anthropic-style caps (streaming + default max_tokens).
-    let mimo = capabilities_for_provider("xiaomi-mimo");
-    assert!(mimo.streaming);
-    assert_eq!(mimo.max_tokens_default, Some(64_000));
-    // ...and Bearer auth (NOT the Anthropic-native x-api-key path).
+    // Xiaomi MiMo Token Plan (SGP) is OpenAI-compatible → default caps (no
+    // forced max_tokens), and Bearer auth.
+    let xiaomi = capabilities_for_provider("xiaomi-token-plan-sgp");
+    assert!(xiaomi.streaming);
+    assert_eq!(xiaomi.max_tokens_default, None);
     assert!(matches!(
-        auth_method_for_provider("xiaomi-mimo", "tp-abc"),
+        auth_method_for_provider("xiaomi-token-plan-sgp", "tp-abc"),
         AuthMethod::BearerToken(v) if v == "tp-abc"
     ));
 
-    // Kimi Coding Plan gets Anthropic-style caps (streaming + default
+    // Kimi for Coding gets Anthropic-style caps (streaming + default
     // max_tokens).
-    let kimi = capabilities_for_provider("kimi-coding-plan");
+    let kimi = capabilities_for_provider("kimi-for-coding");
     assert!(kimi.streaming);
     assert_eq!(kimi.max_tokens_default, Some(64_000));
     // ...and Bearer auth (NOT the Anthropic-native x-api-key path).
     assert!(matches!(
-        auth_method_for_provider("kimi-coding-plan", "sk-kimi"),
+        auth_method_for_provider("kimi-for-coding", "sk-kimi"),
         AuthMethod::BearerToken(v) if v == "sk-kimi"
     ));
 

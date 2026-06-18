@@ -1547,14 +1547,14 @@ mod tests {
                 max_tokens_default: Some(64_000),
             },
             Expected {
-                id: "xiaomi-mimo",
-                fixed_family: Some(FormatFamily::Anthropic),
+                id: "xiaomi-token-plan-sgp",
+                fixed_family: Some(FormatFamily::OpenAI),
                 auth_shape: AuthShape::Bearer,
                 streaming: true,
-                max_tokens_default: Some(64_000),
+                max_tokens_default: None,
             },
             Expected {
-                id: "kimi-coding-plan",
+                id: "kimi-for-coding",
                 fixed_family: Some(FormatFamily::Anthropic),
                 auth_shape: AuthShape::Bearer,
                 streaming: true,

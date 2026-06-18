@@ -499,24 +499,58 @@ mod tests {
     }
 
     /// Xiaomi MiMo Token Plan ships with dotted model ids (`mimo-v2.5-pro`).
-    /// These must round-trip as `xiaomi-mimo/mimo-v2.5-pro` without the catalog
-    /// split logic mangling the dot (cf. the Fireworks multi-segment 404 bug).
+    /// These must round-trip as `xiaomi-token-plan-sgp/mimo-v2.5-pro` without the
+    /// catalog split logic mangling the dot (cf. the Fireworks multi-segment 404
+    /// bug). `xiaomi-token-plan-sgp` is models.dev-native (its models arrive via
+    /// the live catalog refresh, not the embedded snapshot), so the dotted model
+    /// list is seeded here to exercise the split logic in isolation.
     #[test]
-    fn xiaomi_mimo_dotted_model_id_round_trips() {
+    fn xiaomi_token_plan_sgp_dotted_model_id_round_trips() {
         let catalog = CatalogService::new();
-        let models = catalog.list_models("xiaomi-mimo");
+        let provider = Provider {
+            id: "xiaomi-token-plan-sgp".to_string(),
+            name: "Xiaomi MiMo Token Plan (SGP)".to_string(),
+            npm: "@ai-sdk/openai-compatible".to_string(),
+            env_vars: vec!["XIAOMI_API_KEY".to_string()],
+            base_url: "https://token-plan-sgp.xiaomimimo.com/v1".to_string(),
+            docs_url: "https://platform.xiaomimimo.com".to_string(),
+            is_openai_compatible: true,
+        };
+        let seed = |id: &str, name: &str| Model {
+            id: id.to_string(),
+            provider_id: "xiaomi-token-plan-sgp".to_string(),
+            name: name.to_string(),
+            tool_call: true,
+            reasoning: true,
+            attachment: false,
+            context_window: 1_000_000,
+            output_limit: 64_000,
+            pricing: Pricing::default(),
+        };
+        catalog.add_custom_provider(
+            provider,
+            vec![
+                seed("mimo-v2.5-pro", "MiMo-V2.5-Pro"),
+                seed("mimo-v2.5", "MiMo-V2.5"),
+            ],
+        );
+
+        let models = catalog.list_models("xiaomi-token-plan-sgp");
         assert_eq!(
             models.len(),
             2,
-            "xiaomi-mimo should expose mimo-v2.5-pro + mimo-v2.5; got {models:?}"
+            "xiaomi-token-plan-sgp should expose mimo-v2.5-pro + mimo-v2.5; got {models:?}"
         );
-        for full in ["xiaomi-mimo/mimo-v2.5-pro", "xiaomi-mimo/mimo-v2.5"] {
+        for full in [
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            "xiaomi-token-plan-sgp/mimo-v2.5",
+        ] {
             let found = catalog
                 .find_model(full)
                 .unwrap_or_else(|| panic!("should resolve dotted full id {full}"));
-            assert_eq!(found.provider_id, "xiaomi-mimo");
+            assert_eq!(found.provider_id, "xiaomi-token-plan-sgp");
             // The dot in `v2.5` must survive intact.
-            assert_eq!(format!("xiaomi-mimo/{}", found.id), full);
+            assert_eq!(format!("xiaomi-token-plan-sgp/{}", found.id), full);
         }
     }
 
