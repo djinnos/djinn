@@ -140,7 +140,7 @@ describe("AgentRoles", () => {
     ]);
   });
 
-  it("loads and renders default and specialist role content", async () => {
+  it("groups project defaults separately from specialists with explanatory copy", async () => {
     vi.mocked(fetchAgents).mockResolvedValue([defaultWorker, reviewerSpecialist, architectDefault]);
 
     render(<AgentRoles />);
@@ -149,18 +149,56 @@ describe("AgentRoles", () => {
     expect(await screen.findByRole("heading", { name: "Agent Roles" })).toBeInTheDocument();
 
     expect(fetchAgents).toHaveBeenCalledWith("project-1");
-    expect(screen.getByText("Handles implementation tasks")).toBeInTheDocument();
-    expect(screen.getByText("Designs system architecture")).toBeInTheDocument();
-    expect(screen.getAllByText("default").length).toBe(2);
-    expect(screen.getByText("Strict Reviewer")).toBeInTheDocument();
-    expect(screen.getByText("Reviews risky backend changes")).toBeInTheDocument();
-    expect(screen.getByText("1 ext")).toBeInTheDocument();
-    expect(screen.getByText("2 exts")).toBeInTheDocument();
-    expect(screen.getAllByText("Worker")[0]).toBeInTheDocument();
-    expect(screen.getByText("Reviewer")).toBeInTheDocument();
-    expect(screen.getByText("Architect")).toBeInTheDocument();
-    expect(screen.getByText("2 MCP")).toBeInTheDocument();
-    expect(screen.getByText("2 skills")).toBeInTheDocument();
+
+    const defaultsSection = screen.getByRole("region", { name: "Project defaults" });
+    const specialistsSection = screen.getByRole("region", { name: "Specialists" });
+
+    expect(defaultsSection).toHaveTextContent(
+      /used automatically for worker, planner, lead, reviewer, and architect dispatch/i,
+    );
+    expect(defaultsSection).toHaveTextContent(
+      /customize the default behavior for this project/i,
+    );
+    expect(specialistsSection).toHaveTextContent(
+      /run only when a task routes to that specialist agent type or name/i,
+    );
+    expect(specialistsSection).toHaveTextContent(/New Specialist creates specialist-only agents/i);
+
+    expect(within(defaultsSection).getByText("Handles implementation tasks")).toBeInTheDocument();
+    expect(within(defaultsSection).getByText("Designs system architecture")).toBeInTheDocument();
+    expect(within(defaultsSection).getAllByText("default").length).toBe(2);
+    expect(within(defaultsSection).queryByText("Strict Reviewer")).not.toBeInTheDocument();
+    expect(within(defaultsSection).getByText("1 ext")).toBeInTheDocument();
+    expect(within(defaultsSection).getByText("Worker")).toBeInTheDocument();
+    expect(within(defaultsSection).getByText("Architect")).toBeInTheDocument();
+    expect(within(defaultsSection).getByText("1 MCP")).toBeInTheDocument();
+    expect(within(defaultsSection).getByText("1 skill")).toBeInTheDocument();
+    expect(within(defaultsSection).getAllByRole("button", { name: "Edit instructions" })).toHaveLength(2);
+    expect(within(defaultsSection).queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+    expect(
+      within(defaultsSection).queryByRole("button", { name: /delete/i }),
+    ).not.toBeInTheDocument();
+
+    expect(within(specialistsSection).getByText("Strict Reviewer")).toBeInTheDocument();
+    expect(within(specialistsSection).getByText("Reviews risky backend changes")).toBeInTheDocument();
+    expect(within(specialistsSection).getByText("2 exts")).toBeInTheDocument();
+    expect(within(specialistsSection).getByText("Reviewer")).toBeInTheDocument();
+    expect(within(specialistsSection).getByText("2 MCP")).toBeInTheDocument();
+    expect(within(specialistsSection).getByText("2 skills")).toBeInTheDocument();
+    expect(within(specialistsSection).getByRole("button", { name: "Edit" })).toBeInTheDocument();
+  });
+
+  it("keeps specialist creation and empty copy in the specialists section", async () => {
+    vi.mocked(fetchAgents).mockResolvedValue([defaultWorker, architectDefault]);
+
+    render(<AgentRoles />);
+
+    const specialistsSection = await screen.findByRole("region", { name: "Specialists" });
+    expect(within(specialistsSection).getByRole("button", { name: "New Specialist" })).toBeInTheDocument();
+    expect(specialistsSection).toHaveTextContent(
+      /Create a specialist only when tasks should explicitly route to a custom agent type or name/i,
+    );
+    expect(specialistsSection).toHaveTextContent(/this does not edit project defaults/i);
   });
 
   it("creates a specialist from the form with selected capabilities", async () => {
@@ -176,12 +214,13 @@ describe("AgentRoles", () => {
       verification_command: "pnpm test AgentRoles.test.tsx",
     });
 
-    vi.mocked(fetchAgents).mockResolvedValue([]);
+    vi.mocked(fetchAgents).mockResolvedValue([defaultWorker]);
     vi.mocked(createAgent).mockResolvedValue(created);
 
     render(<AgentRoles />);
 
-    await user.click(await screen.findByRole("button", { name: "New Specialist" }));
+    const specialistsSection = await screen.findByRole("region", { name: "Specialists" });
+    await user.click(within(specialistsSection).getByRole("button", { name: "New Specialist" }));
 
     expect(await screen.findByRole("heading", { name: "New specialist" })).toBeInTheDocument();
     expect(fetchAvailableMcpServers).toHaveBeenCalledWith("project-1");
