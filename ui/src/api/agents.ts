@@ -4,7 +4,7 @@ async function getBaseUrl(): Promise<string> {
   return getServerBaseUrl();
 }
 
-export type BaseRole = "worker" | "reviewer" | "lead" | "planner";
+export type BaseRole = "worker" | "reviewer" | "lead" | "planner" | "architect";
 
 export interface Agent {
   id: string;

@@ -97,6 +97,14 @@ const reviewerSpecialist = makeAgent({
   skills: ["rust-review", "testing-library"],
 });
 
+const architectDefault = makeAgent({
+  id: "default-architect",
+  name: "Default Architect",
+  base_role: "architect",
+  description: "Designs system architecture",
+  is_default: true,
+});
+
 describe("AgentRoles", () => {
   beforeEach(() => {
     vi.mocked(fetchAgents).mockReset();
@@ -133,7 +141,7 @@ describe("AgentRoles", () => {
   });
 
   it("loads and renders default and specialist role content", async () => {
-    vi.mocked(fetchAgents).mockResolvedValue([defaultWorker, reviewerSpecialist]);
+    vi.mocked(fetchAgents).mockResolvedValue([defaultWorker, reviewerSpecialist, architectDefault]);
 
     render(<AgentRoles />);
 
@@ -149,6 +157,8 @@ describe("AgentRoles", () => {
     expect(screen.getByText("2 exts")).toBeInTheDocument();
     expect(screen.getAllByText("Worker")[0]).toBeInTheDocument();
     expect(screen.getByText("Reviewer")).toBeInTheDocument();
+    expect(screen.getByText("Architect")).toBeInTheDocument();
+    expect(screen.getByText("Designs system architecture")).toBeInTheDocument();
     expect(screen.getByText("2 MCP")).toBeInTheDocument();
     expect(screen.getByText("2 skills")).toBeInTheDocument();
   });

@@ -1,3 +1,5 @@
+#[path = "tests/agents.rs"]
+mod agents;
 #[path = "tests/contracts.rs"]
 mod contracts;
 #[path = "tests/debug.rs"]
