@@ -190,7 +190,7 @@ impl SupportedIndexer {
             Self::Clang => vec![
                 "--compdb-path".to_string(),
                 ".".to_string(),
-                "--output-path".to_string(),
+                "--index-output-path".to_string(),
                 output,
             ],
             // FIXME(ruby): scip-ruby has NO `index` subcommand — it runs as
