@@ -485,6 +485,34 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         "ensure_canonical_graph: build pipeline complete"
     );
 
+    // Out-of-core scope/parse store: resolve configuration and log whether
+    // the bounded accessor path is available. When engaged (env flag set AND
+    // node count meets threshold), downstream consumers can use
+    // `out_of_core::BoundedScopeAccessor` to keep resident memory bounded.
+    // The graph output is identical to the in-memory path — the out-of-core
+    // store is an accessor-layer optimization, not a different build pipeline.
+    match crate::out_of_core::resolve_out_of_core_config(node_count) {
+        Some(ooc_config) => {
+            tracing::info!(
+                project_id = %project_id,
+                node_count,
+                lru_capacity = ooc_config.lru_capacity,
+                min_nodes = ooc_config.min_nodes,
+                storage_path = %ooc_config.storage_path.display(),
+                "ensure_canonical_graph: out-of-core scope store available (env flag + threshold met)"
+            );
+        }
+        None if crate::out_of_core::out_of_core_enabled() => {
+            tracing::debug!(
+                project_id = %project_id,
+                node_count,
+                min_nodes = crate::out_of_core::out_of_core_min_nodes(),
+                "ensure_canonical_graph: out-of-core flag set but node count below threshold; using in-memory path"
+            );
+        }
+        None => {}
+    }
+
     // Never cache an empty graph. A real project always indexes to >0
     // nodes; node_count==0 means this warmer ran without the project
     // source (e.g. the server-side in-process AppStateGraphWarmer, whose

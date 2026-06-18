@@ -29,6 +29,7 @@ pub mod git_diff;
 pub mod graph_parity;
 pub mod index_tree;
 pub mod layout;
+pub mod out_of_core;
 pub mod process;
 pub mod processes;
 pub mod query_planner;
