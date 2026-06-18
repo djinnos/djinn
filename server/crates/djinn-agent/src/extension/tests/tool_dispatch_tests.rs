@@ -669,6 +669,190 @@ async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
     );
 }
 
+#[tokio::test]
+async fn agent_amend_prompt_accepts_specialist_worker_and_reviewer() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let repo = djinn_db::AgentRepository::new(db.clone(), EventBus::noop());
+
+    let worker = repo
+        .create_for_project(
+            &project.id,
+            djinn_db::AgentCreateInput {
+                name: "Rust specialist worker",
+                base_role: "worker",
+                description: "Handles Rust worker tasks",
+                system_prompt_extensions: "",
+                model_preference: None,
+                verification_command: None,
+                mcp_servers: None,
+                skills: None,
+                is_default: false,
+            },
+        )
+        .await
+        .expect("create specialist worker");
+    let reviewer = repo
+        .create_for_project(
+            &project.id,
+            djinn_db::AgentCreateInput {
+                name: "Rust specialist reviewer",
+                base_role: "reviewer",
+                description: "Reviews Rust-heavy work",
+                system_prompt_extensions: "",
+                model_preference: None,
+                verification_command: None,
+                mcp_servers: None,
+                skills: None,
+                is_default: false,
+            },
+        )
+        .await
+        .expect("create specialist reviewer");
+
+    for (agent_id, amendment) in [
+        (
+            worker.id.as_str(),
+            "When build failures repeat, inspect the first compiler error before editing.",
+        ),
+        (
+            reviewer.id.as_str(),
+            "When reviews repeatedly miss snapshots, verify schema snapshots before approval.",
+        ),
+    ] {
+        let response = call_agent_amend_prompt(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "agent_id": agent_id,
+                    "amendment": amendment,
+                    "metrics_snapshot": "{\"completed_task_count\":3,\"success_rate\":0.67}"
+                })
+                .as_object()
+                .expect("agent_amend_prompt args")
+                .clone(),
+            ),
+            &project_path,
+        )
+        .await
+        .expect("specialist worker/reviewer amendment should succeed");
+
+        assert_eq!(
+            response
+                .get("amendment_appended")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(
+            response
+                .get("learned_prompt")
+                .and_then(|value| value.as_str())
+                .is_some_and(|learned_prompt| learned_prompt.contains(amendment)),
+            "response should include appended learned_prompt: {response:?}"
+        );
+    }
+
+    let worker_history = repo.get_history(&worker.id).await.expect("worker history");
+    assert_eq!(worker_history.len(), 1);
+    let metrics_before: serde_json::Value = serde_json::from_str(
+        worker_history[0]
+            .metrics_before
+            .as_deref()
+            .expect("metrics_before logged"),
+    )
+    .expect("metrics_before json");
+    assert_eq!(metrics_before["completed_task_count"], serde_json::json!(3));
+    assert_eq!(metrics_before["success_rate"], serde_json::json!(0.67));
+}
+
+#[tokio::test]
+async fn agent_amend_prompt_rejects_default_and_non_worker_reviewer_targets() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let repo = djinn_db::AgentRepository::new(db.clone(), EventBus::noop());
+
+    let default_worker = repo
+        .create_for_project(
+            &project.id,
+            djinn_db::AgentCreateInput {
+                name: "Default worker role",
+                base_role: "worker",
+                description: "Default worker",
+                system_prompt_extensions: "Use system_prompt_extensions for default instructions",
+                model_preference: None,
+                verification_command: None,
+                mcp_servers: None,
+                skills: None,
+                is_default: true,
+            },
+        )
+        .await
+        .expect("create default worker");
+    let lead = repo
+        .create_for_project(
+            &project.id,
+            djinn_db::AgentCreateInput {
+                name: "Lead role",
+                base_role: "lead",
+                description: "Non worker/reviewer role",
+                system_prompt_extensions: "",
+                model_preference: None,
+                verification_command: None,
+                mcp_servers: None,
+                skills: None,
+                is_default: false,
+            },
+        )
+        .await
+        .expect("create lead");
+
+    for agent_id in [default_worker.id.as_str(), lead.id.as_str()] {
+        let err = call_agent_amend_prompt(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "agent_id": agent_id,
+                    "amendment": "Do not amend this ineligible role."
+                })
+                .as_object()
+                .expect("agent_amend_prompt args")
+                .clone(),
+            ),
+            &project_path,
+        )
+        .await
+        .expect_err("ineligible role should be rejected");
+
+        assert!(err.contains("only specialist worker/reviewer agents are eligible"));
+        assert!(err.contains("system_prompt_extensions"));
+    }
+
+    assert!(
+        repo.get(&default_worker.id)
+            .await
+            .expect("get default worker")
+            .expect("default worker still exists")
+            .learned_prompt
+            .is_none()
+    );
+    assert!(
+        repo.get(&lead.id)
+            .await
+            .expect("get lead")
+            .expect("lead still exists")
+            .learned_prompt
+            .is_none()
+    );
+}
+
 /// (G2) A windowed read (`offset` + `limit`) must return exactly the right
 /// window AND must stop streaming before reaching the rest of the file. We
 /// prove the early-stop by planting a NUL byte well past the window: a

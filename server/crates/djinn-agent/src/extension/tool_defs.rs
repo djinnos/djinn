@@ -67,15 +67,16 @@ pub(super) fn tool_request_planner() -> RmcpTool {
 pub(super) fn tool_role_amend_prompt() -> RmcpTool {
     RmcpTool::new(
         "agent_amend_prompt".to_string(),
-        "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer base_role). Do NOT use on architect, lead, or planner roles.".to_string(),
+        "Planner-owned, evidence-based amendment path for machine-managed learned_prompt updates. Use only after agent-effectiveness evidence (agent_metrics, repeated reviewer/lead feedback, or repeated task failures) shows a stable specialist-agent pattern; this is audited in learned_prompt_history and is not a substitute for human/project system_prompt_extensions. Only specialist worker/reviewer agents are eligible; default roles and non-worker/reviewer roles must not be amended. Append concise observed-pattern + behavioral-correction text; provide metrics_snapshot when available so the evaluator can compare before/after outcomes."
+            .to_string(),
         object!({
             "type": "object",
             "required": ["agent_id", "amendment"],
             "properties": {
                 "project": {"type": "string", "description": "Absolute project path"},
-                "agent_id": {"type": "string", "description": "Agent UUID or name to amend"},
-                "amendment": {"type": "string", "description": "Amendment text to append to learned_prompt"},
-                "metrics_snapshot": {"type": "string", "description": "JSON string of current metrics for the history record"}
+                "agent_id": {"type": "string", "description": "Specialist worker/reviewer agent UUID or name to amend; defaults and non-worker/reviewer roles are rejected"},
+                "amendment": {"type": "string", "description": "Concise observed-pattern and behavioral-correction text to append to the machine-managed learned_prompt"},
+                "metrics_snapshot": {"type": "string", "description": "Optional JSON string of current agent_metrics or equivalent evidence for the audit history record; Planner should provide it when available"}
             }
         }),
     )
