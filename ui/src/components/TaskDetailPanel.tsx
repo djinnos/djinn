@@ -1,25 +1,15 @@
 import type { Epic, Task, AcceptanceCriterion } from "@/api/types";
-import { StepLog } from "@/components/StepLog";
-import { useStore } from "zustand";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useEffect, useState } from "react";
 import { usersQueryOptions } from "@/api/queryOptions";
 import { userDisplayName } from "@/api/users";
 import { useTaskActions } from "@/hooks/useTaskActions";
 import { useExecutionControl } from "@/hooks/useExecutionControl";
 import { useSelectedProject } from "@/stores/useProjectStore";
-import { verificationStore } from "@/stores/verificationStore";
 import { Button } from "@/components/ui/button";
-import { ArrowDown01Icon, ArrowRight01Icon, Cancel01Icon, PlayIcon, Refresh01Icon, StopIcon } from "@hugeicons/core-free-icons";
+import { Cancel01Icon, PlayIcon, Refresh01Icon, StopIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import {
-  areSetupVerificationViewsEqual,
-  buildSetupVerificationView,
-  EMPTY_SETUP_VERIFICATION,
-  type SetupVerificationView,
-} from "@/lib/setupVerificationView";
 
 type TaskDetailPanelProps = {
   task: Task | null;
@@ -31,7 +21,6 @@ type TaskDetailPanelProps = {
 const STATUS_LABELS: Record<string, string> = {
   open: "Open",
   in_progress: "In Flight — Coding",
-  verifying: "In Flight — Verification",
   needs_task_review: "In Flight — Review",
   in_task_review: "In Flight — Review",
   needs_lead_intervention: "In Flight — Lead Intervention",
@@ -75,10 +64,6 @@ function SectionCard({ title, children }: { title: string; children: React.React
       <div className="rounded-md border bg-card p-4 text-sm">{children}</div>
     </section>
   );
-}
-
-function formatSeconds(durationMs: number): string {
-  return `${(durationMs / 1000).toFixed(durationMs >= 10000 ? 0 : 1)}s`;
 }
 
 function TaskActions({ task }: { task: Task }) {
@@ -160,42 +145,6 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
   const createdByLabel = task.created_by_user_id
     ? (creator ? userDisplayName(creator) : task.created_by_user_id)
     : "Agent / unassigned";
-  const setupVerification = useStore(verificationStore, (state) => {
-    const next = buildSetupVerificationView(task.id, state);
-    const storeState = state as ReturnType<typeof verificationStore.getState> & {
-      _lastSetupVerificationView?: SetupVerificationView;
-    };
-    const prev = storeState._lastSetupVerificationView;
-
-    if (prev && areSetupVerificationViewsEqual(prev, next)) {
-      return prev;
-    }
-
-    const stable = next.hasData ? next : { ...EMPTY_SETUP_VERIFICATION, taskId: task.id };
-    storeState._lastSetupVerificationView = stable;
-    return stable;
-  });
-  const shouldDefaultCollapse = setupVerification.allPassed;
-  const [isCollapsed, setIsCollapsed] = useState(shouldDefaultCollapse);
-
-  useEffect(() => {
-    if (setupVerification.hasFailed || setupVerification.isRunning) {
-      setIsCollapsed(false);
-      return;
-    }
-    if (setupVerification.allPassed) {
-      setIsCollapsed(true);
-    }
-  }, [setupVerification.hasFailed, setupVerification.isRunning, setupVerification.allPassed]);
-
-  const summary = setupVerification.hasFailed
-    ? `Setup failed at ${setupVerification.steps.find((step) => step.status === "failed")?.name ?? "an unknown step"}`
-    : setupVerification.isRunning
-      ? "Setup is running..."
-      : setupVerification.allPassed
-        ? `Setup passed in ${formatSeconds(setupVerification.totalDuration)}`
-        : "Setup pending";
-
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/40" role="dialog" aria-modal="true">
       <button type="button" className="h-full flex-1 cursor-default" onClick={onClose} aria-label="Close task details" />
@@ -237,29 +186,6 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
               <div><span className="font-medium">Updated:</span> {formatRelative(task.updated_at)}</div>
             </div>
           </SectionCard>
-
-          {setupVerification.hasData && (
-            <SectionCard title="Setup & Verification">
-              <div className="space-y-3">
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between rounded border px-3 py-2 text-left"
-                  onClick={() => setIsCollapsed((value) => !value)}
-                >
-                  <span className={setupVerification.hasFailed ? "font-medium text-red-500" : "text-muted-foreground"}>{summary}</span>
-                  {isCollapsed ? <HugeiconsIcon icon={ArrowRight01Icon} size={16} /> : <HugeiconsIcon icon={ArrowDown01Icon} size={16} />}
-                </button>
-                {!isCollapsed && (
-                  <StepLog
-                    steps={setupVerification.steps}
-                    status={setupVerification.status}
-                    originalDurationMs={setupVerification.totalDuration}
-                    emphasizedStepId={setupVerification.failedStepId}
-                  />
-                )}
-              </div>
-            </SectionCard>
-          )}
 
           <SectionCard title="Description">
             <div className="prose prose-sm max-w-none dark:prose-invert">

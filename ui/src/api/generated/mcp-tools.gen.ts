@@ -344,6 +344,17 @@ export namespace CodeGraphInputSchema {
    */
   context_filter?: string
   /**
+   * jc47: the caller's current HEAD / git commit SHA. When supplied,
+   * every successful `code_graph` response includes an additive
+   * `graph_staleness` object comparing this commit against the cached
+   * graph blob's pinned commit. Omit to keep the previous response
+   * shape (no `graph_staleness` field). Empty/whitespace values are
+   * normalized to `None` so clients that serialize every field as `""`
+   * don't accidentally trigger staleness computation. `caller_commit`
+   * and `currentHead` are accepted as aliases.
+   */
+  current_head?: string
+  /**
    * Edge direction filter for `neighbors`: `incoming`, `outgoing`, or omit for both.
    */
   direction?: string
@@ -966,6 +977,246 @@ export namespace DispatchResumeOutputSchema {
 
 }
 export type DispatchResumeOutput = DispatchResumeOutputSchema.DispatchResumeOutput;
+export namespace DoctorFixInputSchema {
+  /**
+   * Parameters for `doctor_fix`.
+   */
+  export interface DoctorFixInput {
+  /**
+   * The stable name of the check that owns the finding. Must match the
+   * `check_name` stored on the persisted finding row.
+   */
+  check_name: string
+  /**
+   * The persisted finding id (UUIDv7) to fix.
+   */
+  finding_id: string
+  [k: string]: any
+  }
+
+}
+export type DoctorFixInput = DoctorFixInputSchema.DoctorFixInput;
+export namespace DoctorFixOutputSchema {
+  /**
+   * Response for `doctor_fix`.
+   */
+  export interface DoctorFixOutput {
+  check_name: string
+  error?: string
+  finding_id: string
+  ok: boolean
+  [k: string]: any
+  }
+
+}
+export type DoctorFixOutput = DoctorFixOutputSchema.DoctorFixOutput;
+export namespace DoctorListFindingsInputSchema {
+  /**
+   * Parameters for `doctor_list_findings`.
+   * 
+   * All filters are optional; an unset field means "no narrowing on that
+   * dimension". The `check` filter matches `check_name` exactly. The
+   * `since` filter is a lower-bound timestamp — rows with
+   * `created_at < since` are excluded. The value should be a UTC
+   * ISO-8601 string matching the schema's `created_at` template so the
+   * string comparison the repository issues in SQL is also a valid
+   * chronological comparison.
+   * 
+   * `limit` is `i64` (not `usize`) so the generated MCP JSON schema
+   * lands on `format: int64` instead of the nonstandard `uint` pinned
+   * by `tool_schemas::mcp_tools_list_schemas_do_not_use_nonstandard_uint_…`.
+   * The repository's defensive ceiling (`MAX_RECENT_FINDINGS`) still
+   * applies, and any caller value above it is silently clamped.
+   */
+  export interface DoctorListFindingsInput {
+  /**
+   * Optional check name to narrow on (matches `check_name` exactly).
+   */
+  check?: string
+  /**
+   * Optional cap on the number of findings returned. Clamped to
+   * `MAX_RECENT_FINDINGS` (the repository's defensive ceiling) when
+   * larger. Defaults to the repository's defensive ceiling when
+   * omitted.
+   */
+  limit?: number
+  /**
+   * Optional lower-bound timestamp filter. Rows with
+   * `created_at < since` are excluded. Defaults to "no time
+   * filter" so callers can ask for "the last N findings for
+   * this check" without a cutoff.
+   */
+  since?: string
+  [k: string]: any
+  }
+
+}
+export type DoctorListFindingsInput = DoctorListFindingsInputSchema.DoctorListFindingsInput;
+export namespace DoctorListFindingsOutputSchema {
+  /**
+   * Response for `doctor_list_findings`.
+   */
+  export interface DoctorListFindingsOutput {
+  error?: string
+  /**
+   * `true` when a filter was applied. Useful for the board / audit
+   * UI to display "filtered by check X, since Y" in the response.
+   */
+  filtered_by_check: boolean
+  /**
+   * `true` when a `since` lower bound was applied.
+   */
+  filtered_by_since: boolean
+  /**
+   * Findings that match the request, newest-first. Empty when the
+   * filter is too narrow or no findings have been recorded yet.
+   */
+  findings: DoctorListFindingEntry[]
+  /**
+   * The actual limit used by the query (after the repository
+   * clamped it to `MAX_RECENT_FINDINGS`).
+   */
+  limit: number
+  ok: boolean
+  [k: string]: any
+  }
+  /**
+   * One persisted finding surfaced through `doctor_list_findings`.
+   * 
+   * Mirrors [`djinn_db::DoctorFinding`] but uses [`AnyJson`] for the
+   * free-form JSON payloads (`entity_ids`, `evidence`,
+   * `resolver_snapshot`) so the generated JSON Schema is the
+   * strict-client-friendly empty schema instead of the bare
+   * `serde_json::Value` catch-all that strict MCP clients (e.g.
+   * Claude Code) reject. The fields serialize to the same JSON shape
+   * as before — the wrapper is `#[serde(transparent)]` and only
+   * changes the schema, not the wire format.
+   */
+  export interface DoctorListFindingEntry {
+  check_name: string
+  /**
+   * Wall-clock UTC ISO-8601 timestamp the finding was recorded.
+   */
+  created_at: string
+  /**
+   * Free-form human-readable detail surfaced in reports.
+   */
+  detail?: string
+  /**
+   * Opaque entity ids this finding relates to. Always a JSON array
+   * (possibly empty) so callers can iterate without inspecting each
+   * row's shape.
+   */
+  entity_ids: {
+  [k: string]: any
+  }
+  /**
+   * Structured check-specific evidence. Free-form JSON.
+   */
+  evidence: {
+  [k: string]: any
+  }
+  /**
+   * Persisted finding id (from `doctor_findings.id`).
+   */
+  id: string
+  resolver_snapshot?: any
+  /**
+   * The run that produced this finding. `None` for ad-hoc inserts.
+   */
+  run_id?: string
+  severity: string
+  [k: string]: any
+  }
+
+}
+export type DoctorListFindingsOutput = DoctorListFindingsOutputSchema.DoctorListFindingsOutput;
+export namespace DoctorRunInputSchema {
+  /**
+   * Parameters for `doctor_run`.
+   */
+  export interface DoctorRunInput {
+  /**
+   * Optional list of check names to run. When omitted (or empty), all
+   * registered checks are run. Unknown names produce a structured error
+   * listing the valid check names so the caller can self-correct.
+   */
+  check_names?: string[]
+  [k: string]: any
+  }
+
+}
+export type DoctorRunInput = DoctorRunInputSchema.DoctorRunInput;
+export namespace DoctorRunOutputSchema {
+  /**
+   * Response for `doctor_run`.
+   */
+  export interface DoctorRunOutput {
+  error?: string
+  ok: boolean
+  /**
+   * All registered checks known at run time (even ones not selected),
+   * so the caller can see the full directory.
+   */
+  registered_checks: DoctorRunCheckMeta[]
+  /**
+   * Results for each check that was selected and executed.
+   */
+  results: DoctorRunCheckResult[]
+  /**
+   * Total number of findings emitted across all selected checks.
+   * 
+   * Counters are `i64` (not `usize`) so the generated MCP JSON schema
+   * lands on `format: int64` instead of the nonstandard `uint` pinned by
+   * `tool_schemas::mcp_tools_list_schemas_do_not_use_nonstandard_uint_…`.
+   */
+  total_findings: number
+  [k: string]: any
+  }
+  /**
+   * Metadata for one check as surfaced in the run report.
+   */
+  export interface DoctorRunCheckMeta {
+  description: string
+  name: string
+  [k: string]: any
+  }
+  /**
+   * Result of one check execution within a run.
+   */
+  export interface DoctorRunCheckResult {
+  check: DoctorRunCheckMeta
+  /**
+   * Error message when `ran` is `false`.
+   */
+  error?: string
+  /**
+   * Findings emitted by this check, with their persisted ids filled in.
+   */
+  findings: DoctorRunFindingEntry[]
+  /**
+   * `true` when the check ran without error (even if it emitted zero
+   * findings). `false` when the check itself returned an error.
+   */
+  ran: boolean
+  [k: string]: any
+  }
+  /**
+   * One persisted finding as surfaced in the run report.
+   */
+  export interface DoctorRunFindingEntry {
+  check_name: string
+  detail: string
+  /**
+   * Persisted finding id (from `doctor_findings.id`).
+   */
+  finding_id: string
+  severity: string
+  [k: string]: any
+  }
+
+}
+export type DoctorRunOutput = DoctorRunOutputSchema.DoctorRunOutput;
 export namespace EpicAddReadSourceInputSchema {
   export interface EpicAddReadSourceInput {
   /**
@@ -1687,10 +1938,18 @@ export namespace GetProjectDevcontainerStatusOutputSchema {
   error?: string
   /**
    * Derived status for the UI banner. One of
-   * `pending | running | ready | failed`. `pending` means no warm has
+   * `pending | running | ready | warning | failed`. `pending` means no warm has
    * ever run; `running` means the image is ready and a warm should be
    * in flight (or imminent); `ready` means derived graph freshness exists;
-   * `failed` mirrors the image build's failed status (no warm possible).
+   * `warning` means a non-fatal graph-cache shrink backstop fired
+   * (see `scip_indexer::append_graph_cache_shrink_warning` and
+   * `canonical_graph::detect_graph_cache_shrink_warning`) — the cache
+   * is still fresh and graph usage is unaffected, but operators should
+   * inspect the matching `workspace_warm_statuses` row carrying the
+   * old/new node counts and commit SHA; `failed` mirrors the image
+   * build's failed status (no warm possible) or any
+   * `failed`/`timed_out` workspace warm status (which always overrides
+   * a shrink warning).
    */
   graph_warm_status: string
   /**
@@ -2290,14 +2549,15 @@ export namespace ImageListOutputSchema {
   [k: string]: any
   }
   export interface ImageDto {
-  /**
-   * Service-preset ids tasks using this image may request (Phase C capability).
-   */
-  allowed_presets?: string[]
   config: EnvironmentConfig
   description?: string
   id: string
   name: string
+  /**
+   * Service-preset ids injected as native sidecars into every Pod that runs
+   * this image (e.g. a Postgres reachable on 127.0.0.1 with TEST_POSTGRES_URL).
+   */
+  service_presets?: string[]
   /**
    * Build status of the image's own config: none | building | ready | failed.
    */
@@ -2436,23 +2696,24 @@ export namespace ImageListOutputSchema {
 
 }
 export type ImageListOutput = ImageListOutputSchema.ImageListOutput;
-export namespace ImageSetAllowedPresetsInputSchema {
-  export interface ImageSetAllowedPresetsInput {
+export namespace ImageSetServicesInputSchema {
+  export interface ImageSetServicesInput {
   /**
    * Image id.
    */
   id: string
   /**
-   * Service-preset ids this image's tasks may request (full replacement).
+   * Service-preset ids to inject as native sidecars into every Pod that runs
+   * this image (full replacement). Empty clears all injected services.
    */
   preset_ids: string[]
   [k: string]: any
   }
 
 }
-export type ImageSetAllowedPresetsInput = ImageSetAllowedPresetsInputSchema.ImageSetAllowedPresetsInput;
-export namespace ImageSetAllowedPresetsOutputSchema {
-  export interface ImageSetAllowedPresetsOutput {
+export type ImageSetServicesInput = ImageSetServicesInputSchema.ImageSetServicesInput;
+export namespace ImageSetServicesOutputSchema {
+  export interface ImageSetServicesOutput {
   error?: string
   id?: string
   status: string
@@ -2460,7 +2721,7 @@ export namespace ImageSetAllowedPresetsOutputSchema {
   }
 
 }
-export type ImageSetAllowedPresetsOutput = ImageSetAllowedPresetsOutputSchema.ImageSetAllowedPresetsOutput;
+export type ImageSetServicesOutput = ImageSetServicesOutputSchema.ImageSetServicesOutput;
 export namespace ImageUpdateInputSchema {
   /**
    * A lifecycle / verification / setup command.
@@ -2655,6 +2916,13 @@ export namespace MemoryAssociationsOutputSchema {
   }
   export interface MemoryAssociationEntry {
   co_access_count: number
+  /**
+   * Association edge kind as stored on `note_associations.kind` (e.g. `"co_access"`).
+   * Today the only value written is `"co_access"`; future wave-1 graph-typed edges
+   * (builds_on / contradicts / supersedes / exemplifies) will widen the value set
+   * — see Epic 2chl. `#[serde(default)]` keeps older clients deserialising cleanly
+   * until they adopt the new field.
+   */
   kind?: string
   last_co_access: string
   note_permalink: string
@@ -2746,6 +3014,7 @@ export namespace MemoryBuildContextOutputSchema {
   note_type: string
   permalink: string
   project_id: string
+  retrieval_anchor?: string
   tags: string[]
   title: string
   updated_at: string
@@ -2892,6 +3161,11 @@ export namespace MemoryEditInputSchema {
   operation: string
   project: string
   /**
+   * Replace the note's retrieval anchor without modifying the note body.
+   * Also accepted as `applies_when`.
+   */
+  retrieval_anchor?: string
+  /**
    * Required for replace_section: heading text identifying the section.
    */
   section?: string
@@ -2918,6 +3192,7 @@ export namespace MemoryEditOutputSchema {
   note_type?: string
   permalink?: string
   project_id?: string
+  retrieval_anchor?: string
   tags?: string[]
   title?: string
   updated_at?: string
@@ -3146,6 +3421,7 @@ export namespace MemoryMoveOutputSchema {
   note_type?: string
   permalink?: string
   project_id?: string
+  retrieval_anchor?: string
   tags?: string[]
   title?: string
   updated_at?: string
@@ -3208,6 +3484,7 @@ export namespace MemoryReadOutputSchema {
   note_type?: string
   permalink?: string
   project_id?: string
+  retrieval_anchor?: string
   tags?: string[]
   title?: string
   updated_at?: string
@@ -3387,6 +3664,11 @@ export namespace MemoryWriteInputSchema {
    */
   project: string
   /**
+   * Objective situation where this note should be retrieved. Also accepted as
+   * `applies_when` for prompt/API language compatibility.
+   */
+  retrieval_anchor?: string
+  /**
    * Crate/module path prefixes this note applies to. Empty array means global.
    */
   scope_paths?: string[]
@@ -3421,6 +3703,7 @@ export namespace MemoryWriteOutputSchema {
   note_type?: string
   permalink?: string
   project_id?: string
+  retrieval_anchor?: string
   tags?: string[]
   title?: string
   updated_at?: string
@@ -4619,9 +4902,17 @@ export namespace ProposalCreateOutputSchema {
   error?: string
   id?: string
   /**
+   * Last proposal revision that the in-flight build has reconciled against.
+   */
+  last_reconciled_revision_seq?: number
+  /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
   latest_revision_seq?: number
+  /**
+   * True when the in-flight build is behind the latest proposal revision.
+   */
+  pending_reconcile?: boolean
   short_id?: string
   /**
    * Lifecycle: draft | in_review | approved | building | done | rejected |
@@ -4818,9 +5109,17 @@ export namespace ProposalGraduateOutputSchema {
   error?: string
   id?: string
   /**
+   * Last proposal revision that the in-flight build has reconciled against.
+   */
+  last_reconciled_revision_seq?: number
+  /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
   latest_revision_seq?: number
+  /**
+   * True when the in-flight build is behind the latest proposal revision.
+   */
+  pending_reconcile?: boolean
   short_id?: string
   /**
    * Lifecycle: draft | in_review | approved | building | done | rejected |
@@ -4899,9 +5198,17 @@ export namespace ProposalListOutputSchema {
   created_at: string
   id: string
   /**
+   * Last proposal revision that the in-flight build has reconciled against.
+   */
+  last_reconciled_revision_seq?: number
+  /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
   latest_revision_seq: number
+  /**
+   * True when the in-flight build is behind the latest proposal revision.
+   */
+  pending_reconcile: boolean
   short_id: string
   /**
    * Lifecycle: draft | in_review | approved | building | done | rejected |
@@ -4926,6 +5233,70 @@ export namespace ProposalListOutputSchema {
 
 }
 export type ProposalListOutput = ProposalListOutputSchema.ProposalListOutput;
+export namespace ProposalReconcileObsoleteEpicInputSchema {
+  export interface ProposalReconcileObsoleteEpicInput {
+  /**
+   * Epic UUID or short_id to retire from this proposal's graduated epics.
+   */
+  epic_id: string
+  /**
+   * Proposal UUID or short_id. Alias for `proposal_id`.
+   */
+  id?: string
+  /**
+   * When true, compute blast radius without closing tasks, closing/unlinking the epic, or killing sessions.
+   */
+  preview?: boolean
+  /**
+   * Proposal UUID or short_id. Alias for `id`.
+   */
+  proposal_id?: string
+  /**
+   * Why obsolete work is being force-closed. Defaults to a reconcile teardown reason.
+   */
+  reason?: string
+  [k: string]: any
+  }
+
+}
+export type ProposalReconcileObsoleteEpicInput = ProposalReconcileObsoleteEpicInputSchema.ProposalReconcileObsoleteEpicInput;
+export namespace ProposalReconcileObsoleteEpicOutputSchema {
+  export interface ProposalReconcileObsoleteEpicOutput {
+  /**
+   * `true` when merged work in the target epic prevented mutation.
+   */
+  blocked: boolean
+  blocked_feedback_body?: string
+  blocked_feedback_id?: string
+  epic_id?: string
+  /**
+   * Target epic closed, or that would be closed in preview.
+   */
+  epics_closed: number
+  error?: string
+  /**
+   * Task UUIDs in the target epic that have merged work and caused a block.
+   */
+  merged_tasks?: string[]
+  ok: boolean
+  /**
+   * `true` when this was a dry-run that did not mutate anything.
+   */
+  preview: boolean
+  proposal_id?: string
+  /**
+   * Running target-epic worker sessions killed, or live sessions in preview.
+   */
+  sessions_killed: number
+  /**
+   * Target-epic tasks force-closed, or open target-epic tasks in preview.
+   */
+  tasks_closed: number
+  [k: string]: any
+  }
+
+}
+export type ProposalReconcileObsoleteEpicOutput = ProposalReconcileObsoleteEpicOutputSchema.ProposalReconcileObsoleteEpicOutput;
 export namespace ProposalRemoveTargetInputSchema {
   export interface ProposalRemoveTargetInput {
   /**
@@ -5009,9 +5380,9 @@ export namespace ProposalShowOutputSchema {
    * Epic title, for display alongside the short id.
    */
   epic_title: string
-  project_path: string
-  reconciled_at_revision_seq: (number | null)
   needs_reconcile: boolean
+  project_path: string
+  reconciled_at_revision_seq?: number
   status: string
   [k: string]: any
   }
@@ -5058,9 +5429,17 @@ export namespace ProposalShowOutputSchema {
   created_at: string
   id: string
   /**
+   * Last proposal revision that the in-flight build has reconciled against.
+   */
+  last_reconciled_revision_seq?: number
+  /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
   latest_revision_seq: number
+  /**
+   * True when the in-flight build is behind the latest proposal revision.
+   */
+  pending_reconcile: boolean
   short_id: string
   /**
    * Lifecycle: draft | in_review | approved | building | done | rejected |
@@ -5094,9 +5473,9 @@ export namespace ProposalShowOutputSchema {
   event_kind: string
   event_metadata?: string
   id: string
+  seq: number
   status_from?: string
   status_to?: string
-  seq: number
   title: string
   [k: string]: any
   }
@@ -5172,9 +5551,17 @@ export namespace ProposalSignoffOutputSchema {
   error?: string
   id?: string
   /**
+   * Last proposal revision that the in-flight build has reconciled against.
+   */
+  last_reconciled_revision_seq?: number
+  /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
   latest_revision_seq?: number
+  /**
+   * True when the in-flight build is behind the latest proposal revision.
+   */
+  pending_reconcile?: boolean
   short_id?: string
   /**
    * Lifecycle: draft | in_review | approved | building | done | rejected |
@@ -5234,9 +5621,17 @@ export namespace ProposalSignoffClearOutputSchema {
   error?: string
   id?: string
   /**
+   * Last proposal revision that the in-flight build has reconciled against.
+   */
+  last_reconciled_revision_seq?: number
+  /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
   latest_revision_seq?: number
+  /**
+   * True when the in-flight build is behind the latest proposal revision.
+   */
+  pending_reconcile?: boolean
   short_id?: string
   /**
    * Lifecycle: draft | in_review | approved | building | done | rejected |
@@ -5372,9 +5767,17 @@ export namespace ProposalUpdateOutputSchema {
   error?: string
   id?: string
   /**
+   * Last proposal revision that the in-flight build has reconciled against.
+   */
+  last_reconciled_revision_seq?: number
+  /**
    * Head revision number (sign-offs anchored earlier are stale).
    */
   latest_revision_seq?: number
+  /**
+   * True when the in-flight build is behind the latest proposal revision.
+   */
+  pending_reconcile?: boolean
   short_id?: string
   /**
    * Lifecycle: draft | in_review | approved | building | done | rejected |
@@ -5505,6 +5908,19 @@ export namespace ProviderModelLookupInputSchema {
 }
 export type ProviderModelLookupInput = ProviderModelLookupInputSchema.ProviderModelLookupInput;
 export namespace ProviderModelLookupOutputSchema {
+  /**
+   * Coarse failure taxonomy for [`ToolError`].
+   * 
+   * Used by supervisors and downstream consumers to branch on failure mode
+   * without having to re-parse the message string. Every variant maps to a
+   * distinct operational decision the agent can make.
+   * 
+   * See the [module-level documentation](self) for the full classification
+   * table. The serialized form is the snake_case variant name (e.g.
+   * `"conflict_recoverable"`).
+   */
+  export type ErrorClass = ("not_found" | "conflict_recoverable" | "validation" | "permission" | "rate_limited" | "transient" | "internal")
+
   export interface ProviderModelLookupOutput {
   /**
    * G3 structured-error envelope, populated on a 404-style miss (the model id
@@ -5524,13 +5940,24 @@ export namespace ProviderModelLookupOutputSchema {
    */
   export interface ToolError {
   /**
-   * Raw upstream detail (response body, provider message) when available.
+   * Bounded upstream detail (response body, provider message) when
+   * available. Truncated to [`MAX_BODY_EXCERPT_BYTES`] bytes with a
+   * `[truncated: N bytes omitted]` marker if the raw body was longer. The
+   * raw body is preserved internally for `tracing::warn!` but never
+   * serialized into the agent-visible envelope.
    */
   body?: string
   /**
    * Human-readable message describing what went wrong. Always present.
    */
   error: string
+  /**
+   * Coarse failure class. Assigned at construction time from a typed
+   * source (HTTP status, provider error variant). Omitted from the wire
+   * when unknown — the legacy envelope shape (without this field) is
+   * still valid.
+   */
+  error_class?: (ErrorClass | null)
   /**
    * Actionable next step the agent can take to recover or disambiguate.
    */
@@ -5790,31 +6217,6 @@ export namespace RetriggerImageBuildOutputSchema {
 
 }
 export type RetriggerImageBuildOutput = RetriggerImageBuildOutputSchema.RetriggerImageBuildOutput;
-export namespace ServiceListInputSchema {
-  export interface ServiceListInput {
-  task: string
-  [k: string]: any
-  }
-
-}
-export type ServiceListInput = ServiceListInputSchema.ServiceListInput;
-export namespace ServiceListOutputSchema {
-  export interface ServiceListOutput {
-  error?: string
-  services: ServiceInstanceDto[]
-  status: string
-  [k: string]: any
-  }
-  export interface ServiceInstanceDto {
-  conn_string?: string
-  env_var?: string
-  service_type: string
-  status: string
-  [k: string]: any
-  }
-
-}
-export type ServiceListOutput = ServiceListOutputSchema.ServiceListOutput;
 export namespace ServicePresetListInputSchema {
   export interface ServicePresetListInput {
   [k: string]: any
@@ -5840,62 +6242,6 @@ export namespace ServicePresetListOutputSchema {
 
 }
 export type ServicePresetListOutput = ServicePresetListOutputSchema.ServicePresetListOutput;
-export namespace ServiceReleaseInputSchema {
-  export interface ServiceReleaseInput {
-  /**
-   * Release only this service type; omit to release all for the task.
-   */
-  service_type?: string
-  task: string
-  [k: string]: any
-  }
-
-}
-export type ServiceReleaseInput = ServiceReleaseInputSchema.ServiceReleaseInput;
-export namespace ServiceReleaseOutputSchema {
-  export interface ServiceReleaseOutput {
-  error?: string
-  released: number
-  status: string
-  [k: string]: any
-  }
-
-}
-export type ServiceReleaseOutput = ServiceReleaseOutputSchema.ServiceReleaseOutput;
-export namespace ServiceRequestInputSchema {
-  export interface ServiceRequestInput {
-  /**
-   * Preset to request: a preset id (e.g. `preset-postgres-18`), service type
-   * (`postgres`/`redis`/`rabbitmq`), or preset name.
-   */
-  preset: string
-  /**
-   * Task UUID or short_id this service is for (its current run owns the pod).
-   */
-  task: string
-  [k: string]: any
-  }
-
-}
-export type ServiceRequestInput = ServiceRequestInputSchema.ServiceRequestInput;
-export namespace ServiceRequestOutputSchema {
-  export interface ServiceRequestOutput {
-  /**
-   * Connection string to use (also set this in the named env var for tests).
-   */
-  conn_string?: string
-  /**
-   * Env var convention for this service (e.g. TEST_POSTGRES_URL / REDIS_URL / AMQP_URL).
-   */
-  env_var?: string
-  error?: string
-  service_type?: string
-  status: string
-  [k: string]: any
-  }
-
-}
-export type ServiceRequestOutput = ServiceRequestOutputSchema.ServiceRequestOutput;
 export namespace SessionActiveInputSchema {
   export interface SessionActiveInput {
   /**
@@ -5926,14 +6272,14 @@ export namespace SessionActiveOutputSchema {
   id: string
   model_id: string
   /**
+   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
+   */
+  parked_reason?: string
+  /**
    * `None` for chat sessions (global, user-scoped); `Some(_)` for every
    * other agent type. See `SessionRecord::project_id`.
    */
   project_id?: string
-  /**
-   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
-   */
-  parked_reason?: string
   started_at: string
   status: string
   task_id?: string
@@ -6018,14 +6364,14 @@ export namespace SessionListOutputSchema {
   id: string
   model_id: string
   /**
+   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
+   */
+  parked_reason?: string
+  /**
    * `None` for chat sessions (global, user-scoped); `Some(_)` for every
    * other agent type. See `SessionRecord::project_id`.
    */
   project_id?: string
-  /**
-   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
-   */
-  parked_reason?: string
   started_at: string
   status: string
   task_id?: string
@@ -6715,8 +7061,15 @@ export namespace TaskTimelineOutputSchema {
   }
   export interface TimelineActivity {
   actor_role: string
+  details?: any
   event_type: string
+  /**
+   * Renderer-friendly discriminator. Usually mirrors `event_type`; for
+   * structured payloads this is the semantic timeline kind.
+   */
+  kind: string
   payload: AnyJson
+  summary?: string
   timestamp: string
   [k: string]: any
   }
@@ -6740,14 +7093,14 @@ export namespace TaskTimelineOutputSchema {
   id: string
   model_id: string
   /**
+   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
+   */
+  parked_reason?: string
+  /**
    * `None` for chat sessions (global, user-scoped); `Some(_)` for every
    * other agent type. See `SessionRecord::project_id`.
    */
   project_id?: string
-  /**
-   * Optional deliberate-park reason for terminal sessions, e.g. `budget`.
-   */
-  parked_reason?: string
   started_at: string
   status: string
   task_id?: string
@@ -7016,7 +7369,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_allowed_presets" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "project_verification_get" | "project_verification_set" | "project_verification_test" | "project_verification_test_status" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_list" | "service_preset_list" | "service_release" | "service_request" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "project_verification_get" | "project_verification_set" | "project_verification_test" | "project_verification_test_status" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -7033,6 +7386,9 @@ export interface McpToolMap {
   "dispatch_pause": { input: DispatchPauseInput; output: DispatchPauseOutput };
   "dispatch_pause_status": { input: DispatchPauseStatusInput; output: DispatchPauseStatusOutput };
   "dispatch_resume": { input: DispatchResumeInput; output: DispatchResumeOutput };
+  "doctor_fix": { input: DoctorFixInput; output: DoctorFixOutput };
+  "doctor_list_findings": { input: DoctorListFindingsInput; output: DoctorListFindingsOutput };
+  "doctor_run": { input: DoctorRunInput; output: DoctorRunOutput };
   "epic_add_read_source": { input: EpicAddReadSourceInput; output: EpicAddReadSourceOutput };
   "epic_blocked_list": { input: EpicBlockedListInput; output: EpicBlockedListOutput };
   "epic_blockers_list": { input: EpicBlockersListInput; output: EpicBlockersListOutput };
@@ -7058,7 +7414,7 @@ export interface McpToolMap {
   "image_create": { input: ImageCreateInput; output: ImageCreateOutput };
   "image_delete": { input: ImageDeleteInput; output: ImageDeleteOutput };
   "image_list": { input: ImageListInput; output: ImageListOutput };
-  "image_set_allowed_presets": { input: ImageSetAllowedPresetsInput; output: ImageSetAllowedPresetsOutput };
+  "image_set_services": { input: ImageSetServicesInput; output: ImageSetServicesOutput };
   "image_update": { input: ImageUpdateInput; output: ImageUpdateOutput };
   "memory_associations": { input: MemoryAssociationsInput; output: MemoryAssociationsOutput };
   "memory_broken_links": { input: MemoryBrokenLinksInput; output: MemoryBrokenLinksOutput };
@@ -7106,6 +7462,7 @@ export interface McpToolMap {
   "proposal_feedback_resolve": { input: ProposalFeedbackResolveInput; output: ProposalFeedbackResolveOutput };
   "proposal_graduate": { input: ProposalGraduateInput; output: ProposalGraduateOutput };
   "proposal_list": { input: ProposalListInput; output: ProposalListOutput };
+  "proposal_reconcile_obsolete_epic": { input: ProposalReconcileObsoleteEpicInput; output: ProposalReconcileObsoleteEpicOutput };
   "proposal_remove_target": { input: ProposalRemoveTargetInput; output: ProposalRemoveTargetOutput };
   "proposal_show": { input: ProposalShowInput; output: ProposalShowOutput };
   "proposal_signoff": { input: ProposalSignoffInput; output: ProposalSignoffOutput };
@@ -7121,10 +7478,7 @@ export interface McpToolMap {
   "provider_remove": { input: ProviderRemoveInput; output: ProviderRemoveOutput };
   "provider_validate": { input: ProviderValidateInput; output: ProviderValidateOutput };
   "retrigger_image_build": { input: RetriggerImageBuildInput; output: RetriggerImageBuildOutput };
-  "service_list": { input: ServiceListInput; output: ServiceListOutput };
   "service_preset_list": { input: ServicePresetListInput; output: ServicePresetListOutput };
-  "service_release": { input: ServiceReleaseInput; output: ServiceReleaseOutput };
-  "service_request": { input: ServiceRequestInput; output: ServiceRequestOutput };
   "session_active": { input: SessionActiveInput; output: SessionActiveOutput };
   "session_for_task": { input: SessionForTaskInput; output: SessionForTaskOutput };
   "session_list": { input: SessionListInput; output: SessionListOutput };

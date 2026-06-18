@@ -294,17 +294,6 @@ impl McpState {
             .await
     }
 
-    pub async fn provision_backing_service(
-        &self,
-        req: crate::bridge::ProvisionServiceRequest,
-    ) -> Result<crate::bridge::ProvisionedService, String> {
-        self.runtime.provision_backing_service(req).await
-    }
-
-    pub async fn release_backing_service(&self, instance_id: &str) -> Result<(), String> {
-        self.runtime.release_backing_service(instance_id).await
-    }
-
     /// Best-effort/idempotent foreground deletion of the canonical task-run Job
     /// (`djinn-taskrun-{task_run_id}`), routed through the runtime bridge so
     /// control-plane/agent callers never depend on djinn-k8s directly.
@@ -419,15 +408,6 @@ pub mod stubs {
             _: &str,
             _: &str,
         ) -> Result<(), crate::bridge::RuntimeDispatchError> {
-            Ok(())
-        }
-        async fn provision_backing_service(
-            &self,
-            _: crate::bridge::ProvisionServiceRequest,
-        ) -> Result<crate::bridge::ProvisionedService, String> {
-            Err("stub: provision_backing_service".into())
-        }
-        async fn release_backing_service(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
         async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {

@@ -23,7 +23,7 @@ use crate::tools::github_app_tools::{GithubAppInstallUrlParams, GithubAppInstall
 use crate::tools::github_tools::{GithubFetchFileParams, GithubSearchParams};
 use crate::tools::graph_tools::CodeGraphParams;
 use crate::tools::image_tools::{
-    ImageCreateParams, ImageDeleteParams, ImageListParams, ImageSetAllowedPresetsParams,
+    ImageCreateParams, ImageDeleteParams, ImageListParams, ImageSetServicesParams,
     ImageUpdateParams, ProjectSetImageParams, ToolchainVersionsParams,
 };
 use crate::tools::memory_tools::{
@@ -53,9 +53,7 @@ use crate::tools::provider_tools::{
     ProviderModelsConnectedInput, ProviderModelsInput, ProviderOauthStartInput,
     ProviderRemoveInput, ProviderValidateInput,
 };
-use crate::tools::service_tools::{
-    ServiceListParams, ServicePresetListParams, ServiceReleaseParams, ServiceRequestParams,
-};
+use crate::tools::service_tools::ServicePresetListParams;
 use crate::tools::session_tools::{
     SessionActiveParams, SessionListParams, SessionMessagesParams, SessionShowParams,
     TaskTimelineParams,
@@ -404,12 +402,12 @@ impl DjinnMcpServer {
                 )?))
                 .await,
             ),
-            "image_set_allowed_presets" => map_json(
+            "image_set_services" => map_json(
                 name,
-                self.image_set_allowed_presets(Parameters(decode_args::<
-                    ImageSetAllowedPresetsParams,
-                >(name, args)?))
-                    .await,
+                self.image_set_services(Parameters(decode_args::<ImageSetServicesParams>(
+                    name, args,
+                )?))
+                .await,
             ),
             "service_preset_list" => map_json(
                 name,
@@ -417,21 +415,6 @@ impl DjinnMcpServer {
                     name, args,
                 )?))
                 .await,
-            ),
-            "service_request" => map_json(
-                name,
-                self.service_request(Parameters(decode_args::<ServiceRequestParams>(name, args)?))
-                    .await,
-            ),
-            "service_list" => map_json(
-                name,
-                self.service_list(Parameters(decode_args::<ServiceListParams>(name, args)?))
-                    .await,
-            ),
-            "service_release" => map_json(
-                name,
-                self.service_release(Parameters(decode_args::<ServiceReleaseParams>(name, args)?))
-                    .await,
             ),
             "proposal_create" => map_json(
                 name,

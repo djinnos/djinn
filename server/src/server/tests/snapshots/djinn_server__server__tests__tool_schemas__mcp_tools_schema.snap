@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 510
 expression: signatures
 ---
 [
@@ -4805,14 +4804,6 @@ expression: signatures
         },
         "ImageDto": {
           "properties": {
-            "allowed_presets": {
-              "default": [],
-              "description": "Service-preset ids tasks using this image may request (Phase C capability).",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
             "config": {
               "$ref": "#/$defs/EnvironmentConfig",
               "description": "The image's EnvironmentConfig (build fields)."
@@ -4826,6 +4817,14 @@ expression: signatures
             },
             "name": {
               "type": "string"
+            },
+            "service_presets": {
+              "default": [],
+              "description": "Service-preset ids injected as native sidecars into every Pod that runs\nthis image (e.g. a Postgres reachable on 127.0.0.1 with TEST_POSTGRES_URL).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "status": {
               "description": "Build status of the image's own config: none | building | ready | failed.",
@@ -5112,7 +5111,7 @@ expression: signatures
     }
   },
   {
-    "name": "image_set_allowed_presets",
+    "name": "image_set_services",
     "read_only": false,
     "destructive": true,
     "idempotent": false,
@@ -5126,7 +5125,7 @@ expression: signatures
           "type": "string"
         },
         "preset_ids": {
-          "description": "Service-preset ids this image's tasks may request (full replacement).",
+          "description": "Service-preset ids to inject as native sidecars into every Pod that runs\nthis image (full replacement). Empty clears all injected services.",
           "items": {
             "type": "string"
           },
@@ -5137,7 +5136,7 @@ expression: signatures
         "id",
         "preset_ids"
       ],
-      "title": "ImageSetAllowedPresetsParams",
+      "title": "ImageSetServicesParams",
       "type": "object"
     },
     "output_schema": {
@@ -13196,76 +13195,6 @@ expression: signatures
     }
   },
   {
-    "name": "service_list",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "task": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "task"
-      ],
-      "title": "ServiceListParams",
-      "type": "object"
-    },
-    "output_schema": {
-      "$defs": {
-        "ServiceInstanceDto": {
-          "properties": {
-            "conn_string": {
-              "nullable": true,
-              "type": "string"
-            },
-            "env_var": {
-              "nullable": true,
-              "type": "string"
-            },
-            "service_type": {
-              "type": "string"
-            },
-            "status": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "service_type",
-            "status"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "services": {
-          "items": {
-            "$ref": "#/$defs/ServiceInstanceDto"
-          },
-          "type": "array"
-        },
-        "status": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "status",
-        "services"
-      ],
-      "title": "ServiceListResponse",
-      "type": "object"
-    }
-  },
-  {
     "name": "service_preset_list",
     "read_only": false,
     "destructive": true,
@@ -13328,113 +13257,6 @@ expression: signatures
         "presets"
       ],
       "title": "ServicePresetListResponse",
-      "type": "object"
-    }
-  },
-  {
-    "name": "service_release",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "service_type": {
-          "default": null,
-          "description": "Release only this service type; omit to release all for the task.",
-          "nullable": true,
-          "type": "string"
-        },
-        "task": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "task"
-      ],
-      "title": "ServiceReleaseParams",
-      "type": "object"
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "released": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "status": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "status",
-        "released"
-      ],
-      "title": "ServiceReleaseResponse",
-      "type": "object"
-    }
-  },
-  {
-    "name": "service_request",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "preset": {
-          "description": "Preset to request: a preset id (e.g. `preset-postgres-18`), service type\n(`postgres`/`redis`/`rabbitmq`), or preset name.",
-          "type": "string"
-        },
-        "task": {
-          "description": "Task UUID or short_id this service is for (its current run owns the pod).",
-          "type": "string"
-        }
-      },
-      "required": [
-        "task",
-        "preset"
-      ],
-      "title": "ServiceRequestParams",
-      "type": "object"
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "conn_string": {
-          "description": "Connection string to use (also set this in the named env var for tests).",
-          "nullable": true,
-          "type": "string"
-        },
-        "env_var": {
-          "description": "Env var convention for this service (e.g. TEST_POSTGRES_URL / REDIS_URL / AMQP_URL).",
-          "nullable": true,
-          "type": "string"
-        },
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "service_type": {
-          "nullable": true,
-          "type": "string"
-        },
-        "status": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "status"
-      ],
-      "title": "ServiceRequestResponse",
       "type": "object"
     }
   },

@@ -24,8 +24,10 @@ export interface CatalogImage {
   description?: string;
   status: ImageBuildStatus;
   config: EnvironmentConfig;
-  /** Service-preset ids this image's tasks may request on demand. */
-  allowedPresets: string[];
+  /** Service-preset ids injected as native sidecars into every Pod that runs
+   *  this image (reachable on 127.0.0.1 with the connection string in the
+   *  preset's env var, e.g. TEST_POSTGRES_URL). */
+  servicePresets: string[];
 }
 
 /** A fixed backing-service preset from the catalog (users do not create these). */
@@ -96,7 +98,7 @@ export async function listImages(): Promise<CatalogImage[]> {
     description: img.description,
     status: img.status,
     config: normalizeConfig(img.config),
-    allowedPresets: img.allowed_presets ?? [],
+    servicePresets: img.service_presets ?? [],
   }));
 }
 
@@ -115,17 +117,17 @@ export async function listServicePresets(): Promise<ServicePreset[]> {
   }));
 }
 
-/** Replace the full set of service presets an image's tasks may request. */
-export async function setImageAllowedPresets(
+/** Replace the full set of backing services injected into this image's Pods. */
+export async function setImageServices(
   id: string,
   presetIds: string[],
 ): Promise<MutationResult> {
-  const response = await callMcpTool("image_set_allowed_presets", {
+  const response = await callMcpTool("image_set_services", {
     id,
     preset_ids: presetIds,
   });
   if (response.status !== "ok") {
-    return { ok: false, error: response.error ?? "set allowed presets failed" };
+    return { ok: false, error: response.error ?? "set image services failed" };
   }
   return { ok: true, id: response.id };
 }

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use tokio::sync::broadcast;
 
 use crate::database::Database;
-use crate::repositories::note::NoteRepository;
+use crate::repositories::note::{NoteRepository, NoteSearchParams};
 use crate::repositories::test_support::{event_bus_for, make_project};
 
 const TEST_WINDOW_DAYS: u32 = 30;
@@ -289,4 +289,110 @@ async fn archive_audit_candidates_is_idempotent_for_already_archived_candidates(
 
     assert_eq!(archived_count, 0);
     assert_eq!(note_status(&db, &already_archived.id).await, "archived");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_sweep_archived_notes_are_hidden_from_retrieval_but_listable_by_status() {
+    let (_db, repo, project_id) = setup().await;
+
+    let seed = repo
+        .create(
+            &project_id,
+            "Archive Retrieval Seed",
+            "Seed note about archive retrieval sentinel context.",
+            "adr",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+    let archived = repo
+        .create(
+            &project_id,
+            "Archived Retrieval Sentinel",
+            "archive retrieval sentinel content linked to [[Archive Retrieval Seed]].\n\n*Extracted from session 019ed7e1-980f-7ea2-935e-6f5e9fc82c14.*",
+            "case",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+    let active_peer = repo
+        .create(
+            &project_id,
+            "Active Retrieval Sentinel",
+            "archive retrieval sentinel active peer linked to [[Archive Retrieval Seed]] with enough detail to stay active.",
+            "case",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+    let archived_count = repo
+        .archive_audit_candidates(&project_id, TEST_WINDOW_DAYS)
+        .await
+        .unwrap();
+    assert_eq!(archived_count, 1);
+
+    let context = repo
+        .build_context(
+            &project_id,
+            &seed.permalink,
+            Some(8192),
+            None,
+            20,
+            Some(0.0),
+        )
+        .await
+        .unwrap();
+    let context_ids = context
+        .related_l1
+        .iter()
+        .map(|note| note.id.as_str())
+        .chain(context.related_l0.iter().map(|note| note.id.as_str()))
+        .collect::<HashSet<_>>();
+    assert!(
+        !context_ids.contains(archived.id.as_str()),
+        "archived sweep note must not be injected into build_context"
+    );
+
+    let search_results = repo
+        .search(NoteSearchParams {
+            project_id: &project_id,
+            query: "archive retrieval sentinel",
+            task_id: None,
+            folder: None,
+            note_type: None,
+            limit: 20,
+            semantic_scores: None,
+        })
+        .await
+        .unwrap();
+    let search_ids = search_results
+        .iter()
+        .map(|note| note.id.as_str())
+        .collect::<HashSet<_>>();
+    assert!(
+        !search_ids.contains(archived.id.as_str()),
+        "archived sweep note must not be returned by default prompt retrieval search"
+    );
+    assert!(
+        search_ids.contains(active_peer.id.as_str()),
+        "active peer proves the retrieval query itself still returns live notes"
+    );
+
+    let default_list = repo.list_compact(&project_id, None, None, 0).await.unwrap();
+    assert!(
+        default_list.iter().all(|note| note.id != archived.id),
+        "default compact list is active-only and should hide archived notes"
+    );
+
+    let archived_list = repo
+        .list_compact_by_status(&project_id, None, None, 0, Some("archived"))
+        .await
+        .unwrap();
+    assert!(
+        archived_list.iter().any(|note| note.id == archived.id),
+        "explicit archived-status list path must keep archived notes visible/restorable"
+    );
 }

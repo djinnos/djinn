@@ -21,8 +21,6 @@ import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useState } from "react";
 import { useIsAllProjects } from "@/stores/useProjectStore";
 import { projectStore } from "@/stores/projectStore";
-import { verificationStore } from "@/stores/verificationStore";
-import { useStoreWithEqualityFn } from "zustand/traditional";
 
 type TaskCardProps = {
   task: Task;
@@ -89,54 +87,27 @@ function formatCompactDuration(totalSeconds: number): string {
 
 // --- Status badge for in-flight cards ---
 
-function getStatusBadge(status: string, hasSession: boolean, allAcMet: boolean, hasSetupStep: boolean): { label: string; className: string } | null {
+function getStatusBadge(status: string, hasSession: boolean, allAcMet: boolean): { label: string; className: string } | null {
   if (status === "needs_lead_intervention" && !hasSession) {
     return { label: "agent stuck", className: "text-red-400" };
-  }
-  if (status === "verifying") {
-    return { label: "verifying", className: "text-yellow-400 animate-pulse" };
   }
   if ((status === "needs_task_review" || status === "in_task_review") && !hasSession && allAcMet) {
     return { label: "merging", className: "text-green-400 animate-pulse" };
   }
-  if (status === "in_progress" && (!hasSession || hasSetupStep)) {
+  if (status === "in_progress" && !hasSession) {
     return { label: "setting up", className: "text-blue-400 animate-pulse" };
   }
   return null;
 }
 
-function StatusBadge({ status, hasSession, allAcMet, hasSetupStep, tooltip }: { status: string; hasSession: boolean; allAcMet: boolean; hasSetupStep: boolean; tooltip?: string }) {
-  const badge = getStatusBadge(status, hasSession, allAcMet, hasSetupStep);
+function StatusBadge({ status, hasSession, allAcMet }: { status: string; hasSession: boolean; allAcMet: boolean }) {
+  const badge = getStatusBadge(status, hasSession, allAcMet);
   if (!badge) return null;
   return (
-    <span className={cn("text-[10px] font-medium", badge.className)} title={tooltip || undefined}>
+    <span className={cn("text-[10px] font-medium", badge.className)}>
       {badge.label}
     </span>
   );
-}
-
-function getTaskRunningStep(taskId: string, state: ReturnType<typeof verificationStore.getState>) {
-  const lifecycle = state.lifecycleSteps.get(taskId) ?? [];
-  const run = Array.from(state.runs.values()).find((candidate) => candidate.taskId === taskId);
-  const verificationSteps = run?.steps ?? [];
-
-  const runningLifecycle = lifecycle[lifecycle.length - 1];
-  if (runningLifecycle) {
-    return {
-      phase: "setup" as const,
-      name: runningLifecycle.detail ? `${runningLifecycle.step}: ${runningLifecycle.detail}` : runningLifecycle.step,
-    };
-  }
-
-  const runningVerification = verificationSteps.find((step) => step.status === "running");
-  if (runningVerification) {
-    return {
-      phase: "verification" as const,
-      name: runningVerification.name,
-    };
-  }
-
-  return null;
 }
 
 // --- Card tint based on status ---
@@ -208,7 +179,6 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const shouldShowDuration = totalTrackedSeconds > 0 || !!runningSessionStartMs;
   const isInFlight =
     task.status === "in_progress" ||
-    task.status === "verifying" ||
     task.status === "needs_task_review" ||
     task.status === "in_task_review" ||
     task.status === "needs_lead_intervention" ||
@@ -219,22 +189,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const acTotal = ac.length;
   const acMet = ac.filter((c: { met?: boolean }) => c.met).length;
   const cardTint = getCardTint(task);
-  const runningStep = useStoreWithEqualityFn(verificationStore, (state) => getTaskRunningStep(task.id, state));
-  const isSettingUp = task.status === "in_progress" && runningStep?.phase === "setup";
-  const statusLabel =
-    isSettingUp
-      ? `setting up: ${runningStep.name}`
-      : task.status === "verifying" && runningStep?.phase === "verification"
-        ? `verifying: ${runningStep.name}`
-        : null;
-  // Build tooltip for the "setting up" badge: shows step, duration, and model
-  const setupTooltip = isSettingUp
-    ? [
-        runningStep.name,
-        shouldShowDuration ? formatCompactDuration(totalTrackedSeconds) : null,
-        task.active_session?.model_id,
-      ].filter(Boolean).join(" · ")
-    : undefined;
+  const isSettingUp = task.status === "in_progress" && !task.active_session;
 
   return (
     <Card
@@ -317,8 +272,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           {/* Status badge for in-flight */}
           {isInFlight && (
             <span className="inline-flex items-center gap-1" data-testid="taskcard-status-badge">
-              <StatusBadge status={task.status} hasSession={!!task.active_session} allAcMet={acTotal > 0 && acMet === acTotal} hasSetupStep={!!isSettingUp} tooltip={setupTooltip} />
-              {statusLabel && !isSettingUp && <span className="text-[10px] font-medium text-muted-foreground">{statusLabel}</span>}
+              <StatusBadge status={task.status} hasSession={!!task.active_session} allAcMet={acTotal > 0 && acMet === acTotal} />
             </span>
           )}
 
