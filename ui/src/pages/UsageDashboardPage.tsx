@@ -9,7 +9,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UsageDashboardFiltersBar } from "@/components/usage/UsageDashboardFilters";
+import { UsageBreakdownsTab } from "@/components/usage/UsageBreakdownsTab";
+import { UsageModelsTab } from "@/components/usage/UsageModelsTab";
 import { UsageOverviewTab } from "@/components/usage/UsageOverviewTab";
+import { UsageProjectModelMatrixTab } from "@/components/usage/UsageProjectModelMatrixTab";
 import { cn } from "@/lib/utils";
 
 /** Default filters: last 30 days, daily granularity. */
@@ -138,38 +141,15 @@ export function UsageDashboardPage() {
             </TabsContent>
 
             <TabsContent value={TAB_MODELS}>
-              <TabPlaceholder
-                title="Models"
-                description="Worker-scoped model effectiveness table with best-in-column highlighting and comparison bars for cost/task, success rate, and average reopens."
-                generatedAt={data?.generated_at}
-                count={data?.model_effectiveness.length}
-                countLabel="models"
-              />
+              {data && <UsageModelsTab data={data} />}
             </TabsContent>
 
             <TabsContent value={TAB_BREAKDOWNS}>
-              <TabPlaceholder
-                title="Breakdowns"
-                description="By User / By Project / By Proposal / By Task sortable tables with expandable per-model detail."
-                generatedAt={data?.generated_at}
-                count={
-                  (data?.breakdowns.by_user.length ?? 0) +
-                  (data?.breakdowns.by_project.length ?? 0) +
-                  (data?.breakdowns.by_proposal.length ?? 0) +
-                  (data?.breakdowns.by_task.length ?? 0)
-                }
-                countLabel="rows"
-              />
+              {data && <UsageBreakdownsTab data={data} />}
             </TabsContent>
 
             <TabsContent value={TAB_MATRIX}>
-              <TabPlaceholder
-                title="Project × Model Matrix"
-                description="Heatmap of cost/task, success rate, average reopens, total spend, and tokens per project-model pair."
-                generatedAt={data?.generated_at}
-                count={data?.project_model_matrix.length}
-                countLabel="cells"
-              />
+              {data && <UsageProjectModelMatrixTab data={data} />}
             </TabsContent>
           </Tabs>
         )}
@@ -190,47 +170,6 @@ function DashboardSkeleton() {
       </div>
       <Skeleton className="h-64 w-full rounded-lg" />
       <Skeleton className="h-48 w-full rounded-lg" />
-    </div>
-  );
-}
-
-// ── Tab placeholder container ────────────────────────────────────────────────
-
-/**
- * Lightweight container rendered inside each tab. The content of each tab
- * (charts, tables, etc.) will be filled by follow-up tasks; this task only
- * establishes the plumbing and shared-data contract.
- */
-function TabPlaceholder({
-  title,
-  description,
-  generatedAt,
-  count,
-  countLabel,
-}: {
-  title: string;
-  description: string;
-  generatedAt?: string;
-  count?: number;
-  countLabel?: string;
-}) {
-  return (
-    <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-8 text-center">
-      <h2 className="text-sm font-medium text-foreground">{title}</h2>
-      <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
-        {description}
-      </p>
-      <p className="mt-3 text-xs text-muted-foreground">
-        {count !== undefined && countLabel
-          ? `${count} ${countLabel} available · `
-          : ""}
-        Content coming in a follow-up task.
-      </p>
-      {generatedAt && (
-        <p className="mt-1 text-xs text-muted-foreground">
-          Data generated {generatedAt}
-        </p>
-      )}
     </div>
   );
 }

@@ -64,6 +64,18 @@ export interface UsageTimeSeriesPoint {
   agent_role?: string;
 }
 
+export interface UsageModelSplit {
+  model: string;
+  cost: number | null;
+  tokens_in?: number;
+  tokens_out?: number;
+  total_tokens?: number;
+  task_count?: number;
+  success_rate?: number | null;
+  avg_reopens?: number | null;
+  cost_per_task?: number | null;
+}
+
 export interface UsageBreakdownRow {
   id: string;
   name: string;
@@ -74,6 +86,13 @@ export interface UsageBreakdownRow {
   success_rate: number | null;
   avg_reopens: number | null;
   cost_per_task: number | null;
+  model_split?: UsageModelSplit[];
+  time_series?: UsageTimeSeriesPoint[];
+  url?: string | null;
+  task_id?: string | null;
+  task_url?: string | null;
+  proposal_id?: string | null;
+  proposal_url?: string | null;
 }
 
 export interface UsageModelEffectiveness {
@@ -84,6 +103,11 @@ export interface UsageModelEffectiveness {
   cost_per_task: number | null;
   total_cost: number | null;
   total_tokens: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  session_count?: number;
+  completed_task_count?: number;
+  reopen_count?: number;
 }
 
 export interface UsageProjectModelCell {
@@ -117,7 +141,7 @@ export interface UsageAnalyticsResponse {
 
 // ── Serialization ──────────────────────────────────────────────────────────
 
-function buildQueryString(filters: UsageAnalyticsFilters): string {
+export function buildUsageAnalyticsQueryString(filters: UsageAnalyticsFilters): string {
   const params = new URLSearchParams();
 
   if (filters.preset) {
@@ -142,7 +166,7 @@ export async function fetchUsageAnalytics(
   filters: UsageAnalyticsFilters = {},
 ): Promise<UsageAnalyticsResponse> {
   const baseUrl = await getBaseUrl();
-  const qs = buildQueryString(filters);
+  const qs = buildUsageAnalyticsQueryString(filters);
   const response = await fetch(`${baseUrl}/api/admin/usage${qs}`);
   if (!response.ok) {
     const text = await response.text();
