@@ -64,7 +64,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub mod cargo_target_seed;
+pub mod cargo_metrics;
+mod cargo_target_seed;
 mod lifecycle;
 mod worker_services;
 
@@ -84,7 +85,6 @@ use djinn_graph::graph_parity::{GraphArtifactBlobParityError, assert_graph_artif
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_runtime::{ResolvedCredentials, RoleKind, TaskRunSpec, WorkerEvent};
 use djinn_supervisor::{RpcServices, SupervisorServices, TaskRunSupervisor};
-use djinn_telemetry::cargo_cache;
 use djinn_workspace::{GitIdentity, MirrorManager, Workspace};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex;
@@ -450,7 +450,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
                 .map(std::string::ToString::to_string);
             if result.cold_started() {
                 let fallback_reason = fallback_reason.as_deref().unwrap_or("unknown");
-                cargo_cache::record_seed_cold(&spec.project_id, fallback_reason);
+                cargo_metrics::record_seed_cold(&spec.project_id, fallback_reason);
                 warn!(
                     task_run_id = %spec.task_run_id,
                     project_id = %spec.project_id,
@@ -467,7 +467,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
                     "cargo target seed: falling back to cold private target dir"
                 );
             } else {
-                cargo_cache::record_seed_hit(&spec.project_id);
+                cargo_metrics::record_seed_hit(&spec.project_id);
                 info!(
                     task_run_id = %spec.task_run_id,
                     project_id = %spec.project_id,
@@ -512,6 +512,10 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
                 skipped_file_count = 0_u64,
                 fallback_reason = %format!("seed task join failed: {err}"),
                 "cargo target seed: proceeding with cold private target dir after setup task failure"
+            );
+            cargo_metrics::record_seed_cold(
+                &spec.project_id,
+                &format!("seed task join failed: {err}"),
             );
         }
     }
@@ -718,7 +722,7 @@ async fn warm_cargo_target_base(
     .await;
 
     let elapsed = started.elapsed();
-    cargo_cache::record_warm_base_freshness(project_id, elapsed.as_secs_f64());
+    cargo_metrics::record_warm_base_freshness(project_id, elapsed.as_millis() as u64);
 
     info!(
         project_id,
