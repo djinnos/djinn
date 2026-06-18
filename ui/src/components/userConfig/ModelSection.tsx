@@ -22,14 +22,14 @@ import {
   ModelSelectorTrigger,
 } from "@/components/ai-elements/model-selector";
 import {
-  type AutomationModel,
-  fetchAutomationConnectedModels,
-  fetchAutomationModelSelection,
-  saveAutomationModelSelection,
-} from "@/api/automationConfig";
+  type UserModel,
+  fetchUserConnectedModels,
+  fetchUserModelSelection,
+  saveUserModelSelection,
+} from "@/api/userConfig";
 import { showToast } from "@/lib/toast";
 
-import { automationKeys } from "./automationKeys";
+import { userConfigKeys } from "./userConfigKeys";
 import { formatProvider } from "./providerDisplay";
 
 /** Strips the provider prefix from a model id ("openai/gpt-5" → "gpt-5"). */
@@ -42,12 +42,12 @@ export function ModelSection({ targetId }: { targetId: string }) {
   const queryClient = useQueryClient();
 
   const connectedModels = useQuery({
-    queryKey: automationKeys.connectedModels(targetId),
-    queryFn: () => fetchAutomationConnectedModels(targetId),
+    queryKey: userConfigKeys.connectedModels(targetId),
+    queryFn: () => fetchUserConnectedModels(targetId),
   });
   const selection = useQuery({
-    queryKey: automationKeys.modelSelection(targetId),
-    queryFn: () => fetchAutomationModelSelection(targetId),
+    queryKey: userConfigKeys.modelSelection(targetId),
+    queryFn: () => fetchUserModelSelection(targetId),
   });
 
   // Local working copy of the ordered selection + per-model caps; seeded from
@@ -71,7 +71,7 @@ export function ModelSection({ targetId }: { targetId: string }) {
   }
 
   const modelsById = useMemo(() => {
-    const map = new Map<string, AutomationModel>();
+    const map = new Map<string, UserModel>();
     for (const model of connectedModels.data ?? []) map.set(model.id, model);
     return map;
   }, [connectedModels.data]);
@@ -86,14 +86,14 @@ export function ModelSection({ targetId }: { targetId: string }) {
       // Only persist caps for models still in the list, defaulting to 1.
       const maxSessions: Record<string, number> = {};
       for (const id of order) maxSessions[id] = caps[id] ?? 1;
-      return saveAutomationModelSelection(targetId, order, maxSessions);
+      return saveUserModelSelection(targetId, order, maxSessions);
     },
     onSuccess: (saved) => {
       setOrder(saved.models);
       setCaps(saved.maxSessions);
       setDirty(false);
-      queryClient.setQueryData(automationKeys.modelSelection(targetId), saved);
-      showToast.success("Automation models saved");
+      queryClient.setQueryData(userConfigKeys.modelSelection(targetId), saved);
+      showToast.success("Model selection saved");
     },
     onError: (error) => {
       showToast.error("Could not save models", {
@@ -102,7 +102,7 @@ export function ModelSection({ targetId }: { targetId: string }) {
     },
   });
 
-  const addModel = (model: AutomationModel) => {
+  const addModel = (model: UserModel) => {
     setOrder((prev) => (prev.includes(model.id) ? prev : [...prev, model.id]));
     setDirty(true);
   };
@@ -128,7 +128,7 @@ export function ModelSection({ targetId }: { targetId: string }) {
         <div>
           <h3 className="text-base font-semibold text-foreground">Models</h3>
           <p className="text-sm text-muted-foreground">
-            The automation user&apos;s model list, in priority (fallback) order — top
+            The user&apos;s model list, in priority (fallback) order — top
             runs first.
           </p>
         </div>
@@ -163,7 +163,7 @@ export function ModelSection({ targetId }: { targetId: string }) {
         <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
           {(connectedModels.data?.length ?? 0) === 0
             ? "Connect a provider above to unlock models."
-            : "No models selected. Use Add model to pick automation's models."}
+            : "No models selected. Use Add model to pick the user's models."}
         </div>
       ) : (
         <Reorder.Group
@@ -197,7 +197,7 @@ export function ModelRow({
   onRemove,
 }: {
   modelId: string;
-  model: AutomationModel | undefined;
+  model: UserModel | undefined;
   maxConcurrent: number;
   onUpdateCap: (value: number) => void;
   onRemove: () => void;
@@ -237,7 +237,7 @@ export function ModelRow({
           <div className="truncate font-semibold">{name}</div>
           <div className="text-xs text-muted-foreground/60">{formatProvider(providerId)}</div>
         </div>
-        {/* Per-model concurrency cap for the automation user. */}
+        {/* Per-model concurrency cap for the target user. */}
         <div className="flex shrink-0 items-center gap-2">
           <Label className="text-sm text-muted-foreground">Sessions:</Label>
           <Input
@@ -269,13 +269,13 @@ export function AddModelButton({
   models,
   onSelect,
 }: {
-  models: AutomationModel[];
-  onSelect: (model: AutomationModel) => void;
+  models: UserModel[];
+  onSelect: (model: UserModel) => void;
 }) {
   const [open, setOpen] = useState(false);
 
   const groups = useMemo(() => {
-    const map = new Map<string, AutomationModel[]>();
+    const map = new Map<string, UserModel[]>();
     for (const model of models) {
       const providerId = model.provider_id ?? "unknown";
       if (!map.has(providerId)) map.set(providerId, []);

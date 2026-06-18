@@ -21,12 +21,18 @@
 
 pub mod leader_tick;
 pub mod live_mover;
+pub mod zombie_running_session;
 
 use std::sync::Arc;
 
 use djinn_core::doctor::{DoctorCheck, DoctorRegistry};
 
 pub use live_mover::{ActiveTask, LiveMoverPredicateCheck, LiveMoverSource};
+pub use zombie_running_session::{
+    SnapshotZombieRunningSessionSource, ZOMBIE_RUNNING_SESSION_CHECK_NAME,
+    ZombieRunningSessionCandidate, ZombieRunningSessionCheck, ZombieRunningSessionSource,
+    check_from_coordinator_state,
+};
 
 /// Register all `djinn-agent`-side seed checks into `registry`.
 ///
