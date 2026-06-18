@@ -51,6 +51,19 @@ async fn mark_old_access(db: &Database, note_id: &str, days: u32) {
     .unwrap();
 }
 
+async fn mark_missing_last_access(db: &Database, note_id: &str) {
+    sqlx::query(
+        r#"UPDATE notes
+           SET access_count = 1,
+               last_accessed = NULL
+           WHERE id = $1"#,
+    )
+    .bind(note_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
 async fn set_status(db: &Database, note_id: &str, status: &str) {
     sqlx::query("UPDATE notes SET status = $1 WHERE id = $2")
         .bind(status)
@@ -94,6 +107,18 @@ async fn extracted_archive_candidates_require_active_extracted_audit_candidate_a
         .await
         .unwrap();
     mark_old_access(&db, &old_access.id, TEST_WINDOW_DAYS + 5).await;
+
+    let missing_last_access = repo
+        .create(
+            &project_id,
+            "Missing Last Access Pitfall",
+            ARCHIVE_SHAPED_BODY,
+            "pitfall",
+            "[]",
+        )
+        .await
+        .unwrap();
+    mark_missing_last_access(&db, &missing_last_access.id).await;
 
     let recent_access = repo
         .create(
@@ -141,6 +166,7 @@ async fn extracted_archive_candidates_require_active_extracted_audit_candidate_a
 
     assert!(candidate_ids.contains(zero_access.id.as_str()));
     assert!(candidate_ids.contains(old_access.id.as_str()));
+    assert!(candidate_ids.contains(missing_last_access.id.as_str()));
     assert!(!candidate_ids.contains(recent_access.id.as_str()));
     assert!(!candidate_ids.contains(not_archive_shaped.id.as_str()));
     assert!(!candidate_ids.contains(archived.id.as_str()));

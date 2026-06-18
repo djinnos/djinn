@@ -38,6 +38,8 @@ use super::scoring::{CONFIDENCE_FLOOR, STALE_CITATION, STALE_DECAY_SIGNAL, bayes
 pub(crate) const DECAY_WINDOW_ENV: &str = "DJINN_LIFECYCLE_DECAY_WINDOW_DAYS";
 /// Default decay window applied when the env override is absent or invalid.
 pub(crate) const DEFAULT_DECAY_WINDOW_DAYS: u32 = 30;
+/// Default archive-candidate access window applied when the caller passes zero.
+pub(crate) const DEFAULT_ARCHIVE_WINDOW_DAYS: u32 = DEFAULT_DECAY_WINDOW_DAYS;
 
 /// Per-note-type decay window overrides (days). These are advisory defaults;
 /// the global env override ([`DECAY_WINDOW_ENV`]) is used by the SQL predicate

@@ -438,7 +438,7 @@ impl NoteRepository {
         let window = if archive_window_days > 0 {
             archive_window_days
         } else {
-            crate::repositories::note::lifecycle::DEFAULT_DECAY_WINDOW_DAYS
+            crate::repositories::note::lifecycle::DEFAULT_ARCHIVE_WINDOW_DAYS
         };
 
         let eligible_rows = sqlx::query(
