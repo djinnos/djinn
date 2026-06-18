@@ -17,9 +17,13 @@ ALTER TABLE sessions
 -- existing `idx_sessions_started_at`, `idx_sessions_project_id`,
 -- `idx_sessions_status`, and `idx_sessions_task_id` indexes from the initial
 -- schema (none are removed). Each composite starts with `started_at` (the
--- primary range-scan column for time-windowed usage analytics) and includes a
--- common group filter, enabling index-only grouped scans.
-CREATE INDEX idx_sessions_started_at_project_id ON sessions(started_at, project_id);
-CREATE INDEX idx_sessions_started_at_model_id ON sessions(started_at, model_id);
-CREATE INDEX idx_sessions_started_at_created_by_user_id
-    ON sessions(started_at, created_by_user_id);
+-- primary range-scan column for time-windowed usage analytics) and then carries
+-- common grouping dimensions so time-bounded usage reports can group/filter by
+-- project, model, and session creator without depending on a single-column
+-- timestamp index alone.
+CREATE INDEX idx_sessions_started_at_project_id_model_id
+    ON sessions(started_at, project_id, model_id);
+CREATE INDEX idx_sessions_started_at_model_id
+    ON sessions(started_at, model_id);
+CREATE INDEX idx_sessions_started_at_created_by_user_id_model_id
+    ON sessions(started_at, created_by_user_id, model_id);
