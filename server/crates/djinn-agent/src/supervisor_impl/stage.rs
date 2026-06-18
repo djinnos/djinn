@@ -1,3 +1,4 @@
+// djinn:allow-oversize — over size-guard byte threshold after reliability fixes; split when touched substantively.
 //! Per-stage execution driver invoked by [`crate::supervisor::TaskRunSupervisor`].
 //!
 //! The supervisor orchestration itself lives in `djinn-supervisor`; this file
@@ -127,11 +128,19 @@ use super::SupervisorCallbackContext;
 ///   provider's `retry_after_ms` (a `Retry-After` / rate-limit-reset window, if
 ///   it supplied one) rides along so the coordinator can floor the redispatch
 ///   cooldown on a multi-hour reset instead of probing on the fixed ladder (A6).
-/// - `ContextOverflow` | `EmptyCompletion` | `Transport` → `None`. Excluded by
-///   design: ContextOverflow is handled by reactive compaction (not a model
-///   health problem); EmptyCompletion has its own empty-turn backoff breaker in
-///   the reply loop; Transport is a one-off network blip. Tripping the breaker
-///   on these would needlessly demote a healthy model.
+/// - `Transport` → [`ProviderFailureClass::Failure`]. A hard network death
+///   (connection refused / instant timeout / broken stream) that kills the
+///   session with no work done — quiet-but-broken, just like a 5xx. Fed to the
+///   gentle consecutive-failure breaker so a one-off blip is absorbed (a
+///   successful session resets the counter via `record_success`) but a model
+///   that dies on every dispatch finally auto-disables instead of being
+///   re-selected forever (the kimi-for-coding/k2p7 incident).
+/// - `ContextOverflow` | `EmptyCompletion` → `None`. Excluded by design:
+///   ContextOverflow is handled by reactive compaction (not a model health
+///   problem); EmptyCompletion has its own empty-turn backoff breaker in the
+///   reply loop (Codex consumer-backend throttling), so demoting the model here
+///   would punish mere throttling. Tripping the breaker on these would
+///   needlessly demote a healthy model.
 /// - An untyped/legacy error (no `ProviderError` source) → `None`, so non-
 ///   provider failures (git, tools, finalize-tool misuse) never trip it.
 fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass> {
@@ -148,9 +157,100 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
         ProviderError::RateLimit { .. } => Some(ProviderFailureClass::Throttle {
             retry_after_ms: provider_err.retry_after_ms(),
         }),
-        ProviderError::ContextOverflow
-        | ProviderError::EmptyCompletion
-        | ProviderError::Transport => None,
+        // A hard transport failure (connection refused, instant timeout, broken
+        // stream) that kills the session is "quiet but broken" the same way a 5xx
+        // is: the model produced no work and exited fast, invisible to the
+        // coordinator's stall detector. Feed it to the GENTLE consecutive-failure
+        // breaker (`record_failure`), NOT the immediate-failover one — a single
+        // network blip on an otherwise-healthy model must not demote it. The
+        // breaker only trips after the configured run of consecutive failures, and
+        // any successful session calls `record_success` (resets the counter), so a
+        // transient blip is absorbed while a model that dies on EVERY dispatch
+        // (the kimi-for-coding/k2p7 incident: instant Transport death, 0 tokens,
+        // re-dispatched forever, absent from model_health) finally auto-disables.
+        ProviderError::Transport => Some(ProviderFailureClass::Failure),
+        // EmptyCompletion has its own empty-turn backoff breaker in the reply loop
+        // (Codex consumer-backend throttling answers a turn with an empty 200);
+        // tripping the model-health breaker on it would wrongly demote a model
+        // that is merely being throttled. ContextOverflow is handled by reactive
+        // compaction — also not a model-health problem. Both stay `None`.
+        ProviderError::ContextOverflow | ProviderError::EmptyCompletion => None,
+    }
+}
+
+/// Map a finished reviewer stage's finalize tool + payload onto a
+/// [`StageOutcome`]. Pure (no `task`/tracing deps) so the verdict-handling
+/// branches are unit-testable.
+///
+/// Crucially distinguishes an EXPLICIT rejection (the reviewer actually called
+/// `submit_review` with a reject/request_changes verdict → `ReviewerRejected`,
+/// which the supervisor maps to `task_review_reject` and reopens the worker's
+/// PR) from a reviewer that ended with NO verdict at all (`finalize_name == ""`
+/// — the model stopped emitting before invoking the finalize tool). A no-verdict
+/// completion is NOT evidence the work is bad; mapping it to `ReviewerRejected`
+/// FALSE-REJECTS good work over a malfunctioning reviewer model (the
+/// kimi-for-coding/k2p7 incident: a model that produces tokens but never calls
+/// the verdict tool). It returns a non-terminal [`StageOutcome::Failed`] instead:
+/// the supervisor does NOT transition the task on a reviewer `Failed`, so it
+/// stays `in_task_review`, and the coordinator's stuck-task recovery scan
+/// releases it `in_task_review → needs_task_review` (ReleaseTaskReview, NO
+/// reopen bump) to dispatch a FRESH reviewer.
+///
+/// This retry is bounded by the existing dispatch machinery, not a new counter:
+/// a task that keeps reappearing for the same role with no typed provider
+/// failure advances `dispatch_failure_streak` and, at
+/// `STREAK_INTERVENTION_THRESHOLD`, routes to a Planner intervention (trigger B
+/// in `dispatch/retry.rs`), with the terminal close at `MAX_DISPATCH_FAILURES`
+/// as the final backstop — so no-verdict reviewers converge instead of looping
+/// forever. Bug 3 (a faulty reviewer MODEL now trips the breaker on its
+/// Transport/failure deaths) accelerates convergence by failing the run over to
+/// a healthy reviewer model.
+fn reviewer_stage_outcome(
+    finalize_name: &str,
+    finalize_payload: Option<&serde_json::Value>,
+) -> StageOutcome {
+    let payload_str = |key: &str| {
+        finalize_payload
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_str())
+    };
+    match finalize_name {
+        "submit_review" => {
+            // Accept both present-tense ("approve"/"reject") and past-tense
+            // ("approved"/"rejected") forms — gpt-5.x consistently emits
+            // past-tense in the submit_review payload, which previously fell
+            // through to the "Failed" arm and broke open_pr for every review.
+            match payload_str("verdict").unwrap_or("") {
+                "approve" | "approved" => StageOutcome::ReviewerApproved,
+                "reject" | "rejected" => StageOutcome::ReviewerRejected {
+                    feedback: payload_str("feedback").unwrap_or("").to_string(),
+                },
+                other => StageOutcome::Failed {
+                    reason: format!("reviewer submitted unknown verdict '{other}'"),
+                    provider_failure: None,
+                },
+            }
+        }
+        // No verdict at all: release for a fresh reviewer (see fn doc). NON-
+        // terminal — must NOT be `ReviewerRejected` (that reopens the PR).
+        "" => StageOutcome::Failed {
+            reason: "reviewer session ended without calling submit_review \
+                     (no verdict rendered); releasing task for a fresh reviewer"
+                .to_string(),
+            provider_failure: None,
+        },
+        "request_lead" => StageOutcome::Escalate {
+            reason: payload_str("reason")
+                .filter(|v| !v.is_empty())
+                .or_else(|| payload_str("message").filter(|v| !v.is_empty()))
+                .or_else(|| payload_str("summary").filter(|v| !v.is_empty()))
+                .unwrap_or("reviewer escalated to lead")
+                .to_string(),
+        },
+        other => StageOutcome::Failed {
+            reason: format!("reviewer finalized via unexpected tool '{other}'"),
+            provider_failure: None,
+        },
     }
 }
 
@@ -659,63 +759,22 @@ pub(crate) async fn execute_stage(
                             provider_failure: None,
                         },
                     },
-                    RoleKind::Reviewer => match finalize_name {
-                        "submit_review" => {
-                            let verdict = final_output
-                                .finalize_payload
-                                .as_ref()
-                                .and_then(|p| p.get("verdict"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            // Accept both present-tense ("approve"/"reject") and
-                            // past-tense ("approved"/"rejected") forms — gpt-5.x
-                            // consistently emits past-tense in the submit_review
-                            // payload, which previously fell through to the "Failed"
-                            // arm and broke open_pr for every review.
-                            match verdict {
-                                "approve" | "approved" => StageOutcome::ReviewerApproved,
-                                "reject" | "rejected" => StageOutcome::ReviewerRejected {
-                                    feedback: final_output
-                                        .finalize_payload
-                                        .as_ref()
-                                        .and_then(|p| p.get("feedback"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string(),
-                                },
-                                other => StageOutcome::Failed {
-                                    reason: format!("reviewer submitted unknown verdict '{other}'"),
-                                    provider_failure: None,
-                                },
-                            }
-                        }
-                        // Reviewer session ended naturally without calling
-                        // submit_review (LLM stopped emitting before invoking the
-                        // finalize tool). Treat as a hard rejection so the task
-                        // re-dispatches a fresh reviewer instead of silently
-                        // approving unreviewed code.
-                        "" => {
+                    RoleKind::Reviewer => {
+                        if finalize_name.is_empty() {
+                            // A no-verdict completion is NOT a rejection — log it so
+                            // the release-for-fresh-reviewer path is visible in the
+                            // task timeline (the helper has no `task` access).
                             tracing::warn!(
                                 task_id = %task.short_id,
                                 task_run_id = %task_run_id,
-                                "Reviewer session ended without calling submit_review; treating as rejection so a fresh reviewer runs"
+                                "Reviewer session ended without calling submit_review; releasing for a fresh reviewer (NOT rejecting the worker's PR)"
                             );
-                            StageOutcome::ReviewerRejected {
-                                feedback: "Reviewer session ended without calling submit_review — \
-                                       you MUST call submit_review with verdict=\"approve\" \
-                                       or verdict=\"reject\" before ending your session."
-                                    .to_string(),
-                            }
                         }
-                        "request_lead" => StageOutcome::Escalate {
-                            reason: extract_reason(&final_output.finalize_payload)
-                                .unwrap_or_else(|| "reviewer escalated to lead".into()),
-                        },
-                        other => StageOutcome::Failed {
-                            reason: format!("reviewer finalized via unexpected tool '{other}'"),
-                            provider_failure: None,
-                        },
-                    },
+                        reviewer_stage_outcome(
+                            finalize_name,
+                            final_output.finalize_payload.as_ref(),
+                        )
+                    }
                     RoleKind::Verifier => StageOutcome::Failed {
                         reason: "verifier stage not yet wired in supervisor".into(),
                         provider_failure: None,
@@ -944,11 +1003,12 @@ mod tests {
     #[test]
     fn breaker_excluded_variants_map_to_none() {
         // ContextOverflow → reactive compaction; EmptyCompletion → empty-turn
-        // backoff breaker; Transport → one-off blip. None must feed the breaker.
+        // backoff breaker. None must feed the model-health breaker. (Transport is
+        // NO LONGER excluded — a hard transport death now feeds the gentle
+        // consecutive-failure breaker; see `transport_error_is_breaker_worthy`.)
         for e in [
             ProviderError::ContextOverflow,
             ProviderError::EmptyCompletion,
-            ProviderError::Transport,
         ] {
             assert_eq!(
                 classify_provider_failure(&typed(e.clone())),
@@ -1100,6 +1160,136 @@ mod tests {
             classify_provider_failure(&stringified),
             None,
             "stringifying the error erases the type — this is the regression we fixed",
+        );
+    }
+
+    #[test]
+    fn transport_error_is_breaker_worthy() {
+        // Regression for the kimi-for-coding/k2p7 incident: a model that dies as a
+        // hard `Transport` failure (connection refused / instant timeout / broken
+        // stream, 0 tokens) previously classified to `None`, so the per-(scope,
+        // model) breaker never tripped and dispatch re-selected the dead model
+        // forever (also never surfacing it in model_health). A Transport death
+        // must now feed the GENTLE consecutive-failure breaker (`Failure`).
+        assert_eq!(
+            classify_provider_failure(&anyhow::Error::new(ProviderError::Transport)),
+            Some(ProviderFailureClass::Failure),
+            "a hard transport death must feed the consecutive-failure breaker",
+        );
+
+        // And it must survive the same context/stream wrapping the auth case does:
+        // the provider client wraps the typed error with a "provider API error"
+        // context and the streaming loop wraps THAT again with diagnostics. As long
+        // as the typed `ProviderError` stays the source, the downcast still finds it.
+        let from_client = anyhow::Error::new(ProviderError::Transport)
+            .context("provider request failed: connection reset by peer");
+        let from_streaming = from_client.context(
+            "provider stream event failed: display=connection reset ...; fs_diag; env_diag",
+        );
+        assert_eq!(
+            classify_provider_failure(&from_streaming),
+            Some(ProviderFailureClass::Failure),
+            "a transport error wrapped through the streaming loop must still feed the breaker",
+        );
+    }
+
+    #[test]
+    fn empty_completion_and_context_overflow_stay_out_of_the_breaker() {
+        // EmptyCompletion has its own empty-turn backoff (Codex consumer-backend
+        // throttling answers with an empty 200); demoting the model here would
+        // punish mere throttling. ContextOverflow is handled by reactive
+        // compaction. Both must stay `None` even after the Transport change.
+        assert_eq!(
+            classify_provider_failure(&anyhow::Error::new(ProviderError::EmptyCompletion)),
+            None,
+            "EmptyCompletion is handled by the empty-turn backoff, not the model-health breaker",
+        );
+        assert_eq!(
+            classify_provider_failure(&anyhow::Error::new(ProviderError::ContextOverflow)),
+            None,
+            "ContextOverflow is handled by reactive compaction, not the model-health breaker",
+        );
+    }
+
+    #[test]
+    fn reviewer_no_verdict_releases_not_rejects() {
+        // Bug 4: a reviewer that runs but never calls submit_review (no verdict)
+        // must NOT map to ReviewerRejected — that would fire `task_review_reject`
+        // (in_task_review → open, reopen_count++) and FALSE-REJECT good work,
+        // reopening the worker's PR over a malfunctioning reviewer model. It must
+        // instead be a non-terminal Failed so the supervisor leaves the task in
+        // in_task_review and the coordinator releases it → needs_task_review for a
+        // FRESH reviewer.
+        let outcome = reviewer_stage_outcome("", None);
+        match outcome {
+            StageOutcome::Failed {
+                provider_failure, ..
+            } => {
+                assert_eq!(
+                    provider_failure, None,
+                    "a no-verdict completion is a structural reviewer failure, not a typed provider error",
+                );
+            }
+            other => {
+                panic!("expected non-terminal Failed for a no-verdict reviewer, got {other:?}")
+            }
+        }
+        assert!(
+            !matches!(
+                reviewer_stage_outcome("", None),
+                StageOutcome::ReviewerRejected { .. }
+            ),
+            "a no-verdict reviewer must never map to ReviewerRejected (would reopen the worker's PR)",
+        );
+    }
+
+    #[test]
+    fn reviewer_explicit_reject_still_rejects() {
+        // The genuine submit_review(reject) path must stay intact (still reopens
+        // the PR via task_review_reject), in both present- and past-tense forms,
+        // and must carry the reviewer's feedback through.
+        let reject = serde_json::json!({"verdict": "reject", "feedback": "missing tests"});
+        assert!(
+            matches!(
+                reviewer_stage_outcome("submit_review", Some(&reject)),
+                StageOutcome::ReviewerRejected { feedback } if feedback == "missing tests"
+            ),
+            "an explicit reject verdict must still map to ReviewerRejected with its feedback",
+        );
+
+        let rejected_past = serde_json::json!({"verdict": "rejected", "feedback": "regression"});
+        assert!(
+            matches!(
+                reviewer_stage_outcome("submit_review", Some(&rejected_past)),
+                StageOutcome::ReviewerRejected { feedback } if feedback == "regression"
+            ),
+            "past-tense 'rejected' must also map to ReviewerRejected",
+        );
+    }
+
+    #[test]
+    fn reviewer_explicit_approve_is_approved() {
+        let approve = serde_json::json!({"verdict": "approve"});
+        assert!(matches!(
+            reviewer_stage_outcome("submit_review", Some(&approve)),
+            StageOutcome::ReviewerApproved
+        ));
+        let approved_past = serde_json::json!({"verdict": "approved"});
+        assert!(matches!(
+            reviewer_stage_outcome("submit_review", Some(&approved_past)),
+            StageOutcome::ReviewerApproved
+        ));
+    }
+
+    #[test]
+    fn reviewer_request_lead_escalates() {
+        let payload = serde_json::json!({"reason": "needs architectural call"});
+        assert!(
+            matches!(
+                reviewer_stage_outcome("request_lead", Some(&payload)),
+                StageOutcome::Escalate { reason } if reason == "needs architectural call"
+            ),
+            "request_lead must escalate to the lead, carrying the stated reason",
         );
     }
 }
