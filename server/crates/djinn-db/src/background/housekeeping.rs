@@ -13,6 +13,20 @@ const DEFAULT_HOUSEKEEPING_INTERVAL_SECS: u64 = 60 * 60;
 const ORPHAN_TAG: &str = "orphan";
 const BROKEN_WIKILINK_MIN_SCORE: f64 = 0.0;
 const HOUSEKEEPING_INTERVAL_ENV: &str = "DJINN_HOUSEKEEPING_INTERVAL_SECS";
+/// Default archive-candidate access window (days) used by the per-project
+/// housekeeping sweep when [`ARCHIVE_WINDOW_ENV`] is absent or invalid.
+/// Distinct from the decay window so decay and archive cadences can be tuned
+/// independently — archive is strictly stricter (no recent access).
+const DEFAULT_ARCHIVE_WINDOW_DAYS: u32 =
+    crate::repositories::note::lifecycle::DEFAULT_ARCHIVE_WINDOW_DAYS;
+/// Env-var name consumed by [`parse_archive_window_days`]. The constant is
+/// re-exported here so unit tests can `set_var`/`remove_var` it without
+/// reaching into the lifecycle module; it is also referenced in the
+/// [`parse_archive_window_days`] docstring to keep the env-override
+/// documentation colocated with the housekeeping call site.
+#[allow(dead_code)]
+const ARCHIVE_WINDOW_ENV: &str =
+    crate::repositories::note::lifecycle::ARCHIVE_WINDOW_ENV;
 /// Env-gated opt-in: when set to "1" (true), the periodic housekeeping tick
 /// also runs a one-shot dry-run retrieval-anchor backfill report (proposal
 /// counts and proposed anchors, no writes). Apply mode is never invoked
@@ -46,6 +60,13 @@ pub(crate) struct ProjectHousekeepingReport {
     /// Extracted notes (`case`/`pattern`/`pitfall`) whose confidence crossed
     /// below `STALE_CITATION` during this tick's decay pass.
     pub decayed_notes: u64,
+    /// Extracted notes flipped from `active` to `archived` by the
+    /// ADR-054 archive-candidate sweep this tick. The sweep runs after decay
+    /// and uses [`crate::repositories::note::lifecycle::ARCHIVE_WINDOW_ENV`]
+    /// (default 60 days). Only reversible status transitions are counted;
+    /// already-archived or otherwise non-active candidates are no-ops and do
+    /// not increment this counter.
+    pub archived_notes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +77,7 @@ pub(crate) struct HousekeepingTickReport {
     pub total_rebuilt_content_hashes: u64,
     pub total_repaired_broken_wikilinks: u64,
     pub total_decayed_notes: u64,
+    pub total_archived_notes: u64,
 }
 
 impl HousekeepingTickReport {
@@ -80,6 +102,10 @@ impl HousekeepingTickReport {
             .iter()
             .map(|report| report.decayed_notes)
             .sum();
+        let total_archived_notes = project_reports
+            .iter()
+            .map(|report| report.archived_notes)
+            .sum();
 
         Self {
             project_reports,
@@ -88,6 +114,7 @@ impl HousekeepingTickReport {
             total_rebuilt_content_hashes,
             total_repaired_broken_wikilinks,
             total_decayed_notes,
+            total_archived_notes,
         }
     }
 }
@@ -213,6 +240,19 @@ fn parse_housekeeping_interval(raw: Option<&str>) -> Duration {
     Duration::from_secs(secs)
 }
 
+/// Read [`ARCHIVE_WINDOW_ENV`] and return a positive `u32` window in days,
+/// falling back to `caller_default` (itself the env-anchored default) when
+/// the env var is unset or invalid. The repository-layer
+/// [`crate::repositories::note::lifecycle::parse_archive_window_days`] does
+/// the same resolution one more time, so this helper exists primarily so the
+/// housekeeping module can:
+///   1. Document the env-override pattern colocated with the call site.
+///   2. Expose a unit-testable parser for the housekeeping tick without
+///      reaching into the lifecycle module's internals.
+fn parse_archive_window_days(caller_default: u32) -> u32 {
+    crate::repositories::note::lifecycle::parse_archive_window_days(caller_default)
+}
+
 fn housekeeping_ticker(interval: Duration) -> Interval {
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -241,6 +281,7 @@ async fn run_tick(db: &Database, event_bus: &EventBus) -> anyhow::Result<Houseke
             rebuilt_content_hashes = report.rebuilt_content_hashes,
             repaired_broken_wikilinks = report.repaired_broken_wikilinks,
             decayed_notes = report.decayed_notes,
+            archived_notes = report.archived_notes,
             "knowledge base housekeeping project report"
         );
 
@@ -255,6 +296,7 @@ async fn run_tick(db: &Database, event_bus: &EventBus) -> anyhow::Result<Houseke
         total_rebuilt_content_hashes = report.total_rebuilt_content_hashes,
         total_repaired_broken_wikilinks = report.total_repaired_broken_wikilinks,
         total_decayed_notes = report.total_decayed_notes,
+        total_archived_notes = report.total_archived_notes,
         "knowledge base housekeeping tick summary"
     );
 
@@ -309,6 +351,18 @@ async fn run_project_housekeeping(
             crate::repositories::note::lifecycle::DEFAULT_DECAY_WINDOW_DAYS,
         )
         .await?;
+    // Archive sweep runs after the decay step and reuses the existing
+    // hourly scheduler — no new tick is added here. The repository call
+    // performs a reversible `active` → `archived` status flip only; it
+    // never hard-deletes note rows. The window is resolved from
+    // `DJINN_LIFECYCLE_ARCHIVE_WINDOW_DAYS` (default 60) inside the
+    // repository call, matching the env-override pattern used by decay.
+    let archived_notes = note_repo
+        .archive_audit_candidates(
+            &project.id,
+            parse_archive_window_days(DEFAULT_ARCHIVE_WINDOW_DAYS),
+        )
+        .await?;
 
     Ok(ProjectHousekeepingReport {
         project_id: project.id.clone(),
@@ -318,6 +372,7 @@ async fn run_project_housekeeping(
         rebuilt_content_hashes,
         repaired_broken_wikilinks,
         decayed_notes,
+        archived_notes,
     })
 }
 
@@ -337,9 +392,12 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::NoteSearchParams;
-    use crate::repositories::test_support::build_multi_project_housekeeping_fixture;
+    use crate::repositories::test_support::{
+        build_multi_project_housekeeping_fixture, event_bus_for, make_project,
+    };
     use djinn_core::events::EventBus;
     use futures::StreamExt;
+    use tokio::sync::broadcast;
 
     use super::*;
 
@@ -387,6 +445,7 @@ mod tests {
                 rebuilt_content_hashes: 3,
                 repaired_broken_wikilinks: 4,
                 decayed_notes: 5,
+                archived_notes: 6,
             },
             ProjectHousekeepingReport {
                 project_id: "project-b".to_string(),
@@ -396,6 +455,7 @@ mod tests {
                 rebuilt_content_hashes: 30,
                 repaired_broken_wikilinks: 40,
                 decayed_notes: 50,
+                archived_notes: 60,
             },
         ]);
 
@@ -405,6 +465,46 @@ mod tests {
         assert_eq!(report.total_rebuilt_content_hashes, 33);
         assert_eq!(report.total_repaired_broken_wikilinks, 44);
         assert_eq!(report.total_decayed_notes, 55);
+        assert_eq!(report.total_archived_notes, 66);
+    }
+
+    #[test]
+    fn parse_archive_window_days_uses_caller_default_when_env_unset() {
+        // SAFETY: single-threaded test; no other thread reads this env var
+        // here, and we restore the previous state at the end.
+        unsafe { std::env::remove_var(ARCHIVE_WINDOW_ENV) };
+        assert_eq!(parse_archive_window_days(60), 60);
+    }
+
+    #[test]
+    fn parse_archive_window_days_falls_back_to_60_when_caller_passes_zero() {
+        // SAFETY: single-threaded test; no other thread reads this env var
+        // here, and we restore the previous state at the end.
+        unsafe { std::env::remove_var(ARCHIVE_WINDOW_ENV) };
+        // A zero caller default is treated as "use the module default", which
+        // is 60 days. This mirrors the decay-window parser's contract.
+        assert_eq!(parse_archive_window_days(0), 60);
+    }
+
+    #[test]
+    fn parse_archive_window_days_honors_positive_env_override() {
+        // SAFETY: single-threaded test; no other thread reads this env var
+        // here, and we restore the previous state at the end.
+        unsafe { std::env::set_var(ARCHIVE_WINDOW_ENV, "90") };
+        // Env wins over caller-provided value.
+        assert_eq!(parse_archive_window_days(60), 90);
+        unsafe { std::env::remove_var(ARCHIVE_WINDOW_ENV) };
+    }
+
+    #[test]
+    fn parse_archive_window_days_ignores_zero_and_invalid_env_values() {
+        // SAFETY: single-threaded test; no other thread reads this env var
+        // here, and we restore the previous state at the end.
+        unsafe { std::env::set_var(ARCHIVE_WINDOW_ENV, "0") };
+        assert_eq!(parse_archive_window_days(60), 60);
+        unsafe { std::env::set_var(ARCHIVE_WINDOW_ENV, "garbage") };
+        assert_eq!(parse_archive_window_days(60), 60);
+        unsafe { std::env::remove_var(ARCHIVE_WINDOW_ENV) };
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -459,6 +559,14 @@ mod tests {
             assert_eq!(
                 project_report.rebuilt_content_hashes,
                 fixture_project.expected.rebuild_missing_content_hashes,
+            );
+            // The shipped multi-project fixture only uses hand-written
+            // `reference` notes, so the archive sweep must report zero
+            // for every project — the SQL `note_type IN ('case',
+            // 'pattern', 'pitfall')` predicate is the safety boundary.
+            assert_eq!(
+                project_report.archived_notes,
+                fixture_project.expected.archive_audit_candidates,
             );
 
             let repaired_content: String =
@@ -546,6 +654,11 @@ mod tests {
             .iter()
             .map(|project| project.expected.repair_broken_wikilinks)
             .sum();
+        let expected_total_archived: u64 = fixture
+            .projects
+            .iter()
+            .map(|project| project.expected.archive_audit_candidates)
+            .sum();
 
         assert_eq!(report.total_pruned_associations, expected_total_pruned);
         assert_eq!(report.total_orphan_notes_flagged, expected_total_orphans);
@@ -554,6 +667,133 @@ mod tests {
             report.total_repaired_broken_wikilinks,
             expected_total_repairs
         );
+        assert_eq!(report.total_archived_notes, expected_total_archived);
         assert!(report.total_repaired_broken_wikilinks > 0);
+    }
+
+    /// Drive `run_project_housekeeping` directly (bypassing `run_tick`'s
+    /// project enumeration) so we can stage a project with both a
+    /// single-project archive count and a non-zero count that the tick-level
+    /// aggregation will sum. This is the "single-project" half of the
+    /// acceptance criterion: it proves `archived_notes` is exposed per
+    /// project and that the per-project report is wired through the
+    /// existing housekeeping call path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_project_housekeeping_reports_archived_notes_for_eligible_candidates() {
+        let db = Database::open_in_memory().unwrap();
+        let event_bus = EventBus::noop();
+        let (tx, _rx) = broadcast::channel(256);
+        let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let tmp = crate::database::test_tempdir().unwrap();
+        let project = make_project(&db, tmp.path()).await;
+        let _ = tmp;
+
+        // ADR-054 archive-candidate shape: short body, "Extracted from session ..."
+        // footer, and an extracted note type. With never-accessed and the
+        // default 60-day window, the archive sweep should flip it.
+        const ARCHIVE_SHAPED_BODY: &str = "One short extracted paragraph.\n\n*Extracted from session 019ed7e1-980f-7ea2-935e-6f5e9fc82c14.*";
+        let eligible = note_repo
+            .create(
+                &project.id,
+                "Eligible Archive Candidate",
+                ARCHIVE_SHAPED_BODY,
+                "case",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        // SAFETY: single-threaded test; clear any leftover override and
+        // restore at the end.
+        unsafe { std::env::remove_var(ARCHIVE_WINDOW_ENV) };
+
+        let report = run_project_housekeeping(&db, &event_bus, &project)
+            .await
+            .unwrap();
+
+        assert_eq!(report.archived_notes, 1);
+
+        let status: String = sqlx::query_scalar("SELECT status FROM notes WHERE id = $1")
+            .bind(&eligible.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(status, "archived");
+    }
+
+    /// Multi-project aggregation: create two projects with non-zero
+    /// archive candidate counts and assert the tick-level
+    /// `total_archived_notes` sum is correct. This is the "multi-project"
+    /// half of the acceptance criterion.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_tick_aggregates_archived_notes_across_multiple_projects() {
+        let db = Database::open_in_memory().unwrap();
+        let event_bus = EventBus::noop();
+        let (tx, _rx) = broadcast::channel(256);
+        let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let tmp = crate::database::test_tempdir().unwrap();
+        let root = tmp.keep();
+        let path_one = root.join("archive-project-one");
+        let path_two = root.join("archive-project-two");
+        std::fs::create_dir_all(&path_one).unwrap();
+        std::fs::create_dir_all(&path_two).unwrap();
+
+        let project_one = make_project(&db, &path_one).await;
+        let project_two = make_project(&db, &path_two).await;
+
+        const ARCHIVE_SHAPED_BODY: &str = "One short extracted paragraph.\n\n*Extracted from session 019ed7e1-980f-7ea2-935e-6f5e9fc82c14.*";
+
+        // Project one: two eligible archive candidates.
+        let _p1_a = note_repo
+            .create(
+                &project_one.id,
+                "Project One Archive A",
+                ARCHIVE_SHAPED_BODY,
+                "case",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let _p1_b = note_repo
+            .create(
+                &project_one.id,
+                "Project One Archive B",
+                ARCHIVE_SHAPED_BODY,
+                "pitfall",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        // Project two: one eligible archive candidate.
+        let _p2_a = note_repo
+            .create(
+                &project_two.id,
+                "Project Two Archive A",
+                ARCHIVE_SHAPED_BODY,
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        // SAFETY: single-threaded test; clear any leftover override.
+        unsafe { std::env::remove_var(ARCHIVE_WINDOW_ENV) };
+
+        let report = run_tick(&db, &event_bus).await.unwrap();
+
+        let by_project: HashMap<_, _> = report
+            .project_reports
+            .iter()
+            .map(|r| (r.project_id.clone(), r.archived_notes))
+            .collect();
+
+        assert_eq!(by_project.get(&project_one.id).copied(), Some(2));
+        assert_eq!(by_project.get(&project_two.id).copied(), Some(1));
+        // Tick-level aggregation: 2 + 1 = 3 archived notes across both
+        // projects.
+        assert_eq!(report.total_archived_notes, 3);
     }
 }
