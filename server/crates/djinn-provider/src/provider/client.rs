@@ -45,6 +45,25 @@ fn body_model_id(body: &serde_json::Value) -> &str {
     body.get("model").and_then(|m| m.as_str()).unwrap_or("")
 }
 
+/// Parse one SSE line, returning the trimmed `data:` payload to yield, or `None`
+/// for non-data lines (`event:`, `id:`, comments, blanks) and the empty/`[DONE]`
+/// sentinels.
+///
+/// Per the SSE spec the single space after `data:` is OPTIONAL. Anthropic and
+/// OpenAI emit `data: {...}` (with space), but some Anthropic-compatible vendors
+/// — notably the Kimi for Coding endpoint (`api.kimi.com/coding`) — emit
+/// `data:{...}` with NO space. We strip only the `data:` field name and let
+/// `trim()` drop the optional leading space so both forms parse. Matching the
+/// literal `"data: "` (with space) silently dropped every Kimi event, which
+/// surfaced as a "stream ended without events" empty turn.
+fn parse_sse_data_line(line: &str) -> Option<&str> {
+    let data = line.strip_prefix("data:")?.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return None;
+    }
+    Some(data)
+}
+
 /// Render the request headers (auth + extras) into a single redacted string for
 /// the debug log. Auth header VALUES are always redacted; any other header that
 /// looks credential-bearing is scrubbed via [`redact_secrets`] using the same
@@ -281,15 +300,11 @@ impl ApiClient {
             loop {
                 match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, lines.next_line()).await {
                     Ok(Ok(Some(line))) => {
-                        // SSE lines starting with "data: "
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            let data = data.trim();
-                            if data.is_empty() || data == "[DONE]" {
-                                continue;
-                            }
+                        // Yield payloads from SSE `data:` lines; skip event:, id:,
+                        // comment, blank lines and the `[DONE]` sentinel.
+                        if let Some(data) = parse_sse_data_line(&line) {
                             yield Ok(data.to_string());
                         }
-                        // Skip event:, id:, comment lines, and blank lines
                     }
                     Ok(Ok(None)) => break, // end of stream
                     Ok(Err(e)) => {
@@ -474,6 +489,35 @@ mod tests {
     #[test]
     fn request_timeout_is_10_minutes() {
         assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn parse_sse_data_line_handles_space_and_no_space() {
+        // Anthropic/OpenAI form (space after colon).
+        assert_eq!(
+            parse_sse_data_line("data: {\"type\":\"message_start\"}"),
+            Some("{\"type\":\"message_start\"}")
+        );
+        // Kimi for Coding form (NO space after colon) — the regression.
+        assert_eq!(
+            parse_sse_data_line("data:{\"type\":\"message_start\"}"),
+            Some("{\"type\":\"message_start\"}")
+        );
+    }
+
+    #[test]
+    fn parse_sse_data_line_skips_non_data_and_sentinels() {
+        // Non-data SSE fields and comments are ignored.
+        assert_eq!(parse_sse_data_line("event:message_start"), None);
+        assert_eq!(parse_sse_data_line("event: message_start"), None);
+        assert_eq!(parse_sse_data_line("id: 42"), None);
+        assert_eq!(parse_sse_data_line(": keep-alive comment"), None);
+        assert_eq!(parse_sse_data_line(""), None);
+        // Empty payloads and the [DONE] sentinel (either spacing) are dropped.
+        assert_eq!(parse_sse_data_line("data:"), None);
+        assert_eq!(parse_sse_data_line("data: "), None);
+        assert_eq!(parse_sse_data_line("data: [DONE]"), None);
+        assert_eq!(parse_sse_data_line("data:[DONE]"), None);
     }
 
     #[test]
