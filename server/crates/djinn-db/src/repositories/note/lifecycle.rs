@@ -38,6 +38,8 @@ use super::scoring::{CONFIDENCE_FLOOR, STALE_CITATION, STALE_DECAY_SIGNAL, bayes
 pub(crate) const DECAY_WINDOW_ENV: &str = "DJINN_LIFECYCLE_DECAY_WINDOW_DAYS";
 /// Default decay window applied when the env override is absent or invalid.
 pub(crate) const DEFAULT_DECAY_WINDOW_DAYS: u32 = 30;
+/// Default archive-candidate access window applied when the caller passes zero.
+pub(crate) const DEFAULT_ARCHIVE_WINDOW_DAYS: u32 = DEFAULT_DECAY_WINDOW_DAYS;
 
 /// Per-note-type decay window overrides (days). These are advisory defaults;
 /// the global env override ([`DECAY_WINDOW_ENV`]) is used by the SQL predicate
@@ -61,7 +63,94 @@ struct DecayCandidate {
     confidence: f64,
 }
 
+/// Lifecycle status values stored in `notes.status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoteStatus {
+    Active,
+    Archived,
+}
+
+impl NoteStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Archived => "archived",
+        }
+    }
+}
+
 impl NoteRepository {
+    /// Flip a note from one lifecycle status to another through the shared
+    /// status substrate. The `current_status` guard makes this primitive
+    /// idempotent for sweep callers: rows that are already archived or otherwise
+    /// moved out of the expected status are left untouched and reported as not
+    /// changed.
+    pub(crate) async fn set_note_status(
+        &self,
+        note_id: &str,
+        current_status: NoteStatus,
+        next_status: NoteStatus,
+    ) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+
+        let result = sqlx::query(
+            r#"UPDATE notes
+               SET status = $1,
+                   updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE id = $2
+                 AND status = $3"#,
+        )
+        .bind(next_status.as_str())
+        .bind(note_id)
+        .bind(current_status.as_str())
+        .execute(self.db.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Archive ADR-054 archive candidates that have no recent access.
+    ///
+    /// Candidate selection is delegated to
+    /// [`extracted_archive_candidates`](Self::extracted_archive_candidates),
+    /// which enforces both the ADR-054 `archive_candidate` classifier and the
+    /// SQL safety predicate for active extracted note types with no recent
+    /// access. This method performs a reversible status flip only; it never hard
+    /// deletes note rows. The return value counts only rows actually changed
+    /// from `active` to `archived`; candidates that were archived by another
+    /// actor between selection and update are successful no-ops.
+    pub async fn archive_audit_candidates(
+        &self,
+        project_id: &str,
+        archive_window_days: u32,
+    ) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+
+        let candidates = self
+            .extracted_archive_candidates(project_id, archive_window_days)
+            .await?;
+        let mut archived_count = 0_u64;
+
+        for candidate in &candidates {
+            if self
+                .set_note_status(&candidate.note_id, NoteStatus::Active, NoteStatus::Archived)
+                .await?
+            {
+                archived_count += 1;
+            }
+        }
+
+        tracing::debug!(
+            project_id,
+            candidate_count = candidates.len(),
+            archived_count,
+            archive_window_days,
+            "archive_audit_candidates tick"
+        );
+
+        Ok(archived_count)
+    }
+
     /// Decay stale extracted notes (`case`, `pattern`, `pitfall`) for a single
     /// project.
     ///
