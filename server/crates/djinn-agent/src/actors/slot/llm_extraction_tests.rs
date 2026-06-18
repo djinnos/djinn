@@ -1231,7 +1231,7 @@ async fn llm_extraction_treats_empty_anchor_as_missing() {
     let json = serde_json::json!({
         "cases": [{
             "title": "Whitespace Anchor Case",
-            "content": "## Situation\nA case that emits a whitespace-only anchor must still be persisted under a deterministic constraint. The constraint is that the durable lesson must remain visible across future tasks. The approach taken is to ignore the blank anchor and treat it as missing. The result is the note persists with a null anchor. The reusable lesson is that empty retrieval hooks should not break the write path. ## Related\n- anchor normalization",
+            "content": "## Situation\nA case that emits a whitespace-only anchor must still be persisted under a deterministic constraint.\n## Constraint\nThe durable lesson must remain visible across future tasks even when the optional retrieval hook is blank.\n## Approach taken\nIgnore the blank anchor after trimming and treat it as missing while leaving the durable note body intact.\n## Result\nThe note persists successfully with a null retrieval anchor instead of an empty string.\n## Why it worked / failed\nThe anchor normalization is separate from ADR-054 body validation, so empty optional metadata does not invalidate reusable content.\n## Reusable lesson\nEmpty retrieval hooks should be normalized away without breaking durable note writes.\n## Related\n- anchor normalization",
             "applies_when": "   \n  "
         }],
         "patterns": [],
