@@ -1,0 +1,7 @@
+    Blocking waiting for file lock on build directory
+    Checking djinn-workspace v0.1.0 (/workspace/.tmpASpR9X/server/crates/djinn-workspace)
+    Checking djinn-runtime v0.1.0 (/workspace/.tmpASpR9X/server/crates/djinn-runtime)
+    Checking djinn-supervisor v0.1.0 (/workspace/.tmpASpR9X/server/crates/djinn-supervisor)
+    Checking djinn-k8s v0.1.0 (/workspace/.tmpASpR9X/server/crates/djinn-k8s)
+    Checking djinn-agent v0.1.0 (/workspace/.tmpASpR9X/server/crates/djinn-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7m 25s
