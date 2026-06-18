@@ -21,6 +21,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 mod budget;
+pub(crate) mod cache;
 mod indexing;
 pub mod workspaces;
 
