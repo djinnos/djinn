@@ -684,7 +684,11 @@ async fn list_sessions_for_task_run(
         r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
             status, tokens_in, tokens_out,
             cache_read_tokens, cache_write_tokens, task_run_id, title,
-            parked_reason
+            parked_reason,
+            cost_usd, input_price_per_million_snapshot,
+            output_price_per_million_snapshot,
+            cache_read_price_per_million_snapshot,
+            cache_write_price_per_million_snapshot
          FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
     )
     .bind(task_run_id)

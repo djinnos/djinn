@@ -13,13 +13,22 @@ export interface AgentCardProps {
   isDeleting: boolean;
   /** Editing agents (incl. their MCP servers + skills) is admin-only. */
   canEdit: boolean;
+  editLabel?: string;
 }
 
-export function AgentCard({ role, onEdit, onDelete, isDeleting, canEdit }: AgentCardProps) {
+export function AgentCard({
+  role,
+  onEdit,
+  onDelete,
+  isDeleting,
+  canEdit,
+  editLabel,
+}: AgentCardProps) {
   const identity = getAgentIdentity(role.base_role);
   const mcpCount = role.mcp_servers?.length ?? 0;
   const skillCount = role.skills?.length ?? 0;
   const extCount = role.system_prompt_extensions.length;
+  const resolvedEditLabel = editLabel ?? (role.is_default ? "Edit instructions" : "Edit");
 
   return (
     <div className="group relative flex flex-col rounded-xl border border-border bg-card overflow-hidden transition-colors hover:border-border/80">
@@ -34,7 +43,7 @@ export function AgentCard({ role, onEdit, onDelete, isDeleting, canEdit }: Agent
         {canEdit && (
           <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
             <Button variant="outline" size="sm" className="h-7 px-2 text-xs bg-card" onClick={onEdit}>
-              Edit
+              {resolvedEditLabel}
             </Button>
             {!role.is_default && (
               <ConfirmButton
