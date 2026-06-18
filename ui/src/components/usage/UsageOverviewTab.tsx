@@ -322,7 +322,7 @@ function ChartEmptyState({
   );
 }
 
-function isSpendGrouping(value: string): value is SpendGrouping {
+function isSpendGrouping(value: string | null): value is SpendGrouping {
   return GROUPING_OPTIONS.some((option) => option.value === value);
 }
 
