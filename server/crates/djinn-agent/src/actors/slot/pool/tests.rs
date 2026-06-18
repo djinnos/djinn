@@ -154,6 +154,7 @@ async fn seed_running_session_with_task_run(
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(task_run_id),
+            pricing: None,
         })
         .await
         .expect("session create should succeed");
@@ -188,6 +189,7 @@ async fn seed_running_session_with_task_run_in_project(
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(task_run_id),
+            pricing: None,
         })
         .await
         .expect("session create should succeed");
@@ -1079,6 +1081,7 @@ async fn stall_kill_settles_session_row_and_clears_from_per_user_cap() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: None,
+            pricing: None,
         })
         .await
         .expect("session create should succeed");
@@ -1802,6 +1805,7 @@ async fn evict_session_with_no_task_run_id_is_idempotent() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: None,
+            pricing: None,
         })
         .await
         .expect("session create should succeed");

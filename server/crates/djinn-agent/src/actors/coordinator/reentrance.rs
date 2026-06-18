@@ -212,6 +212,7 @@ mod tests {
                 agent_type: "planner",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
