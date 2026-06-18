@@ -460,6 +460,7 @@ async fn llm_extracted_notes_have_confidence_0_5() {
     assert_eq!(stored_taxonomy.extraction_quality.merged, 0);
     assert_eq!(stored_taxonomy.extraction_quality.downgraded, 0);
     assert_eq!(stored_taxonomy.extraction_quality.discarded, 0);
+    assert_eq!(stored_taxonomy.extraction_quality.admission_dropped, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -737,7 +738,29 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
     let provider = Arc::new(FakeProvider::script(vec![
         vec![
             djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
-                text: r#"{"cases":[{"title":"Duplicate Semantic Note","content":"Fix flaky semantic duplicate tests by injecting dedup candidates and comparing stable summaries."}],"patterns":[],"pitfalls":[]}"#.to_string(),
+                text: serde_json::json!({
+                    "cases": [{
+                        "title": "Duplicate Semantic Note",
+                        "content": "## Situation
+Flaky semantic duplicate tests made extraction unreliable across repeated runs.
+## Constraint
+Novelty checks needed stable inputs and deterministic comparison summaries.
+## Approach taken
+Inject dedup candidates with stable summaries and compare them deterministically.
+## Result
+The extraction pipeline stopped creating noisy duplicate notes.
+## Why it worked / failed
+Stable comparison inputs removed the non-determinism that caused flaky merges.
+## Reusable lesson
+Use injected stable candidates and deterministic summaries when testing novelty detection.
+## Related
+- semantic dedup
+- extraction quality"
+                    }],
+                    "patterns": [],
+                    "pitfalls": []
+                })
+                .to_string(),
             }),
             djinn_provider::provider::StreamEvent::Done,
         ],
@@ -862,7 +885,31 @@ async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
     };
 
     let provider = Arc::new(FakeProvider::text(
-        r#"{"cases":[],"patterns":[{"title":"Temporary Working Spec Note","content":"Recommended approach for this task: keep a temporary hypothesis about the current migration and maybe investigate the next step later so the team can continue the session. Why it works: it preserves context during the current task, but it is still temporary and should not become durable memory.","scope_paths":["server/crates/djinn-agent/src/actors/slot"]}],"pitfalls":[]}"#,
+        &serde_json::json!({
+            "cases": [],
+            "patterns": [{
+                "title": "Temporary Working Spec Note",
+                "content": "## Context
+A working hypothesis about the current migration that needs investigation before the next step. The approach is temporary and might change.
+## Problem shape
+The current task requires a temporary solution that could change soon.
+## Recommended approach
+Investigate the next step and maybe adjust the approach. This is for now.
+## Why it works
+The hypothesis preserves context during the current task and temporary work.
+## Tradeoffs / limits
+This is a temporary approach that might not work long-term. The current task focus limits reuse.
+## When to use
+Use when the current task needs a working hypothesis and temporary investigation.
+## When not to use
+Do not use when a durable lesson is available or the approach is stable.
+## Related
+- temporary approaches
+- working hypotheses",
+                "scope_paths": ["server/crates/djinn-agent/src/actors/slot"]
+            }],
+            "pitfalls": []
+        }).to_string(),
     ));
 
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
@@ -912,6 +959,7 @@ async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
     assert_eq!(stored_taxonomy.extraction_quality.extracted, 1);
     assert_eq!(stored_taxonomy.extraction_quality.downgraded, 1);
     assert_eq!(stored_taxonomy.extraction_quality.written, 0);
+    assert_eq!(stored_taxonomy.extraction_quality.admission_dropped, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -930,7 +978,14 @@ async fn llm_extraction_downgrades_note_missing_required_adr_054_sections() {
     };
 
     let provider = Arc::new(FakeProvider::text(
-        r#"{"cases":[],"patterns":[{"title":"Unstructured Pattern Note","content":"Reusable approach: keep extraction deterministic across future tasks by isolating unstable inputs and documenting why the pattern helps."}],"pitfalls":[]}"#,
+        &serde_json::json!({
+            "cases": [],
+            "patterns": [{
+                "title": "Unstructured Pattern Note",
+                "content": "Reusable approach: keep extraction deterministic across future tasks by isolating unstable inputs and documenting why the pattern helps."
+            }],
+            "pitfalls": []
+        }).to_string(),
     ));
 
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
@@ -940,49 +995,24 @@ async fn llm_extraction_downgrades_note_missing_required_adr_054_sections() {
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-    assert_eq!(
-        notes.len(),
-        1,
-        "notes missing ADR-054 sections should be routed into the working-spec fallback"
-    );
-
-    let working_spec = &notes[0];
-    assert_eq!(working_spec.note_type, "design");
-    assert_eq!(
-        working_spec.title,
-        format!("Working Spec {}", fixture.task.short_id)
-    );
-    assert!(working_spec.content.contains("## Active objective"));
-    assert!(working_spec.content.contains("## Relevant scope"));
-    assert!(working_spec.content.contains("## Constraints"));
-    assert!(working_spec.content.contains("## Current hypotheses"));
-    assert!(working_spec.content.contains("## Open questions"));
-    assert!(working_spec.content.contains("Unstructured Pattern Note"));
+    // The ADR-054 admission gate drops underspecified notes before novelty
+    // judging and before any create_* call — no working-spec fallback, no
+    // durable write. The note is simply skipped.
     assert!(
-        working_spec
-            .content
-            .contains("missing_required_adr_054_sections")
-    );
-    assert!(working_spec.content.contains(&fixture.session_id));
-
-    let durable_notes: Vec<_> = notes
-        .iter()
-        .filter(|note| matches!(note.note_type.as_str(), "case" | "pattern" | "pitfall"))
-        .collect();
-    assert!(
-        durable_notes.is_empty(),
-        "notes missing ADR-054 sections should not become durable extracted notes"
+        notes.is_empty(),
+        "notes missing all ADR-054 sections should be dropped at admission gate, not persisted"
     );
 
     let stored_json =
         SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
             .get_event_taxonomy_json(&fixture.session_id)
             .await
-            .expect("query session event_taxonomy after template downgrade");
+            .expect("query session event_taxonomy after admission drop");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
-        .expect("deserialize stored taxonomy after template downgrade");
+        .expect("deserialize stored taxonomy after admission drop");
     assert_eq!(stored_taxonomy.extraction_quality.extracted, 1);
-    assert_eq!(stored_taxonomy.extraction_quality.downgraded, 1);
+    assert_eq!(stored_taxonomy.extraction_quality.admission_dropped, 1);
+    assert_eq!(stored_taxonomy.extraction_quality.downgraded, 0);
     assert_eq!(stored_taxonomy.extraction_quality.written, 0);
 }
 
