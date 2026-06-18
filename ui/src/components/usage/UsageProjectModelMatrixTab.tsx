@@ -267,7 +267,7 @@ function ProjectModelCell({
         }
       >
         <div className="font-semibold text-foreground">{label}</div>
-        {value === null || value === undefined && (
+        {(value === null || value === undefined) && (
           <div className="mt-1 text-xs text-muted-foreground">
             {metric.emptyLabel}
           </div>
@@ -358,7 +358,7 @@ function getMatrixMetric(key: MatrixMetricKey): MatrixMetricSpec {
   return MATRIX_METRICS.find((metric) => metric.key === key) ?? MATRIX_METRICS[0];
 }
 
-function isMatrixMetricKey(value: string): value is MatrixMetricKey {
+function isMatrixMetricKey(value: string | null): value is MatrixMetricKey {
   return MATRIX_METRICS.some((metric) => metric.key === value);
 }
 

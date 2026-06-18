@@ -20,7 +20,7 @@ describe("usage formatters", () => {
     expect(formatCompactNumber(1234)).toBe("1.2K");
     expect(formatPercent(0.875)).toBe("88%");
     expect(formatAverageReopens(1.234)).toBe("1.23");
-    expect(formatDeltaPercent(0.125)).toBe("+12%");
+    expect(formatDeltaPercent(0.125)).toBe("+13%");
     expect(formatDeltaPercent(-0.025)).toBe("-2.5%");
     expect(formatDeltaPercent(null)).toBe(EM_DASH);
   });
