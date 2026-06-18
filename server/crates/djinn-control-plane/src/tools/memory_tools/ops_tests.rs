@@ -75,15 +75,6 @@ mod tests {
         ) -> Result<(), crate::bridge::RuntimeDispatchError> {
             Ok(())
         }
-        async fn provision_backing_service(
-            &self,
-            _: crate::bridge::ProvisionServiceRequest,
-        ) -> Result<crate::bridge::ProvisionedService, String> {
-            Err("stub".into())
-        }
-        async fn release_backing_service(&self, _: &str) -> Result<(), String> {
-            Ok(())
-        }
         async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
@@ -138,15 +129,6 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<(), crate::bridge::RuntimeDispatchError> {
-            Ok(())
-        }
-        async fn provision_backing_service(
-            &self,
-            _: crate::bridge::ProvisionServiceRequest,
-        ) -> Result<crate::bridge::ProvisionedService, String> {
-            Err("stub".into())
-        }
-        async fn release_backing_service(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
         async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {

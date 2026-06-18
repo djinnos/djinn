@@ -104,25 +104,6 @@ pub trait GraphWarmerService: Send + Sync {
         ))
     }
 
-    /// Provision an on-demand backing service (Phase C): create a Pod + ClusterIP
-    /// Service for one (task, service-type), owned by the task-run Job so it's
-    /// GC'd with the task. Returns the connection info the worker exports.
-    /// Default errors — only the K8s warmer can create the objects.
-    async fn provision_backing_service(
-        &self,
-        _req: BackingServiceRequest,
-    ) -> Result<BackingServiceConn, WarmerError> {
-        Err(WarmerError::Backend(
-            "backing-service provisioning requires the kubernetes runtime".to_string(),
-        ))
-    }
-
-    /// Tear down a provisioned backing service (best-effort; the ownerRef + a
-    /// label reaper are the backstops). No-op default.
-    async fn release_backing_service(&self, _instance_id: &str) -> Result<(), WarmerError> {
-        Ok(())
-    }
-
     /// Foreground-delete the canonical task-run Job (`djinn-taskrun-{task_run_id}`).
     ///
     /// Default impl errors — only a backend that owns a kube client (the
@@ -141,33 +122,6 @@ pub trait GraphWarmerService: Send + Sync {
     async fn list_taskrun_jobs(&self) -> Result<Vec<TaskrunJobRef>, WarmerError> {
         Ok(Vec::new())
     }
-}
-
-/// A request to provision an on-demand backing service. Primitive fields only —
-/// keeps this trait free of k8s types. The provisioner maps it onto the k8s
-/// pod/service builders.
-#[derive(Clone, Debug)]
-pub struct BackingServiceRequest {
-    pub instance_id: String,
-    pub task_run_id: String,
-    pub service_type: String,
-    pub image: String,
-    pub port: i32,
-    pub env: Vec<(String, String)>,
-    pub cpu_request: String,
-    pub memory_request: String,
-    pub cpu_limit: String,
-    pub memory_limit: String,
-    /// Connection template with `{host}`/`{port}` placeholders.
-    pub conn_template: String,
-}
-
-/// What `provision_backing_service` returns to the caller.
-#[derive(Clone, Debug)]
-pub struct BackingServiceConn {
-    pub pod_name: String,
-    pub service_name: String,
-    pub conn_string: String,
 }
 
 /// Errors surfaced by a [`GraphWarmerService`] implementation.

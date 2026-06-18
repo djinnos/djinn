@@ -290,7 +290,7 @@ impl NoteRepository {
             "SELECT id, permalink, title, folder, note_type,
                     COALESCE(abstract, substr(content, 1, 200)) as abstract_text
              FROM notes
-             WHERE project_id = $1 AND id IN ({})",
+             WHERE project_id = $1 AND status = 'active' AND id IN ({})",
             placeholders
         );
         let mut q = sqlx::query_as::<_, (String, String, String, String, String, String)>(&sql)
@@ -371,6 +371,7 @@ impl NoteRepository {
                AND ($2 = '' OR n.folder = $3)
                AND ($4 = '' OR n.note_type = $5)
                AND {branch_filter_sql}
+               AND n.status = 'active'
                AND n.id IN ({})",
             placeholders
         );
@@ -428,19 +429,14 @@ impl NoteRepository {
     pub async fn catalog(&self, project_id: &str) -> Result<String> {
         self.db.ensure_initialized().await?;
 
-        let rows = sqlx::query!(
+        let notes: Vec<(String, String, String, String)> = sqlx::query_as(
             "SELECT folder, title, permalink, updated_at
-             FROM notes WHERE project_id = $1
+             FROM notes WHERE project_id = $1 AND status = 'active'
              ORDER BY folder, title",
-            project_id
         )
+        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
-
-        let notes: Vec<(String, String, String, String)> = rows
-            .into_iter()
-            .map(|r| (r.folder, r.title, r.permalink, r.updated_at))
-            .collect();
 
         Ok(build_catalog(&notes))
     }
@@ -495,6 +491,23 @@ impl NoteRepository {
         depth: i64,
         status: Option<&str>,
     ) -> Result<Vec<NoteCompact>> {
+        self.list_compact_by_status(project_id, folder, note_type, depth, Some("active"))
+            .await
+    }
+
+    /// List compact note summaries with an explicit lifecycle status filter.
+    ///
+    /// Passing `Some("archived")` is the reversible/listable archive path used
+    /// by lifecycle tooling. Passing `None` lists all statuses for administrative
+    /// callers; default browsing should use [`Self::list_compact`].
+    pub async fn list_compact_by_status(
+        &self,
+        project_id: &str,
+        folder: Option<&str>,
+        note_type: Option<&str>,
+        depth: i64,
+        status: Option<&str>,
+    ) -> Result<Vec<NoteCompact>> {
         self.db.ensure_initialized().await?;
         let status = djinn_memory::note_status::normalize(status);
         if !djinn_memory::note_status::is_valid(&status) {
@@ -503,7 +516,7 @@ impl NoteRepository {
             )));
         }
 
-        // NOTE: dynamic SQL (folder/note_type clauses appended at runtime) — compile-time check not possible.
+        // NOTE: dynamic SQL (folder/note_type/status clauses appended at runtime) — compile-time check not possible.
         // Postgres positional binds: project_id is $1; appended clauses number
         // their placeholders from $2 onward. Plain `AS scope_paths` alias (the
         // `!` non-null assertion is macro-only — see `recent`).
@@ -514,6 +527,12 @@ impl NoteRepository {
         let mut binds: Vec<String> = vec![project_id.to_string(), status];
         // Next free placeholder index ($1 is project_id, $2 is status).
         let mut next = 3;
+
+        if let Some(status) = status {
+            sql.push_str(&format!(" AND status = ${next}"));
+            next += 1;
+            binds.push(status.to_string());
+        }
 
         if let Some(f) = folder {
             if depth == 1 {
@@ -615,6 +634,7 @@ impl NoteRepository {
              WHERE n.project_id = $1
                AND n.status = 'active'
                AND n.note_type IN ({types_in})
+               AND n.status = 'active'
                AND n.confidence >= $2
                AND {scope_clause}
              ORDER BY n.confidence DESC, n.updated_at DESC

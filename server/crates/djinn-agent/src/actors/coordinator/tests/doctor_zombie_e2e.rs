@@ -70,6 +70,7 @@ async fn zombie_running_session_doctor_e2e() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: None,
+            pricing: None,
         })
         .await
         .unwrap();
