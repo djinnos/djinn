@@ -12,6 +12,7 @@ import { UsageDashboardFiltersBar } from "@/components/usage/UsageDashboardFilte
 import { UsageBreakdownsTab } from "@/components/usage/UsageBreakdownsTab";
 import { UsageModelsTab } from "@/components/usage/UsageModelsTab";
 import { UsageOverviewTab } from "@/components/usage/UsageOverviewTab";
+import { UsageProjectModelMatrixTab } from "@/components/usage/UsageProjectModelMatrixTab";
 import { cn } from "@/lib/utils";
 
 /** Default filters: last 30 days, daily granularity. */
@@ -148,13 +149,7 @@ export function UsageDashboardPage() {
             </TabsContent>
 
             <TabsContent value={TAB_MATRIX}>
-              <TabPlaceholder
-                title="Project × Model Matrix"
-                description="Heatmap of cost/task, success rate, average reopens, total spend, and tokens per project-model pair."
-                generatedAt={data?.generated_at}
-                count={data?.project_model_matrix.length}
-                countLabel="cells"
-              />
+              {data && <UsageProjectModelMatrixTab data={data} />}
             </TabsContent>
           </Tabs>
         )}
@@ -175,45 +170,6 @@ function DashboardSkeleton() {
       </div>
       <Skeleton className="h-64 w-full rounded-lg" />
       <Skeleton className="h-48 w-full rounded-lg" />
-    </div>
-  );
-}
-
-// ── Tab placeholder container ────────────────────────────────────────────────
-
-/**
- * Lightweight container for tabs still owned by follow-up tasks.
- */
-function TabPlaceholder({
-  title,
-  description,
-  generatedAt,
-  count,
-  countLabel,
-}: {
-  title: string;
-  description: string;
-  generatedAt?: string;
-  count?: number;
-  countLabel?: string;
-}) {
-  return (
-    <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-8 text-center">
-      <h2 className="text-sm font-medium text-foreground">{title}</h2>
-      <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
-        {description}
-      </p>
-      <p className="mt-3 text-xs text-muted-foreground">
-        {count !== undefined && countLabel
-          ? `${count} ${countLabel} available · `
-          : ""}
-        Content coming in a follow-up task.
-      </p>
-      {generatedAt && (
-        <p className="mt-1 text-xs text-muted-foreground">
-          Data generated {generatedAt}
-        </p>
-      )}
     </div>
   );
 }
