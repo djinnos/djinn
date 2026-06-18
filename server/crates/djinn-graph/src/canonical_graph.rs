@@ -41,6 +41,19 @@ struct GraphCacheShrinkWarning {
     workspace_status_summary: String,
 }
 
+fn cache_reuse_enabled() -> bool {
+    std::env::var("DJINN_GRAPH_CACHE_REUSE_ENABLED")
+        .or_else(|_| std::env::var("DJINN_CACHE_REUSE_ENABLED"))
+        .or_else(|_| std::env::var("CACHE_REUSE_ENABLED"))
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// Pre-computed strongly-connected components, one set per `kind_filter`
 /// variant the `cycles` op exposes (`None` / `File` / `Symbol`).
 pub struct CachedSccs {
@@ -355,8 +368,11 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let blocking =
         tokio::task::spawn_blocking(move || -> Result<CanonicalGraphBuildOutput, String> {
             let t_parse = std::time::Instant::now();
-            let parsed = crate::scip_parser::parse_scip_artifacts(&artifacts)
-                .map_err(|e| format!("parse_scip_artifacts: {e}"))?;
+            let parsed = crate::scip_parser::parse_scip_artifacts_with_cache_reuse(
+                &artifacts,
+                cache_reuse_enabled(),
+            )
+            .map_err(|e| format!("parse_scip_artifacts: {e}"))?;
             let parse_ms = t_parse.elapsed().as_millis() as u64;
             let _ = std::fs::remove_dir_all(&output_dir_for_blocking);
 
