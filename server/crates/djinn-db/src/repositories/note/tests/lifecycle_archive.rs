@@ -60,6 +60,16 @@ async fn mark_very_old_access(db: &Database, note_id: &str) {
     mark_old_access(db, note_id, 9999).await;
 }
 
+async fn mark_empty_last_access(db: &Database, note_id: &str) {
+    // The postgres schema makes `last_accessed` NOT NULL, so missing access is
+    // represented defensively with an empty string in tests instead of NULL.
+    sqlx::query("UPDATE notes SET access_count = 1, last_accessed = '' WHERE id = $1")
+        .bind(note_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+}
+
 async fn set_status(db: &Database, note_id: &str, status: &str) {
     sqlx::query("UPDATE notes SET status = $1 WHERE id = $2")
         .bind(status)
@@ -116,6 +126,18 @@ async fn extracted_archive_candidates_require_active_extracted_audit_candidate_a
         .unwrap();
     mark_very_old_access(&db, &very_old_access.id).await;
 
+    let empty_last_access = repo
+        .create(
+            &project_id,
+            "Empty Last Access Pitfall",
+            ARCHIVE_SHAPED_BODY,
+            "pitfall",
+            "[]",
+        )
+        .await
+        .unwrap();
+    mark_empty_last_access(&db, &empty_last_access.id).await;
+
     let recent_access = repo
         .create(
             &project_id,
@@ -163,6 +185,7 @@ async fn extracted_archive_candidates_require_active_extracted_audit_candidate_a
     assert!(candidate_ids.contains(zero_access.id.as_str()));
     assert!(candidate_ids.contains(old_access.id.as_str()));
     assert!(candidate_ids.contains(very_old_access.id.as_str()));
+    assert!(candidate_ids.contains(empty_last_access.id.as_str()));
     assert!(!candidate_ids.contains(recent_access.id.as_str()));
     assert!(!candidate_ids.contains(not_archive_shaped.id.as_str()));
     assert!(!candidate_ids.contains(archived.id.as_str()));
