@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { AutomationModel } from "@/api/automationConfig";
+import type { UserModel } from "@/api/userConfig";
 import { render, screen } from "@/test/test-utils";
 
 import { ModelSection, stripProviderPrefix } from "./ModelSection";
@@ -9,29 +9,29 @@ vi.mock("@/lib/toast", () => ({
   showToast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
 
-vi.mock("@/api/automationConfig", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/api/automationConfig")>();
+vi.mock("@/api/userConfig", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/api/userConfig")>();
   return {
     ...actual,
-    fetchAutomationConnectedModels: vi.fn(async () => [
+    fetchUserConnectedModels: vi.fn(async () => [
       {
         id: "openai/gpt-5",
         name: "GPT-5",
         provider_id: "openai",
         tool_call: true,
-      } as AutomationModel,
+      } as UserModel,
       {
         id: "anthropic/claude-sonnet-4",
         name: "Claude Sonnet 4",
         provider_id: "anthropic",
         tool_call: true,
-      } as AutomationModel,
+      } as UserModel,
     ]),
-    fetchAutomationModelSelection: vi.fn(async () => ({
+    fetchUserModelSelection: vi.fn(async () => ({
       models: ["openai/gpt-5"],
       maxSessions: { "openai/gpt-5": 3 },
     })),
-    saveAutomationModelSelection: vi.fn(),
+    saveUserModelSelection: vi.fn(),
   };
 });
 
@@ -41,8 +41,8 @@ describe("ModelSection", () => {
     expect(stripProviderPrefix("custom-model")).toBe("custom-model");
   });
 
-  it("smoke-renders selected automation model settings", async () => {
-    render(<ModelSection targetId="automation-user" />);
+  it("smoke-renders selected user model settings", async () => {
+    render(<ModelSection targetId="target-user" />);
 
     expect(screen.getByRole("heading", { name: "Models" })).toBeInTheDocument();
     expect(await screen.findByText("GPT-5")).toBeInTheDocument();

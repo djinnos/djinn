@@ -16,6 +16,7 @@ import { ImagesPage } from "@/pages/ImagesPage";
 import { ImageEditorPage } from "@/pages/ImageEditorPage";
 import { ProjectEnvironmentPage } from "@/pages/ProjectEnvironmentPage";
 import { UsersPage } from "@/pages/UsersPage";
+import { UsageDashboardPage } from "@/pages/UsageDashboardPage";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { DispatchPauseBanner } from "@/components/DispatchPauseBanner";
 import { AuthGate, useAuthUser } from "@/components/AuthGate";
@@ -80,6 +81,12 @@ function MainLayout() {
             <Route
               path="/users"
               element={isAdmin ? <UsersPage /> : <Navigate to="/tasks" replace />}
+            />
+
+            {/* Usage & Analytics — admin-only dashboard */}
+            <Route
+              path="/admin/usage"
+              element={isAdmin ? <UsageDashboardPage /> : <Navigate to="/tasks" replace />}
             />
 
             {/* Settings */}
