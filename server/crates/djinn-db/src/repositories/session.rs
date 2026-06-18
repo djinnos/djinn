@@ -1343,6 +1343,13 @@ mod tests {
         let listed = repo.list_for_task(&task_id).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].cost_usd, Some(0.0123));
+        assert_eq!(listed[0].input_price_per_million_snapshot, Some(1.5));
+        assert_eq!(listed[0].output_price_per_million_snapshot, Some(6.0));
+        assert_eq!(listed[0].cache_read_price_per_million_snapshot, Some(0.15));
+        assert_eq!(
+            listed[0].cache_write_price_per_million_snapshot,
+            Some(1.875)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
