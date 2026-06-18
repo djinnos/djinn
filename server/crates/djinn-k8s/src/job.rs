@@ -459,6 +459,9 @@ fn build_task_run_env(
     env.push(env_var("GIT_CONFIG_KEY_0", "safe.directory"));
     env.push(env_var("GIT_CONFIG_VALUE_0", "*"));
 
+    // djinn:allow-oversize — job.rs was already over the 50KB byte guard on
+    // main before this one-line forward; kept whole rather than split.
+    //
     // Forward the outbound-request debug flag to the task-run pod (the LLM
     // call for worker/planner/reviewer stages happens in this Pod, not the
     // server). Only forwarded when set on the server, so it stays off by
