@@ -272,9 +272,57 @@ jobs:
   # ║  test build when clippy would have failed anyway.                ║
   # ╚══════════════════════════════════════════════════════════════════╝
 
+  # ── Build test binaries ONCE ─────────────────────────────────────────
+  # Compile the full test suite a single time into a nextest archive, then
+  # hand it to the sharded `server-test` matrix below. This replaces the
+  # old pattern where each of the 4 shards recompiled the test binaries off
+  # the restored rust-cache (up to 4× duplicate compilation).
+  #
+  # The build needs NO database: `cargo nextest archive` compiles the
+  # `sqlx::query!` macros, but with SQLX_OFFLINE=true + the committed
+  # `server/.sqlx/` cache (kept fresh by the `Server sqlx Cache` job) they
+  # resolve offline — exactly as `server-clippy` and the warm-cache jobs do.
+  server-test-build:
+    name: Server Test (build archive)
+    needs: [changes, server-clippy]
+    if: needs.changes.outputs.server == 'true' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup toolchain install
+        working-directory: server
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: taiki-e/install-action@nextest
+
+      # Build every test binary once and pack them into a self-contained
+      # archive. The build selection (--workspace/--all-targets/--all-features)
+      # is encoded into the archive; the run job does NOT repeat these.
+      - name: Build test archive
+        run: cargo nextest archive --workspace --all-targets --all-features --profile ci --archive-file target/nextest-archive.tar.zst
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nextest-archive
+          path: server/target/nextest-archive.tar.zst
+          retention-days: 1
+
   server-test:
     name: Server Test
-    needs: [changes, server-clippy]
+    needs: [changes, server-clippy, server-test-build]
     if: needs.changes.outputs.server == 'true' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     strategy:
@@ -289,6 +337,10 @@ jobs:
     # points DATABASE_URL (compile-time sqlx macros) and
     # DJINN_TEST_DATABASE_URL (runtime per-test DB clones) at :5433 — CI
     # inherits those automatically, so we just forward the port here.
+    #
+    # This job ONLY runs prebuilt binaries from the archive produced by
+    # `server-test-build` — it does NOT compile, so there is no rust-cache
+    # restore here. Only the test RUNTIME needs the database.
     services:
       postgres:
         image: postgres:16
@@ -306,14 +358,6 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: server
-          shared-key: server-test
-          cache-on-failure: true
-          cache-all-crates: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
       - uses: taiki-e/install-action@nextest
 
       # Prebuilt binary — avoids a multi-minute Rust build of sqlx-cli.
@@ -321,9 +365,15 @@ jobs:
         with:
           tool: sqlx-cli
 
-      # The compile-time sqlx::query! macros connect to DATABASE_URL
-      # (:5433/djinn via .cargo/config.toml), so the schema must exist
-      # before the test binaries build.
+      # Pull the test archive built once by `server-test-build`.
+      - uses: actions/download-artifact@v4
+        with:
+          name: nextest-archive
+          path: server/target/
+
+      # The compile-time sqlx::query! macros already resolved at archive
+      # build time; the runtime still needs the schema for per-test DB
+      # clones. Apply migrations against the live service DB.
       - name: Apply djinn-db migrations
         working-directory: server/crates/djinn-db
         env:
@@ -364,8 +414,14 @@ jobs:
       # reopen/intervention chaos tests discoverable here; if future stress
       # coverage needs a slower profile, wire that explicit profile into this
       # job instead of filtering the regressions out of CI.
+      #
+      # Runs the prebuilt binaries from the archive (no compile).
+      # --workspace-remap . maps the archived workspace root onto this
+      # checkout so test fixtures and relative paths resolve. The build
+      # selection is already encoded in the archive, so the
+      # --workspace/--all-targets/--all-features flags are NOT repeated.
       - name: Tests
-        run: cargo nextest run --workspace --all-targets --all-features --profile ci --partition count:${{ matrix.shard }}/4
+        run: cargo nextest run --archive-file target/nextest-archive.tar.zst --workspace-remap . --partition count:${{ matrix.shard }}/4 --profile ci
 
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  sqlx offline-cache freshness gate (merge queue only)            ║
@@ -479,6 +535,7 @@ jobs:
     if: always() && github.event_name != 'push'
     needs:
       - server-clippy
+      - server-test-build
       - server-test
       - server-sqlx-cache
       - ui-frontend
@@ -487,6 +544,7 @@ jobs:
         run: |
           results=(
             "${{ needs.server-clippy.result }}"
+            "${{ needs.server-test-build.result }}"
             "${{ needs.server-test.result }}"
             "${{ needs.server-sqlx-cache.result }}"
             "${{ needs.ui-frontend.result }}"
