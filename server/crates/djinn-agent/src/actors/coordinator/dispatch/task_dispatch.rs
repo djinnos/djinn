@@ -218,14 +218,37 @@ impl CoordinatorActor {
                     .into_iter()
                     .map(|t| t.task_id)
                     .collect();
+                // A task-run that has handed off to the verification stage no
+                // longer uses the model (in-pod verify runs `cargo`/`clippy`,
+                // zero model tokens) even though its slot/pod is still held and
+                // the pool still reports it as a running task. Drop those from
+                // the ledger so the per-model cap is released at the
+                // worker→verify transition — mirroring the `t.status <>
+                // 'verifying'` exclusion in `count_active_by_user_and_model`, so
+                // the DB seed and the `max(db, ledger)` overlay agree and a
+                // verify-stage run cannot be re-counted via the ledger floor.
+                let verifying: std::collections::HashSet<String> =
+                    match self.task_repo().list_by_status("verifying").await {
+                        Ok(tasks) => tasks.into_iter().map(|t| t.id).collect(),
+                        Err(e) => {
+                            // Conservative on error: keep counting verifying
+                            // tasks (may briefly defer a dispatch) rather than
+                            // risk an under-count that overshoots the cap.
+                            tracing::warn!(error = %e, "CoordinatorActor: list verifying tasks failed during cap seed; not releasing verify-stage cap this pass");
+                            std::collections::HashSet::new()
+                        }
+                    };
+                let live_non_verifying = |task_id: &String| {
+                    live.contains(task_id) && !verifying.contains(task_id)
+                };
                 let stale_inflight_task_ids: Vec<String> = self
                     .inflight_dispatches
                     .keys()
-                    .filter(|task_id| !live.contains(*task_id))
+                    .filter(|task_id| !live_non_verifying(task_id))
                     .cloned()
                     .collect();
                 self.inflight_dispatches
-                    .retain(|task_id, _| live.contains(task_id));
+                    .retain(|task_id, _| live_non_verifying(task_id));
                 for task_id in stale_inflight_task_ids {
                     self.persist_durable_dispatch_state_update(
                         &task_id,
@@ -2331,6 +2354,97 @@ mod inflight_ledger_tests {
             running_counts.is_empty(),
             "ready-task fixture should not require pre-existing running sessions"
         );
+    }
+
+    /// A task-run that has handed off to the `verifying` stage no longer uses
+    /// the model — in-pod verification runs `cargo`/`clippy` (zero model
+    /// tokens) while the worker slot/pod is still held and the pool still
+    /// reports the task as running. `reconcile_inflight_dispatch_ledger` must
+    /// drop such tasks from the in-flight ledger so the per-model cap is
+    /// released at the worker→verify transition (mirroring the
+    /// `t.status <> 'verifying'` exclusion in the DB seed), even though the
+    /// pool still tracks the slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_inflight_ledger_drops_verifying_stage_tasks() {
+        clear_dispatch_cap_observations();
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        let (runtime, mut started_rx) = Wnd1ControlledRuntime::new();
+        let mut actor = wnd1_actor_for_tests(&db, &events_tx, &runtime, 4);
+
+        let task_id = fixture.task_ids[0].clone();
+        let creator = fixture.created_by_user_id.clone();
+        let model = fixture.model_id.clone();
+
+        // Dispatch the task into the controlled pool (its runner blocks until
+        // released), then record it in the in-flight ledger as a real dispatch
+        // would. The pool now reports it as a running task.
+        actor
+            .pool
+            .dispatch(&task_id, &fixture.project_path, &model)
+            .await
+            .expect("dispatch wnd1 task into controlled pool");
+        // Wait until the slot runner has actually started (pool tracks it).
+        let started = tokio::time::timeout(WND1_DISPATCH_SETTLE_TIMEOUT, started_rx.recv())
+            .await
+            .expect("slot runner should start within settle timeout")
+            .expect("started channel open");
+        assert_eq!(started, task_id);
+        actor
+            .record_inflight_dispatch(&task_id, None, Some(&creator), &model)
+            .await;
+
+        // While the task is `open`/`in_progress` and still in the pool, the
+        // ledger keeps the entry (covers the pod/session-row boot-lag window).
+        actor.reconcile_inflight_dispatch_ledger().await;
+        assert!(
+            actor.inflight_dispatches.contains_key(&task_id),
+            "ledger must retain a live, non-verifying dispatch"
+        );
+        let mut counts: HashMap<(String, String), u32> = HashMap::new();
+        overlay_inflight_ledger(&mut counts, &actor.inflight_dispatches);
+        assert_eq!(
+            counts.get(&(creator.clone(), model.clone())).copied(),
+            Some(1),
+            "a live worker-stage dispatch must count against the per-model cap"
+        );
+
+        // Flip the task into the verification stage. The slot/pod is still held
+        // (the controlled runner is still blocked), so the pool STILL reports
+        // the task as running — but the model is no longer in use.
+        sqlx::query!(
+            "UPDATE tasks SET status = 'verifying' WHERE id = $1",
+            task_id
+        )
+        .execute(db.pool())
+        .await
+        .expect("flip wnd1 task to verifying");
+        assert!(
+            actor
+                .pool
+                .has_session(&task_id)
+                .await
+                .expect("query pool task mapping"),
+            "pool should still hold the verifying task's slot"
+        );
+
+        // Reconcile now drops it from the ledger: the cap is released at the
+        // worker→verify transition even though the slot is still held.
+        actor.reconcile_inflight_dispatch_ledger().await;
+        assert!(
+            !actor.inflight_dispatches.contains_key(&task_id),
+            "ledger must drop a verify-stage task so the per-model cap is released"
+        );
+        let mut counts: HashMap<(String, String), u32> = HashMap::new();
+        overlay_inflight_ledger(&mut counts, &actor.inflight_dispatches);
+        assert_eq!(
+            counts.get(&(creator, model)).copied(),
+            None,
+            "verify-stage task must not count against the per-model cap via the ledger"
+        );
+
+        runtime.release(&task_id).await;
     }
 
     #[test]
