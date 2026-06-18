@@ -21,6 +21,7 @@ mod org_sync;
 mod project_tools;
 mod state;
 mod static_ui;
+mod usage_analytics;
 mod users;
 pub use auth::{AuthenticatedUser, authenticate, require_admin};
 pub use org_sync::{SyncReport, start_org_member_sync, sync_once};
@@ -52,6 +53,7 @@ pub fn router(state: AppState, serve_ui: bool) -> Router {
         .merge(crate::mirror_fetcher::router())
         .merge(org_sync::router())
         .merge(project_tools::router())
+        .merge(usage_analytics::router())
         .merge(users::router());
     if serve_ui {
         router = router.fallback(static_ui::serve_static);

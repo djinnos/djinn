@@ -623,7 +623,9 @@ pub(crate) fn record_auto_merge_decision_metrics(decision: &AutoMergeTickDecisio
 ///
 /// Reasons that are NOT failures: `"BRANCH_INVALIDATED"` (head moved —
 /// queue will pick up the new SHA), `"QUEUE_CLEARED"` (admin reset),
-/// `"DEQUEUED"` (manual intervention by a human).
+/// `"DEQUEUED"`/`"MANUAL"` (manual intervention by a human — `manual` is the
+/// `RemovedFromMergeQueueEvent` timeline-surface word, `DEQUEUED` the
+/// GraphQL-enum surface for the same operator queue-removal).
 ///
 /// All other reasons (CHECKS_FAILED, MERGE_CONFLICT, NO_RESPONSE,
 /// NOT_QUEUEABLE, ROLL_BACK, UNKNOWN_REMOVAL_REASON, anything new GitHub
@@ -633,17 +635,21 @@ pub(in crate::actors::coordinator) fn dequeue_reason_is_failure(reason: Option<&
     match reason {
         None => false,
         // GitHub emits two vocabularies for this reason depending on surface:
-        // SCREAMING_CASE GraphQL-enum style (`CHECKS_FAILED`) and lowercase
-        // snake_case on `RemovedFromMergeQueueEvent` timeline nodes
-        // (`failed_checks`, `merged`) — compare case-insensitively or the
-        // safe-list never matches real events and EVERY dequeue (including a
-        // successful merge) reopens the task for rework. `MERGED` is the
-        // queue's success exit; the next poll tick sees `pr.merged` and closes
-        // the task. Unknown reasons stay conservative-failure so a new GitHub
-        // vocabulary never silently swallows a real eviction.
+        // SCREAMING_CASE GraphQL-enum style (`CHECKS_FAILED`, `DEQUEUED`) and
+        // lowercase snake_case on `RemovedFromMergeQueueEvent` timeline nodes
+        // (`failed_checks`, `merged`, `manual`) — compare case-insensitively
+        // or the safe-list never matches real events and EVERY dequeue
+        // (including a successful merge) reopens the task for rework. The two
+        // surfaces don't share spellings for an operator queue-removal:
+        // `manual` is the timeline word, `DEQUEUED` the GraphQL-enum word for
+        // the same human dequeue — both are benign and must be safe-listed.
+        // `MERGED` is the queue's success exit; the next poll tick sees
+        // `pr.merged` and closes the task. Unknown reasons stay
+        // conservative-failure so a new GitHub vocabulary never silently
+        // swallows a real eviction.
         Some(r) => !matches!(
             r.to_ascii_uppercase().as_str(),
-            "MERGED" | "BRANCH_INVALIDATED" | "QUEUE_CLEARED" | "DEQUEUED"
+            "MERGED" | "BRANCH_INVALIDATED" | "QUEUE_CLEARED" | "DEQUEUED" | "MANUAL"
         ),
     }
 }

@@ -14,9 +14,10 @@ const BASE_ROLE_LABELS: Record<BaseRole, string> = {
   reviewer: "Reviewer",
   lead: "Lead",
   planner: "Planner",
+  architect: "Architect",
 };
 
-const BASE_ROLES: BaseRole[] = ["worker", "reviewer", "lead", "planner"];
+const BASE_ROLES: BaseRole[] = ["worker", "reviewer", "lead", "planner", "architect"];
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -30,15 +31,18 @@ const AMBER_400 = "#fbbf24";
 const RED_400 = "#f87171";
 /** Matches text-purple-400 */
 const PURPLE_400 = "#c084fc";
+/** Matches text-emerald-400 */
+const EMERALD_400 = "#34d399";
 
 const ROLE_COLORS: Record<BaseRole, string> = {
   worker: BLUE_400,
   reviewer: AMBER_400,
   lead: RED_400,
   planner: PURPLE_400,
+  architect: EMERALD_400,
 };
 
-const TOKEN_BAR_COLORS = [BLUE_400, "#34d399"] as const; // blue for in, emerald for out
+const TOKEN_BAR_COLORS = [BLUE_400, EMERALD_400] as const; // blue for in, emerald for out
 
 // ── Nivo dark theme ──────────────────────────────────────────────────────────
 

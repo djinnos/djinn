@@ -4,7 +4,10 @@ use djinn_memory::{ExtractedNoteAuditCategory, ExtractedNoteAuditFinding};
 use sqlx::Row;
 
 use super::*;
-use crate::repositories::note::{NoteConsolidationRepository, STALE_CITATION};
+use crate::repositories::note::{
+    NoteConsolidationRepository, STALE_CITATION, assess_note_quality, looks_task_local,
+    required_sections,
+};
 
 impl NoteRepository {
     // ── Wikilink graph ────────────────────────────────────────────────────────
@@ -291,17 +294,10 @@ impl NoteRepository {
                 });
             }
 
-            let required_sections = required_sections(&note.note_type);
-            let missing_sections = missing_required_sections(&note.content, &required_sections);
-            let paragraph_count = note
-                .content
-                .split("\n\n")
-                .filter(|block| !block.trim().is_empty())
-                .count();
-            let content_len = note.content.trim().chars().count();
+            let quality = assess_note_quality(&note.note_type, &note.content);
             let has_footer_only_shape = note.content.contains("*Extracted from session ")
-                && paragraph_count <= 2
-                && missing_sections.len() == required_sections.len();
+                && quality.paragraph_count <= 2
+                && quality.missing_sections.len() == required_sections(&note.note_type).len();
             let looks_task_local = looks_task_local(&note.title, &note.content);
             let is_orphan = !sqlx::query_scalar!(
                 r#"SELECT EXISTS(SELECT 1 FROM note_links WHERE target_id = $1) AS "exists!: bool""#,
@@ -310,26 +306,7 @@ impl NoteRepository {
             .fetch_one(self.db.pool())
             .await?;
 
-            if (!missing_sections.is_empty() || content_len < 220 || paragraph_count < 3)
-                && seen.insert((note.id.clone(), "underspecified"))
-            {
-                let mut reasons = Vec::new();
-                if !missing_sections.is_empty() {
-                    reasons.push(format!(
-                        "Missing ADR-054 required sections: {}",
-                        missing_sections.join(", ")
-                    ));
-                }
-                if content_len < 220 {
-                    reasons.push(format!(
-                        "Body is too short for durable memory ({content_len} chars)"
-                    ));
-                }
-                if paragraph_count < 3 {
-                    reasons.push(format!(
-                        "Body has only {paragraph_count} paragraph(s); strengthen with explicit context, rationale, and transfer lesson"
-                    ));
-                }
+            if quality.is_underspecified && seen.insert((note.id.clone(), "underspecified")) {
                 underspecified.push(ExtractedNoteAuditFinding {
                     note_id: note.id.clone(),
                     permalink: note.permalink.clone(),
@@ -337,7 +314,7 @@ impl NoteRepository {
                     note_type: note.note_type.clone(),
                     folder: note.folder.clone(),
                     category: ExtractedNoteAuditCategory::Underspecified,
-                    reasons,
+                    reasons: quality.reasons.clone(),
                     related_note_ids: cluster_by_note_id
                         .get(&note.id)
                         .into_iter()
@@ -643,62 +620,4 @@ impl NoteRepository {
 
         Ok(ranked)
     }
-}
-
-fn required_sections(note_type: &str) -> Vec<&'static str> {
-    match note_type {
-        "pattern" => vec![
-            "Context",
-            "Problem shape",
-            "Recommended approach",
-            "Why it works",
-            "Tradeoffs / limits",
-            "When to use",
-            "When not to use",
-            "Related",
-        ],
-        "pitfall" => vec![
-            "Trigger / smell",
-            "Failure mode",
-            "Observable symptoms",
-            "Prevention",
-            "Recovery",
-            "Related",
-        ],
-        "case" => vec![
-            "Situation",
-            "Constraint",
-            "Approach taken",
-            "Result",
-            "Why it worked / failed",
-            "Reusable lesson",
-            "Related",
-        ],
-        _ => vec![],
-    }
-}
-
-fn missing_required_sections(content: &str, required_sections: &[&str]) -> Vec<String> {
-    required_sections
-        .iter()
-        .filter(|section| !content.contains(&format!("## {section}")))
-        .map(|section| section.to_string())
-        .collect()
-}
-
-fn looks_task_local(title: &str, content: &str) -> bool {
-    let haystack = format!("{}\n{}", title.to_lowercase(), content.to_lowercase());
-    [
-        "this session",
-        "current task",
-        "working note",
-        "working spec",
-        "follow-up work",
-        "could not be updated from this session",
-        "drafted locally",
-        "active follow-up work",
-        "next session",
-    ]
-    .iter()
-    .any(|needle| haystack.contains(needle))
 }

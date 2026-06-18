@@ -2452,8 +2452,12 @@ mod inflight_ledger_tests {
         // Flip the task into the verification stage. The slot/pod is still held
         // (the controlled runner is still blocked), so the pool STILL reports
         // the task as running — but the model is no longer in use.
-        djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
-            .set_status(&task_id, "verifying")
+        // Use the runtime-checked query API here so this test helper does not
+        // require a dedicated sqlx offline metadata entry just to flip fixture
+        // state.
+        sqlx::query("UPDATE tasks SET status = 'verifying' WHERE id = $1")
+            .bind(&task_id)
+            .execute(db.pool())
             .await
             .expect("flip wnd1 task to verifying");
         assert!(
