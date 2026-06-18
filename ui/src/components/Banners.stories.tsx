@@ -14,7 +14,7 @@ import type { DispatchPauseEntry } from "@/stores/dispatchPauseStore";
 /* ---------------------------------------------------------------------------
  * BoardHealthBanner — presentational mock
  * Reproduces the exact JSX from BoardHealthBanner.tsx but accepts data as props
- * instead of relying on useBoardHealth() / verificationStore.
+ * instead of relying on useBoardHealth().
  * --------------------------------------------------------------------------- */
 
 interface LspWarning {
@@ -22,35 +22,21 @@ interface LspWarning {
   message: string;
 }
 
-interface StepEntryMock {
-  index: number;
-  name: string;
-  command?: string;
-  phase: "setup" | "verification";
-  status: "running" | "passed" | "failed" | "skipped";
-  exitCode?: number;
-  stderr?: string;
-}
-
 interface BoardHealthBannerMockProps {
   lspWarnings?: LspWarning[];
   projectIssues?: Record<string, string>;
-  failedSteps?: StepEntryMock[];
-  failedRunTaskId?: string;
 }
 
 function BoardHealthBannerMock({
   lspWarnings = [],
   projectIssues = {},
-  failedSteps = [],
-  failedRunTaskId,
 }: BoardHealthBannerMockProps) {
   const [dismissed, setDismissed] = useState(false);
   if (dismissed) return null;
 
   const issueEntries = Object.entries(projectIssues);
   const totalIssues =
-    lspWarnings.length + issueEntries.length + failedSteps.length;
+    lspWarnings.length + issueEntries.length;
 
   return (
     <Card className="mx-4 border-amber-500/20 bg-amber-500/[0.04]">
@@ -102,45 +88,6 @@ function BoardHealthBannerMock({
               <span>{w.message}</span>
             </div>
           ))}
-
-          {/* Failed verification/setup steps */}
-          {failedSteps.map((step) => (
-            <div
-              key={`${step.phase}-${step.index}`}
-              className="flex items-start gap-2 text-xs text-red-400"
-            >
-              <span className="mt-px shrink-0 font-medium">
-                {step.phase === "setup" ? "setup" : "verify"} failed:
-              </span>
-              <span className="text-red-300/80">
-                {step.name}
-                {step.command ? (
-                  <code className="ml-1.5 rounded bg-white/5 px-1 py-0.5 font-mono text-[10px]">
-                    {step.command}
-                  </code>
-                ) : null}
-                {step.exitCode != null ? (
-                  <span className="ml-1 text-muted-foreground">
-                    (exit {step.exitCode})
-                  </span>
-                ) : null}
-              </span>
-            </div>
-          ))}
-
-          {/* Show stderr for the first failed step if available */}
-          {failedSteps.length > 0 && failedSteps[0].stderr && (
-            <pre className="mt-1 max-h-24 overflow-auto rounded bg-black/30 p-2 font-mono text-[10px] leading-relaxed text-red-300/70">
-              {failedSteps[0].stderr.trim().slice(0, 500)}
-            </pre>
-          )}
-
-          {/* Show which task failed if it was task-scoped */}
-          {failedRunTaskId && (
-            <span className="text-[10px] text-muted-foreground">
-              task: {failedRunTaskId}
-            </span>
-          )}
         </div>
       </CardContent>
     </Card>
@@ -259,88 +206,6 @@ export const ProjectIssues: StoryObj = {
       projectIssues={{
         "/home/user/projects/webapp": "Missing package.json — cannot resolve dependencies",
       }}
-    />
-  ),
-};
-
-export const FailedVerification: StoryObj = {
-  render: () => (
-    <BoardHealthBannerMock
-      failedSteps={[
-        {
-          index: 0,
-          name: "Install dependencies",
-          command: "pnpm install --frozen-lockfile",
-          phase: "setup",
-          status: "failed",
-          exitCode: 1,
-          stderr:
-            "ERR_PNPM_FROZEN_LOCKFILE  Cannot perform installation with frozen lockfile because the lockfile needs updates.\n\nNote: If you are running this command in CI, make sure that pnpm-lock.yaml is up to date.",
-        },
-      ]}
-      failedRunTaskId="019cbe9f-6ae7-7d90-a8be-6ba626cc0119"
-    />
-  ),
-};
-
-export const MultipleIssues: StoryObj = {
-  render: () => (
-    <BoardHealthBannerMock
-      lspWarnings={[
-        { server: "typescript", message: "TypeScript server not responding" },
-      ]}
-      projectIssues={{
-        "/home/user/projects/api": "Git working tree is dirty — uncommitted changes detected",
-      }}
-      failedSteps={[
-        {
-          index: 2,
-          name: "Type check",
-          command: "pnpm tsc --noEmit",
-          phase: "verification",
-          status: "failed",
-          exitCode: 2,
-          stderr: "src/index.ts(14,5): error TS2322: Type 'string' is not assignable to type 'number'.",
-        },
-      ]}
-    />
-  ),
-};
-
-export const BoardHealthMultipleFailures: StoryObj = {
-  render: () => (
-    <BoardHealthBannerMock
-      failedSteps={[
-        {
-          index: 0,
-          name: "Install dependencies",
-          command: "pnpm install --frozen-lockfile",
-          phase: "setup",
-          status: "failed",
-          exitCode: 1,
-          stderr:
-            "ERR_PNPM_FROZEN_LOCKFILE  Cannot perform installation with frozen lockfile because the lockfile needs updates.",
-        },
-        {
-          index: 1,
-          name: "Type check",
-          command: "pnpm tsc --noEmit",
-          phase: "verification",
-          status: "failed",
-          exitCode: 2,
-          stderr:
-            "src/index.ts(14,5): error TS2322: Type 'string' is not assignable to type 'number'.\nsrc/api/client.ts(88,12): error TS2345: Argument of type 'null' is not assignable to parameter of type 'Request'.",
-        },
-        {
-          index: 2,
-          name: "Lint",
-          command: "pnpm lint",
-          phase: "verification",
-          status: "failed",
-          exitCode: 1,
-        },
-      ]}
-      failedRunTaskId="019cbe9f-6ae7-7d90-a8be-6ba626cc0119"
     />
   ),
 };
