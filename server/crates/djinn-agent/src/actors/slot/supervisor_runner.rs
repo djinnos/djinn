@@ -587,6 +587,15 @@ pub(crate) async fn run_supervisor_dispatch(
         .unwrap_or(TaskRunStatus::Interrupted);
     reap_orphan_task_run(&app_state, &task.id, reap_status).await;
 
+    // Deterministic teardown backstop: remove the worker's private Cargo target
+    // dir now that the run is terminal. The in-pod Drop guard
+    // (`CargoTargetRunDirGuard`) handles clean exits, but a SIGKILLed worker
+    // (memory-cgroup OOM, node eviction, deadline) never runs Drop — so without
+    // this the dir orphans until the periodic coordinator sweep collects it. We
+    // share the same cache PVC as the worker (mounted host-side at
+    // `$DJINN_HOME/cache`), so we can remove it directly. Best-effort + logged.
+    teardown_cargo_target_run_dir(&app_state, &spec.task_run_id).await;
+
     // D2: a worker that never completed its startup handshake (image-pull
     // failure, unschedulable, crash-loop) was torn down above. Treat it as an
     // infra stall: trip the breaker so dispatch fails over off this model, and
@@ -1204,6 +1213,61 @@ async fn reap_orphan_task_run(
                 "supervisor dispatch: reap_running_for_task failed"
             );
         }
+    }
+}
+
+/// Best-effort host-side teardown of a terminal task-run's private Cargo
+/// target dir, covering the SIGKILL case the in-pod Drop guard misses.
+///
+/// The host shares the worker's cache PVC, so it can delete the dir directly.
+/// The root is resolved from the [`AgentContext`] (falling back to the
+/// canonical host path) so we never operate on the Job-pod `/cache` convention,
+/// which is not mounted in the server pod.
+async fn teardown_cargo_target_run_dir(app_state: &AgentContext, task_run_id: &str) {
+    let root = app_state
+        .cargo_target_runs_root
+        .clone()
+        .unwrap_or_else(djinn_core::paths::cargo_target_runs_root);
+    let id = task_run_id.to_string();
+    let log_root = root.clone();
+    let log_id = id.clone();
+    match tokio::task::spawn_blocking(move || {
+        djinn_core::cargo_target_runs::teardown_run_dir(&root, &id)
+    })
+    .await
+    {
+        Ok(Ok(result)) => {
+            if result.removed {
+                tracing::info!(
+                    task_run_id = %log_id,
+                    root = %log_root.display(),
+                    cleanup_outcome = result.outcome(),
+                    removed_count = result.removed_count(),
+                    "supervisor dispatch: host teardown removed orphaned cargo target run-dir"
+                );
+            } else {
+                tracing::debug!(
+                    task_run_id = %log_id,
+                    root = %log_root.display(),
+                    cleanup_outcome = result.outcome(),
+                    "supervisor dispatch: cargo target run-dir already absent at host teardown"
+                );
+            }
+        }
+        Ok(Err(e)) => tracing::warn!(
+            task_run_id = %log_id,
+            root = %log_root.display(),
+            error = %e,
+            cleanup_outcome = "failed",
+            "supervisor dispatch: host teardown failed to remove cargo target run-dir"
+        ),
+        Err(e) => tracing::warn!(
+            task_run_id = %log_id,
+            root = %log_root.display(),
+            error = %e,
+            cleanup_outcome = "failed",
+            "supervisor dispatch: host teardown task join failed"
+        ),
     }
 }
 
