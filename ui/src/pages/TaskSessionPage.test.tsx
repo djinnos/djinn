@@ -19,7 +19,6 @@ const mockTask: Task = {
 };
 
 const useTaskStoreMock = vi.fn();
-const buildSetupVerificationViewMock = vi.fn();
 
 vi.mock("react-router-dom", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -64,61 +63,18 @@ vi.mock("@/components/SessionThread", () => ({
   SessionThread: () => <div data-testid="session-thread" />,
 }));
 
-vi.mock("@/lib/setupVerificationView", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return {
-    ...actual,
-    buildSetupVerificationView: (...args: unknown[]) => buildSetupVerificationViewMock(...args),
-  };
-});
-
-describe("TaskSessionPage sidebar Setup & Verification", () => {
+describe("TaskSessionPage", () => {
   beforeEach(() => {
     useTaskStoreMock.mockImplementation((selector: (state: { tasks: Map<string, Task> }) => unknown) =>
       selector({ tasks: new Map([[mockTask.id, mockTask]]) })
     );
-    buildSetupVerificationViewMock.mockReset();
-    buildSetupVerificationViewMock.mockReturnValue({
-      taskId: mockTask.id,
-      steps: [],
-      status: "passed",
-      hasData: false,
-      allPassed: false,
-      isRunning: false,
-      hasFailed: false,
-      totalDuration: 0,
-      failedStepId: null,
-    });
   });
 
-  it("renders Setup & Verification when step history exists", () => {
-    buildSetupVerificationViewMock.mockReturnValue({
-      taskId: mockTask.id,
-      steps: [
-        {
-          index: 0,
-          name: "Dispatch",
-          phase: "setup",
-          status: "running",
-        },
-      ],
-      status: "running",
-      hasData: true,
-      allPassed: false,
-      isRunning: true,
-      hasFailed: false,
-      totalDuration: 0,
-      failedStepId: null,
-    });
-
+  it("renders the task sidebar and session thread", () => {
     render(<TaskSessionPage />);
 
     expect(screen.getByText("Acceptance Criteria")).toBeInTheDocument();
-  });
-
-  it("does not render Setup & Verification section when there is no dispatch/step history", () => {
-    render(<TaskSessionPage />);
-    expect(screen.queryByText("Setup & Verification")).not.toBeInTheDocument();
+    expect(screen.getByTestId("session-thread")).toBeInTheDocument();
   });
 });
 

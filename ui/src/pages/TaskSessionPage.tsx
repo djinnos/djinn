@@ -32,7 +32,6 @@ import { TaskIdLabel } from "@/components/TaskIdLabel";
 const STATUS_LABELS: Record<string, string> = {
   open: "Open",
   in_progress: "Coding",
-  verifying: "Verifying",
   needs_task_review: "Needs Review",
   in_task_review: "In Review",
   needs_lead_intervention: "Lead Intervention",
@@ -43,7 +42,6 @@ const STATUS_LABELS: Record<string, string> = {
 const STATUS_COLORS: Record<string, string> = {
   open: "bg-blue-500/15 text-blue-400",
   in_progress: "bg-emerald-500/15 text-emerald-400",
-  verifying: "bg-yellow-500/15 text-yellow-400",
   needs_task_review: "bg-amber-500/15 text-amber-400",
   in_task_review: "bg-amber-500/15 text-amber-400",
   needs_lead_intervention: "bg-red-500/15 text-red-400",

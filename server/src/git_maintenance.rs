@@ -86,11 +86,9 @@ async fn run_tick(state: &AppState) {
         // 2. Working clone (`$DJINN_HOME/projects/{owner}/{repo}`). Skip
         //    GitHub-less projects and any whose clone isn't on disk yet.
         let projects_root = djinn_core::paths::projects_root();
-        let Some(clone_gc) = clone_gc_request(
-            &projects_root,
-            &project.github_owner,
-            &project.github_repo,
-        ) else {
+        let Some(clone_gc) =
+            clone_gc_request(&projects_root, &project.github_owner, &project.github_repo)
+        else {
             continue;
         };
         match djinn_workspace::gc_project_clone_under(
@@ -120,7 +118,11 @@ struct ProjectCloneGcRequest {
     repo: String,
 }
 
-fn clone_gc_request(projects_root: &Path, owner: &str, repo: &str) -> Option<ProjectCloneGcRequest> {
+fn clone_gc_request(
+    projects_root: &Path,
+    owner: &str,
+    repo: &str,
+) -> Option<ProjectCloneGcRequest> {
     if owner.is_empty() || repo.is_empty() {
         return None;
     }
