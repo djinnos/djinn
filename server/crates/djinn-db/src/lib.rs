@@ -111,8 +111,8 @@ pub use repositories::{
     },
     task_run::{CreateTaskRunParams, TaskRunRepository},
     usage_analytics::{
-        BreakdownRow, DailySeriesRow, GroupDimension, UsageAnalyticsQuery,
-        UsageAnalyticsRepository, UsageAnalyticsResult, UsageTotals,
+        BreakdownRow, DailySeriesRow, GroupDimension, ModelEffectivenessRow, ProjectModelMatrixRow,
+        UsageAnalyticsQuery, UsageAnalyticsRepository, UsageAnalyticsResult, UsageTotals,
     },
     user::{User, UserRepository},
     user_settings::UserSettingsRepository,
