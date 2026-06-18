@@ -23,7 +23,7 @@
 //! No real SCIP binaries, Docker, Kubernetes, network access, or privileged
 //! external infrastructure is required.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -46,6 +46,36 @@ struct FakePartition {
     source_content: Vec<u8>,
 }
 
+fn fake_artifact_payload(partition: &FakePartition) -> String {
+    format!(
+        "fake-scip partition={} source_hash={}",
+        partition.name,
+        cache::content_hash(&partition.source_content)
+    )
+}
+
+fn expected_payloads(partitions: &[FakePartition]) -> BTreeMap<String, String> {
+    partitions
+        .iter()
+        .map(|partition| (partition.name.clone(), fake_artifact_payload(partition)))
+        .collect()
+}
+
+/// Fake final graph-builder sink. Production parses SCIP and builds the
+/// canonical graph after collection; this deterministic sink records the full
+/// current artifact set it would consume without requiring valid protobuf SCIP.
+fn fake_graph_build_consumes_artifacts(
+    artifacts: &[super::ScipArtifact],
+) -> BTreeMap<String, String> {
+    artifacts
+        .iter()
+        .map(|artifact| {
+            let payload = fs::read_to_string(&artifact.path).expect("read collected artifact");
+            (artifact.workspace_slug.clone(), payload)
+        })
+        .collect()
+}
+
 /// Measurable cost outcome from a single simulated run.
 #[derive(Debug)]
 struct RunCost {
@@ -55,6 +85,18 @@ struct RunCost {
     cache_hits: usize,
     /// Final artifact count collected from disk.
     artifact_count: usize,
+    /// Partition names whose fake indexer was invoked (cache misses). This is
+    /// the deterministic stand-in for elapsed warm cost.
+    invoked_partitions: Vec<String>,
+    /// Partition names that the final fake graph-build stage consumed. This
+    /// guards whole-graph semantics: even if only one partition changed, graph
+    /// assembly must still see every current artifact.
+    graph_build_partitions: BTreeSet<String>,
+    /// The exact artifact payload consumed by the fake graph build for each
+    /// partition. Payloads include source content hashes, so this proves the
+    /// changed partition contributes its current artifact while unchanged
+    /// partitions are replayed from cache.
+    graph_build_payloads: BTreeMap<String, String>,
 }
 
 /// Build deterministic fake partitions.
@@ -129,6 +171,7 @@ fn simulate_run(
 
     let mut invocations = 0usize;
     let mut cache_hits = 0usize;
+    let mut invoked_partitions = Vec::new();
     let mut commands = Vec::new();
 
     for (plan, partition) in plans.iter().zip(partitions.iter()) {
@@ -140,9 +183,13 @@ fn simulate_run(
             }
             CacheLookup::Miss => {
                 invocations += 1;
+                invoked_partitions.push(partition.name.clone());
                 // Simulate indexer invocation: write a fake SCIP artifact
-                // whose content is deterministic per partition.
-                let content = format!("fake-scip-for-{}", partition.name);
+                // whose content is deterministic per partition and source
+                // content hash. A changed partition therefore produces a new
+                // current artifact while unchanged partitions can be replayed
+                // from the versioned cache.
+                let content = fake_artifact_payload(partition);
                 fs::write(&plan.output_path, &content).expect("write fake artifact");
                 // Store in cache so subsequent warm runs can reuse it.
                 store
@@ -163,13 +210,17 @@ fn simulate_run(
 
     // Final graph assembly: collect all artifacts from disk. This is the
     // same step the production `run_indexers` pipeline performs.
-    let artifacts =
-        collect_scip_artifacts(output_root, &commands).expect("collect artifacts");
+    let artifacts = collect_scip_artifacts(output_root, &commands).expect("collect artifacts");
+    let graph_build_payloads = fake_graph_build_consumes_artifacts(&artifacts);
+    let graph_build_partitions = graph_build_payloads.keys().cloned().collect();
 
     RunCost {
         invocations,
         cache_hits,
         artifact_count: artifacts.len(),
+        invoked_partitions,
+        graph_build_partitions,
+        graph_build_payloads,
     }
 }
 
@@ -200,6 +251,19 @@ fn cold_run_invokes_all_partitions_and_produces_full_artifact_set() {
     assert_eq!(
         cost.artifact_count, PARTITION_COUNT,
         "cold run must produce one artifact per partition"
+    );
+    assert_eq!(
+        cost.invoked_partitions,
+        partitions
+            .iter()
+            .map(|partition| partition.name.clone())
+            .collect::<Vec<_>>(),
+        "cold run must invoke every partition in deterministic order"
+    );
+    assert_eq!(
+        cost.graph_build_payloads,
+        expected_payloads(&partitions),
+        "cold graph build must consume the complete current artifact payload set"
     );
 }
 
@@ -236,6 +300,16 @@ fn warm_unchanged_is_cache_hit_dominated_with_zero_invocations() {
     assert_eq!(
         warm_cost.artifact_count, PARTITION_COUNT,
         "warm-unchanged must still produce full artifact set"
+    );
+    assert!(
+        warm_cost.invoked_partitions.is_empty(),
+        "warm-unchanged graph warm must not invoke any partition: {:?}",
+        warm_cost.invoked_partitions
+    );
+    assert_eq!(
+        warm_cost.graph_build_payloads,
+        expected_payloads(&partitions),
+        "warm-unchanged graph build must consume the same full current artifact set from cache"
     );
 
     // Measurable warm-cost reduction signal
@@ -274,8 +348,7 @@ fn warm_one_partition_changed_invokes_only_that_partition() {
 
     // Phase 2: modify one partition's source content (simulating a file edit)
     let changed_index = 2;
-    partitions[changed_index].source_content =
-        b"package pkg2\nfunc updated() {}\n".to_vec();
+    partitions[changed_index].source_content = b"package pkg2\nfunc updated() {}\n".to_vec();
 
     let warm_cost = simulate_run(&store, &output_warm, &partitions);
 
@@ -291,6 +364,16 @@ fn warm_one_partition_changed_invokes_only_that_partition() {
     assert_eq!(
         warm_cost.artifact_count, PARTITION_COUNT,
         "warm-one-changed must still produce full artifact set (all partitions)"
+    );
+    assert_eq!(
+        warm_cost.invoked_partitions,
+        vec![partitions[changed_index].name.clone()],
+        "warm-one-changed must invoke exactly the changed partition"
+    );
+    assert_eq!(
+        warm_cost.graph_build_payloads,
+        expected_payloads(&partitions),
+        "warm-one-changed graph build must consume the full current artifact set, not a changed-partition-only subset"
     );
 
     // Measurable warm-cost reduction signal
@@ -340,11 +423,25 @@ fn whole_graph_semantics_never_produce_changed_file_only_artifact_set() {
     // Even though only 1 partition was re-indexed, the final artifact set
     // must contain ALL partitions (from cache + fresh index).
     assert_eq!(
-        warm_cost.artifact_count, PARTITION_COUNT,
+        warm_cost.artifact_count,
+        PARTITION_COUNT,
         "final artifact set must contain ALL partitions regardless of which changed; \
          got {got} artifacts, expected {expected}",
         got = warm_cost.artifact_count,
         expected = PARTITION_COUNT,
+    );
+    assert_eq!(
+        warm_cost.graph_build_partitions,
+        partitions
+            .iter()
+            .map(|partition| partition.name.clone())
+            .collect::<BTreeSet<_>>(),
+        "fake graph build must consume every partition, not only the changed partition"
+    );
+    assert_eq!(
+        warm_cost.graph_build_payloads,
+        expected_payloads(&partitions),
+        "fake graph build must consume current payloads for all partitions, including the changed partition"
     );
 
     // Verify the individual artifact files exist on disk (not just counted).
