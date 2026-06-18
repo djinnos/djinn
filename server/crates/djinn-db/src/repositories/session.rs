@@ -1300,9 +1300,7 @@ mod tests {
         assert!(created.input_price_per_million_snapshot.is_none());
         assert!(created.output_price_per_million_snapshot.is_none());
         assert!(created.cache_read_price_per_million_snapshot.is_none());
-        assert!(created
-            .cache_write_price_per_million_snapshot
-            .is_none());
+        assert!(created.cache_write_price_per_million_snapshot.is_none());
 
         // Populate the columns directly (later tasks wire this up from the
         // catalog) and verify the repository projections read them back.
@@ -1330,10 +1328,7 @@ mod tests {
         assert_eq!(fetched.input_price_per_million_snapshot, Some(1.5));
         assert_eq!(fetched.output_price_per_million_snapshot, Some(6.0));
         assert_eq!(fetched.cache_read_price_per_million_snapshot, Some(0.15));
-        assert_eq!(
-            fetched.cache_write_price_per_million_snapshot,
-            Some(1.875)
-        );
+        assert_eq!(fetched.cache_write_price_per_million_snapshot, Some(1.875));
 
         // The list-for-task projection must also carry the new fields.
         let listed = repo.list_for_task(&task_id).await.unwrap();
