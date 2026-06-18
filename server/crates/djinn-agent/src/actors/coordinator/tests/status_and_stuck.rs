@@ -148,6 +148,211 @@ async fn stuck_detection_releases_orphaned_in_progress_task() {
     );
 }
 
+/// Bug 2 regression: a `verifying` task whose ONLY task-run is a leaked
+/// `running, ended_at=NULL` row left behind by a pod that died without writing
+/// terminal must NOT be treated as a live in-pod verify forever. Once the
+/// `running` row's `started_at` is older than the liveness grace, recovery
+/// fires (task leaves `verifying`) within minutes instead of waiting on the
+/// 4-hour stale-run reaper.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stuck_verifying_with_stale_running_run_is_recovered() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let epic = make_epic(&db, tx.clone()).await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = repo
+        .create(
+            &epic.id,
+            "Verifying-stale-run",
+            "",
+            "",
+            "task",
+            0,
+            "",
+            Some("open"),
+        )
+        .await
+        .unwrap();
+    repo.set_status(&task.id, "verifying").await.unwrap();
+    // Backdate `updated_at` past the 180s verifying-recovery grace so the task
+    // is eligible for recovery on entry.
+    sqlx::query(
+        "UPDATE tasks SET updated_at = to_char(now() AT TIME ZONE 'utc' - interval '30 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+    )
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // Seed a leaked `running` task-run whose `started_at` is far past the
+    // 600s liveness grace — the Bug-2 wedge condition.
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, started_at) \
+         VALUES ($1, $2, $3, 'manual', 'running', to_char(now() AT TIME ZONE 'utc' - interval '90 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
+    )
+    .bind("run-stale-verify")
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let handle = spawn_coordinator(&db, &tx);
+    handle.trigger_stuck_scan().await.unwrap();
+    handle.wait_for_status(|s| s.sessions_recovered >= 1).await;
+
+    let updated = repo.get(&task.id).await.unwrap().unwrap();
+    assert_ne!(
+        updated.status, "verifying",
+        "verifying task with a STALE running task-run must be recovered, not stranded"
+    );
+}
+
+/// Counterpart to the above: a `verifying` task with a FRESH `running`
+/// task-run (a genuine in-pod verify in flight) must be PROTECTED — recovery
+/// is skipped so the live verify isn't yanked out from under the worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stuck_verifying_with_fresh_running_run_is_protected() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let epic = make_epic(&db, tx.clone()).await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = repo
+        .create(
+            &epic.id,
+            "Verifying-fresh-run",
+            "",
+            "",
+            "task",
+            0,
+            "",
+            Some("open"),
+        )
+        .await
+        .unwrap();
+    repo.set_status(&task.id, "verifying").await.unwrap();
+    // Backdate `updated_at` past the 180s grace, so the ONLY thing protecting
+    // the task is the fresh running-run liveness gate.
+    sqlx::query(
+        "UPDATE tasks SET updated_at = to_char(now() AT TIME ZONE 'utc' - interval '30 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+    )
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // A `running` task-run that started just now — a live in-pod verify.
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) \
+         VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind("run-fresh-verify")
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let handle = spawn_coordinator(&db, &tx);
+    handle.trigger_stuck_scan().await.unwrap();
+    // Give the scan time to run; it should be a no-op for this task.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let updated = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        updated.status, "verifying",
+        "verifying task with a FRESH running task-run must be protected (live in-pod verify)"
+    );
+}
+
+/// Bug 1 defense-in-depth: a `verifying` task whose in-pod verification already
+/// wrote a terminal `verification_runs` row (passed) but lost its
+/// WorkerSubmitted report (e.g. the task-run pod was TTL-GC'd) must be RE-ARMED
+/// against that row — advancing to `needs_task_review` — instead of being
+/// released back to `open`, which would discard the completed-and-verified work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stuck_verifying_with_terminal_inpod_run_is_rearmed_not_released() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let epic = make_epic(&db, tx.clone()).await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = repo
+        .create(
+            &epic.id,
+            "Verifying-rearm",
+            "",
+            "",
+            "task",
+            0,
+            "",
+            Some("open"),
+        )
+        .await
+        .unwrap();
+    repo.set_status(&task.id, "verifying").await.unwrap();
+    sqlx::query(
+        "UPDATE tasks SET updated_at = to_char(now() AT TIME ZONE 'utc' - interval '30 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+    )
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // Leaked stale `running` run so the recovery block is reached (Bug-2 gate),
+    // standing in for the pod that died after writing the verification row.
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, started_at) \
+         VALUES ($1, $2, $3, 'manual', 'running', to_char(now() AT TIME ZONE 'utc' - interval '90 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
+    )
+    .bind("run-rearm")
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // The worker-written terminal in-pod verification row (passed).
+    let run_repo = djinn_db::VerificationRunRepository::new(db.clone());
+    let verification_run_id = "vrun-rearm";
+    run_repo
+        .create(verification_run_id, &task.id, &task.project_id)
+        .await
+        .unwrap();
+    run_repo
+        .complete(
+            verification_run_id,
+            djinn_db::VerificationRunStatus::PASSED,
+            "[]",
+            "[]",
+            None,
+        )
+        .await
+        .unwrap();
+
+    let handle = spawn_coordinator(&db, &tx);
+    handle.trigger_stuck_scan().await.unwrap();
+
+    // The re-armed host pipeline consumes the passed row and transitions
+    // verifying → needs_task_review. Poll until the task leaves `verifying`.
+    let mut final_status = String::new();
+    for _ in 0..100 {
+        let cur = repo.get(&task.id).await.unwrap().unwrap();
+        if cur.status != "verifying" {
+            final_status = cur.status;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        final_status, "needs_task_review",
+        "verifying task with a terminal passed in-pod verification row must be re-armed \
+         to needs_task_review, not released back to open"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_closed_task_applies_failure_confidence_once() {
     let db = test_helpers::create_test_db();

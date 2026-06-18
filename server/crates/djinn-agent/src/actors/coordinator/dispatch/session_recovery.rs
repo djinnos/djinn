@@ -723,18 +723,67 @@ impl CoordinatorActor {
             // grace. This gates on task-run liveness instead of a blunt timeout,
             // so genuine orphans recover promptly while in-pod verifies of any
             // duration are protected.
-            let has_live_run = djinn_db::TaskRunRepository::new(self.db.clone())
+            //
+            // BUG 2 (leaked `running` row strands the task for hours): a
+            // `running, ended_at=NULL` task-run left behind by a pod that died
+            // out-of-band (OOM / eviction / deploy-kill) WITHOUT writing its
+            // terminal RPC makes the naive `has_live_run` test true FOREVER —
+            // so this recovery is skipped until `reap_stale_running` clears the
+            // row, which keys on a 4-HOUR `STALE_TASK_RUN_THRESHOLD_SECS` and
+            // only runs on the 15-minute stale-resource sweep. That produced the
+            // observed 3.7–5h silent stalls. Guard against it: a `running` row is
+            // only treated as LIVE while it is also RECENTLY active — its
+            // `started_at` is within a short liveness grace comfortably above any
+            // real in-pod verify duration. A `running` row older than that grace
+            // is a leaked orphan, not a live verify, so recovery proceeds within
+            // minutes instead of hours. `started_at` is the same
+            // `YYYY-MM-DDTHH:MM:SS.mmmZ` string format as the cutoff below, so
+            // the comparison is a lexical string compare (same idiom as
+            // `reap_stale_task_runs`).
+            const RUNNING_RUN_LIVENESS_GRACE_SECS: i64 = 600;
+            let running_cutoff = time::OffsetDateTime::now_utc()
+                - time::Duration::seconds(RUNNING_RUN_LIVENESS_GRACE_SECS);
+            let running_cutoff_iso = running_cutoff
+                .format(&time::macros::format_description!(
+                    "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+                ))
+                .ok();
+            let runs = djinn_db::TaskRunRepository::new(self.db.clone())
                 .list_for_task(&task.id)
                 .await
-                .map(|runs| {
-                    runs.iter().any(|r| {
-                        r.status == djinn_core::models::TaskRunStatus::Running.as_str()
-                            && r.ended_at.is_none()
-                    })
-                })
-                .unwrap_or(false);
+                .unwrap_or_default();
+            let mut has_stale_running_run = false;
+            let has_live_run = runs.iter().any(|r| {
+                let is_running = r.status == djinn_core::models::TaskRunStatus::Running.as_str()
+                    && r.ended_at.is_none();
+                if !is_running {
+                    return false;
+                }
+                // Live only if started recently. If we couldn't format a cutoff
+                // (clock/format error), conservatively treat it as live.
+                match running_cutoff_iso.as_deref() {
+                    Some(cutoff) if r.started_at.as_str() < cutoff => {
+                        has_stale_running_run = true;
+                        false
+                    }
+                    _ => true,
+                }
+            });
             if has_live_run {
                 continue;
+            }
+            if has_stale_running_run {
+                // Loud, so the stall is visible instead of silently waiting on
+                // the 4-hour reaper. A `verifying` task whose only task-run is a
+                // leaked `running` row is exactly the Bug-2 wedge.
+                tracing::error!(
+                    task_id = %task.short_id,
+                    task_uuid = %task.id,
+                    "CoordinatorActor: verifying task has a STALE `running` task-run \
+                     (started > liveness grace ago, no terminal write — likely an \
+                     OOM/eviction/deploy-killed pod); recovering instead of waiting \
+                     on the 4-hour stale-run reaper"
+                );
             }
 
             // Short grace for true orphans: still skip the few-second window
@@ -752,6 +801,50 @@ impl CoordinatorActor {
                 && task.updated_at.as_str() > cutoff_iso.as_str()
             {
                 continue;
+            }
+
+            // BUG 1 defense-in-depth: before releasing this `verifying` task back
+            // to `open` (which discards completed-and-verified work), check for a
+            // worker-written terminal in-pod `verification_runs` row. Its presence
+            // means the worker DID finish verification in-pod but its
+            // WorkerSubmitted report frame was lost (e.g. the task-run pod was
+            // TTL-GC'd before the host could consume it), so the host pipeline was
+            // never armed. Re-arm it against the existing row instead of throwing
+            // the run away. `spawn_verification_with_in_pod_run` is idempotent
+            // against the unchanged commit and re-registers the task in the
+            // verification tracker, so a redundant tick won't double-process it.
+            match djinn_db::VerificationRunRepository::new(self.db.clone())
+                .latest_terminal_for_task(&task.id)
+                .await
+            {
+                Ok(Some(run_id)) => {
+                    let project_path = self
+                        .project_path_for_id(&task.project_id)
+                        .await
+                        .unwrap_or_default();
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        verification_run_id = %run_id,
+                        "CoordinatorActor: orphaned verifying task has a terminal in-pod \
+                         verification row; re-arming host verification pipeline instead of \
+                         releasing to open"
+                    );
+                    crate::actors::slot::verification::spawn_verification_with_in_pod_run(
+                        task.id.clone(),
+                        project_path,
+                        self.maintenance_context(),
+                        Some(run_id),
+                    );
+                    affected += 1;
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "CoordinatorActor: failed to look up in-pod verification row during \
+                     verifying recovery; falling through to release-to-open"
+                ),
             }
 
             let evidence = match self.collect_live_mover_evidence(&task).await {

@@ -44,7 +44,7 @@ impl CoordinatorActor {
             graph_warmer: None,
             repo_graph_ops: None,
             runtime_ops: None,
-            cargo_target_runs_root: None,
+            cargo_target_runs_root: Some(djinn_core::paths::cargo_target_runs_root()),
             mirror: self.mirror.clone(),
             rpc_registry: None,
             default_project_id: None,
