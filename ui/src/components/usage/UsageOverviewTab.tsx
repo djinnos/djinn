@@ -21,6 +21,7 @@ import {
   formatBucket,
   formatCompactNumber,
   formatCurrency,
+  formatDeltaPercent,
   truncateLabel,
 } from "./usageFormatters";
 
@@ -516,9 +517,8 @@ function formatKpiValue(kpi: UsageKpi): string {
 }
 
 function formatDelta(delta: number | null): string {
-  if (delta === null) return EM_DASH;
-  const pct = Math.abs(delta) <= 1 ? delta * 100 : delta;
-  return `${pct > 0 ? "+" : ""}${pct.toFixed(Math.abs(pct) < 10 ? 1 : 0)}% vs prior`;
+  const formatted = formatDeltaPercent(delta);
+  return formatted === EM_DASH ? formatted : `${formatted} vs prior`;
 }
 
 function buildTokenSummary(points: UsageTimeSeriesPoint[]): string | undefined {
