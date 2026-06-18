@@ -10,13 +10,6 @@ export interface OrgUser {
   is_admin: boolean;
   /** Proposal capability role: `proposer` | `pm` | `engineer`. */
   role?: string;
-  /**
-   * True for the non-human "automation" service user — the synthetic account
-   * that owns system-initiated work (board patrols, etc.). It can't log in, so
-   * an admin configures its credentials + model selection on its behalf via the
-   * Configure-automation panel on the Users page.
-   */
-  is_service?: boolean;
   /** Optional last-seen timestamp (ISO 8601), surfaced when the server sends it. */
   last_seen_at?: string | null;
 }
