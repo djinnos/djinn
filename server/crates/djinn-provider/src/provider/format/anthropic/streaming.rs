@@ -6,7 +6,9 @@ use std::pin::Pin;
 use crate::message::{ContentBlock, Conversation};
 #[allow(unused_imports)]
 use crate::provider::client::ApiClient;
-use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
+use crate::provider::{
+    LlmProvider, ProviderConfig, ProviderError, StreamEvent, TokenUsage, ToolChoice,
+};
 
 use super::request::AnthropicProvider;
 
@@ -183,10 +185,70 @@ pub(crate) fn parse_anthropic_event(
             events.push(StreamEvent::Done);
         }
 
-        _ => {} // ping, error, etc.
+        // `error` is handled out-of-band in the stream loop (it must surface as
+        // a typed `Err(ProviderError)`, not a `StreamEvent`); see
+        // `classify_anthropic_error_event`. `ping` and any unknown event types
+        // carry no usable completion content and are dropped.
+        _ => {}
     }
 
     events
+}
+
+/// Classify an Anthropic **in-stream** `error` SSE event into a typed
+/// [`ProviderError`] plus a human-readable message.
+///
+/// Anthropic signals rate-limit / overload / refusal as an HTTP `200` SSE
+/// stream carrying `event: error\ndata: {"type":"error","error":{"type":
+/// "rate_limit_error","message":"..."}}` rather than a 4xx/5xx status. Dropping
+/// it (the previous `_ => {}` behaviour) yielded zero `StreamEvent`s, so the
+/// turn looked like an "empty/no-event turn" and the real failure never reached
+/// `classify_provider_failure` / the per-(scope,model) health breaker.
+///
+/// We reuse [`ProviderError::from_stream_error`] — the same mapping the OpenAI
+/// Responses streaming path uses for its mid-stream `error`/`response.failed`
+/// events — passing Anthropic's `error.type` as the `code`. The substring
+/// classifier covers the Anthropic vocabulary directly:
+/// `rate_limit_error` → `RateLimit` (retryable), `overloaded_error`/`api_error`
+/// → `ProviderInternal{500}` (retryable, server-side), `authentication_error`/
+/// `permission_error` → `Authentication` (terminal), `invalid_request_error` →
+/// `InvalidRequest` (terminal). A `retry-after` (ms) is folded in when present.
+pub(crate) fn classify_anthropic_error_event(data: &str) -> (ProviderError, String) {
+    let v: Value = serde_json::from_str(data).unwrap_or(Value::Null);
+    let error = v.get("error");
+    let err_type = error
+        .and_then(|e| e.get("type"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let message = error
+        .and_then(|e| e.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("provider returned an error event")
+        .to_string();
+
+    let class = ProviderError::from_stream_error(err_type.as_deref(), &message);
+
+    // Anthropic may include `error.retry_after` (seconds) on rate-limit events;
+    // carry it through to the typed RateLimit so backoff can honour it.
+    let class = match class {
+        ProviderError::RateLimit { .. } => {
+            let retry_after_ms = error
+                .and_then(|e| e.get("retry_after"))
+                .and_then(Value::as_f64)
+                .map(|secs| (secs * 1000.0) as u64);
+            class.with_retry_after(retry_after_ms)
+        }
+        other => other,
+    };
+
+    // Human-readable message rides along as anyhow context; prefix the
+    // Anthropic error type when we have one (mirrors OpenAI's `code: message`).
+    let display = match err_type {
+        Some(t) => format!("{t}: {message}"),
+        None => message,
+    };
+
+    (class, display)
 }
 
 impl LlmProvider for AnthropicProvider {
@@ -244,6 +306,22 @@ impl LlmProvider for AnthropicProvider {
                                 // Anthropic data lines contain the event type in the JSON
                                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
                                     let event_type = v["type"].as_str().unwrap_or("").to_string();
+                                    if event_type == "error" {
+                                        // Anthropic signals rate-limit/overload/refusal as a
+                                        // 200 SSE `error` event (not a 4xx/5xx status). Surface
+                                        // it as a TYPED `ProviderError` so the reply loop reports
+                                        // the real reason and the health breaker gets fed —
+                                        // dropping it (old `_ => {}`) made the turn look "empty".
+                                        // Preserve the typed error as the anyhow *source* (via
+                                        // `.context`) so `consume_provider_stream`'s
+                                        // `Err(e) => Err(e.context(..))` keeps it downcastable;
+                                        // do NOT stringify it (that erases the type the breaker
+                                        // classifies on).
+                                        let (class, msg) = classify_anthropic_error_event(&line);
+                                        tracing::error!(target: "djinn_provider::request", error = %msg, ?class, "anthropic stream error event");
+                                        yield Err(anyhow::Error::new(class).context(msg));
+                                        return;
+                                    }
                                     for event in parse_anthropic_event(&event_type, &line, &mut tool_acc, &mut input_tokens, &mut cache_read, &mut cache_write) {
                                         yield Ok(event);
                                     }
