@@ -1031,6 +1031,10 @@ fn planner_prompt_contains_learned_prompt_amendment_guidance() {
         prompt.contains("metrics_snapshot"),
         "planner prompt must mention the metrics_snapshot parameter for audit"
     );
+    assert!(
+        prompt.contains("JSON metrics snapshot"),
+        "planner prompt must require JSON metrics snapshots when available"
+    );
 
     // Evaluator follow-up semantics: confirm / probation / discard.
     assert!(

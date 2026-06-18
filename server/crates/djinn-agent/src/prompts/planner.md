@@ -71,7 +71,7 @@ A single task failure or a one-off mistake is NOT evidence — the pattern must 
 **Amendment shape:**
 - The `amendment` text must be **concise, behavioral, and self-contained** — it should describe the observed pattern and the desired correction in a way the agent can act on.
 - Include enough context to explain *why* the correction is needed (the observed pattern), not just *what* to do.
-- Pass a `metrics_snapshot` (JSON string of the current `agent_metrics` output) when available, so the amendment history records the pre-amendment baseline for later evaluation.
+- Pass a `metrics_snapshot` when available: a JSON metrics snapshot of the current `agent_metrics` output, so the amendment history records the pre-amendment baseline for later evaluation.
 
 **Evaluator follow-up (you do not run this):**
 After you submit an amendment, the coordinator's prompt-evaluation loop decides its fate based on post-amendment metrics: meaningful success-rate improvement or token reduction **confirms** the amendment; ambiguous results keep it **on probation**; regressions or no benefit cause it to be **discarded and reverted**. You do not confirm or discard amendments yourself — propose the amendment with strong evidence and let the evaluator close the loop.
