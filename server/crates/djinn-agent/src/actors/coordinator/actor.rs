@@ -778,7 +778,13 @@ impl CoordinatorActor {
             graph_warmer: None,
             repo_graph_ops: None,
             runtime_ops: self.runtime_ops.clone(),
-            cargo_target_runs_root: None,
+            // Explicit host-side runs root so the periodic sweep targets the
+            // directory actually mounted in the server pod
+            // (`$DJINN_HOME/cache/cargo-target-runs`) rather than the Job-pod
+            // `/cache` convention, which does not exist here. Relying on the
+            // sweep's `unwrap_or_else` fallback meant the sweep silently no-op'd
+            // on `ErrorKind::NotFound` and `cargo-target-runs` grew unbounded.
+            cargo_target_runs_root: Some(djinn_core::paths::cargo_target_runs_root()),
             mirror: self.mirror.clone(),
             rpc_registry: self.rpc_registry.clone(),
             default_project_id: None,

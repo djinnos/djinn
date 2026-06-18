@@ -293,9 +293,17 @@ pub(super) struct CargoTargetRunDirSweepStats {
     pub(super) deleted: usize,
     pub(super) retained: usize,
     pub(super) errors: usize,
+    /// Dirs LRU-trimmed by the state-independent hard cap (oldest-first).
+    pub(super) cap_trimmed: usize,
+    /// Per-entry errors during the hard-cap trim.
+    pub(super) cap_errors: usize,
 }
 
 async fn sweep_orphaned_cargo_target_run_dirs(db: &djinn_db::Database, root: Option<&Path>) {
+    // Production wiring sets `cargo_target_runs_root` explicitly (the server pod
+    // mounts the shared cache PVC at `$DJINN_HOME/cache`, NOT the Job-pod
+    // `/cache` path the [`CARGO_TARGET_RUNS_ROOT`] constant names). The
+    // `unwrap_or_else` fallback only fires in tests/contexts that don't set it.
     sweep_orphaned_cargo_target_run_dirs_under(
         db,
         root.unwrap_or_else(|| Path::new(CARGO_TARGET_RUNS_ROOT)),
@@ -443,13 +451,69 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
         }
     }
 
+    // Hard backstop: LRU-trim the runs root below an absolute count cap,
+    // independent of task-run state. Even if both the deterministic teardown
+    // and the orphan sweep above regress (e.g. the protected-ids query starts
+    // over-protecting, or a new keying bug leaves rows "running"), this still
+    // bounds worst-case disk so a reaping regression can't refill the PVC and
+    // re-trigger node DiskPressure eviction. Runs in `spawn_blocking` since the
+    // trim is synchronous `std::fs`.
+    let cap = djinn_core::cargo_target_runs::hard_cap_dirs_from_env();
+    let trim_root = root.to_path_buf();
+    match tokio::task::spawn_blocking(move || {
+        djinn_core::cargo_target_runs::trim_run_dirs_to_cap(&trim_root, cap)
+    })
+    .await
+    {
+        Ok(Ok(trim)) => {
+            stats.cap_trimmed = trim.trimmed;
+            stats.cap_errors = trim.errors;
+            if trim.trimmed > 0 || trim.errors > 0 {
+                tracing::warn!(
+                    root = %root.display(),
+                    cap,
+                    scanned = trim.scanned,
+                    trimmed = trim.trimmed,
+                    retained = trim.retained,
+                    errors = trim.errors,
+                    "CoordinatorActor: cargo target run-dir hard cap trimmed dirs \
+                     (orphan sweep is not keeping the runs root bounded)"
+                );
+            }
+        }
+        Ok(Err(e)) => {
+            stats.cap_errors += 1;
+            tracing::warn!(
+                error = %e,
+                root = %root.display(),
+                cap,
+                "CoordinatorActor: cargo target run-dir hard cap trim failed"
+            );
+        }
+        Err(e) => {
+            stats.cap_errors += 1;
+            tracing::warn!(
+                error = %e,
+                root = %root.display(),
+                cap,
+                "CoordinatorActor: cargo target run-dir hard cap trim task join failed"
+            );
+        }
+    }
+
     tracing::info!(
         root = %root.display(),
         scanned = stats.scanned,
         deleted = stats.deleted,
         retained = stats.retained,
         errors = stats.errors,
-        cleanup_outcome = if stats.errors == 0 { "completed" } else { "completed_with_errors" },
+        cap_trimmed = stats.cap_trimmed,
+        cap_errors = stats.cap_errors,
+        cleanup_outcome = if stats.errors == 0 && stats.cap_errors == 0 {
+            "completed"
+        } else {
+            "completed_with_errors"
+        },
         "CoordinatorActor: cargo target run-dir sweep completed"
     );
 
