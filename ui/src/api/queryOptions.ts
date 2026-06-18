@@ -2,6 +2,10 @@ import { queryOptions } from "@tanstack/react-query";
 import { checkServerHealth, fetchProviderCatalog } from "./server";
 import { fetchUsers } from "./users";
 import { fetchUserSettings } from "./userSettings";
+import {
+  fetchUsageAnalytics,
+  type UsageAnalyticsFilters,
+} from "./analytics";
 
 export const serverHealthQueryOptions = () =>
   queryOptions({
@@ -36,4 +40,19 @@ export const userSettingsQueryOptions = () =>
     queryKey: USER_SETTINGS_QUERY_KEY,
     queryFn: fetchUserSettings,
     staleTime: 30 * 1000,
+  });
+
+/**
+ * Admin-only usage analytics query. The query key includes the serialized
+ * filter set so React Query deduplicates identical requests regardless of
+ * which component mounts the hook.
+ */
+export const USAGE_ANALYTICS_QUERY_KEY = (filters: UsageAnalyticsFilters) =>
+  ["admin", "usage", filters] as const;
+
+export const usageAnalyticsQueryOptions = (filters: UsageAnalyticsFilters) =>
+  queryOptions({
+    queryKey: USAGE_ANALYTICS_QUERY_KEY(filters),
+    queryFn: () => fetchUsageAnalytics(filters),
+    staleTime: 60 * 1000,
   });
