@@ -1084,12 +1084,12 @@ fn anchor_extraction_provider() -> Arc<FakeProvider> {
         }],
         "patterns": [{
             "title": "Anchored Pattern",
-            "content": "## Context\nA pattern is most useful when retrieval hooks onto a situation rather than free text. ## Problem shape\nNoisy embeddings over full content make retrieval brittle. ## Recommended approach\nPersist a separate applies_when sentence. ## Why it works\nThe short anchor dominates the embedding signal. ## Tradeoffs / limits\nThe body still carries the durable lesson. ## When to use\nUse when durable knowledge is hard to find. ## When not to use\nDo not use when the body already is the retrieval target. ## Related\n- retrieval anchor",
+            "content": "## Context\nA pattern is most useful when retrieval hooks onto a situation rather than free text.\n## Problem shape\nNoisy embeddings over full content make retrieval brittle.\n## Recommended approach\nPersist a separate applies_when sentence.\n## Why it works\nThe short anchor dominates the embedding signal.\n## Tradeoffs / limits\nThe body still carries the durable lesson.\n## When to use\nUse when durable knowledge is hard to find.\n## When not to use\nDo not use when the body already is the retrieval target.\n## Related\n- retrieval anchor",
             "applies_when": "When durable knowledge is hard to retrieve by full content."
         }],
         "pitfalls": [{
             "title": "Anchored Pitfall",
-            "content": "## Trigger / smell\nA pitfall becomes unrecoverable when its trigger is buried inside a long body. ## Failure mode\nEmbedding drift hides the trigger. ## Observable symptoms\nThe pitfall is never recalled. ## Prevention\nPersist a separate applies_when trigger sentence. ## Recovery\nRe-anchor and re-embed. ## Related\n- retrieval anchor",
+            "content": "## Trigger / smell\nA pitfall becomes unrecoverable when its trigger is buried inside a long body.\n## Failure mode\nEmbedding drift hides the trigger.\n## Observable symptoms\nThe pitfall is never recalled.\n## Prevention\nPersist a separate applies_when trigger sentence.\n## Recovery\nRe-anchor and re-embed.\n## Related\n- retrieval anchor",
             "applies_when": "When a pitfall is buried inside a long body and not recalled."
         }]
     })
