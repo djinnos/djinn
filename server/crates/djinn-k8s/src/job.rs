@@ -21,6 +21,7 @@ use uuid::Uuid;
 use djinn_supervisor::cargo_target_run_dir;
 
 use crate::config::KubernetesConfig;
+use crate::sidecar::{BackingServiceSpec, sidecar_container, sidecar_dshm_volume, sidecar_conn_env};
 
 /// Label key for the task-run id (Djinn's primary correlator).
 pub const LABEL_TASK_RUN_ID: &str = "djinn.app/task-run-id";
@@ -168,16 +169,26 @@ pub const VOLUME_WORKSPACE: &str = "workspace";
 /// there is no fallback to `config.image`; the per-task-run Pod always
 /// runs the project-specific image. `config.image` is retained only for
 /// legacy call sites we no longer expect to reach at runtime.
+/// `services` are the backing services declared on the project's image
+/// (resolved via [`crate::sidecar::resolve_image_services`]); each is injected
+/// as a native sidecar and its connection string exported to the worker as the
+/// preset's env var. Pass an empty slice for no injected services.
 pub fn build_task_run_job(
     config: &KubernetesConfig,
     task_run_id: &Uuid,
     project_id: &str,
     secret_name: &str,
     project_image_tag: &str,
+    services: &[BackingServiceSpec],
 ) -> Job {
     let task_run_id_str = task_run_id.to_string();
     let labels = job_labels(&task_run_id_str);
     let job_name = format!("djinn-taskrun-{task_run_id}");
+
+    // Worker env carries the base task-run knobs plus one connection env var
+    // per injected backing service (e.g. TEST_POSTGRES_URL → 127.0.0.1:5432).
+    let mut worker_env = build_task_run_env(config, &task_run_id_str, project_id);
+    worker_env.extend(services.iter().map(sidecar_conn_env));
 
     let container = Container {
         name: "worker".to_string(),
@@ -194,7 +205,7 @@ pub fn build_task_run_job(
             crate::warm_job::WARM_COMMAND_BIN.to_string(),
             "task-run".to_string(),
         ]),
-        env: Some(build_task_run_env(config, &task_run_id_str, project_id)),
+        env: Some(worker_env),
         volume_mounts: Some(vec![
             volume_mount(VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
             volume_mount(VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
@@ -225,7 +236,7 @@ pub fn build_task_run_job(
         ..Container::default()
     };
 
-    let volumes = vec![
+    let mut volumes = vec![
         Volume {
             name: VOLUME_SPEC.to_string(),
             secret: Some(SecretVolumeSource {
@@ -301,6 +312,22 @@ pub fn build_task_run_job(
         },
         crate::env_config::env_config_volume(project_id),
     ];
+    // Backing-service sidecars share a Memory /dev/shm (Postgres needs more than
+    // the 64Mi default). Added only when services are injected so the manifest
+    // is byte-identical to the pre-feature shape for service-less projects.
+    if !services.is_empty() {
+        volumes.push(sidecar_dshm_volume());
+    }
+
+    // Each declared backing service becomes a native sidecar (initContainer +
+    // restartPolicy: Always). `None` when there are none, keeping the manifest
+    // unchanged for projects without injected services.
+    let init_containers = (!services.is_empty()).then(|| {
+        services
+            .iter()
+            .map(|s| sidecar_container(config, s))
+            .collect::<Vec<_>>()
+    });
 
     // Pin Pods to a dedicated NodePool when the operator has configured one.
     // Both fields stay `None` if the corresponding config entry is empty so
@@ -312,6 +339,7 @@ pub fn build_task_run_job(
     let pod_spec = PodSpec {
         service_account_name: Some(config.service_account.clone()),
         restart_policy: Some("Never".to_string()),
+        init_containers,
         containers: vec![container],
         volumes: Some(volumes),
         node_selector,
@@ -723,7 +751,7 @@ mod tests {
         let secret_name = "djinn-taskrun-test";
         let project_image = "registry.example:5000/djinn-project-p:abc123def456";
 
-        let job = build_task_run_job(&cfg, &task_run_id, "proj-xyz", secret_name, project_image);
+        let job = build_task_run_job(&cfg, &task_run_id, "proj-xyz", secret_name, project_image, &[]);
 
         // Metadata.
         let meta = &job.metadata;
@@ -1004,6 +1032,7 @@ mod tests {
             "proj-xyz",
             "djinn-taskrun-test",
             "registry.example:5000/djinn-project-p:abc123def456",
+            &[],
         );
 
         let pod = job
@@ -1042,6 +1071,7 @@ mod tests {
             "proj-xyz",
             "djinn-taskrun-test",
             "registry.example:5000/djinn-project-p:abc123def456",
+            &[],
         );
 
         let pod = job
@@ -1299,6 +1329,7 @@ mod tests {
             project_id,
             "djinn-taskrun-first",
             "registry.example:5000/djinn-project-p:abc123def456",
+            &[],
         );
         let second_job = build_task_run_job(
             &cfg,
@@ -1306,6 +1337,7 @@ mod tests {
             project_id,
             "djinn-taskrun-second",
             "registry.example:5000/djinn-project-p:abc123def456",
+            &[],
         );
 
         let first_envs = task_run_job_envs(&first_job);
@@ -1368,6 +1400,7 @@ mod tests {
             "proj-xyz",
             "djinn-taskrun-test",
             "registry.example:5000/djinn-project-p:abc123def456",
+            &[],
         );
 
         let pod = job
@@ -1385,5 +1418,98 @@ mod tests {
         assert_eq!(tols[0].operator.as_deref(), Some("Equal"));
         assert_eq!(tols[0].value.as_deref(), Some("djinn"));
         assert_eq!(tols[0].effect.as_deref(), Some("NoSchedule"));
+    }
+
+    /// A declared backing service is injected as a native sidecar and its
+    /// connection string exported to the worker; service-less projects keep
+    /// the pre-feature manifest shape (no initContainers, no extra volume).
+    #[test]
+    fn injects_backing_service_as_native_sidecar() {
+        let cfg = KubernetesConfig::for_testing();
+        let postgres = BackingServiceSpec {
+            service_type: "postgres".into(),
+            image: "postgres:18-alpine".into(),
+            port: 5432,
+            env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
+            cpu_request: "100m".into(),
+            memory_request: "256Mi".into(),
+            cpu_limit: "500m".into(),
+            memory_limit: "512Mi".into(),
+            conn_template: "postgres://postgres:postgres@{host}:{port}/app_test".into(),
+            conn_env_var: "TEST_POSTGRES_URL".into(),
+        };
+
+        // Service-less build: no initContainers, no svc-dshm volume.
+        let bare = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-bare",
+            "registry.example:5000/djinn-project-p:abc123def456",
+            &[],
+        );
+        let bare_pod = bare
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec");
+        assert!(
+            bare_pod.init_containers.is_none(),
+            "no services ⇒ no initContainers (manifest unchanged)"
+        );
+        assert!(
+            !bare_pod
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|v| v.name == crate::sidecar::SIDECAR_DSHM_VOLUME),
+            "no services ⇒ no svc-dshm volume"
+        );
+
+        // With one service injected.
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-svc",
+            "registry.example:5000/djinn-project-p:abc123def456",
+            std::slice::from_ref(&postgres),
+        );
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec");
+
+        // Native sidecar in initContainers.
+        let inits = pod.init_containers.as_ref().expect("init_containers set");
+        assert_eq!(inits.len(), 1);
+        assert_eq!(inits[0].name, "svc-postgres");
+        assert_eq!(inits[0].restart_policy.as_deref(), Some("Always"));
+
+        // Connection env var exported to the worker container.
+        let worker = &pod.containers[0];
+        let envs: BTreeMap<&str, &str> = worker
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            envs.get("TEST_POSTGRES_URL").copied(),
+            Some("postgres://postgres:postgres@127.0.0.1:5432/app_test")
+        );
+
+        // Shared /dev/shm volume added for the sidecar.
+        assert!(
+            pod.volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|v| v.name == crate::sidecar::SIDECAR_DSHM_VOLUME),
+            "svc-dshm volume must be present when a service is injected"
+        );
     }
 }
