@@ -251,18 +251,15 @@ impl NoteRepository {
 
     /// Get temporal scores for all notes in project.
     async fn temporal_scores_all(&self, project_id: &str) -> Result<Vec<(String, f64)>> {
-        let rows = sqlx::query!(
+        let rows: Vec<(String, i64, String, String)> = sqlx::query_as(
             "SELECT id, access_count, created_at, updated_at
              FROM notes
-             WHERE project_id = $1",
-            project_id
+             WHERE project_id = $1
+               AND status = 'active'",
         )
+        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
-        let rows: Vec<(String, i64, String, String)> = rows
-            .into_iter()
-            .map(|r| (r.id, r.access_count, r.created_at, r.updated_at))
-            .collect();
 
         use std::time::SystemTime;
 
@@ -309,7 +306,7 @@ impl NoteRepository {
         let sql = format!(
             "SELECT id, permalink, title, note_type, COALESCE(overview, substr(content, 1, 500)) as disclosure_text
              FROM notes
-             WHERE id IN ({})",
+             WHERE status = 'active' AND id IN ({})",
             crate::repositories::pg_placeholders(ids.len(), 1)
         );
 
@@ -366,7 +363,7 @@ impl NoteRepository {
         let sql = format!(
             "SELECT id, permalink, title, note_type, COALESCE(abstract, substr(content, 1, 100)) as disclosure_text
              FROM notes
-             WHERE id IN ({})",
+             WHERE status = 'active' AND id IN ({})",
             crate::repositories::pg_placeholders(ids.len(), 1)
         );
 
