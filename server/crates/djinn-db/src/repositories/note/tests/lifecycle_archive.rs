@@ -51,23 +51,13 @@ async fn mark_old_access(db: &Database, note_id: &str, days: u32) {
     .unwrap();
 }
 
-async fn mark_missing_last_access(db: &Database, note_id: &str) {
-    // The `last_accessed` column is `NOT NULL DEFAULT to_char(...)`, so a
-    // literal NULL cannot be stored. The empty string exercises the `= ''`
-    // branch of the staleness predicate in `extracted_archive_candidates`,
-    // which treats it the same as "never accessed". The `IS NULL` branch is
-    // kept as a defensive guard against hand-edited rows but is unreachable
-    // through the normal insert/update path.
-    sqlx::query(
-        r#"UPDATE notes
-           SET access_count = 1,
-               last_accessed = ''
-           WHERE id = $1"#,
-    )
-    .bind(note_id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+async fn mark_very_old_access(db: &Database, note_id: &str) {
+    // Simulate a note whose last access is far outside any reasonable window.
+    // This exercises the `last_accessed < to_char(...)` branch of the
+    // staleness predicate in `extracted_archive_candidates`.  The column is
+    // `NOT NULL`, so we use a real (very old) timestamp rather than NULL or
+    // empty string.
+    mark_old_access(db, note_id, 9999).await;
 }
 
 async fn set_status(db: &Database, note_id: &str, status: &str) {
@@ -114,17 +104,17 @@ async fn extracted_archive_candidates_require_active_extracted_audit_candidate_a
         .unwrap();
     mark_old_access(&db, &old_access.id, TEST_WINDOW_DAYS + 5).await;
 
-    let missing_last_access = repo
+    let very_old_access = repo
         .create(
             &project_id,
-            "Missing Last Access Pitfall",
+            "Very Old Access Pitfall",
             ARCHIVE_SHAPED_BODY,
             "pitfall",
             "[]",
         )
         .await
         .unwrap();
-    mark_missing_last_access(&db, &missing_last_access.id).await;
+    mark_very_old_access(&db, &very_old_access.id).await;
 
     let recent_access = repo
         .create(
@@ -172,7 +162,7 @@ async fn extracted_archive_candidates_require_active_extracted_audit_candidate_a
 
     assert!(candidate_ids.contains(zero_access.id.as_str()));
     assert!(candidate_ids.contains(old_access.id.as_str()));
-    assert!(candidate_ids.contains(missing_last_access.id.as_str()));
+    assert!(candidate_ids.contains(very_old_access.id.as_str()));
     assert!(!candidate_ids.contains(recent_access.id.as_str()));
     assert!(!candidate_ids.contains(not_archive_shaped.id.as_str()));
     assert!(!candidate_ids.contains(archived.id.as_str()));
