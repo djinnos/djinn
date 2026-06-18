@@ -28,9 +28,9 @@ use tokio::sync::broadcast;
 
 use super::{coordinator_actor_for_tests, create_task_with_note};
 use crate::actors::coordinator::dispatch::session_recovery::ZOMBIE_HARD_CAP_SECS;
-use crate::doctor::leader_tick::{run_cheap_doctor_checks, DOCTOR_CRITICAL_FINDING_ACTIVITY};
+use crate::doctor::leader_tick::{DOCTOR_CRITICAL_FINDING_ACTIVITY, run_cheap_doctor_checks};
 use crate::doctor::zombie_running_session::{
-    check_from_coordinator_state, ZOMBIE_RUNNING_SESSION_CHECK_NAME,
+    ZOMBIE_RUNNING_SESSION_CHECK_NAME, check_from_coordinator_state,
 };
 use crate::events::event_bus_for;
 use crate::test_helpers;
@@ -120,18 +120,16 @@ async fn zombie_running_session_doctor_e2e() {
 
     // ── 5. Invoke the production cheap-doctor leader-tick helper ────────
     let before = Instant::now();
-    run_cheap_doctor_checks(&registry, &db, &tx, Some("doctor-zombie-e2e-run")).await;
+    let runs = run_cheap_doctor_checks(&registry, &db, &tx, Some("doctor-zombie-e2e-run")).await;
     let tick_elapsed = before.elapsed();
 
     // ── 6. Assertion block 1: returned finding ─────────────────────────
-    // run_cheap_doctor_checks does not return findings directly; it persists
-    // them. We verify via the persistence layer (block 2). For the returned
-    // finding shape, we use the check's own run() on the same source:
-    let findings = registry
-        .get(ZOMBIE_RUNNING_SESSION_CHECK_NAME)
-        .expect("zombie check registered")
-        .run()
-        .expect("check runs");
+    let findings = runs
+        .iter()
+        .find(|run| run.check_name == ZOMBIE_RUNNING_SESSION_CHECK_NAME)
+        .expect("zombie cheap-doctor run returned")
+        .findings
+        .as_slice();
 
     let finding = findings
         .iter()
@@ -284,9 +282,9 @@ async fn zombie_running_session_doctor_e2e() {
         "activity payload must contain severity = critical"
     );
     assert_eq!(
-        payload.get("check").and_then(Value::as_str),
+        payload.get("check_name").and_then(Value::as_str),
         Some(ZOMBIE_RUNNING_SESSION_CHECK_NAME),
-        "activity payload must contain check = zombie_running_session"
+        "activity payload must contain check_name = zombie_running_session"
     );
     // The payload.entity_ids map must reference the fabricated session/task.
     let entity_ids = payload

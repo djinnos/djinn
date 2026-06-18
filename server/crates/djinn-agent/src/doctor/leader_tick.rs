@@ -25,7 +25,9 @@
 
 use std::time::Instant as StdInstant;
 
-use djinn_core::doctor::{DoctorRegistry, Finding, FindingSeverity, run_cheap_subset};
+use djinn_core::doctor::{
+    DoctorCheckRun, DoctorRegistry, Finding, FindingSeverity, run_cheap_subset,
+};
 use djinn_db::{DoctorFindingRepository, NewDoctorFinding};
 use serde_json::json;
 use tracing::{error, info, warn};
@@ -133,6 +135,7 @@ async fn record_activity_for_finding(repo: &djinn_db::TaskRepository, finding: &
 
     let payload = json!({
         "check": finding.check_name,
+        "check_name": finding.check_name,
         "severity": finding.severity.as_str(),
         "kind": kind_label,
         "detail": finding.detail,
@@ -173,12 +176,15 @@ async fn record_activity_for_finding(repo: &djinn_db::TaskRepository, finding: &
 /// `run_id` is stamped on every persisted finding so the operator can scope a
 /// subsequent `doctor_list_findings` query back to one leader-tick invocation.
 /// Pass `None` for ad-hoc invocations (tests).
+///
+/// Returns the cheap-check runs after persistence/metric/activity side effects
+/// so hermetic coordinator tests can assert the same findings the tick handled.
 pub async fn run_cheap_doctor_checks(
     registry: &DoctorRegistry,
     db: &djinn_db::Database,
     events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
     run_id: Option<&str>,
-) {
+) -> Vec<DoctorCheckRun> {
     let started = StdInstant::now();
     let runs = match run_cheap_subset(registry) {
         Ok(runs) => runs,
@@ -189,7 +195,7 @@ pub async fn run_cheap_doctor_checks(
                 error = %error,
                 "CoordinatorActor: cheap doctor subset failed to enumerate; skipping tick"
             );
-            return;
+            return Vec::new();
         }
     };
 
@@ -200,7 +206,7 @@ pub async fn run_cheap_doctor_checks(
             elapsed_ms = started.elapsed().as_millis() as u64,
             "CoordinatorActor: cheap doctor subset had no registered checks"
         );
-        return;
+        return Vec::new();
     }
 
     let finding_repo = DoctorFindingRepository::new(db.clone());
@@ -239,6 +245,8 @@ pub async fn run_cheap_doctor_checks(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "CoordinatorActor: cheap doctor tick complete"
     );
+
+    runs
 }
 
 #[cfg(test)]
@@ -464,7 +472,7 @@ mod tests {
         // The fixture's critical finding is tied to task-fixture-1, so the
         // activity entry must be attached to that task with the
         // `doctor_critical_finding` event type and the canonical payload
-        // shape (check / severity / detail / entity_ids).
+        // shape (check/check_name / severity / detail / entity_ids).
         let task_activity = task_repo
             .list_activity("task-fixture-1")
             .await
@@ -476,6 +484,7 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(&critical.payload).expect("payload is json");
         assert_eq!(payload["check"], TEST_CHECK_NAME);
+        assert_eq!(payload["check_name"], TEST_CHECK_NAME);
         assert_eq!(payload["severity"], "critical");
         assert_eq!(payload["kind"], "critical");
         assert_eq!(payload["detail"], "fixture critical divergence");
@@ -497,6 +506,7 @@ mod tests {
         let warn_payload: serde_json::Value =
             serde_json::from_str(&warn_entry.payload).expect("payload is json");
         assert_eq!(warn_payload["check"], TEST_CHECK_NAME);
+        assert_eq!(warn_payload["check_name"], TEST_CHECK_NAME);
         assert_eq!(warn_payload["severity"], "warn");
         assert_eq!(warn_payload["kind"], "warn");
 
@@ -518,6 +528,7 @@ mod tests {
         let board_payload: serde_json::Value =
             serde_json::from_str(&board_entry.payload).expect("payload is json");
         assert_eq!(board_payload["check"], "leader_tick.board_wide");
+        assert_eq!(board_payload["check_name"], "leader_tick.board_wide");
         assert_eq!(board_payload["severity"], "critical");
     }
 
