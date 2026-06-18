@@ -810,10 +810,13 @@ pub(crate) async fn run_supervisor_dispatch(
             //     coordinator's throttle→stall intent).
             //   - Failure   → `record_failure` (auth/invalid/5xx/invalid-output:
             //     gentler, trips only after repeats — a one-off may be transient).
-            // ContextOverflow / EmptyCompletion / Transport and untyped errors
-            // classified to `None` in `stage.rs` and are deliberately NOT fed
-            // (reactive compaction / empty-turn backoff / one-off blip handle
-            // those; non-provider errors must not over-trip the breaker).
+            // A hard `Transport` death folds into `Failure` in `stage.rs` so a
+            // model that dies instantly on every dispatch trips the gentle
+            // consecutive-failure breaker (a one-off blip is absorbed by the next
+            // successful run's `record_success`). ContextOverflow / EmptyCompletion
+            // and untyped errors still classify to `None` and are deliberately NOT
+            // fed (reactive compaction / empty-turn backoff handle those;
+            // non-provider errors must not over-trip the breaker).
             if let Some(class) = provider_failure_class_for_report(&report) {
                 let (is_throttle, retry_after_ms) = match class {
                     djinn_runtime::ProviderFailureClass::Throttle { retry_after_ms } => {
