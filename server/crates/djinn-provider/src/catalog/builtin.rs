@@ -225,43 +225,38 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         streaming: true,
         max_tokens_default: Some(64_000),
     },
-    // Anthropic-compatible. Present in models.dev (`xiaomi-mimo`, "Xiaomi MiMo
-    // Token Plan") with the Anthropic-compatible base_url + MiMo model list
-    // (mimo-v2.5-pro, mimo-v2.5); listed here so the env-var bootstrap upserts
-    // XIAOMI_MIMO_API_KEY into the vault. The Token Plan key has the `tp-xxxxx`
-    // format and authenticates via `Authorization: Bearer <tp-key>` (NOT the
-    // Anthropic-native `x-api-key` path). The default base_url is the SGP region
-    // (`https://token-plan-sgp.xiaomimimo.com/anthropic`); CN
-    // (`https://token-plan-cn.xiaomimimo.com/anthropic`) and AMS
-    // (`https://token-plan-ams.xiaomimimo.com/anthropic`) variants also exist.
+    // OpenAI-compatible. Models.dev-native (`xiaomi-token-plan-sgp`, "Xiaomi MiMo
+    // Token Plan (SGP)") with api `https://token-plan-sgp.xiaomimimo.com/v1` (npm
+    // @ai-sdk/openai-compatible) + the MiMo model list (mimo-v2.5-pro, …); models
+    // come from the live catalog refresh, so none are hand-added to snapshot.json.
+    // Listed here so the env-var bootstrap upserts XIAOMI_API_KEY into the vault.
+    // The Token Plan key authenticates via `Authorization: Bearer <key>`. CN/AMS
+    // region variants `xiaomi-token-plan-cn`/`xiaomi-token-plan-ams` also exist in
+    // models.dev.
     BuiltinProvider {
-        id: "xiaomi-mimo",
-        display_name: "Xiaomi MiMo Token Plan",
-        required_env_vars: &["XIAOMI_MIMO_API_KEY"],
+        id: "xiaomi-token-plan-sgp",
+        display_name: "Xiaomi MiMo Token Plan (SGP)",
+        required_env_vars: &["XIAOMI_API_KEY"],
         oauth_keys: &[],
         docs_url: "https://platform.xiaomimimo.com",
         merge_into: None,
         auth_only: false,
-        format_rule: FormatRule::Fixed(FormatFamily::Anthropic),
+        format_rule: FormatRule::Fixed(FormatFamily::OpenAI),
         auth_shape: AuthShape::Bearer,
         streaming: true,
-        max_tokens_default: Some(64_000),
+        max_tokens_default: None,
     },
-    // Anthropic-compatible. Present in models.dev (`kimi-coding-plan`, "Kimi
-    // Coding Plan") with the Anthropic-compatible Kimi Code subscription
-    // endpoint + the `kimi-for-coding` model; listed here so the env-var
+    // Anthropic-compatible. Models.dev-native (`kimi-for-coding`, "Kimi for
+    // Coding") with api `https://api.kimi.com/coding/v1` (npm @ai-sdk/anthropic) +
+    // the K2.7 Code model list (k2p7, …); models come from the live catalog
+    // refresh, so none are hand-added to snapshot.json. Listed here so the env-var
     // bootstrap upserts KIMI_API_KEY into the vault. The subscription key
     // authenticates via `Authorization: Bearer <key>` (NOT the Anthropic-native
-    // `x-api-key` path). The base_url is the Kimi Code coding endpoint
-    // (`https://api.kimi.com/coding/v1`), NOT the api.moonshot.ai pay-as-you-go
-    // API. NOTE: `kimi-for-coding` only routes to the newest K2.7 Code when
-    // Thinking/reasoning is enabled (otherwise it silently falls back to K2.6);
-    // the model is marked `reasoning: true` in snapshot.json, so the shared
-    // `default_reasoning_effort_for_model` policy auto-enables thinking for the
-    // Anthropic format family (reasoning_effort = Some(Medium)).
+    // `x-api-key` path), and the endpoint is the Kimi Code coding endpoint, NOT
+    // the api.moonshot.ai pay-as-you-go API.
     BuiltinProvider {
-        id: "kimi-coding-plan",
-        display_name: "Kimi Coding Plan",
+        id: "kimi-for-coding",
+        display_name: "Kimi for Coding",
         required_env_vars: &["KIMI_API_KEY"],
         oauth_keys: &[],
         docs_url: "https://www.kimi.com/code/docs",
