@@ -9,6 +9,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UsageDashboardFiltersBar } from "@/components/usage/UsageDashboardFilters";
+import { UsageBreakdownsTab } from "@/components/usage/UsageBreakdownsTab";
+import { UsageModelsTab } from "@/components/usage/UsageModelsTab";
+import { UsageOverviewTab } from "@/components/usage/UsageOverviewTab";
 import { cn } from "@/lib/utils";
 
 /** Default filters: last 30 days, daily granularity. */
@@ -133,38 +136,15 @@ export function UsageDashboardPage() {
             </TabsList>
 
             <TabsContent value={TAB_OVERVIEW}>
-              <TabPlaceholder
-                title="Overview"
-                description="KPI row with period-over-period deltas, stacked spend time series, and spend-by-dimension bars."
-                generatedAt={data?.generated_at}
-                count={data?.kpis.length}
-                countLabel="KPIs"
-              />
+              {data && <UsageOverviewTab data={data} />}
             </TabsContent>
 
             <TabsContent value={TAB_MODELS}>
-              <TabPlaceholder
-                title="Models"
-                description="Worker-scoped model effectiveness table with best-in-column highlighting and comparison bars for cost/task, success rate, and average reopens."
-                generatedAt={data?.generated_at}
-                count={data?.model_effectiveness.length}
-                countLabel="models"
-              />
+              {data && <UsageModelsTab data={data} />}
             </TabsContent>
 
             <TabsContent value={TAB_BREAKDOWNS}>
-              <TabPlaceholder
-                title="Breakdowns"
-                description="By User / By Project / By Proposal / By Task sortable tables with expandable per-model detail."
-                generatedAt={data?.generated_at}
-                count={
-                  (data?.breakdowns.by_user.length ?? 0) +
-                  (data?.breakdowns.by_project.length ?? 0) +
-                  (data?.breakdowns.by_proposal.length ?? 0) +
-                  (data?.breakdowns.by_task.length ?? 0)
-                }
-                countLabel="rows"
-              />
+              {data && <UsageBreakdownsTab data={data} />}
             </TabsContent>
 
             <TabsContent value={TAB_MATRIX}>
@@ -202,9 +182,7 @@ function DashboardSkeleton() {
 // ── Tab placeholder container ────────────────────────────────────────────────
 
 /**
- * Lightweight container rendered inside each tab. The content of each tab
- * (charts, tables, etc.) will be filled by follow-up tasks; this task only
- * establishes the plumbing and shared-data contract.
+ * Lightweight container for tabs still owned by follow-up tasks.
  */
 function TabPlaceholder({
   title,
