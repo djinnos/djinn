@@ -489,7 +489,7 @@ impl NoteRepository {
         folder: Option<&str>,
         note_type: Option<&str>,
         depth: i64,
-        status: Option<&str>,
+        _status: Option<&str>,
     ) -> Result<Vec<NoteCompact>> {
         self.list_compact_by_status(project_id, folder, note_type, depth, Some("active"))
             .await
@@ -527,12 +527,6 @@ impl NoteRepository {
         let mut binds: Vec<String> = vec![project_id.to_string(), status];
         // Next free placeholder index ($1 is project_id, $2 is status).
         let mut next = 3;
-
-        if let Some(status) = status {
-            sql.push_str(&format!(" AND status = ${next}"));
-            next += 1;
-            binds.push(status.to_string());
-        }
 
         if let Some(f) = folder {
             if depth == 1 {
