@@ -1,3 +1,4 @@
+// djinn:allow-oversize — over size-guard byte threshold after reliability fixes; split when touched substantively.
 //! Per-stage execution driver invoked by [`crate::supervisor::TaskRunSupervisor`].
 //!
 //! The supervisor orchestration itself lives in `djinn-supervisor`; this file
