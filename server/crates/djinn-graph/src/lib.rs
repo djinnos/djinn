@@ -29,6 +29,7 @@ pub mod git_diff;
 pub mod graph_parity;
 pub mod index_tree;
 pub mod layout;
+pub mod out_of_core;
 pub mod process;
 pub mod processes;
 pub mod query_planner;
@@ -37,6 +38,7 @@ pub mod repo_graph;
 pub mod route_extraction;
 pub mod scip_indexer;
 pub mod scip_parser;
+pub mod warm_sentinel;
 pub mod ykcg_parity;
 
 pub use repo_graph::stable_node_uid;

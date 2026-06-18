@@ -175,6 +175,38 @@ impl ScipCacheKey {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ParseCacheKeyIngredients {
+    schema_version: String,
+    cache_kind: String,
+    file_content_hash: String,
+    scip_version: String,
+}
+
+impl ParseCacheKeyIngredients {
+    fn new(file_content_hash: impl Into<String>, scip_version: impl Into<String>) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            cache_kind: "parsed-scip-index".to_string(),
+            file_content_hash: file_content_hash.into(),
+            scip_version: scip_version.into(),
+        }
+    }
+
+    fn cache_key(&self) -> Result<ScipCacheKey> {
+        let bytes =
+            serde_json::to_vec(self).context("serialize SCIP parse cache key ingredients")?;
+        Ok(ScipCacheKey(hex_sha256(&bytes)))
+    }
+}
+
+pub(crate) fn parse_cache_key(
+    file_content_hash: impl Into<String>,
+    scip_version: impl Into<String>,
+) -> Result<ScipCacheKey> {
+    ParseCacheKeyIngredients::new(file_content_hash, scip_version).cache_key()
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ScipCacheStore {
     root: PathBuf,
@@ -204,6 +236,14 @@ impl ScipCacheStore {
         Self { root: root.into() }
     }
 
+    /// Return the root directory of this cache store.
+    ///
+    /// Used by [`crate::warm_sentinel`] to derive the sentinel state
+    /// directory.
+    pub(crate) fn cache_root(&self) -> &Path {
+        &self.root
+    }
+
     pub(crate) fn lookup(&self, key: &ScipCacheKey, output_path: &Path) -> CacheLookup {
         match self.try_lookup(key, output_path) {
             Ok(true) => CacheLookup::Hit,
@@ -214,11 +254,48 @@ impl ScipCacheStore {
     pub(crate) fn store_artifact(&self, key: &ScipCacheKey, artifact_path: &Path) -> Result<()> {
         let bytes = fs::read(artifact_path)
             .with_context(|| format!("read SCIP artifact {}", artifact_path.display()))?;
+        self.store_bytes(key, &bytes)
+    }
+
+    pub(crate) fn load_bytes(&self, key: &ScipCacheKey) -> Result<Option<Vec<u8>>> {
+        let entry = self.entry_dir(key);
+        let manifest_path = entry.join("manifest.json");
+        let artifact_path = entry.join("artifact.scip");
+        let manifest_bytes = match fs::read(&manifest_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| format!("read {}", manifest_path.display()));
+            }
+        };
+        let manifest: CacheManifest = match serde_json::from_slice(&manifest_bytes) {
+            Ok(manifest) => manifest,
+            Err(_) => return Ok(None),
+        };
+        if manifest.schema_version != SCHEMA_VERSION || manifest.key != key.as_str() {
+            return Ok(None);
+        }
+        let bytes = match fs::read(&artifact_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| format!("read {}", artifact_path.display()));
+            }
+        };
+        if bytes.len() as u64 != manifest.artifact_len
+            || hex_sha256(&bytes) != manifest.artifact_sha256
+        {
+            return Ok(None);
+        }
+        Ok(Some(bytes))
+    }
+
+    pub(crate) fn store_bytes(&self, key: &ScipCacheKey, bytes: &[u8]) -> Result<()> {
         let entry = self.entry_dir(key);
         fs::create_dir_all(&entry)
             .with_context(|| format!("create SCIP cache entry dir {}", entry.display()))?;
 
-        self.publish_artifact(key, &entry, &bytes)?;
+        self.publish_artifact(key, &entry, bytes)?;
         Ok(())
     }
 
@@ -401,6 +478,16 @@ pub(crate) fn relevant_environment(indexer: SupportedIndexer) -> BTreeMap<String
     relevant_environment_from_env(indexer, |name| env::var(name).ok())
 }
 
+pub(crate) fn scip_version_for_indexer(indexer: Option<SupportedIndexer>) -> String {
+    match indexer.map(version_override_env_name) {
+        Some(name) => {
+            let value = env::var(&name).unwrap_or_else(|_| "<unset>".to_string());
+            format!("{name}={value}")
+        }
+        None => "SCIP_UNKNOWN_VERSION=<unset>".to_string(),
+    }
+}
+
 pub(crate) fn hash_file(path: &Path) -> Result<String> {
     let bytes =
         fs::read(path).with_context(|| format!("read {} for SCIP cache hash", path.display()))?;
@@ -480,6 +567,10 @@ fn unique_temp_path(dir: &Path, file_name: &str) -> PathBuf {
 fn hex_sha256(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     hex::encode(digest)
+}
+
+pub(crate) fn content_hash(bytes: &[u8]) -> String {
+    hex_sha256(bytes)
 }
 
 #[cfg(test)]

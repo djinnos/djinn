@@ -141,7 +141,7 @@ export interface UsageAnalyticsResponse {
 
 // ── Serialization ──────────────────────────────────────────────────────────
 
-function buildQueryString(filters: UsageAnalyticsFilters): string {
+export function buildUsageAnalyticsQueryString(filters: UsageAnalyticsFilters): string {
   const params = new URLSearchParams();
 
   if (filters.preset) {
@@ -166,7 +166,7 @@ export async function fetchUsageAnalytics(
   filters: UsageAnalyticsFilters = {},
 ): Promise<UsageAnalyticsResponse> {
   const baseUrl = await getBaseUrl();
-  const qs = buildQueryString(filters);
+  const qs = buildUsageAnalyticsQueryString(filters);
   const response = await fetch(`${baseUrl}/api/admin/usage${qs}`);
   if (!response.ok) {
     const text = await response.text();

@@ -41,6 +41,19 @@ struct GraphCacheShrinkWarning {
     workspace_status_summary: String,
 }
 
+fn cache_reuse_enabled() -> bool {
+    std::env::var("DJINN_GRAPH_CACHE_REUSE_ENABLED")
+        .or_else(|_| std::env::var("DJINN_CACHE_REUSE_ENABLED"))
+        .or_else(|_| std::env::var("CACHE_REUSE_ENABLED"))
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// Pre-computed strongly-connected components, one set per `kind_filter`
 /// variant the `cycles` op exposes (`None` / `File` / `Symbol`).
 pub struct CachedSccs {
@@ -316,6 +329,30 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         }
     }
 
+    // --- Crash-sentinel contract (warm_sentinel) ---
+    // Before entering the file-based cache-mutating section, check whether a
+    // previous warm run crashed mid-mutation. If so, force a full rebuild
+    // (skip parse cache reuse), clean up orphaned tmp artifacts, and log a
+    // clear recovery message. See `warm_sentinel` module-level docs.
+    let sentinel_cache_root = crate::scip_indexer::cache::ScipCacheStore::from_environment();
+    let force_full_rebuild =
+        crate::warm_sentinel::observe_and_recover(sentinel_cache_root.cache_root());
+    if force_full_rebuild {
+        tracing::info!(
+            project_id,
+            commit_sha = %commit_sha,
+            "ensure_canonical_graph: stale warm sentinel recovered — forcing full rebuild (cache reuse disabled)"
+        );
+    }
+    // Write the sentinel checkpoint before any file-based cache mutation.
+    if let Err(e) = crate::warm_sentinel::checkpoint(sentinel_cache_root.cache_root(), &commit_sha)
+    {
+        tracing::warn!(
+            error = %e,
+            "ensure_canonical_graph: failed to write warm sentinel checkpoint; proceeding without sentinel protection"
+        );
+    }
+
     let temp_base = std::env::current_dir()
         .map_err(|e| format!("resolve current dir for canonical-graph tempdir: {e}"))?
         .join("target")
@@ -352,11 +389,17 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let artifacts = run.artifacts;
     let workspace_statuses = run.workspace_statuses;
     let project_root_for_blocking = handle.path().to_path_buf();
+    // Capture recovery flag for the blocking thread — when a stale sentinel
+    // was detected, disable parse cache reuse to force a clean rebuild.
+    let effective_cache_reuse = cache_reuse_enabled() && !force_full_rebuild;
     let blocking =
         tokio::task::spawn_blocking(move || -> Result<CanonicalGraphBuildOutput, String> {
             let t_parse = std::time::Instant::now();
-            let parsed = crate::scip_parser::parse_scip_artifacts(&artifacts)
-                .map_err(|e| format!("parse_scip_artifacts: {e}"))?;
+            let parsed = crate::scip_parser::parse_scip_artifacts_with_cache_reuse(
+                &artifacts,
+                effective_cache_reuse,
+            )
+            .map_err(|e| format!("parse_scip_artifacts: {e}"))?;
             let parse_ms = t_parse.elapsed().as_millis() as u64;
             let _ = std::fs::remove_dir_all(&output_dir_for_blocking);
 
@@ -441,6 +484,34 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         edge_count,
         "ensure_canonical_graph: build pipeline complete"
     );
+
+    // Out-of-core scope/parse store: resolve configuration and log whether
+    // the bounded accessor path is available. When engaged (env flag set AND
+    // node count meets threshold), downstream consumers can use
+    // `out_of_core::BoundedScopeAccessor` to keep resident memory bounded.
+    // The graph output is identical to the in-memory path — the out-of-core
+    // store is an accessor-layer optimization, not a different build pipeline.
+    match crate::out_of_core::resolve_out_of_core_config(node_count) {
+        Some(ooc_config) => {
+            tracing::info!(
+                project_id = %project_id,
+                node_count,
+                lru_capacity = ooc_config.lru_capacity,
+                min_nodes = ooc_config.min_nodes,
+                storage_path = %ooc_config.storage_path.display(),
+                "ensure_canonical_graph: out-of-core scope store available (env flag + threshold met)"
+            );
+        }
+        None if crate::out_of_core::out_of_core_enabled() => {
+            tracing::debug!(
+                project_id = %project_id,
+                node_count,
+                min_nodes = crate::out_of_core::out_of_core_min_nodes(),
+                "ensure_canonical_graph: out-of-core flag set but node count below threshold; using in-memory path"
+            );
+        }
+        None => {}
+    }
 
     // Never cache an empty graph. A real project always indexes to >0
     // nodes; node_count==0 means this warmer ran without the project
@@ -553,6 +624,11 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         layout_positions,
     )
     .await;
+
+    // Warm pipeline succeeded — clear the crash sentinel so the next warm
+    // does not observe a stale in-progress marker.
+    crate::warm_sentinel::clear(sentinel_cache_root.cache_root());
+
     spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
     spawn_cluster_docs_best_effort(ctx, project_id, &graph);
     Ok((handle, graph))
@@ -564,10 +640,19 @@ fn detect_graph_cache_shrink_warning(
     workspace_statuses: &[crate::scip_indexer::WorkspaceWarmStatus],
 ) -> Option<GraphCacheShrinkWarning> {
     let previous_blob = previous_blob?;
-    if workspace_statuses
-        .iter()
-        .any(|status| matches!(status.status.as_str(), "failed" | "timed_out"))
-    {
+    // Suppress shrink warnings whenever the warm explains a node-count drop:
+    // `failed`/`timed_out` rows mean an indexer could not produce an artifact,
+    // and `ready_with_quarantine` means a below-workspace partition was
+    // quarantined while the rest of the workspace succeeded — both are
+    // expected causes of a smaller graph and should not append a misleading
+    // synthetic `graph-cache` warning row. Only an *unexplained* shrink with
+    // no such status still emits the warning.
+    if workspace_statuses.iter().any(|status| {
+        matches!(
+            status.status.as_str(),
+            "failed" | "timed_out" | "ready_with_quarantine"
+        )
+    }) {
         return None;
     }
 
@@ -1294,6 +1379,34 @@ mod tests {
             detect_graph_cache_shrink_warning(Some(&blob), 700, &[warm_status("timed_out")]),
             None
         );
+    }
+
+    #[test]
+    fn shrink_decision_ignores_ready_with_quarantine_workspace() {
+        // `ready_with_quarantine` means a below-workspace partition was
+        // quarantined while the rest succeeded — the smaller graph is
+        // explained and must not append a misleading shrink warning.
+        let blob = graph_artifact_blob_with_nodes(1_000);
+
+        assert_eq!(
+            detect_graph_cache_shrink_warning(
+                Some(&blob),
+                700,
+                &[warm_status("ready_with_quarantine")]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn shrink_decision_warns_on_unexplained_shrink_with_only_ready() {
+        // Only `ready` statuses (no quarantine/explanation) → shrink is
+        // unexplained and the warning MUST fire.
+        let blob = graph_artifact_blob_with_nodes(1_000);
+
+        let warning = detect_graph_cache_shrink_warning(Some(&blob), 700, &[warm_status("ready")])
+            .expect("warning decision");
+        assert_eq!(warning.delta, 300);
     }
 
     #[test]
