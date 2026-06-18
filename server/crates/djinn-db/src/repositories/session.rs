@@ -1071,13 +1071,22 @@ mod tests {
         ) -> String {
             let id = uuid::Uuid::now_v7().to_string();
             let short_id = format!("t{}{}", &id[..6], &id[id.len() - 6..]);
-            sqlx::query!(
+            // Runtime `sqlx::query` (no `query!` macro) — the test sets a
+            // per-row `status` (`in_progress` / `verifying`) so the query
+            // string varies per call and would otherwise need a fresh
+            // `.sqlx/` cache entry for each variant.
+            sqlx::query(
                 "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                                     issue_type, priority, owner, status, continuation_count,
                                     labels, acceptance_criteria, memory_refs, created_by_user_id)
                  VALUES ($1,$2,$3,$4,'T','','','task',0,'',$6,0,'[]'::jsonb,'[]'::jsonb,'[]'::jsonb,$5)",
-                id, project_id, short_id, epic_id, creator, status
             )
+            .bind(&id)
+            .bind(project_id)
+            .bind(&short_id)
+            .bind(epic_id)
+            .bind(creator)
+            .bind(status)
             .execute(db.pool())
             .await
             .unwrap();
