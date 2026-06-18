@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use djinn_memory::{ExtractedNoteAuditCategory, ExtractedNoteAuditFinding};
+use sqlx::Row;
 
 use super::*;
 use crate::repositories::note::{NoteConsolidationRepository, STALE_CITATION};
@@ -417,6 +418,63 @@ impl NoteRepository {
             archive_candidates,
             rerun_hint: "Rerun `memory_extracted_audit()` after cleanup and compare category counts to measure the remaining ADR-054 migration backlog.".to_string(),
         })
+    }
+
+    /// ADR-054 archive candidates that are safe for an automated archive pass.
+    ///
+    /// This intersects the ADR-054 audit classifier with the lifecycle/access
+    /// safety boundary required by the archive sweep: only `active` extracted
+    /// note types (`case`, `pattern`, `pitfall`) are eligible, and only when the
+    /// note has never been accessed (`access_count = 0`) or its last access is
+    /// outside the configured archive window. Hand-written note types are
+    /// excluded by the SQL predicate before any status mutation can consume this
+    /// result.
+    pub async fn extracted_archive_candidates(
+        &self,
+        project_id: &str,
+        archive_window_days: u32,
+    ) -> Result<Vec<ExtractedNoteAuditFinding>> {
+        self.db.ensure_initialized().await?;
+
+        let window = if archive_window_days > 0 {
+            archive_window_days
+        } else {
+            crate::repositories::note::lifecycle::DEFAULT_ARCHIVE_WINDOW_DAYS
+        };
+
+        let eligible_rows = sqlx::query(
+            r#"SELECT id
+               FROM notes
+               WHERE project_id = $1
+                 AND status = 'active'
+                 AND note_type IN ('case', 'pattern', 'pitfall')
+                 AND (
+                     access_count = 0
+                     OR last_accessed IS NULL
+                     OR last_accessed = ''
+                     OR last_accessed < to_char(
+                         (now() at time zone 'utc') - ($2 || ' days')::interval,
+                         'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+                     )
+                 )"#,
+        )
+        .bind(project_id)
+        .bind(window.to_string())
+        .fetch_all(self.db.pool())
+        .await?;
+
+        let mut eligible_ids = HashSet::with_capacity(eligible_rows.len());
+        for row in eligible_rows {
+            let id: String = row.try_get("id")?;
+            eligible_ids.insert(id);
+        }
+
+        let audit = self.extracted_note_audit(project_id).await?;
+        Ok(audit
+            .archive_candidates
+            .into_iter()
+            .filter(|finding| eligible_ids.contains(&finding.note_id))
+            .collect())
     }
 
     async fn note_id_by_permalink(
