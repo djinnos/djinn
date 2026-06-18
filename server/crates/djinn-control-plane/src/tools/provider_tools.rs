@@ -155,8 +155,8 @@ impl From<ModelHealth> for ModelHealthOutput {
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct ProviderCatalogInput {
-    /// Admin-only: act on behalf of this user id (e.g. the automation service
-    /// user). Non-admins must omit it.
+    /// Admin-only: act on behalf of this user id (e.g. another user to
+    /// configure). Non-admins must omit it.
     #[serde(default)]
     pub target_user_id: Option<String>,
 }
@@ -198,8 +198,8 @@ pub struct ProviderCatalogItem {
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct ProviderConnectedInput {
-    /// Admin-only: act on behalf of this user id (e.g. the automation service
-    /// user). Non-admins must omit it.
+    /// Admin-only: act on behalf of this user id (e.g. another user to
+    /// configure). Non-admins must omit it.
     #[serde(default)]
     pub target_user_id: Option<String>,
 }
@@ -250,8 +250,8 @@ pub struct ProviderModelOutput {
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct ProviderModelsConnectedInput {
-    /// Admin-only: act on behalf of this user id (e.g. the automation service
-    /// user). Non-admins must omit it.
+    /// Admin-only: act on behalf of this user id (e.g. another user to
+    /// configure). Non-admins must omit it.
     #[serde(default)]
     pub target_user_id: Option<String>,
 }
@@ -268,8 +268,8 @@ pub struct ProviderModelsConnectedResponse {
 pub struct ProviderOauthStartInput {
     /// Provider ID to start OAuth for (accepts catalog aliases, e.g. 'github-copilot').
     pub provider_id: String,
-    /// Admin-only: act on behalf of this user id (e.g. the automation service
-    /// user). Non-admins must omit it.
+    /// Admin-only: act on behalf of this user id (e.g. another user to
+    /// configure). Non-admins must omit it.
     #[serde(default)]
     pub target_user_id: Option<String>,
 }
@@ -839,7 +839,7 @@ impl DjinnMcpServer {
 
         // Resolve the effective owner for the stored OAuth token. With no
         // `target_user_id` this is the acting user; an admin may target another
-        // user (e.g. the automation service user, which can't self-configure).
+        // user (e.g. another target user that can't self-configure).
         let effective_user = match acting_user::resolve_effective_user(
             self.state.db(),
             input.target_user_id.as_deref(),
