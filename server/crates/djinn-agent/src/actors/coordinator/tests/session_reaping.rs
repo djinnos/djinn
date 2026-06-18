@@ -816,6 +816,11 @@ async fn cargo_target_run_dir_sweep_retains_live_and_deletes_orphans() {
     assert_eq!(stats.deleted, 2);
     assert_eq!(stats.retained, 4);
     assert_eq!(stats.errors, 0);
+    // The default cap (64) never trims our handful — the orphan sweep above did
+    // all the work. The hard-cap LRU-trim itself is unit-tested in
+    // `djinn_core::cargo_target_runs::trim_keeps_newest_and_removes_oldest_beyond_cap`.
+    assert_eq!(stats.cap_trimmed, 0);
+    assert_eq!(stats.cap_errors, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
