@@ -133,7 +133,7 @@ async fn valid_transition(
 // guard masking the state-machine error.
 
 #[rstest]
-#[case("open", TransitionAction::SubmitVerification)]
+#[case("open", TransitionAction::SubmitTaskReview)]
 #[case("open", TransitionAction::SubmitTaskReview)]
 #[case("open", TransitionAction::TaskReviewStart)]
 #[case("open", TransitionAction::TaskReviewApprove)]

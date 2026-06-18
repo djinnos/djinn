@@ -55,7 +55,6 @@ fn arb_status() -> impl Strategy<Value = TaskStatus> {
     prop_oneof![
         Just(TaskStatus::Open),
         Just(TaskStatus::InProgress),
-        Just(TaskStatus::Verifying),
         Just(TaskStatus::NeedsTaskReview),
         Just(TaskStatus::InTaskReview),
         Just(TaskStatus::Approved),
@@ -70,10 +69,6 @@ fn arb_status() -> impl Strategy<Value = TaskStatus> {
 fn arb_action() -> impl Strategy<Value = TransitionAction> {
     prop_oneof![
         Just(TransitionAction::Start),
-        Just(TransitionAction::SubmitVerification),
-        Just(TransitionAction::VerificationPass),
-        Just(TransitionAction::VerificationFail),
-        Just(TransitionAction::ReleaseVerification),
         Just(TransitionAction::SubmitTaskReview),
         Just(TransitionAction::TaskReviewStart),
         Just(TransitionAction::TaskReviewReject),
@@ -107,7 +102,6 @@ fn arb_action() -> impl Strategy<Value = TransitionAction> {
 const NON_CLOSED_STATUSES: &[TaskStatus] = &[
     TaskStatus::Open,
     TaskStatus::InProgress,
-    TaskStatus::Verifying,
     TaskStatus::NeedsTaskReview,
     TaskStatus::InTaskReview,
     TaskStatus::Approved,

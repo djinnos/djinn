@@ -1736,25 +1736,25 @@ impl TaskRunSupervisor {
             TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::LoopGuardTripped { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
-                };
+        };
 
-                // Flip `task_runs.status` to its terminal value. The worker has already
-                // fired `submit_task_review` (task → `needs_task_review`) above.
-                //
-                // On the cancellation path the host-bound RPC channel may already be torn
-                // down (the reader loop saw `Control(Cancel)` and the writer's
-                // `cancelled()` branch shut the write half). In that case
-                // `update_task_run_status` returns a transport-level error and we must
-                // still produce the report so the worker exits cleanly and the host's
-                // per-task-run dispatch can pair it with the
-                // `KubernetesRuntime::teardown` path. When cancel is NOT set, an
-                // `update_task_run_status` failure stays fatal — a genuine RPC
-                // malfunction worth surfacing.
-                if let Err(e) = self
+        // Flip `task_runs.status` to its terminal value. The worker has already
+        // fired `submit_task_review` (task → `needs_task_review`) above.
+        //
+        // On the cancellation path the host-bound RPC channel may already be torn
+        // down (the reader loop saw `Control(Cancel)` and the writer's
+        // `cancelled()` branch shut the write half). In that case
+        // `update_task_run_status` returns a transport-level error and we must
+        // still produce the report so the worker exits cleanly and the host's
+        // per-task-run dispatch can pair it with the
+        // `KubernetesRuntime::teardown` path. When cancel is NOT set, an
+        // `update_task_run_status` failure stays fatal — a genuine RPC
+        // malfunction worth surfacing.
+        if let Err(e) = self
             .services
             .update_task_run_status(run_id.clone(), terminal_status)
             .await
-                {
+        {
             if self.services.cancel().is_cancelled() {
                 debug!(
                     task_run_id = %run_id,
@@ -1766,61 +1766,61 @@ impl TaskRunSupervisor {
                 cleanup_cargo_target_run_dir(&run_id).await;
                 return Err(SupervisorError::UpdateTaskRunStatus(e));
             }
-                }
+        }
 
-                cleanup_cargo_target_run_dir(&run_id).await;
+        cleanup_cargo_target_run_dir(&run_id).await;
 
-                info!(task_run_id = %run_id, ?outcome, "task-run finished");
-                Ok(TaskRunReport {
+        info!(task_run_id = %run_id, ?outcome, "task-run finished");
+        Ok(TaskRunReport {
             task_run_id: run_id,
             outcome,
             stages_completed: completed,
             verification_run_id: None,
-                })
-            }
+        })
+    }
 
-                /// Best-effort terminal status write for an early-cancelled run.
-                ///
-                /// Called from `run` when a host-bound RPC fails *during* an active
-                /// cancellation, before the supervisor would otherwise reach the
-                /// stage for-loop's natural cancel-check (and therefore before the
-                /// trailing `update_task_run_status` at the bottom of `run`).  The
-                /// helper always attempts the terminal RPC so the host's
-                /// `task_runs.status` row flips to `interrupted` regardless of which
-                /// stage tripped the cancel.  A failure on this last RPC is
-                /// swallowed — the cancellation IS the success, and a transport
-                /// error here just means the host's per-task-run dispatch will fall
-                /// back to its Job-status polling path.
-                async fn finalize_interrupted(
-            &self,
-            run_id: String,
-            stages_completed: Vec<RoleKind>,
-                ) -> Result<TaskRunReport, SupervisorError> {
-            if let Err(e) = self
-                .services
-                .update_task_run_status(run_id.clone(), TaskRunStatus::Interrupted)
-                .await
-            {
-                debug!(
-                    task_run_id = %run_id,
-                    error = %e,
-                    "finalize_interrupted: update_task_run_status failed; \
-                     host will fall back to Job-status polling"
-                );
-            }
-            cleanup_cargo_target_run_dir(&run_id).await;
+    /// Best-effort terminal status write for an early-cancelled run.
+    ///
+    /// Called from `run` when a host-bound RPC fails *during* an active
+    /// cancellation, before the supervisor would otherwise reach the
+    /// stage for-loop's natural cancel-check (and therefore before the
+    /// trailing `update_task_run_status` at the bottom of `run`).  The
+    /// helper always attempts the terminal RPC so the host's
+    /// `task_runs.status` row flips to `interrupted` regardless of which
+    /// stage tripped the cancel.  A failure on this last RPC is
+    /// swallowed — the cancellation IS the success, and a transport
+    /// error here just means the host's per-task-run dispatch will fall
+    /// back to its Job-status polling path.
+    async fn finalize_interrupted(
+        &self,
+        run_id: String,
+        stages_completed: Vec<RoleKind>,
+    ) -> Result<TaskRunReport, SupervisorError> {
+        if let Err(e) = self
+            .services
+            .update_task_run_status(run_id.clone(), TaskRunStatus::Interrupted)
+            .await
+        {
+            debug!(
+                task_run_id = %run_id,
+                error = %e,
+                "finalize_interrupted: update_task_run_status failed; \
+                 host will fall back to Job-status polling"
+            );
+        }
+        cleanup_cargo_target_run_dir(&run_id).await;
 
-            info!(task_run_id = %run_id, "task-run interrupted (early-cancel path)");
-            Ok(TaskRunReport {
-                task_run_id: run_id,
-                outcome: TaskRunOutcome::Interrupted,
-                stages_completed,
-                // Interrupted runs never reach the worker-submit point, so no in-pod
-                // verification ran.
-                verification_run_id: None,
-            })
-                }
-            }
+        info!(task_run_id = %run_id, "task-run interrupted (early-cancel path)");
+        Ok(TaskRunReport {
+            task_run_id: run_id,
+            outcome: TaskRunOutcome::Interrupted,
+            stages_completed,
+            // Interrupted runs never reach the worker-submit point, so no in-pod
+            // verification ran.
+            verification_run_id: None,
+        })
+    }
+}
 
 async fn cleanup_cargo_target_run_dir(task_run_id: &str) {
     let started = Instant::now();
@@ -1946,9 +1946,7 @@ mod tests {
             acceptance_criteria: "[]".into(),
             reopen_count: 0,
             continuation_count: 0,
-            verification_failure_count: 0,
             total_reopen_count: 0,
-            total_verification_failure_count: 0,
             intervention_count: 0,
             last_intervention_at: None,
             created_at: "now".into(),

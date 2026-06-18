@@ -86,7 +86,7 @@ where
                 if let Err(transition_err) = repo
                     .transition(
                         &task_id,
-                        TransitionAction::ReleaseVerification,
+                        TransitionAction::Release,
                         "agent-supervisor",
                         "system",
                         Some(&format!("verification pipeline error: {e}")),
@@ -112,7 +112,7 @@ where
                 if let Err(transition_err) = repo
                     .transition(
                         &task_id,
-                        TransitionAction::ReleaseVerification,
+                        TransitionAction::Release,
                         "agent-supervisor",
                         "system",
                         Some(&format!(
@@ -163,6 +163,7 @@ where
 /// 5. On fail: logs the failure as an activity comment, transitions to `open` (VerificationFail)
 /// 6. Cleans up the worktree
 /// 7. Triggers redispatch for the project
+#[allow(dead_code)]
 pub(crate) fn spawn_verification(task_id: String, project_path: String, app_state: AgentContext) {
     spawn_verification_with_in_pod_run(task_id, project_path, app_state, None);
 }
@@ -173,6 +174,7 @@ pub(crate) fn spawn_verification(task_id: String, project_path: String, app_stat
 /// CONSUMES that row directly instead of dispatching a second verify Job — the
 /// double-compile fix. `None` (or a non-terminal in-pod row) falls through to
 /// the standalone verification path (the separate verify Job).
+#[allow(dead_code)]
 pub(crate) fn spawn_verification_with_in_pod_run(
     task_id: String,
     project_path: String,
@@ -334,7 +336,7 @@ async fn run_verification_pipeline(
     if let Err(e) = task_repo
         .transition(
             task_id,
-            TransitionAction::VerificationPass,
+            TransitionAction::SubmitTaskReview,
             "agent-supervisor",
             "system",
             None,
@@ -950,12 +952,14 @@ async fn handle_verification_failure(
     // Check if this failure will hit the escalation threshold BEFORE
     // transitioning, so we can go directly to lead without an intermediate
     // `open` state that would trigger a spurious worker dispatch.
+    // Verification failure counting is removed (verification gate no longer exists).
+    // Always use the normal path: transition to open for re-dispatch to worker.
     let current_count = task_repo
         .get(task_id)
         .await
         .ok()
         .flatten()
-        .map(|t| t.verification_failure_count)
+        .map(|_| 0)
         .unwrap_or(0);
 
     // VerificationFail increments the count, so the post-transition count
@@ -998,7 +1002,7 @@ async fn handle_verification_failure(
         if let Err(e) = task_repo
             .transition(
                 task_id,
-                TransitionAction::VerificationFail,
+                TransitionAction::Release,
                 "agent-supervisor",
                 "system",
                 Some(feedback),

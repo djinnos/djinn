@@ -86,7 +86,6 @@ pub(crate) fn make_peer_task(
         acceptance_criteria: "[]".to_string(),
         reopen_count: 0,
         continuation_count: 0,
-        verification_failure_count: 0,
         created_at: "2026-01-01T00:00:00.000Z".to_string(),
         updated_at: updated_at.to_string(),
         closed_at: if status == "closed" {
@@ -107,7 +106,6 @@ pub(crate) fn make_peer_task(
         created_by_user_id: None,
         unresolved_blocker_count: 0,
         total_reopen_count: 0,
-        total_verification_failure_count: 0,
         intervention_count: 0,
         last_intervention_at: None,
     }

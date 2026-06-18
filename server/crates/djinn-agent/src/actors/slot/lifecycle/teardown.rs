@@ -133,7 +133,7 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
 pub(crate) async fn apply_transition_and_dispatch(
     transition: Option<(TransitionAction, Option<String>)>,
     task_id: &str,
-    project_path: &str,
+    _project_path: &str,
     role: &Arc<dyn AgentRole>,
     app_state: &AgentContext,
     tokens_in: i64,
@@ -152,7 +152,6 @@ pub(crate) async fn apply_transition_and_dispatch(
             "Lifecycle: applying session transition"
         );
         let is_conflict_rejection = action == TransitionAction::TaskReviewRejectConflict;
-        let is_submit_verification = action == TransitionAction::SubmitVerification;
         let is_orphaned_tool_call = reason
             .as_deref()
             .map(super::super::reply_loop::error_handling::is_orphaned_tool_call_error_str)
@@ -205,13 +204,7 @@ pub(crate) async fn apply_transition_and_dispatch(
         if is_conflict_rejection || is_orphaned_tool_call {
             interrupt_paused_worker_session(task_id, app_state).await;
         }
-        if is_submit_verification {
-            super::super::verification::spawn_verification(
-                task_id.to_string(),
-                project_path.to_string(),
-                app_state.clone(),
-            );
-        }
+        // SubmitVerification removed; verification no longer runs after session teardown.
     } else {
         tracing::info!(
             task_id = %task_id,
