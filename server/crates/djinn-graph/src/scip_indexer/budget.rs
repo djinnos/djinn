@@ -137,8 +137,9 @@ fn max_cap(indexer: SupportedIndexer) -> Duration {
     }
 }
 
-/// File extensions that count as "source" for each indexer's size estimation.
-fn source_extensions(indexer: SupportedIndexer) -> &'static [&'static str] {
+/// File extensions that count as "source" for each indexer's size estimation
+/// and SCIP cache key computation.
+pub(crate) fn source_extensions(indexer: SupportedIndexer) -> &'static [&'static str] {
     match indexer {
         SupportedIndexer::RustAnalyzer => &["rs"],
         SupportedIndexer::TypeScript => &["ts", "tsx", "js", "jsx", "mjs", "cjs"],
