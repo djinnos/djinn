@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UsageDashboardFiltersBar } from "@/components/usage/UsageDashboardFilters";
+import { UsageOverviewTab } from "@/components/usage/UsageOverviewTab";
 import { cn } from "@/lib/utils";
 
 /** Default filters: last 30 days, daily granularity. */
@@ -133,13 +134,7 @@ export function UsageDashboardPage() {
             </TabsList>
 
             <TabsContent value={TAB_OVERVIEW}>
-              <TabPlaceholder
-                title="Overview"
-                description="KPI row with period-over-period deltas, stacked spend time series, and spend-by-dimension bars."
-                generatedAt={data?.generated_at}
-                count={data?.kpis.length}
-                countLabel="KPIs"
-              />
+              {data && <UsageOverviewTab data={data} />}
             </TabsContent>
 
             <TabsContent value={TAB_MODELS}>

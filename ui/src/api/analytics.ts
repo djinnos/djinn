@@ -54,6 +54,14 @@ export interface UsageTimeSeriesPoint {
   task_count: number;
   /** Optional dimension key (model, project, agent_type) when grouped. */
   group_key?: string;
+  /** Optional model dimension supplied by grouped overview responses. */
+  model?: string;
+  /** Optional project dimension supplied by grouped overview responses. */
+  project_id?: string;
+  project_name?: string;
+  /** Optional agent role / type dimension supplied by grouped overview responses. */
+  agent_type?: string;
+  agent_role?: string;
 }
 
 export interface UsageBreakdownRow {
