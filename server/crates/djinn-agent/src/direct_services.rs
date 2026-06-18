@@ -187,6 +187,13 @@ impl SupervisorServices for DirectServices {
     ) -> Result<SessionRecord, String> {
         let ctx = &self.callbacks.agent_context;
         let repo = SessionRepository::new(ctx.db.clone(), ctx.event_bus.clone());
+        // Resolve the current catalog pricing at session start so later cost
+        // calculations don't require catalog access. Uncatalogued models
+        // produce `None` — all snapshot columns and `cost_usd` stay NULL.
+        let pricing = ctx
+            .catalog
+            .find_model(params.model.as_str())
+            .map(|m| m.pricing);
         repo.create(CreateSessionParams {
             project_id: params.project_id.as_str(),
             task_id: params.task_id.as_deref(),
@@ -194,6 +201,7 @@ impl SupervisorServices for DirectServices {
             agent_type: params.agent_type.as_str(),
             metadata_json: params.metadata_json.as_deref(),
             task_run_id: params.task_run_id.as_deref(),
+            pricing: pricing.as_ref(),
         })
         .await
         .map_err(|e| e.to_string())

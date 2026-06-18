@@ -182,15 +182,6 @@ impl RuntimeOps for StubRuntime {
             "stub: RuntimeOps::dispatch_verification not implemented".into(),
         ))
     }
-    async fn provision_backing_service(
-        &self,
-        _req: crate::bridge::ProvisionServiceRequest,
-    ) -> Result<crate::bridge::ProvisionedService, String> {
-        Err("stub: RuntimeOps::provision_backing_service not implemented".into())
-    }
-    async fn release_backing_service(&self, _instance_id: &str) -> Result<(), String> {
-        Ok(())
-    }
     async fn teardown_taskrun_job(&self, _task_run_id: &str) -> Result<(), String> {
         Ok(())
     }

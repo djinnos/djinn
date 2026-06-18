@@ -125,6 +125,7 @@ async fn make_fixture() -> TestFixture {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: None,
+            pricing: None,
         })
         .await
         .expect("create session");
@@ -460,6 +461,7 @@ async fn llm_extracted_notes_have_confidence_0_5() {
     assert_eq!(stored_taxonomy.extraction_quality.merged, 0);
     assert_eq!(stored_taxonomy.extraction_quality.downgraded, 0);
     assert_eq!(stored_taxonomy.extraction_quality.discarded, 0);
+    assert_eq!(stored_taxonomy.extraction_quality.admission_dropped, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -921,7 +923,14 @@ async fn llm_extraction_admission_gate_drops_pattern_missing_adr_054_sections() 
     };
 
     let provider = Arc::new(FakeProvider::text(
-        r#"{"cases":[],"patterns":[{"title":"Unstructured Pattern Note","content":"Reusable approach: keep extraction deterministic across future tasks by isolating unstable inputs and documenting why the pattern helps."}],"pitfalls":[]}"#,
+        &serde_json::json!({
+            "cases": [],
+            "patterns": [{
+                "title": "Unstructured Pattern Note",
+                "content": "Reusable approach: keep extraction deterministic across future tasks by isolating unstable inputs and documenting why the pattern helps."
+            }],
+            "pitfalls": []
+        }).to_string(),
     ));
 
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
@@ -1279,12 +1288,13 @@ async fn extraction_quality_for(
         .get_event_taxonomy_json(session_id)
         .await
         .expect("query session event_taxonomy");
-    serde_json::from_str(
+    let taxonomy: SessionTaxonomy = serde_json::from_str(
         stored_json
             .as_deref()
             .expect("taxonomy persisted after gate test"),
     )
-    .expect("deserialize stored taxonomy after gate test")
+    .expect("deserialize stored taxonomy after gate test");
+    taxonomy.extraction_quality
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

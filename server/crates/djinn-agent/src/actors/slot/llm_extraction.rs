@@ -963,18 +963,20 @@ async fn process_extracted_note(
     // (graph.rs::extracted_note_audit) cannot drift. The gate is scoped to
     // `run_llm_extraction_inner`; human-authored memory writes are
     // unaffected.
-    let gate = assess_note_quality(note_type, &note.content);
-    if gate.is_underspecified {
-        extraction_quality.admission_dropped += 1;
-        tracing::warn!(
-            session_id = %extraction_context.session_id,
-            project_id = %extraction_context.project_id,
-            note_type = %note_type,
-            title = %note.title,
-            reasons = ?gate.reasons,
-            "llm_extraction: dropping underspecified note at admission gate"
-        );
-        return;
+    if matches!(note_type, "case" | "pattern" | "pitfall") {
+        let quality = assess_note_quality(note_type, &note.content);
+        if quality.is_underspecified {
+            extraction_quality.admission_dropped += 1;
+            tracing::warn!(
+                session_id = %extraction_context.session_id,
+                project_id = %extraction_context.project_id,
+                note_type = %note_type,
+                title = %note.title,
+                reasons = ?quality.reasons,
+                "llm_extraction: dropping underspecified note at admission gate"
+            );
+            return;
+        }
     }
 
     let novelty = match novelty_decision(extraction_context, note_type, note).await {
@@ -2122,6 +2124,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .expect("create session");
@@ -2194,6 +2197,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .expect("create session");

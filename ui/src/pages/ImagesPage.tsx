@@ -233,11 +233,11 @@ export function ImagesPage() {
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        {image.allowedPresets.length === 0 ? (
+                        {image.servicePresets.length === 0 ? (
                           <span className="text-xs text-muted-foreground">—</span>
                         ) : (
                           <div className="flex flex-wrap gap-1">
-                            {image.allowedPresets.map((presetId) => (
+                            {image.servicePresets.map((presetId) => (
                               <Badge
                                 key={presetId}
                                 variant="outline"
