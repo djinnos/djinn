@@ -350,13 +350,17 @@ impl SessionRuntime for KubernetesRuntime {
             )));
         }
 
-        // 2. Build + create the Job manifest.
+        // 2. Build + create the Job manifest. Resolve the backing services
+        //    declared on the project's image so they're injected as native
+        //    sidecars (best-effort — never blocks dispatch; see resolver).
+        let services = crate::sidecar::resolve_image_services(db, &spec.project_id).await;
         let job = build_task_run_job(
             &self.config,
             &task_run_id,
             &spec.project_id,
             &resource_name,
             &project_image_tag,
+            &services,
         );
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
         let created_job = match jobs.create(&PostParams::default(), &job).await {
@@ -1611,6 +1615,7 @@ mod tests {
             "proj-xyz",
             &resource_name,
             "reg.test:5000/djinn-project-proj-xyz:deadbeefcafe",
+            &[],
         );
 
         // The Secret and Job share the same resource name.
