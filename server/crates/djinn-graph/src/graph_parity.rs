@@ -593,4 +593,51 @@ mod tests {
 
         assert_graph_artifact_blob_parity(&blob, &blob).expect("matching blobs should match");
     }
+
+    /// Spike `fp53` in-tree demonstration: `assert_graph_artifact_blob_parity`
+    /// returns `Ok(())` on the same warm repeated twice.  This is the
+    /// smallest possible end-to-end demonstration of the parity API's
+    /// Ok semantics; the full warm-path version (driving
+    /// `ensure_canonical_graph` twice and diffing the resulting
+    /// `repo_graph_cache` blobs) is the regression gate that
+    /// `server/crates/djinn-graph/tests/incremental_parity.rs::assert_incremental_matches_full`
+    /// adds (task `mc41` / `imx6`).  Kept in-tree so the parity API's
+    /// contract is visible at the comparator's own call site.
+    #[test]
+    fn parity_accepts_repeated_warm() {
+        let blob = bincode::serialize(&base_artifact()).expect("serialize");
+        assert_graph_artifact_blob_parity(&blob, &blob).expect("same warm twice should match");
+    }
+
+    /// Spike `fp53` in-tree demonstration: `assert_graph_artifact_blob_parity`
+    /// returns `Err(GraphArtifactBlobParityError::Diff(_))` with a
+    /// structured `GraphParityDiff` that names the added file when a
+    /// file is added between the two warms.  This proves the
+    /// comparator is a real equivalence gate, not a tautology, and
+    /// the harness built on top of it
+    /// (`tests/incremental_parity.rs::assert_incremental_matches_full`)
+    /// will fail loudly when the future cache-reuse path
+    /// (`r8x9` / `35mc`) ever diverges from the cold re-parse path.
+    #[test]
+    fn parity_reports_diff_when_file_added_between_warms() {
+        let old = base_artifact();
+        let mut new_artifact = base_artifact();
+        new_artifact.nodes.push(file_node("src/added.rs"));
+        let old_blob = bincode::serialize(&old).expect("serialize old");
+        let new_blob = bincode::serialize(&new_artifact).expect("serialize new");
+        let err = assert_graph_artifact_blob_parity(&old_blob, &new_blob)
+            .expect_err("extra file must produce Err with structured diff");
+        let GraphArtifactBlobParityError::Diff(diff) = err else {
+            panic!("expected Diff variant, got {err:?}");
+        };
+        assert_eq!(diff.files.added_count, 1);
+        assert!(
+            diff.files
+                .added_samples
+                .iter()
+                .any(|s| s == "file:src/added.rs"),
+            "added file sample must name the divergent file; got {:?}",
+            diff.files.added_samples
+        );
+    }
 }
