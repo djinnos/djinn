@@ -64,6 +64,35 @@ fn readiness_gate_enabled() -> bool {
     }
 }
 
+fn task_ownerless_from_creator_lookup<E: std::fmt::Display>(
+    task_short_id: &str,
+    created_by_user_id: Option<&str>,
+    creator_lookup: Result<Option<()>, E>,
+) -> bool {
+    let Some(uid) = created_by_user_id else {
+        return true;
+    };
+
+    match creator_lookup {
+        // Creator id resolves to a user row: dispatch may proceed under that owner.
+        Ok(Some(())) => false,
+        // Creator id present but no matching user row (dangling reference) →
+        // ownerless; refuse rather than dispatch under a ghost identity.
+        Ok(None) => true,
+        // DB error resolving the creator: fail-closed (refuse) so a transient
+        // lookup failure can't slip an unverified owner past the guard.
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_short_id,
+                created_by_user_id = uid,
+                error = %e,
+                "CoordinatorActor: ownership guard — failed to resolve task creator; treating as ownerless"
+            );
+            true
+        }
+    }
+}
+
 /// Overlay the in-flight dispatch ledger onto the DB-seeded per-user running
 /// counts, taking `max(db, ledger)` per `(creator, model)`.
 ///
@@ -639,9 +668,9 @@ impl CoordinatorActor {
 
     /// Proposal 1omc hard guard: a task may only dispatch under a real user.
     ///
-    /// Returns `true` when the task has no resolved owner (`created_by_user_id`
-    /// is NULL) or is still attributed to the retired automation sentinel
-    /// (a user row with `github_id == AUTOMATION_SENTINEL_GITHUB_ID`, i.e. `0`).
+    /// Returns `true` when the task has no resolved owner: `created_by_user_id`
+    /// is NULL, points at no user row, or cannot be verified because the DB
+    /// lookup fails.
     /// Such tasks must NOT consume org-shared credentials under no identity; the
     /// caller parks them and emits a loud warning so the ownership regression is
     /// visible instead of silently running ownerless.
@@ -651,34 +680,19 @@ impl CoordinatorActor {
     /// is exercised by the live MCP/session path, not these unit fixtures.
     #[cfg(not(test))]
     async fn task_is_ownerless(&self, task: &djinn_core::models::Task) -> bool {
-        /// Legacy automation service-user marker. The automation user is retired
-        /// (proposal 1omc); any task still pointing at a `github_id == 0` row is
-        /// treated as ownerless.
-        const AUTOMATION_SENTINEL_GITHUB_ID: i64 = 0;
         let Some(uid) = task.created_by_user_id.as_deref() else {
             return true;
         };
-        match djinn_db::UserRepository::new(self.db.clone())
+        let creator_lookup = djinn_db::UserRepository::new(self.db.clone())
             .get_by_id(uid)
             .await
-        {
-            // Creator resolves to the retired automation sentinel → ownerless.
-            Ok(Some(user)) => user.github_id == AUTOMATION_SENTINEL_GITHUB_ID,
-            // Creator id present but no matching user row (dangling reference) →
-            // ownerless; refuse rather than dispatch under a ghost identity.
-            Ok(None) => true,
-            // DB error resolving the creator: fail-closed (refuse) so a transient
-            // lookup failure can't slip an unverified owner past the guard.
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    created_by_user_id = uid,
-                    error = %e,
-                    "CoordinatorActor: ownership guard — failed to resolve task creator; treating as ownerless"
-                );
-                true
-            }
-        }
+            .map(|maybe_user| maybe_user.map(|_| ()));
+
+        task_ownerless_from_creator_lookup(
+            &task.short_id,
+            task.created_by_user_id.as_deref(),
+            creator_lookup,
+        )
     }
 
     #[cfg(test)]
@@ -962,10 +976,9 @@ impl CoordinatorActor {
                 continue;
             }
             // Proposal 1omc: every dispatch must run under a real user. Refuse to
-            // dispatch a task with no resolved owner (or one still attributed to
-            // the retired automation sentinel, github_id 0). Park it loudly rather
-            // than silently consuming org-shared credentials under no identity —
-            // this surfaces an ownership regression instead of running ownerless.
+            // dispatch a task with no resolved owner. Park it loudly rather than
+            // silently consuming org-shared credentials under no identity — this
+            // surfaces an ownership regression instead of running ownerless.
             if self.task_is_ownerless(&task).await {
                 tracing::warn!(
                     task_id = %task.short_id,
@@ -973,7 +986,7 @@ impl CoordinatorActor {
                     project_id = %task.project_id,
                     created_by_user_id = ?task.created_by_user_id,
                     "CoordinatorActor: REFUSING dispatch — task has no real owner \
-                     (created_by_user_id is NULL or the retired automation sentinel). \
+                     (created_by_user_id is NULL, dangling, or could not be verified). \
                      Every task must run under a real user (proposal 1omc); parking it."
                 );
                 continue;
@@ -1266,7 +1279,7 @@ impl CoordinatorActor {
                         role,
                         "no model available for this task's owner: none of the role's configured \
                          models have a provider connected for them. Connect a provider/model for \
-                         the owner (or the automation user) and reopen.",
+                         the owner and reopen.",
                     )
                     .await;
                     self.dispatch_failure_streak.remove(&task.id);
@@ -1585,6 +1598,30 @@ mod inflight_ledger_tests {
             created_by_user_id: creator.map(str::to_owned),
             unresolved_blocker_count: 0,
         }
+    }
+
+    #[test]
+    fn task_ownerless_guard_refuses_null_and_unresolved_creators() {
+        assert!(task_ownerless_from_creator_lookup(
+            "task",
+            None,
+            Ok::<Option<()>, &str>(Some(())),
+        ));
+        assert!(task_ownerless_from_creator_lookup(
+            "task",
+            Some("missing-user-id"),
+            Ok::<Option<()>, &str>(None),
+        ));
+        assert!(task_ownerless_from_creator_lookup(
+            "task",
+            Some("lookup-error-user-id"),
+            Err::<Option<()>, &str>("database unavailable"),
+        ));
+        assert!(!task_ownerless_from_creator_lookup(
+            "task",
+            Some("real-user-id"),
+            Ok::<Option<()>, &str>(Some(())),
+        ));
     }
 
     #[test]

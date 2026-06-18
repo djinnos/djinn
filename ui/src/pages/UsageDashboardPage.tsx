@@ -1,10 +1,16 @@
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Analytics01Icon } from "@hugeicons/core-free-icons";
+import { Analytics01Icon, Refresh01Icon } from "@hugeicons/core-free-icons";
 import { usageAnalyticsQueryOptions } from "@/api/queryOptions";
 import type { UsageAnalyticsFilters } from "@/api/analytics";
 import { InlineError } from "@/components/InlineError";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { UsageDashboardFiltersBar } from "@/components/usage/UsageDashboardFilters";
+import { UsageOverviewTab } from "@/components/usage/UsageOverviewTab";
+import { cn } from "@/lib/utils";
 
 /** Default filters: last 30 days, daily granularity. */
 const DEFAULT_FILTERS: UsageAnalyticsFilters = {
@@ -12,45 +18,92 @@ const DEFAULT_FILTERS: UsageAnalyticsFilters = {
   granularity: "day",
 };
 
+/** Tab values for the dashboard. */
+const TAB_OVERVIEW = "overview";
+const TAB_MODELS = "models";
+const TAB_BREAKDOWNS = "breakdowns";
+const TAB_MATRIX = "matrix";
+
 /**
  * Admin-only usage analytics dashboard. Non-admin access is blocked by the
  * route guard in App.tsx which redirects to /tasks.
  *
- * This is the navigation/routing shell; tab content and filter UI will be
- * added in follow-up tasks.
+ * The page owns a single canonical `UsageAnalyticsFilters` object that is
+ * passed to the React Query option and consumed by every tab, so all tabs
+ * share the same fetched data and there is no per-tab duplicated filter
+ * logic or divergent request.
  */
 export function UsageDashboardPage() {
-  const { data, isLoading, isError, error, refetch } = useQuery(
-    usageAnalyticsQueryOptions(DEFAULT_FILTERS),
-  );
+  const [filters, setFilters] =
+    useState<UsageAnalyticsFilters>(DEFAULT_FILTERS);
+
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
+    ...usageAnalyticsQueryOptions(filters),
+    // Keep the previous result visible while refetching on a filter change so
+    // the dashboard never flashes to a loading skeleton unnecessarily and the
+    // active tab is not lost.
+    placeholderData: (prev) => prev,
+  });
+
+  // ── Empty-state detection ─────────────────────────────────────────────────
+  const isEmpty = useMemo(() => {
+    if (!data) return false;
+    return (
+      data.kpis.length === 0 &&
+      data.time_series.length === 0 &&
+      data.model_effectiveness.length === 0 &&
+      data.project_model_matrix.length === 0 &&
+      data.breakdowns.by_user.length === 0 &&
+      data.breakdowns.by_project.length === 0 &&
+      data.breakdowns.by_proposal.length === 0 &&
+      data.breakdowns.by_task.length === 0
+    );
+  }, [data]);
 
   return (
     <div className="flex h-full flex-col overflow-hidden p-6">
-      <div className="mb-5 flex items-center gap-3">
-        <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-          <HugeiconsIcon icon={Analytics01Icon} size={18} />
-        </span>
-        <div>
-          <h1 className="text-xl font-bold text-foreground">
-            Usage &amp; Analytics
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            AI usage, cost, and effectiveness across this deployment.
-          </p>
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+            <HugeiconsIcon icon={Analytics01Icon} size={18} />
+          </span>
+          <div>
+            <h1 className="text-xl font-bold text-foreground">
+              Usage &amp; Analytics
+            </h1>
+            <p className="text-sm text-muted-foreground">
+              AI usage, cost, and effectiveness across this deployment.
+            </p>
+          </div>
         </div>
+        <Button
+          variant="outline"
+          size="sm"
+          className="shrink-0"
+          onClick={() => void refetch()}
+          disabled={isFetching}
+        >
+          <HugeiconsIcon
+            icon={Refresh01Icon}
+            size={14}
+            className={cn("mr-1.5", isFetching && "animate-spin")}
+          />
+          Refresh
+        </Button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto pb-6">
+      {/* ── Global filter bar ──────────────────────────────────────────────── */}
+      <UsageDashboardFiltersBar
+        filters={filters}
+        onChange={setFilters}
+        data={data}
+      />
+
+      {/* ── Content ────────────────────────────────────────────────────────── */}
+      <div className="min-h-0 flex-1 overflow-y-auto pt-5 pb-6">
         {isLoading ? (
-          <div className="space-y-3">
-            <Skeleton className="h-10 w-full rounded-lg" />
-            <div className="grid grid-cols-4 gap-3">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <Skeleton key={i} className="h-24 rounded-lg" />
-              ))}
-            </div>
-            <Skeleton className="h-64 w-full rounded-lg" />
-          </div>
+          <DashboardSkeleton />
         ) : isError ? (
           <InlineError
             message={
@@ -59,44 +112,125 @@ export function UsageDashboardPage() {
                 : "Failed to load usage analytics"
             }
             onRetry={() => void refetch()}
+            retrying={isFetching}
           />
-        ) : (
-          <div className="space-y-6">
-            {/* Placeholder KPI row — will be filled in follow-up tasks */}
-            {data?.kpis && data.kpis.length > 0 ? (
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                {data.kpis.map((kpi) => (
-                  <div
-                    key={kpi.label}
-                    className="rounded-lg border border-border bg-card p-4"
-                  >
-                    <p className="text-xs text-muted-foreground">{kpi.label}</p>
-                    <p className="mt-1 text-lg font-semibold text-foreground">
-                      {kpi.formatted}
-                    </p>
-                    {kpi.delta_pct !== null && (
-                      <p
-                        className={`mt-0.5 text-xs ${
-                          kpi.delta_pct >= 0
-                            ? "text-emerald-500"
-                            : "text-red-400"
-                        }`}
-                      >
-                        {kpi.delta_pct >= 0 ? "+" : ""}
-                        {kpi.delta_pct.toFixed(1)}%
-                      </p>
-                    )}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-10 text-center text-sm text-muted-foreground">
-                Analytics data will appear here once the backend is ready.
-              </div>
-            )}
+        ) : isEmpty ? (
+          <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-12 text-center">
+            <p className="text-sm font-medium text-foreground">No usage data</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Analytics will appear here once the deployment has completed task
+              activity within the selected range.
+            </p>
           </div>
+        ) : (
+          <Tabs defaultValue={TAB_OVERVIEW} className="flex flex-col gap-4">
+            <TabsList className="w-fit">
+              <TabsTrigger value={TAB_OVERVIEW}>Overview</TabsTrigger>
+              <TabsTrigger value={TAB_MODELS}>Models</TabsTrigger>
+              <TabsTrigger value={TAB_BREAKDOWNS}>Breakdowns</TabsTrigger>
+              <TabsTrigger value={TAB_MATRIX}>
+                Project × Model Matrix
+              </TabsTrigger>
+            </TabsList>
+
+            <TabsContent value={TAB_OVERVIEW}>
+              {data && <UsageOverviewTab data={data} />}
+            </TabsContent>
+
+            <TabsContent value={TAB_MODELS}>
+              <TabPlaceholder
+                title="Models"
+                description="Worker-scoped model effectiveness table with best-in-column highlighting and comparison bars for cost/task, success rate, and average reopens."
+                generatedAt={data?.generated_at}
+                count={data?.model_effectiveness.length}
+                countLabel="models"
+              />
+            </TabsContent>
+
+            <TabsContent value={TAB_BREAKDOWNS}>
+              <TabPlaceholder
+                title="Breakdowns"
+                description="By User / By Project / By Proposal / By Task sortable tables with expandable per-model detail."
+                generatedAt={data?.generated_at}
+                count={
+                  (data?.breakdowns.by_user.length ?? 0) +
+                  (data?.breakdowns.by_project.length ?? 0) +
+                  (data?.breakdowns.by_proposal.length ?? 0) +
+                  (data?.breakdowns.by_task.length ?? 0)
+                }
+                countLabel="rows"
+              />
+            </TabsContent>
+
+            <TabsContent value={TAB_MATRIX}>
+              <TabPlaceholder
+                title="Project × Model Matrix"
+                description="Heatmap of cost/task, success rate, average reopens, total spend, and tokens per project-model pair."
+                generatedAt={data?.generated_at}
+                count={data?.project_model_matrix.length}
+                countLabel="cells"
+              />
+            </TabsContent>
+          </Tabs>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Loading skeleton ────────────────────────────────────────────────────────
+
+function DashboardSkeleton() {
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <Skeleton key={i} className="h-24 rounded-lg" />
+        ))}
+      </div>
+      <Skeleton className="h-64 w-full rounded-lg" />
+      <Skeleton className="h-48 w-full rounded-lg" />
+    </div>
+  );
+}
+
+// ── Tab placeholder container ────────────────────────────────────────────────
+
+/**
+ * Lightweight container rendered inside each tab. The content of each tab
+ * (charts, tables, etc.) will be filled by follow-up tasks; this task only
+ * establishes the plumbing and shared-data contract.
+ */
+function TabPlaceholder({
+  title,
+  description,
+  generatedAt,
+  count,
+  countLabel,
+}: {
+  title: string;
+  description: string;
+  generatedAt?: string;
+  count?: number;
+  countLabel?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-8 text-center">
+      <h2 className="text-sm font-medium text-foreground">{title}</h2>
+      <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
+        {description}
+      </p>
+      <p className="mt-3 text-xs text-muted-foreground">
+        {count !== undefined && countLabel
+          ? `${count} ${countLabel} available · `
+          : ""}
+        Content coming in a follow-up task.
+      </p>
+      {generatedAt && (
+        <p className="mt-1 text-xs text-muted-foreground">
+          Data generated {generatedAt}
+        </p>
+      )}
     </div>
   );
 }
