@@ -52,10 +52,16 @@ async fn mark_old_access(db: &Database, note_id: &str, days: u32) {
 }
 
 async fn mark_missing_last_access(db: &Database, note_id: &str) {
+    // The `last_accessed` column is `NOT NULL DEFAULT to_char(...)`, so a
+    // literal NULL cannot be stored. The empty string exercises the `= ''`
+    // branch of the staleness predicate in `extracted_archive_candidates`,
+    // which treats it the same as "never accessed". The `IS NULL` branch is
+    // kept as a defensive guard against hand-edited rows but is unreachable
+    // through the normal insert/update path.
     sqlx::query(
         r#"UPDATE notes
            SET access_count = 1,
-               last_accessed = NULL
+               last_accessed = ''
            WHERE id = $1"#,
     )
     .bind(note_id)
