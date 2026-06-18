@@ -7320,8 +7320,10 @@ expression: signatures
     "output_schema": {
       "$defs": {
         "EnrichmentClaim": {
+          "description": "Claim node extracted by the enrichment pass — a decision or assertion the\nmemory records.",
           "properties": {
             "evidence_quote": {
+              "default": null,
               "nullable": true,
               "type": "string"
             },
@@ -7336,16 +7338,18 @@ expression: signatures
             "statement",
             "source_note_id"
           ],
-          "title": "EnrichmentClaim",
           "type": "object"
         },
         "EnrichmentEdge": {
+          "description": "Typed implicit edge between two notes (`builds_on` / `contradicts` /\n`supersedes` / `exemplifies` / `derived_from`).",
           "properties": {
             "confidence": {
               "description": "Confidence in [0.0, 1.0].",
+              "format": "double",
               "type": "number"
             },
             "evidence_quote": {
+              "default": null,
               "nullable": true,
               "type": "string"
             },
@@ -7365,12 +7369,13 @@ expression: signatures
             "kind",
             "confidence"
           ],
-          "title": "EnrichmentEdge",
           "type": "object"
         },
         "EnrichmentEntity": {
+          "description": "Entity node extracted by the enrichment pass — recurring system or concept\n(\"dispatch gate\", \"circuit breaker\", \"slot actor\").",
           "properties": {
             "aliases": {
+              "default": [],
               "items": {
                 "type": "string"
               },
@@ -7383,7 +7388,6 @@ expression: signatures
           "required": [
             "canonical_name"
           ],
-          "title": "EnrichmentEntity",
           "type": "object"
         },
         "EnrichmentReport": {
@@ -7394,12 +7398,14 @@ expression: signatures
               "type": "integer"
             },
             "claims": {
+              "default": [],
               "items": {
                 "$ref": "#/$defs/EnrichmentClaim"
               },
               "type": "array"
             },
             "edges": {
+              "default": [],
               "items": {
                 "$ref": "#/$defs/EnrichmentEdge"
               },
@@ -7410,6 +7416,7 @@ expression: signatures
               "type": "integer"
             },
             "entities": {
+              "default": [],
               "items": {
                 "$ref": "#/$defs/EnrichmentEntity"
               },
@@ -7428,6 +7435,7 @@ expression: signatures
               "type": "string"
             },
             "warnings": {
+              "default": [],
               "description": "Non-fatal warnings — provider errors, parse failures, etc. The pass\nalways succeeds; warnings are surfaced in the response, never\npropagated as blocking failures.",
               "items": {
                 "type": "string"
@@ -7442,11 +7450,11 @@ expression: signatures
             "entity_merges",
             "edges_dropped_wikilink_dup"
           ],
-          "title": "EnrichmentReport",
           "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "MCP response for `memory_run_enrichment`. The `report` is present when\n`status=\"completed\"` (foreground execution). For\n`status=\"queued\"` (background execution) the report is `None`; the pass\nemits the structured report through its own `INFO` log line at finish.",
       "properties": {
         "error": {
           "description": "Top-level failure: project not found, enrichment subsystem not\nconfigured, provider errors that propagate before the pass begins.\nPer-batch provider failures land in `report.warnings` rather than\nhere — the pass is best-effort and never blocks retrieval.",
@@ -7476,10 +7484,7 @@ expression: signatures
         }
       },
       "required": [
-        "status",
-        "project_id",
-        "report",
-        "error"
+        "status"
       ],
       "title": "MemoryRunEnrichmentResponse",
       "type": "object"
