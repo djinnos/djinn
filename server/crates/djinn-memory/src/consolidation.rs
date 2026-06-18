@@ -23,6 +23,12 @@ pub struct ConsolidationRunMetric {
     pub consolidated_cluster_count: i64,
     pub consolidated_note_count: i64,
     pub source_note_count: i64,
+    /// Number of extracted notes decayed by a lifecycle sweep run.
+    #[serde(default)]
+    pub decayed_note_count: i64,
+    /// Number of extracted notes archived by a lifecycle sweep run.
+    #[serde(default)]
+    pub archived_note_count: i64,
     /// Number of source notes marked as superseded via `note_associations.kind
     /// = 'supersedes'` edges during this run (yk9t task dm4w).
     pub superseded_source_note_count: i64,

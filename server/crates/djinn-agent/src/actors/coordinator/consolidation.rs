@@ -140,6 +140,8 @@ async fn consolidate_clusters(
         consolidated_cluster_count: qualifying_clusters.len() as i64,
         consolidated_note_count,
         source_note_count,
+        decayed_note_count: 0,
+        archived_note_count: 0,
         superseded_source_note_count,
         started_at,
         completed_at: Some(&completed_at),
