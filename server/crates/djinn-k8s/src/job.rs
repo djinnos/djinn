@@ -459,6 +459,18 @@ fn build_task_run_env(
     env.push(env_var("GIT_CONFIG_KEY_0", "safe.directory"));
     env.push(env_var("GIT_CONFIG_VALUE_0", "*"));
 
+    // djinn:allow-oversize — job.rs was already over the 50KB byte guard on
+    // main before this one-line forward; kept whole rather than split.
+    //
+    // Forward the outbound-request debug flag to the task-run pod (the LLM
+    // call for worker/planner/reviewer stages happens in this Pod, not the
+    // server). Only forwarded when set on the server, so it stays off by
+    // default; used to capture the literal provider request for diagnosing
+    // empty-stream failures (e.g. kimi-for-coding).
+    if let Ok(v) = std::env::var("DJINN_DEBUG_PROVIDER_REQUEST") {
+        env.push(env_var("DJINN_DEBUG_PROVIDER_REQUEST", &v));
+    }
+
     env.extend(task_run_cache_env_vars(project_id, task_run_id_str));
     env
 }
