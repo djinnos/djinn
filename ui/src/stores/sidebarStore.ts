@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-export type ActiveView = 'tasks' | 'chat' | 'settings' | 'agents' | 'metrics' | 'memory' | 'code-graph' | 'proposals' | 'repositories' | 'images' | 'users';
+export type ActiveView = 'tasks' | 'chat' | 'settings' | 'agents' | 'metrics' | 'memory' | 'code-graph' | 'proposals' | 'repositories' | 'images' | 'users' | 'admin-analytics';
 
 export interface SidebarState {
   activeSection: ActiveView;

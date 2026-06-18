@@ -17,37 +17,37 @@ import { InlineError } from "@/components/InlineError";
 import {
   type CatalogProvider,
   type ConnectedProvider,
-  fetchAutomationCatalog,
-  fetchAutomationConnectedProviders,
-  setAutomationCredential,
-  startAutomationOAuth,
-  type AutomationOAuthPending,
-} from "@/api/automationConfig";
+  fetchUserCatalog,
+  fetchUserConnectedProviders,
+  setUserCredential,
+  startUserOAuth,
+  type UserOAuthPending,
+} from "@/api/userConfig";
 import { getServerBaseUrl } from "@/api/serverUrl";
 import { showToast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
-import { automationKeys } from "./automationKeys";
+import { userConfigKeys } from "./userConfigKeys";
 
 export function ProviderSection({ targetId }: { targetId: string }) {
   const queryClient = useQueryClient();
 
   const connected = useQuery({
-    queryKey: automationKeys.connectedProviders(targetId),
-    queryFn: () => fetchAutomationConnectedProviders(targetId),
+    queryKey: userConfigKeys.connectedProviders(targetId),
+    queryFn: () => fetchUserConnectedProviders(targetId),
   });
   const catalog = useQuery({
-    queryKey: automationKeys.catalog(targetId),
-    queryFn: () => fetchAutomationCatalog(targetId),
+    queryKey: userConfigKeys.catalog(targetId),
+    queryFn: () => fetchUserCatalog(targetId),
   });
 
   const refreshConnected = useCallback(() => {
     void queryClient.invalidateQueries({
-      queryKey: automationKeys.connectedProviders(targetId),
+      queryKey: userConfigKeys.connectedProviders(targetId),
     });
     // Connecting a provider unlocks new models too.
     void queryClient.invalidateQueries({
-      queryKey: automationKeys.connectedModels(targetId),
+      queryKey: userConfigKeys.connectedModels(targetId),
     });
   }, [queryClient, targetId]);
 
@@ -67,7 +67,7 @@ export function ProviderSection({ targetId }: { targetId: string }) {
       <div>
         <h3 className="text-base font-semibold text-foreground">Providers</h3>
         <p className="text-sm text-muted-foreground">
-          Connect a model provider for the automation user. Use the device-code
+          Connect a model provider for this user. Use the device-code
           sign-in for ChatGPT / Codex, or paste an API key for any other provider.
         </p>
       </div>
@@ -157,7 +157,7 @@ export function ApiKeyConnectForm({
 
   const mutation = useMutation({
     mutationFn: () =>
-      setAutomationCredential({
+      setUserCredential({
         targetUserId: targetId,
         providerId,
         keyName,
@@ -165,7 +165,7 @@ export function ApiKeyConnectForm({
       }),
     onSuccess: () => {
       showToast.success("Provider connected", {
-        description: `${selected?.name ?? providerId} key stored for automation.`,
+        description: `${selected?.name ?? providerId} key stored for this user.`,
       });
       setApiKey("");
       setProviderId("");
@@ -192,9 +192,9 @@ export function ApiKeyConnectForm({
 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
         <div className="flex flex-1 flex-col gap-1.5">
-          <Label htmlFor="automation-provider">Provider</Label>
+          <Label htmlFor="user-config-provider">Provider</Label>
           <select
-            id="automation-provider"
+            id="user-config-provider"
             value={providerId}
             disabled={catalogLoading || mutation.isPending}
             onChange={(e) => setProviderId(e.target.value)}
@@ -217,11 +217,11 @@ export function ApiKeyConnectForm({
         </div>
 
         <div className="flex flex-[2] flex-col gap-1.5">
-          <Label htmlFor="automation-api-key">
+          <Label htmlFor="user-config-api-key">
             API key{keyName ? ` (${keyName})` : ""}
           </Label>
           <Input
-            id="automation-api-key"
+            id="user-config-api-key"
             type="password"
             autoComplete="off"
             placeholder="sk-…"
@@ -243,7 +243,7 @@ export function ApiKeyConnectForm({
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">
-        Stored encrypted and owned by the automation user.
+        Stored encrypted and owned by this user.
       </p>
     </form>
   );
@@ -251,7 +251,7 @@ export function ApiKeyConnectForm({
 
 type CodexPhase =
   | { kind: "idle" }
-  | { kind: "pending"; pending: AutomationOAuthPending }
+  | { kind: "pending"; pending: UserOAuthPending }
   | { kind: "error"; message: string }
   | { kind: "just_connected" };
 
@@ -275,7 +275,7 @@ export function CodexConnectCard({
   const handleConnect = useCallback(async () => {
     settledRef.current = false;
     setPhase({ kind: "idle" });
-    const result = await startAutomationOAuth(targetId, "openai");
+    const result = await startUserOAuth(targetId, "openai");
     if (result.kind === "connected") {
       settledRef.current = true;
       setPhase({ kind: "just_connected" });
@@ -308,7 +308,7 @@ export function CodexConnectCard({
     const onCredentialEvent = () => {
       // The SSE carries no target id, so re-check this user's connected
       // providers before declaring success.
-      void fetchAutomationConnectedProviders(targetId)
+      void fetchUserConnectedProviders(targetId)
         .then((providers) => {
           if (providers.some((p) => p.id === "openai" && p.connection_methods.includes("oauth"))) {
             markConnected();
@@ -321,7 +321,7 @@ export function CodexConnectCard({
 
     // Fallback poll in case the SSE is missed (component opened mid-stream).
     const interval = setInterval(() => {
-      void fetchAutomationConnectedProviders(targetId)
+      void fetchUserConnectedProviders(targetId)
         .then((providers) => {
           if (providers.some((p) => p.id === "openai" && p.connection_methods.includes("oauth"))) {
             markConnected();
@@ -373,7 +373,7 @@ export function CodexConnectCard({
       {phase.kind === "idle" && !showConnected && (
         <>
           <p className="text-sm leading-relaxed text-muted-foreground">
-            Connect a ChatGPT Plus, Pro, or Team account for the automation user.
+            Connect a ChatGPT Plus, Pro, or Team account for this user.
             No API key needed.
           </p>
           <Button className="w-full" onClick={() => void handleConnect()}>
