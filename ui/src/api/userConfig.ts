@@ -6,9 +6,8 @@ import type {
 } from "@/api/generated/mcp-tools.gen";
 
 /**
- * Admin-side helpers for configuring another user on their behalf — the
- * non-human "automation" service user (which can't sign in to configure
- * itself) as well as any human user an admin manages.
+ * Admin-side helpers for configuring another user on their behalf — any
+ * human or non-human user an admin manages.
  *
  * Every call threads the target user's id through the admin-gated
  * `target_user_id` arg so the server reads/writes THAT user's per-user config
@@ -23,33 +22,33 @@ import type {
 
 export type CatalogProvider = ProviderCatalogOutputSchema.ProviderCatalogItem;
 export type ConnectedProvider = ProviderConnectedOutputSchema.ProviderCatalogItem;
-export type AutomationModel = ProviderModelsConnectedOutputSchema.ProviderModelOutput;
+export type UserModel = ProviderModelsConnectedOutputSchema.ProviderModelOutput;
 
 /** Full provider catalog (static; not target-scoped, but accepts it harmlessly). */
-export async function fetchAutomationCatalog(
+export async function fetchUserCatalog(
   targetUserId: string,
 ): Promise<CatalogProvider[]> {
   const response = await callMcpTool("provider_catalog", { target_user_id: targetUserId });
   return response.providers;
 }
 
-/** Providers the automation user currently has live credentials for. */
-export async function fetchAutomationConnectedProviders(
+/** Providers the target user currently has live credentials for. */
+export async function fetchUserConnectedProviders(
   targetUserId: string,
 ): Promise<ConnectedProvider[]> {
   const response = await callMcpTool("provider_connected", { target_user_id: targetUserId });
   return response.providers;
 }
 
-/** Tool-call-capable models on providers the automation user has connected. */
-export async function fetchAutomationConnectedModels(
+/** Tool-call-capable models on providers the target user has connected. */
+export async function fetchUserConnectedModels(
   targetUserId: string,
-): Promise<AutomationModel[]> {
+): Promise<UserModel[]> {
   const response = await callMcpTool("provider_models_connected", {
     target_user_id: targetUserId,
   });
   const seen = new Set<string>();
-  const models: AutomationModel[] = [];
+  const models: UserModel[] = [];
   for (const model of response.models) {
     if (model.tool_call === false) continue;
     if (seen.has(model.id)) continue;
@@ -59,8 +58,8 @@ export async function fetchAutomationConnectedModels(
   return models;
 }
 
-/** The automation user's ordered model selection plus per-model caps. */
-export interface AutomationModelSelection {
+/** The target user's ordered model selection plus per-model caps. */
+export interface UserModelSelection {
   /** Full `"provider/model"` ids, high → low priority. */
   models: string[];
   /** Per-model concurrency caps keyed by full `"provider/model"` id. */
@@ -71,13 +70,13 @@ function parseMaxSessions(raw: unknown): Record<string, number> {
   return raw && typeof raw === "object" ? (raw as Record<string, number>) : {};
 }
 
-/** The automation user's ordered model selection (high → low priority) + caps. */
-export async function fetchAutomationModelSelection(
+/** The target user's ordered model selection (high → low priority) + caps. */
+export async function fetchUserModelSelection(
   targetUserId: string,
-): Promise<AutomationModelSelection> {
+): Promise<UserModelSelection> {
   const response = await callMcpTool("user_settings_get", { target_user_id: targetUserId });
   if (response.ok === false) {
-    throw new Error(response.error ?? "Failed to load automation settings");
+    throw new Error(response.error ?? "Failed to load user settings");
   }
   return {
     models: Array.isArray(response.models) ? response.models : [],
@@ -85,19 +84,19 @@ export async function fetchAutomationModelSelection(
   };
 }
 
-/** Persist the automation user's ordered model selection and per-model caps. */
-export async function saveAutomationModelSelection(
+/** Persist the target user's ordered model selection and per-model caps. */
+export async function saveUserModelSelection(
   targetUserId: string,
   models: string[],
   maxSessions: Record<string, number>,
-): Promise<AutomationModelSelection> {
+): Promise<UserModelSelection> {
   const response = await callMcpTool("user_settings_set", {
     target_user_id: targetUserId,
     models,
     max_sessions: maxSessions,
   });
   if (!response.ok) {
-    throw new Error(response.error ?? "Failed to save automation models");
+    throw new Error(response.error ?? "Failed to save user models");
   }
   return {
     models: Array.isArray(response.models) ? response.models : models,
@@ -105,8 +104,8 @@ export async function saveAutomationModelSelection(
   };
 }
 
-/** Store an API key credential owned by the automation user. */
-export async function setAutomationCredential(args: {
+/** Store an API key credential owned by the target user. */
+export async function setUserCredential(args: {
   targetUserId: string;
   providerId: string;
   keyName: string;
@@ -123,28 +122,28 @@ export async function setAutomationCredential(args: {
   }
 }
 
-export interface AutomationOAuthPending {
+export interface UserOAuthPending {
   userCode: string;
   verificationUri?: string;
   verificationUriComplete: string;
   expiresInSecs: number;
 }
 
-export type AutomationOAuthResult =
+export type UserOAuthResult =
   | { kind: "connected" }
-  | { kind: "pending"; pending: AutomationOAuthPending }
+  | { kind: "pending"; pending: UserOAuthPending }
   | { kind: "error"; message: string };
 
 /**
- * Kick off the device-code OAuth flow for the automation user. On a pending
+ * Kick off the device-code OAuth flow for the target user. On a pending
  * flow the server hands back a short `user_code` + `verification_uri_complete`
  * and spawns a background poller; the caller surfaces the code and awaits a
  * `credential.updated` SSE (or polls `provider_connected`) to confirm.
  */
-export async function startAutomationOAuth(
+export async function startUserOAuth(
   targetUserId: string,
   providerId: string,
-): Promise<AutomationOAuthResult> {
+): Promise<UserOAuthResult> {
   try {
     const result = await callMcpTool("provider_oauth_start", {
       target_user_id: targetUserId,
