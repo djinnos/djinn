@@ -385,6 +385,18 @@ mod tests {
 
         assert_eq!(finding.check_name, ZOMBIE_RUNNING_SESSION_CHECK_NAME);
         assert_eq!(finding.severity, FindingSeverity::Critical);
+        assert!(
+            finding.evidence.is_object(),
+            "zombie findings must carry structured evidence"
+        );
+        assert!(
+            finding.resolver_snapshot.inputs.is_object(),
+            "zombie findings must snapshot resolver inputs"
+        );
+        assert!(
+            finding.resolver_snapshot.outputs.is_object(),
+            "zombie findings must snapshot resolver outputs"
+        );
         assert_eq!(
             finding.entity_ids.get("session_id").map(String::as_str),
             Some("session-zombie")
@@ -445,7 +457,26 @@ mod tests {
         assert!(run_one(candidate).is_empty());
 
         let mut candidate = zombie_candidate();
+        candidate.slot_pool_session_present = true;
+        assert!(run_one(candidate).is_empty());
+
+        let mut candidate = zombie_candidate();
         candidate.worker_connected = true;
+        assert!(run_one(candidate).is_empty());
+
+        let mut candidate = zombie_candidate();
+        candidate.pod_present = true;
+        assert!(run_one(candidate).is_empty());
+    }
+
+    #[test]
+    fn non_running_or_taskless_rows_do_not_report_findings() {
+        let mut candidate = zombie_candidate();
+        candidate.db_status = "completed".to_owned();
+        assert!(run_one(candidate).is_empty());
+
+        let mut candidate = zombie_candidate();
+        candidate.task_id = None;
         assert!(run_one(candidate).is_empty());
     }
 }
