@@ -227,20 +227,22 @@ impl CoordinatorActor {
                 // 'verifying'` exclusion in `count_active_by_user_and_model`, so
                 // the DB seed and the `max(db, ledger)` overlay agree and a
                 // verify-stage run cannot be re-counted via the ledger floor.
-                let verifying: std::collections::HashSet<String> =
-                    match self.task_repo().list_by_status("verifying").await {
-                        Ok(tasks) => tasks.into_iter().map(|t| t.id).collect(),
-                        Err(e) => {
-                            // Conservative on error: keep counting verifying
-                            // tasks (may briefly defer a dispatch) rather than
-                            // risk an under-count that overshoots the cap.
-                            tracing::warn!(error = %e, "CoordinatorActor: list verifying tasks failed during cap seed; not releasing verify-stage cap this pass");
-                            std::collections::HashSet::new()
-                        }
-                    };
-                let live_non_verifying = |task_id: &String| {
-                    live.contains(task_id) && !verifying.contains(task_id)
+                let verifying: std::collections::HashSet<String> = match self
+                    .task_repo()
+                    .list_by_status("verifying")
+                    .await
+                {
+                    Ok(tasks) => tasks.into_iter().map(|t| t.id).collect(),
+                    Err(e) => {
+                        // Conservative on error: keep counting verifying
+                        // tasks (may briefly defer a dispatch) rather than
+                        // risk an under-count that overshoots the cap.
+                        tracing::warn!(error = %e, "CoordinatorActor: list verifying tasks failed during cap seed; not releasing verify-stage cap this pass");
+                        std::collections::HashSet::new()
+                    }
                 };
+                let live_non_verifying =
+                    |task_id: &String| live.contains(task_id) && !verifying.contains(task_id);
                 let stale_inflight_task_ids: Vec<String> = self
                     .inflight_dispatches
                     .keys()
@@ -2413,13 +2415,11 @@ mod inflight_ledger_tests {
         // Flip the task into the verification stage. The slot/pod is still held
         // (the controlled runner is still blocked), so the pool STILL reports
         // the task as running — but the model is no longer in use.
-        sqlx::query!(
-            "UPDATE tasks SET status = 'verifying' WHERE id = $1",
-            task_id
-        )
-        .execute(db.pool())
-        .await
-        .expect("flip wnd1 task to verifying");
+        sqlx::query("UPDATE tasks SET status = 'verifying' WHERE id = $1")
+            .bind(&task_id)
+            .execute(db.pool())
+            .await
+            .expect("flip wnd1 task to verifying");
         assert!(
             actor
                 .pool
