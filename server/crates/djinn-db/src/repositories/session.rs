@@ -63,7 +63,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -94,7 +98,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -166,7 +174,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE status = 'running'"#
         )
         .fetch_all(self.db.pool())
@@ -202,7 +214,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE task_id = $1 AND status = 'running'"#,
             task_id
         )
@@ -237,7 +253,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -256,7 +276,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE project_id = $1 AND id = $2"#,
             project_id,
             id
@@ -272,7 +296,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE task_id = $1 ORDER BY started_at DESC"#,
             task_id
         )
@@ -289,7 +317,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status, tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
         )
         .bind(task_run_id)
@@ -308,7 +340,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions
              WHERE project_id = $1 AND task_id = $2 ORDER BY started_at DESC"#,
             project_id,
@@ -325,7 +361,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions
              WHERE status = 'running' ORDER BY started_at DESC"#
         )
@@ -385,7 +425,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions
              WHERE project_id = $1 AND status = 'running' ORDER BY started_at DESC"#,
             project_id
@@ -407,7 +451,11 @@ impl SessionRepository {
                     s.status AS "status!", s.tokens_in, s.tokens_out,
                     s.cache_read_tokens, s.cache_write_tokens,
                     s.task_run_id, s.title,
-                    s.parked_reason AS "parked_reason?"
+                    s.parked_reason AS "parked_reason?",
+                    s.cost_usd, s.input_price_per_million_snapshot,
+                    s.output_price_per_million_snapshot,
+                    s.cache_read_price_per_million_snapshot,
+                    s.cache_write_price_per_million_snapshot
              FROM sessions s
              INNER JOIN tasks t ON t.id = s.task_id
              WHERE s.status = 'running' AND s.agent_type = 'planner' AND t.epic_id = $1
@@ -425,7 +473,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions
              WHERE task_id = $1 AND status = 'running' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -538,7 +590,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -617,7 +673,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' AND agent_type = $2
              ORDER BY started_at DESC LIMIT 1"#,
@@ -681,7 +741,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -741,7 +805,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -764,7 +832,11 @@ impl SessionRepository {
                     s.status AS "status!", s.tokens_in, s.tokens_out,
                     s.cache_read_tokens, s.cache_write_tokens,
                     s.task_run_id, s.title,
-                    s.parked_reason AS "parked_reason?"
+                    s.parked_reason AS "parked_reason?",
+                    s.cost_usd, s.input_price_per_million_snapshot,
+                    s.output_price_per_million_snapshot,
+                    s.cache_read_price_per_million_snapshot,
+                    s.cache_write_price_per_million_snapshot
              FROM sessions s
              LEFT JOIN (
                 SELECT session_id, MAX(created_at) AS last_at
@@ -797,7 +869,11 @@ impl SessionRepository {
                     s.status AS "status!", s.tokens_in, s.tokens_out,
                     s.cache_read_tokens, s.cache_write_tokens,
                     s.task_run_id, s.title,
-                    s.parked_reason AS "parked_reason?"
+                    s.parked_reason AS "parked_reason?",
+                    s.cost_usd, s.input_price_per_million_snapshot,
+                    s.output_price_per_million_snapshot,
+                    s.cache_read_price_per_million_snapshot,
+                    s.cache_write_price_per_million_snapshot
              FROM sessions s
              LEFT JOIN (
                 SELECT session_id, MAX(created_at) AS last_at
@@ -1207,6 +1283,73 @@ mod tests {
 
         let fetched = repo.get(&created.id).await.unwrap().unwrap();
         assert_eq!(fetched.parked_reason.as_deref(), Some("budget"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_record_maps_nullable_cost_and_snapshot_fields() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+            })
+            .await
+            .unwrap();
+
+        // New sessions have no pricing snapshot or cost yet — all five
+        // nullable columns must be NULL, never zero.
+        assert!(created.cost_usd.is_none());
+        assert!(created.input_price_per_million_snapshot.is_none());
+        assert!(created.output_price_per_million_snapshot.is_none());
+        assert!(created.cache_read_price_per_million_snapshot.is_none());
+        assert!(created.cache_write_price_per_million_snapshot.is_none());
+
+        // Populate the columns directly (later tasks wire this up from the
+        // catalog) and verify the repository projections read them back.
+        sqlx::query(
+            r#"UPDATE sessions
+               SET cost_usd = $1,
+                   input_price_per_million_snapshot = $2,
+                   output_price_per_million_snapshot = $3,
+                   cache_read_price_per_million_snapshot = $4,
+                   cache_write_price_per_million_snapshot = $5
+               WHERE id = $6"#,
+        )
+        .bind(0.0123_f64)
+        .bind(1.5_f64)
+        .bind(6.0_f64)
+        .bind(0.15_f64)
+        .bind(1.875_f64)
+        .bind(&created.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.cost_usd, Some(0.0123));
+        assert_eq!(fetched.input_price_per_million_snapshot, Some(1.5));
+        assert_eq!(fetched.output_price_per_million_snapshot, Some(6.0));
+        assert_eq!(fetched.cache_read_price_per_million_snapshot, Some(0.15));
+        assert_eq!(fetched.cache_write_price_per_million_snapshot, Some(1.875));
+
+        // The list-for-task projection must also carry the new fields.
+        let listed = repo.list_for_task(&task_id).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].cost_usd, Some(0.0123));
+        assert_eq!(listed[0].input_price_per_million_snapshot, Some(1.5));
+        assert_eq!(listed[0].output_price_per_million_snapshot, Some(6.0));
+        assert_eq!(listed[0].cache_read_price_per_million_snapshot, Some(0.15));
+        assert_eq!(
+            listed[0].cache_write_price_per_million_snapshot,
+            Some(1.875)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
