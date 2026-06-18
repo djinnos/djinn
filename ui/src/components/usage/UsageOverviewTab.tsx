@@ -14,9 +14,16 @@ import type {
   UsageTimeSeriesPoint,
 } from "@/api/analytics";
 import { cn } from "@/lib/utils";
-
-const EM_DASH = "—";
-const FALLBACK_GROUP = "Unattributed";
+import {
+  EM_DASH,
+  FALLBACK_GROUP,
+  formatAgentRole,
+  formatBucket,
+  formatCompactNumber,
+  formatCurrency,
+  formatDeltaPercent,
+  truncateLabel,
+} from "./usageFormatters";
 
 const GROUPING_OPTIONS = [
   { value: "model", label: "Model" },
@@ -510,25 +517,8 @@ function formatKpiValue(kpi: UsageKpi): string {
 }
 
 function formatDelta(delta: number | null): string {
-  if (delta === null) return EM_DASH;
-  const pct = Math.abs(delta) <= 1 ? delta * 100 : delta;
-  return `${pct > 0 ? "+" : ""}${pct.toFixed(Math.abs(pct) < 10 ? 1 : 0)}% vs prior`;
-}
-
-function formatCurrency(value: number): string {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: value >= 100 ? 0 : 2,
-    maximumFractionDigits: value >= 100 ? 0 : 2,
-  }).format(value);
-}
-
-function formatCompactNumber(value: number): string {
-  return new Intl.NumberFormat("en-US", {
-    notation: "compact",
-    maximumFractionDigits: 1,
-  }).format(value);
+  const formatted = formatDeltaPercent(delta);
+  return formatted === EM_DASH ? formatted : `${formatted} vs prior`;
 }
 
 function buildTokenSummary(points: UsageTimeSeriesPoint[]): string | undefined {
@@ -537,24 +527,4 @@ function buildTokenSummary(points: UsageTimeSeriesPoint[]): string | undefined {
     0,
   );
   return tokens > 0 ? `${formatCompactNumber(tokens)} tokens in range` : undefined;
-}
-
-function formatBucket(date: string): string {
-  const parsed = new Date(date);
-  if (Number.isNaN(parsed.getTime())) return date;
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-  }).format(parsed);
-}
-
-function formatAgentRole(role: string | undefined): string {
-  if (!role) return FALLBACK_GROUP;
-  return role
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (match) => match.toUpperCase());
-}
-
-function truncateLabel(label: string): string {
-  return label.length > 24 ? `${label.slice(0, 21)}…` : label;
 }
