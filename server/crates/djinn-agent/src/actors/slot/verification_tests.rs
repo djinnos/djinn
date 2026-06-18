@@ -263,6 +263,68 @@ async fn consume_in_pod_run_returns_terminal_result() {
     assert_eq!(result.total_duration_ms, 42);
 }
 
+/// Bug 1 recovery detection: the supervisor infra-death seam and the
+/// coordinator's stuck-`verifying` sweep both decide "re-arm vs reset to open"
+/// by looking up the worker's terminal in-pod verification row via
+/// `latest_terminal_for_task`. This pins that lookup: a `passed`/`failed` row
+/// is found (drives re-arm), while `error`/`pending`/`running` rows are not (so
+/// recovery falls through to releasing the task). Without a usable row the
+/// completed work would be discarded.
+#[tokio::test]
+async fn latest_terminal_inpod_run_drives_rearm_decision() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let repo = djinn_db::VerificationRunRepository::new(db.clone());
+
+    // No row yet → no re-arm; recovery would release to open.
+    assert!(
+        repo.latest_terminal_for_task(&task.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "no verification row → nothing to re-arm against"
+    );
+
+    // A `running` in-pod row (verify in flight, no terminal write) is NOT a
+    // recoverable artifact.
+    repo.create("vr-running", &task.id, &project.id)
+        .await
+        .unwrap();
+    repo.mark_running("vr-running").await.unwrap();
+    assert!(
+        repo.latest_terminal_for_task(&task.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a non-terminal running row must not drive re-arm"
+    );
+
+    // A terminal `passed` row IS the recoverable artifact the seams re-arm on.
+    repo.create("vr-passed", &task.id, &project.id)
+        .await
+        .unwrap();
+    repo.complete(
+        "vr-passed",
+        djinn_db::VerificationRunStatus::PASSED,
+        "[]",
+        "[]",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.latest_terminal_for_task(&task.id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("vr-passed"),
+        "a terminal passed row must be detected so the host pipeline is re-armed \
+         instead of discarding the completed work"
+    );
+}
+
 /// FALLBACK selection: no in-pod run id on the report → `None` so the caller
 /// dispatches the separate verify Job (unchanged behavior).
 #[tokio::test]
