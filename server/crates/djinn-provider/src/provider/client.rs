@@ -21,6 +21,95 @@ fn auth_secrets(auth: &AuthMethod) -> Vec<String> {
     }
 }
 
+/// Env var that gates the outbound provider-request debug logger. Truthy
+/// (`1`/`true`/`yes`/`on`, case-insensitive) turns it on. Default OFF — no log
+/// spam and no behaviour change when unset.
+const DEBUG_PROVIDER_REQUEST_ENV: &str = "DJINN_DEBUG_PROVIDER_REQUEST";
+
+/// `tracing` target the outbound-request log uses. Grep
+/// `djinn_provider::outbound_request` to find the captured lines.
+const OUTBOUND_REQUEST_TARGET: &str = "djinn_provider::outbound_request";
+
+fn debug_provider_request_enabled() -> bool {
+    std::env::var(DEBUG_PROVIDER_REQUEST_ENV)
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+/// Best-effort extraction of the model id from a request body for log fields.
+fn body_model_id(body: &serde_json::Value) -> &str {
+    body.get("model").and_then(|m| m.as_str()).unwrap_or("")
+}
+
+/// Render the request headers (auth + extras) into a single redacted string for
+/// the debug log. Auth header VALUES are always redacted; any other header that
+/// looks credential-bearing is scrubbed via [`redact_secrets`] using the same
+/// key/value heuristics as response bodies.
+fn render_redacted_headers(auth: &AuthMethod, extra_headers: &HeaderMap) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    match auth {
+        AuthMethod::BearerToken(_) => {
+            lines.push("Authorization: Bearer ***REDACTED***".to_string());
+        }
+        AuthMethod::ApiKeyHeader { header, .. } => {
+            lines.push(format!("{header}: ***REDACTED***"));
+        }
+        AuthMethod::NoAuth => {}
+    }
+    for (name, value) in extra_headers {
+        let raw = value.to_str().unwrap_or("<non-utf8>");
+        // Reuse the body redactor on a synthetic `"name":"value"` pair so the
+        // existing sensitive-key heuristics (authorization/api-key/secret/bearer)
+        // scrub credential-bearing extra headers (e.g. Helicone-Auth).
+        let scrubbed = redact_secrets(&format!("\"{name}\":\"{raw}\""), &[]);
+        let rendered = scrubbed
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .map(|inner| inner.replacen("\":\"", ": ", 1))
+            .unwrap_or_else(|| format!("{name}: {raw}"));
+        lines.push(rendered);
+    }
+    lines.join("\n")
+}
+
+/// When `DJINN_DEBUG_PROVIDER_REQUEST` is truthy, log the EXACT outbound LLM
+/// HTTP request (method, effective URL, all headers, full JSON body) at INFO,
+/// with secrets redacted, just before it is sent. Used to diagnose failures we
+/// cannot reproduce offline (the kimi-for-coding/k2p7 empty-stream incident: the
+/// literal runtime request — full injected MCP tool set + exact serialization —
+/// differs from a known-good curl in some way we can only see by capturing it).
+fn log_outbound_request(
+    method: &str,
+    url: &str,
+    body: &serde_json::Value,
+    auth: &AuthMethod,
+    extra_headers: &HeaderMap,
+) {
+    if !debug_provider_request_enabled() {
+        return;
+    }
+    let secrets = auth_secrets(auth);
+    let secret_refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
+    // The actual serialized JSON that goes on the wire, then redacted so a
+    // gateway-echoed api-key or any sensitive field never lands in the log.
+    let body_json = serde_json::to_string(body).unwrap_or_else(|_| "<unserializable>".to_string());
+    let body_redacted = redact_secrets(&body_json, &secret_refs);
+    let headers_redacted = render_redacted_headers(auth, extra_headers);
+    tracing::info!(
+        target: OUTBOUND_REQUEST_TARGET,
+        provider_model = %body_model_id(body),
+        method = %method,
+        url = %url,
+        headers = %headers_redacted,
+        body = %body_redacted,
+        "outbound provider request (DJINN_DEBUG_PROVIDER_REQUEST)"
+    );
+}
+
 /// Build the boundary `anyhow::Error` for a non-success HTTP status: a typed
 /// [`ProviderError`] source (so callers can `downcast_ref`) plus a readable,
 /// secret-redacted context message.
@@ -95,6 +184,8 @@ impl ApiClient {
 
         Box::pin(stream! {
             let secret_refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
+            // Env-gated capture of the literal outbound request (default OFF).
+            log_outbound_request("POST", &url, &body, &auth, &extra_headers);
             // Retry loop for the initial HTTP request.
             let response = 'retry: {
                 let mut attempt = 0u32;
@@ -231,6 +322,8 @@ impl ApiClient {
     ) -> anyhow::Result<String> {
         let secrets = auth_secrets(auth);
         let secret_refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
+        // Env-gated capture of the literal outbound request (default OFF).
+        log_outbound_request("POST", url, &body, auth, &extra_headers);
         let mut attempt = 0u32;
         loop {
             let mut req = self.inner.post(url).json(&body);
@@ -473,5 +566,130 @@ mod tests {
         assert!(!is_rate_limit_status(
             reqwest::StatusCode::SERVICE_UNAVAILABLE
         ));
+    }
+
+    // ─── Outbound-request debug logger (DJINN_DEBUG_PROVIDER_REQUEST) ─────────
+
+    use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::prelude::*;
+
+    /// Serialize tests that mutate the process-global env var + tracing default.
+    fn env_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedEvents(Arc<StdMutex<Vec<String>>>);
+
+    struct CaptureVisitor<'a>(&'a mut Vec<String>);
+    impl Visit for CaptureVisitor<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0.push(format!("{}={:?}", field.name(), value));
+        }
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.push(format!("{}={}", field.name(), value));
+        }
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for CapturedEvents {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            if event.metadata().target() != OUTBOUND_REQUEST_TARGET {
+                return;
+            }
+            let mut fields = Vec::new();
+            event.record(&mut CaptureVisitor(&mut fields));
+            self.0.lock().unwrap().push(fields.join(" | "));
+        }
+    }
+
+    fn capture_with_env(value: Option<&str>) -> Vec<String> {
+        let captured = CapturedEvents(Arc::new(StdMutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::registry().with(captured.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            match value {
+                Some(v) => unsafe { std::env::set_var(DEBUG_PROVIDER_REQUEST_ENV, v) },
+                None => unsafe { std::env::remove_var(DEBUG_PROVIDER_REQUEST_ENV) },
+            }
+            let body = serde_json::json!({
+                "model": "kimi-for-coding/k2p7",
+                "messages": [{"role": "user", "content": "hi"}],
+            });
+            let auth = AuthMethod::BearerToken("sk-super-secret-token".to_string());
+            let mut headers = HeaderMap::new();
+            headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+            log_outbound_request(
+                "POST",
+                "https://api.kimi.com/coding/v1",
+                &body,
+                &auth,
+                &headers,
+            );
+        });
+        captured.0.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn logger_silent_when_env_unset() {
+        let _g = env_test_guard();
+        let events = capture_with_env(None);
+        assert!(
+            events.is_empty(),
+            "no outbound-request event must be emitted when {DEBUG_PROVIDER_REQUEST_ENV} is unset: {events:?}"
+        );
+        // A falsey value is also OFF.
+        let events = capture_with_env(Some("0"));
+        assert!(
+            events.is_empty(),
+            "falsey value must keep the logger OFF: {events:?}"
+        );
+    }
+
+    #[test]
+    fn logger_emits_and_redacts_when_env_set() {
+        let _g = env_test_guard();
+        for truthy in ["1", "true", "YES", "on"] {
+            let events = capture_with_env(Some(truthy));
+            assert_eq!(
+                events.len(),
+                1,
+                "exactly one outbound-request event expected for {truthy:?}: {events:?}"
+            );
+            let joined = &events[0];
+            // The token must never appear in the captured event — redacted in
+            // both the Authorization header and (defensively) the body.
+            assert!(
+                !joined.contains("sk-super-secret-token"),
+                "secret token leaked into log for {truthy:?}: {joined}"
+            );
+            assert!(
+                joined.contains("***REDACTED***"),
+                "expected redaction marker: {joined}"
+            );
+            // Useful fields are present for diffing against a known-good curl.
+            assert!(
+                joined.contains("kimi-for-coding/k2p7"),
+                "model id field missing: {joined}"
+            );
+            assert!(
+                joined.contains("https://api.kimi.com/coding/v1"),
+                "url field missing: {joined}"
+            );
+            assert!(
+                joined.contains("Authorization"),
+                "auth header missing: {joined}"
+            );
+            assert!(
+                joined.contains("anthropic-version"),
+                "extra header missing: {joined}"
+            );
+        }
+        // Cleanup so the env var never leaks to a sibling test.
+        unsafe { std::env::remove_var(DEBUG_PROVIDER_REQUEST_ENV) };
     }
 }
