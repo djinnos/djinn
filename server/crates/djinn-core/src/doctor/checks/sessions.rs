@@ -261,6 +261,10 @@ impl<D: CheckDb + Send + Sync> DoctorCheck for ZombieRunningSessionCheck<D> {
          detector (no state mutation)."
     }
 
+    fn cadence(&self) -> crate::doctor::DoctorCheckCadence {
+        crate::doctor::DoctorCheckCadence::Cheap
+    }
+
     fn run(&self) -> DoctorResult<Vec<Finding>> {
         let active = self.db.zombie_running_sessions();
         let mut findings = Vec::new();

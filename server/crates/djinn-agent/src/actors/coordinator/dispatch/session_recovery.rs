@@ -2,6 +2,11 @@ use super::super::*;
 use djinn_core::models::{TaskStatus, TransitionAction};
 use tracing::Instrument as _;
 
+/// A `running`, zero-token session older than this has slipped past the
+/// 180s fast-path stall breaker — its in-memory tracking has drifted. Reap it
+/// on DB truth alone.
+pub(in crate::actors::coordinator) const ZOMBIE_HARD_CAP_SECS: u64 = 10 * 60;
+
 impl CoordinatorActor {
     async fn teardown_zombie_taskrun_job(
         &self,
@@ -269,11 +274,6 @@ impl CoordinatorActor {
         fields(kind = "periodic")
     )]
     pub(in crate::actors::coordinator) async fn reap_zombie_sessions(&mut self) {
-        /// A `running`, zero-token session older than this has slipped past the
-        /// 180s fast-path stall breaker — its in-memory tracking has drifted.
-        /// Reap it on DB truth alone.
-        const ZOMBIE_HARD_CAP_SECS: u64 = 10 * 60;
-
         let session_repo = djinn_db::SessionRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
