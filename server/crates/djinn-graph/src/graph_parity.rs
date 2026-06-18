@@ -593,4 +593,24 @@ mod tests {
 
         assert_graph_artifact_blob_parity(&blob, &blob).expect("matching blobs should match");
     }
+
+    #[test]
+    fn td55_equivalence_fixture_builds_matching_artifact_blobs() {
+        let old_blob = crate::test_helpers::td55_equivalence_fixture_artifact_blob();
+        let new_blob = crate::test_helpers::td55_equivalence_fixture_artifact_blob();
+        let artifact = deserialize_repo_graph_artifact_bincode(&old_blob)
+            .expect("fixture blob should deserialize through artifact compat seam");
+
+        assert!(
+            artifact.edges.iter().any(|edge| {
+                edge.kind == RepoGraphEdgeKind::SymbolReference
+                    && artifact.nodes[edge.source].file_path
+                        != artifact.nodes[edge.target].file_path
+            }),
+            "fixture should include a cross-file symbol reference edge"
+        );
+
+        assert_graph_artifact_blob_parity(&old_blob, &new_blob)
+            .expect("identical td55 fixture builds should match");
+    }
 }

@@ -4,7 +4,6 @@ import { sseStore } from './sseStore';
 import { taskStore } from './taskStore';
 import { epicStore } from './epicStore';
 import { projectStore } from './projectStore';
-import { verificationStore } from './verificationStore';
 import { dispatchPauseStore } from './dispatchPauseStore';
 import { fetchProjects } from '@/api/server';
 import {
@@ -74,7 +73,6 @@ describe('sseEventHandlers', () => {
     vi.clearAllMocks();
     taskStore.getState().clearTasks();
     epicStore.getState().clearEpics();
-    verificationStore.setState({ runs: new Map(), lifecycle: new Map() });
     dispatchPauseStore.getState().clearAll();
     projectStore.setState({ selectedProjectId: null, projects: [] });
   });

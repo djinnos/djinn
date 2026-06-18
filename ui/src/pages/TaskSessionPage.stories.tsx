@@ -164,19 +164,19 @@ const baseTimeline: TimelineEntry[] = [
   },
   {
     kind: "divider",
-    label: "Coding → Verifying",
+    label: "Coding → Review",
     timestamp: minutesAgo(36),
   },
   {
     kind: "command",
-    name: "verification",
+    name: "test",
     body: "PASS src/stores/sseStore.test.ts (4 tests)\nPASS src/hooks/useSSE.test.ts (2 tests)\n\nTest Suites: 2 passed, 2 total\nTests:       6 passed, 6 total",
     passed: true,
     timestamp: minutesAgo(35),
   },
   {
     kind: "divider",
-    label: "Verifying → Review",
+    label: "Review started",
     timestamp: minutesAgo(32),
   },
   {
@@ -275,16 +275,6 @@ vi.mock("@/stores/useEpicStore", () => ({
   },
 }));
 
-vi.mock("@/stores/verificationStore", () => ({
-  verificationStore: {
-    subscribe: () => () => {},
-    getState: () => ({
-      runs: new Map(),
-      lifecycleSteps: new Map(),
-    }),
-  },
-}));
-
 vi.mock("@/hooks/useSessionMessages", () => ({
   useSessionMessages: () => ({
     timeline: currentTimeline,
@@ -352,14 +342,14 @@ export const CompletedTask: Story = {
       },
       {
         kind: "command" as const,
-        name: "verification",
+        name: "test",
         body: "PASS src/stores/sseStore.test.ts (6 tests)\nPASS src/hooks/useSSE.test.ts (3 tests)\nPASS src/components/ConnectionStatusBadge.test.ts (2 tests)\n\nTest Suites: 3 passed, 3 total\nTests:       11 passed, 11 total",
         passed: true,
         timestamp: minutesAgo(3),
       },
       {
         kind: "divider" as const,
-        label: "Verifying → Done",
+        label: "Review → Done",
         timestamp: minutesAgo(2),
       },
     ];
