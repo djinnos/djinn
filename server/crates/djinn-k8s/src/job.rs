@@ -1097,6 +1097,195 @@ mod tests {
         );
     }
 
+    /// Regression guard: warm and task-run must resolve the same shared cache
+    /// strategy for a given project. The cold-compile regression was caused by
+    /// warm and worker silently diverging on feature sets (warm ran
+    /// `--all-features`, worker ran default features). This test asserts that
+    /// the shared cache routing env vars — CARGO_HOME (shared registry),
+    /// SCCACHE_DIR (namespaced sccache), and SCCACHE_CACHE_SIZE — are identical
+    /// between warm and worker, and that CARGO_TARGET_DIR resolves to the same
+    /// per-project base directory. The intended differences (CARGO_INCREMENTAL
+    /// and RUSTC_WRAPPER) are also pinned.
+    ///
+    /// Tests a workspace-with-sccache project shape (the typical djinn project
+    /// with `rustc-wrapper = "sccache"` pinned in `.cargo/config.toml`).
+    #[test]
+    fn warm_and_worker_resolve_same_cache_strategy() {
+        let project_id = "test-project";
+        let task_run_id = Uuid::now_v7().to_string();
+
+        let warm_vars = warm_cache_env_vars(project_id);
+        let warm_env: BTreeMap<&str, &str> = warm_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id);
+        let worker_env: BTreeMap<&str, &str> = worker_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        // --- Shared cache routing must be identical ---
+        // CARGO_HOME is the content-addressed registry (safe to share).
+        assert_eq!(
+            warm_env.get("CARGO_HOME"),
+            worker_env.get("CARGO_HOME"),
+            "CARGO_HOME must be identical between warm and worker"
+        );
+        assert_eq!(warm_env.get("CARGO_HOME").copied(), Some("/cache/cargo"));
+
+        // SCCACHE_DIR is namespaced per project.
+        assert_eq!(
+            warm_env.get("SCCACHE_DIR"),
+            worker_env.get("SCCACHE_DIR"),
+            "SCCACHE_DIR must be identical between warm and worker"
+        );
+        assert_eq!(
+            warm_env.get("SCCACHE_DIR").copied(),
+            Some("/cache/sccache/test-project"),
+        );
+
+        assert_eq!(
+            warm_env.get("SCCACHE_CACHE_SIZE"),
+            worker_env.get("SCCACHE_CACHE_SIZE"),
+            "SCCACHE_CACHE_SIZE must be identical between warm and worker"
+        );
+        assert_eq!(warm_env.get("SCCACHE_CACHE_SIZE").copied(), Some("20G"),);
+
+        assert_eq!(
+            warm_env.get("SQLX_OFFLINE"),
+            worker_env.get("SQLX_OFFLINE"),
+            "SQLX_OFFLINE must be identical between warm and worker"
+        );
+
+        // --- CARGO_TARGET_DIR base resolves to the same per-project directory ---
+        // Warm writes the shared per-project base; worker uses a private
+        // per-run dir seeded from that base.
+        let warm_target = warm_env
+            .get("CARGO_TARGET_DIR")
+            .expect("warm CARGO_TARGET_DIR set");
+        let worker_target = worker_env
+            .get("CARGO_TARGET_DIR")
+            .expect("worker CARGO_TARGET_DIR set");
+
+        assert_eq!(
+            *warm_target, "/cache/cargo-target/test-project",
+            "warm CARGO_TARGET_DIR must be the per-project shared base"
+        );
+        assert!(
+            worker_target.starts_with("/cache/cargo-target-runs/"),
+            "worker CARGO_TARGET_DIR must be a private per-run dir: {worker_target}"
+        );
+        // Both resolve under the same per-project namespace — the worker's
+        // private dir is seeded from the warm base.
+        assert!(
+            warm_target.contains("test-project"),
+            "warm target must be namespaced per project"
+        );
+
+        // --- Intended differences pinned ---
+        // Warm disables incremental (sccache + cargo freshness strategy);
+        // worker enables it (iterative edit/compile loop).
+        assert_eq!(
+            warm_env.get("CARGO_INCREMENTAL").copied(),
+            Some("0"),
+            "warm must disable incremental (sccache compatibility)"
+        );
+        assert_eq!(
+            worker_env.get("CARGO_INCREMENTAL").copied(),
+            Some("1"),
+            "worker must enable incremental (iterative edit loop)"
+        );
+
+        // Warm does NOT force RUSTC_WRAPPER — the repo's .cargo/config.toml
+        // pins `rustc-wrapper = "sccache"` if needed. Worker explicitly clears
+        // it so incremental compilation works alongside any repo-level wrapper.
+        assert!(
+            !warm_env.contains_key("RUSTC_WRAPPER"),
+            "warm must not force RUSTC_WRAPPER (repo config handles it)"
+        );
+        assert_eq!(
+            worker_env.get("RUSTC_WRAPPER").copied(),
+            Some(""),
+            "worker must clear RUSTC_WRAPPER so incremental works"
+        );
+    }
+
+    /// Same invariant as [`warm_and_worker_resolve_same_cache_strategy`] but for
+    /// a single-crate no-sccache project shape. The cache routing env vars are
+    /// identical regardless of project shape — the per-project namespace is the
+    /// only variable. When `CargoCachePolicy` is introduced (Phase 2), this test
+    /// will be extended to verify that the policy produces matching feature sets
+    /// for both warm and worker.
+    ///
+    /// Even without sccache pinned in `.cargo/config.toml`, the warm/worker env
+    /// vars still set SCCACHE_DIR (on the PVC, namespaced) so a repo that later
+    /// adds sccache gets a writable, Landlock-allowed cache dir for free.
+    #[test]
+    fn warm_and_worker_same_posture_no_sccache() {
+        let project_id = "single-crate-project";
+        let task_run_id = Uuid::now_v7().to_string();
+
+        let warm_vars = warm_cache_env_vars(project_id);
+        let warm_env: BTreeMap<&str, &str> = warm_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id);
+        let worker_env: BTreeMap<&str, &str> = worker_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        // Shared cache routing identical regardless of project shape.
+        assert_eq!(
+            warm_env.get("CARGO_HOME"),
+            worker_env.get("CARGO_HOME"),
+            "CARGO_HOME must be identical between warm and worker (no-sccache shape)"
+        );
+        assert_eq!(
+            warm_env.get("SCCACHE_DIR"),
+            worker_env.get("SCCACHE_DIR"),
+            "SCCACHE_DIR must be identical between warm and worker (no-sccache shape)"
+        );
+        assert_eq!(
+            warm_env.get("SCCACHE_DIR").copied(),
+            Some("/cache/sccache/single-crate-project"),
+            "SCCACHE_DIR must be namespaced per project even without sccache pinned"
+        );
+        assert_eq!(
+            warm_env.get("SCCACHE_CACHE_SIZE"),
+            worker_env.get("SCCACHE_CACHE_SIZE"),
+        );
+        assert_eq!(warm_env.get("SQLX_OFFLINE"), worker_env.get("SQLX_OFFLINE"),);
+
+        // CARGO_TARGET_DIR resolves to the same per-project base.
+        let warm_target = warm_env
+            .get("CARGO_TARGET_DIR")
+            .expect("warm CARGO_TARGET_DIR set");
+        let worker_target = worker_env
+            .get("CARGO_TARGET_DIR")
+            .expect("worker CARGO_TARGET_DIR set");
+
+        assert_eq!(
+            *warm_target, "/cache/cargo-target/single-crate-project",
+            "warm CARGO_TARGET_DIR must be the per-project shared base (no-sccache)"
+        );
+        assert!(
+            worker_target.starts_with("/cache/cargo-target-runs/"),
+            "worker CARGO_TARGET_DIR must be a private per-run dir (no-sccache): {worker_target}"
+        );
+
+        // Intended differences are the same regardless of project shape.
+        assert_eq!(warm_env.get("CARGO_INCREMENTAL").copied(), Some("0"));
+        assert_eq!(worker_env.get("CARGO_INCREMENTAL").copied(), Some("1"));
+        assert!(
+            !warm_env.contains_key("RUSTC_WRAPPER"),
+            "warm must not force RUSTC_WRAPPER (no-sccache shape)"
+        );
+        assert_eq!(worker_env.get("RUSTC_WRAPPER").copied(), Some(""));
+    }
+
     #[test]
     fn same_project_task_runs_get_distinct_private_cargo_target_dirs() {
         let cfg = KubernetesConfig::for_testing();

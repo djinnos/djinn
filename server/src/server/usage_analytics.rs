@@ -1,12 +1,11 @@
 // HTTP handler for the `/api/admin/usage` REST endpoint consumed by the
 // admin analytics UI.
 //
-// Returns the proposal response shape for usage/cost reporting at daily
-// granularity: `totals`, `previous_totals`, `series`, `breakdown`,
-// `model_effectiveness`, and `project_model_matrix`.  This task wires the
-// daily repository rows from task yzh4 into JSON DTOs; week/month rollups,
-// previous-totals computation, and model effectiveness are filled by
-// follow-up tasks and left as empty/placeholder here.
+// Returns the proposal response shape for usage/cost reporting:
+// `totals`, `previous_totals`, `series`, `breakdown`, `model_effectiveness`,
+// and `project_model_matrix`. The repository deliberately returns daily rows;
+// this handler maps those ISO day buckets into requested day/week/month periods
+// using deterministic Rust date arithmetic.
 
 use axum::{
     Json, Router,
@@ -14,12 +13,14 @@ use axum::{
     http::{HeaderMap, StatusCode},
     routing::get,
 };
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
 use crate::server::auth::require_admin;
 use djinn_db::{
-    DailySeriesRow, GroupDimension, UsageAnalyticsQuery, UsageAnalyticsRepository,
+    BreakdownRow, DailySeriesRow, GroupDimension, UsageAnalyticsQuery, UsageAnalyticsRepository,
     UsageAnalyticsResult, UsageTotals,
 };
 
@@ -45,9 +46,8 @@ struct UsageQuery {
     agent_type: Option<String>,
 }
 
-/// Time-series bucket granularity.  Only `Day` is honoured in this task;
-/// `Week` and `Month` are accepted and validated here so the follow-up
-/// rollup task can act on them without changing the parser.
+/// Time-series bucket granularity. Repository rows are daily; week/month
+/// variants are rolled up in this handler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Granularity {
@@ -105,7 +105,7 @@ fn default_window() -> (String, String) {
 /// the repository. The DB query compares ISO-8601 strings, so callers may pass
 /// either a date (`YYYY-MM-DD`) or a timestamp whose first 10 characters are an
 /// ISO date prefix.
-fn validate_date_bound(name: &str, value: String) -> Result<String, (StatusCode, String)> {
+fn parse_iso_date_prefix(name: &str, value: &str) -> Result<time::Date, (StatusCode, String)> {
     let Some(date) = value.get(..10) else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -157,7 +157,11 @@ fn validate_date_bound(name: &str, value: String) -> Result<String, (StatusCode,
             StatusCode::BAD_REQUEST,
             format!("invalid {name}: expected YYYY-MM-DD or ISO-8601 timestamp"),
         )
-    })?;
+    })
+}
+
+fn validate_date_bound(name: &str, value: String) -> Result<String, (StatusCode, String)> {
+    parse_iso_date_prefix(name, &value)?;
 
     Ok(value)
 }
@@ -165,13 +169,55 @@ fn validate_date_bound(name: &str, value: String) -> Result<String, (StatusCode,
 fn validate_date_range(from: String, to: String) -> Result<(String, String), (StatusCode, String)> {
     let from = validate_date_bound("from", from)?;
     let to = validate_date_bound("to", to)?;
-    if from >= to {
+    let from_date = parse_iso_date_prefix("from", &from)?;
+    let to_date = parse_iso_date_prefix("to", &to)?;
+    if from_date >= to_date {
         return Err((
             StatusCode::BAD_REQUEST,
             "invalid date range: from must be before to".to_string(),
         ));
     }
     Ok((from, to))
+}
+
+fn format_date(date: time::Date) -> String {
+    format!(
+        "{:04}-{:02}-{:02}",
+        date.year(),
+        u8::from(date.month()),
+        date.day()
+    )
+}
+
+fn previous_window_query(
+    query: &UsageAnalyticsQuery,
+) -> Result<UsageAnalyticsQuery, (StatusCode, String)> {
+    let from = parse_iso_date_prefix("from", &query.from)?;
+    let to = parse_iso_date_prefix("to", &query.to)?;
+    let span_days = to.to_julian_day() - from.to_julian_day();
+    if span_days <= 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid date range: from must be before to".to_string(),
+        ));
+    }
+
+    let previous_from =
+        time::Date::from_julian_day(from.to_julian_day() - span_days).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "invalid date range: previous window is out of range".to_string(),
+            )
+        })?;
+
+    Ok(UsageAnalyticsQuery {
+        from: format_date(previous_from),
+        to: format_date(from),
+        group_by: query.group_by,
+        project_id: query.project_id.clone(),
+        model_id: query.model_id.clone(),
+        agent_type: query.agent_type.clone(),
+    })
 }
 
 impl UsageQuery {
@@ -266,8 +312,8 @@ struct BreakdownPointDto {
     total_cost_usd: Option<f64>,
 }
 
-impl From<djinn_db::BreakdownRow> for BreakdownPointDto {
-    fn from(r: djinn_db::BreakdownRow) -> Self {
+impl From<BreakdownRow> for BreakdownPointDto {
+    fn from(r: BreakdownRow) -> Self {
         Self {
             group_key: r.group_key,
             day: r.day,
@@ -279,6 +325,179 @@ impl From<djinn_db::BreakdownRow> for BreakdownPointDto {
             total_cost_usd: r.total_cost_usd,
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct UsageAccumulator {
+    session_count: i64,
+    tokens_in: i64,
+    tokens_out: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+    total_cost_usd: f64,
+    cost_known: bool,
+}
+
+impl UsageAccumulator {
+    fn add_values(
+        &mut self,
+        session_count: i64,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read_tokens: i64,
+        cache_write_tokens: i64,
+        total_cost_usd: Option<f64>,
+    ) {
+        self.session_count += session_count;
+        self.tokens_in += tokens_in;
+        self.tokens_out += tokens_out;
+        self.cache_read_tokens += cache_read_tokens;
+        self.cache_write_tokens += cache_write_tokens;
+
+        let has_usage = session_count != 0
+            || tokens_in != 0
+            || tokens_out != 0
+            || cache_read_tokens != 0
+            || cache_write_tokens != 0;
+        match total_cost_usd {
+            Some(cost) if self.cost_known => self.total_cost_usd += cost,
+            Some(_) => {}
+            None if has_usage => self.cost_known = false,
+            None => {}
+        }
+    }
+
+    fn into_series_point(self, day: String) -> SeriesPointDto {
+        SeriesPointDto {
+            day,
+            session_count: self.session_count,
+            tokens_in: self.tokens_in,
+            tokens_out: self.tokens_out,
+            cache_read_tokens: self.cache_read_tokens,
+            cache_write_tokens: self.cache_write_tokens,
+            total_cost_usd: self.cost_known.then_some(self.total_cost_usd),
+        }
+    }
+
+    fn into_breakdown_point(self, group_key: String, day: String) -> BreakdownPointDto {
+        BreakdownPointDto {
+            group_key,
+            day,
+            session_count: self.session_count,
+            tokens_in: self.tokens_in,
+            tokens_out: self.tokens_out,
+            cache_read_tokens: self.cache_read_tokens,
+            cache_write_tokens: self.cache_write_tokens,
+            total_cost_usd: self.cost_known.then_some(self.total_cost_usd),
+        }
+    }
+}
+
+fn empty_accumulator() -> UsageAccumulator {
+    UsageAccumulator {
+        cost_known: true,
+        ..UsageAccumulator::default()
+    }
+}
+
+fn week_start(date: time::Date) -> Result<time::Date, (StatusCode, String)> {
+    let offset = match date.weekday() {
+        time::Weekday::Monday => 0,
+        time::Weekday::Tuesday => 1,
+        time::Weekday::Wednesday => 2,
+        time::Weekday::Thursday => 3,
+        time::Weekday::Friday => 4,
+        time::Weekday::Saturday => 5,
+        time::Weekday::Sunday => 6,
+    };
+    time::Date::from_julian_day(date.to_julian_day() - offset).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "invalid date range: week bucket is out of range".to_string(),
+        )
+    })
+}
+
+fn period_start(day: &str, granularity: Granularity) -> Result<String, (StatusCode, String)> {
+    let date = parse_iso_date_prefix("day", day)?;
+    let start = match granularity {
+        Granularity::Day => date,
+        Granularity::Week => week_start(date)?,
+        Granularity::Month => time::Date::from_calendar_date(date.year(), date.month(), 1)
+            .map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "invalid date range: month bucket is out of range".to_string(),
+                )
+            })?,
+    };
+    Ok(format_date(start))
+}
+
+fn rollup_series(
+    rows: Vec<DailySeriesRow>,
+    granularity: Granularity,
+) -> Result<Vec<SeriesPointDto>, (StatusCode, String)> {
+    if granularity == Granularity::Day {
+        return Ok(rows.into_iter().map(Into::into).collect());
+    }
+
+    let mut by_period: BTreeMap<String, UsageAccumulator> = BTreeMap::new();
+    for row in rows {
+        let period = period_start(&row.day, granularity)?;
+        by_period
+            .entry(period)
+            .or_insert_with(empty_accumulator)
+            .add_values(
+                row.session_count,
+                row.tokens_in,
+                row.tokens_out,
+                row.cache_read_tokens,
+                row.cache_write_tokens,
+                row.total_cost_usd,
+            );
+    }
+
+    Ok(by_period
+        .into_iter()
+        .map(|(day, acc)| acc.into_series_point(day))
+        .collect())
+}
+
+fn rollup_breakdown(
+    rows: Vec<BreakdownRow>,
+    granularity: Granularity,
+) -> Result<Vec<BreakdownPointDto>, (StatusCode, String)> {
+    if granularity == Granularity::Day {
+        let mut rows: Vec<_> = rows.into_iter().map(Into::into).collect();
+        rows.sort_by(|a: &BreakdownPointDto, b| {
+            a.group_key
+                .cmp(&b.group_key)
+                .then_with(|| a.day.cmp(&b.day))
+        });
+        return Ok(rows);
+    }
+
+    let mut by_group_period: BTreeMap<(String, String), UsageAccumulator> = BTreeMap::new();
+    for row in rows {
+        let period = period_start(&row.day, granularity)?;
+        by_group_period
+            .entry((row.group_key, period))
+            .or_insert_with(empty_accumulator)
+            .add_values(
+                row.session_count,
+                row.tokens_in,
+                row.tokens_out,
+                row.cache_read_tokens,
+                row.cache_write_tokens,
+                row.total_cost_usd,
+            );
+    }
+
+    Ok(by_group_period
+        .into_iter()
+        .map(|((group_key, day), acc)| acc.into_breakdown_point(group_key, day))
+        .collect())
 }
 
 /// Per-model effectiveness row.  Computed over worker sessions only in the
@@ -315,12 +534,11 @@ struct UsageResponse {
     granularity: Granularity,
     /// Overall totals across the queried window.
     totals: TotalsDto,
-    /// Totals for the preceding window of equal length.  Populated by the
-    /// follow-up rollup task (g86s); zeroed here.
+    /// Totals for the preceding window of equal length.
     previous_totals: TotalsDto,
-    /// Daily time series for the window.
+    /// Time series for the window at the requested period granularity.
     series: Vec<SeriesPointDto>,
-    /// Breakdown rows grouped by the requested dimension, per day.
+    /// Breakdown rows grouped by the requested dimension and period.
     breakdown: Vec<BreakdownPointDto>,
     /// Per-model effectiveness metrics (worker-scoped).  Placeholder until 0d3p.
     model_effectiveness: Vec<ModelEffectivenessDto>,
@@ -329,30 +547,26 @@ struct UsageResponse {
 }
 
 impl UsageResponse {
-    fn from_result(result: UsageAnalyticsResult, granularity: Granularity) -> Self {
+    fn from_results(
+        result: UsageAnalyticsResult,
+        previous_totals: UsageTotals,
+        granularity: Granularity,
+    ) -> Result<Self, (StatusCode, String)> {
         let UsageAnalyticsResult {
             totals,
             series,
             breakdown,
         } = result;
-        Self {
+        Ok(Self {
             granularity,
             totals: totals.into(),
-            // previous_totals: follow-up task g86s fills this.
-            previous_totals: TotalsDto {
-                session_count: 0,
-                tokens_in: 0,
-                tokens_out: 0,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                total_cost_usd: None,
-            },
-            series: series.into_iter().map(Into::into).collect(),
-            breakdown: breakdown.into_iter().map(Into::into).collect(),
+            previous_totals: previous_totals.into(),
+            series: rollup_series(series, granularity)?,
+            breakdown: rollup_breakdown(breakdown, granularity)?,
             // model_effectiveness / project_model_matrix: follow-up task 0d3p.
             model_effectiveness: Vec::new(),
             project_model_matrix: Vec::new(),
-        }
+        })
     }
 }
 
@@ -370,13 +584,22 @@ async fn usage_handler(
     require_admin(&state, &headers).await?;
     let (query, granularity) = q.into_typed()?;
 
+    let previous_query = previous_window_query(&query)?;
     let repo = UsageAnalyticsRepository::new(state.db().clone());
     let result = repo
         .query(&query)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let previous = repo
+        .query(&previous_query)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(UsageResponse::from_result(result, granularity)))
+    Ok(Json(UsageResponse::from_results(
+        result,
+        previous.totals,
+        granularity,
+    )?))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -544,7 +767,8 @@ mod tests {
     #[test]
     fn response_shape_has_all_fields() {
         let result = UsageAnalyticsResult::default();
-        let resp = UsageResponse::from_result(result, Granularity::Day);
+        let resp =
+            UsageResponse::from_results(result, UsageTotals::default(), Granularity::Day).unwrap();
         let json = serde_json::to_value(&resp).unwrap();
         for field in [
             "totals",
@@ -563,9 +787,131 @@ mod tests {
     }
 
     #[test]
-    fn previous_totals_defaults_to_zero_unpriced() {
-        let resp = UsageResponse::from_result(UsageAnalyticsResult::default(), Granularity::Day);
-        assert_eq!(resp.previous_totals.session_count, 0);
-        assert!(resp.previous_totals.total_cost_usd.is_none());
+    fn previous_window_matches_requested_day_span() {
+        let query = UsageAnalyticsQuery {
+            from: "2025-03-10".into(),
+            to: "2025-03-17".into(),
+            group_by: GroupDimension::Project,
+            project_id: Some("proj-1".into()),
+            model_id: Some("model-1".into()),
+            agent_type: Some("worker".into()),
+        };
+
+        let previous = previous_window_query(&query).unwrap();
+        assert_eq!(previous.from, "2025-03-03");
+        assert_eq!(previous.to, "2025-03-10");
+        assert_eq!(previous.group_by, GroupDimension::Project);
+        assert_eq!(previous.project_id.as_deref(), Some("proj-1"));
+        assert_eq!(previous.model_id.as_deref(), Some("model-1"));
+        assert_eq!(previous.agent_type.as_deref(), Some("worker"));
+    }
+
+    #[test]
+    fn weekly_rollup_sums_daily_rows_and_preserves_unknown_cost() {
+        let rows = vec![
+            DailySeriesRow {
+                day: "2025-03-03".into(),
+                session_count: 1,
+                tokens_in: 10,
+                tokens_out: 20,
+                cache_read_tokens: 3,
+                cache_write_tokens: 4,
+                total_cost_usd: Some(0.5),
+            },
+            DailySeriesRow {
+                day: "2025-03-05".into(),
+                session_count: 2,
+                tokens_in: 30,
+                tokens_out: 40,
+                cache_read_tokens: 5,
+                cache_write_tokens: 6,
+                total_cost_usd: None,
+            },
+            DailySeriesRow {
+                day: "2025-03-10".into(),
+                session_count: 3,
+                tokens_in: 50,
+                tokens_out: 60,
+                cache_read_tokens: 7,
+                cache_write_tokens: 8,
+                total_cost_usd: Some(1.5),
+            },
+        ];
+
+        let rolled = rollup_series(rows, Granularity::Week).unwrap();
+        assert_eq!(rolled.len(), 2);
+        assert_eq!(rolled[0].day, "2025-03-03");
+        assert_eq!(rolled[0].session_count, 3);
+        assert_eq!(rolled[0].tokens_in, 40);
+        assert!(rolled[0].total_cost_usd.is_none());
+        assert_eq!(rolled[1].day, "2025-03-10");
+        assert_eq!(rolled[1].total_cost_usd, Some(1.5));
+    }
+
+    #[test]
+    fn monthly_breakdown_rollup_keeps_groups_separate_and_sorted() {
+        let rows = vec![
+            BreakdownRow {
+                group_key: "b".into(),
+                day: "2025-02-01".into(),
+                session_count: 1,
+                tokens_in: 2,
+                tokens_out: 3,
+                cache_read_tokens: 4,
+                cache_write_tokens: 5,
+                total_cost_usd: Some(0.1),
+            },
+            BreakdownRow {
+                group_key: "a".into(),
+                day: "2025-01-31".into(),
+                session_count: 2,
+                tokens_in: 3,
+                tokens_out: 4,
+                cache_read_tokens: 5,
+                cache_write_tokens: 6,
+                total_cost_usd: Some(0.2),
+            },
+            BreakdownRow {
+                group_key: "a".into(),
+                day: "2025-01-15".into(),
+                session_count: 3,
+                tokens_in: 4,
+                tokens_out: 5,
+                cache_read_tokens: 6,
+                cache_write_tokens: 7,
+                total_cost_usd: Some(0.3),
+            },
+        ];
+
+        let rolled = rollup_breakdown(rows, Granularity::Month).unwrap();
+        assert_eq!(rolled.len(), 2);
+        assert_eq!(rolled[0].group_key, "a");
+        assert_eq!(rolled[0].day, "2025-01-01");
+        assert_eq!(rolled[0].session_count, 5);
+        assert_eq!(rolled[0].tokens_in, 7);
+        assert_eq!(rolled[0].total_cost_usd, Some(0.5));
+        assert_eq!(rolled[1].group_key, "b");
+        assert_eq!(rolled[1].day, "2025-02-01");
+    }
+
+    #[test]
+    fn previous_totals_uses_supplied_repository_totals() {
+        let previous_totals = UsageTotals {
+            session_count: 2,
+            tokens_in: 11,
+            tokens_out: 12,
+            cache_read_tokens: 13,
+            cache_write_tokens: 14,
+            total_cost_usd: Some(0.42),
+        };
+        let resp = UsageResponse::from_results(
+            UsageAnalyticsResult::default(),
+            previous_totals,
+            Granularity::Day,
+        )
+        .unwrap();
+        assert_eq!(resp.previous_totals.session_count, 2);
+        assert_eq!(resp.previous_totals.tokens_in, 11);
+        assert_eq!(resp.previous_totals.total_cost_usd, Some(0.42));
     }
 }

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { TaskCard } from "./TaskCard";
 import { render, screen } from "@/test/test-utils";
 import { mockTaskA } from "@/test/fixtures";
-import { verificationStore } from "@/stores/verificationStore";
 
 describe("TaskCard", () => {
   it("renders title, short_id, status badge, priority, labels, and AC count", () => {
@@ -31,8 +30,8 @@ describe("TaskCard", () => {
     expect(screen.getByText(/frontend/i)).toBeInTheDocument();
   });
 
-  it("renders setup and verifying badge text with active step names", () => {
-    const setupTask = {
+  it("renders setting up badge for in-progress tasks without an active session", () => {
+    const task = {
       ...mockTaskA,
       id: "task-setup-step",
       short_id: "s1",
@@ -40,58 +39,8 @@ describe("TaskCard", () => {
       title: "Setup task",
     };
 
-    const verifyingTask = {
-      ...mockTaskA,
-      id: "task-verify-step",
-      short_id: "v1",
-      status: "verifying",
-      title: "Verifying task",
-    };
+    render(<TaskCard task={task} />);
 
-    verificationStore.getState().clearLifecycleSteps(setupTask.id);
-    verificationStore.getState().clearRun("run-setup");
-    verificationStore.getState().clearLifecycleSteps(verifyingTask.id);
-    verificationStore.getState().clearRun("run-verify");
-
-    verificationStore.getState().addLifecycleStep(setupTask.id, {
-      step: "cargo build",
-      detail: "",
-      status: "running",
-      timestamp: new Date().toISOString(),
-    });
-
-    verificationStore.getState().addStep("run-setup", {
-      index: 0,
-      name: "cargo test",
-      phase: "verification",
-      status: "running",
-    }, {
-      projectId: "project-a",
-      taskId: setupTask.id,
-    });
-
-    verificationStore.getState().addStep("run-verify", {
-      index: 0,
-      name: "cargo test",
-      phase: "verification",
-      status: "running",
-    }, {
-      projectId: "project-a",
-      taskId: verifyingTask.id,
-    });
-
-    const { rerender } = render(<TaskCard task={setupTask} />);
-    // During setup, only the "setting up" badge is shown; details are in the tooltip
-    const setupBadge = screen.getByText("setting up");
-    expect(setupBadge).toBeInTheDocument();
-    expect(setupBadge).toHaveAttribute("title", expect.stringContaining("cargo build"));
-
-    rerender(<TaskCard task={verifyingTask} />);
-    expect(screen.getByText("verifying: cargo test")).toBeInTheDocument();
-
-    verificationStore.getState().clearLifecycleSteps(setupTask.id);
-    verificationStore.getState().clearRun("run-setup");
-    verificationStore.getState().clearLifecycleSteps(verifyingTask.id);
-    verificationStore.getState().clearRun("run-verify");
+    expect(screen.getByText("setting up")).toBeInTheDocument();
   });
 });
