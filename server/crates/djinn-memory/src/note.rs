@@ -208,6 +208,29 @@ pub struct ExtractedNoteAuditFinding {
     pub related_note_ids: Vec<String>,
 }
 
+/// Result of the ADR-054 note-quality classifier — the single source of truth
+/// for "is this extracted note too underspecified for durable memory?"
+///
+/// Shared by the extraction admission gate (in `djinn-agent`) and the corpus
+/// audit (`extracted_note_audit` in `djinn-db`) so both use identical
+/// predicates. Produced by [`djinn_db::repositories::note::assess_note_quality`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NoteQualityAssessment {
+    /// Required ADR-054 section headings absent from (or out of canonical
+    /// order in) the content body. Empty when all required sections are
+    /// present in order.
+    pub missing_sections: Vec<String>,
+    /// Character count of the trimmed content body.
+    pub content_len: usize,
+    /// Number of non-empty `\n\n`-delimited blocks in the content.
+    pub paragraph_count: usize,
+    /// `true` when the note is too underspecified for durable memory.
+    pub is_underspecified: bool,
+    /// Human-readable reasons explaining why the note is underspecified
+    /// (empty when it passes all checks).
+    pub reasons: Vec<String>,
+}
+
 /// Aggregate ADR-054 audit report for existing extracted notes.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ExtractedNoteAuditReport {

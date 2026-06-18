@@ -1248,7 +1248,7 @@ expression: signatures
       "properties": {
         "target_user_id": {
           "default": null,
-          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "description": "Admin-only: act on behalf of this user id (e.g. another user to\nconfigure). Non-admins must omit it.",
           "nullable": true,
           "type": "string"
         }
@@ -1331,7 +1331,7 @@ expression: signatures
         },
         "target_user_id": {
           "default": null,
-          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "description": "Admin-only: act on behalf of this user id (e.g. another user to\nconfigure). Non-admins must omit it.",
           "nullable": true,
           "type": "string"
         }
@@ -12244,7 +12244,7 @@ expression: signatures
       "properties": {
         "target_user_id": {
           "default": null,
-          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "description": "Admin-only: act on behalf of this user id (e.g. another user to\nconfigure). Non-admins must omit it.",
           "nullable": true,
           "type": "string"
         }
@@ -12361,7 +12361,7 @@ expression: signatures
       "properties": {
         "target_user_id": {
           "default": null,
-          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "description": "Admin-only: act on behalf of this user id (e.g. another user to\nconfigure). Non-admins must omit it.",
           "nullable": true,
           "type": "string"
         }
@@ -12818,7 +12818,7 @@ expression: signatures
       "properties": {
         "target_user_id": {
           "default": null,
-          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "description": "Admin-only: act on behalf of this user id (e.g. another user to\nconfigure). Non-admins must omit it.",
           "nullable": true,
           "type": "string"
         }
@@ -12938,7 +12938,7 @@ expression: signatures
         },
         "target_user_id": {
           "default": null,
-          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "description": "Admin-only: act on behalf of this user id (e.g. another user to\nconfigure). Non-admins must omit it.",
           "nullable": true,
           "type": "string"
         }
@@ -15506,7 +15506,7 @@ expression: signatures
       "properties": {
         "target_user_id": {
           "default": null,
-          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "description": "Admin-only: act on behalf of this user id (e.g. another user to\nconfigure). Non-admins must omit it.",
           "nullable": true,
           "type": "string"
         }
@@ -15593,7 +15593,7 @@ expression: signatures
         },
         "target_user_id": {
           "default": null,
-          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "description": "Admin-only: act on behalf of this user id (e.g. another user to\nconfigure). Non-admins must omit it.",
           "nullable": true,
           "type": "string"
         }

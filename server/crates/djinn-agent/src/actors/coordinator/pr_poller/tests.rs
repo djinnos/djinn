@@ -749,6 +749,12 @@ fn dequeue_reasons_classified_correctly() {
     assert!(!dequeue_reason_is_failure(Some("branch_invalidated")));
     assert!(!dequeue_reason_is_failure(Some("QUEUE_CLEARED")));
     assert!(!dequeue_reason_is_failure(Some("DEQUEUED")));
+    // Operator queue-removal surfaces as `manual` on the timeline event and
+    // `DEQUEUED` on the GraphQL enum — both spellings are benign and must
+    // not reopen the task for rework (regression: a manual dequeue
+    // spuriously reopened a task in prod, 2026-06-18).
+    assert!(!dequeue_reason_is_failure(Some("manual")));
+    assert!(!dequeue_reason_is_failure(Some("MANUAL")));
     assert!(!dequeue_reason_is_failure(None));
 }
 
@@ -816,6 +822,15 @@ fn dequeue_requires_rework_ignores_non_failure_and_absent_events() {
     assert!(!dequeue_requires_rework(
         Some(&merged),
         Some("2026-06-12T14:12:31Z"),
+        None
+    ));
+    // An operator manually removing the PR from the queue surfaces as
+    // `manual` on the timeline event — benign, must not reopen for rework
+    // (regression: a manual dequeue spuriously reopened a task, 2026-06-18).
+    let manual = dequeue_event("manual", Some("2026-06-18T10:00:00Z"));
+    assert!(!dequeue_requires_rework(
+        Some(&manual),
+        Some("2026-06-18T09:00:00Z"),
         None
     ));
     assert!(!dequeue_requires_rework(

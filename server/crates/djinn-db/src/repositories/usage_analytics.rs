@@ -202,10 +202,6 @@ impl UsageAnalyticsRepository {
         if let Some(ref agent_type) = params.agent_type {
             conditions.push(format!("s.agent_type = ${bind_idx}"));
             binds.push(agent_type.clone());
-            #[allow(unused_assignments)]
-            {
-                bind_idx += 1;
-            }
         }
 
         // When grouping by proposal, only include sessions that trace to a
@@ -234,7 +230,7 @@ impl UsageAnalyticsRepository {
     }
 
     /// Bind parameters onto a `sqlx::query()` builder.
-    async fn bind_all<'q>(
+    fn bind_all<'q>(
         query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
         binds: &'q [String],
     ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
@@ -265,7 +261,7 @@ impl UsageAnalyticsRepository {
         );
 
         let query = sqlx::query(&sql);
-        let query = Self::bind_all(query, &binds).await;
+        let query = Self::bind_all(query, &binds);
         let row = query.fetch_one(self.db.pool()).await?;
 
         Ok(UsageTotals {
@@ -304,7 +300,7 @@ impl UsageAnalyticsRepository {
         );
 
         let query = sqlx::query(&sql);
-        let query = Self::bind_all(query, &binds).await;
+        let query = Self::bind_all(query, &binds);
         let rows = query.fetch_all(self.db.pool()).await?;
 
         Ok(rows
@@ -346,7 +342,7 @@ impl UsageAnalyticsRepository {
         );
 
         let query = sqlx::query(&sql);
-        let query = Self::bind_all(query, &binds).await;
+        let query = Self::bind_all(query, &binds);
         let rows = query.fetch_all(self.db.pool()).await?;
 
         Ok(rows

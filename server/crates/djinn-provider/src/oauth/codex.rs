@@ -174,7 +174,7 @@ impl CodexTokens {
     /// users.
     ///
     /// Used by the device-flow short-circuit so connecting a fresh identity
-    /// (e.g. the automation service user) doesn't see the acting admin's — or
+    /// (e.g. another target user) doesn't see the acting admin's — or
     /// the org-shared — token and skip the flow. The filesystem-cache migration
     /// only applies to the org-shared / local-dev identity (`owner == None`);
     /// a per-user target never inherits a local fs cache.
@@ -425,7 +425,7 @@ pub async fn start_codex_device_auth(
     //    flow. Resolve against `owner_user_id` with exact-owner semantics —
     //    NOT the acting user's `SESSION_USER_ID` task-local, and NOT the
     //    org-shared fallback. Otherwise an admin connecting OAuth on the
-    //    automation user's behalf short-circuits on their *own* (or an
+    //    another user's behalf short-circuits on their *own* (or an
     //    org-shared) token and the UI flips straight to "Connected" without
     //    ever writing a credential for the target.
     // If the target owner's codex credential was marked revoked (a 401 during a
@@ -520,7 +520,7 @@ pub async fn start_codex_device_auth(
     //    it inside the spawned task so the eventual `save_to_db` → `set` stamps
     //    `owner_user_id = this user`. `None` (local dev / no auth) writes the
     //    org-shared credential, as before. An admin may pass another user's id
-    //    here to connect OAuth on their behalf (e.g. the automation service user).
+    //    here to connect OAuth on their behalf (e.g. another target user).
     let poll_repo = repo.clone();
     let device_auth_id = uc.device_auth_id;
     let user_code = uc.user_code;
