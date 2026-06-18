@@ -8,6 +8,7 @@ mod git_bridge;
 mod graph_bridge;
 mod graph_data;
 mod lsp_bridge;
+mod memory_enrichment_bridge;
 mod runtime_bridge;
 mod slot_pool_bridge;
 
@@ -32,6 +33,10 @@ pub use self::graph_data::{
     WorkspacesResult,
 };
 pub use self::lsp_bridge::{LspOps, LspWarning};
+pub use self::memory_enrichment_bridge::{
+    EnrichmentClaim, EnrichmentEdge, EnrichmentEntity, EnrichmentReport, EnrichmentStatus,
+    MemoryEnrichmentOps,
+};
 pub use self::runtime_bridge::{
     ProvisionServiceRequest, ProvisionedService, RuntimeDispatchError, RuntimeOps, TaskrunJobRef,
 };
