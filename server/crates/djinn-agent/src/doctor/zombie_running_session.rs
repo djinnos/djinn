@@ -195,7 +195,7 @@ impl<S: ZombieRunningSessionSource> ZombieRunningSessionCheck<S> {
         let snapshot = ResolverSnapshot::new(
             "resolve_zombie_running_session",
             inputs_json.clone(),
-            outputs_json,
+            outputs_json.clone(),
         );
         let task_id = inputs.task_id.as_deref().unwrap_or_default().to_owned();
         let evidence = json!({
@@ -215,6 +215,7 @@ impl<S: ZombieRunningSessionSource> ZombieRunningSessionCheck<S> {
                 "worker_connected": inputs.live_state.worker_connected,
                 "pod_present": inputs.live_state.pod_present,
             },
+            "resolver_outputs": outputs_json,
         });
 
         Some(
@@ -406,6 +407,7 @@ mod tests {
             Some("task-zombie")
         );
         assert_eq!(finding.evidence["db_row"]["status"], "running");
+        assert_eq!(finding.evidence["resolver_outputs"]["reason"], "zombie");
         assert!(
             !finding.evidence["live_state"]["slot_pool_has_session"]
                 .as_bool()
