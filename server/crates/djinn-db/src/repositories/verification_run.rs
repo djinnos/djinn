@@ -90,6 +90,33 @@ impl VerificationRunRepository {
         }))
     }
 
+    /// Latest verification run for `task_id` that reached a USABLE terminal
+    /// state (`passed` | `failed`) — the ones [`consume_in_pod_verification_run`]
+    /// can replay directly. Returns the row id (newest by `created_at`) or
+    /// `None` when no such row exists.
+    ///
+    /// Used by the recovery paths (supervisor infra-death seam + coordinator
+    /// stuck-`verifying` sweep) to detect a worker-written in-pod verification
+    /// that lost its report frame to a TTL-GC'd pod, so the host pipeline can be
+    /// re-armed against the existing row instead of discarding the work.
+    /// `error`/`pending`/`running` rows are deliberately excluded — they aren't
+    /// trustworthy results and would only round-trip through a fresh verify Job.
+    pub async fn latest_terminal_for_task(&self, task_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query(
+            r#"SELECT id
+                 FROM verification_runs
+                WHERE task_id = $1
+                  AND status IN ('passed', 'failed')
+                ORDER BY created_at DESC
+                LIMIT 1"#,
+        )
+        .bind(task_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(row.map(|r| r.get("id")))
+    }
+
     /// Mark a run `running` (the Job pod picked it up).
     pub async fn mark_running(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
@@ -175,6 +202,67 @@ mod tests {
         assert!(done.setup_results.contains("echo hi"));
         assert!(done.verification_results.contains("cargo test"));
         assert!(done.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn latest_terminal_for_task_picks_newest_usable_terminal() {
+        let db = Database::open_in_memory().unwrap();
+        seed_project(&db, "p1").await;
+        let repo = VerificationRunRepository::new(db.clone());
+
+        // No rows yet.
+        assert!(
+            repo.latest_terminal_for_task("t1").await.unwrap().is_none(),
+            "no rows → None"
+        );
+
+        // A pending row is not a usable terminal.
+        repo.create("r-pending", "t1", "p1").await.unwrap();
+        assert!(
+            repo.latest_terminal_for_task("t1").await.unwrap().is_none(),
+            "pending row is not terminal"
+        );
+
+        // An `error` row is excluded too.
+        repo.create("r-error", "t1", "p1").await.unwrap();
+        repo.complete(
+            "r-error",
+            VerificationRunStatus::ERROR,
+            "[]",
+            "[]",
+            Some("boom"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            repo.latest_terminal_for_task("t1").await.unwrap().is_none(),
+            "error row is not a usable terminal"
+        );
+
+        // A passed row is usable. created_at uses millisecond resolution, so
+        // ordering is by created_at DESC; insert the newer one last and stamp it
+        // distinctly by failing it after the passed one.
+        repo.create("r-passed", "t1", "p1").await.unwrap();
+        repo.complete("r-passed", VerificationRunStatus::PASSED, "[]", "[]", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.latest_terminal_for_task("t1")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("r-passed"),
+            "passed row is a usable terminal"
+        );
+
+        // Cross-task isolation.
+        assert!(
+            repo.latest_terminal_for_task("other-task")
+                .await
+                .unwrap()
+                .is_none(),
+            "rows for another task are not returned"
+        );
     }
 
     #[tokio::test]

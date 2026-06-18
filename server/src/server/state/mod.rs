@@ -979,7 +979,10 @@ impl AppState {
                 self.clone(),
             ))),
             runtime_ops: Some(Arc::new(self.clone())),
-            cargo_target_runs_root: None,
+            // Host-side runs root for the coordinator sweep + teardown backstop.
+            // Resolves to `$DJINN_HOME/cache/cargo-target-runs` (the server pod's
+            // mount of the shared cache PVC), not the Job-pod `/cache` path.
+            cargo_target_runs_root: Some(djinn_core::paths::cargo_target_runs_root()),
             mirror: Some(self.inner.mirror.clone()),
             rpc_registry: Some(self.inner.rpc_registry.clone()),
             // Host-side AgentContext serves multiple projects (chat surface
