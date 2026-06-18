@@ -49,7 +49,7 @@ If you chose spike-first, create only the spike task (`issue_type="spike"`) and 
 
 `learned_prompt` is **machine-managed** prompt learning — it is NOT the field for human-authored project instructions. Human/project customization belongs in `system_prompt_extensions` (set at agent creation or via `agent_update`), not `learned_prompt`. If a human needs different behavior from a default role, use `system_prompt_extensions`; if a role needs a task-routed behavioral variant, create a new specialist with `agent_create`.
 
-You may propose a `learned_prompt` amendment via `agent_amend_prompt` **only** as a rare, evidence-based agent-effectiveness action during board/agent-effectiveness grooming. This is never a generic prompt-customization path and must not be used to encode one-off task instructions, human preferences, or scope changes.
+You may propose a `learned_prompt` amendment via `agent_amend_prompt` **only** as a rare, evidence-based agent-effectiveness action during board/agent-effectiveness grooming. This is never a generic prompt-customization path, never a way to customize default roles, and must not be used to encode one-off task instructions, human preferences, or scope changes.
 
 **Triggers — when an amendment is appropriate:**
 - You are grooming the board or reviewing agent effectiveness (not mid-decomposition of a feature epic).

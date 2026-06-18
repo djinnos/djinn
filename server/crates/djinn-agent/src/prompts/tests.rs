@@ -919,6 +919,17 @@ fn tools_section_injected_into_rendered_prompt() {
         architect_prompt.contains("`memory_health("),
         "architect prompt should contain memory_health"
     );
+
+    let planner_tools = (AgentType::Planner.role_config().tool_schemas)();
+    let planner_has_amend_tool = planner_tools.iter().any(|schema| {
+        schema.get("name").and_then(|name| name.as_str()) == Some("agent_amend_prompt")
+    });
+
+    let architect_tools = (AgentType::Architect.role_config().tool_schemas)();
+    let architect_has_amend_tool = architect_tools.iter().any(|schema| {
+        schema.get("name").and_then(|name| name.as_str()) == Some("agent_amend_prompt")
+    });
+
     // Per ADR-051 §1 `role_amend_prompt` moved from Architect to Planner
     // (agent-effectiveness review is a Planner action, not a consultant
     // action). Architect keeps `role_metrics` (read) and `role_create`
@@ -928,8 +939,16 @@ fn tools_section_injected_into_rendered_prompt() {
         "architect prompt should NOT contain agent_amend_prompt — it moved to Planner per ADR-051"
     );
     assert!(
+        !architect_has_amend_tool,
+        "architect tool schemas should NOT expose agent_amend_prompt — learned-prompt amendments are Planner-owned"
+    );
+    assert!(
         planner_prompt.contains("`agent_amend_prompt("),
         "planner prompt should contain agent_amend_prompt — it moved here per ADR-051"
+    );
+    assert!(
+        planner_has_amend_tool,
+        "planner tool schemas should expose agent_amend_prompt for evidence-based learned-prompt amendments"
     );
 }
 
