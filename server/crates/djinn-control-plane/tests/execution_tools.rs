@@ -582,6 +582,7 @@ impl RealPoolKillHarness {
                     agent_type: "worker",
                     metadata_json: None,
                     task_run_id: Some(task_run_id),
+                    pricing: None,
                 })
                 .await
                 .expect("session create should succeed");
