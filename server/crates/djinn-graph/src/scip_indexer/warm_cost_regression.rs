@@ -35,6 +35,15 @@ use super::{ExecutedIndexerCommand, PlannedIndexerCommand, SupportedIndexer};
 /// cost-reduction pattern without being slow.
 const PARTITION_COUNT: usize = 4;
 
+/// Deterministic fake cost for invoking one partition indexer. This is much
+/// larger than a cache metadata/version check so warm paths have a measurable
+/// cost reduction without relying on wall-clock timings.
+const FAKE_INDEXER_INVOCATION_COST: usize = 100;
+
+/// Deterministic fake cost for the unavoidable per-partition cache
+/// metadata/version check.
+const FAKE_CACHE_METADATA_COST: usize = 1;
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -85,6 +94,9 @@ struct RunCost {
     cache_hits: usize,
     /// Final artifact count collected from disk.
     artifact_count: usize,
+    /// Deterministic fake elapsed cost: every partition pays a tiny metadata
+    /// check cost, and every cache miss pays the much larger invocation cost.
+    fake_elapsed_cost: usize,
     /// Partition names whose fake indexer was invoked (cache misses). This is
     /// the deterministic stand-in for elapsed warm cost.
     invoked_partitions: Vec<String>,
@@ -218,6 +230,8 @@ fn simulate_run(
         invocations,
         cache_hits,
         artifact_count: artifacts.len(),
+        fake_elapsed_cost: partitions.len() * FAKE_CACHE_METADATA_COST
+            + invocations * FAKE_INDEXER_INVOCATION_COST,
         invoked_partitions,
         graph_build_partitions,
         graph_build_payloads,
@@ -251,6 +265,11 @@ fn cold_run_invokes_all_partitions_and_produces_full_artifact_set() {
     assert_eq!(
         cost.artifact_count, PARTITION_COUNT,
         "cold run must produce one artifact per partition"
+    );
+    assert_eq!(
+        cost.fake_elapsed_cost,
+        PARTITION_COUNT * (FAKE_CACHE_METADATA_COST + FAKE_INDEXER_INVOCATION_COST),
+        "cold run cost must include metadata checks plus every fake indexer invocation"
     );
     assert_eq!(
         cost.invoked_partitions,
@@ -301,6 +320,11 @@ fn warm_unchanged_is_cache_hit_dominated_with_zero_invocations() {
         warm_cost.artifact_count, PARTITION_COUNT,
         "warm-unchanged must still produce full artifact set"
     );
+    assert_eq!(
+        warm_cost.fake_elapsed_cost,
+        PARTITION_COUNT * FAKE_CACHE_METADATA_COST,
+        "warm-unchanged cost must be only cache metadata/version checks"
+    );
     assert!(
         warm_cost.invoked_partitions.is_empty(),
         "warm-unchanged graph warm must not invoke any partition: {:?}",
@@ -324,6 +348,12 @@ fn warm_unchanged_is_cache_hit_dominated_with_zero_invocations() {
     assert_eq!(
         reduction, PARTITION_COUNT,
         "warm-unchanged cost reduction must equal partition count (100% reduction)"
+    );
+    assert!(
+        warm_cost.fake_elapsed_cost * 10 < cold_cost.fake_elapsed_cost,
+        "warm-unchanged fake elapsed cost must be substantially cheaper than cold: cold={}, warm={}",
+        cold_cost.fake_elapsed_cost,
+        warm_cost.fake_elapsed_cost,
     );
 }
 
@@ -366,6 +396,11 @@ fn warm_one_partition_changed_invokes_only_that_partition() {
         "warm-one-changed must still produce full artifact set (all partitions)"
     );
     assert_eq!(
+        warm_cost.fake_elapsed_cost,
+        PARTITION_COUNT * FAKE_CACHE_METADATA_COST + FAKE_INDEXER_INVOCATION_COST,
+        "warm-one-changed cost must include metadata checks plus one fake indexer invocation"
+    );
+    assert_eq!(
         warm_cost.invoked_partitions,
         vec![partitions[changed_index].name.clone()],
         "warm-one-changed must invoke exactly the changed partition"
@@ -390,6 +425,12 @@ fn warm_one_partition_changed_invokes_only_that_partition() {
         reduction,
         PARTITION_COUNT - 1,
         "warm-one-changed cost reduction must be (N-1)"
+    );
+    assert!(
+        warm_cost.fake_elapsed_cost * 2 < cold_cost.fake_elapsed_cost,
+        "warm-one-changed fake elapsed cost must be substantially cheaper than cold: cold={}, warm={}",
+        cold_cost.fake_elapsed_cost,
+        warm_cost.fake_elapsed_cost,
     );
 }
 
@@ -464,7 +505,7 @@ fn whole_graph_semantics_never_produce_changed_file_only_artifact_set() {
 /// must produce the same key deterministically.
 #[test]
 fn cache_key_changes_with_source_content_and_is_deterministic() {
-    let output_root = Path::new("/tmp/djinn-key-test");
+    let output_root = Path::new("fake-output-root");
     let plan = plan_for_partition("key-test", output_root);
 
     let key_a = key_for_partition(&plan, b"original content");
