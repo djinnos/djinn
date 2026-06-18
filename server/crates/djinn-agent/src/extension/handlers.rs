@@ -57,11 +57,14 @@ pub(crate) use code_intel::{
 };
 #[cfg(test)]
 pub(super) use code_intel::{call_code_graph_inner, should_pre_resolve_chat_key};
+#[cfg(test)]
+pub(super) use memory_agent::call_agent_amend_prompt;
+#[cfg(not(test))]
+use memory_agent::call_agent_amend_prompt;
 use memory_agent::{
-    call_agent_amend_prompt, call_agent_create, call_agent_metrics, call_memory_broken_links,
-    call_memory_build_context, call_memory_edit, call_memory_extracted_audit, call_memory_health,
-    call_memory_list, call_memory_move, call_memory_orphans, call_memory_read, call_memory_search,
-    call_memory_write,
+    call_agent_create, call_agent_metrics, call_memory_broken_links, call_memory_build_context,
+    call_memory_edit, call_memory_extracted_audit, call_memory_health, call_memory_list,
+    call_memory_move, call_memory_orphans, call_memory_read, call_memory_search, call_memory_write,
 };
 pub(crate) use task_admin::call_task_kill_session;
 use task_admin::{
