@@ -2,7 +2,7 @@ import { ConfirmButton } from "./ConfirmButton";
 import { TaskIdLabel } from "./TaskIdLabel";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { HealthCheckPanel } from "./HealthCheckPanel";
-import type { VerificationRun, StepEntry } from "@/stores/verificationStore";
+import type { StepLogEntry, StepLogStatus } from "./StepLog";
 
 const meta = {
   title: "Shared/SmallComponents",
@@ -13,18 +13,23 @@ const meta = {
 
 export default meta;
 
+type HealthCheckRun = {
+  status: StepLogStatus;
+  startedAt?: string;
+  steps: StepLogEntry[];
+};
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function step(
   index: number,
   name: string,
-  status: StepEntry["status"],
-  overrides?: Partial<StepEntry>,
-): StepEntry {
+  status: StepLogEntry["status"],
+  overrides?: Partial<StepLogEntry>,
+): StepLogEntry {
   return {
     index,
     name,
-    phase: "verification",
     status,
     ...overrides,
   };
@@ -34,16 +39,13 @@ function ThrowError(): never {
   throw new Error("Test error");
 }
 
-// ── Mock verification runs ───────────────────────────────────────────────────
+// ── Mock health check runs ───────────────────────────────────────────────────
 
-const passedRun: VerificationRun = {
-  projectId: "proj-001",
-  taskId: "019cbe9f-6ae7-7d90-a8be-6ba626cc0119",
+const passedRun: HealthCheckRun = {
   status: "passed",
   startedAt: "2026-03-19T10:30:00Z",
   steps: [
     step(0, "pnpm install", "passed", {
-      phase: "setup",
       command: "pnpm install --frozen-lockfile",
       durationMs: 1_340,
       exitCode: 0,
@@ -72,14 +74,11 @@ const passedRun: VerificationRun = {
   ],
 };
 
-const failedRun: VerificationRun = {
-  projectId: "proj-001",
-  taskId: "019cbe9f-6ae7-7d90-a8be-6ba626cc0119",
+const failedRun: HealthCheckRun = {
   status: "failed",
   startedAt: "2026-03-19T11:15:00Z",
   steps: [
     step(0, "pnpm install", "passed", {
-      phase: "setup",
       command: "pnpm install --frozen-lockfile",
       durationMs: 1_120,
       exitCode: 0,
@@ -101,13 +100,11 @@ const failedRun: VerificationRun = {
   ],
 };
 
-const runningRun: VerificationRun = {
-  projectId: "proj-001",
+const runningRun: HealthCheckRun = {
   status: "running",
   startedAt: "2026-03-19T12:00:00Z",
   steps: [
     step(0, "pnpm install", "passed", {
-      phase: "setup",
       command: "pnpm install --frozen-lockfile",
       durationMs: 1_050,
       exitCode: 0,
