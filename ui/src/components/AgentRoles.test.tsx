@@ -150,7 +150,8 @@ describe("AgentRoles", () => {
 
     expect(fetchAgents).toHaveBeenCalledWith("project-1");
     expect(screen.getByText("Handles implementation tasks")).toBeInTheDocument();
-    expect(screen.getByText("default")).toBeInTheDocument();
+    expect(screen.getByText("Designs system architecture")).toBeInTheDocument();
+    expect(screen.getAllByText("default").length).toBe(2);
     expect(screen.getByText("Strict Reviewer")).toBeInTheDocument();
     expect(screen.getByText("Reviews risky backend changes")).toBeInTheDocument();
     expect(screen.getByText("1 ext")).toBeInTheDocument();
@@ -158,7 +159,6 @@ describe("AgentRoles", () => {
     expect(screen.getAllByText("Worker")[0]).toBeInTheDocument();
     expect(screen.getByText("Reviewer")).toBeInTheDocument();
     expect(screen.getByText("Architect")).toBeInTheDocument();
-    expect(screen.getByText("Designs system architecture")).toBeInTheDocument();
     expect(screen.getByText("2 MCP")).toBeInTheDocument();
     expect(screen.getByText("2 skills")).toBeInTheDocument();
   });
