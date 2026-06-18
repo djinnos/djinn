@@ -32,8 +32,8 @@ use std::sync::Arc;
 
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{
-    NoteRepository, ProjectRepository, SessionRepository, TaskRepository, assess_note_quality,
-    folder_for_type, permalink_for,
+    CreateConsolidationRunMetric, NoteConsolidationRepository, NoteRepository, ProjectRepository,
+    SessionRepository, TaskRepository, assess_note_quality, folder_for_type, permalink_for,
 };
 use djinn_provider::provider::{LlmProvider, TelemetryMeta, create_provider};
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider_for_user};
@@ -903,7 +903,42 @@ async fn run_llm_extraction_inner(
             .unwrap_or_else(CandidateLookup::production),
     };
 
-    for (note_type, note) in &deduped_notes {
+    // ── ADR-054 admission gate ────────────────────────────────────────────
+    // For each deduped candidate whose note_type is case/pattern/pitfall,
+    // call `assess_note_quality` BEFORE novelty judging. If underspecified,
+    // skip without a novelty call or a create call. This keeps the gate
+    // inside the per-note processing path so existing test expectations for
+    // non-gated note types (e.g. working-spec downgrades) are preserved.
+    let mut admission_dropped_count: u64 = 0;
+    let gate_filtered: Vec<_> = deduped_notes
+        .into_iter()
+        .filter(|(note_type, _note)| {
+            // Only gate the three ADR-054 durable note types.
+            if !matches!(*note_type, "case" | "pattern" | "pitfall") {
+                return true;
+            }
+            let quality = assess_note_quality(note_type, &_note.content);
+            if quality.is_underspecified {
+                admission_dropped_count += 1;
+                tracing::warn!(
+                    session_id = %extraction_context.session_id,
+                    project_id = %extraction_context.project_id,
+                    note_type = %note_type,
+                    title = %_note.title,
+                    reasons = %quality.reasons.join(", "),
+                    "llm_extraction: admission gate dropped underspecified candidate"
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    if admission_dropped_count > 0 {
+        extraction_quality.admission_dropped = Some(admission_dropped_count as u32);
+    }
+
+    for (note_type, note) in &gate_filtered {
         process_extracted_note(
             &extraction_context,
             note_type,
@@ -916,6 +951,62 @@ async fn run_llm_extraction_inner(
     taxonomy.extraction_quality = extraction_quality;
 
     persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
+
+    // ── Write admission-dropped metric ──────────────────────────────────
+    // Lightweight per-extraction row in `consolidation_run_metrics`.  The
+    // consolidation worker writes its own rows with non-zero cluster/sweep
+    // counts; this row only records the admission gate counter so the value
+    // is observable per-extraction without waiting for the next consolidation
+    // tick.  All consolidation counters are zero (task 9aig).
+    write_extraction_metric(&app_state.db, &project.id, admission_dropped_count).await;
+}
+
+/// Write a lightweight `consolidation_run_metrics` row that records only the
+/// admission-dropped counter from this extraction run.  All consolidation
+/// counters are zero — this is a dedicated per-extraction metric, not a real
+/// consolidation tick.
+///
+/// Chosen path: emit a dedicated per-extraction row rather than piggybacking
+/// on the next consolidation tick so the drop count is observable immediately
+/// after each extraction and does not depend on the consolidation scheduler.
+async fn write_extraction_metric(
+    db: &djinn_db::Database,
+    project_id: &str,
+    admission_dropped_count: u64,
+) {
+    let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+    let now = ::time::OffsetDateTime::now_utc()
+        .format(&::time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00.000Z".to_owned());
+    match consolidation_repo
+        .create_run_metric(CreateConsolidationRunMetric {
+            project_id,
+            note_type: "extraction",
+            status: "completed",
+            scanned_note_count: 0,
+            candidate_cluster_count: 0,
+            consolidated_cluster_count: 0,
+            consolidated_note_count: 0,
+            source_note_count: 0,
+            superseded_source_note_count: 0,
+            admission_dropped_note_count: admission_dropped_count as i64,
+            started_at: &now,
+            completed_at: Some(&now),
+            error_message: None,
+        })
+        .await
+    {
+        Ok(_) => tracing::debug!(
+            project_id = %project_id,
+            admission_dropped_count,
+            "llm_extraction: wrote admission-dropped metric row"
+        ),
+        Err(e) => tracing::warn!(
+            project_id = %project_id,
+            error = %e,
+            "llm_extraction: failed to write admission-dropped metric row"
+        ),
+    }
 }
 
 async fn persist_extraction_quality(

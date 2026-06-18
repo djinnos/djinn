@@ -216,6 +216,18 @@ impl NoteRepository {
         .fetch_one(self.db.pool())
         .await?;
 
+        // Sum of admission_dropped_note_count across all run metrics for this
+        // project.  Uses runtime query because the column is added by a later
+        // migration and not in the offline sqlx cache.
+        let admission_dropped_note_count: i64 = sqlx::query_scalar(
+            r#"SELECT COALESCE(SUM(admission_dropped_note_count), 0)
+             FROM consolidation_run_metrics
+             WHERE project_id = $1"#,
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+
         Ok(HealthReport {
             total_notes,
             broken_link_count,
@@ -223,6 +235,7 @@ impl NoteRepository {
             low_confidence_note_count,
             stale_note_count,
             stale_notes_by_folder,
+            admission_dropped_note_count,
         })
     }
 

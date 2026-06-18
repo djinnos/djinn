@@ -446,6 +446,7 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
             consolidated_note_count: 1,
             source_note_count: 3,
             superseded_source_note_count: 0,
+            admission_dropped_note_count: 0,
             started_at: "2026-03-25T10:00:00.000Z",
             completed_at: Some("2026-03-25T10:01:00.000Z"),
             error_message: None,
@@ -464,6 +465,7 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
             consolidated_note_count: 0,
             source_note_count: 0,
             superseded_source_note_count: 0,
+            admission_dropped_note_count: 0,
             started_at: "2026-03-25T11:00:00.000Z",
             completed_at: Some("2026-03-25T11:02:00.000Z"),
             error_message: Some("llm timeout"),
@@ -482,6 +484,7 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
             consolidated_note_count: 1,
             source_note_count: 4,
             superseded_source_note_count: 0,
+            admission_dropped_note_count: 0,
             started_at: "2026-03-25T12:00:00.000Z",
             completed_at: Some("2026-03-25T12:03:00.000Z"),
             error_message: None,
@@ -910,6 +913,7 @@ async fn supersession_metric_round_trips_superseded_source_note_count() {
             consolidated_note_count: 1,
             source_note_count: 3,
             superseded_source_note_count: 3,
+            admission_dropped_note_count: 0,
             started_at: "2026-06-17T10:00:00.000Z",
             completed_at: Some("2026-06-17T10:01:00.000Z"),
             error_message: None,
@@ -978,4 +982,154 @@ async fn supersession_direction_convention_records_edge_regardless_of_id_order()
     assert!(neighbors.contains_key(&source_id));
     assert!(neighbors[&canonical_id].contains(&source_id));
     assert!(neighbors[&source_id].contains(&canonical_id));
+}
+
+/// AC2: `create_run_metric` / `list_run_metrics` round-trip the
+/// `admission_dropped_note_count` column (task 9aig).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_dropped_note_count_round_trips_through_create_and_list() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let project = make_project(&db, tmp.path()).await;
+    let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+    // Non-zero admission drop count.
+    let metric = consolidation_repo
+        .create_run_metric(CreateConsolidationRunMetric {
+            project_id: &project.id,
+            note_type: "extraction",
+            status: "completed",
+            scanned_note_count: 0,
+            candidate_cluster_count: 0,
+            consolidated_cluster_count: 0,
+            consolidated_note_count: 0,
+            source_note_count: 0,
+            superseded_source_note_count: 0,
+            admission_dropped_note_count: 5,
+            started_at: "2026-06-18T10:00:00.000Z",
+            completed_at: Some("2026-06-18T10:00:01.000Z"),
+            error_message: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(metric.admission_dropped_note_count, 5);
+
+    // Round-trip via list.
+    let listed = consolidation_repo
+        .list_run_metrics(&project.id, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].admission_dropped_note_count, 5);
+}
+
+/// AC4: A session with zero drops writes `admission_dropped_note_count = 0`;
+/// the field is never NULL at write time (task 9aig).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_admission_drops_writes_zero_not_null() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let project = make_project(&db, tmp.path()).await;
+    let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+    let metric = consolidation_repo
+        .create_run_metric(CreateConsolidationRunMetric {
+            project_id: &project.id,
+            note_type: "extraction",
+            status: "completed",
+            scanned_note_count: 0,
+            candidate_cluster_count: 0,
+            consolidated_cluster_count: 0,
+            consolidated_note_count: 0,
+            source_note_count: 0,
+            superseded_source_note_count: 0,
+            admission_dropped_note_count: 0,
+            started_at: "2026-06-18T11:00:00.000Z",
+            completed_at: Some("2026-06-18T11:00:01.000Z"),
+            error_message: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(metric.admission_dropped_note_count, 0);
+    // Verify the column is NOT NULL by raw-querying it.
+    let raw: i64 = sqlx::query_scalar(
+        "SELECT admission_dropped_note_count FROM consolidation_run_metrics WHERE id = $1",
+    )
+    .bind(&metric.id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(raw, 0);
+}
+
+/// AC3: After creating a metric row with non-zero `admission_dropped_note_count`,
+/// `memory_health` returns a non-zero sum for the admission-dropped counter
+/// (task 9aig).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_health_sums_admission_dropped_note_count() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+    // Create an extraction metric row with non-zero admission drops.
+    consolidation_repo
+        .create_run_metric(CreateConsolidationRunMetric {
+            project_id: &project.id,
+            note_type: "extraction",
+            status: "completed",
+            scanned_note_count: 0,
+            candidate_cluster_count: 0,
+            consolidated_cluster_count: 0,
+            consolidated_note_count: 0,
+            source_note_count: 0,
+            superseded_source_note_count: 0,
+            admission_dropped_note_count: 3,
+            started_at: "2026-06-18T12:00:00.000Z",
+            completed_at: Some("2026-06-18T12:00:01.000Z"),
+            error_message: None,
+        })
+        .await
+        .unwrap();
+
+    // Create a second metric row with additional drops.
+    consolidation_repo
+        .create_run_metric(CreateConsolidationRunMetric {
+            project_id: &project.id,
+            note_type: "extraction",
+            status: "completed",
+            scanned_note_count: 0,
+            candidate_cluster_count: 0,
+            consolidated_cluster_count: 0,
+            consolidated_note_count: 0,
+            source_note_count: 0,
+            superseded_source_note_count: 0,
+            admission_dropped_note_count: 2,
+            started_at: "2026-06-18T13:00:00.000Z",
+            completed_at: Some("2026-06-18T13:00:01.000Z"),
+            error_message: None,
+        })
+        .await
+        .unwrap();
+
+    let health = note_repo.health(&project.id).await.unwrap();
+    assert_eq!(health.admission_dropped_note_count, 5); // 3 + 2
+}
+
+/// AC3 (zero case): When no metric rows exist for a project,
+/// `memory_health` returns zero for `admission_dropped_note_count`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_health_returns_zero_when_no_metrics() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    let health = note_repo.health(&project.id).await.unwrap();
+    assert_eq!(health.admission_dropped_note_count, 0);
 }

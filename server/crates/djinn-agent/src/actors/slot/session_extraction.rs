@@ -198,6 +198,9 @@ pub struct ExtractionQuality {
     pub downgraded: u32,
     #[serde(default)]
     pub discarded: u32,
+    /// Number of candidates rejected by the ADR-054 admission gate (task 9aig).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_dropped: Option<u32>,
 }
 
 // ── Tool name classification ──────────────────────────────────────────────────
@@ -1029,6 +1032,7 @@ mod tests {
                 merged: 0,
                 downgraded: 0,
                 discarded: 0,
+                admission_dropped: None,
             },
         };
         let json = serde_json::to_string(&tax).unwrap();

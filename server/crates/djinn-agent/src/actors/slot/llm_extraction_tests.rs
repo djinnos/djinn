@@ -737,7 +737,14 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
     let provider = Arc::new(FakeProvider::script(vec![
         vec![
             djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
-                text: r#"{"cases":[{"title":"Duplicate Semantic Note","content":"Fix flaky semantic duplicate tests by injecting dedup candidates and comparing stable summaries."}],"patterns":[],"pitfalls":[]}"#.to_string(),
+                text: serde_json::json!({
+                    "cases": [{
+                        "title": "Duplicate Semantic Note",
+                        "content": "## Situation\nA flaky extraction pipeline had to compare candidate summaries under a deterministic constraint.\n## Constraint\nNovelty checks needed stable inputs across repeated runs and future tasks.\n## Approach taken\nInject a stable candidate seam and keep the comparison summary explicit in the extraction flow.\n## Result\nThe extraction remained deterministic and avoided duplicate durable notes.\n## Why it worked / failed\nThe seam removed unstable inputs that were previously changing across runs.\n## Reusable lesson\nUse an explicit deterministic seam when extraction quality depends on comparing generated summaries reliably.\n## Related\n- novelty detection\n- extraction quality gates"
+                    }],
+                    "patterns": [],
+                    "pitfalls": []
+                }).to_string(),
             }),
             djinn_provider::provider::StreamEvent::Done,
         ],
@@ -847,7 +854,7 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
+async fn llm_extraction_admission_gate_drops_underspecified_pattern_before_downgrade() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
 
@@ -872,50 +879,29 @@ async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
+    // The admission gate drops the underspecified pattern before it reaches the
+    // downgrade path, so no notes (including working specs) are persisted.
     assert_eq!(
         notes.len(),
-        1,
-        "downgraded note should be retained as a working spec"
-    );
-    let working_spec = &notes[0];
-    assert_eq!(working_spec.note_type, "design");
-    assert_eq!(
-        working_spec.title,
-        format!("Working Spec {}", fixture.task.short_id)
-    );
-    assert!(working_spec.content.contains("## Active objective"));
-    assert!(working_spec.content.contains("## Relevant scope"));
-    assert!(working_spec.content.contains("## Constraints"));
-    assert!(working_spec.content.contains("## Current hypotheses"));
-    assert!(working_spec.content.contains("## Open questions"));
-    assert!(working_spec.content.contains("Temporary Working Spec Note"));
-    assert!(working_spec.content.contains("task-scoped working context"));
-    assert!(working_spec.content.contains(&fixture.session_id));
-    assert!(working_spec.folder.starts_with("design"));
-
-    let durable_notes: Vec<_> = notes
-        .iter()
-        .filter(|note| matches!(note.note_type.as_str(), "case" | "pattern" | "pitfall"))
-        .collect();
-    assert!(
-        durable_notes.is_empty(),
-        "downgraded notes should not become durable extracted notes"
+        0,
+        "underspecified pattern should be dropped by admission gate"
     );
 
     let stored_json =
         SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
             .get_event_taxonomy_json(&fixture.session_id)
             .await
-            .expect("query session event_taxonomy after downgrade");
+            .expect("query session event_taxonomy after gate drop");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
-        .expect("deserialize stored taxonomy after downgrade");
-    assert_eq!(stored_taxonomy.extraction_quality.extracted, 1);
-    assert_eq!(stored_taxonomy.extraction_quality.downgraded, 1);
-    assert_eq!(stored_taxonomy.extraction_quality.written, 0);
+        .expect("deserialize stored taxonomy after gate drop");
+    assert_eq!(
+        stored_taxonomy.extraction_quality.admission_dropped,
+        Some(1)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn llm_extraction_downgrades_note_missing_required_adr_054_sections() {
+async fn llm_extraction_admission_gate_drops_pattern_missing_required_adr_054_sections() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
 
@@ -940,50 +926,25 @@ async fn llm_extraction_downgrades_note_missing_required_adr_054_sections() {
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
+    // The admission gate drops the underspecified pattern before it reaches
+    // the downgrade-to-working-spec path.
     assert_eq!(
         notes.len(),
-        1,
-        "notes missing ADR-054 sections should be routed into the working-spec fallback"
-    );
-
-    let working_spec = &notes[0];
-    assert_eq!(working_spec.note_type, "design");
-    assert_eq!(
-        working_spec.title,
-        format!("Working Spec {}", fixture.task.short_id)
-    );
-    assert!(working_spec.content.contains("## Active objective"));
-    assert!(working_spec.content.contains("## Relevant scope"));
-    assert!(working_spec.content.contains("## Constraints"));
-    assert!(working_spec.content.contains("## Current hypotheses"));
-    assert!(working_spec.content.contains("## Open questions"));
-    assert!(working_spec.content.contains("Unstructured Pattern Note"));
-    assert!(
-        working_spec
-            .content
-            .contains("missing_required_adr_054_sections")
-    );
-    assert!(working_spec.content.contains(&fixture.session_id));
-
-    let durable_notes: Vec<_> = notes
-        .iter()
-        .filter(|note| matches!(note.note_type.as_str(), "case" | "pattern" | "pitfall"))
-        .collect();
-    assert!(
-        durable_notes.is_empty(),
-        "notes missing ADR-054 sections should not become durable extracted notes"
+        0,
+        "underspecified pattern missing ADR-054 sections should be dropped by admission gate"
     );
 
     let stored_json =
         SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
             .get_event_taxonomy_json(&fixture.session_id)
             .await
-            .expect("query session event_taxonomy after template downgrade");
+            .expect("query session event_taxonomy after gate drop");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
-        .expect("deserialize stored taxonomy after template downgrade");
-    assert_eq!(stored_taxonomy.extraction_quality.extracted, 1);
-    assert_eq!(stored_taxonomy.extraction_quality.downgraded, 1);
-    assert_eq!(stored_taxonomy.extraction_quality.written, 0);
+        .expect("deserialize stored taxonomy after gate drop");
+    assert_eq!(
+        stored_taxonomy.extraction_quality.admission_dropped,
+        Some(1)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -183,6 +183,11 @@ pub struct HealthReport {
     pub low_confidence_note_count: i64,
     pub stale_note_count: i64,
     pub stale_notes_by_folder: Vec<StaleFolder>,
+    /// Sum of `admission_dropped_note_count` across recent
+    /// `consolidation_run_metrics` rows for this project.  Non-zero when
+    /// the extraction admission gate has rejected underspecified candidates
+    /// (task 9aig).
+    pub admission_dropped_note_count: i64,
 }
 
 /// Classification assigned during ADR-054 extracted-note corpus audits.

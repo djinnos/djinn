@@ -141,6 +141,7 @@ async fn consolidate_clusters(
         consolidated_note_count,
         source_note_count,
         superseded_source_note_count,
+        admission_dropped_note_count: 0, // Consolidation ticks never reject notes
         started_at,
         completed_at: Some(&completed_at),
         error_message: None,

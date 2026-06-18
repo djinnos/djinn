@@ -23,6 +23,9 @@ pub struct CreateConsolidationRunMetric<'a> {
     pub consolidated_note_count: i64,
     pub source_note_count: i64,
     pub superseded_source_note_count: i64,
+    /// Number of candidate extracted notes rejected by the ADR-054 admission
+    /// gate.  Pass 0 for pure consolidation ticks (task 9aig).
+    pub admission_dropped_note_count: i64,
     pub started_at: &'a str,
     pub completed_at: Option<&'a str>,
     pub error_message: Option<&'a str>,
@@ -564,18 +567,19 @@ impl NoteConsolidationRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
 
-        // Runtime (non-macro) query: the `superseded_source_note_count` column
-        // is added by migration 63 and is not yet present in the offline `.sqlx`
-        // cache, so a compile-checked `query!` would fail under
-        // `SQLX_OFFLINE=true`.
+        // Runtime (non-macro) query: the `superseded_source_note_count` and
+        // `admission_dropped_note_count` columns are added by later migrations
+        // and are not yet present in the offline `.sqlx` cache, so a
+        // compile-checked `query!` would fail under `SQLX_OFFLINE=true`.
         sqlx::query(
             "INSERT INTO consolidation_run_metrics (
                 id, project_id, status, note_type,
                 scanned_note_count, candidate_cluster_count,
                 consolidated_cluster_count, consolidated_note_count,
                 source_note_count, superseded_source_note_count,
+                admission_dropped_note_count,
                 started_at, completed_at, error_message
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
         .bind(&id)
         .bind(params.project_id)
@@ -587,6 +591,7 @@ impl NoteConsolidationRepository {
         .bind(params.consolidated_note_count)
         .bind(params.source_note_count)
         .bind(params.superseded_source_note_count)
+        .bind(params.admission_dropped_note_count)
         .bind(params.started_at)
         .bind(params.completed_at)
         .bind(params.error_message)
@@ -616,6 +621,7 @@ impl NoteConsolidationRepository {
                     CAST(consolidated_note_count AS BIGINT) AS consolidated_note_count,
                     CAST(source_note_count AS BIGINT) AS source_note_count,
                     CAST(superseded_source_note_count AS BIGINT) AS superseded_source_note_count,
+                    CAST(admission_dropped_note_count AS BIGINT) AS admission_dropped_note_count,
                     started_at, completed_at, error_message
              FROM consolidation_run_metrics
              WHERE project_id = $1
@@ -670,6 +676,7 @@ impl NoteConsolidationRepository {
                     CAST(consolidated_note_count AS BIGINT) AS consolidated_note_count,
                     CAST(source_note_count AS BIGINT) AS source_note_count,
                     CAST(superseded_source_note_count AS BIGINT) AS superseded_source_note_count,
+                    CAST(admission_dropped_note_count AS BIGINT) AS admission_dropped_note_count,
                     started_at, completed_at, error_message
              FROM consolidation_run_metrics
              WHERE id = $1"#,
