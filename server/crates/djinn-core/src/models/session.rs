@@ -138,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn session_record_defaults_missing_parked_reason() {
+    fn session_record_defaults_missing_nullable_additions() {
         let json = serde_json::json!({
             "id": "session-1",
             "project_id": "project-1",
@@ -159,5 +159,10 @@ mod tests {
         let decoded: SessionRecord = serde_json::from_value(json).unwrap();
 
         assert!(decoded.parked_reason.is_none());
+        assert!(decoded.cost_usd.is_none());
+        assert!(decoded.input_price_per_million_snapshot.is_none());
+        assert!(decoded.output_price_per_million_snapshot.is_none());
+        assert!(decoded.cache_read_price_per_million_snapshot.is_none());
+        assert!(decoded.cache_write_price_per_million_snapshot.is_none());
     }
 }
