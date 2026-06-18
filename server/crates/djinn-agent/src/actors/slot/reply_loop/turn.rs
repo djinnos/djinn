@@ -30,6 +30,34 @@ use super::persistence::{persist_session_message, serialize_llm_input, serialize
 use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
 
+/// Build the terminal error for a reply loop that gave up after the bounded
+/// empty/no-event-turn retries.
+///
+/// Carries a typed [`djinn_provider::provider::ProviderError`] source so the
+/// host's `classify_provider_failure` can `downcast_ref` it and feed the
+/// per-(scope,model) health breaker. Before this, a terminal empty/no-event
+/// stream (the kimi-for-coding/k2p7 incident: every turn-1 ended with no SSE
+/// events) returned a plain `anyhow` error → classified `None` → breaker never
+/// fed → dispatch re-selected the dead model forever (it broke `twty`/`oy1q`).
+///
+/// We mirror the Codex empty-200 mid-stream path (`from_stream_error`'s default)
+/// and use `ProviderInternal { status: 500 }`, which `classify_provider_failure`
+/// maps to the GENTLE consecutive-failure breaker (`Failure`): a one-off blip is
+/// absorbed (a successful session resets the streak) but a model that produces
+/// empty turns on EVERY dispatch finally auto-disables / fails over. We do NOT
+/// use `EmptyCompletion`, which is deliberately `None` (it has its own in-loop
+/// backoff for Codex consumer-backend throttling). The readable diagnostic rides
+/// along as `.context` so the existing string-based detectors still match on the
+/// top-level Display.
+fn empty_turn_terminal_error(kind: &str, retries: u32, diag: String) -> anyhow::Error {
+    anyhow::Error::new(djinn_provider::provider::ProviderError::ProviderInternal { status: 500 })
+        .context(format!(
+            "provider returned {retries} empty {kind} turns — the backend likely refused or \
+             throttled the request (a ChatGPT-account Codex rate limit returns empty 200s, \
+             not 429s; verify provider/account status or switch to an API-key backend); {diag}"
+        ))
+}
+
 fn permission_denial_text(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("permission denied")
@@ -774,11 +802,10 @@ pub(crate) async fn run_reply_loop(
                     continue;
                 }
                 let diag = runtime_fs_diagnostics(project_path, worktree_path);
-                return Err(anyhow::anyhow!(
-                    "provider returned {} empty/no-event turns — the backend likely refused or \
-                     throttled the request (a ChatGPT-account Codex rate limit returns empty 200s, \
-                     not 429s; verify provider/account status or switch to an API-key backend); {}",
-                    empty_turn_retries, diag
+                return Err(empty_turn_terminal_error(
+                    "no-event",
+                    empty_turn_retries,
+                    diag,
                 ));
             }
 
@@ -817,11 +844,10 @@ pub(crate) async fn run_reply_loop(
                     continue;
                 }
                 let diag = runtime_fs_diagnostics(project_path, worktree_path);
-                return Err(anyhow::anyhow!(
-                    "provider returned {} empty assistant turns — the backend likely refused or \
-                     throttled the request (a ChatGPT-account Codex rate limit returns empty 200s, \
-                     not 429s; verify provider/account status or switch to an API-key backend); {}",
-                    empty_turn_retries, diag
+                return Err(empty_turn_terminal_error(
+                    "assistant",
+                    empty_turn_retries,
+                    diag,
                 ));
             }
             // Reset retry counter on successful content.
@@ -1268,4 +1294,37 @@ pub(crate) async fn run_reply_loop(
         total_cache_read as i64,
         total_cache_write as i64,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_provider::provider::ProviderError;
+
+    #[test]
+    fn empty_turn_terminal_error_is_breaker_classifiable() {
+        // The terminal empty/no-event-turn failure must carry a typed
+        // `ProviderError` source so `classify_provider_failure` (which
+        // `downcast_ref`s) can feed the per-(scope,model) breaker. Before this,
+        // it returned a plain `anyhow!` string → downcast failed → `None` → the
+        // breaker was never fed and the dead model was re-selected forever.
+        for kind in ["no-event", "assistant"] {
+            let err = empty_turn_terminal_error(kind, 2, "diag".to_string());
+            let typed = err
+                .downcast_ref::<ProviderError>()
+                .expect("terminal empty-turn error must carry a typed ProviderError source");
+            // ProviderInternal{500} mirrors the Codex empty-200 path and maps to
+            // the GENTLE consecutive-failure breaker (`Failure`), NOT
+            // `EmptyCompletion` (which classifies as `None` by design).
+            assert_eq!(*typed, ProviderError::ProviderInternal { status: 500 });
+            assert!(
+                typed.retryable(),
+                "{kind}: a server-internal empty-turn failure is transient/retryable"
+            );
+            // The readable diagnostic still rides on the top-level Display.
+            let display = err.to_string();
+            assert!(display.contains("empty"), "{kind}: {display}");
+            assert!(display.contains("diag"), "{kind}: {display}");
+        }
+    }
 }
