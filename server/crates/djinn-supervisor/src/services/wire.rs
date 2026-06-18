@@ -959,6 +959,11 @@ mod tests {
             task_run_id: Some("run-1".into()),
             title: None,
             parked_reason: None,
+            cost_usd: None,
+            input_price_per_million_snapshot: None,
+            output_price_per_million_snapshot: None,
+            cache_read_price_per_million_snapshot: None,
+            cache_write_price_per_million_snapshot: None,
         };
         let resp = ServiceRpcResponse::CreateSession(Ok(session.clone()));
         let f = Frame {
