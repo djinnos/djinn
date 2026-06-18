@@ -83,7 +83,6 @@ export function AgentForm({
   );
   const [mcpServers, setMcpServers] = useState<string[]>(initial?.mcp_servers ?? []);
   const [skills, setSkills] = useState<string[]>(initial?.skills ?? []);
-  const [verificationCommand, setVerificationCommand] = useState(initial?.verification_command ?? "");
 
   let formTitle = "New specialist";
   if (isDefaultEdit) {
@@ -104,7 +103,6 @@ export function AgentForm({
         .filter(Boolean),
       mcp_servers: mcpServers,
       skills,
-      verification_command: verificationCommand.trim() || null,
     });
   };
 
@@ -359,19 +357,6 @@ export function AgentForm({
               })}
             </div>
           )}
-        </div>
-
-        {/* Verification command */}
-        <div className="space-y-2">
-          <Label htmlFor="role-verification-command" className="text-xs text-muted-foreground block">
-            Verification command
-          </Label>
-          <Input
-            id="role-verification-command"
-            placeholder="e.g. pnpm test"
-            value={verificationCommand}
-            onChange={(e) => setVerificationCommand(e.target.value)}
-          />
         </div>
       </div>
     </form>
