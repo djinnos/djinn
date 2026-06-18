@@ -3,6 +3,7 @@ import { ConfirmButton } from "@/components/ConfirmButton";
 import { cn } from "@/lib/utils";
 import { getAgentIdentity } from "@/lib/agentIdentity";
 import type { Agent } from "@/api/agents";
+import { LearnedPromptSection } from "@/components/agentRoles/LearnedPromptSection";
 import { Delete02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
@@ -14,6 +15,7 @@ export interface AgentCardProps {
   /** Editing agents (incl. their MCP servers + skills) is admin-only. */
   canEdit: boolean;
   editLabel?: string;
+  onLearnedPromptCleared?: () => void;
 }
 
 export function AgentCard({
@@ -23,6 +25,7 @@ export function AgentCard({
   isDeleting,
   canEdit,
   editLabel,
+  onLearnedPromptCleared,
 }: AgentCardProps) {
   const identity = getAgentIdentity(role.base_role);
   const mcpCount = role.mcp_servers?.length ?? 0;
@@ -70,7 +73,7 @@ export function AgentCard({
           <span className={cn("text-[11px] font-medium", identity.color)}>
             {identity.label}
           </span>
-          {role.learned_prompt && (
+          {role.learned_prompt !== null && (
             <span className="shrink-0 rounded-full w-2 h-2 bg-blue-500" title="Learned prompt active" />
           )}
           {role.is_default && (
@@ -102,6 +105,13 @@ export function AgentCard({
               </span>
             )}
           </div>
+        )}
+        {role.learned_prompt !== null && (
+          <LearnedPromptSection
+            role={role}
+            canClear={canEdit}
+            onCleared={onLearnedPromptCleared}
+          />
         )}
       </div>
     </div>
