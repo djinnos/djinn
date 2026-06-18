@@ -54,6 +54,54 @@ pub fn required_sections(note_type: &str) -> &'static [&'static str] {
     }
 }
 
+fn paragraph_count(content: &str, required: &[&str]) -> usize {
+    let blank_line_blocks = content
+        .split("\n\n")
+        .filter(|block| !block.trim().is_empty())
+        .count();
+
+    // LLM extraction often emits ADR-054 sections as compact Markdown with one
+    // body line per `##` heading rather than blank lines between every section.
+    // Treat those section bodies as paragraph-equivalent for durability density,
+    // while still letting collapsed heading-only content (for example two actual
+    // paragraphs total) fail the low-paragraph check.
+    let section_body_blocks = section_body_count(content, required);
+
+    blank_line_blocks.max(section_body_blocks)
+}
+
+fn section_body_count(content: &str, required: &[&str]) -> usize {
+    if required.is_empty() {
+        return 0;
+    }
+
+    let required_headings = required
+        .iter()
+        .map(|section| format!("## {section}"))
+        .collect::<Vec<_>>();
+    let mut count = 0usize;
+    let mut current_has_body = false;
+    let mut in_required_section = false;
+
+    for line in content.lines().map(str::trim) {
+        if required_headings.iter().any(|heading| line == heading) {
+            if in_required_section && current_has_body {
+                count += 1;
+            }
+            in_required_section = true;
+            current_has_body = false;
+        } else if in_required_section && !line.is_empty() && !line.starts_with("## ") {
+            current_has_body = true;
+        }
+    }
+
+    if in_required_section && current_has_body {
+        count += 1;
+    }
+
+    count
+}
+
 /// Return the required sections that are absent *or out of canonical order* in
 /// `content`. Sections are matched as exact level-two markdown headings
 /// (`## {section}`); a section is reported missing unless every earlier required
@@ -124,10 +172,7 @@ pub fn assess_note_quality(note_type: &str, content: &str) -> NoteQualityAssessm
     let required = required_sections(note_type);
     let missing_sections = missing_required_sections(content, required);
     let content_len = content.trim().chars().count();
-    let paragraph_count = content
-        .split("\n\n")
-        .filter(|block| !block.trim().is_empty())
-        .count();
+    let paragraph_count = paragraph_count(content, required);
 
     let mut reasons = Vec::new();
     if required.is_empty() {
@@ -168,18 +213,35 @@ mod tests {
     use super::*;
 
     fn all_case_sections() -> String {
-        [
-            "## Situation",
-            "## Constraint",
-            "## Approach taken",
-            "## Result",
-            "## Why it worked / failed",
-            "## Reusable lesson",
-            "## Related",
-        ]
-        .join("\n\nDurable body paragraph with enough substance to pass the gate. ")
-            + "\n\nAdditional context paragraph for density.\n\n"
-            + "Closing rationale that explains why the lesson generalizes beyond this task."
+        r#"## Situation
+
+Durable body paragraph with enough substance to pass the gate.
+
+## Constraint
+
+Durable constraint paragraph that explains the reusable boundary.
+
+## Approach taken
+
+Durable approach paragraph that captures the action in a reusable way.
+
+## Result
+
+Durable result paragraph that shows the outcome future work can compare.
+
+## Why it worked / failed
+
+Durable rationale paragraph that explains why the approach transferred.
+
+## Reusable lesson
+
+Durable lesson paragraph that generalizes beyond this task.
+
+## Related
+
+- durable extraction
+- ADR-054"#
+            .to_string()
     }
 
     #[test]
