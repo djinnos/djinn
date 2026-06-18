@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ServiceBadge } from "@/components/UserConfigDialog";
 import type { AutomationModel } from "@/api/automationConfig";
 import { render, screen } from "@/test/test-utils";
 
@@ -50,13 +49,5 @@ describe("ModelSection", () => {
     expect(screen.getByText("OpenAI")).toBeInTheDocument();
     expect(screen.getByDisplayValue("3")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add model" })).toBeInTheDocument();
-  });
-});
-
-describe("ServiceBadge", () => {
-  it("remains available from the UserConfigDialog facade", () => {
-    render(<ServiceBadge />);
-
-    expect(screen.getByText("Service")).toBeInTheDocument();
   });
 });

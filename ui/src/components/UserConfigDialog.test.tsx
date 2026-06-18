@@ -59,7 +59,6 @@ const automationUser: OrgUser = {
   is_member_of_org: true,
   is_admin: false,
   role: "engineer",
-  is_service: true,
   last_seen_at: null,
 };
 
