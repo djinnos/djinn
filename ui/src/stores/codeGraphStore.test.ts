@@ -232,6 +232,24 @@ describe("codeGraphStore", () => {
     });
   });
 
+  describe("layoutMode", () => {
+    it("defaults to force", () => {
+      expect(useCodeGraphStore.getState().layoutMode).toBe("force");
+    });
+
+    it("setLayoutMode updates and persists the mode", () => {
+      useCodeGraphStore.getState().setLayoutMode("sequential");
+      expect(useCodeGraphStore.getState().layoutMode).toBe("sequential");
+      expect(sessionStorage.getItem("codegraph.layoutMode")).toBe("sequential");
+      useCodeGraphStore.getState().setLayoutMode("radial");
+      expect(useCodeGraphStore.getState().layoutMode).toBe("radial");
+      expect(sessionStorage.getItem("codegraph.layoutMode")).toBe("radial");
+      useCodeGraphStore.getState().setLayoutMode("force");
+      expect(useCodeGraphStore.getState().layoutMode).toBe("force");
+      expect(sessionStorage.getItem("codegraph.layoutMode")).toBe("force");
+    });
+  });
+
   describe("expandedCommunityIds", () => {
     it("defaults to an empty set", () => {
       expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(0);
@@ -284,6 +302,7 @@ describe("codeGraphStore", () => {
       s.setHover("foo");
       s.toggleEdgeKind("Implements");
       s.setDepthFilter(1);
+      s.setLayoutMode("radial");
       s.expandCommunity("auth");
 
       useCodeGraphStore.getState().reset();
@@ -298,6 +317,7 @@ describe("codeGraphStore", () => {
       expect(after.edgeKindFilters.Reads).toBe(false);
       expect(after.edgeKindFilters.FileReference).toBe(false);
       expect(after.colorMode).toBe("topology");
+      expect(after.layoutMode).toBe("force");
       expect(after.complexityAvailable).toBe(false);
       expect(after.semanticZoomMode).toBe("auto");
       expect(after.expandedCommunityIds.size).toBe(0);

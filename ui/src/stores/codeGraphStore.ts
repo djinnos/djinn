@@ -126,6 +126,32 @@ export const DEFAULT_DEPTH = MAX_DEPTH;
 export type ColorMode = "topology" | "complexity";
 export const DEFAULT_COLOR_MODE: ColorMode = "topology";
 
+/** Layout algorithm used to seed the code graph canvas. */
+export type LayoutMode = "force" | "sequential" | "radial";
+export const DEFAULT_LAYOUT_MODE: LayoutMode = "force";
+const LAYOUT_MODE_STORAGE_KEY = "codegraph.layoutMode";
+
+function isLayoutMode(value: string | null): value is LayoutMode {
+  return value === "force" || value === "sequential" || value === "radial";
+}
+
+function readStoredLayoutMode(): LayoutMode {
+  try {
+    const stored = globalThis.sessionStorage?.getItem(LAYOUT_MODE_STORAGE_KEY);
+    return isLayoutMode(stored) ? stored : DEFAULT_LAYOUT_MODE;
+  } catch {
+    return DEFAULT_LAYOUT_MODE;
+  }
+}
+
+function persistLayoutMode(mode: LayoutMode) {
+  try {
+    globalThis.sessionStorage?.setItem(LAYOUT_MODE_STORAGE_KEY, mode);
+  } catch {
+    // sessionStorage can be unavailable in non-browser renderers.
+  }
+}
+
 /**
  * Semantic zoom mode for community-collapse behaviour.
  *   - `"auto"` (default) — the canvas decides `symbol` vs `community`
@@ -156,6 +182,8 @@ export interface CodeGraphHighlightState {
   depthFilter: number;
   /** Iter 30: see {@link ColorMode}. Default `"topology"`. */
   colorMode: ColorMode;
+  /** Layout algorithm for node positioning. Default `"force"`. */
+  layoutMode: LayoutMode;
   /**
    * Iter 30: `true` when the current snapshot has at least one function
    * node with a populated `cognitive` value. Drives the toolbar's
@@ -198,6 +226,8 @@ export interface CodeGraphHighlightActions {
   setDepthFilter: (depth: number) => void;
   /** Iter 30: switch heatmap mode. */
   setColorMode: (mode: ColorMode) => void;
+  /** Switch graph layout mode (force/sequential/radial). */
+  setLayoutMode: (mode: LayoutMode) => void;
   /** Iter 30: canvas reports whether complexity data is present in the snapshot. */
   setComplexityAvailable: (available: boolean) => void;
   /** Set the semantic zoom mode override (auto/symbol/community). */
@@ -246,6 +276,7 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   hideTests: false,
   depthFilter: DEFAULT_DEPTH,
   colorMode: DEFAULT_COLOR_MODE,
+  layoutMode: readStoredLayoutMode(),
   complexityAvailable: false,
   semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
   expandedCommunityIds: new Set<string>(),
@@ -335,6 +366,11 @@ export const useCodeGraphStore = create<
     set({ colorMode: mode });
   },
 
+  setLayoutMode: (mode) => {
+    persistLayoutMode(mode);
+    set({ layoutMode: mode });
+  },
+
   setComplexityAvailable: (available) => {
     set((state) => {
       // Auto-snap the mode back to topology if complexity becomes
@@ -384,6 +420,7 @@ export const useCodeGraphStore = create<
   },
 
   reset: () => {
+    persistLayoutMode(DEFAULT_LAYOUT_MODE);
     set((state) => ({
       ...INITIAL_STATE,
       selectedWorkspaceSlug: state.selectedWorkspaceSlug,
@@ -394,6 +431,7 @@ export const useCodeGraphStore = create<
       nodeKindFilters: defaultNodeKindFilters(),
       symbolKindFilters: defaultSymbolKindFilters(),
       colorMode: DEFAULT_COLOR_MODE,
+      layoutMode: DEFAULT_LAYOUT_MODE,
       complexityAvailable: false,
       semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
       expandedCommunityIds: new Set(),
@@ -430,3 +468,6 @@ export const selectSymbolKindFilters = (
 export const selectDepthFilter = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
 ) => s.depthFilter;
+export const selectLayoutMode = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.layoutMode;
