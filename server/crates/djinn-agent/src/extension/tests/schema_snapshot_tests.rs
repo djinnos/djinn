@@ -260,6 +260,45 @@ fn code_graph_schema_embeds_workflow_guidance() {
 }
 
 #[test]
+fn agent_amend_prompt_schema_embeds_revived_loop_contract() {
+    let schema = serde_json::to_value(tool_role_amend_prompt()).expect("serialize tool schema");
+    let description = schema
+        .get("description")
+        .and_then(|value| value.as_str())
+        .expect("agent_amend_prompt has description");
+
+    for required in [
+        "Planner-owned",
+        "evidence-based",
+        "machine-managed learned_prompt",
+        "learned_prompt_history",
+        "system_prompt_extensions",
+        "Only specialist worker/reviewer agents are eligible",
+        "default roles",
+        "metrics_snapshot when available",
+    ] {
+        assert!(
+            description.contains(required),
+            "agent_amend_prompt description should mention {required}: {description}"
+        );
+    }
+
+    let agent_id_description = schema
+        .pointer("/inputSchema/properties/agent_id/description")
+        .and_then(|value| value.as_str())
+        .expect("agent_id property has description");
+    assert!(agent_id_description.contains("Specialist worker/reviewer"));
+    assert!(agent_id_description.contains("defaults"));
+
+    let metrics_description = schema
+        .pointer("/inputSchema/properties/metrics_snapshot/description")
+        .and_then(|value| value.as_str())
+        .expect("metrics_snapshot property has description");
+    assert!(metrics_description.contains("Optional JSON string"));
+    assert!(metrics_description.contains("Planner should provide it when available"));
+}
+
+#[test]
 fn proposal_ac_set_schema_remains_status_only() {
     let schema = serde_json::to_value(shared_schemas::tool_proposal_ac_set())
         .expect("serialize proposal_ac_set schema");

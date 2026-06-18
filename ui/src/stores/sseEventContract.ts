@@ -63,7 +63,6 @@ export const SERVER_SSE_EVENT_NAMES = [
   "task.created",
   "task.updated",
   "task.deleted",
-  "verification.step",
   "lagged",
   "ping",
 ] as const;
@@ -152,7 +151,6 @@ export const SERVER_SSE_EVENT_DECISIONS = {
   "task.created": { kind: "dispatch", eventType: "task_created" },
   "task.updated": { kind: "dispatch", eventType: "task_updated" },
   "task.deleted": { kind: "dispatch", eventType: "task_deleted" },
-  "verification.step": { kind: "dispatch", eventType: "verification_step" },
   lagged: { kind: "hydrate", reason: "lagged" },
   ping: { kind: "liveness", reason: "ping" },
 } as const satisfies ServerSSEEventDecisionMap;

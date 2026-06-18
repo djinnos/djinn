@@ -26,6 +26,7 @@ export const BASE_ROLES: BaseRole[] = ["worker", "reviewer", "lead", "planner", 
 export interface AgentFormProps {
   initial?: Partial<Omit<CreateAgentRequest, "project_id">>;
   fixedBaseRole?: BaseRole;
+  isDefaultEdit?: boolean;
   submitLabel: string;
   isBusy: boolean;
   availableMcpServers: AvailableMcpServer[];
@@ -34,9 +35,29 @@ export interface AgentFormProps {
   onCancel: () => void;
 }
 
+function ReadOnlyMetadata({
+  label,
+  value,
+  className,
+}: {
+  label: string;
+  value: string;
+  className?: string;
+}) {
+  return (
+    <div className={cn("space-y-1.5 min-w-40", className)}>
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-foreground">
+        {value}
+      </div>
+    </div>
+  );
+}
+
 export function AgentForm({
   initial,
   fixedBaseRole,
+  isDefaultEdit = false,
   submitLabel,
   isBusy,
   availableMcpServers,
@@ -54,9 +75,14 @@ export function AgentForm({
   );
   const [mcpServers, setMcpServers] = useState<string[]>(initial?.mcp_servers ?? []);
   const [skills, setSkills] = useState<string[]>(initial?.skills ?? []);
-  const [verificationCommand, setVerificationCommand] = useState(
-    initial?.verification_command ?? "",
-  );
+  const [verificationCommand, setVerificationCommand] = useState(initial?.verification_command ?? "");
+
+  let formTitle = "New specialist";
+  if (isDefaultEdit) {
+    formTitle = `Edit default ${BASE_ROLE_LABELS[baseRole]} instructions`;
+  } else if (initial?.name) {
+    formTitle = `Edit "${initial.name}"`;
+  }
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -87,21 +113,41 @@ export function AgentForm({
       <div className="shrink-0 border-b border-border px-6 py-4 space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-lg font-semibold text-foreground">
-            {initial?.name ? `Edit "${initial.name}"` : "New specialist"}
+            {formTitle}
           </h3>
           <div className="flex gap-2">
             <Button type="button" variant="outline" size="sm" onClick={onCancel} disabled={isBusy}>
               Cancel
             </Button>
-            <Button type="submit" size="sm" disabled={isBusy || !name.trim()}>
+            <Button type="submit" size="sm" disabled={isBusy || (!isDefaultEdit && !name.trim())}>
               {isBusy ? "Saving..." : submitLabel}
             </Button>
           </div>
         </div>
 
+        {isDefaultEdit && (
+          <p className="text-sm text-muted-foreground">
+            Update the human-authored instructions and safe configuration used when Djinn
+            automatically dispatches this project default. Identity fields are immutable.
+          </p>
+        )}
+
         {/* Compact metadata row */}
         <div className="flex flex-wrap items-end gap-4">
-          {!fixedBaseRole && (
+          {isDefaultEdit ? (
+            <>
+              <ReadOnlyMetadata label="Name" value={initial?.name ?? name} />
+              <ReadOnlyMetadata label="Base role" value={BASE_ROLE_LABELS[baseRole]} />
+              <ReadOnlyMetadata label="Default status" value="Project default" />
+              {description && (
+                <ReadOnlyMetadata
+                  label="Description"
+                  value={description}
+                  className="min-w-72"
+                />
+              )}
+            </>
+          ) : !fixedBaseRole ? (
             <div className="space-y-1.5">
               <Label className="text-xs text-muted-foreground">Base role</Label>
               <div className="flex gap-1.5">
@@ -122,33 +168,37 @@ export function AgentForm({
                 ))}
               </div>
             </div>
+          ) : null}
+
+          {!isDefaultEdit && (
+            <>
+              <div className="space-y-1.5 flex-1 min-w-48">
+                <Label htmlFor="role-name" className="text-xs text-muted-foreground">
+                  Name
+                </Label>
+                <Input
+                  id="role-name"
+                  autoFocus
+                  placeholder="e.g. Senior Backend Worker"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                />
+              </div>
+
+              <div className="space-y-1.5 flex-1 min-w-48">
+                <Label htmlFor="role-description" className="text-xs text-muted-foreground">
+                  Description
+                </Label>
+                <Input
+                  id="role-description"
+                  placeholder="Short description of what this specialist does"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                />
+              </div>
+            </>
           )}
-
-          <div className="space-y-1.5 flex-1 min-w-48">
-            <Label htmlFor="role-name" className="text-xs text-muted-foreground">
-              Name
-            </Label>
-            <Input
-              id="role-name"
-              autoFocus
-              placeholder="e.g. Senior Backend Worker"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              required
-            />
-          </div>
-
-          <div className="space-y-1.5 flex-1 min-w-48">
-            <Label htmlFor="role-description" className="text-xs text-muted-foreground">
-              Description
-            </Label>
-            <Input
-              id="role-description"
-              placeholder="Short description of what this specialist does"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-            />
-          </div>
         </div>
       </div>
 
@@ -157,7 +207,7 @@ export function AgentForm({
         {/* System prompt extensions */}
         <div className="space-y-2">
           <Label htmlFor="role-extensions" className="text-xs text-muted-foreground block">
-            System prompt extensions
+            {isDefaultEdit ? "Default instructions" : "System prompt extensions"}
           </Label>
           <Textarea
             id="role-extensions"
@@ -297,19 +347,15 @@ export function AgentForm({
 
         {/* Verification command */}
         <div className="space-y-2">
-          <Label htmlFor="role-verification" className="text-xs text-muted-foreground block">
+          <Label htmlFor="role-verification-command" className="text-xs text-muted-foreground block">
             Verification command
           </Label>
           <Input
-            id="role-verification"
-            placeholder="e.g. cargo test -- --nocapture"
+            id="role-verification-command"
+            placeholder="e.g. pnpm test"
             value={verificationCommand}
             onChange={(e) => setVerificationCommand(e.target.value)}
-            className="font-mono text-sm"
           />
-          <p className="text-xs text-muted-foreground/60">
-            Custom command to verify this agent's work. Leave empty to use project defaults.
-          </p>
         </div>
       </div>
     </form>
