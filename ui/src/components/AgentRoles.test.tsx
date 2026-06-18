@@ -70,7 +70,6 @@ const makeAgent = (overrides: Partial<Agent>): Agent => ({
   mcp_servers: [],
   skills: [],
   model_preference: null,
-  verification_command: null,
   is_default: false,
   learned_prompt: null,
   ...overrides,
@@ -211,7 +210,6 @@ describe("AgentRoles", () => {
       system_prompt_extensions: ["Prefer accessible queries."],
       mcp_servers: ["github"],
       skills: ["testing-library"],
-      verification_command: "pnpm test AgentRoles.test.tsx",
     });
 
     vi.mocked(fetchAgents).mockResolvedValue([defaultWorker]);
@@ -230,7 +228,6 @@ describe("AgentRoles", () => {
     await user.type(screen.getByLabelText("Name"), "Frontend Reviewer");
     await user.type(screen.getByLabelText("Description"), "Reviews React UI changes");
     await user.type(screen.getByLabelText("System prompt extensions"), "Prefer accessible queries.");
-    await user.type(screen.getByLabelText("Verification command"), "pnpm test AgentRoles.test.tsx");
 
     await waitFor(() => {
       expect(screen.getByRole("option", { name: "github (stdio)" })).toBeInTheDocument();
@@ -254,7 +251,6 @@ describe("AgentRoles", () => {
         system_prompt_extensions: ["Prefer accessible queries."],
         mcp_servers: ["github"],
         skills: ["testing-library"],
-        verification_command: "pnpm test AgentRoles.test.tsx",
       });
     });
 
@@ -270,7 +266,6 @@ describe("AgentRoles", () => {
       name: "Careful Reviewer",
       description: "Reviews high-risk backend changes",
       skills: ["testing-library"],
-      verification_command: "pnpm test -- AgentRoles",
     });
 
     render(<AgentRoles />);
@@ -284,8 +279,6 @@ describe("AgentRoles", () => {
     await user.type(screen.getByLabelText("Name"), "Careful Reviewer");
     await user.clear(screen.getByLabelText("Description"));
     await user.type(screen.getByLabelText("Description"), "Reviews high-risk backend changes");
-    await user.clear(screen.getByLabelText("Verification command"));
-    await user.type(screen.getByLabelText("Verification command"), "pnpm test -- AgentRoles");
 
     await user.click(screen.getByRole("button", { name: "Save" }));
 
@@ -296,7 +289,6 @@ describe("AgentRoles", () => {
         system_prompt_extensions: ["Check migrations.", "Check concurrency."],
         mcp_servers: ["github", "postgres"],
         skills: ["rust-review", "testing-library"],
-        verification_command: "pnpm test -- AgentRoles",
       });
     });
 

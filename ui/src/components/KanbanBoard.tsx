@@ -89,7 +89,6 @@ function taskToColumnKey(task: Task): ColumnKey | null {
     return "pr_ready";
   if (
     task.status === "in_progress" ||
-    task.status === "verifying" ||
     task.status === "needs_task_review" ||
     task.status === "in_task_review" ||
     task.status === "needs_lead_intervention" ||

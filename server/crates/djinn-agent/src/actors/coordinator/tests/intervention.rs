@@ -321,6 +321,7 @@ impl InterventionChaosHarness {
                         agent_type: "worker",
                         metadata_json: None,
                         task_run_id: None,
+                        pricing: None,
                     })
                     .await
                     .unwrap()
