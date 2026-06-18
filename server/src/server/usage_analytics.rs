@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use crate::server::AppState;
 use crate::server::auth::require_admin;
 use djinn_db::{
-    BreakdownRow, DailySeriesRow, GroupDimension, UsageAnalyticsQuery, UsageAnalyticsRepository,
-    UsageAnalyticsResult, UsageTotals,
+    BreakdownRow, DailySeriesRow, GroupDimension, ModelEffectivenessRow, ProjectModelMatrixRow,
+    UsageAnalyticsQuery, UsageAnalyticsRepository, UsageAnalyticsResult, UsageTotals,
 };
 
 pub(super) fn router() -> Router<AppState> {
@@ -500,24 +500,51 @@ fn rollup_breakdown(
         .collect())
 }
 
-/// Per-model effectiveness row.  Computed over worker sessions only in the
-/// follow-up effectiveness task (0d3p); left as an empty placeholder here so
-/// the response shape is stable for the frontend.
+/// Per-model effectiveness row.  Computed over worker sessions only.
+///
+/// Completed-task attribution uses shared-credit: every model that ran at
+/// least one worker session on a completed task receives credit for that task.
+/// The `completed_task_count` field reflects this shared-credit semantics;
+/// UI code should label it accordingly (e.g. "Tasks (shared credit)").
 #[derive(Serialize)]
 struct ModelEffectivenessDto {
     model_id: String,
     sessions: i64,
+    /// Aggregate spend in USD. NULL when all worker sessions for this model
+    /// used unpriced models.
     spend_usd: Option<f64>,
     tokens_in: i64,
     tokens_out: i64,
+    /// Shared-credit completed-task count.
     completed_task_count: i64,
     success_rate: Option<f64>,
+    avg_reopens: Option<f64>,
     verification_pass_rate: Option<f64>,
+    /// Cost per completed task. NULL when no completed tasks or unpriced.
     cost_per_completed_task: Option<f64>,
+    /// Average total tokens per completed task.
+    tokens_per_task: Option<f64>,
 }
 
-/// Project × model matrix entry.  Populated by the follow-up effectiveness
-/// task (0d3p); empty placeholder here.
+impl From<ModelEffectivenessRow> for ModelEffectivenessDto {
+    fn from(r: ModelEffectivenessRow) -> Self {
+        Self {
+            model_id: r.model_id,
+            sessions: r.sessions,
+            spend_usd: r.spend_usd,
+            tokens_in: r.tokens_in,
+            tokens_out: r.tokens_out,
+            completed_task_count: r.shared_credit_completed_task_count,
+            success_rate: r.success_rate,
+            avg_reopens: r.avg_reopens,
+            verification_pass_rate: r.verification_pass_rate,
+            cost_per_completed_task: r.cost_per_completed_task,
+            tokens_per_task: r.tokens_per_task,
+        }
+    }
+}
+
+/// Project × model matrix entry for frontend consumption.
 #[derive(Serialize)]
 struct ProjectModelMatrixDto {
     project_id: String,
@@ -526,6 +553,19 @@ struct ProjectModelMatrixDto {
     spend_usd: Option<f64>,
     tokens_in: i64,
     tokens_out: i64,
+}
+
+impl From<ProjectModelMatrixRow> for ProjectModelMatrixDto {
+    fn from(r: ProjectModelMatrixRow) -> Self {
+        Self {
+            project_id: r.project_id,
+            model_id: r.model_id,
+            sessions: r.sessions,
+            spend_usd: r.spend_usd,
+            tokens_in: r.tokens_in,
+            tokens_out: r.tokens_out,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -540,9 +580,9 @@ struct UsageResponse {
     series: Vec<SeriesPointDto>,
     /// Breakdown rows grouped by the requested dimension and period.
     breakdown: Vec<BreakdownPointDto>,
-    /// Per-model effectiveness metrics (worker-scoped).  Placeholder until 0d3p.
+    /// Per-model effectiveness metrics (worker-scoped, shared-credit attribution).
     model_effectiveness: Vec<ModelEffectivenessDto>,
-    /// Project × model spend/token matrix.  Placeholder until 0d3p.
+    /// Project × model spend/token matrix.
     project_model_matrix: Vec<ProjectModelMatrixDto>,
 }
 
@@ -551,6 +591,8 @@ impl UsageResponse {
         result: UsageAnalyticsResult,
         previous_totals: UsageTotals,
         granularity: Granularity,
+        effectiveness_rows: Vec<ModelEffectivenessRow>,
+        matrix_rows: Vec<ProjectModelMatrixRow>,
     ) -> Result<Self, (StatusCode, String)> {
         let UsageAnalyticsResult {
             totals,
@@ -563,9 +605,8 @@ impl UsageResponse {
             previous_totals: previous_totals.into(),
             series: rollup_series(series, granularity)?,
             breakdown: rollup_breakdown(breakdown, granularity)?,
-            // model_effectiveness / project_model_matrix: follow-up task 0d3p.
-            model_effectiveness: Vec::new(),
-            project_model_matrix: Vec::new(),
+            model_effectiveness: effectiveness_rows.into_iter().map(Into::into).collect(),
+            project_model_matrix: matrix_rows.into_iter().map(Into::into).collect(),
         })
     }
 }
@@ -595,10 +636,18 @@ async fn usage_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Model effectiveness (worker-scoped) and project × model matrix.
+    let (effectiveness_rows, matrix_rows) = repo
+        .query_effectiveness(&query)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     Ok(Json(UsageResponse::from_results(
         result,
         previous.totals,
         granularity,
+        effectiveness_rows,
+        matrix_rows,
     )?))
 }
 
@@ -767,8 +816,14 @@ mod tests {
     #[test]
     fn response_shape_has_all_fields() {
         let result = UsageAnalyticsResult::default();
-        let resp =
-            UsageResponse::from_results(result, UsageTotals::default(), Granularity::Day).unwrap();
+        let resp = UsageResponse::from_results(
+            result,
+            UsageTotals::default(),
+            Granularity::Day,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
         let json = serde_json::to_value(&resp).unwrap();
         for field in [
             "totals",
@@ -784,6 +839,112 @@ mod tests {
         assert!(json.get("series").unwrap().is_array());
         assert!(json.get("model_effectiveness").unwrap().is_array());
         assert!(json.get("project_model_matrix").unwrap().is_array());
+    }
+
+    #[test]
+    fn model_effectiveness_dto_has_all_metric_fields() {
+        // Verify that a ModelEffectivenessDto serialises with all required
+        // metric fields, including shared-credit completed_task_count,
+        // avg_reopens, and tokens_per_task.
+        let row = ModelEffectivenessRow {
+            model_id: "test-model".into(),
+            sessions: 10,
+            spend_usd: Some(2.50),
+            tokens_in: 1000,
+            tokens_out: 500,
+            shared_credit_completed_task_count: 3,
+            success_rate: Some(0.67),
+            avg_reopens: Some(0.5),
+            verification_pass_rate: Some(0.80),
+            cost_per_completed_task: Some(0.83),
+            tokens_per_task: Some(500.0),
+        };
+        let dto: ModelEffectivenessDto = row.into();
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(
+            json.get("model_id").unwrap().as_str().unwrap(),
+            "test-model"
+        );
+        assert_eq!(json.get("sessions").unwrap().as_i64().unwrap(), 10);
+        assert!((json.get("spend_usd").unwrap().as_f64().unwrap() - 2.50).abs() < 0.01);
+        assert_eq!(json.get("tokens_in").unwrap().as_i64().unwrap(), 1000);
+        assert_eq!(json.get("tokens_out").unwrap().as_i64().unwrap(), 500);
+        // Shared-credit completed task count — field name documents the
+        // attribution semantics so the UI can label it accurately.
+        assert_eq!(
+            json.get("completed_task_count").unwrap().as_i64().unwrap(),
+            3
+        );
+        assert!((json.get("success_rate").unwrap().as_f64().unwrap() - 0.67).abs() < 0.01);
+        assert!((json.get("avg_reopens").unwrap().as_f64().unwrap() - 0.5).abs() < 0.01);
+        assert!(
+            (json
+                .get("verification_pass_rate")
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                - 0.80)
+                .abs()
+                < 0.01
+        );
+        assert!(
+            (json
+                .get("cost_per_completed_task")
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                - 0.83)
+                .abs()
+                < 0.01
+        );
+        assert!((json.get("tokens_per_task").unwrap().as_f64().unwrap() - 500.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn model_effectiveness_dto_preserves_null_spend() {
+        // When all worker sessions use unpriced models, spend and
+        // cost_per_completed_task must be NULL (not zero).
+        let row = ModelEffectivenessRow {
+            model_id: "unpriced-model".into(),
+            sessions: 5,
+            spend_usd: None,
+            tokens_in: 200,
+            tokens_out: 100,
+            shared_credit_completed_task_count: 2,
+            success_rate: Some(1.0),
+            avg_reopens: Some(0.0),
+            verification_pass_rate: Some(1.0),
+            cost_per_completed_task: None,
+            tokens_per_task: Some(150.0),
+        };
+        let dto: ModelEffectivenessDto = row.into();
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert!(json.get("spend_usd").unwrap().is_null());
+        assert!(json.get("cost_per_completed_task").unwrap().is_null());
+        assert!(!json.get("tokens_per_task").unwrap().is_null());
+    }
+
+    #[test]
+    fn project_model_matrix_dto_serialises_correctly() {
+        let row = ProjectModelMatrixRow {
+            project_id: "proj-1".into(),
+            model_id: "model-a".into(),
+            sessions: 7,
+            spend_usd: Some(1.23),
+            tokens_in: 300,
+            tokens_out: 150,
+        };
+        let dto: ProjectModelMatrixDto = row.into();
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json.get("project_id").unwrap().as_str().unwrap(), "proj-1");
+        assert_eq!(json.get("model_id").unwrap().as_str().unwrap(), "model-a");
+        assert_eq!(json.get("sessions").unwrap().as_i64().unwrap(), 7);
+        assert!((json.get("spend_usd").unwrap().as_f64().unwrap() - 1.23).abs() < 0.01);
+        assert_eq!(json.get("tokens_in").unwrap().as_i64().unwrap(), 300);
+        assert_eq!(json.get("tokens_out").unwrap().as_i64().unwrap(), 150);
     }
 
     #[test]
@@ -908,6 +1069,8 @@ mod tests {
             UsageAnalyticsResult::default(),
             previous_totals,
             Granularity::Day,
+            Vec::new(),
+            Vec::new(),
         )
         .unwrap();
         assert_eq!(resp.previous_totals.session_count, 2);
