@@ -756,24 +756,40 @@ async fn warm_cargo_target_base(
 
     let commands = &policy.warm_commands;
     if commands.is_empty() {
-        info!(project_id, "cargo warm: no warm commands in policy; skipping");
+        info!(
+            project_id,
+            "cargo warm: no warm commands in policy; skipping"
+        );
         return;
     }
 
     // clippy is the heavier of verification's two passes and produces the same
     // check artifacts; fall back to a plain build if clippy is unavailable.
+    let feature_flags = policy.features();
+    let clippy_args: Vec<String> = commands[0]
+        .args
+        .iter()
+        .cloned()
+        .chain(feature_flags.iter().cloned())
+        .collect();
     let clippy_ok = run_cargo_warm_step(
         project_id,
         &workspace_dir,
-        &commands[0].args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        &clippy_args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
         &commands[0].label,
     )
     .await;
     if !clippy_ok && commands.len() > 1 {
+        let build_args: Vec<String> = commands[1]
+            .args
+            .iter()
+            .cloned()
+            .chain(feature_flags.iter().cloned())
+            .collect();
         run_cargo_warm_step(
             project_id,
             &workspace_dir,
-            &commands[1].args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            &build_args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             &commands[1].label,
         )
         .await;
@@ -781,10 +797,16 @@ async fn warm_cargo_target_base(
 
     // Run remaining warm commands (e.g. test --no-run)
     for cmd in commands.iter().skip(if clippy_ok { 1 } else { 2 }) {
+        let args: Vec<String> = cmd
+            .args
+            .iter()
+            .cloned()
+            .chain(feature_flags.iter().cloned())
+            .collect();
         run_cargo_warm_step(
             project_id,
             &workspace_dir,
-            &cmd.args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             &cmd.label,
         )
         .await;
@@ -1801,8 +1823,9 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
     // lands on `<root>/server` — the exact dir verification's `cd server`
     // compiles in. Best-effort: never fails the graph warm.
     djinn_workspace::normalize_mtimes_at(&lifecycle_root).await;
-    let policy = cargo_cache_policy::resolve_cargo_cache_policy(&lifecycle_root, env_config.as_ref())
-        .unwrap_or_default();
+    let policy =
+        cargo_cache_policy::resolve_cargo_cache_policy(&lifecycle_root, env_config.as_ref())
+            .unwrap_or_default();
     warm_cargo_target_base(project_id, &lifecycle_root, &policy).await;
 
     // Architect-only warm path: this subcommand binary is dispatched
