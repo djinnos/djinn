@@ -62,7 +62,7 @@ impl IssueType {
     }
 
     /// Returns `true` for types that use the simple lifecycle
-    /// (open → in_progress → closed), skipping review phase.
+    /// (open → in_progress → closed), skipping review phases.
     pub fn uses_simple_lifecycle(&self) -> bool {
         matches!(
             self,
@@ -141,7 +141,7 @@ pub struct Task {
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub pr_url: Option<String>,
     /// JSON metadata about an active merge conflict (set by conflict transitions
-    /// and worktree rebase failures; cleared on close).
+    /// and worktree rebase failures; cleared on submit_task_review/close).
     pub merge_conflict_metadata: Option<String>,
     /// JSON array of memory note permalinks associated with this task.
     pub memory_refs: String,
@@ -252,7 +252,7 @@ pub enum TransitionAction {
     /// `open`) so the run never moved off `needs_task_review` and the post-worker
     /// submission no-op'd — the task got review-dispatched without it. This action
     /// walks `needs_task_review → in_progress` so the redo ends with a legal
-    /// submit, identical to the `NewTask` path. No AC/blocker gate
+    /// `submit_task_review`. No AC/blocker gate
     /// (the task already passed `start` once).
     ResumeWorker,
     SubmitTaskReview,
@@ -434,7 +434,7 @@ pub fn compute_transition(
             // legal from `needs_task_review`; carries no AC/blocker gate (unlike
             // `Start`) because the task already cleared those when it first
             // started. Lands at `in_progress` so the post-worker
-            // the next review — same as the `NewTask` path.
+            // `submit_task_review` walk succeeds and the task enters review.
             if *from != TaskStatus::NeedsTaskReview {
                 return bad("resume_worker is only valid from needs_task_review");
             }
@@ -580,7 +580,7 @@ pub fn compute_transition(
         TransitionAction::Escalate => {
             if !matches!(
                 from,
-                TaskStatus::Open | TaskStatus::InProgress | TaskStatus::InTaskReview
+                TaskStatus::Open | TaskStatus::InProgress | TaskStatus::InTaskReview,
             ) {
                 return bad("escalate is only valid from open, in_progress, or in_task_review");
             }
@@ -722,8 +722,8 @@ pub fn compute_transition(
 ///
 /// For `spike`, `research`, `decomposition`, and `review` task types the simple
 /// lifecycle applies: `open → in_progress → closed`.  Actions that belong only to
-/// the full worker lifecycle (task_review_*,
-/// lead_intervention_*) are rejected for these types.
+/// the full worker lifecycle (task_review_*, lead_intervention_*) are rejected
+/// for these types.
 ///
 /// All other issue types (task, feature, bug) use the full lifecycle via
 /// [`compute_transition`].
@@ -921,6 +921,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn review_response_worker_redo_walk_reaches_task_review() {
+        // Regression for the redo hop (task u4fx): a non-durable
+        // `needs_task_review` routes a worker redo. The worker pre-stage can't
+        // walk `start` (legal only from `open`), so the supervisor uses
+        // `resume_worker` to move `needs_task_review → in_progress`; the
+        // post-worker `submit_task_review` then succeeds and the task enters
+        // `needs_task_review` — ready for the reviewer dispatch.
+        let resume = compute_transition(
+            &TransitionAction::ResumeWorker,
+            &TaskStatus::NeedsTaskReview,
+            None,
+        )
+        .expect("resume_worker from needs_task_review is valid");
+        assert_eq!(resume.to_status, Some(TaskStatus::InProgress));
+
+        let submit = compute_transition(
+            &TransitionAction::SubmitTaskReview,
+            &resume.to_status.clone().expect("resume sets status"),
+            None,
+        )
+        .expect("submit_task_review from in_progress (after resume) is valid");
+        assert_eq!(submit.to_status, Some(TaskStatus::NeedsTaskReview));
     }
 
     #[test]

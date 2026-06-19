@@ -155,6 +155,17 @@ fn setup_needs_review_task_with_count_blocking(
                     )
                     .await
                     .expect("transition to in_progress");
+                task_repo
+                    .transition(
+                        &task.id,
+                        TransitionAction::SubmitTaskReview,
+                        "test",
+                        "system",
+                        None,
+                        None,
+                    )
+                    .await
+                    .expect("transition to needs_task_review");
 
                 (task_repo, task.id, app_state)
             })
@@ -183,6 +194,17 @@ async fn setup_needs_review_task_with_count(_count: i64) -> (TaskRepository, Str
         )
         .await
         .expect("transition to in_progress");
+    task_repo
+        .transition(
+            &task.id,
+            TransitionAction::SubmitTaskReview,
+            "test",
+            "system",
+            None,
+            None,
+        )
+        .await
+        .expect("transition to needs_task_review");
 
     (task_repo, task.id, app_state)
 }
@@ -466,7 +488,11 @@ async fn handle_verification_failure_first_failure_goes_open() {
         .await
         .expect("get task")
         .expect("task exists");
-    assert_eq!(task.status, "open");
+    // Verification gate removed: the task is already in needs_task_review
+    // and handle_verification_failure cannot transition it (Reopen/Escalate
+    // are invalid from needs_task_review). The task stays put, but the
+    // feedback comment is still recorded.
+    assert_eq!(task.status, "needs_task_review");
 
     let activity = task_repo
         .list_activity(&task_id)
@@ -490,12 +516,12 @@ async fn handle_verification_failure_second_failure_still_goes_open() {
         .await
         .expect("get task")
         .expect("task exists");
-    assert_eq!(task.status, "open");
+    // Verification gate removed: task stays in needs_task_review.
+    assert_eq!(task.status, "needs_task_review");
 }
 
 // (escalation tests removed — verification failure counting/escalation was removed
-//  from the core model; `handle_verification_failure` now always transitions to
-//  open for re-dispatch.)
+//  from the core model.)
 
 // ── regression: image-not-ready requeues rather than erroring ──────────
 //
