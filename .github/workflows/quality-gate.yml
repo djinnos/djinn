@@ -465,8 +465,6 @@ jobs:
 
       - name: Tests
         run: pnpm test
-        env:
-          NODE_OPTIONS: "--max-old-space-size=4096"
 
   # ── Quality gate ────────────────────────────────────────────────────
   # If you change this job's name, also update the branch-protection rule
