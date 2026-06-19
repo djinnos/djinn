@@ -12,9 +12,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use crate::test_helpers;
-use djinn_db::{
-    CreateUserAuthSession, SessionAuthRepository, UserRepository,
-};
+use djinn_db::{CreateUserAuthSession, SessionAuthRepository, UserRepository};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -82,11 +80,7 @@ async fn seed_nonadmin_session(db: &djinn_db::Database) -> String {
 
 /// Issue a GET `/api/admin/usage` request with the given query string and
 /// optional `djinn_session` cookie.
-async fn get_usage(
-    app: &axum::Router,
-    query: &str,
-    cookie: Option<&str>,
-) -> (StatusCode, Value) {
+async fn get_usage(app: &axum::Router, query: &str, cookie: Option<&str>) -> (StatusCode, Value) {
     let uri = if query.is_empty() {
         "/api/admin/usage".to_string()
     } else {
@@ -103,9 +97,8 @@ async fn get_usage(
     let status = response.status();
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&body).unwrap_or_else(|_| {
-        serde_json::json!({ "_raw": String::from_utf8_lossy(&body) })
-    });
+    let json: Value = serde_json::from_slice(&body)
+        .unwrap_or_else(|_| serde_json::json!({ "_raw": String::from_utf8_lossy(&body) }));
 
     (status, json)
 }
@@ -214,12 +207,8 @@ async fn admin_request_returns_all_six_top_level_fields() {
     let admin_cookie = seed_admin_session(&db).await;
     let app = test_helpers::create_test_app_with_db(db);
 
-    let (status, body) = get_usage(
-        &app,
-        "from=2025-01-01&to=2025-02-01",
-        Some(&admin_cookie),
-    )
-    .await;
+    let (status, body) =
+        get_usage(&app, "from=2025-01-01&to=2025-02-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::OK);
 
@@ -245,10 +234,7 @@ async fn admin_request_returns_all_six_top_level_fields() {
     assert!(body.get("breakdown").unwrap().is_array());
     assert!(body.get("model_effectiveness").unwrap().is_array());
     assert!(body.get("project_model_matrix").unwrap().is_array());
-    assert_eq!(
-        body.get("granularity").unwrap().as_str().unwrap(),
-        "day"
-    );
+    assert_eq!(body.get("granularity").unwrap().as_str().unwrap(), "day");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -257,12 +243,8 @@ async fn totals_and_previous_totals_contain_expected_scalar_fields() {
     let admin_cookie = seed_admin_session(&db).await;
     let app = test_helpers::create_test_app_with_db(db);
 
-    let (status, body) = get_usage(
-        &app,
-        "from=2025-01-01&to=2025-02-01",
-        Some(&admin_cookie),
-    )
-    .await;
+    let (status, body) =
+        get_usage(&app, "from=2025-01-01&to=2025-02-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::OK);
 
@@ -317,10 +299,7 @@ async fn granularity_month_is_accepted_and_reflected_in_response() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body.get("granularity").unwrap().as_str().unwrap(),
-        "month"
-    );
+    assert_eq!(body.get("granularity").unwrap().as_str().unwrap(), "month");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -334,9 +313,45 @@ async fn weekly_rollup_and_previous_window_with_seeded_data() {
     // Seed sessions across two weeks:
     //   Window (2025-03-10..2025-03-17): 2 sessions
     //   Previous window (2025-03-03..2025-03-10): 1 session
-    seed_session_row(&db, "proj-rollup", "model-a", "worker", "2025-03-11T10:00:00Z", 100, 50, 10, 5, Some(0.50)).await;
-    seed_session_row(&db, "proj-rollup", "model-a", "worker", "2025-03-12T10:00:00Z", 200, 100, 20, 10, Some(1.00)).await;
-    seed_session_row(&db, "proj-rollup", "model-a", "worker", "2025-03-05T10:00:00Z", 300, 150, 30, 15, Some(1.50)).await;
+    seed_session_row(
+        &db,
+        "proj-rollup",
+        "model-a",
+        "worker",
+        "2025-03-11T10:00:00Z",
+        100,
+        50,
+        10,
+        5,
+        Some(0.50),
+    )
+    .await;
+    seed_session_row(
+        &db,
+        "proj-rollup",
+        "model-a",
+        "worker",
+        "2025-03-12T10:00:00Z",
+        200,
+        100,
+        20,
+        10,
+        Some(1.00),
+    )
+    .await;
+    seed_session_row(
+        &db,
+        "proj-rollup",
+        "model-a",
+        "worker",
+        "2025-03-05T10:00:00Z",
+        300,
+        150,
+        30,
+        15,
+        Some(1.50),
+    )
+    .await;
 
     let app = test_helpers::create_test_app_with_db(db);
 
@@ -385,9 +400,45 @@ async fn monthly_rollup_with_seeded_data() {
     seed_project(&db, "proj-monthly", "monthly-project").await;
 
     // Seed sessions across two months.
-    seed_session_row(&db, "proj-monthly", "model-a", "worker", "2025-01-15T10:00:00Z", 100, 50, 10, 5, Some(0.50)).await;
-    seed_session_row(&db, "proj-monthly", "model-a", "worker", "2025-01-20T10:00:00Z", 200, 100, 20, 10, Some(1.00)).await;
-    seed_session_row(&db, "proj-monthly", "model-b", "worker", "2025-02-10T10:00:00Z", 300, 150, 30, 15, Some(1.50)).await;
+    seed_session_row(
+        &db,
+        "proj-monthly",
+        "model-a",
+        "worker",
+        "2025-01-15T10:00:00Z",
+        100,
+        50,
+        10,
+        5,
+        Some(0.50),
+    )
+    .await;
+    seed_session_row(
+        &db,
+        "proj-monthly",
+        "model-a",
+        "worker",
+        "2025-01-20T10:00:00Z",
+        200,
+        100,
+        20,
+        10,
+        Some(1.00),
+    )
+    .await;
+    seed_session_row(
+        &db,
+        "proj-monthly",
+        "model-b",
+        "worker",
+        "2025-02-10T10:00:00Z",
+        300,
+        150,
+        30,
+        15,
+        Some(1.50),
+    )
+    .await;
 
     let app = test_helpers::create_test_app_with_db(db);
 
@@ -399,10 +450,7 @@ async fn monthly_rollup_with_seeded_data() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body.get("granularity").unwrap().as_str().unwrap(),
-        "month"
-    );
+    assert_eq!(body.get("granularity").unwrap().as_str().unwrap(), "month");
 
     // Totals should cover all 3 sessions.
     let totals = body.get("totals").unwrap();
@@ -443,12 +491,8 @@ async fn null_cost_fields_serialize_as_json_null() {
 
     let app = test_helpers::create_test_app_with_db(db);
 
-    let (status, body) = get_usage(
-        &app,
-        "from=2025-03-01&to=2025-04-01",
-        Some(&admin_cookie),
-    )
-    .await;
+    let (status, body) =
+        get_usage(&app, "from=2025-03-01&to=2025-04-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::OK);
 
@@ -520,12 +564,8 @@ async fn reversed_date_range_returns_400() {
     let app = test_helpers::create_test_app_with_db(db);
 
     // from >= to
-    let (status, body) = get_usage(
-        &app,
-        "from=2025-03-01&to=2025-03-01",
-        Some(&admin_cookie),
-    )
-    .await;
+    let (status, body) =
+        get_usage(&app, "from=2025-03-01&to=2025-03-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let msg = body.get("_raw").and_then(|v| v.as_str()).unwrap_or("");
@@ -541,12 +581,8 @@ async fn invalid_date_format_returns_400() {
     let admin_cookie = seed_admin_session(&db).await;
     let app = test_helpers::create_test_app_with_db(db);
 
-    let (status, body) = get_usage(
-        &app,
-        "from=not-a-date&to=2025-02-01",
-        Some(&admin_cookie),
-    )
-    .await;
+    let (status, body) =
+        get_usage(&app, "from=not-a-date&to=2025-02-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let msg = body.get("_raw").and_then(|v| v.as_str()).unwrap_or("");
@@ -562,12 +598,7 @@ async fn invalid_month_day_returns_400() {
     let admin_cookie = seed_admin_session(&db).await;
     let app = test_helpers::create_test_app_with_db(db);
 
-    let (status, _) = get_usage(
-        &app,
-        "from=2025-02-30&to=2025-03-01",
-        Some(&admin_cookie),
-    )
-    .await;
+    let (status, _) = get_usage(&app, "from=2025-02-30&to=2025-03-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
@@ -584,10 +615,7 @@ async fn omitted_query_params_apply_defaults() {
     let (status, body) = get_usage(&app, "", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body.get("granularity").unwrap().as_str().unwrap(),
-        "day"
-    );
+    assert_eq!(body.get("granularity").unwrap().as_str().unwrap(), "day");
     assert!(body.get("totals").unwrap().is_object());
 }
 
@@ -606,10 +634,6 @@ async fn all_group_by_dimensions_are_accepted() {
             Some(&admin_cookie),
         )
         .await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "group_by={dim} should be accepted"
-        );
+        assert_eq!(status, StatusCode::OK, "group_by={dim} should be accepted");
     }
 }
