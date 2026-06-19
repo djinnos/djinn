@@ -28,6 +28,7 @@ describe("GraphToolbar layout mode toggle", () => {
   });
 
   it("updates the store when a layout mode is clicked", async () => {
+    useCodeGraphStore.getState().setGraphReady(true);
     const user = userEvent.setup();
     render(<GraphToolbar />);
 
@@ -46,11 +47,21 @@ describe("GraphToolbar layout mode toggle", () => {
     );
   });
 
-  it("disables all layout mode buttons when the toolbar is disabled", () => {
-    render(<GraphToolbar disabled />);
+  it("disables all layout mode buttons when the graph is not ready", () => {
+    useCodeGraphStore.getState().setGraphReady(false);
+    render(<GraphToolbar />);
 
     expect(screen.getByTestId("layout-mode-force")).toBeDisabled();
     expect(screen.getByTestId("layout-mode-sequential")).toBeDisabled();
     expect(screen.getByTestId("layout-mode-radial")).toBeDisabled();
+  });
+
+  it("enables all layout mode buttons when the graph is ready", () => {
+    useCodeGraphStore.getState().setGraphReady(true);
+    render(<GraphToolbar />);
+
+    expect(screen.getByTestId("layout-mode-force")).not.toBeDisabled();
+    expect(screen.getByTestId("layout-mode-sequential")).not.toBeDisabled();
+    expect(screen.getByTestId("layout-mode-radial")).not.toBeDisabled();
   });
 });

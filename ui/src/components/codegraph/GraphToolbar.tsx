@@ -72,13 +72,12 @@ const SYMBOL_KIND_LABEL: Record<string, string> = {
 
 interface GraphToolbarProps {
   className?: string;
-  disabled?: boolean;
 }
 
 export function GraphToolbar({
   className,
-  disabled = false,
 }: GraphToolbarProps) {
+  const disabled = !useCodeGraphStore((s) => s.graphReady);
   const edgeKindFilters = useCodeGraphStore((s) => s.edgeKindFilters);
   const toggleEdgeKind = useCodeGraphStore((s) => s.toggleEdgeKind);
   const nodeKindFilters = useCodeGraphStore((s) => s.nodeKindFilters);
