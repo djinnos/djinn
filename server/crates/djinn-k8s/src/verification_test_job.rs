@@ -307,8 +307,13 @@ mod tests {
         );
         assert_eq!(
             envs.get("CARGO_INCREMENTAL").copied(),
-            Some("0"),
-            "warm/verify base uses sccache (incremental=0); reuse is cargo freshness + sccache"
+            Some("1"),
+            "warm/verify base uses incremental compilation (warm == verify == worker parity)"
+        );
+        assert_eq!(
+            envs.get("RUSTC_WRAPPER").copied(),
+            Some(""),
+            "verification-test must clear RUSTC_WRAPPER so incremental works"
         );
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),

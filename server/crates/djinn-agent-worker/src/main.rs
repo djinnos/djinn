@@ -876,15 +876,14 @@ async fn warm_cargo_target_base(
         project_id,
         &workspace_dir,
         &clippy_args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        &commands[0].label,
+        commands[0].label,
     )
     .await;
 
     // Run remaining warm commands (all-features clippy, default-features
-    // clippy, build fallback, etc.), skipping the first (already ran) and
-    // the build fallback (index 1) when clippy succeeded.
-    let start = if clippy_ok { 1 } else { 1 };
-    for cmd in commands.iter().skip(start) {
+    // clippy, build fallback, test --no-run, etc.), skipping the first
+    // (already ran). The build fallback is skipped when clippy succeeded.
+    for cmd in commands.iter().skip(1) {
         // Skip the build fallback if clippy already succeeded — it's only
         // needed when clippy fails.
         if !clippy_ok
@@ -907,7 +906,7 @@ async fn warm_cargo_target_base(
             project_id,
             &workspace_dir,
             &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            &cmd.label,
+            cmd.label,
         )
         .await;
     }
@@ -2042,6 +2041,12 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
     // lands on `<root>/server` — the exact dir verification's `cd server`
     // compiles in. Best-effort: never fails the graph warm.
     djinn_workspace::normalize_mtimes_at(&lifecycle_root).await;
+    // Force djinn's cache strategy (incremental-on, sccache-off) onto the cloned
+    // tree's `.cargo/config.toml` even if the project pins
+    // `rustc-wrapper = "sccache"` or `CARGO_INCREMENTAL=0 force=true` (env alone
+    // can't beat `force=true`). Warm/verify/worker must share one strategy or the
+    // warm seed is wasted; this is the warm side of that guarantee. Best-effort.
+    djinn_workspace::normalize_cargo_config_at(&lifecycle_root).await;
     let policy =
         cargo_cache_policy::resolve_cargo_cache_policy(&lifecycle_root, env_config.as_ref())
             .unwrap_or_default();
@@ -2353,6 +2358,11 @@ async fn run_verify_task(run_id: &str) -> Result<()> {
     // for cargo freshness on a fresh clone. Best-effort; never fails
     // verification.
     djinn_workspace::normalize_mtimes_at(&project_root).await;
+    // Strip any sccache wrapper / incremental force-clamp from the clone's
+    // `.cargo/config.toml` so verification compiles with the SAME incremental-on,
+    // sccache-off strategy the warm base was built with — otherwise the seed is
+    // wasted. Best-effort.
+    djinn_workspace::normalize_cargo_config_at(&project_root).await;
 
     // Resolve scoped commands + run `verify_commit` + write the terminal row.
     // Shared with the IN-POD post-task verification path so both resolve and gate
@@ -2570,6 +2580,10 @@ pub(crate) async fn run_in_pod_verification(
     //    Fresh under cargo (CARGO_TARGET_DIR already points at the worker run
     //    dir — we deliberately do NOT seed or reset it).
     djinn_workspace::normalize_mtimes_at(workspace_root).await;
+    // Same cache-strategy normalization as the separate-pod verify + warm paths:
+    // strip sccache wrapper / incremental clamp from the clone config so the
+    // in-pod verification compile matches the worker's incremental artifacts.
+    djinn_workspace::normalize_cargo_config_at(workspace_root).await;
 
     // 3. Resolve the project's target branch + open the row.
     let project_repo = djinn_db::ProjectRepository::new(db.clone(), EventBus::noop());

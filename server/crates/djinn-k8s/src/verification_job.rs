@@ -367,12 +367,13 @@ mod tests {
         );
         assert_eq!(
             envs.get("CARGO_INCREMENTAL").copied(),
-            Some("0"),
-            "verification reuses the warm base via cargo freshness + sccache (incremental=0; sccache forbids incremental)"
+            Some("1"),
+            "verification reuses the warm base incrementally (warm == verify == worker parity)"
         );
-        assert!(
-            !envs.contains_key("RUSTC_WRAPPER"),
-            "verification must not force sccache (it disables incremental)"
+        assert_eq!(
+            envs.get("RUSTC_WRAPPER").copied(),
+            Some(""),
+            "verification must clear RUSTC_WRAPPER so incremental works"
         );
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),

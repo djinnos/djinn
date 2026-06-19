@@ -49,12 +49,100 @@ fn effective_shell_timeout_ms(requested: Option<u64>, command: &str) -> u64 {
     }
 }
 
+/// Message returned to a worker that tries to type-check with
+/// `cargo check`/`cargo build`. Clippy hits the warm cargo cache (the warm base
+/// plus CI compile through clippy-driver under a distinct fingerprint), whereas
+/// `cargo check` produces DIFFERENT artifacts that are NOT in the warm base, so
+/// it cold-builds the whole workspace. Steering the worker to clippy is what
+/// makes the warm-cache fast path actually pay off.
+const CARGO_CHECK_DENIED_MSG: &str = "cargo check / cargo build (for type-checking) is disabled for the worker role: it produces different artifacts than the warm cargo cache and cold-builds the workspace. Use `cargo clippy -p <crate>` instead (it reuses the warm cache and also lints). `cargo test`/`cargo nextest`, `cargo tree`, `cargo metadata`, and `cargo fmt` are allowed.";
+
+/// Does this shell command, run by the WORKER role, invoke a `cargo check` or
+/// `cargo build` whose only purpose is type-checking? Returns the denial message
+/// when so. We allow clippy/test/nextest/tree/metadata/fmt and all non-cargo
+/// commands.
+///
+/// Robust to: `bash -lc "cargo check"`, leading paths
+/// (`/usr/local/bin/cargo build`), `cargo +nightly check`, and `&&`/`;`/`|`
+/// command chains. Conservative: only the exact denied subcommands trip it, so a
+/// `cargo clippy` containing the word "check" in a path is unaffected.
+fn worker_cargo_check_denied(command: &str) -> Option<&'static str> {
+    // Split into individual sub-commands across chain/grouping operators so each
+    // is classified on its own (a chain like `cargo clippy && cargo check` must
+    // still be denied for the `cargo check` segment).
+    for segment in command.split(['\n', ';', '&', '|']) {
+        if segment_is_denied_cargo(segment) {
+            return Some(CARGO_CHECK_DENIED_MSG);
+        }
+    }
+    None
+}
+
+/// True when a single shell segment is a `cargo check`/`cargo build` invocation.
+fn segment_is_denied_cargo(segment: &str) -> bool {
+    let mut tokens = segment.split_whitespace().peekable();
+
+    // Walk past a leading `bash -lc`/`sh -c` wrapper and any env-assignment
+    // prefixes (`FOO=bar cargo ...`). The wrapped command's quotes are stripped
+    // by tokenization, so `bash -lc "cargo check"` exposes `cargo` `check`.
+    while let Some(&tok) = tokens.peek() {
+        let bare = tok.trim_matches(['"', '\'']);
+        let base = bare.rsplit('/').next().unwrap_or(bare);
+        if base == "cargo" {
+            break;
+        }
+        // env assignment like KEY=VALUE — skip.
+        if bare.contains('=') && !bare.starts_with('-') {
+            tokens.next();
+            continue;
+        }
+        // shell wrapper / leading binary we don't care about — skip it.
+        tokens.next();
+    }
+
+    // Consume the `cargo` token itself.
+    match tokens.next() {
+        Some(tok) => {
+            let bare = tok.trim_matches(['"', '\'']);
+            let base = bare.rsplit('/').next().unwrap_or(bare);
+            if base != "cargo" {
+                return false;
+            }
+        }
+        None => return false,
+    }
+
+    // Skip a `+toolchain` selector if present.
+    if tokens.peek().is_some_and(|next| next.starts_with('+')) {
+        tokens.next();
+    }
+
+    // The next token is the subcommand.
+    match tokens.next() {
+        Some(sub) => {
+            let sub = sub.trim_matches(['"', '\'']);
+            sub == "check" || sub == "build"
+        }
+        None => false,
+    }
+}
+
 pub(crate) async fn call_shell(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
+    session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: ShellParams = parse_args(arguments)?;
+
+    // Worker role: steer type-checks to clippy (which reuses the warm cargo
+    // cache). `cargo check`/`cargo build` cold-build the workspace.
+    if session_role == Some("worker")
+        && let Some(msg) = worker_cargo_check_denied(&p.command)
+    {
+        return Err(msg.to_string());
+    }
+
     let timeout_ms = effective_shell_timeout_ms(p.timeout_ms, &p.command);
 
     // Cross-repo shell: when `project` names a DIFFERENT registered project,
@@ -884,5 +972,44 @@ mod timeout_tests {
     fn a_large_explicit_build_timeout_is_preserved() {
         let got = effective_shell_timeout_ms(Some(3_600_000), "cargo test");
         assert_eq!(got, 3_600_000);
+    }
+}
+
+#[cfg(test)]
+mod worker_cargo_guard_tests {
+    use super::worker_cargo_check_denied;
+
+    #[test]
+    fn worker_rejects_cargo_check_and_build() {
+        assert!(worker_cargo_check_denied("cargo check -p djinn-db").is_some());
+        assert!(worker_cargo_check_denied("cargo build -p x").is_some());
+        // bash -lc wrapper.
+        assert!(worker_cargo_check_denied(r#"bash -lc "cargo check""#).is_some());
+        assert!(worker_cargo_check_denied(r#"bash -lc 'cargo check'"#).is_some());
+        // leading path + toolchain selector.
+        assert!(worker_cargo_check_denied("/usr/local/bin/cargo check").is_some());
+        assert!(worker_cargo_check_denied("cargo +nightly check -p x").is_some());
+        // env-assignment prefix.
+        assert!(worker_cargo_check_denied("FOO=bar cargo check").is_some());
+        // chain — the denied segment trips it even after an allowed one.
+        assert!(worker_cargo_check_denied("cargo clippy -p x && cargo check -p x").is_some());
+        assert!(worker_cargo_check_denied("cd server; cargo build").is_some());
+    }
+
+    #[test]
+    fn worker_allows_clippy_test_and_inspection() {
+        assert!(worker_cargo_check_denied("cargo clippy -p x").is_none());
+        assert!(worker_cargo_check_denied("cargo clippy --all-targets -- -D warnings").is_none());
+        assert!(worker_cargo_check_denied("cargo nextest run -p x").is_none());
+        assert!(worker_cargo_check_denied("cargo test -p x").is_none());
+        assert!(worker_cargo_check_denied("cargo tree -p x").is_none());
+        assert!(worker_cargo_check_denied("cargo metadata --format-version 1").is_none());
+        assert!(worker_cargo_check_denied("cargo fmt").is_none());
+        assert!(worker_cargo_check_denied("git diff").is_none());
+        assert!(worker_cargo_check_denied("ls -la").is_none());
+        // A non-cargo binary that happens to be named with "check" is fine.
+        assert!(worker_cargo_check_denied("./scripts/check-file-size.sh").is_none());
+        // clippy chained with an allowed cargo command stays allowed.
+        assert!(worker_cargo_check_denied("cargo clippy -p x && cargo test -p x").is_none());
     }
 }

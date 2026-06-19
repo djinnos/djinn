@@ -10,10 +10,12 @@
 //!   clone per project (`<root>/{project_id}/`) for the chat subsystem.
 //!   Refreshed whenever the mirror fetcher advances the project's refs.
 
+pub mod cargo_config;
 pub mod mirror;
 pub mod workspace;
 pub mod workspace_store;
 
+pub use cargo_config::{normalize_cargo_config_at, normalize_cargo_config_text};
 pub use mirror::{
     GcGuardError, MirrorError, MirrorManager, gc_mirror_under, gc_project_clone_under,
     mirror_path_for, mirrors_root,

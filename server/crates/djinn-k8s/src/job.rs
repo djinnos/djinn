@@ -595,22 +595,26 @@ pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
 }
 
 /// Cache env vars for warm Pods that populate the shared per-project cargo
-/// target base. `CARGO_INCREMENTAL` is derived from the policy:
-/// - `None` or `AutoDetected` → `0` (backward compat, sccache-safe)
-/// - `Explicit` with `sccache=true` → `0` (sccache forbids incremental)
-/// - `Explicit` with `sccache=false` → `1` (incremental enabled)
+/// target base.
+///
+/// Warm, verify, and task-run pods must use the SAME compile strategy or the
+/// warm base is wasted (cargo fingerprints fold in `CARGO_INCREMENTAL` and the
+/// rustc wrapper). All three therefore force `CARGO_INCREMENTAL=1` and clear
+/// any repo `rustc-wrapper = "sccache"` (`RUSTC_WRAPPER=""`). The clone-config
+/// normalization step (`djinn_workspace::normalize_cargo_config_at`) guarantees
+/// this even when a project pins `sccache`/`CARGO_INCREMENTAL=0 force=true` in
+/// its own `.cargo/config.toml`, which env vars alone cannot override.
+///
+/// `policy` is accepted for signature parity with the other builders but no
+/// longer flips incremental: incremental-on is now an invariant across all
+/// djinn build pods.
 pub(crate) fn warm_cache_env_vars(
     project_id: &str,
-    policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+    _policy: Option<&djinn_stack::environment::CargoCachePolicy>,
 ) -> Vec<EnvVar> {
     let mut env = cache_env_vars(project_id);
-    let incremental = match policy {
-        Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_)) => {
-            if override_.sccache { "0" } else { "1" }
-        }
-        _ => "0",
-    };
-    env.push(env_var("CARGO_INCREMENTAL", incremental));
+    env.push(env_var("CARGO_INCREMENTAL", "1"));
+    env.push(env_var("RUSTC_WRAPPER", ""));
     env
 }
 
@@ -618,20 +622,17 @@ pub(crate) fn warm_cache_env_vars(
 /// per-project base as a read-only SEED: the worker (`run_verify_task`) seeds
 /// a private run target dir from the warm base and overrides `CARGO_TARGET_DIR`
 /// to point there before running `verify_commit`, so it never writes the shared
-/// base or contends on Cargo's build-dir lock. `CARGO_INCREMENTAL` is derived
-/// from the policy (same logic as `warm_cache_env_vars`).
+/// base or contends on Cargo's build-dir lock.
+///
+/// Must match `warm_cache_env_vars` / `task_run_cache_env_vars`:
+/// `CARGO_INCREMENTAL=1` + `RUSTC_WRAPPER=""` so the seed is reusable.
 pub(crate) fn verify_cache_env_vars(
     project_id: &str,
-    policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+    _policy: Option<&djinn_stack::environment::CargoCachePolicy>,
 ) -> Vec<EnvVar> {
     let mut env = cache_env_vars(project_id);
-    let incremental = match policy {
-        Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_)) => {
-            if override_.sccache { "0" } else { "1" }
-        }
-        _ => "0",
-    };
-    env.push(env_var("CARGO_INCREMENTAL", incremental));
+    env.push(env_var("CARGO_INCREMENTAL", "1"));
+    env.push(env_var("RUSTC_WRAPPER", ""));
     env
 }
 
@@ -640,40 +641,30 @@ pub(crate) fn verify_cache_env_vars(
 /// the shared Cargo build-dir lock while preserving the warm per-project base as
 /// a read-only seed source.
 ///
-/// Unlike warm/verification (one-shot, sccache + `CARGO_INCREMENTAL=0`), a
-/// task-run is an ITERATIVE worker loop: the agent edits a crate and re-runs
-/// `cargo check`/`clippy`/`test` many times. Incremental compilation is the right
-/// tool there — it recompiles only changed codegen units (seconds) instead of a
-/// full crate rebuild (~9min for a large crate like `djinn-agent`) every edit.
+/// A task-run is an ITERATIVE worker loop: the agent edits a crate and re-runs
+/// `cargo clippy`/`test` many times. Incremental compilation is the right tool —
+/// it recompiles only changed codegen units (seconds) instead of a full crate
+/// rebuild (~9min for a large crate like `djinn-agent`) every edit.
 ///
-/// When `policy` indicates sccache=true, `CARGO_INCREMENTAL=0` and `RUSTC_WRAPPER`
-/// is kept (so the repo's `.cargo/config.toml` wrapper applies). When sccache=false
-/// or no policy is given (default), `CARGO_INCREMENTAL=1` and `RUSTC_WRAPPER=""`
-/// to disable any repo-level sccache wrapper so incremental works.
+/// Always `CARGO_INCREMENTAL=1` and `RUSTC_WRAPPER=""` (clearing any repo
+/// `rustc-wrapper = "sccache"`), matching `warm_cache_env_vars` and
+/// `verify_cache_env_vars`. Warm == verify == worker must use the SAME compile
+/// strategy or the warm seed is wasted. `policy` is accepted for signature
+/// parity but no longer flips incremental.
 fn task_run_cache_env_vars(
     project_id: &str,
     task_run_id: &str,
-    policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+    _policy: Option<&djinn_stack::environment::CargoCachePolicy>,
 ) -> Vec<EnvVar> {
     let mut env = common_cache_env_vars(project_id);
     env.push(env_var(
         "CARGO_TARGET_DIR",
         &cargo_target_run_dir(task_run_id).display().to_string(),
     ));
-    let (incremental, clear_wrapper) = match policy {
-        Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_))
-            if override_.sccache =>
-        {
-            ("0", false)
-        }
-        _ => ("1", true),
-    };
-    env.push(env_var("CARGO_INCREMENTAL", incremental));
-    if clear_wrapper {
-        // Override any `.cargo/config.toml` `rustc-wrapper = "sccache"`: sccache
-        // forbids incremental, and the iterative loop wants incremental.
-        env.push(env_var("RUSTC_WRAPPER", ""));
-    }
+    env.push(env_var("CARGO_INCREMENTAL", "1"));
+    // Override any `.cargo/config.toml` `rustc-wrapper = "sccache"`: sccache
+    // forbids incremental, and the iterative loop wants incremental.
+    env.push(env_var("RUSTC_WRAPPER", ""));
     env
 }
 
@@ -1249,26 +1240,31 @@ mod tests {
             "warm target must be namespaced per project"
         );
 
-        // --- Intended differences pinned ---
-        // Warm disables incremental (sccache + cargo freshness strategy);
-        // worker enables it (iterative edit/compile loop).
+        // --- Compile strategy MUST be identical (parity invariant) ---
+        // Warm == verify == worker: incremental=1 + RUSTC_WRAPPER="" so the
+        // warm seed is reusable across all three.
         assert_eq!(
             warm_env.get("CARGO_INCREMENTAL").copied(),
-            Some("0"),
-            "warm must disable incremental (sccache compatibility)"
+            Some("1"),
+            "warm must enable incremental (warm-cache parity)"
         );
         assert_eq!(
             worker_env.get("CARGO_INCREMENTAL").copied(),
             Some("1"),
             "worker must enable incremental (iterative edit loop)"
         );
+        assert_eq!(
+            warm_env.get("CARGO_INCREMENTAL"),
+            worker_env.get("CARGO_INCREMENTAL"),
+            "warm and worker CARGO_INCREMENTAL must match"
+        );
 
-        // Warm does NOT force RUSTC_WRAPPER — the repo's .cargo/config.toml
-        // pins `rustc-wrapper = "sccache"` if needed. Worker explicitly clears
-        // it so incremental compilation works alongside any repo-level wrapper.
-        assert!(
-            !warm_env.contains_key("RUSTC_WRAPPER"),
-            "warm must not force RUSTC_WRAPPER (repo config handles it)"
+        // All djinn build pods clear RUSTC_WRAPPER so any repo-level sccache
+        // wrapper can't disable incremental.
+        assert_eq!(
+            warm_env.get("RUSTC_WRAPPER").copied(),
+            Some(""),
+            "warm must clear RUSTC_WRAPPER so incremental works"
         );
         assert_eq!(
             worker_env.get("RUSTC_WRAPPER").copied(),
@@ -1342,20 +1338,16 @@ mod tests {
             "worker CARGO_TARGET_DIR must be a private per-run dir (no-sccache): {worker_target}"
         );
 
-        // Intended differences are the same regardless of project shape.
-        assert_eq!(warm_env.get("CARGO_INCREMENTAL").copied(), Some("0"));
+        // Compile strategy is the same regardless of project shape: warm ==
+        // worker (incremental=1, wrapper cleared).
+        assert_eq!(warm_env.get("CARGO_INCREMENTAL").copied(), Some("1"));
         assert_eq!(worker_env.get("CARGO_INCREMENTAL").copied(), Some("1"));
-        assert!(
-            !warm_env.contains_key("RUSTC_WRAPPER"),
-            "warm must not force RUSTC_WRAPPER (no-sccache shape)"
-        );
+        assert_eq!(warm_env.get("RUSTC_WRAPPER").copied(), Some(""));
         assert_eq!(worker_env.get("RUSTC_WRAPPER").copied(), Some(""));
     }
 
-    /// When an explicit CargoCachePolicy with sccache=false is provided, warm
-    /// and verification should enable incremental (CARGO_INCREMENTAL=1) instead
-    /// of forcing 0. Task-run behavior is unchanged (incremental=1, wrapper
-    /// cleared).
+    /// Incremental is now an invariant (always 1) regardless of policy: even an
+    /// explicit `sccache=false` policy yields incremental=1 for warm/verify/worker.
     #[test]
     fn explicit_policy_no_sccache_enables_incremental_for_warm_and_verify() {
         let project_id = "explicit-no-sccache";
@@ -1414,12 +1406,12 @@ mod tests {
         );
     }
 
-    /// When an explicit CargoCachePolicy with sccache=true is provided, warm
-    /// and verification should disable incremental (CARGO_INCREMENTAL=0). Task-run
-    /// also disables incremental and keeps RUSTC_WRAPPER (so the repo's sccache
-    /// wrapper applies).
+    /// Even an explicit `sccache=true` policy can NOT re-enable sccache or
+    /// disable incremental on djinn build pods: warm/verify/worker force
+    /// incremental=1 + RUSTC_WRAPPER="" so the warm seed stays reusable. (The
+    /// clone-config normalization step enforces the same on the cloned tree.)
     #[test]
-    fn explicit_policy_sccache_disables_incremental_and_keeps_wrapper() {
+    fn explicit_policy_sccache_still_forces_incremental_and_clears_wrapper() {
         let project_id = "explicit-sccache";
         let task_run_id = Uuid::now_v7().to_string();
         let policy = djinn_stack::environment::CargoCachePolicy::Explicit(
@@ -1451,28 +1443,23 @@ mod tests {
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        // Warm/verify with sccache=true → incremental disabled
-        assert_eq!(
-            warm_env.get("CARGO_INCREMENTAL").copied(),
-            Some("0"),
-            "warm must disable incremental when policy.sccache=true"
-        );
-        assert_eq!(
-            verify_env.get("CARGO_INCREMENTAL").copied(),
-            Some("0"),
-            "verify must disable incremental when policy.sccache=true"
-        );
-
-        // Task-run with sccache=true → incremental disabled, wrapper kept
-        assert_eq!(
-            worker_env.get("CARGO_INCREMENTAL").copied(),
-            Some("0"),
-            "worker must disable incremental when policy.sccache=true"
-        );
-        assert!(
-            !worker_env.contains_key("RUSTC_WRAPPER"),
-            "worker must NOT clear RUSTC_WRAPPER when policy.sccache=true"
-        );
+        // All three force incremental=1 + RUSTC_WRAPPER="" regardless of policy.
+        for (label, env) in [
+            ("warm", &warm_env),
+            ("verify", &verify_env),
+            ("worker", &worker_env),
+        ] {
+            assert_eq!(
+                env.get("CARGO_INCREMENTAL").copied(),
+                Some("1"),
+                "{label} must force incremental even when policy.sccache=true"
+            );
+            assert_eq!(
+                env.get("RUSTC_WRAPPER").copied(),
+                Some(""),
+                "{label} must clear RUSTC_WRAPPER even when policy.sccache=true"
+            );
+        }
     }
 
     /// AutoDetected policy behaves identically to None (backward compat).
@@ -1706,17 +1693,11 @@ mod tests {
         );
     }
 
-    /// Consistency test (epic AC #4): for a given `CargoCachePolicy::Explicit`,
-    /// `warm_cache_env_vars` and `task_run_cache_env_vars` resolve
-    /// CARGO_INCREMENTAL and RUSTC_WRAPPER consistently — they agree on whether
-    /// sccache is in use and incremental is enabled, respecting the intentional
-    /// warm-vs-worker posture difference:
-    /// - Warm compiles the shared base with incremental disabled (sccache
-    ///   compatible) when sccache=true; worker disables incremental AND keeps
-    ///   RUSTC_WRAPPER so the repo's sccache wrapper applies.
-    /// - Warm does NOT set RUSTC_WRAPPER (the repo's `.cargo/config.toml`
-    ///   handles it); worker only clears RUSTC_WRAPPER when sccache=false so
-    ///   incremental works.
+    /// Consistency test (epic AC #4): `warm_cache_env_vars` and
+    /// `task_run_cache_env_vars` resolve CARGO_INCREMENTAL and RUSTC_WRAPPER
+    /// IDENTICALLY (incremental=1, wrapper cleared) even for an explicit
+    /// `sccache=true` policy — the warm-cache fast path requires all djinn build
+    /// pods to share one compile strategy, so the seed is reusable.
     #[test]
     fn policy_derived_env_consistent_across_warm_and_worker() {
         let project_id = "consistency-test";
@@ -1746,28 +1727,29 @@ mod tests {
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        // Both agree sccache is active: CARGO_INCREMENTAL=0
+        // Both force incremental on (parity invariant), regardless of policy.
         assert_eq!(
             warm_env.get("CARGO_INCREMENTAL").copied(),
-            Some("0"),
-            "warm sets CARGO_INCREMENTAL=0 when sccache=true"
+            Some("1"),
+            "warm forces CARGO_INCREMENTAL=1 (warm-cache parity)"
         );
         assert_eq!(
-            worker_env.get("CARGO_INCREMENTAL").copied(),
-            Some("0"),
-            "worker sets CARGO_INCREMENTAL=0 when sccache=true (agrees with warm)"
+            warm_env.get("CARGO_INCREMENTAL"),
+            worker_env.get("CARGO_INCREMENTAL"),
+            "warm and worker CARGO_INCREMENTAL must be identical"
         );
 
-        // Warm does NOT set RUSTC_WRAPPER — the repo config handles it.
-        assert!(
-            !warm_env.contains_key("RUSTC_WRAPPER"),
-            "warm must not force RUSTC_WRAPPER (repo .cargo/config.toml handles it)"
+        // Both clear RUSTC_WRAPPER so a repo-level sccache wrapper can't disable
+        // incremental.
+        assert_eq!(
+            warm_env.get("RUSTC_WRAPPER").copied(),
+            Some(""),
+            "warm must clear RUSTC_WRAPPER"
         );
-        // Worker keeps RUSTC_WRAPPER (does NOT clear it) when sccache=true,
-        // so the repo's sccache wrapper applies.
-        assert!(
-            !worker_env.contains_key("RUSTC_WRAPPER"),
-            "worker must NOT clear RUSTC_WRAPPER when sccache=true (keep repo wrapper)"
+        assert_eq!(
+            warm_env.get("RUSTC_WRAPPER"),
+            worker_env.get("RUSTC_WRAPPER"),
+            "warm and worker RUSTC_WRAPPER must be identical"
         );
 
         // Shared cache routing is identical.
