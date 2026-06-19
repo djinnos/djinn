@@ -83,6 +83,15 @@ fn proposal_not_found_error(id: &str) -> String {
     format!("proposal not found: {id}")
 }
 
+fn validate_proposal_body_format(body_format: &str) -> Result<&str, String> {
+    match body_format {
+        "markdown" | "mdx" => Ok(body_format),
+        other => Err(format!(
+            "invalid body_format: {other:?} (expected markdown or mdx)"
+        )),
+    }
+}
+
 /// List a proposal's targets and resolve each project id to an `owner/repo`
 /// slug + name for display chips.
 async fn target_models(
@@ -288,6 +297,11 @@ impl DjinnMcpServer {
         if let Err(e) = validate_design(body) {
             return Json(err_single(e));
         }
+        let body_format =
+            match validate_proposal_body_format(p.body_format.as_deref().unwrap_or("markdown")) {
+                Ok(v) => v,
+                Err(e) => return Json(err_single(e)),
+            };
         let ac = p.acceptance_criteria.unwrap_or_default();
         if let Err(e) = validate_ac_count(ac.len()) {
             return Json(err_single(e));
@@ -313,7 +327,7 @@ impl DjinnMcpServer {
                 body,
                 acceptance_criteria: Some(&ac_json),
                 status,
-                body_format: p.body_format.as_deref(),
+                body_format: Some(body_format),
             })
             .await
         {
@@ -501,6 +515,13 @@ impl DjinnMcpServer {
         if let Err(e) = validate_proposal_status(status) {
             return Json(err_single(e));
         }
+        let body_format = match p.body_format.as_deref() {
+            Some(value) => match validate_proposal_body_format(value) {
+                Ok(v) => Some(v),
+                Err(e) => return Json(err_single(e)),
+            },
+            None => None,
+        };
 
         // Resolve superseded_by to a canonical proposal id when provided.
         let superseded_by = if let Some(ref s) = p.superseded_by {
@@ -521,7 +542,7 @@ impl DjinnMcpServer {
                     acceptance_criteria: &ac_json,
                     status,
                     superseded_by: superseded_by.as_deref(),
-                    body_format: p.body_format.as_deref(),
+                    body_format,
                 },
             )
             .await

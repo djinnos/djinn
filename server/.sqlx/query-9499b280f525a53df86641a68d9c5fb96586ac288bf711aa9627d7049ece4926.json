@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE proposals SET title = $1, body = $2, acceptance_criteria = $3, status = $4,\n                    superseded_by = $5, latest_revision_seq = $8,\n                    pending_reconcile = CASE WHEN $9 THEN true ELSE pending_reconcile END,\n                    closed_at = CASE WHEN $6 IN ('done', 'rejected', 'archived', 'superseded')\n                        THEN COALESCE(closed_at, to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))\n                        ELSE NULL END,\n                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')\n             WHERE id = $7",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Text",
+        "Jsonb",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Text",
+        "Int4",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9499b280f525a53df86641a68d9c5fb96586ac288bf711aa9627d7049ece4926"
+}
