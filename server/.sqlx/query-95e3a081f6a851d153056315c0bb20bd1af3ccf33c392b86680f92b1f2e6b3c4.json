@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT output, duration_ms AS \"duration_ms!: i64\", created_at FROM verification_cache WHERE project_id = $1 AND commit_sha = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "output",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "duration_ms!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "created_at",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "95e3a081f6a851d153056315c0bb20bd1af3ccf33c392b86680f92b1f2e6b3c4"
+}
