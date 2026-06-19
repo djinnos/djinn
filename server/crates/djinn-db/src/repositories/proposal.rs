@@ -73,6 +73,8 @@ pub struct ProposalCreateInput<'a> {
     pub acceptance_criteria: Option<&'a str>,
     /// Initial status; `None` defaults to `draft`.
     pub status: Option<&'a str>,
+    /// Body format: `markdown` (default) or `mdx`.
+    pub body_format: Option<&'a str>,
 }
 
 pub struct ProposalUpdateInput<'a> {
@@ -82,6 +84,8 @@ pub struct ProposalUpdateInput<'a> {
     pub acceptance_criteria: &'a str,
     pub status: &'a str,
     pub superseded_by: Option<&'a str>,
+    /// Body format: `markdown` (default) or `mdx`.
+    pub body_format: Option<&'a str>,
 }
 
 pub struct ProposalFeedbackCreateInput<'a> {
@@ -117,6 +121,7 @@ struct ProposalStatusEvent<'a> {
     seq: i32,
     title: &'a str,
     body: &'a str,
+    body_format: &'a str,
     acceptance_criteria: &'a serde_json::Value,
     edited_by: Option<&'a str>,
     status_from: &'a str,
@@ -137,7 +142,7 @@ impl ProposalRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Proposal,
-            r#"SELECT id, short_id, title, body,
+            r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS "acceptance_criteria!",
                     status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE id = $1"#,
@@ -151,7 +156,7 @@ impl ProposalRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Proposal,
-            r#"SELECT id, short_id, title, body,
+            r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS "acceptance_criteria!",
                     status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE short_id = $1"#,
@@ -166,7 +171,7 @@ impl ProposalRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Proposal,
-            r#"SELECT id, short_id, title, body,
+            r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS "acceptance_criteria!",
                     status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE id = $1 OR short_id = $2"#,
@@ -191,13 +196,15 @@ impl ProposalRepository {
         // Author is the authenticated MCP caller, mirroring how epics stamp
         // `created_by_user_id`. `None` when no user context is in scope.
         let author_user_id = djinn_core::auth_context::current_user_id();
+        let body_format = input.body_format.unwrap_or("markdown");
         sqlx::query!(
-            "INSERT INTO proposals (id, short_id, title, body, acceptance_criteria, status, author_user_id, latest_revision_seq)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 1)",
+            "INSERT INTO proposals (id, short_id, title, body, body_format, acceptance_criteria, status, author_user_id, latest_revision_seq)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1)",
             id,
             short_id,
             input.title,
             input.body,
+            body_format,
             acceptance_criteria,
             status,
             author_user_id
@@ -211,6 +218,7 @@ impl ProposalRepository {
             1,
             input.title,
             input.body,
+            body_format,
             &acceptance_criteria,
             author_user_id.as_deref(),
         )
@@ -235,11 +243,13 @@ impl ProposalRepository {
             .ok_or_else(|| Error::InvalidData(format!("proposal not found: {id}")))?;
         let current_ac: serde_json::Value =
             serde_json::from_str(&current.acceptance_criteria).unwrap_or(serde_json::json!([]));
+        let effective_body_format = input.body_format.unwrap_or(&current.body_format);
         // A "material" edit changes the spec (title/body/AC), not just status.
         // Only material edits append a revision and disturb sign-offs.
         let content_changed = input.title != current.title
             || input.body != current.body
-            || acceptance_criteria != current_ac;
+            || acceptance_criteria != current_ac
+            || effective_body_format != current.body_format;
 
         // Stale/hard rule: editing the spec of an *approved* proposal reverts it
         // to in_review and clears its sign-offs (you changed an approved spec).
@@ -264,7 +274,7 @@ impl ProposalRepository {
             !content_changed && status_changed && effective_status == "done";
 
         sqlx::query!(
-            r#"UPDATE proposals SET title = $1, body = $2, acceptance_criteria = $3, status = $4,
+            r#"UPDATE proposals SET title = $1, body = $2, body_format = $10, acceptance_criteria = $3, status = $4,
                     superseded_by = $5, latest_revision_seq = $8,
                     pending_reconcile = CASE WHEN $9 THEN true ELSE pending_reconcile END,
                     closed_at = CASE WHEN $6 IN ('done', 'rejected', 'archived', 'superseded')
@@ -280,7 +290,8 @@ impl ProposalRepository {
             effective_status,
             id,
             next_seq,
-            building_amend
+            building_amend,
+            effective_body_format
         )
         .execute(self.db.pool())
         .await?;
@@ -292,6 +303,7 @@ impl ProposalRepository {
                 next_seq,
                 input.title,
                 input.body,
+                effective_body_format,
                 &acceptance_criteria,
                 editor.as_deref(),
             )
@@ -303,6 +315,7 @@ impl ProposalRepository {
                 seq: next_seq,
                 title: input.title,
                 body: input.body,
+                body_format: effective_body_format,
                 acceptance_criteria: &acceptance_criteria,
                 edited_by: editor.as_deref(),
                 status_from: &current.status,
@@ -509,7 +522,7 @@ impl ProposalRepository {
         // The correlated subquery counts unresolved feedback per row (cheap via
         // the `proposal_feedback_unresolved` partial index) for the list badge.
         let sql = format!(
-            r#"SELECT id, short_id, title, body, acceptance_criteria::text AS acceptance_criteria,
+            r#"SELECT id, short_id, title, body, body_format, acceptance_criteria::text AS acceptance_criteria,
                     status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id,
                     (SELECT COUNT(*) FROM proposal_feedback pf
                        WHERE pf.proposal_id = proposals.id AND pf.resolved_at IS NULL) AS unresolved_feedback_count
@@ -543,20 +556,22 @@ impl ProposalRepository {
         seq: i32,
         title: &str,
         body: &str,
+        body_format: &str,
         acceptance_criteria: &serde_json::Value,
         edited_by: Option<&str>,
     ) -> Result<()> {
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
             r#"INSERT INTO proposal_revisions
-                (id, proposal_id, seq, title, body, acceptance_criteria, edited_by_user_id, event_kind)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, 'spec_revision')"#,
+                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision')"#,
         )
         .bind(id)
         .bind(proposal_id)
         .bind(seq)
         .bind(title)
         .bind(body)
+        .bind(body_format)
         .bind(acceptance_criteria)
         .bind(edited_by)
         .execute(self.db.pool())
@@ -568,15 +583,16 @@ impl ProposalRepository {
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
             "INSERT INTO proposal_revisions
-                (id, proposal_id, seq, title, body, acceptance_criteria, edited_by_user_id,
+                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id,
                  event_kind, status_from, status_to)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'status_change', $8, $9)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'status_change', $9, $10)",
         )
         .bind(id)
         .bind(event.proposal_id)
         .bind(event.seq)
         .bind(event.title)
         .bind(event.body)
+        .bind(event.body_format)
         .bind(event.acceptance_criteria)
         .bind(event.edited_by)
         .bind(event.status_from)
@@ -590,7 +606,7 @@ impl ProposalRepository {
     pub async fn revisions(&self, proposal_id: &str) -> Result<Vec<ProposalRevision>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, ProposalRevision>(
-            r#"SELECT id, proposal_id, seq, title, body,
+            r#"SELECT id, proposal_id, seq, title, body, body_format,
                     acceptance_criteria::text AS acceptance_criteria,
                     edited_by_user_id, event_kind, status_from, status_to,
                     event_metadata::text AS event_metadata, created_at
@@ -1204,6 +1220,7 @@ impl ProposalRepository {
             next_revision_seq,
             &current.title,
             &current.body,
+            &current.body_format,
             &acceptance_criteria,
             editor.as_deref(),
         )
@@ -1239,7 +1256,7 @@ impl ProposalRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Proposal,
-            r#"SELECT id, short_id, title, body,
+            r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS "acceptance_criteria!",
                     status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals p
@@ -1263,7 +1280,7 @@ impl ProposalRepository {
     pub async fn drift_building_proposals(&self) -> Result<Vec<Proposal>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Proposal>(
-            r#"SELECT id, short_id, title, body,
+            r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS acceptance_criteria,
                     status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals p
@@ -1446,6 +1463,7 @@ mod tests {
             body: "",
             acceptance_criteria: None,
             status: None,
+            body_format: None,
         }
     }
 
@@ -1459,6 +1477,7 @@ mod tests {
             body,
             acceptance_criteria: Some(ac),
             status: None,
+            body_format: None,
         }
     }
 
@@ -1500,6 +1519,7 @@ mod tests {
                     acceptance_criteria: "[\"ac1\"]",
                     status: "archived",
                     superseded_by: None,
+                    body_format: None,
                 },
             )
             .await
@@ -1654,6 +1674,7 @@ mod tests {
             acceptance_criteria: ac,
             status,
             superseded_by: None,
+            body_format: None,
         }
     }
 
@@ -1922,6 +1943,7 @@ mod tests {
                     r#"[{"criterion":"a","met":false},{"criterion":"b","met":false}]"#,
                 ),
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();
@@ -1958,6 +1980,7 @@ mod tests {
                     r#"[{"criterion":"rewrite me","met":false},{"criterion":"drop me","met":false},{"criterion":"waive me","met":false}]"#,
                 ),
                 status: Some("in_review"),
+                body_format: None,
             })
             .await
             .unwrap();
@@ -2055,6 +2078,7 @@ mod tests {
                 body: "body",
                 acceptance_criteria: Some(r#"[{"criterion":"keep","met":false}]"#),
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();

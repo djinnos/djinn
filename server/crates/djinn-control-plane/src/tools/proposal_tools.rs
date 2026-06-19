@@ -111,7 +111,7 @@ async fn target_models(
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ProposalCreateParams {
     pub title: String,
-    /// Markdown spec body.
+    /// Markdown or MDX spec body.
     pub body: Option<String>,
     /// Acceptance criteria: plain strings or `{criterion, met}` objects.
     pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
@@ -121,6 +121,8 @@ pub struct ProposalCreateParams {
     /// Initial status: `triage`, `draft` (default), or `in_review`. Proposer-
     /// role authors are always placed in `triage` regardless of this value.
     pub status: Option<String>,
+    /// Body format: `markdown` (default) or `mdx`.
+    pub body_format: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -156,6 +158,8 @@ pub struct ProposalUpdateParams {
     pub status: Option<String>,
     /// UUID or short_id of the proposal that supersedes this one.
     pub superseded_by: Option<String>,
+    /// Body format: `markdown` (default) or `mdx`.
+    pub body_format: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -309,6 +313,7 @@ impl DjinnMcpServer {
                 body,
                 acceptance_criteria: Some(&ac_json),
                 status,
+                body_format: p.body_format.as_deref(),
             })
             .await
         {
@@ -516,6 +521,7 @@ impl DjinnMcpServer {
                     acceptance_criteria: &ac_json,
                     status,
                     superseded_by: superseded_by.as_deref(),
+                    body_format: p.body_format.as_deref(),
                 },
             )
             .await
@@ -1545,6 +1551,7 @@ mod stop_build_tests {
                 body: "",
                 acceptance_criteria: None,
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();
