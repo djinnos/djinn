@@ -341,11 +341,33 @@ pub struct GraphEdge {
     pub raw_text: String,
 }
 
+/// A typed semantic edge between two notes (builds_on, contradicts, supersedes,
+/// exemplifies, derived_from). These are stored on `note_associations` with a
+/// `kind` value other than `co_access` and surfaced through the
+/// `memory_graph` tool as a separate layer from wikilink `GraphEdge`s so the
+/// UI can toggle/style them independently.
+///
+/// Note: the F5 `note_associations` substrate is undirected (canonical-pair
+/// ordering: `note_a_id < note_b_id`). Outbound direction for directional
+/// kinds (e.g. `supersedes`) is reconstructed at scoring/context time.
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct TypedEdge {
+    pub source_id: String,
+    pub target_id: String,
+    pub kind: String,
+    pub weight: f64,
+}
+
 /// Full knowledge graph: all nodes and all resolved edges.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct GraphResponse {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
+    /// Typed semantic edges (builds_on, contradicts, supersedes, exemplifies,
+    /// derived_from) sourced from `note_associations` where `kind <> 'co_access'`.
+    #[serde(default)]
+    pub typed_edges: Vec<TypedEdge>,
 }
 
 /// A wikilink pointing to a note that does not exist.

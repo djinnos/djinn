@@ -315,11 +315,11 @@ impl UsageAnalyticsRepository {
         let row = query.fetch_one(self.db.pool()).await?;
 
         Ok(UsageTotals {
-            session_count: row.get("session_count"),
-            tokens_in: row.get("tokens_in"),
-            tokens_out: row.get("tokens_out"),
-            cache_read_tokens: row.get("cache_read_tokens"),
-            cache_write_tokens: row.get("cache_write_tokens"),
+            session_count: row.get("session_count!"),
+            tokens_in: row.get("tokens_in!"),
+            tokens_out: row.get("tokens_out!"),
+            cache_read_tokens: row.get("cache_read_tokens!"),
+            cache_write_tokens: row.get("cache_write_tokens!"),
             total_cost_usd: row.get("total_cost_usd"),
         })
     }
@@ -356,12 +356,12 @@ impl UsageAnalyticsRepository {
         Ok(rows
             .into_iter()
             .map(|r| DailySeriesRow {
-                day: r.get("day"),
-                session_count: r.get("session_count"),
-                tokens_in: r.get("tokens_in"),
-                tokens_out: r.get("tokens_out"),
-                cache_read_tokens: r.get("cache_read_tokens"),
-                cache_write_tokens: r.get("cache_write_tokens"),
+                day: r.get("day!"),
+                session_count: r.get("session_count!"),
+                tokens_in: r.get("tokens_in!"),
+                tokens_out: r.get("tokens_out!"),
+                cache_read_tokens: r.get("cache_read_tokens!"),
+                cache_write_tokens: r.get("cache_write_tokens!"),
                 total_cost_usd: r.get("total_cost_usd"),
             })
             .collect())
@@ -398,13 +398,13 @@ impl UsageAnalyticsRepository {
         Ok(rows
             .into_iter()
             .map(|r| BreakdownRow {
-                group_key: r.get("group_key"),
-                day: r.get("day"),
-                session_count: r.get("session_count"),
-                tokens_in: r.get("tokens_in"),
-                tokens_out: r.get("tokens_out"),
-                cache_read_tokens: r.get("cache_read_tokens"),
-                cache_write_tokens: r.get("cache_write_tokens"),
+                group_key: r.get("group_key!"),
+                day: r.get("day!"),
+                session_count: r.get("session_count!"),
+                tokens_in: r.get("tokens_in!"),
+                tokens_out: r.get("tokens_out!"),
+                cache_read_tokens: r.get("cache_read_tokens!"),
+                cache_write_tokens: r.get("cache_write_tokens!"),
                 total_cost_usd: r.get("total_cost_usd"),
             })
             .collect())
@@ -523,11 +523,11 @@ impl UsageAnalyticsRepository {
         Ok(rows
             .into_iter()
             .map(|r| {
-                let sessions: i64 = r.get("sessions");
+                let sessions: i64 = r.get("sessions!");
                 let spend_usd: Option<f64> = r.get("spend_usd");
-                let tokens_in: i64 = r.get("tokens_in");
-                let tokens_out: i64 = r.get("tokens_out");
-                let completed: i64 = r.get("shared_credit_completed_task_count");
+                let tokens_in: i64 = r.get("tokens_in!");
+                let tokens_out: i64 = r.get("tokens_out!");
+                let completed: i64 = r.get("shared_credit_completed_task_count!");
 
                 // cost_per_completed_task: NULL when no completed tasks or
                 // all sessions were unpriced (NULL cost_usd).
@@ -543,7 +543,7 @@ impl UsageAnalyticsRepository {
                 };
 
                 ModelEffectivenessRow {
-                    model_id: r.get("model_id"),
+                    model_id: r.get("model_id!"),
                     sessions,
                     spend_usd,
                     tokens_in,
@@ -592,12 +592,12 @@ impl UsageAnalyticsRepository {
         Ok(rows
             .into_iter()
             .map(|r| ProjectModelMatrixRow {
-                project_id: r.get("project_id"),
-                model_id: r.get("model_id"),
-                sessions: r.get("sessions"),
+                project_id: r.get("project_id!"),
+                model_id: r.get("model_id!"),
+                sessions: r.get("sessions!"),
                 spend_usd: r.get("spend_usd"),
-                tokens_in: r.get("tokens_in"),
-                tokens_out: r.get("tokens_out"),
+                tokens_in: r.get("tokens_in!"),
+                tokens_out: r.get("tokens_out!"),
             })
             .collect())
     }

@@ -242,6 +242,38 @@ impl OutOfCoreStore {
         Ok(())
     }
 
+    /// Write multiple scope entries to disk and persist the index once at
+    /// the end. This reduces index I/O from O(N²) (one index write per
+    /// entry) to O(N) (one index write for the whole batch).
+    pub fn put_batch(&mut self, entries: &[ScopeEntry]) -> Result<usize, OutOfCoreError> {
+        let mut count = 0usize;
+        for entry in entries {
+            let filename = format!("{}.json", entry.id.0);
+            let path = self.root.join(&filename);
+            let json = serde_json::to_string(entry)
+                .map_err(|e| OutOfCoreError::Serialize(e.to_string()))?;
+            std::fs::write(&path, json).map_err(|e| OutOfCoreError::Io {
+                path: path.clone(),
+                source: e,
+            })?;
+            if !self.index.contains_key(&entry.id) {
+                self.order.push(entry.id.clone());
+            }
+            self.index
+                .insert(entry.id.clone(), PathBuf::from(&filename));
+            count += 1;
+        }
+        self.persist_index()?;
+        Ok(count)
+    }
+
+    /// Explicitly persist the in-memory index to disk. Useful after a batch
+    /// of operations when index durability is required before a crash-sensitive
+    /// step.
+    pub fn flush_index(&self) -> Result<(), OutOfCoreError> {
+        self.persist_index()
+    }
+
     /// Read a scope entry from disk by shard id.
     pub fn get(&self, id: &ShardId) -> Result<Option<ScopeEntry>, OutOfCoreError> {
         let filename = match self.index.get(id) {
@@ -346,13 +378,8 @@ impl OutOfCoreStore {
     /// so downstream consumers can load one file at a time without holding
     /// the entire parsed index in memory.
     pub fn put_parsed_index(&mut self, index: &ParsedScipIndex) -> Result<usize, OutOfCoreError> {
-        let mut count = 0usize;
-        for file in &index.files {
-            let entry = ScopeEntry::from_scip_file(file);
-            self.put(&entry)?;
-            count += 1;
-        }
-        Ok(count)
+        let entries: Vec<ScopeEntry> = index.files.iter().map(ScopeEntry::from_scip_file).collect();
+        self.put_batch(&entries)
     }
 
     /// Yield deserialized [`ScipFile`] entries from disk, one at a time.
@@ -451,6 +478,16 @@ mod lru {
 
         /// Insert a key-value pair. If the cache is full, evicts the
         /// least-recently-used entry. Returns `true` if an eviction occurred.
+        ///
+        /// ## Complexity analysis
+        ///
+        /// The eviction scan (`min_by_key` over the map entries) is O(capacity)
+        /// per put. Over a full iteration of N shards through `for_each_scope`,
+        /// each shard is loaded once (N puts) and the cache holds at most
+        /// `capacity` entries. Total cost is O(N * capacity). Since capacity is
+        /// bounded (default 1024, typically <= 8192), this is O(N) in practice.
+        /// For bounded capacity the scan is acceptable; if capacity grows very
+        /// large, a doubly-linked-list + hashmap LRU would give O(1) eviction.
         pub fn put(&mut self, key: K, value: V) -> bool {
             self.access_counter += 1;
             let counter = self.access_counter;
@@ -1177,5 +1214,216 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 10, "iterator must yield exactly 10 files");
+    }
+
+    // -- Synthetic large-fixture bounded-memory test --
+
+    #[test]
+    fn test_bounded_memory_synthetic_large_fixture() {
+        let td = test_tempdir("ooc-synthetic-large-");
+        let store = OutOfCoreStore::open(td.path()).unwrap();
+        let capacity = 8;
+        let mut accessor = BoundedScopeAccessor::new(store, capacity);
+
+        // Create 1000 synthetic shards with ~1KB payloads.
+        let entries: Vec<ScopeEntry> = (0..1000)
+            .map(|i| ScopeEntry {
+                id: ShardId(format!("shard-{i:04}")),
+                source_key: format!("file_{i}.rs"),
+                payload: vec![b'x'; 1024],
+            })
+            .collect();
+
+        // Put all entries via the underlying store.
+        for entry in &entries {
+            accessor.store.put(entry).unwrap();
+        }
+
+        assert_eq!(
+            accessor.shard_count(),
+            1000,
+            "store must contain 1000 shards"
+        );
+
+        // Iterate all via for_each_scope, asserting resident_count stays bounded.
+        // We cannot check resident_count inside the closure because for_each_scope
+        // takes &mut self and the closure would need to borrow accessor again.
+        // Instead, we verify the bound after the full iteration and also check
+        // by manually loading entries one at a time.
+        let mut visited = 0usize;
+        accessor
+            .for_each_scope(|entry| {
+                assert_eq!(entry.payload.len(), 1024, "payload must be intact");
+                visited += 1;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(visited, 1000, "for_each_scope must visit all 1000 shards");
+        assert_eq!(
+            accessor.shard_count(),
+            1000,
+            "shard count must be 1000 after iteration"
+        );
+        assert!(
+            accessor.resident_count() <= capacity,
+            "resident_count {} must not exceed capacity {capacity} after full iteration",
+            accessor.resident_count()
+        );
+
+        // Verify bounded memory by loading entries one-at-a-time and checking
+        // resident count after each load.
+        let ids: Vec<ShardId> = (0..1000)
+            .map(|i| ShardId(format!("shard-{i:04}")))
+            .collect();
+        for id in &ids {
+            let _entry = accessor
+                .get_scope(id)
+                .unwrap()
+                .expect("entry must be accessible");
+            assert!(
+                accessor.resident_count() <= capacity,
+                "resident_count {} must not exceed capacity {capacity} after loading {id:?}",
+                accessor.resident_count()
+            );
+        }
+    }
+
+    // -- Batch put test --
+
+    #[test]
+    fn test_put_batch_single_index_write() {
+        let td = test_tempdir("ooc-put-batch-");
+        let mut store = OutOfCoreStore::open(td.path()).unwrap();
+
+        let entries: Vec<ScopeEntry> = (0..10)
+            .map(|i| ScopeEntry {
+                id: ShardId(format!("batch-{i:02}")),
+                source_key: format!("batch_file_{i}.rs"),
+                payload: format!("batch-payload-{i}").into_bytes(),
+            })
+            .collect();
+
+        let count = store.put_batch(&entries).unwrap();
+        assert_eq!(count, 10, "put_batch must return 10");
+        assert_eq!(store.shard_count(), 10, "store must contain 10 shards");
+
+        // Verify each entry is readable and correct.
+        for (i, entry) in entries.iter().enumerate() {
+            let loaded = store.get(&entry.id).unwrap().expect("entry must exist");
+            assert_eq!(loaded.source_key, format!("batch_file_{i}.rs"));
+            assert_eq!(loaded.payload, format!("batch-payload-{i}").into_bytes());
+        }
+    }
+
+    #[test]
+    fn test_put_batch_produces_same_state_as_individual_puts() {
+        let td_batch = test_tempdir("ooc-batch-state-");
+        let td_single = test_tempdir("ooc-single-state-");
+
+        let entries: Vec<ScopeEntry> = (0..20)
+            .map(|i| ScopeEntry {
+                id: ShardId(format!("state-{i:02}")),
+                source_key: format!("state_file_{i}.rs"),
+                payload: format!("state-payload-{i}").into_bytes(),
+            })
+            .collect();
+
+        // Batch path.
+        let mut batch_store = OutOfCoreStore::open(td_batch.path()).unwrap();
+        let batch_count = batch_store.put_batch(&entries).unwrap();
+        assert_eq!(batch_count, 20);
+
+        // Individual put path.
+        let mut single_store = OutOfCoreStore::open(td_single.path()).unwrap();
+        for entry in &entries {
+            single_store.put(entry).unwrap();
+        }
+
+        // Both stores should have identical state.
+        assert_eq!(batch_store.shard_count(), single_store.shard_count());
+
+        let batch_ids = batch_store.enumerate_ids();
+        let single_ids = single_store.enumerate_ids();
+        assert_eq!(batch_ids.len(), single_ids.len());
+        for id in &batch_ids {
+            assert!(
+                single_ids.contains(id),
+                "single store must contain id {id:?}"
+            );
+            let batch_entry = batch_store.get(id).unwrap().unwrap();
+            let single_entry = single_store.get(id).unwrap().unwrap();
+            assert_eq!(batch_entry, single_entry, "entries for {id:?} must match");
+        }
+    }
+
+    #[test]
+    fn test_flush_index_persists_index() {
+        let td = test_tempdir("ooc-flush-");
+        let mut store = OutOfCoreStore::open(td.path()).unwrap();
+
+        let entry = ScopeEntry {
+            id: ShardId::from_file_key("src/flush.rs"),
+            source_key: "src/flush.rs".to_string(),
+            payload: b"flush test".to_vec(),
+        };
+        store.put(&entry).unwrap();
+
+        // Remove the index file manually.
+        let index_path = td.path().join("index.json");
+        assert!(index_path.exists());
+        std::fs::remove_file(&index_path).unwrap();
+
+        // flush_index should recreate it.
+        store.flush_index().unwrap();
+        assert!(index_path.exists(), "flush_index must recreate index.json");
+
+        // Re-open the store and verify the entry is still readable.
+        let reopened = OutOfCoreStore::open(td.path()).unwrap();
+        let loaded = reopened
+            .get(&entry.id)
+            .unwrap()
+            .expect("entry must exist after reopen");
+        assert_eq!(loaded, entry);
+    }
+
+    // -- Timing regression test --
+
+    #[test]
+    fn test_iteration_performance_1000_shards() {
+        let td = test_tempdir("ooc-perf-1000-");
+        let store = OutOfCoreStore::open(td.path()).unwrap();
+        let capacity = 8;
+        let mut accessor = BoundedScopeAccessor::new(store, capacity);
+
+        // Create 1000 shards with ~1KB payloads.
+        let entries: Vec<ScopeEntry> = (0..1000)
+            .map(|i| ScopeEntry {
+                id: ShardId(format!("perf-{i:04}")),
+                source_key: format!("perf_file_{i}.rs"),
+                payload: vec![b'y'; 1024],
+            })
+            .collect();
+
+        for entry in &entries {
+            accessor.store.put(entry).unwrap();
+        }
+
+        let start = std::time::Instant::now();
+        let mut visited = 0usize;
+        accessor
+            .for_each_scope(|_entry| {
+                visited += 1;
+                Ok(())
+            })
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(visited, 1000, "must visit all 1000 shards");
+        assert!(
+            elapsed.as_secs() < 10,
+            "iteration of 1000 shards must complete in under 10 seconds, took {:?}",
+            elapsed
+        );
     }
 }
