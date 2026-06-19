@@ -103,6 +103,7 @@ async fn proposal_ac_amend_validates_and_uses_repository_primitive() {
                 r#"[{"criterion":"Old text","met":false},{"criterion":"Drop me","met":true},{"criterion":"Waive me","met":false}]"#,
             ),
             status: Some("building"),
+            body_format: None,
         })
         .await
         .expect("create proposal");
@@ -252,6 +253,7 @@ async fn proposal_ac_set_stays_status_only_without_revision_bump() {
                 r#"[{"criterion":"Keep text","met":false},{"criterion":"Also keep","met":false}]"#,
             ),
             status: Some("building"),
+            body_format: None,
         })
         .await
         .expect("create proposal");
@@ -297,6 +299,7 @@ async fn proposal_ac_set_records_successful_reconcile_for_graduated_epics() {
             body: "body",
             acceptance_criteria: Some(r#"[{"criterion":"Ship it","met":false}]"#),
             status: Some("approved"),
+            body_format: None,
         })
         .await
         .expect("create proposal");
@@ -317,6 +320,7 @@ async fn proposal_ac_set_records_successful_reconcile_for_graduated_epics() {
                 acceptance_criteria: r#"[{"criterion":"Ship it better","met":false}]"#,
                 status: "building",
                 superseded_by: None,
+                body_format: None,
             },
         )
         .await
@@ -371,6 +375,7 @@ async fn proposal_reconcile_obsolete_epic_then_ac_set_preserves_unrelated_epics(
             body: "body",
             acceptance_criteria: Some(r#"[{"criterion":"Ship revised scope","met":false}]"#),
             status: Some("approved"),
+            body_format: None,
         })
         .await
         .expect("create proposal");
@@ -395,6 +400,7 @@ async fn proposal_reconcile_obsolete_epic_then_ac_set_preserves_unrelated_epics(
                 acceptance_criteria: r#"[{"criterion":"Ship revised scope","met":false}]"#,
                 status: "building",
                 superseded_by: None,
+                body_format: None,
             },
         )
         .await
