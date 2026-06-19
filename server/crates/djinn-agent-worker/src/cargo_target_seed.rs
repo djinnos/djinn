@@ -222,7 +222,9 @@ pub fn seed_cargo_target_dir_with_options(
 
     if let Some(err) = first_error.lock().ok().and_then(|guard| guard.clone()) {
         let mut result = metrics.result(start.elapsed(), None);
-        result.fallback_reason = Some(CargoTargetSeedFallback::CloneFailed(err));
+        let reason = CargoTargetSeedFallback::CloneFailed(err);
+        emit_cargo_target_seed_fallback_metric(&reason);
+        result.fallback_reason = Some(reason);
         return Ok(result);
     }
 
@@ -264,6 +266,8 @@ pub fn classify_cargo_target_path(relative_path: &Path) -> CloneAction {
 }
 
 fn fallback_result(start: Instant, reason: CargoTargetSeedFallback) -> CargoTargetSeedResult {
+    emit_cargo_target_seed_fallback_metric(&reason);
+
     CargoTargetSeedResult {
         elapsed: start.elapsed(),
         linked_file_count: 0,
@@ -272,6 +276,32 @@ fn fallback_result(start: Instant, reason: CargoTargetSeedFallback) -> CargoTarg
         linked_bytes: 0,
         copied_bytes: 0,
         fallback_reason: Some(reason),
+    }
+}
+
+fn emit_cargo_target_seed_fallback_metric(reason: &CargoTargetSeedFallback) {
+    djinn_telemetry::cargo_target_seed::increment_seed_fallback(
+        cargo_target_seed_fallback_metric_reason(reason),
+    );
+}
+
+fn cargo_target_seed_fallback_metric_reason(reason: &CargoTargetSeedFallback) -> &'static str {
+    match reason {
+        CargoTargetSeedFallback::BaseMissing => {
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_MISSING
+        }
+        CargoTargetSeedFallback::BaseNotDirectory => {
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_NOT_DIRECTORY
+        }
+        CargoTargetSeedFallback::BaseUnusable(_) => {
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_UNUSABLE
+        }
+        CargoTargetSeedFallback::ScanFailed(_) => {
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_SCAN_FAILED
+        }
+        CargoTargetSeedFallback::CloneFailed(_) => {
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_CLONE_FAILED
+        }
     }
 }
 
@@ -438,6 +468,11 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
+    use std::sync::{Mutex, MutexGuard};
+
+    const CARGO_TARGET_SEED_TOTAL: &str = "djinn_cargo_target_seed_total";
+
+    static METRIC_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn classifies_heavy_artifacts_for_hardlink() {
@@ -481,6 +516,7 @@ mod tests {
 
     #[test]
     fn missing_base_returns_cold_start_and_prepares_run_dir() {
+        let _guard = metric_test_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let base = tmp.path().join("missing-base");
         let run = tmp.path().join("run-target");
@@ -502,6 +538,7 @@ mod tests {
 
     #[test]
     fn non_directory_base_returns_cold_start() {
+        let _guard = metric_test_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let base = tmp.path().join("base-file");
         let run = tmp.path().join("run-target");
@@ -520,6 +557,7 @@ mod tests {
 
     #[test]
     fn seeds_target_tree_with_required_clone_semantics() {
+        let _guard = metric_test_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let base = tmp.path().join("warm-base");
         let run = tmp.path().join("run-target");
@@ -576,6 +614,52 @@ mod tests {
     }
 
     #[test]
+    fn emits_fallback_metric_with_bounded_reason_label() {
+        let _guard = metric_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("missing-base");
+        let run = tmp.path().join("run-target");
+        let reason = djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_MISSING;
+        let before = fallback_metric_value(reason);
+
+        let result =
+            seed_cargo_target_dir_with_options(&base, &run, &CargoTargetSeedOptions::new(2))
+                .expect("missing base should not fail dispatch");
+
+        assert_eq!(
+            result.fallback_reason,
+            Some(CargoTargetSeedFallback::BaseMissing)
+        );
+        let after = fallback_metric_value(reason);
+        assert_eq!(
+            after,
+            before + 1.0,
+            "fallback metric should increment exactly once for BaseMissing"
+        );
+    }
+
+    #[test]
+    fn successful_seed_does_not_emit_fallback_metric() {
+        let _guard = metric_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("warm-base");
+        let run = tmp.path().join("run-target");
+        write_base_file(
+            &base,
+            Path::new("debug/deps/libsuccess.rlib"),
+            b"seeded artifact",
+        );
+        let before = total_fallback_metric_value();
+
+        let result =
+            seed_cargo_target_dir_with_options(&base, &run, &CargoTargetSeedOptions::new(2))
+                .expect("seed target dir");
+
+        assert_eq!(result.fallback_reason, None);
+        assert_eq!(total_fallback_metric_value(), before);
+    }
+
+    #[test]
     fn teardown_run_dir_removes_private_dir_and_ignores_missing() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let run = tmp.path().join("run-target");
@@ -596,6 +680,44 @@ mod tests {
         let path = base.join(relative);
         fs::create_dir_all(path.parent().expect("relative path parent")).expect("create parent");
         fs::write(path, contents).expect("write base file");
+    }
+
+    fn metric_test_guard() -> MutexGuard<'static, ()> {
+        METRIC_TEST_MUTEX
+            .lock()
+            .expect("cargo target seed metric test mutex poisoned")
+    }
+
+    fn total_fallback_metric_value() -> f64 {
+        [
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_MISSING,
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_NOT_DIRECTORY,
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_UNUSABLE,
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_SCAN_FAILED,
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_CLONE_FAILED,
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_UNKNOWN,
+        ]
+        .into_iter()
+        .map(fallback_metric_value)
+        .sum()
+    }
+
+    fn fallback_metric_value(reason: &str) -> f64 {
+        djinn_telemetry::render()
+            .expect("render telemetry")
+            .lines()
+            .find_map(|line| {
+                let (sample, value) = line.rsplit_once(' ')?;
+                if sample.starts_with(CARGO_TARGET_SEED_TOTAL)
+                    && sample.contains("outcome=\"fallback\"")
+                    && sample.contains(&format!("fallback_reason=\"{reason}\""))
+                {
+                    value.parse::<f64>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0.0)
     }
 
     #[cfg(unix)]
