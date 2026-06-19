@@ -198,8 +198,10 @@ pub struct ExtractionQuality {
     pub downgraded: u32,
     #[serde(default)]
     pub discarded: u32,
-    /// Notes dropped by the ADR-054 admission gate (underspecified structure)
-    /// before novelty judging or persistence.
+    /// Number of candidates dropped at the ADR-054 admission gate (post-dedup,
+    /// pre-novelty) because `assess_note_quality` reported `is_underspecified`.
+    /// The admission gate lives inside `run_llm_extraction_inner` and never
+    /// affects human-authored memory writes.
     #[serde(default)]
     pub admission_dropped: u32,
 }
