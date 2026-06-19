@@ -30,7 +30,7 @@ pub(crate) struct SetupError {
 
 /// Run project setup commands (if any) and format them for the prompt.
 ///
-/// Setup commands come from `environment_config.lifecycle.pre_verification`;
+/// Setup commands come from `environment_config.lifecycle.pre_task`;
 /// callers fetch them upstream and pass them in.
 ///
 /// This mirrors the byte-for-byte behaviour of the former inline block in
@@ -44,7 +44,7 @@ pub(crate) struct SetupError {
 /// The caller is responsible for all task-status transitions and worktree
 /// teardown on error — this function does not touch either.
 pub(crate) async fn resolve_setup_context(
-    pre_verification_hooks: Vec<djinn_stack::environment::HookCommand>,
+    setup_hooks: Vec<djinn_stack::environment::HookCommand>,
     worktree_path: &Path,
     task_id: &str,
     task_short_id: &str,
@@ -58,7 +58,7 @@ pub(crate) async fn resolve_setup_context(
             ));
     };
 
-    let setup_specs = hook_commands_to_specs(&pre_verification_hooks);
+    let setup_specs = hook_commands_to_specs(&setup_hooks);
     let prompt_setup_commands = format_command_details(&setup_specs);
     if !setup_specs.is_empty() {
         let setup_start = std::time::Instant::now();

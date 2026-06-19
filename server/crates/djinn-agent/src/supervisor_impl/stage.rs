@@ -469,7 +469,7 @@ pub(crate) async fn execute_stage(
     let SetupContext {
         prompt_setup_commands,
     } = match resolve_setup_context(
-        env_config.lifecycle.pre_verification,
+        env_config.lifecycle.pre_task,
         worktree_path,
         &task.id,
         &task.short_id,
