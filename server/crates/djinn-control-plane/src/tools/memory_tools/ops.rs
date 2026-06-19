@@ -347,6 +347,8 @@ pub async fn memory_health(server: &DjinnMcpServer, p: HealthParams) -> MemoryHe
                 low_confidence_note_count: None,
                 stale_note_count: None,
                 stale_notes_by_folder: None,
+                lifecycle: None,
+                recent_sweep: None,
                 error: Some("project parameter required".to_string()),
             };
         }
@@ -361,6 +363,8 @@ pub async fn memory_health(server: &DjinnMcpServer, p: HealthParams) -> MemoryHe
                 low_confidence_note_count: None,
                 stale_note_count: None,
                 stale_notes_by_folder: None,
+                lifecycle: None,
+                recent_sweep: None,
                 error: Some(error),
             };
         }
@@ -375,6 +379,8 @@ pub async fn memory_health(server: &DjinnMcpServer, p: HealthParams) -> MemoryHe
             low_confidence_note_count: Some(h.low_confidence_note_count),
             stale_note_count: Some(h.stale_note_count),
             stale_notes_by_folder: Some(h.stale_notes_by_folder),
+            lifecycle: Some(h.lifecycle),
+            recent_sweep: Some(h.recent_sweep),
             error: None,
         },
         Err(e) => MemoryHealthResponse {
@@ -384,6 +390,8 @@ pub async fn memory_health(server: &DjinnMcpServer, p: HealthParams) -> MemoryHe
             low_confidence_note_count: None,
             stale_note_count: None,
             stale_notes_by_folder: None,
+            lifecycle: None,
+            recent_sweep: None,
             error: Some(e.to_string()),
         },
     }

@@ -51,7 +51,7 @@ impl DjinnMcpServer {
     /// Returns aggregate health report (total notes, broken links, orphan notes,
     /// duplicate clusters, low-confidence notes, stale note totals, stale notes by folder).
     #[tool(
-        description = "Returns aggregate health report (total notes, broken links, orphan notes, duplicate clusters, low-confidence notes, stale note totals, stale notes by folder)."
+        description = "Returns aggregate health report (total notes, broken links, orphan notes, low-confidence notes, stale note totals, stale notes by folder, lifecycle counts, and recent lifecycle sweep metrics)."
     )]
     pub async fn memory_health(
         &self,
@@ -67,6 +67,8 @@ impl DjinnMcpServer {
                     low_confidence_note_count: None,
                     stale_note_count: None,
                     stale_notes_by_folder: None,
+                    lifecycle: None,
+                    recent_sweep: None,
                     error: Some("project parameter required".to_string()),
                 });
             }
@@ -80,6 +82,8 @@ impl DjinnMcpServer {
                 low_confidence_note_count: None,
                 stale_note_count: None,
                 stale_notes_by_folder: None,
+                lifecycle: None,
+                recent_sweep: None,
                 error: Some(format!("project not found: {project_path}")),
             });
         };
@@ -94,6 +98,8 @@ impl DjinnMcpServer {
                 low_confidence_note_count: Some(h.low_confidence_note_count),
                 stale_note_count: Some(h.stale_note_count),
                 stale_notes_by_folder: Some(h.stale_notes_by_folder),
+                lifecycle: Some(h.lifecycle),
+                recent_sweep: Some(h.recent_sweep),
                 error: None,
             }),
             Err(e) => Json(MemoryHealthResponse {
@@ -103,6 +109,8 @@ impl DjinnMcpServer {
                 low_confidence_note_count: None,
                 stale_note_count: None,
                 stale_notes_by_folder: None,
+                lifecycle: None,
+                recent_sweep: None,
                 error: Some(e.to_string()),
             }),
         }
