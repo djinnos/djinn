@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/test/test-utils";
 
 import { CodeGraphPage } from "@/pages/CodeGraphPage";
@@ -374,8 +374,8 @@ describe("CodeGraphPage", () => {
             label: "fn_b",
             symbol_kind: "function",
             file_path: "src/b.rs",
-            pagerank: 0.3,
-            cognitive: 12,
+            pagerank: 0.5,
+            cognitive: 5,
           },
           {
             id: "symbol:fn_c",
@@ -383,14 +383,13 @@ describe("CodeGraphPage", () => {
             label: "fn_c",
             symbol_kind: "function",
             file_path: "src/c.rs",
-            pagerank: 0.2,
-            cognitive: 30,
+            pagerank: 0.5,
+            cognitive: 7,
           },
         ],
         edges: [],
       },
     }));
-
     projectStore.setState({
       projects: projectsFixture,
       selectedProjectId: "project-a",
@@ -424,13 +423,12 @@ describe("CodeGraphPage", () => {
             symbol_kind: "function",
             file_path: "src/a.rs",
             pagerank: 0.5,
-            cognitive: 7,
+            cognitive: 3,
           },
         ],
         edges: [],
       },
     }));
-
     projectStore.setState({
       projects: projectsFixture,
       selectedProjectId: "project-a",
@@ -449,5 +447,22 @@ describe("CodeGraphPage", () => {
     // Toggling back to topology works too.
     fireEvent.click(screen.getByTestId("color-mode-topology"));
     expect(useCodeGraphStore.getState().colorMode).toBe("topology");
+  });
+
+  // ── Regression: exactly one toolbar on the page ───────────────────────────
+
+  it("renders exactly one graph-toolbar on the Code Graph page (regression)", async () => {
+    projectStore.setState({
+      projects: projectsFixture,
+      selectedProjectId: "project-a",
+      lastViewPerProject: {},
+    });
+
+    render(<CodeGraphPage />);
+
+    await waitFor(() => {
+      const toolbars = screen.queryAllByTestId("graph-toolbar");
+      expect(toolbars).toHaveLength(1);
+    });
   });
 });
