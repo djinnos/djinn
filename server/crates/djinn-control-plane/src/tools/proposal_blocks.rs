@@ -4,7 +4,7 @@
 //! stable block type maps to the MDX tag clients should emit plus the field
 //! schema workers can use when validating or generating proposal bodies.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::LazyLock;
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
@@ -42,6 +42,26 @@ pub struct ProposalBlocksParams {}
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ProposalBlocksResponse {
     pub blocks: BTreeMap<&'static str, ProposalBlockDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParsedProposalBlock {
+    /// Stable proposal block type identifier, e.g. `annotated-code`.
+    pub block_type: String,
+    /// MDX component tag found in the body, e.g. `AnnotatedCode`.
+    pub tag: String,
+    /// Stable identifier for this block from the optional `id` attribute.
+    pub id: String,
+    /// All attributes from the opening tag, including `id` when present.
+    pub attributes: HashMap<String, String>,
+    /// Raw content between opening and closing tags.
+    pub raw_content: String,
+}
+
+impl ParsedProposalBlock {
+    pub fn block_id(&self) -> &str {
+        &self.id
+    }
 }
 
 fn string_field() -> ProposalBlockFieldSchema {
@@ -242,6 +262,97 @@ pub fn proposal_block_registry() -> BTreeMap<&'static str, ProposalBlockDefiniti
     PROPOSAL_BLOCK_REGISTRY.clone()
 }
 
+pub fn proposal_block_definition_for_tag(tag: &str) -> Option<&'static ProposalBlockDefinition> {
+    PROPOSAL_BLOCK_REGISTRY
+        .values()
+        .find(|definition| definition.tag == tag)
+}
+
+pub fn proposal_block_tags() -> HashSet<&'static str> {
+    PROPOSAL_BLOCK_REGISTRY
+        .values()
+        .map(|definition| definition.tag)
+        .collect()
+}
+
+/// Extract registered proposal MDX blocks from a body string.
+///
+/// This lightweight parser is intended for validation/introspection workflows,
+/// not for rendering arbitrary MDX. It recognizes the PascalCase component tags
+/// published in [`PROPOSAL_BLOCK_REGISTRY`] and skips unrelated HTML/MDX tags.
+pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedProposalBlock>, String> {
+    let re = regex::Regex::new(r"<([A-Z][A-Za-z0-9]*)([^>]*)>")
+        .map_err(|e| format!("block parser regex error: {e}"))?;
+    let mut blocks = Vec::new();
+
+    for cap in re.captures_iter(body) {
+        let tag = &cap[1];
+        let Some(definition) = proposal_block_definition_for_tag(tag) else {
+            continue;
+        };
+        let attrs_str = &cap[2];
+        let open_end = cap.get(0).expect("full match exists").end();
+        let attributes = parse_attributes(attrs_str);
+        let id = attributes.get("id").cloned().unwrap_or_default();
+        let raw_content = if attrs_str.trim_end().ends_with('/') {
+            String::new()
+        } else {
+            let closing_tag = format!("</{tag}>");
+            let close_start = body[open_end..]
+                .find(&closing_tag)
+                .map(|pos| open_end + pos)
+                .ok_or_else(|| {
+                    format!("unclosed <{tag}> block (no closing {closing_tag} found)")
+                })?;
+            body[open_end..close_start].to_string()
+        };
+
+        blocks.push(ParsedProposalBlock {
+            block_type: definition.block_type.to_string(),
+            tag: tag.to_string(),
+            id,
+            attributes,
+            raw_content,
+        });
+    }
+
+    Ok(blocks)
+}
+
+/// Parse `key="value"` and `key='value'` attributes from an MDX opening tag.
+fn parse_attributes(attrs_str: &str) -> HashMap<String, String> {
+    let re = regex::Regex::new(r#"([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#)
+        .expect("attr regex should compile");
+    let mut map = HashMap::new();
+    for cap in re.captures_iter(attrs_str) {
+        let key = cap[1].to_string();
+        let value = cap
+            .get(2)
+            .or_else(|| cap.get(3))
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+        map.insert(key, value);
+    }
+    map
+}
+
+/// Ensure all parsed blocks have non-empty, unique `id` attributes.
+pub fn validate_block_ids(blocks: &[ParsedProposalBlock]) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for block in blocks {
+        if block.id.is_empty() {
+            return Err(format!(
+                "{} block is missing a required `id` attribute",
+                block.tag
+            ));
+        }
+        if !seen.insert(block.id.as_str()) {
+            return Err(format!("duplicate block id: `{}`", block.block_id()));
+        }
+    }
+    Ok(())
+}
+
 #[tool_router(router = proposal_blocks_tool_router, vis = "pub")]
 impl DjinnMcpServer {
     #[tool(
@@ -260,5 +371,133 @@ impl DjinnMcpServer {
         Json(ProposalBlocksResponse {
             blocks: proposal_block_registry(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_contains_v1_blocks() {
+        let registry = proposal_block_registry();
+        assert_eq!(registry.len(), 8);
+        assert_eq!(registry["rich-text"].tag, "RichText");
+        assert_eq!(registry["diagram"].tag, "Diagram");
+        assert_eq!(registry["annotated-code"].tag, "AnnotatedCode");
+        assert_eq!(registry["data-model"].tag, "DataModel");
+        assert_eq!(registry["api-endpoint"].tag, "ApiEndpoint");
+        assert_eq!(registry["decisions"].tag, "Decisions");
+        assert_eq!(registry["file-tree"].tag, "FileTree");
+        assert_eq!(registry["question-form"].tag, "QuestionForm");
+    }
+
+    #[test]
+    fn registry_contains_field_schemas() {
+        let registry = proposal_block_registry();
+        let diagram_type = registry["diagram"].fields["type"].clone();
+        assert_eq!(diagram_type.field_type, "string");
+        assert_eq!(
+            diagram_type.enum_values.as_deref(),
+            Some(["mermaid", "plantuml", "svg"].as_slice())
+        );
+
+        let question_kind = registry["question-form"].fields["questions"]
+            .items
+            .as_ref()
+            .and_then(|items| items.fields.as_ref())
+            .and_then(|fields| fields.get("kind"))
+            .expect("question kind schema exists");
+        assert_eq!(
+            question_kind.enum_values.as_deref(),
+            Some(["text", "single", "multi"].as_slice())
+        );
+    }
+
+    #[test]
+    fn parse_registered_mdx_blocks() {
+        let body = r#"# Proposal
+
+<RichText id="intro" content="Hello" />
+
+<Diagram id='flow' type='mermaid'>
+graph TD;
+</Diagram>
+
+<AnnotatedCode id="example" language="rust">
+fn main() {}
+</AnnotatedCode>"#;
+
+        let blocks = parse_mdx_blocks(body).unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].block_type, "rich-text");
+        assert_eq!(blocks[0].tag, "RichText");
+        assert_eq!(blocks[0].id, "intro");
+        assert!(blocks[0].raw_content.is_empty());
+        assert_eq!(blocks[1].block_type, "diagram");
+        assert_eq!(blocks[1].tag, "Diagram");
+        assert_eq!(blocks[1].id, "flow");
+        assert_eq!(
+            blocks[1].attributes.get("type").map(String::as_str),
+            Some("mermaid")
+        );
+        assert!(blocks[1].raw_content.contains("graph TD"));
+        assert_eq!(blocks[2].block_type, "annotated-code");
+    }
+
+    #[test]
+    fn validate_ids_passes_with_unique_ids() {
+        let blocks = vec![
+            ParsedProposalBlock {
+                block_type: "data-model".to_string(),
+                tag: "DataModel".to_string(),
+                id: "schema-a".to_string(),
+                attributes: HashMap::new(),
+                raw_content: String::new(),
+            },
+            ParsedProposalBlock {
+                block_type: "decisions".to_string(),
+                tag: "Decisions".to_string(),
+                id: "decisions-1".to_string(),
+                attributes: HashMap::new(),
+                raw_content: String::new(),
+            },
+        ];
+        assert!(validate_block_ids(&blocks).is_ok());
+    }
+
+    #[test]
+    fn validate_ids_fails_on_empty() {
+        let blocks = vec![ParsedProposalBlock {
+            block_type: "data-model".to_string(),
+            tag: "DataModel".to_string(),
+            id: String::new(),
+            attributes: HashMap::new(),
+            raw_content: String::new(),
+        }];
+        let err = validate_block_ids(&blocks).unwrap_err();
+        assert!(err.contains("missing a required `id`"));
+    }
+
+    #[test]
+    fn validate_ids_fails_on_duplicate() {
+        let blocks = vec![
+            ParsedProposalBlock {
+                block_type: "data-model".to_string(),
+                tag: "DataModel".to_string(),
+                id: "same-id".to_string(),
+                attributes: HashMap::new(),
+                raw_content: String::new(),
+            },
+            ParsedProposalBlock {
+                block_type: "decisions".to_string(),
+                tag: "Decisions".to_string(),
+                id: "same-id".to_string(),
+                attributes: HashMap::new(),
+                raw_content: String::new(),
+            },
+        ];
+        let err = validate_block_ids(&blocks).unwrap_err();
+        assert!(err.contains("duplicate block id"));
     }
 }

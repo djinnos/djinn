@@ -11223,7 +11223,12 @@ expression: signatures
           "type": "array"
         },
         "body": {
-          "description": "Markdown spec body.",
+          "description": "Spec body (markdown or MDX depending on `body_format`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "body_format": {
+          "description": "Body encoding: `markdown` (default) or `mdx` (block-aware).",
           "nullable": true,
           "type": "string"
         },
@@ -11292,6 +11297,10 @@ expression: signatures
           "type": "string"
         },
         "body": {
+          "type": "string"
+        },
+        "body_format": {
+          "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
           "type": "string"
         },
         "build_owner_user_id": {
@@ -11711,6 +11720,10 @@ expression: signatures
         "body": {
           "type": "string"
         },
+        "body_format": {
+          "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
+          "type": "string"
+        },
         "build_owner_user_id": {
           "description": "Build owner once graduated.",
           "nullable": true,
@@ -11864,6 +11877,10 @@ expression: signatures
             "body": {
               "type": "string"
             },
+            "body_format": {
+              "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
+              "type": "string"
+            },
             "build_owner_user_id": {
               "description": "Build owner once graduated.",
               "nullable": true,
@@ -11923,6 +11940,7 @@ expression: signatures
             "short_id",
             "title",
             "body",
+            "body_format",
             "acceptance_criteria",
             "status",
             "created_at",
@@ -12333,6 +12351,10 @@ expression: signatures
             "body": {
               "type": "string"
             },
+            "body_format": {
+              "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
+              "type": "string"
+            },
             "build_owner_user_id": {
               "description": "Build owner once graduated.",
               "nullable": true,
@@ -12392,6 +12414,7 @@ expression: signatures
             "short_id",
             "title",
             "body",
+            "body_format",
             "acceptance_criteria",
             "status",
             "created_at",
@@ -12410,6 +12433,10 @@ expression: signatures
               "type": "array"
             },
             "body": {
+              "type": "string"
+            },
+            "body_format": {
+              "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
               "type": "string"
             },
             "created_at": {
@@ -12451,6 +12478,7 @@ expression: signatures
             "seq",
             "title",
             "body",
+            "body_format",
             "acceptance_criteria",
             "event_kind",
             "created_at"
@@ -12646,6 +12674,10 @@ expression: signatures
         "body": {
           "type": "string"
         },
+        "body_format": {
+          "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
+          "type": "string"
+        },
         "build_owner_user_id": {
           "description": "Build owner once graduated.",
           "nullable": true,
@@ -12776,6 +12808,10 @@ expression: signatures
           "type": "string"
         },
         "body": {
+          "type": "string"
+        },
+        "body_format": {
+          "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
           "type": "string"
         },
         "build_owner_user_id": {
@@ -12979,6 +13015,11 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "body_format": {
+          "description": "Body encoding: `markdown` (default) or `mdx` (block-aware).",
+          "nullable": true,
+          "type": "string"
+        },
         "id": {
           "description": "Proposal UUID or short_id.",
           "type": "string"
@@ -13046,6 +13087,10 @@ expression: signatures
           "type": "string"
         },
         "body": {
+          "type": "string"
+        },
+        "body_format": {
+          "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
           "type": "string"
         },
         "build_owner_user_id": {
