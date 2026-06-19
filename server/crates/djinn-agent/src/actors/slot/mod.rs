@@ -77,6 +77,17 @@ pub mod helpers;
 // and worktree orchestration have been deleted.
 pub(crate) mod lifecycle;
 pub(crate) mod llm_extraction;
+pub(crate) mod memory_enrichment;
+/// Re-export the public memory-enrichment entry point so non-agent crates
+/// (e.g. `djinn-server`'s `mcp_bridge`) can trigger the pass without
+/// depending on `djinn_agent::actors::slot` internals.
+///
+/// The trigger (`memory_run_enrichment` MCP tool) is intentionally a thin
+/// admin/operator surface — see `djinn-control-plane::tools::memory_tools::run_enrichment`.
+pub use memory_enrichment::{
+    EnrichmentClaim, EnrichmentEdge, EnrichmentEntity, EnrichmentReport, run_memory_enrichment,
+    run_memory_enrichment_with_db,
+};
 mod pool;
 pub(crate) mod reply_loop;
 #[cfg(test)]

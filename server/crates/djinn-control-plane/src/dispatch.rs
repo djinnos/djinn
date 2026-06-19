@@ -30,7 +30,7 @@ use crate::tools::memory_tools::{
     AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
     DiffParams, EditParams, ExtractedAuditParams, GraphParams, HealthParams, HistoryParams,
     ListParams, MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecentParams,
-    RepairEmbeddingsParams, SearchParams, TaskRefsParams, WriteParams,
+    RepairEmbeddingsParams, RunEnrichmentParams, SearchParams, TaskRefsParams, WriteParams,
 };
 use crate::tools::pr_review_tools::PrReviewContextParams;
 use crate::tools::project_tools::{
@@ -691,6 +691,13 @@ impl DjinnMcpServer {
             "memory_repair_embeddings" => map_json(
                 name,
                 self.memory_repair_embeddings(Parameters(decode_args::<RepairEmbeddingsParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "memory_run_enrichment" => map_json(
+                name,
+                self.memory_run_enrichment(Parameters(decode_args::<RunEnrichmentParams>(
                     name, args,
                 )?))
                 .await,
