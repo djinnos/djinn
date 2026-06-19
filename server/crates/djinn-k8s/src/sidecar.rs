@@ -297,7 +297,10 @@ mod tests {
         assert!(c.startup_probe.is_some());
         // Must run as the image default (root) so the service entrypoint can
         // initialise its data dir; the Pod default uid 10001 would break it.
-        let sc = c.security_context.as_ref().expect("container securityContext");
+        let sc = c
+            .security_context
+            .as_ref()
+            .expect("container securityContext");
         assert_eq!(sc.run_as_user, Some(0));
         assert_eq!(sc.run_as_non_root, Some(false));
     }
