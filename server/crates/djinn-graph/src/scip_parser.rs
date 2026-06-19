@@ -270,9 +270,22 @@ pub fn parse_scip_artifacts_with_cache_reuse(
     cache_reuse_enabled: bool,
 ) -> Result<Vec<ParsedScipIndex>> {
     let store = cache_reuse_enabled.then(cache::ScipCacheStore::from_environment);
+    parse_scip_artifacts_with_cache_store(artifacts, store.as_ref())
+}
+
+/// Parse SCIP artifacts using an explicit, caller-provided cache store.
+///
+/// This is the same path as [`parse_scip_artifacts_with_cache_reuse`] but
+/// accepts the store directly rather than deriving it from the environment,
+/// so parity tests can isolate the cache root to a temp directory without
+/// mutating process-wide environment variables.
+pub(crate) fn parse_scip_artifacts_with_cache_store(
+    artifacts: &[ScipArtifact],
+    cache_store: Option<&cache::ScipCacheStore>,
+) -> Result<Vec<ParsedScipIndex>> {
     artifacts
         .iter()
-        .map(|artifact| parse_scip_artifact(artifact, store.as_ref()))
+        .map(|artifact| parse_scip_artifact(artifact, cache_store))
         .collect()
 }
 
