@@ -16,3 +16,5 @@ mod oauth;
 mod router;
 #[path = "tests/tool_schemas.rs"]
 mod tool_schemas;
+#[path = "tests/usage_analytics.rs"]
+mod usage_analytics;
