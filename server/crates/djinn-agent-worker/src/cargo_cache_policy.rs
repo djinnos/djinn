@@ -87,6 +87,28 @@ pub fn resolve_cargo_cache_policy(
     project_root: &Path,
     env_config: Option<&EnvironmentConfig>,
 ) -> Option<CargoCachePolicy> {
+    if let Some(cfg) = env_config {
+        if let Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_policy)) =
+            &cfg.cargo_cache_policy
+        {
+            return Some(CargoCachePolicy {
+                workspace: override_policy.workspace,
+                features: override_policy.features.clone(),
+                all_features: override_policy.all_features,
+                sccache: override_policy.sccache,
+                incremental: override_policy.incremental,
+                warm_commands: override_policy
+                    .warm_commands
+                    .iter()
+                    .map(|command| CargoWarmCommand {
+                        label: "override",
+                        args: command.args.clone(),
+                    })
+                    .collect(),
+            });
+        }
+    }
+
     let workspace_dir = resolve_cargo_workspace_dir(project_root, env_config)?;
 
     let is_workspace = detect_workspace_layout(&workspace_dir);
@@ -548,6 +570,79 @@ features = "foo bar"
         assert_eq!(
             policy.features(),
             vec!["--features".to_string(), "foo,bar".to_string()]
+        );
+    }
+
+    #[test]
+    fn explicit_env_config_override_takes_precedence_over_detection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["crate-a"]
+"#,
+        )
+        .expect("write Cargo.toml");
+        fs::create_dir_all(root.join(".cargo")).expect("mkdir .cargo");
+        fs::write(
+            root.join(".cargo/config.toml"),
+            r#"[build]
+rustc-wrapper = "sccache"
+features = ["detected"]
+"#,
+        )
+        .expect("write config.toml");
+        fs::create_dir_all(root.join("crate-a/src")).expect("mkdir crate-a/src");
+        fs::write(
+            root.join("crate-a/Cargo.toml"),
+            r#"[package]
+name = "crate-a"
+version = "0.1.0"
+"#,
+        )
+        .expect("write crate-a/Cargo.toml");
+
+        let mut cfg = make_env_config_with_rust_workspace(".");
+        cfg.lifecycle.pre_verification = vec![djinn_stack::environment::HookCommand::Shell(
+            "cargo test --workspace --all-features".into(),
+        )];
+        cfg.cargo_cache_policy = Some(djinn_stack::environment::CargoCachePolicy::Explicit(
+            djinn_stack::environment::CargoCachePolicyOverride {
+                workspace: false,
+                features: vec!["override-a".into(), "override-b".into()],
+                all_features: false,
+                sccache: false,
+                incremental: true,
+                warm_commands: vec![djinn_stack::environment::CargoWarmCommand {
+                    label: "explicit warm".into(),
+                    args: vec![
+                        "check".into(),
+                        "--features".into(),
+                        "override-a,override-b".into(),
+                    ],
+                }],
+            },
+        ));
+
+        let policy = resolve_cargo_cache_policy(root, Some(&cfg)).expect("policy");
+        assert!(!policy.workspace);
+        assert_eq!(policy.features, vec!["override-a", "override-b"]);
+        assert!(!policy.all_features);
+        assert!(!policy.sccache);
+        assert!(policy.incremental);
+        assert_eq!(
+            policy.features(),
+            vec![
+                "--features".to_string(),
+                "override-a,override-b".to_string()
+            ]
+        );
+        assert_eq!(policy.warm_commands.len(), 1);
+        assert_eq!(policy.warm_commands[0].label, "override");
+        assert_eq!(
+            policy.warm_commands[0].args,
+            vec!["check", "--features", "override-a,override-b"]
         );
     }
 }
