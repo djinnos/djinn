@@ -82,7 +82,43 @@ impl NoteRepository {
             })
             .collect();
 
-        Ok(GraphResponse { nodes, edges })
+        // ── Typed semantic edges ──────────────────────────────────────────────
+        // Fetch typed association edges (kind <> 'co_access') for notes in this
+        // project. Uses a runtime (non-macro) query because the widened kind
+        // CHECK constraint was added after the offline .sqlx cache was generated.
+        //
+        // The F5 substrate is undirected (canonical-pair ordering: note_a_id <
+        // note_b_id). Outbound direction for directional kinds (e.g.
+        // supersedes) is reconstructed at scoring/context time — here we
+        // project both endpoints as (source_id = note_a_id, target_id = note_b_id)
+        // so the canonical pair is preserved verbatim.
+        let typed_edge_rows = sqlx::query(
+            r#"SELECT na.note_a_id AS "source_id", na.note_b_id AS "target_id",
+                      na.kind, na.weight
+               FROM note_associations na
+               JOIN notes n_a ON n_a.id = na.note_a_id AND n_a.project_id = $1
+               JOIN notes n_b ON n_b.id = na.note_b_id AND n_b.project_id = $1
+               WHERE na.kind <> 'co_access'"#,
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        let typed_edges = typed_edge_rows
+            .into_iter()
+            .map(|row| TypedEdge {
+                source_id: row.get("source_id"),
+                target_id: row.get("target_id"),
+                kind: row.get("kind"),
+                weight: row.get("weight"),
+            })
+            .collect();
+
+        Ok(GraphResponse {
+            nodes,
+            edges,
+            typed_edges,
+        })
     }
 
     /// All wikilinks in a project whose target note does not exist.

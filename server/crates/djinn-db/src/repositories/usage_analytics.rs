@@ -481,43 +481,98 @@ impl UsageAnalyticsRepository {
     ///
     /// Uses shared-credit attribution: each completed task counts for every
     /// model that ran at least one worker session on it.  Success rate,
-    /// average reopens, and verification pass rate reuse the same pattern as
-    /// `AgentRepository::get_metrics`.
+    /// average reopens, and verification pass rate are computed over distinct
+    /// shared-credit tasks per model (not raw worker-session rows) so that
+    /// multiple sessions on the same task cannot inflate rates above 1.0.
     async fn fetch_model_effectiveness(
         &self,
         params: &UsageAnalyticsQuery,
     ) -> Result<Vec<ModelEffectivenessRow>> {
         let (from_clause, where_clause, binds) = Self::build_effectiveness_from_where(params);
 
+        // Use CTEs to separate session-level aggregates (spend, tokens,
+        // sessions) from task-level outcome metrics.  Task outcomes are
+        // computed over DISTINCT (model_id, task_id) pairs so that multiple
+        // worker sessions on the same task cannot overweight success_rate,
+        // avg_reopens, or verification_pass_rate.
+        //
+        // `filtered_sessions` — rows matching the effectiveness WHERE clause
+        //     (date range, worker scope, optional project/model filters).
+        // `session_agg` — per-model session/spend/tokens rollup.
+        // `task_agg` — per-model task-outcome rollup over distinct
+        //     (model_id, task_id) pairs, using task properties from the
+        //     tasks table (which are functionally dependent on task_id).
         let sql = format!(
-            "SELECT \
-                s.model_id                               AS \"model_id!\", \
-                COUNT(*)                                 AS \"sessions!\", \
-                CASE \
-                    WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
-                    ELSE SUM(s.cost_usd) \
-                END                                      AS \"spend_usd\", \
-                COALESCE(SUM(s.tokens_in), 0)            AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)           AS \"tokens_out!\", \
-                COUNT(DISTINCT \
-                    CASE WHEN t.status = 'closed' \
-                              AND t.close_reason = 'completed' \
-                         THEN t.id END \
-                )                                        AS \"shared_credit_completed_task_count!\", \
-                CAST(SUM(CASE WHEN t.status = 'closed' AND t.close_reason = 'completed' THEN 1 ELSE 0 END) AS DOUBLE PRECISION) \
-                    / CAST(GREATEST(1, COUNT(DISTINCT \
-                        CASE WHEN t.status = 'closed' THEN t.id END \
-                    )) AS DOUBLE PRECISION)              AS \"success_rate: f64\", \
-                COALESCE(AVG(CASE WHEN t.status = 'closed' \
-                    THEN CAST(t.total_reopen_count AS DOUBLE PRECISION) \
-                    ELSE NULL END), 0.0)                 AS \"avg_reopens!: f64\", \
-                CAST(SUM(CASE WHEN t.status = 'closed' AND t.total_verification_failure_count = 0 THEN 1 ELSE 0 END) AS DOUBLE PRECISION) \
-                    / CAST(GREATEST(1, COUNT(DISTINCT \
-                        CASE WHEN t.status = 'closed' THEN t.id END \
-                    )) AS DOUBLE PRECISION)              AS \"verification_pass_rate: f64\" \
-             {from_clause} {where_clause} \
-             GROUP BY s.model_id \
-             ORDER BY s.model_id"
+            "WITH filtered_sessions AS ( \
+                SELECT \
+                    s.model_id, \
+                    s.task_id, \
+                    s.cost_usd, \
+                    s.tokens_in, \
+                    s.tokens_out, \
+                    t.status, \
+                    t.close_reason, \
+                    t.total_reopen_count, \
+                    t.total_verification_failure_count \
+                {from_clause} {where_clause} \
+             ), \
+             session_agg AS ( \
+                SELECT \
+                    model_id, \
+                    COUNT(*) AS sessions, \
+                    CASE WHEN bool_or(cost_usd IS NULL) \
+                         THEN NULL ELSE SUM(cost_usd) END AS spend_usd, \
+                    COALESCE(SUM(tokens_in), 0)  AS tokens_in, \
+                    COALESCE(SUM(tokens_out), 0) AS tokens_out \
+                FROM filtered_sessions \
+                GROUP BY model_id \
+             ), \
+             task_agg AS ( \
+                SELECT \
+                    model_id, \
+                    COUNT(DISTINCT \
+                        CASE WHEN status = 'closed' \
+                                  AND close_reason = 'completed' \
+                             THEN task_id END) AS completed_count, \
+                    COUNT(DISTINCT \
+                        CASE WHEN status = 'closed' \
+                             THEN task_id END) AS closed_count, \
+                    AVG(CASE WHEN status = 'closed' \
+                             THEN total_reopen_count::DOUBLE PRECISION \
+                             ELSE NULL END) AS avg_reopens, \
+                    COUNT(DISTINCT \
+                        CASE WHEN status = 'closed' \
+                                  AND total_verification_failure_count = 0 \
+                             THEN task_id END) AS verified_count \
+                FROM ( \
+                    SELECT DISTINCT \
+                        model_id, task_id, status, close_reason, \
+                        total_reopen_count, total_verification_failure_count \
+                    FROM filtered_sessions \
+                ) distinct_tasks \
+                GROUP BY model_id \
+             ) \
+             SELECT \
+                 sa.model_id                                AS \"model_id!\", \
+                 sa.sessions                                AS \"sessions!\", \
+                 sa.spend_usd                               AS \"spend_usd\", \
+                 sa.tokens_in                               AS \"tokens_in!\", \
+                 sa.tokens_out                              AS \"tokens_out!\", \
+                 COALESCE(ta.completed_count, 0)            AS \"shared_credit_completed_task_count!\", \
+                 COALESCE( \
+                     ta.completed_count::DOUBLE PRECISION \
+                     / GREATEST(1, ta.closed_count)::DOUBLE PRECISION, \
+                     0.0 \
+                 )                                          AS \"success_rate!: f64\", \
+                 COALESCE(ta.avg_reopens, 0.0)              AS \"avg_reopens!: f64\", \
+                 COALESCE( \
+                     ta.verified_count::DOUBLE PRECISION \
+                     / GREATEST(1, ta.closed_count)::DOUBLE PRECISION, \
+                     0.0 \
+                 )                                          AS \"verification_pass_rate!: f64\" \
+             FROM session_agg sa \
+             LEFT JOIN task_agg ta ON ta.model_id = sa.model_id \
+             ORDER BY sa.model_id"
         );
 
         let mut query = sqlx::query(&sql);
@@ -555,9 +610,9 @@ impl UsageAnalyticsRepository {
                     tokens_in,
                     tokens_out,
                     shared_credit_completed_task_count: completed,
-                    success_rate: r.get("success_rate"),
+                    success_rate: Some(r.get("success_rate!")),
                     avg_reopens: r.get("avg_reopens!"),
-                    verification_pass_rate: r.get("verification_pass_rate"),
+                    verification_pass_rate: Some(r.get("verification_pass_rate!")),
                     cost_per_completed_task,
                     tokens_per_task,
                 }

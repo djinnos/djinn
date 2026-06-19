@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use djinn_core::events::EventBus;
 use djinn_memory::{
     BrokenLink, ExtractedNoteAuditReport, GraphEdge, GraphNode, GraphResponse, HealthReport, Note,
-    NoteCompact, NoteSearchResult, OrphanNote, StaleFolder,
+    NoteCompact, NoteSearchResult, OrphanNote, StaleFolder, TypedEdge,
 };
 use std::sync::Arc;
 
