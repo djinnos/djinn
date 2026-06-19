@@ -465,6 +465,7 @@ async fn approved_simple_task_with_memory_write_signal_skips_direct_close() {
             agent_type: "architect",
             metadata_json: None,
             task_run_id: None,
+            pricing: None,
         })
         .await
         .unwrap();
@@ -643,6 +644,7 @@ async fn architect_spike_with_real_adr_file_routes_through_pr_flow_via_worktree_
             agent_type: "architect",
             metadata_json: None,
             task_run_id: None,
+            pricing: None,
         })
         .await
         .unwrap();

@@ -24,6 +24,12 @@ const PR_POLLER_TRACKED: &str = "djinn_pr_poller_tracked";
 const MERGE_FAILURES_TOTAL: &str = "djinn_merge_failures_total";
 const DOCTOR_FINDINGS: &str = "djinn_doctor_findings";
 const DOCTOR_RUN_DURATION_SECONDS: &str = "djinn_doctor_run_duration_seconds";
+const CARGO_TARGET_SEED_TOTAL: &str = "djinn_cargo_target_seed_total";
+const CARGO_SEED_HIT_TOTAL: &str = "djinn_cargo_seed_hit_total";
+const CARGO_SEED_COLD_TOTAL: &str = "djinn_cargo_seed_cold_total";
+const CARGO_WARM_BASE_FRESHNESS_SECONDS: &str = "djinn_cargo_warm_base_freshness_seconds";
+const CARGO_WARM_STEP_FRESH_COUNT: &str = "djinn_cargo_warm_step_fresh_count";
+const CARGO_WARM_STEP_COMPILING_COUNT: &str = "djinn_cargo_warm_step_compiling_count";
 const SLOT_POOL_STATES: [&str; 2] = ["free", "busy"];
 const JIT_PITFALL_HINTS_TOTAL: &str = "djinn_jit_pitfall_hints_total";
 const JIT_PITFALL_OUTCOMES: [&str; 7] = [
@@ -145,6 +151,95 @@ pub mod doctor {
     /// Convenience wrapper for callers measuring with `std::time::Duration`.
     pub fn record_run_duration(check: &str, duration: std::time::Duration) {
         set_run_duration_seconds(check, duration.as_secs_f64());
+    }
+}
+
+pub mod cargo_cache {
+    pub const SEED_HIT_TOTAL: &str = super::CARGO_SEED_HIT_TOTAL;
+    pub const SEED_COLD_TOTAL: &str = super::CARGO_SEED_COLD_TOTAL;
+    pub const WARM_BASE_FRESHNESS_SECONDS: &str = super::CARGO_WARM_BASE_FRESHNESS_SECONDS;
+    pub const WARM_STEP_FRESH_COUNT: &str = super::CARGO_WARM_STEP_FRESH_COUNT;
+    pub const WARM_STEP_COMPILING_COUNT: &str = super::CARGO_WARM_STEP_COMPILING_COUNT;
+
+    /// Increment the Cargo target warm-base seed hit counter for a project.
+    pub fn record_seed_hit(project_id: &str) {
+        metrics::counter!(super::CARGO_SEED_HIT_TOTAL, "project_id" => project_id.to_owned())
+            .increment(1);
+    }
+
+    /// Increment the Cargo target cold-start fallback counter for a project and reason.
+    pub fn record_seed_cold(project_id: &str, fallback_reason: &str) {
+        metrics::counter!(
+            super::CARGO_SEED_COLD_TOTAL,
+            "project_id" => project_id.to_owned(),
+            "fallback_reason" => fallback_reason.to_owned()
+        )
+        .increment(1);
+    }
+
+    /// Set the elapsed age/freshness gauge for a just-produced warm Cargo base.
+    pub fn record_warm_base_freshness(project_id: &str, age_secs: f64) {
+        metrics::gauge!(
+            super::CARGO_WARM_BASE_FRESHNESS_SECONDS,
+            "project_id" => project_id.to_owned()
+        )
+        .set(age_secs);
+    }
+
+    /// Set the number of Cargo units reported as `Fresh` for one warm step.
+    pub fn record_warm_step_fresh_count(project_id: &str, step: &str, count: usize) {
+        metrics::gauge!(
+            super::CARGO_WARM_STEP_FRESH_COUNT,
+            "project_id" => project_id.to_owned(),
+            "step" => step.to_owned()
+        )
+        .set(count as f64);
+    }
+
+    /// Set the number of Cargo units reported as `Compiling` for one warm step.
+    pub fn record_warm_step_compiling_count(project_id: &str, step: &str, count: usize) {
+        metrics::gauge!(
+            super::CARGO_WARM_STEP_COMPILING_COUNT,
+            "project_id" => project_id.to_owned(),
+            "step" => step.to_owned()
+        )
+        .set(count as f64);
+    }
+}
+
+pub mod cargo_target_seed {
+    pub const FALLBACK_REASON_BASE_MISSING: &str = "base_missing";
+    pub const FALLBACK_REASON_BASE_NOT_DIRECTORY: &str = "base_not_directory";
+    pub const FALLBACK_REASON_BASE_UNUSABLE: &str = "base_unusable";
+    pub const FALLBACK_REASON_SCAN_FAILED: &str = "scan_failed";
+    pub const FALLBACK_REASON_CLONE_FAILED: &str = "clone_failed";
+    pub const FALLBACK_REASON_UNKNOWN: &str = "unknown";
+
+    const OUTCOME_HIT: &str = "hit";
+    const OUTCOME_FALLBACK: &str = "fallback";
+
+    /// Increment the Cargo target seed counter for a warm-base hit.
+    pub fn increment_seed_hit() {
+        metrics::counter!(
+            super::CARGO_TARGET_SEED_TOTAL,
+            "outcome" => OUTCOME_HIT,
+            "fallback_reason" => ""
+        )
+        .increment(1);
+    }
+
+    /// Increment the Cargo target seed counter for a cold fallback reason.
+    ///
+    /// Callers should pass one of the `FALLBACK_REASON_*` constants. Unexpected
+    /// local failures should be mapped to `FALLBACK_REASON_UNKNOWN` rather than
+    /// passed through as free-form labels.
+    pub fn increment_seed_fallback(reason: &'static str) {
+        metrics::counter!(
+            super::CARGO_TARGET_SEED_TOTAL,
+            "outcome" => OUTCOME_FALLBACK,
+            "fallback_reason" => reason
+        )
+        .increment(1);
     }
 }
 
@@ -281,6 +376,47 @@ fn register_metrics() {
     metrics::describe_gauge!(
         DOCTOR_RUN_DURATION_SECONDS,
         "Doctor check run duration in seconds for the most recent recorded run. The only label is the stable DoctorCheck::name() value as check."
+    );
+    metrics::describe_counter!(
+        CARGO_TARGET_SEED_TOTAL,
+        "Cargo target seed outcomes partitioned by bounded outcome and fallback_reason labels."
+    );
+    metrics::counter!(CARGO_TARGET_SEED_TOTAL, "outcome" => "hit", "fallback_reason" => "")
+        .absolute(0);
+    for reason in [
+        cargo_target_seed::FALLBACK_REASON_BASE_MISSING,
+        cargo_target_seed::FALLBACK_REASON_BASE_NOT_DIRECTORY,
+        cargo_target_seed::FALLBACK_REASON_BASE_UNUSABLE,
+        cargo_target_seed::FALLBACK_REASON_SCAN_FAILED,
+        cargo_target_seed::FALLBACK_REASON_CLONE_FAILED,
+        cargo_target_seed::FALLBACK_REASON_UNKNOWN,
+    ] {
+        metrics::counter!(
+            CARGO_TARGET_SEED_TOTAL,
+            "outcome" => "fallback",
+            "fallback_reason" => reason
+        )
+        .absolute(0);
+    }
+    metrics::describe_counter!(
+        CARGO_SEED_HIT_TOTAL,
+        "Cargo target warm-base seed successes partitioned by project id."
+    );
+    metrics::describe_counter!(
+        CARGO_SEED_COLD_TOTAL,
+        "Cargo target seed fallbacks to a cold private run target dir partitioned by project id and fallback reason."
+    );
+    metrics::describe_gauge!(
+        CARGO_WARM_BASE_FRESHNESS_SECONDS,
+        "Seconds elapsed while producing the most recent warm Cargo target base for a project."
+    );
+    metrics::describe_gauge!(
+        CARGO_WARM_STEP_FRESH_COUNT,
+        "Cargo warm-step crate count reported as Fresh, partitioned by project id and step."
+    );
+    metrics::describe_gauge!(
+        CARGO_WARM_STEP_COMPILING_COUNT,
+        "Cargo warm-step crate count reported as Compiling, partitioned by project id and step."
     );
 }
 
@@ -531,6 +667,74 @@ mod tests {
                 std::time::Duration::from_millis(250),
             );
         });
+        assert_sync_unit(|| cargo_cache::record_seed_hit("project-sync"));
+        assert_sync_unit(|| cargo_cache::record_seed_cold("project-sync", "base_missing"));
+        assert_sync_unit(|| cargo_cache::record_warm_base_freshness("project-sync", 1.0));
+    }
+
+    #[test]
+    fn cargo_seed_hit_counter_renders_project_label() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let project_id = "project-seed-hit-test";
+        cargo_cache::record_seed_hit(project_id);
+
+        let rendered = render().unwrap();
+        let sample = rendered_sample(
+            &rendered,
+            cargo_cache::SEED_HIT_TOTAL,
+            &[("project_id", project_id)],
+        );
+        assert!(
+            sample.ends_with(" 1"),
+            "unexpected seed-hit sample: {sample}"
+        );
+    }
+
+    #[test]
+    fn cargo_seed_cold_counter_renders_fallback_reason_label() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let project_id = "project-seed-cold-test";
+        let fallback_reason = "base target dir is missing";
+        cargo_cache::record_seed_cold(project_id, fallback_reason);
+
+        let rendered = render().unwrap();
+        let sample = rendered_sample(
+            &rendered,
+            cargo_cache::SEED_COLD_TOTAL,
+            &[
+                ("project_id", project_id),
+                ("fallback_reason", fallback_reason),
+            ],
+        );
+        assert!(
+            sample.ends_with(" 1"),
+            "unexpected seed-cold sample: {sample}"
+        );
+    }
+
+    #[test]
+    fn cargo_warm_base_freshness_gauge_renders_positive_value() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let project_id = "project-warm-freshness-test";
+        cargo_cache::record_warm_base_freshness(project_id, 2.5);
+
+        let rendered = render().unwrap();
+        let sample = rendered_sample(
+            &rendered,
+            cargo_cache::WARM_BASE_FRESHNESS_SECONDS,
+            &[("project_id", project_id)],
+        );
+        let value = sample
+            .rsplit_once(' ')
+            .and_then(|(_, value)| value.parse::<f64>().ok())
+            .expect("freshness gauge sample should end with a number");
+        assert!(value > 0.0, "freshness gauge must be positive: {sample}");
     }
 
     #[test]
@@ -643,6 +847,149 @@ mod tests {
             unlabelled_sample_value(&rendered, MERGE_FAILURES_TOTAL),
             merge_failures_before + 1.0
         );
+    }
+
+    // ── cargo_target_seed telemetry tests ───────────────────────────
+
+    // Helper to extract the numeric value from a rendered Prometheus sample line.
+    fn sample_value(sample: &str) -> f64 {
+        sample
+            .rsplit_once(' ')
+            .and_then(|(_, v)| v.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("sample should end with a number: {sample}"))
+    }
+
+    #[test]
+    fn cargo_target_seed_hit_counter_renders_outcome_label() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let before = render().unwrap();
+        let before_sample = rendered_sample(
+            &before,
+            CARGO_TARGET_SEED_TOTAL,
+            &[("outcome", "hit"), ("fallback_reason", "")],
+        );
+        let before_val = sample_value(before_sample);
+
+        cargo_target_seed::increment_seed_hit();
+
+        let after = render().unwrap();
+        let after_sample = rendered_sample(
+            &after,
+            CARGO_TARGET_SEED_TOTAL,
+            &[("outcome", "hit"), ("fallback_reason", "")],
+        );
+        assert_eq!(
+            sample_value(after_sample),
+            before_val + 1.0,
+            "cargo-target-seed hit should increment by 1: {after_sample}"
+        );
+    }
+
+    #[test]
+    fn cargo_target_seed_fallback_counter_renders_fallback_reason_label() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let reason = cargo_target_seed::FALLBACK_REASON_BASE_MISSING;
+        let before = render().unwrap();
+        let before_sample = rendered_sample(
+            &before,
+            CARGO_TARGET_SEED_TOTAL,
+            &[("outcome", "fallback"), ("fallback_reason", reason)],
+        );
+        let before_val = sample_value(before_sample);
+
+        cargo_target_seed::increment_seed_fallback(reason);
+
+        let after = render().unwrap();
+        let after_sample = rendered_sample(
+            &after,
+            CARGO_TARGET_SEED_TOTAL,
+            &[("outcome", "fallback"), ("fallback_reason", reason)],
+        );
+        assert_eq!(
+            sample_value(after_sample),
+            before_val + 1.0,
+            "cargo-target-seed fallback should increment by 1: {after_sample}"
+        );
+    }
+
+    #[test]
+    fn cargo_target_seed_fallback_unknown_reason_renders() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let reason = cargo_target_seed::FALLBACK_REASON_UNKNOWN;
+        let before = render().unwrap();
+        let before_sample = rendered_sample(
+            &before,
+            CARGO_TARGET_SEED_TOTAL,
+            &[("outcome", "fallback"), ("fallback_reason", reason)],
+        );
+        let before_val = sample_value(before_sample);
+
+        cargo_target_seed::increment_seed_fallback(reason);
+
+        let after = render().unwrap();
+        let after_sample = rendered_sample(
+            &after,
+            CARGO_TARGET_SEED_TOTAL,
+            &[("outcome", "fallback"), ("fallback_reason", reason)],
+        );
+        assert_eq!(
+            sample_value(after_sample),
+            before_val + 1.0,
+            "cargo-target-seed unknown-fallback should increment by 1: {after_sample}"
+        );
+    }
+
+    #[test]
+    fn cargo_target_seed_all_fallback_reasons_render_distinctly() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let reasons = [
+            cargo_target_seed::FALLBACK_REASON_BASE_MISSING,
+            cargo_target_seed::FALLBACK_REASON_BASE_NOT_DIRECTORY,
+            cargo_target_seed::FALLBACK_REASON_BASE_UNUSABLE,
+            cargo_target_seed::FALLBACK_REASON_SCAN_FAILED,
+            cargo_target_seed::FALLBACK_REASON_CLONE_FAILED,
+            cargo_target_seed::FALLBACK_REASON_UNKNOWN,
+        ];
+
+        // Snapshot before values.
+        let before = render().unwrap();
+        let before_vals: Vec<f64> = reasons
+            .iter()
+            .map(|reason| {
+                let sample = rendered_sample(
+                    &before,
+                    CARGO_TARGET_SEED_TOTAL,
+                    &[("outcome", "fallback"), ("fallback_reason", reason)],
+                );
+                sample_value(sample)
+            })
+            .collect();
+
+        for reason in &reasons {
+            cargo_target_seed::increment_seed_fallback(reason);
+        }
+
+        let after = render().unwrap();
+        for (i, reason) in reasons.iter().enumerate() {
+            let after_sample = rendered_sample(
+                &after,
+                CARGO_TARGET_SEED_TOTAL,
+                &[("outcome", "fallback"), ("fallback_reason", reason)],
+            );
+            assert_eq!(
+                sample_value(after_sample),
+                before_vals[i] + 1.0,
+                "cargo-target-seed fallback reason {reason} should increment by 1: {after_sample}"
+            );
+        }
     }
 }
 

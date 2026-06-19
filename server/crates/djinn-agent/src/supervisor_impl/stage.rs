@@ -639,7 +639,7 @@ pub(crate) async fn execute_stage(
     // dispatches under that owner's model/credentials. Without this the worker
     // pod runs outside any user scope: `current_user_id()` is `None`, so
     // `epic_create` stamped NULL and downstream wave-planner tasks fell back to
-    // the automation user (losing both attribution and the build owner's model
+    // a generic user (losing both attribution and the build owner's model
     // the user picked at kickoff). The host already scopes credential
     // resolution this way (supervisor_runner.rs); this extends the same
     // identity to in-pod tool execution.

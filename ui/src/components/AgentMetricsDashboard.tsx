@@ -14,9 +14,10 @@ const BASE_ROLE_LABELS: Record<BaseRole, string> = {
   reviewer: "Reviewer",
   lead: "Lead",
   planner: "Planner",
+  architect: "Architect",
 };
 
-const BASE_ROLES: BaseRole[] = ["worker", "reviewer", "lead", "planner"];
+const BASE_ROLES: BaseRole[] = ["worker", "reviewer", "lead", "planner", "architect"];
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -30,15 +31,18 @@ const AMBER_400 = "#fbbf24";
 const RED_400 = "#f87171";
 /** Matches text-purple-400 */
 const PURPLE_400 = "#c084fc";
+/** Matches text-emerald-400 */
+const EMERALD_400 = "#34d399";
 
 const ROLE_COLORS: Record<BaseRole, string> = {
   worker: BLUE_400,
   reviewer: AMBER_400,
   lead: RED_400,
   planner: PURPLE_400,
+  architect: EMERALD_400,
 };
 
-const TOKEN_BAR_COLORS = [BLUE_400, "#34d399"] as const; // blue for in, emerald for out
+const TOKEN_BAR_COLORS = [BLUE_400, EMERALD_400] as const; // blue for in, emerald for out
 
 // ── Nivo dark theme ──────────────────────────────────────────────────────────
 
@@ -198,7 +202,6 @@ export function AgentMetricsDashboard({ projectId }: { projectId: string | null 
       totalTasks,
       successRate: weightedAvg((m) => m.success_rate),
       avgTime: weightedAvg((m) => m.avg_time_to_complete_seconds),
-      verificationRate: weightedAvg((m) => m.verification_pass_rate),
       successTrend: weightedAvg((m) => m.success_rate_trend),
     };
   }, [defaults]);
@@ -219,7 +222,6 @@ export function AgentMetricsDashboard({ projectId }: { projectId: string | null 
     if (!perRole.length) return [];
     const metricKeys = [
       { key: "Success rate", fn: (m: AgentMetrics) => (m.success_rate ?? 0) * 100 },
-      { key: "Verification", fn: (m: AgentMetrics) => (m.verification_pass_rate ?? 0) * 100 },
       { key: "Low reopen", fn: (m: AgentMetrics) => Math.max(0, Math.round(100 - (m.reopen_rate ?? 0) * 20)) },
     ];
     return metricKeys.map(({ key, fn }) => {
@@ -333,7 +335,7 @@ export function AgentMetricsDashboard({ projectId }: { projectId: string | null 
       {kpis && (
         <>
           {/* KPI strip */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
             <KpiCard
               label="Total tasks"
               value={String(kpis.totalTasks)}
@@ -349,11 +351,6 @@ export function AgentMetricsDashboard({ projectId }: { projectId: string | null 
               label="Avg completion time"
               value={fmtDuration(kpis.avgTime)}
               hint="Weighted average time to complete a task"
-            />
-            <KpiCard
-              label="Verification rate"
-              value={fmtPct(kpis.verificationRate)}
-              hint="Weighted average: percentage of tasks with zero verification failures across their lifetime"
             />
           </div>
 
@@ -544,11 +541,10 @@ function RoleDetailCard({ metrics }: { metrics: AgentMetrics }) {
             </div>
           )}
           {/* Stats grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 flex-1 min-w-0">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 flex-1 min-w-0">
             <MetricCell label="Avg tokens in" value={fmtTokens(metrics.avg_tokens_in)} hint="Average input tokens per task" />
             <MetricCell label="Avg tokens out" value={fmtTokens(metrics.avg_tokens_out)} hint="Average output tokens per task" />
             <MetricCell label="Avg time" value={fmtDuration(metrics.avg_time_to_complete_seconds)} hint="Average time to complete a task" />
-            <MetricCell label="Verification" value={fmtPct(metrics.verification_pass_rate)} hint="Percentage of tasks that passed verification with zero failures" />
             <MetricCell label="Avg reopens" value={fmtAvg(metrics.reopen_rate)} hint="Average number of times a task was reopened after closing" />
           </div>
         </div>

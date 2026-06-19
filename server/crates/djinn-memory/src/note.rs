@@ -1,6 +1,26 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Shared note lifecycle vocabulary used by the schema, repository, and tool
+/// surfaces. Keep this as one status field rather than parallel booleans.
+pub mod note_status {
+    pub const ACTIVE: &str = "active";
+    pub const ARCHIVED: &str = "archived";
+    pub const DEPRECATED: &str = "deprecated";
+
+    pub fn normalize(status: Option<&str>) -> String {
+        status
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(ACTIVE)
+            .to_ascii_lowercase()
+    }
+
+    pub fn is_valid(status: &str) -> bool {
+        matches!(status, ACTIVE | ARCHIVED | DEPRECATED)
+    }
+}
+
 /// A knowledge base note persisted in the MySQL/Dolt index, optionally backed by a
 /// markdown file on disk.
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
@@ -18,6 +38,9 @@ pub struct Note {
     pub storage: String,
     pub note_type: String,
     pub folder: String,
+    /// Lifecycle status: active by default; archived/deprecated notes remain
+    /// restorable and listable only via explicit status filters.
+    pub status: String,
     pub tags: String,    // JSON array string, e.g. '["rust","db"]'
     pub content: String, // Markdown body without frontmatter
     /// Objective retrieval situation where this note applies. Stored separately
@@ -57,6 +80,7 @@ impl Note {
             "storage": self.storage,
             "note_type": self.note_type,
             "folder": self.folder,
+            "status": self.status,
             "tags": self.parsed_tags(),
             "content": self.content,
             "retrieval_anchor": self.retrieval_anchor,
@@ -129,6 +153,7 @@ pub struct NoteCompact {
     pub title: String,
     pub note_type: String,
     pub folder: String,
+    pub status: String,
     pub updated_at: String,
     pub scope_paths: String,
 }
@@ -183,6 +208,27 @@ pub struct HealthReport {
     pub low_confidence_note_count: i64,
     pub stale_note_count: i64,
     pub stale_notes_by_folder: Vec<StaleFolder>,
+    /// Summed admission-dropped count from recent consolidation_run_metrics rows for this project.
+    pub admission_dropped_note_count: i64,
+    pub lifecycle: LifecycleHealth,
+    pub recent_sweep: RecentSweepMetrics,
+}
+
+/// Lifecycle-status counts for a project's notes.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LifecycleHealth {
+    pub active_notes: i64,
+    pub archived_notes: i64,
+}
+
+/// Most recent housekeeping/operator lifecycle sweep counters surfaced through
+/// `memory_health`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RecentSweepMetrics {
+    pub last_sweep_at: Option<String>,
+    pub last_decayed_count: i64,
+    pub last_archived_count: i64,
+    pub last_superseded_source_count: i64,
 }
 
 /// Classification assigned during ADR-054 extracted-note corpus audits.
@@ -206,6 +252,29 @@ pub struct ExtractedNoteAuditFinding {
     pub category: ExtractedNoteAuditCategory,
     pub reasons: Vec<String>,
     pub related_note_ids: Vec<String>,
+}
+
+/// Result of the ADR-054 note-quality classifier — the single source of truth
+/// for "is this extracted note too underspecified for durable memory?"
+///
+/// Shared by the extraction admission gate (in `djinn-agent`) and the corpus
+/// audit (`extracted_note_audit` in `djinn-db`) so both use identical
+/// predicates. Produced by [`djinn_db::repositories::note::assess_note_quality`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NoteQualityAssessment {
+    /// Required ADR-054 section headings absent from (or out of canonical
+    /// order in) the content body. Empty when all required sections are
+    /// present in order.
+    pub missing_sections: Vec<String>,
+    /// Character count of the trimmed content body.
+    pub content_len: usize,
+    /// Number of non-empty `\n\n`-delimited blocks in the content.
+    pub paragraph_count: usize,
+    /// `true` when the note is too underspecified for durable memory.
+    pub is_underspecified: bool,
+    /// Human-readable reasons explaining why the note is underspecified
+    /// (empty when it passes all checks).
+    pub reasons: Vec<String>,
 }
 
 /// Aggregate ADR-054 audit report for existing extracted notes.
@@ -322,6 +391,7 @@ mod tests {
             storage: "db".to_string(),
             note_type: "pattern".to_string(),
             folder: "patterns".to_string(),
+            status: "active".to_string(),
             tags: r#"["retrieval"]"#.to_string(),
             content: "Body remains separate from the retrieval anchor.".to_string(),
             retrieval_anchor,

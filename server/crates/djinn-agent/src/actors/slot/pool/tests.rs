@@ -103,17 +103,6 @@ impl djinn_control_plane::bridge::RuntimeOps for RecordingRuntimeOps {
 
     async fn trigger_graph_warm(&self, _: &str) {}
 
-    async fn provision_backing_service(
-        &self,
-        _: djinn_control_plane::bridge::ProvisionServiceRequest,
-    ) -> Result<djinn_control_plane::bridge::ProvisionedService, String> {
-        Err("not used".to_string())
-    }
-
-    async fn release_backing_service(&self, _: &str) -> Result<(), String> {
-        Ok(())
-    }
-
     async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String> {
         self.calls
             .lock()
@@ -165,6 +154,7 @@ async fn seed_running_session_with_task_run(
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(task_run_id),
+            pricing: None,
         })
         .await
         .expect("session create should succeed");
@@ -199,6 +189,7 @@ async fn seed_running_session_with_task_run_in_project(
             agent_type: "worker",
             metadata_json: None,
             task_run_id: Some(task_run_id),
+            pricing: None,
         })
         .await
         .expect("session create should succeed");
@@ -1090,6 +1081,7 @@ async fn stall_kill_settles_session_row_and_clears_from_per_user_cap() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: None,
+            pricing: None,
         })
         .await
         .expect("session create should succeed");
@@ -1813,6 +1805,7 @@ async fn evict_session_with_no_task_run_id_is_idempotent() {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: None,
+            pricing: None,
         })
         .await
         .expect("session create should succeed");

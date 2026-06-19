@@ -5,13 +5,23 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { Fragment } from "react";
 import { cn } from "@/lib/utils";
-import type { StepEntry, VerificationRun } from "@/stores/verificationStore";
 
-type RunStatus = VerificationRun["status"];
+export type StepLogStatus = "running" | "passed" | "failed" | "skipped" | "cache_hit";
+
+export interface StepLogEntry {
+  index: number;
+  name: string;
+  status: "pending" | "running" | "passed" | "failed" | "skipped";
+  command?: string;
+  stdout?: string;
+  stderr?: string;
+  durationMs?: number;
+  exitCode?: number;
+}
 
 interface StepLogProps {
-  steps: StepEntry[];
-  status: RunStatus;
+  steps: StepLogEntry[];
+  status: StepLogStatus;
   label?: string;
   originalDurationMs?: number;
   emphasizedStepId?: string | null;
@@ -30,7 +40,7 @@ function getStepValue(index: number): string {
 
 // ── Status icon ─────────────────────────────────────────────────────────────
 
-function StepStatusIcon({ stepStatus }: { stepStatus: StepEntry["status"] }) {
+function StepStatusIcon({ stepStatus }: { stepStatus: StepLogEntry["status"] }) {
   switch (stepStatus) {
     case "running":
       return <Spinner size="xs" className="text-blue-400" />;
@@ -47,7 +57,7 @@ function StepStatusIcon({ stepStatus }: { stepStatus: StepEntry["status"] }) {
 
 // ── Summary header with pill badges + progress ──────────────────────────────
 
-function StepSummary({ steps, status, originalDurationMs }: { steps: StepEntry[]; status: RunStatus; originalDurationMs?: number }) {
+function StepSummary({ steps, status, originalDurationMs }: { steps: StepLogEntry[]; status: StepLogStatus; originalDurationMs?: number }) {
   const passed = steps.filter((s) => s.status === "passed").length;
   const failed = steps.filter((s) => s.status === "failed").length;
   const skipped = steps.filter((s) => s.status === "skipped").length;
@@ -141,7 +151,6 @@ export function StepLog({ steps, status, label, originalDurationMs, emphasizedSt
     .filter((step) => step.status === "failed")
     .map((step) => getStepValue(step.index));
 
-  const hasBothPhases = steps.some((s) => s.phase === "setup") && steps.some((s) => s.phase === "verification");
 
   return (
     <div className={cn("overflow-hidden rounded-lg border border-border bg-card", className)}>
@@ -153,26 +162,15 @@ export function StepLog({ steps, status, label, originalDurationMs, emphasizedSt
       <StepSummary steps={steps} status={status} originalDurationMs={originalDurationMs} />
       <div className="px-2 pb-2">
         <Accordion defaultValue={failedStepValues} multiple>
-          {steps.map((step, idx) => {
-            const isFirstOfPhase = idx === 0 || steps[idx - 1].phase !== step.phase;
-            const phaseLabel = hasBothPhases && isFirstOfPhase
-              ? step.phase === "setup" ? "Setup" : "Verification"
-              : null;
+          {steps.map((step) => {
             const durationLabel = step.status === "skipped" ? "skipped" : formatDuration(step.durationMs);
             const hasOutput = Boolean(step.command || step.stdout || step.stderr);
             const stepValue = getStepValue(step.index);
             const isEmphasized = emphasizedStepId === stepValue;
 
-            const phaseDivider = phaseLabel ? (
-              <div className="px-3 pt-3 pb-1">
-                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{phaseLabel}</span>
-              </div>
-            ) : null;
-
             if (!hasOutput) {
               return (
                 <Fragment key={step.index}>
-                  {phaseDivider}
                   <div
                     className={cn(
                       "flex items-center gap-2.5 rounded-md border border-transparent px-3 py-2.5 text-sm",
@@ -195,7 +193,6 @@ export function StepLog({ steps, status, label, originalDurationMs, emphasizedSt
 
             return (
               <Fragment key={step.index}>
-                {phaseDivider}
                 <AccordionItem
                   value={stepValue}
                   className={cn(

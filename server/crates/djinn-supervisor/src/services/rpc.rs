@@ -1584,6 +1584,11 @@ mod tests {
                         task_run_id: params.task_run_id.clone(),
                         title: None,
                         parked_reason: None,
+                        cost_usd: None,
+                        input_price_per_million_snapshot: None,
+                        output_price_per_million_snapshot: None,
+                        cache_read_price_per_million_snapshot: None,
+                        cache_write_price_per_million_snapshot: None,
                     };
                     let reply = Frame {
                         correlation_id: frame.correlation_id,

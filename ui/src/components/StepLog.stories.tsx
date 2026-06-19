@@ -1,5 +1,4 @@
-import { StepLog } from "./StepLog";
-import type { StepEntry } from "@/stores/verificationStore";
+import { StepLog, type StepLogEntry } from "./StepLog";
 
 const meta = {
   title: "Session/StepLog",
@@ -16,13 +15,12 @@ export default meta;
 function step(
   index: number,
   name: string,
-  status: StepEntry["status"],
-  overrides?: Partial<StepEntry>,
-): StepEntry {
+  status: StepLogEntry["status"],
+  overrides?: Partial<StepLogEntry>,
+): StepLogEntry {
   return {
     index,
     name,
-    phase: "verification",
     status,
     ...overrides,
   };
@@ -34,7 +32,6 @@ export const AllPassed = {
   args: {
     steps: [
       step(0, "pnpm install", "passed", {
-        phase: "setup",
         command: "pnpm install --frozen-lockfile",
         durationMs: 1_230,
         exitCode: 0,
@@ -104,7 +101,6 @@ export const Running = {
   args: {
     steps: [
       step(0, "pnpm install", "passed", {
-        phase: "setup",
         command: "pnpm install --frozen-lockfile",
         durationMs: 1_100,
         exitCode: 0,

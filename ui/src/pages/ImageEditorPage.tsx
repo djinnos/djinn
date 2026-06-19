@@ -3,9 +3,9 @@
  *
  * Routes: `/images/new` and `/images/:id/edit`. Replaces the old cramped
  * ImageEditorDialog with a full-width layout: name/description, a Form /
- * Raw JSON tab pair (reusing ImageConfigEditor), and the allowed-services
+ * Raw JSON tab pair (reusing ImageConfigEditor), and the injected-services
  * picker. On save it calls `image_create` / `image_update` +
- * `image_set_allowed_presets`, then navigates back to `/images`.
+ * `image_set_services`, then navigates back to `/images`.
  */
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -31,7 +31,7 @@ import {
   updateImage,
   listImages,
   listServicePresets,
-  setImageAllowedPresets,
+  setImageServices,
   type ServicePreset,
 } from "@/api/images";
 import { ImageConfigEditor } from "@/components/images/ImageConfigEditor";
@@ -80,7 +80,7 @@ export function ImageEditorPage() {
           setDescription(image.description ?? "");
           setConfig(seed);
           setRawText(JSON.stringify(seed, null, 2));
-          setSelectedPresets(image.allowedPresets);
+          setSelectedPresets(image.servicePresets);
         }
       } catch (err) {
         if (cancelled) return;
@@ -173,9 +173,9 @@ export function ImageEditorPage() {
       }
       const imageId = isEdit && id ? id : result.id;
       if (imageId) {
-        const presetResult = await setImageAllowedPresets(imageId, selectedPresets);
+        const presetResult = await setImageServices(imageId, selectedPresets);
         if (!presetResult.ok) {
-          showToast.error("Saved image, but allowed services failed to update", {
+          showToast.error("Saved image, but injected services failed to update", {
             description: presetResult.error,
           });
         }
@@ -291,9 +291,11 @@ export function ImageEditorPage() {
 
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-0.5">
-              <Label className="text-sm font-medium">Allowed services</Label>
+              <Label className="text-sm font-medium">Injected services</Label>
               <p className="text-xs text-muted-foreground">
-                Projects using this image may request these services on demand during tests.
+                These services are injected as sidecars into every task-run
+                Pod that uses this image — reachable on 127.0.0.1 with the connection string in
+                the preset's env var (e.g. TEST_POSTGRES_URL).
               </p>
             </div>
             {presets.length === 0 ? (

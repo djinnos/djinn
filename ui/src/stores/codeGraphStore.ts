@@ -126,29 +126,38 @@ export const DEFAULT_DEPTH = MAX_DEPTH;
 export type ColorMode = "topology" | "complexity";
 export const DEFAULT_COLOR_MODE: ColorMode = "topology";
 
-/** Layout algorithm used to seed the code graph canvas. */
 export type LayoutMode = "force" | "sequential" | "radial";
 export const DEFAULT_LAYOUT_MODE: LayoutMode = "force";
+
 const LAYOUT_MODE_STORAGE_KEY = "codegraph.layoutMode";
+const LAYOUT_MODES: ReadonlySet<string> = new Set([
+  "force",
+  "sequential",
+  "radial",
+]);
 
 function isLayoutMode(value: string | null): value is LayoutMode {
-  return value === "force" || value === "sequential" || value === "radial";
+  return value !== null && LAYOUT_MODES.has(value);
 }
 
-function readStoredLayoutMode(): LayoutMode {
+function readPersistedLayoutMode(): LayoutMode {
+  if (typeof window === "undefined") return DEFAULT_LAYOUT_MODE;
+
   try {
-    const stored = globalThis.sessionStorage?.getItem(LAYOUT_MODE_STORAGE_KEY);
-    return isLayoutMode(stored) ? stored : DEFAULT_LAYOUT_MODE;
+    const persisted = window.sessionStorage.getItem(LAYOUT_MODE_STORAGE_KEY);
+    return isLayoutMode(persisted) ? persisted : DEFAULT_LAYOUT_MODE;
   } catch {
     return DEFAULT_LAYOUT_MODE;
   }
 }
 
-function persistLayoutMode(mode: LayoutMode) {
+function persistLayoutMode(mode: LayoutMode): void {
+  if (typeof window === "undefined") return;
+
   try {
-    globalThis.sessionStorage?.setItem(LAYOUT_MODE_STORAGE_KEY, mode);
+    window.sessionStorage.setItem(LAYOUT_MODE_STORAGE_KEY, mode);
   } catch {
-    // sessionStorage can be unavailable in non-browser renderers.
+    // Best-effort UI preference persistence; state updates should still work.
   }
 }
 
@@ -182,7 +191,7 @@ export interface CodeGraphHighlightState {
   depthFilter: number;
   /** Iter 30: see {@link ColorMode}. Default `"topology"`. */
   colorMode: ColorMode;
-  /** Layout algorithm for node positioning. Default `"force"`. */
+  /** Layout algorithm preference for the code graph canvas. */
   layoutMode: LayoutMode;
   /**
    * Iter 30: `true` when the current snapshot has at least one function
@@ -226,7 +235,7 @@ export interface CodeGraphHighlightActions {
   setDepthFilter: (depth: number) => void;
   /** Iter 30: switch heatmap mode. */
   setColorMode: (mode: ColorMode) => void;
-  /** Switch graph layout mode (force/sequential/radial). */
+  /** Switch the graph layout algorithm and persist the UI preference. */
   setLayoutMode: (mode: LayoutMode) => void;
   /** Iter 30: canvas reports whether complexity data is present in the snapshot. */
   setComplexityAvailable: (available: boolean) => void;
@@ -276,7 +285,7 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   hideTests: false,
   depthFilter: DEFAULT_DEPTH,
   colorMode: DEFAULT_COLOR_MODE,
-  layoutMode: readStoredLayoutMode(),
+  layoutMode: DEFAULT_LAYOUT_MODE,
   complexityAvailable: false,
   semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
   expandedCommunityIds: new Set<string>(),
@@ -287,6 +296,7 @@ export const useCodeGraphStore = create<
   CodeGraphHighlightState & CodeGraphHighlightActions
 >((set) => ({
   ...INITIAL_STATE,
+  layoutMode: readPersistedLayoutMode(),
 
   setSelection: (id) => {
     set({ selectionId: id });
@@ -420,7 +430,6 @@ export const useCodeGraphStore = create<
   },
 
   reset: () => {
-    persistLayoutMode(DEFAULT_LAYOUT_MODE);
     set((state) => ({
       ...INITIAL_STATE,
       selectedWorkspaceSlug: state.selectedWorkspaceSlug,
@@ -431,7 +440,7 @@ export const useCodeGraphStore = create<
       nodeKindFilters: defaultNodeKindFilters(),
       symbolKindFilters: defaultSymbolKindFilters(),
       colorMode: DEFAULT_COLOR_MODE,
-      layoutMode: DEFAULT_LAYOUT_MODE,
+      layoutMode: state.layoutMode,
       complexityAvailable: false,
       semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
       expandedCommunityIds: new Set(),

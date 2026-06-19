@@ -38,8 +38,10 @@ use super::scoring::{CONFIDENCE_FLOOR, STALE_CITATION, STALE_DECAY_SIGNAL, bayes
 pub(crate) const DECAY_WINDOW_ENV: &str = "DJINN_LIFECYCLE_DECAY_WINDOW_DAYS";
 /// Default decay window applied when the env override is absent or invalid.
 pub(crate) const DEFAULT_DECAY_WINDOW_DAYS: u32 = 30;
-/// Default archive-candidate access window applied when the caller passes zero.
-pub(crate) const DEFAULT_ARCHIVE_WINDOW_DAYS: u32 = DEFAULT_DECAY_WINDOW_DAYS;
+/// Default archive-candidate access window applied when the env override is
+/// absent or invalid. Distinct from the decay window so operators can tune
+/// decay and archive cadences independently.
+pub(crate) const DEFAULT_ARCHIVE_WINDOW_DAYS: u32 = 60;
 
 /// Per-note-type decay window overrides (days). These are advisory defaults;
 /// the global env override ([`DECAY_WINDOW_ENV`]) is used by the SQL predicate
@@ -61,6 +63,14 @@ pub(crate) const DECAY_ITERATION_CAP: u8 = 5;
 struct DecayCandidate {
     id: String,
     confidence: f64,
+}
+
+/// Projected counts for a lifecycle sweep before (or after) applying writes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LifecycleSweepProjection {
+    pub decayed_candidates: u64,
+    pub archive_candidates: u64,
+    pub already_archived: u64,
 }
 
 /// Lifecycle status values stored in `notes.status`.
@@ -151,6 +161,45 @@ impl NoteRepository {
         Ok(archived_count)
     }
 
+    /// Return the counts an archive pass would affect without changing note
+    /// status. The candidate count uses the same ADR-054 + access-window filter
+    /// as [`archive_audit_candidates`](Self::archive_audit_candidates).
+    pub async fn lifecycle_sweep_projection(
+        &self,
+        project_id: &str,
+        decay_window_days: u32,
+        archive_window_days: u32,
+    ) -> Result<LifecycleSweepProjection> {
+        self.db.ensure_initialized().await?;
+
+        let decayed_candidates = self
+            .select_decay_candidates(project_id, decay_window_days)
+            .await?
+            .into_iter()
+            .filter(|candidate| would_cross_decay_threshold(candidate.confidence))
+            .count() as u64;
+        let archive_candidates = self
+            .extracted_archive_candidates(project_id, archive_window_days)
+            .await?
+            .len() as u64;
+        let already_archived: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*)
+               FROM notes
+               WHERE project_id = $1
+                 AND status = 'archived'
+                 AND note_type IN ('case', 'pattern', 'pitfall')"#,
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+
+        Ok(LifecycleSweepProjection {
+            decayed_candidates,
+            archive_candidates,
+            already_archived: already_archived.max(0) as u64,
+        })
+    }
+
     /// Decay stale extracted notes (`case`, `pattern`, `pitfall`) for a single
     /// project.
     ///
@@ -174,44 +223,9 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         let window = parse_decay_window_days(decay_window_days);
-
-        // Select decay candidates. Runtime `sqlx::query` (not the
-        // compile-checked `query!` macro) is used because the
-        // `($3 || ' days')::interval` construction is dynamic.
-        //
-        // Safety boundary: `note_type IN ('case','pattern','pitfall')` is the
-        // hard predicate that guarantees hand-written types are never touched.
-        // The `status = 'active'` predicate guarantees a human-archived or
-        // deprecated note is never decayed.
-        let rows = sqlx::query(
-            r#"SELECT id, confidence
-               FROM notes
-               WHERE project_id = $1
-                 AND note_type IN ('case', 'pattern', 'pitfall')
-                 AND confidence > $2
-                 AND status = 'active'
-                 AND (
-                     last_accessed IS NULL
-                     OR last_accessed = ''
-                     OR last_accessed < to_char(
-                         (now() at time zone 'utc') - ($3 || ' days')::interval,
-                         'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
-                     )
-                 )
-               ORDER BY last_accessed ASC NULLS FIRST"#,
-        )
-        .bind(project_id)
-        .bind(STALE_CITATION)
-        .bind(window.to_string())
-        .fetch_all(self.db.pool())
-        .await?;
-
-        let mut candidates: Vec<DecayCandidate> = Vec::with_capacity(rows.len());
-        for row in rows {
-            let id: String = row.try_get("id")?;
-            let confidence: f64 = row.try_get("confidence")?;
-            candidates.push(DecayCandidate { id, confidence });
-        }
+        let candidates = self
+            .select_decay_candidates(project_id, decay_window_days)
+            .await?;
 
         let mut decayed_count: u64 = 0;
         for candidate in &candidates {
@@ -269,6 +283,71 @@ impl NoteRepository {
 
         Ok(confidence <= STALE_CITATION)
     }
+
+    async fn select_decay_candidates(
+        &self,
+        project_id: &str,
+        decay_window_days: u32,
+    ) -> Result<Vec<DecayCandidate>> {
+        let window = parse_decay_window_days(decay_window_days);
+
+        // Select decay candidates. Runtime `sqlx::query` (not the
+        // compile-checked `query!` macro) is used because the
+        // `($3 || ' days')::interval` construction is dynamic.
+        //
+        // Safety boundary: `note_type IN ('case','pattern','pitfall')` is the
+        // hard predicate that guarantees hand-written types are never touched.
+        // The `status = 'active'` predicate guarantees a human-archived or
+        // deprecated note is never decayed.
+        let rows = sqlx::query(
+            r#"SELECT id, confidence
+               FROM notes
+               WHERE project_id = $1
+                 AND note_type IN ('case', 'pattern', 'pitfall')
+                 AND confidence > $2
+                 AND status = 'active'
+                 AND (
+                     last_accessed IS NULL
+                     OR last_accessed = ''
+                     OR last_accessed < to_char(
+                         (now() at time zone 'utc') - ($3 || ' days')::interval,
+                         'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+                     )
+                 )
+               ORDER BY last_accessed ASC NULLS FIRST"#,
+        )
+        .bind(project_id)
+        .bind(STALE_CITATION)
+        .bind(window.to_string())
+        .fetch_all(self.db.pool())
+        .await?;
+
+        let mut candidates: Vec<DecayCandidate> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let confidence: f64 = row.try_get("confidence")?;
+            candidates.push(DecayCandidate { id, confidence });
+        }
+
+        Ok(candidates)
+    }
+}
+
+fn would_cross_decay_threshold(starting_confidence: f64) -> bool {
+    let mut confidence = starting_confidence;
+    for _ in 0..DECAY_ITERATION_CAP {
+        if confidence <= STALE_CITATION {
+            return true;
+        }
+        if (confidence - CONFIDENCE_FLOOR).abs() < f64::EPSILON {
+            return false;
+        }
+        confidence = bayesian_update(confidence, STALE_DECAY_SIGNAL);
+        if confidence <= STALE_CITATION {
+            return true;
+        }
+    }
+    confidence <= STALE_CITATION
 }
 
 /// Resolve the effective decay window. The env override

@@ -466,6 +466,7 @@ pub(crate) fn tool_memory_list() -> RmcpTool {
             "properties": {
                 "folder": {"type": "string", "description": "Filter by folder (e.g. \"decisions\")"},
                 "type": {"type": "string", "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\")"},
+                "status": {"type": "string", "description": "Explicit lifecycle status filter. Defaults to active; use archived or deprecated to list non-live notes."},
                 "depth": {"type": "integer", "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels"}
             }
         }),
@@ -528,7 +529,7 @@ pub(crate) fn tool_memory_build_context() -> RmcpTool {
 pub(crate) fn tool_memory_health() -> RmcpTool {
     RmcpTool::new(
         "memory_health".to_string(),
-        "Returns aggregate health report: total notes, broken link count, orphan note count, duplicate cluster count, low-confidence note count, stale note count, stale notes by folder.".to_string(),
+        "Returns aggregate health report: total notes, broken link count, orphan note count, low-confidence note count, stale note count, stale notes by folder, lifecycle counts, and recent lifecycle sweep metrics.".to_string(),
         object!({
             "type": "object",
             "properties": {}

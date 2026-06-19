@@ -152,7 +152,7 @@ pub fn build_lexical_search_plan(
         (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Ranked) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.project_id = $22\n  AND ($33 = '' OR n.folder = $43)\n  AND ($54 = '' OR n.note_type = $64)\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT $75".to_owned(),
+            sql: "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.project_id = $22\n  AND n.status = 'active'\n  AND ($33 = '' OR n.folder = $43)\n  AND ($54 = '' OR n.note_type = $64)\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT $75".to_owned(),
             query,
             score_alias: "bm25_score",
             score_descending: false,
@@ -164,7 +164,7 @@ pub fn build_lexical_search_plan(
         (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Dedup) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,\n       -bm25(notes_fts, 3.0, 1.0, 2.0) as score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.project_id = $22\n  AND n.folder = $33\n  AND n.note_type = $44\n  AND -bm25(notes_fts, 3.0, 1.0, 2.0) > $55\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT $66".to_owned(),
+            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,\n       -bm25(notes_fts, 3.0, 1.0, 2.0) as score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.project_id = $22\n  AND n.status = 'active'\n  AND n.folder = $33\n  AND n.note_type = $44\n  AND -bm25(notes_fts, 3.0, 1.0, 2.0) > $55\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT $66".to_owned(),
             query,
             score_alias: "score",
             score_descending: true,
@@ -176,7 +176,7 @@ pub fn build_lexical_search_plan(
         (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Contradiction) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,\n       -bm25(notes_fts, 3.0, 1.0, 2.0) as score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.id != $22\n  AND -bm25(notes_fts, 3.0, 1.0, 2.0) > 5.0\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT 3".to_owned(),
+            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,\n       -bm25(notes_fts, 3.0, 1.0, 2.0) as score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.id != $22\n  AND n.status = 'active'\n  AND -bm25(notes_fts, 3.0, 1.0, 2.0) > 5.0\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT 3".to_owned(),
             query,
             score_alias: "score",
             score_descending: true,
@@ -188,7 +188,7 @@ pub fn build_lexical_search_plan(
         (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Discovery) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.project_id = $22\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT $33".to_owned(),
+            sql: "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.project_id = $22\n  AND n.status = 'active'\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT $33".to_owned(),
             query,
             score_alias: "bm25_score",
             score_descending: false,
@@ -202,7 +202,7 @@ pub fn build_lexical_search_plan(
             mode,
             // Bind order (see `ranked_lexical_scores`): $1 query, $2 project_id,
             // $3/$4 folder (guard + equality), $5/$6 note_type, $7 limit.
-            sql: "SELECT n.id, ts_rank(n.search_vector, to_tsquery('english', $1))::float8 AS fulltext_score\nFROM notes n\nWHERE n.project_id = $2\n  AND ($3 = '' OR n.folder = $4)\n  AND ($5 = '' OR n.note_type = $6)\n  AND n.search_vector @@ to_tsquery('english', $1)\nORDER BY fulltext_score DESC, n.id ASC\nLIMIT $7".to_owned(),
+            sql: "SELECT n.id, ts_rank(n.search_vector, to_tsquery('english', $1))::float8 AS fulltext_score\nFROM notes n\nWHERE n.project_id = $2\n  AND n.status = 'active'\n  AND ($3 = '' OR n.folder = $4)\n  AND ($5 = '' OR n.note_type = $6)\n  AND n.search_vector @@ to_tsquery('english', $1)\nORDER BY fulltext_score DESC, n.id ASC\nLIMIT $7".to_owned(),
             query,
             score_alias: "fulltext_score",
             score_descending: true,
@@ -216,7 +216,7 @@ pub fn build_lexical_search_plan(
             mode,
             // Bind order (see `dedup_lexical_candidates`): $1 query, $2 project_id,
             // $3 folder, $4 note_type, $5 threshold, $6 limit.
-            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,\n       ts_rank(n.search_vector, to_tsquery('english', $1))::float8 AS score\nFROM notes n\nWHERE n.project_id = $2\n  AND n.folder = $3\n  AND n.note_type = $4\n  AND n.search_vector @@ to_tsquery('english', $1)\n  AND ts_rank(n.search_vector, to_tsquery('english', $1))::float8 > $5\nORDER BY score DESC, n.id ASC\nLIMIT $6".to_owned(),
+            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,\n       ts_rank(n.search_vector, to_tsquery('english', $1))::float8 AS score\nFROM notes n\nWHERE n.project_id = $2\n  AND n.status = 'active'\n  AND n.folder = $3\n  AND n.note_type = $4\n  AND n.search_vector @@ to_tsquery('english', $1)\n  AND ts_rank(n.search_vector, to_tsquery('english', $1))::float8 > $5\nORDER BY score DESC, n.id ASC\nLIMIT $6".to_owned(),
             query,
             score_alias: "score",
             score_descending: true,
@@ -229,7 +229,7 @@ pub fn build_lexical_search_plan(
             mode,
             // Bind order (see `contradiction_lexical_candidates`): $1 query,
             // $2 note_id, $3 threshold. Limit is fixed at 3.
-            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,\n       ts_rank(n.search_vector, to_tsquery('english', $1))::float8 AS score\nFROM notes n\nWHERE n.id != $2\n  AND n.search_vector @@ to_tsquery('english', $1)\n  AND ts_rank(n.search_vector, to_tsquery('english', $1))::float8 > $3\nORDER BY score DESC, n.id ASC\nLIMIT 3".to_owned(),
+            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,\n       ts_rank(n.search_vector, to_tsquery('english', $1))::float8 AS score\nFROM notes n\nWHERE n.id != $2\n  AND n.status = 'active'\n  AND n.search_vector @@ to_tsquery('english', $1)\n  AND ts_rank(n.search_vector, to_tsquery('english', $1))::float8 > $3\nORDER BY score DESC, n.id ASC\nLIMIT 3".to_owned(),
             query,
             score_alias: "score",
             score_descending: true,
@@ -241,7 +241,7 @@ pub fn build_lexical_search_plan(
             backend,
             mode,
             // Bind order (see `fts_candidates`): $1 query, $2 project_id, $3 limit.
-            sql: "SELECT n.id, ts_rank(n.search_vector, to_tsquery('english', $1))::float8 AS fulltext_score\nFROM notes n\nWHERE n.project_id = $2\n  AND n.search_vector @@ to_tsquery('english', $1)\nORDER BY fulltext_score DESC, n.id ASC\nLIMIT $3".to_owned(),
+            sql: "SELECT n.id, ts_rank(n.search_vector, to_tsquery('english', $1))::float8 AS fulltext_score\nFROM notes n\nWHERE n.project_id = $2\n  AND n.status = 'active'\n  AND n.search_vector @@ to_tsquery('english', $1)\nORDER BY fulltext_score DESC, n.id ASC\nLIMIT $3".to_owned(),
             query,
             score_alias: "fulltext_score",
             score_descending: true,

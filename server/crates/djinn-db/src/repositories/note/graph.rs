@@ -1,10 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use djinn_memory::{ExtractedNoteAuditCategory, ExtractedNoteAuditFinding};
+use djinn_memory::{
+    ExtractedNoteAuditCategory, ExtractedNoteAuditFinding, LifecycleHealth, RecentSweepMetrics,
+};
 use sqlx::Row;
 
 use super::*;
-use crate::repositories::note::{NoteConsolidationRepository, STALE_CITATION};
+use crate::repositories::note::{
+    NoteConsolidationRepository, STALE_CITATION, assess_note_quality, looks_task_local,
+    required_sections,
+};
 
 impl NoteRepository {
     // ── Wikilink graph ────────────────────────────────────────────────────────
@@ -213,6 +218,59 @@ impl NoteRepository {
         .fetch_one(self.db.pool())
         .await?;
 
+        let active_notes: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM notes WHERE project_id = $1 AND status = 'active'"#,
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+        let archived_notes: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM notes WHERE project_id = $1 AND status = 'archived'"#,
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+
+        let recent_sweep_row = sqlx::query(
+            r#"SELECT completed_at,
+                      CAST(decayed_note_count AS BIGINT) AS decayed_note_count,
+                      CAST(archived_note_count AS BIGINT) AS archived_note_count,
+                      CAST(superseded_source_note_count AS BIGINT) AS superseded_source_note_count
+               FROM consolidation_run_metrics
+               WHERE project_id = $1
+                 AND note_type = 'lifecycle_sweep'
+               ORDER BY COALESCE(completed_at, started_at) DESC, id DESC
+               LIMIT 1"#,
+        )
+        .bind(project_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        let recent_sweep = if let Some(row) = recent_sweep_row {
+            RecentSweepMetrics {
+                last_sweep_at: row.try_get("completed_at")?,
+                last_decayed_count: row.try_get("decayed_note_count")?,
+                last_archived_count: row.try_get("archived_note_count")?,
+                last_superseded_source_count: row.try_get("superseded_source_note_count")?,
+            }
+        } else {
+            RecentSweepMetrics {
+                last_sweep_at: None,
+                last_decayed_count: 0,
+                last_archived_count: 0,
+                last_superseded_source_count: 0,
+            }
+        };
+
+        let admission_dropped_note_count: i64 = sqlx::query_scalar(
+            r#"SELECT COALESCE(SUM(admission_dropped_note_count), 0)::BIGINT
+               FROM consolidation_run_metrics
+               WHERE project_id = $1"#,
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+
         Ok(HealthReport {
             total_notes,
             broken_link_count,
@@ -220,6 +278,12 @@ impl NoteRepository {
             low_confidence_note_count,
             stale_note_count,
             stale_notes_by_folder,
+            admission_dropped_note_count,
+            lifecycle: LifecycleHealth {
+                active_notes,
+                archived_notes,
+            },
+            recent_sweep,
         })
     }
 
@@ -229,12 +293,13 @@ impl NoteRepository {
 
         let notes = sqlx::query_as::<_, Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                    storage, note_type, folder, tags::text AS tags, content,
+                    storage, note_type, folder, status, tags::text AS tags, content,
                     retrieval_anchor, created_at, updated_at, last_accessed,
                     access_count, confidence, abstract AS abstract_, overview,
                     scope_paths::text AS scope_paths
              FROM notes
              WHERE project_id = $1
+               AND status = 'active'
                AND note_type IN ('case', 'pattern', 'pitfall')
              ORDER BY note_type, permalink"#,
         )
@@ -290,17 +355,10 @@ impl NoteRepository {
                 });
             }
 
-            let required_sections = required_sections(&note.note_type);
-            let missing_sections = missing_required_sections(&note.content, &required_sections);
-            let paragraph_count = note
-                .content
-                .split("\n\n")
-                .filter(|block| !block.trim().is_empty())
-                .count();
-            let content_len = note.content.trim().chars().count();
+            let quality = assess_note_quality(&note.note_type, &note.content);
             let has_footer_only_shape = note.content.contains("*Extracted from session ")
-                && paragraph_count <= 2
-                && missing_sections.len() == required_sections.len();
+                && quality.paragraph_count <= 2
+                && quality.missing_sections.len() == required_sections(&note.note_type).len();
             let looks_task_local = looks_task_local(&note.title, &note.content);
             let is_orphan = !sqlx::query_scalar!(
                 r#"SELECT EXISTS(SELECT 1 FROM note_links WHERE target_id = $1) AS "exists!: bool""#,
@@ -309,26 +367,7 @@ impl NoteRepository {
             .fetch_one(self.db.pool())
             .await?;
 
-            if (!missing_sections.is_empty() || content_len < 220 || paragraph_count < 3)
-                && seen.insert((note.id.clone(), "underspecified"))
-            {
-                let mut reasons = Vec::new();
-                if !missing_sections.is_empty() {
-                    reasons.push(format!(
-                        "Missing ADR-054 required sections: {}",
-                        missing_sections.join(", ")
-                    ));
-                }
-                if content_len < 220 {
-                    reasons.push(format!(
-                        "Body is too short for durable memory ({content_len} chars)"
-                    ));
-                }
-                if paragraph_count < 3 {
-                    reasons.push(format!(
-                        "Body has only {paragraph_count} paragraph(s); strengthen with explicit context, rationale, and transfer lesson"
-                    ));
-                }
+            if quality.is_underspecified && seen.insert((note.id.clone(), "underspecified")) {
                 underspecified.push(ExtractedNoteAuditFinding {
                     note_id: note.id.clone(),
                     permalink: note.permalink.clone(),
@@ -336,7 +375,7 @@ impl NoteRepository {
                     note_type: note.note_type.clone(),
                     folder: note.folder.clone(),
                     category: ExtractedNoteAuditCategory::Underspecified,
-                    reasons,
+                    reasons: quality.reasons.clone(),
                     related_note_ids: cluster_by_note_id
                         .get(&note.id)
                         .into_iter()
@@ -514,11 +553,11 @@ impl NoteRepository {
         let mut filtered = Vec::new();
 
         for (id, score) in candidate_scores {
-            let note_type = sqlx::query_scalar!(
-                "SELECT note_type FROM notes WHERE id = $1 AND project_id = $2 LIMIT 1",
-                id,
-                project_id
+            let note_type: Option<String> = sqlx::query_scalar(
+                "SELECT note_type FROM notes WHERE id = $1 AND project_id = $2 AND status = 'active' LIMIT 1",
             )
+            .bind(&id)
+            .bind(project_id)
             .fetch_optional(self.db.pool())
             .await?;
 
@@ -633,7 +672,26 @@ impl NoteRepository {
             }
         }
 
-        let mut ranked: Vec<(String, f64)> = scores.into_iter().collect();
+        let candidate_ids: Vec<String> = scores.keys().cloned().collect();
+        if candidate_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let placeholders = crate::repositories::pg_placeholders(candidate_ids.len(), 2);
+        let sql = format!(
+            "SELECT id FROM notes WHERE project_id = $1 AND status = 'active' AND id IN ({placeholders})"
+        );
+        let mut query = sqlx::query_scalar::<_, String>(&sql).bind(project_id);
+        for note_id in &candidate_ids {
+            query = query.bind(note_id);
+        }
+        let active_ids: std::collections::HashSet<String> =
+            query.fetch_all(self.db.pool()).await?.into_iter().collect();
+
+        let mut ranked: Vec<(String, f64)> = scores
+            .into_iter()
+            .filter(|(note_id, _)| active_ids.contains(note_id))
+            .collect();
         ranked.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -642,62 +700,4 @@ impl NoteRepository {
 
         Ok(ranked)
     }
-}
-
-fn required_sections(note_type: &str) -> Vec<&'static str> {
-    match note_type {
-        "pattern" => vec![
-            "Context",
-            "Problem shape",
-            "Recommended approach",
-            "Why it works",
-            "Tradeoffs / limits",
-            "When to use",
-            "When not to use",
-            "Related",
-        ],
-        "pitfall" => vec![
-            "Trigger / smell",
-            "Failure mode",
-            "Observable symptoms",
-            "Prevention",
-            "Recovery",
-            "Related",
-        ],
-        "case" => vec![
-            "Situation",
-            "Constraint",
-            "Approach taken",
-            "Result",
-            "Why it worked / failed",
-            "Reusable lesson",
-            "Related",
-        ],
-        _ => vec![],
-    }
-}
-
-fn missing_required_sections(content: &str, required_sections: &[&str]) -> Vec<String> {
-    required_sections
-        .iter()
-        .filter(|section| !content.contains(&format!("## {section}")))
-        .map(|section| section.to_string())
-        .collect()
-}
-
-fn looks_task_local(title: &str, content: &str) -> bool {
-    let haystack = format!("{}\n{}", title.to_lowercase(), content.to_lowercase());
-    [
-        "this session",
-        "current task",
-        "working note",
-        "working spec",
-        "follow-up work",
-        "could not be updated from this session",
-        "drafted locally",
-        "active follow-up work",
-        "next session",
-    ]
-    .iter()
-    .any(|needle| haystack.contains(needle))
 }

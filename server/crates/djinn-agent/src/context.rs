@@ -287,15 +287,6 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
             "dispatch_verification not supported on the agent-internal runtime".to_string(),
         ))
     }
-    async fn provision_backing_service(
-        &self,
-        _req: djinn_control_plane::bridge::ProvisionServiceRequest,
-    ) -> Result<djinn_control_plane::bridge::ProvisionedService, String> {
-        Err("provision_backing_service not supported on the agent-internal runtime".to_string())
-    }
-    async fn release_backing_service(&self, _instance_id: &str) -> Result<(), String> {
-        Ok(())
-    }
     async fn teardown_taskrun_job(&self, _task_run_id: &str) -> Result<(), String> {
         // Task-run Job deletion is owned by the server-side AppState impl via
         // the K8s graph warmer. Agent-internal/test contexts have no kube

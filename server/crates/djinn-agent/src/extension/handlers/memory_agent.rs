@@ -65,6 +65,7 @@ pub(super) async fn call_memory_list(
                 project: project_path,
                 folder: p.folder,
                 note_type: p.note_type,
+                status: p.status,
                 depth: p.depth,
             },
         )
@@ -319,7 +320,7 @@ pub(super) async fn call_agent_metrics(
     }))
 }
 
-pub(super) async fn call_agent_amend_prompt(
+pub(crate) async fn call_agent_amend_prompt(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     project_path: &str,
@@ -343,11 +344,13 @@ pub(super) async fn call_agent_amend_prompt(
 
     let role = role.ok_or_else(|| format!("agent not found: {}", p.agent_id))?;
 
-    // Only allow amending specialist roles. Prevents patching high-level orchestration roles.
-    if matches!(role.base_role.as_str(), "architect" | "lead" | "planner") {
+    // Only allow amending specialist worker/reviewer roles. Defaults and
+    // orchestration roles use system_prompt_extensions or specialist creation
+    // instead of machine-managed learned_prompt amendments.
+    if !matches!(role.base_role.as_str(), "worker" | "reviewer") || role.is_default {
         return Err(format!(
-            "cannot amend learned_prompt for base_role '{}'; only specialist roles (worker, reviewer) are eligible",
-            role.base_role
+            "cannot amend learned_prompt for agent '{}' (base_role '{}', is_default {}); only specialist worker/reviewer agents are eligible; use system_prompt_extensions or create a specialist instead",
+            role.name, role.base_role, role.is_default
         ));
     }
 

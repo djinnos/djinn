@@ -63,15 +63,75 @@ pub(crate) struct RepoDependencyGraphBuilder {
 
 impl RepoDependencyGraphBuilder {
     pub(super) fn add_index(&mut self, index: &ParsedScipIndex) {
-        self.current_workspace = Some(index.workspace_slug.clone());
-        for external_symbol in &index.external_symbols {
-            self.ensure_symbol_node(external_symbol, None, None, true);
-        }
+        self.add_scip_files(
+            &index.workspace_slug,
+            &index.external_symbols,
+            index.files.iter(),
+        );
+    }
 
-        for file in &index.files {
+    /// Process external symbols and iterate over files without requiring
+    /// the full [`ParsedScipIndex`] to be resident in memory. Designed for
+    /// the bounded-memory out-of-core path where files are streamed one at
+    /// a time from the on-disk store.
+    ///
+    /// # Memory invariant
+    ///
+    /// Only one `ScipFile` is resident per iteration step — the iterator
+    /// is consumed lazily so peak file-data residency is **O(1)**.
+    pub(super) fn add_scip_files<'a, I>(
+        &mut self,
+        workspace_slug: &str,
+        external_symbols: &[ScipSymbol],
+        files: I,
+    ) where
+        I: Iterator<Item = &'a ScipFile>,
+    {
+        self.current_workspace = Some(workspace_slug.to_string());
+        for symbol in external_symbols {
+            self.ensure_symbol_node(symbol, None, None, true);
+        }
+        // Bounded-memory invariant: only one ScipFile is resident per
+        // iteration step — the iterator is consumed lazily.
+        for file in files {
             self.add_file(file);
         }
         self.current_workspace = None;
+    }
+
+    /// Like [`Self::add_scip_files`] but accepts a **fallible** iterator
+    /// of file entries. Designed for the out-of-core pipeline where each
+    /// file is loaded from disk on demand and the load may fail.
+    ///
+    /// Processing stops at the first error.
+    ///
+    /// # Memory invariant
+    ///
+    /// Only one `ScipFile` is resident per iteration step — the iterator
+    /// is consumed lazily so peak file-data residency is **O(1)**.
+    pub(super) fn add_scip_files_fallible<I, F, E>(
+        &mut self,
+        workspace_slug: &str,
+        external_symbols: &[ScipSymbol],
+        files: I,
+    ) -> Result<(), String>
+    where
+        I: Iterator<Item = Result<F, E>>,
+        F: std::borrow::Borrow<ScipFile>,
+        E: std::fmt::Display,
+    {
+        self.current_workspace = Some(workspace_slug.to_string());
+        for symbol in external_symbols {
+            self.ensure_symbol_node(symbol, None, None, true);
+        }
+        // Bounded-memory invariant: only one ScipFile is resident per
+        // iteration step — the iterator is consumed lazily.
+        for file_result in files {
+            let file = file_result.map_err(|e| e.to_string())?;
+            self.add_file(file.borrow());
+        }
+        self.current_workspace = None;
+        Ok(())
     }
 
     pub(super) fn add_file(&mut self, file: &ScipFile) {
