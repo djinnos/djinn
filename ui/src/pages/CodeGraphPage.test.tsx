@@ -451,7 +451,7 @@ describe("CodeGraphPage", () => {
 
   // ── Regression: exactly one toolbar on the page ───────────────────────────
 
-  it("renders exactly one graph-toolbar on the Code Graph page (regression)", async () => {
+  it("renders exactly one graph-toolbar on the assembled Code Graph page (regression)", async () => {
     projectStore.setState({
       projects: projectsFixture,
       selectedProjectId: "project-a",
@@ -460,9 +460,10 @@ describe("CodeGraphPage", () => {
 
     render(<CodeGraphPage />);
 
+    expect(screen.getByTestId("code-graph-canvas")).toBeInTheDocument();
     await waitFor(() => {
-      const toolbars = screen.queryAllByTestId("graph-toolbar");
-      expect(toolbars).toHaveLength(1);
+      expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", 10_000);
     });
+    expect(screen.getAllByTestId("graph-toolbar")).toHaveLength(1);
   });
 });
