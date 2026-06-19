@@ -152,9 +152,16 @@ jobs:
           cache-from: type=gha,scope=djinn-agent-runtime-base
           cache-to: type=gha,scope=djinn-agent-runtime-base,mode=max
 
-  # ── Rust binary jobs (produce artifacts the image jobs COPY in) ───────
-  server-binary:
-    name: djinn-server binary (+ UI embed)
+  # ── Rust binary job (produces artifacts the image jobs COPY in) ───────
+  # Both release binaries build in ONE job sharing a single `server/target`
+  # dir + one Swatinem cache, so the common dependency graph (tokio, sqlx,
+  # axum, …) compiles ONCE instead of twice. Two SEQUENTIAL cargo builds —
+  # NOT a unified `-p A -p B` — keep each binary's exact feature resolution
+  # (a unified build would feature-unify qdrant onto worker deps). Worker
+  # first (default features, no qdrant), then server (adds qdrant on top),
+  # reusing the on-disk artifacts of the shared non-qdrant deps.
+  binaries:
+    name: djinn-server + djinn-agent-worker binaries (+ UI embed)
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -190,54 +197,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
-          shared-key: release-server
+          shared-key: release-bins
           cache-on-failure: true
           cache-all-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Cargo build
+      # Worker FIRST so its deps resolve WITHOUT qdrant (default features);
+      # the server build then layers only the qdrant-extra deps on top,
+      # reusing every shared non-qdrant artifact already on disk.
+      - name: Cargo build worker
+        run: cargo build --release --locked -p djinn-agent-worker
+      - name: Cargo build server
         run: cargo build --release --locked --features qdrant -p djinn-server
-      - name: Stage + strip binary
+      - name: Stage + strip binaries
         run: |
           mkdir -p ../stage
           cp target/release/djinn-server ../stage/djinn-server
           strip ../stage/djinn-server
+          cp target/release/djinn-agent-worker ../stage/djinn-agent-worker
+          strip ../stage/djinn-agent-worker
       - uses: actions/upload-artifact@v4
         with:
           name: djinn-server-bin
           path: stage/djinn-server
           retention-days: 1
           if-no-files-found: error
-
-  worker-binary:
-    name: djinn-agent-worker binary
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: server
-    env:
-      SQLX_OFFLINE: "true"
-      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install
-      - name: Install mold
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mold
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: server
-          shared-key: release-worker
-          cache-on-failure: true
-          cache-all-crates: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Cargo build
-        run: cargo build --release --locked -p djinn-agent-worker
-      - name: Stage + strip binary
-        run: |
-          mkdir -p ../stage
-          cp target/release/djinn-agent-worker ../stage/djinn-agent-worker
-          strip ../stage/djinn-agent-worker
       - uses: actions/upload-artifact@v4
         with:
           name: djinn-agent-worker-bin
@@ -248,7 +231,7 @@ jobs:
   # ── Image jobs that consume a binary ──────────────────────────────────
   server:
     name: djinn-server
-    needs: server-binary
+    needs: binaries
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -289,7 +272,7 @@ jobs:
     # Needs the pre-built worker binary and the base image at the same
     # commit's sha tag (FROM arg below) — without both, the runtime image
     # would either be missing the binary or built on a stale base.
-    needs: [runtime-base, worker-binary]
+    needs: [runtime-base, binaries]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
