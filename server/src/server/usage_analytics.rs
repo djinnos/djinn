@@ -1078,3 +1078,91 @@ mod tests {
         assert_eq!(resp.previous_totals.total_cost_usd, Some(0.42));
     }
 }
+
+#[cfg(test)]
+mod rollup_regression_tests {
+    use super::*;
+
+    fn daily(day: &str, sessions: i64, cost: Option<f64>) -> DailySeriesRow {
+        DailySeriesRow {
+            day: day.to_string(),
+            session_count: sessions,
+            tokens_in: sessions * 10,
+            tokens_out: sessions * 5,
+            cache_read_tokens: sessions,
+            cache_write_tokens: sessions * 2,
+            total_cost_usd: cost,
+        }
+    }
+
+    #[test]
+    fn day_week_and_month_rollups_preserve_totals_without_db_bucketing() {
+        let rows = vec![
+            daily("2025-01-01", 1, Some(0.25)),
+            daily("2025-01-05", 2, Some(0.75)),
+            daily("2025-02-01", 3, Some(1.00)),
+        ];
+
+        let day = rollup_series(rows.clone(), Granularity::Day).unwrap();
+        assert_eq!(day.len(), 3);
+        assert_eq!(day.iter().map(|p| p.session_count).sum::<i64>(), 6);
+        assert_eq!(
+            day.iter().map(|p| p.total_cost_usd.unwrap()).sum::<f64>(),
+            2.0
+        );
+
+        let week = rollup_series(rows.clone(), Granularity::Week).unwrap();
+        assert_eq!(week.len(), 2);
+        assert_eq!(week[0].day, "2024-12-30");
+        assert_eq!(week[0].session_count, 3);
+        assert_eq!(week[0].tokens_in, 30);
+        assert_eq!(week[0].total_cost_usd, Some(1.0));
+        assert_eq!(week[1].session_count, 3);
+
+        let month = rollup_series(rows, Granularity::Month).unwrap();
+        assert_eq!(month.len(), 2);
+        assert_eq!(month[0].day, "2025-01-01");
+        assert_eq!(month[0].session_count, 3);
+        assert_eq!(month[0].tokens_out, 15);
+        assert_eq!(month[0].total_cost_usd, Some(1.0));
+        assert_eq!(month[1].day, "2025-02-01");
+        assert_eq!(month[1].session_count, 3);
+    }
+
+    #[test]
+    fn weekly_rollup_keeps_unpriced_cost_null_when_any_day_is_null() {
+        let week = rollup_series(
+            vec![
+                daily("2025-01-06", 1, Some(0.0)),
+                daily("2025-01-07", 1, None),
+            ],
+            Granularity::Week,
+        )
+        .unwrap();
+
+        assert_eq!(week.len(), 1);
+        assert_eq!(week[0].day, "2025-01-06");
+        assert_eq!(week[0].session_count, 2);
+        assert!(week[0].total_cost_usd.is_none());
+    }
+
+    #[test]
+    fn previous_window_query_preserves_filters_and_previous_period_totals_span() {
+        let previous = previous_window_query(&UsageAnalyticsQuery {
+            from: "2025-03-10".into(),
+            to: "2025-03-17".into(),
+            group_by: GroupDimension::Project,
+            project_id: Some("project-1".into()),
+            model_id: Some("model-1".into()),
+            agent_type: Some("worker".into()),
+        })
+        .unwrap();
+
+        assert_eq!(previous.from, "2025-03-03");
+        assert_eq!(previous.to, "2025-03-10");
+        assert_eq!(previous.group_by, GroupDimension::Project);
+        assert_eq!(previous.project_id.as_deref(), Some("project-1"));
+        assert_eq!(previous.model_id.as_deref(), Some("model-1"));
+        assert_eq!(previous.agent_type.as_deref(), Some("worker"));
+    }
+}
