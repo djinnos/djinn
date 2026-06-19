@@ -34,6 +34,24 @@ pub struct CargoCachePolicy {
     pub warm_commands: Vec<CargoWarmCommand>,
 }
 
+impl CargoCachePolicy {
+    /// Return the feature flags as CLI arguments for cargo commands.
+    ///
+    /// * Empty vec → default features (no extra flags).
+    /// * `["--all-features"]` → all features enabled.
+    /// * `["--features", "foo,bar"]` → named features from `.cargo/config.toml`.
+    pub fn features(&self) -> Vec<String> {
+        if self.all_features {
+            vec!["--all-features".to_string()]
+        } else if !self.features.is_empty() {
+            let joined = self.features.join(",");
+            vec!["--features".to_string(), joined]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 impl Default for CargoCachePolicy {
     fn default() -> Self {
         Self {
@@ -81,7 +99,8 @@ pub fn resolve_cargo_cache_policy(
         .as_ref()
         .map(|c| c.features.clone())
         .unwrap_or_default();
-    let all_features = detect_all_features_from_env_config(env_config) || config_features.contains(&"all-features".to_string());
+    let all_features = detect_all_features_from_env_config(env_config)
+        || config_features.contains(&"all-features".to_string());
 
     let features = if all_features {
         Vec::new()
@@ -89,7 +108,7 @@ pub fn resolve_cargo_cache_policy(
         config_features
     };
 
-    let warm_commands = build_warm_commands(is_workspace, all_features);
+    let warm_commands = build_warm_commands(is_workspace, all_features, &features);
 
     Some(CargoCachePolicy {
         workspace: is_workspace,
@@ -124,10 +143,7 @@ fn read_cargo_config_toml(workspace_dir: &Path) -> Option<CargoConfigToml> {
             out.rustc_wrapper = Some(wrapper.to_string());
         }
         if let Some(features) = build.get("features").and_then(|v| v.as_str()) {
-            out.features = features
-                .split_whitespace()
-                .map(|s| s.to_string())
-                .collect();
+            out.features = features.split_whitespace().map(|s| s.to_string()).collect();
         }
         if let Some(features_arr) = build.get("features").and_then(|v| v.as_array()) {
             out.features = features_arr
@@ -187,30 +203,40 @@ fn hook_contains(hook: &djinn_stack::environment::HookCommand, needle: &str) -> 
     }
 }
 
-fn build_warm_commands(is_workspace: bool, all_features: bool) -> Vec<CargoWarmCommand> {
+fn build_warm_commands(
+    is_workspace: bool,
+    all_features: bool,
+    features: &[String],
+) -> Vec<CargoWarmCommand> {
+    let feature_args = if all_features {
+        vec!["--all-features".to_string()]
+    } else if !features.is_empty() {
+        let joined = features.join(",");
+        vec!["--features".to_string(), joined]
+    } else {
+        Vec::new()
+    };
+
     let mut clippy_args = vec!["clippy".to_string()];
     if is_workspace {
         clippy_args.push("--workspace".to_string());
     }
     clippy_args.push("--all-targets".to_string());
-    if all_features {
-        clippy_args.push("--all-features".to_string());
-    }
+    clippy_args.extend(feature_args.clone());
 
     let mut build_args = vec!["build".to_string()];
     if is_workspace {
         build_args.push("--workspace".to_string());
     }
     build_args.push("--all-targets".to_string());
+    build_args.extend(feature_args.clone());
 
     let mut test_args = vec!["test".to_string()];
     if is_workspace {
         test_args.push("--workspace".to_string());
     }
     test_args.push("--all-targets".to_string());
-    if all_features {
-        test_args.push("--all-features".to_string());
-    }
+    test_args.extend(feature_args);
     test_args.push("--no-run".to_string());
 
     vec![
@@ -302,10 +328,13 @@ mod tests {
     fn single_crate_default_features() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
-        fs::write(root.join("Cargo.toml"), r#"[package]
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
 name = "single"
 version = "0.1.0"
-"#)
+"#,
+        )
         .expect("write Cargo.toml");
         fs::create_dir_all(root.join("src")).expect("mkdir src");
         fs::write(root.join("src/main.rs"), "fn main() {}").expect("write main.rs");
@@ -363,12 +392,20 @@ version = "0.1.0"
         assert!(policy.incremental);
         assert_eq!(policy.features, Vec::<String>::new());
 
-        assert_eq!(policy.warm_commands[0].args, vec![
-            "clippy", "--workspace", "--all-targets", "--all-features"
-        ]);
-        assert_eq!(policy.warm_commands[2].args, vec![
-            "test", "--workspace", "--all-targets", "--all-features", "--no-run"
-        ]);
+        assert_eq!(
+            policy.warm_commands[0].args,
+            vec!["clippy", "--workspace", "--all-targets", "--all-features"]
+        );
+        assert_eq!(
+            policy.warm_commands[2].args,
+            vec![
+                "test",
+                "--workspace",
+                "--all-targets",
+                "--all-features",
+                "--no-run"
+            ]
+        );
     }
 
     // (c) workspace with pinned `rustc-wrapper = "sccache"`
@@ -408,9 +445,10 @@ version = "0.1.0"
         assert!(!policy.incremental);
         assert_eq!(policy.features, Vec::<String>::new());
 
-        assert_eq!(policy.warm_commands[0].args, vec![
-            "clippy", "--workspace", "--all-targets"
-        ]);
+        assert_eq!(
+            policy.warm_commands[0].args,
+            vec!["clippy", "--workspace", "--all-targets"]
+        );
     }
 
     #[test]
@@ -445,6 +483,26 @@ features = ["foo", "bar"]
         let policy = resolve_cargo_cache_policy(root, None).expect("policy");
         assert_eq!(policy.features, vec!["foo", "bar"]);
         assert!(!policy.all_features);
+
+        // Verify warm commands include --features for named feature sets
+        assert_eq!(
+            policy.warm_commands[0].args,
+            vec!["clippy", "--all-targets", "--features", "foo,bar"]
+        );
+        assert_eq!(
+            policy.warm_commands[1].args,
+            vec!["build", "--all-targets", "--features", "foo,bar"]
+        );
+        assert_eq!(
+            policy.warm_commands[2].args,
+            vec!["test", "--all-targets", "--features", "foo,bar", "--no-run"]
+        );
+
+        // Verify features() returns the correct CLI args
+        assert_eq!(
+            policy.features(),
+            vec!["--features".to_string(), "foo,bar".to_string()]
+        );
     }
 
     #[test]
@@ -470,5 +528,26 @@ features = "foo bar"
 
         let policy = resolve_cargo_cache_policy(root, None).expect("policy");
         assert_eq!(policy.features, vec!["foo", "bar"]);
+        assert!(!policy.all_features);
+
+        // Verify warm commands include --features for named feature sets
+        assert_eq!(
+            policy.warm_commands[0].args,
+            vec!["clippy", "--all-targets", "--features", "foo,bar"]
+        );
+        assert_eq!(
+            policy.warm_commands[1].args,
+            vec!["build", "--all-targets", "--features", "foo,bar"]
+        );
+        assert_eq!(
+            policy.warm_commands[2].args,
+            vec!["test", "--all-targets", "--features", "foo,bar", "--no-run"]
+        );
+
+        // Verify features() returns the correct CLI args
+        assert_eq!(
+            policy.features(),
+            vec!["--features".to_string(), "foo,bar".to_string()]
+        );
     }
 }
