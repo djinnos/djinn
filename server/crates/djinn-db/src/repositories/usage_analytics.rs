@@ -479,7 +479,7 @@ impl UsageAnalyticsRepository {
     ///
     /// Uses shared-credit attribution: each completed task counts for every
     /// model that ran at least one worker session on it.  Success rate,
-    /// average reopens, and verification pass rate are computed over distinct
+    /// average reopens are computed over distinct
     /// shared-credit tasks per model (not raw worker-session rows) so that
     /// multiple sessions on the same task cannot inflate rates above 1.0.
     async fn fetch_model_effectiveness(
@@ -491,8 +491,8 @@ impl UsageAnalyticsRepository {
         // Use CTEs to separate session-level aggregates (spend, tokens,
         // sessions) from task-level outcome metrics.  Task outcomes are
         // computed over DISTINCT (model_id, task_id) pairs so that multiple
-        // worker sessions on the same task cannot overweight success_rate,
-        // avg_reopens, or verification_pass_rate.
+        // worker sessions on the same task cannot overweight success_rate
+        // or avg_reopens.
         //
         // `filtered_sessions` — rows matching the effectiveness WHERE clause
         //     (date range, worker scope, optional project/model filters).
@@ -510,8 +510,7 @@ impl UsageAnalyticsRepository {
                     s.tokens_out, \
                     t.status, \
                     t.close_reason, \
-                    t.total_reopen_count, \
-                    t.total_verification_failure_count \
+                    t.total_reopen_count \
                 {from_clause} {where_clause} \
              ), \
              session_agg AS ( \
@@ -537,15 +536,11 @@ impl UsageAnalyticsRepository {
                              THEN task_id END) AS closed_count, \
                     AVG(CASE WHEN status = 'closed' \
                              THEN total_reopen_count::DOUBLE PRECISION \
-                             ELSE NULL END) AS avg_reopens, \
-                    COUNT(DISTINCT \
-                        CASE WHEN status = 'closed' \
-                                  AND total_verification_failure_count = 0 \
-                             THEN task_id END) AS verified_count \
+                             ELSE NULL END) AS avg_reopens \
                 FROM ( \
                     SELECT DISTINCT \
                         model_id, task_id, status, close_reason, \
-                        total_reopen_count, total_verification_failure_count \
+                        total_reopen_count \
                     FROM filtered_sessions \
                 ) distinct_tasks \
                 GROUP BY model_id \
@@ -562,12 +557,7 @@ impl UsageAnalyticsRepository {
                      / GREATEST(1, ta.closed_count)::DOUBLE PRECISION, \
                      0.0 \
                  )                                          AS \"success_rate!: f64\", \
-                 COALESCE(ta.avg_reopens, 0.0)              AS \"avg_reopens!: f64\", \
-                 COALESCE( \
-                     ta.verified_count::DOUBLE PRECISION \
-                     / GREATEST(1, ta.closed_count)::DOUBLE PRECISION, \
-                     0.0 \
-                 )                                          AS \"verification_pass_rate!: f64\" \
+                 COALESCE(ta.avg_reopens, 0.0)              AS \"avg_reopens!: f64\" \
              FROM session_agg sa \
              LEFT JOIN task_agg ta ON ta.model_id = sa.model_id \
              ORDER BY sa.model_id"
