@@ -354,6 +354,23 @@ impl SessionRuntime for KubernetesRuntime {
         //    declared on the project's image so they're injected as native
         //    sidecars (best-effort — never blocks dispatch; see resolver).
         let services = crate::sidecar::resolve_image_services(db, &spec.project_id).await;
+
+        // Load the project's EnvironmentConfig to extract the
+        // cargo_cache_policy for the task-run Job's env vars. Fail-open:
+        // if the DB lookup or JSON parse fails, proceed with no policy
+        // (backward-compatible default behavior).
+        let cargo_cache_policy: Option<djinn_stack::environment::CargoCachePolicy> = {
+            let env_repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+            match env_repo.get_environment_config(&spec.project_id).await {
+                Ok(Some(raw)) => {
+                    serde_json::from_str::<djinn_stack::environment::EnvironmentConfig>(&raw)
+                        .ok()
+                        .and_then(|cfg| cfg.cargo_cache_policy)
+                }
+                _ => None,
+            }
+        };
+
         let job = build_task_run_job(
             &self.config,
             &task_run_id,
@@ -361,6 +378,7 @@ impl SessionRuntime for KubernetesRuntime {
             &resource_name,
             &project_image_tag,
             &services,
+            cargo_cache_policy.as_ref(),
         );
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
         let created_job = match jobs.create(&PostParams::default(), &job).await {
@@ -1616,6 +1634,7 @@ mod tests {
             &resource_name,
             "reg.test:5000/djinn-project-proj-xyz:deadbeefcafe",
             &[],
+            None,
         );
 
         // The Secret and Job share the same resource name.

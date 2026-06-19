@@ -65,7 +65,12 @@ pub const WARM_COMMAND_BIN: &str = "/opt/djinn/bin/djinn-agent-worker";
 /// The ServiceAccount (`config.service_account`) is reused from task-run
 /// dispatch — the warm Pod needs the mirror PVC + the DB env, both of
 /// which already work with the task-run SA.
-pub fn build_warm_job(config: &KubernetesConfig, project_id: &str, project_image_tag: &str) -> Job {
+pub fn build_warm_job(
+    config: &KubernetesConfig,
+    project_id: &str,
+    project_image_tag: &str,
+    policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+) -> Job {
     let suffix = Uuid::now_v7();
     let sanitized_project = sanitize_id(project_id);
     let job_name = format!("djinn-warm-{}-{}", sanitized_project, short_uuid(&suffix));
@@ -161,7 +166,7 @@ exec {bin} warm-graph "{project_id}"
     // settings. Single-sourced in job.rs to avoid the
     // task-run-updated-but-warm-missed drift that bit DJINN_*_URL.
     // Needs the cache volume mounted below.
-    env.extend(crate::job::warm_cache_env_vars(project_id, None));
+    env.extend(crate::job::warm_cache_env_vars(project_id, policy));
 
     let container = Container {
         name: "warmer".to_string(),
@@ -355,7 +360,12 @@ mod tests {
     fn builds_warm_job_manifest_with_expected_shape() {
         let mut cfg = KubernetesConfig::for_testing();
         cfg.database_url = Some("postgres://djinn@djinn-postgres:5432/djinn".into());
-        let job = build_warm_job(&cfg, "proj-xyz", "reg.example:5000/djinn-project-p:abc123");
+        let job = build_warm_job(
+            &cfg,
+            "proj-xyz",
+            "reg.example:5000/djinn-project-p:abc123",
+            None,
+        );
 
         let meta = &job.metadata;
         let name = meta.name.as_deref().expect("name");
@@ -637,7 +647,12 @@ mod tests {
             ..Toleration::default()
         });
 
-        let job = build_warm_job(&cfg, "proj-xyz", "reg.example:5000/djinn-project-p:abc123");
+        let job = build_warm_job(
+            &cfg,
+            "proj-xyz",
+            "reg.example:5000/djinn-project-p:abc123",
+            None,
+        );
         let pod = job
             .spec
             .as_ref()
