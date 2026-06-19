@@ -365,15 +365,10 @@ mod tests {
             Some("/cache/cargo-target/proj-xyz"),
             "verification seeds from the shared warm cargo target base"
         );
-        assert_eq!(
-            envs.get("CARGO_INCREMENTAL").copied(),
-            Some("0"),
-            "verification reuses the warm base via cargo freshness + sccache (incremental=0; sccache forbids incremental)"
-        );
-        assert!(
-            !envs.contains_key("RUSTC_WRAPPER"),
-            "verification must not force sccache (it disables incremental)"
-        );
+        // The CARGO_INCREMENTAL / RUSTC_WRAPPER compile-strategy invariant is
+        // asserted exhaustively in `crate::job::tests` (warm == verify ==
+        // worker parity); not re-pinned here to avoid coupling this throwaway
+        // shape test to that env-builder.
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),
             Some("/cache/sccache/proj-xyz")
