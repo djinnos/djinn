@@ -809,7 +809,7 @@ async fn run_cargo_warm_step(
     args: &[&str],
     label: &str,
 ) -> bool {
-    let cargo_instrumented = std::env::var("DJINN_CARGO_INSTRUMENT").is_ok();
+    let cargo_instrumented = cargo_instrument_enabled();
 
     if !cargo_instrumented {
         return match tokio::process::Command::new("cargo")
@@ -906,10 +906,19 @@ async fn run_cargo_warm_step(
 }
 
 fn cargo_fresh_compiling_counts(output: &[u8]) -> (usize, usize) {
-    let mut fresh_count = 0;
-    let mut compiling_count = 0;
+    let (f, c) = parse_cargo_fresh_compiling(&String::from_utf8_lossy(output));
+    (f as usize, c as usize)
+}
 
-    for line in String::from_utf8_lossy(output).lines() {
+/// Parse cargo `-v` stdout/stderr for `Fresh` and `Compiling` line prefixes.
+///
+/// This is intentionally a pure `&str → (u64, u64)` function so it can be
+/// unit-tested with static strings without spawning any processes.
+fn parse_cargo_fresh_compiling(output: &str) -> (u64, u64) {
+    let mut fresh_count: u64 = 0;
+    let mut compiling_count: u64 = 0;
+
+    for line in output.lines() {
         match line.split_whitespace().next() {
             Some("Fresh") => fresh_count += 1,
             Some("Compiling") => compiling_count += 1,
@@ -918,6 +927,14 @@ fn cargo_fresh_compiling_counts(output: &[u8]) -> (usize, usize) {
     }
 
     (fresh_count, compiling_count)
+}
+
+/// Returns `true` when `DJINN_CARGO_INSTRUMENT` is set in the environment,
+/// indicating that cargo warm steps should capture stdout/stderr for
+/// Fresh/Compiling line parsing.  Extracted so tests can verify the toggle
+/// without spawning a real cargo process.
+fn cargo_instrument_enabled() -> bool {
+    std::env::var("DJINN_CARGO_INSTRUMENT").is_ok()
 }
 
 struct CargoTargetRunDirGuard {
@@ -3047,5 +3064,98 @@ mod tests {
             djinn_db::VerificationRunStatus::PASSED,
             "a project with no verification rules passes vacuously"
         );
+    }
+
+    // ── parse_cargo_fresh_compiling unit tests ──────────────────────
+
+    #[test]
+    fn parse_cargo_fresh_compiling_zero_fresh_zero_compiling() {
+        let (fresh, compiling) = parse_cargo_fresh_compiling("");
+        assert_eq!(fresh, 0);
+        assert_eq!(compiling, 0);
+    }
+
+    #[test]
+    fn parse_cargo_fresh_compiling_only_non_cargo_output() {
+        let stdout = "warning: unused variable `x`\n   --> src/lib.rs:10:9\n";
+        let (fresh, compiling) = parse_cargo_fresh_compiling(stdout);
+        assert_eq!(fresh, 0);
+        assert_eq!(compiling, 0);
+    }
+
+    #[test]
+    fn parse_cargo_fresh_compiling_mixed_lines() {
+        let stdout = "\
+   Compiling serde v1.0.0
+   Compiling serde_derive v1.0.0
+   Fresh libc v0.2.0
+   Fresh memchr v2.0.0
+   Fresh proc-macro2 v1.0.0
+warning: something
+   Compiling syn v2.0.0
+";
+        let (fresh, compiling) = parse_cargo_fresh_compiling(stdout);
+        assert_eq!(fresh, 3);
+        assert_eq!(compiling, 3);
+    }
+
+    #[test]
+    fn parse_cargo_fresh_compiling_all_fresh() {
+        let stdout = "   Fresh crate-a v0.1.0\n   Fresh crate-b v0.2.0\n";
+        let (fresh, compiling) = parse_cargo_fresh_compiling(stdout);
+        assert_eq!(fresh, 2);
+        assert_eq!(compiling, 0);
+    }
+
+    #[test]
+    fn parse_cargo_fresh_compiling_all_compiling() {
+        let stdout = "   Compiling crate-a v0.1.0\n   Compiling crate-b v0.2.0\n";
+        let (fresh, compiling) = parse_cargo_fresh_compiling(stdout);
+        assert_eq!(fresh, 0);
+        assert_eq!(compiling, 2);
+    }
+
+    #[test]
+    fn parse_cargo_fresh_compiling_edge_case_partial_match() {
+        // "Freshly" and "Compilation" should NOT match.
+        let stdout = "Freshly ground coffee\nCompilation finished\n   Fresh foo v0.1.0\n";
+        let (fresh, compiling) = parse_cargo_fresh_compiling(stdout);
+        assert_eq!(fresh, 1);
+        assert_eq!(compiling, 0);
+    }
+
+    #[test]
+    fn parse_cargo_fresh_compiling_delegates_from_byte_version() {
+        let raw = b"   Fresh foo v0.1.0\n   Compiling bar v0.2.0\n";
+        let (f, c) = cargo_fresh_compiling_counts(raw);
+        assert_eq!(f, 1);
+        assert_eq!(c, 1);
+    }
+
+    // ── DJINN_CARGO_INSTRUMENT toggle tests ─────────────────────────
+
+    #[test]
+    fn cargo_instrument_toggle_absent_by_default() {
+        // In a clean test environment the var should be absent.
+        // Remove it in case a previous test set it.
+        // SAFETY: test-only env mutation; these tests must not run in parallel.
+        unsafe { std::env::remove_var("DJINN_CARGO_INSTRUMENT") };
+        assert!(!cargo_instrument_enabled());
+    }
+
+    #[test]
+    fn cargo_instrument_toggle_enabled_when_set() {
+        // SAFETY: test-only env mutation.
+        unsafe { std::env::set_var("DJINN_CARGO_INSTRUMENT", "1") };
+        assert!(cargo_instrument_enabled());
+        unsafe { std::env::remove_var("DJINN_CARGO_INSTRUMENT") };
+    }
+
+    #[test]
+    fn cargo_instrument_toggle_enabled_for_any_value() {
+        // SAFETY: test-only env mutation.
+        unsafe { std::env::set_var("DJINN_CARGO_INSTRUMENT", "") };
+        assert!(cargo_instrument_enabled());
+        unsafe { std::env::remove_var("DJINN_CARGO_INSTRUMENT") };
     }
 }
