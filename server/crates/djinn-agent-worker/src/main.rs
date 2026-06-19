@@ -61,6 +61,7 @@
 //! over the handshake-guarded TCP connection, not the apiserver.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -809,11 +810,22 @@ async fn run_cargo_warm_step(
     args: &[&str],
     label: &str,
 ) -> bool {
+    run_cargo_warm_step_with_cargo("cargo", project_id, workspace_dir, args, label).await
+}
+
+async fn run_cargo_warm_step_with_cargo(
+    cargo_bin: impl AsRef<OsStr>,
+    project_id: &str,
+    workspace_dir: &Path,
+    args: &[&str],
+    label: &str,
+) -> bool {
     let cargo_instrumented = cargo_instrument_enabled();
+    let plan = cargo_warm_execution_plan(args, cargo_instrumented);
 
     if !cargo_instrumented {
-        return match tokio::process::Command::new("cargo")
-            .args(args)
+        return match tokio::process::Command::new(cargo_bin.as_ref())
+            .args(&plan.args)
             .current_dir(workspace_dir)
             .status()
             .await
@@ -843,11 +855,8 @@ async fn run_cargo_warm_step(
         };
     }
 
-    let mut instrumented_args = args.to_vec();
-    instrumented_args.push("-v");
-
-    match tokio::process::Command::new("cargo")
-        .args(&instrumented_args)
+    match tokio::process::Command::new(cargo_bin.as_ref())
+        .args(&plan.args)
         .current_dir(workspace_dir)
         .output()
         .await
@@ -902,6 +911,33 @@ async fn run_cargo_warm_step(
             );
             false
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CargoWarmOutputMode {
+    InheritStatusOnly,
+    CaptureForInstrumentation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CargoWarmExecutionPlan {
+    args: Vec<String>,
+    output_mode: CargoWarmOutputMode,
+}
+
+fn cargo_warm_execution_plan(args: &[&str], instrumented: bool) -> CargoWarmExecutionPlan {
+    let mut planned_args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    let output_mode = if instrumented {
+        planned_args.push("-v".to_owned());
+        CargoWarmOutputMode::CaptureForInstrumentation
+    } else {
+        CargoWarmOutputMode::InheritStatusOnly
+    };
+
+    CargoWarmExecutionPlan {
+        args: planned_args,
+        output_mode,
     }
 }
 
@@ -2420,7 +2456,52 @@ mod tests {
         RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
     };
     use std::collections::BTreeMap;
+    use std::io::Write;
     use std::process::Command;
+    use tracing::dispatcher::Dispatch;
+
+    static CARGO_INSTRUMENT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn take(&self) -> String {
+            let mut buf = self.0.lock().expect("captured logs mutex poisoned");
+            let out =
+                String::from_utf8(buf.clone()).expect("captured log bytes were not valid utf-8");
+            buf.clear();
+            out
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogsWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogsWriter {
+                inner: std::sync::Arc::clone(&self.0),
+            }
+        }
+    }
+
+    struct CapturedLogsWriter {
+        inner: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl Write for CapturedLogsWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner
+                .lock()
+                .expect("captured logs mutex poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn resolve_cargo_workspace_prefers_env_config_rust_root() {
@@ -3136,6 +3217,7 @@ warning: something
 
     #[test]
     fn cargo_instrument_toggle_absent_by_default() {
+        let _guard = CARGO_INSTRUMENT_ENV_LOCK.lock().expect("env lock poisoned");
         // In a clean test environment the var should be absent.
         // Remove it in case a previous test set it.
         // SAFETY: test-only env mutation; these tests must not run in parallel.
@@ -3145,6 +3227,7 @@ warning: something
 
     #[test]
     fn cargo_instrument_toggle_enabled_when_set() {
+        let _guard = CARGO_INSTRUMENT_ENV_LOCK.lock().expect("env lock poisoned");
         // SAFETY: test-only env mutation.
         unsafe { std::env::set_var("DJINN_CARGO_INSTRUMENT", "1") };
         assert!(cargo_instrument_enabled());
@@ -3153,9 +3236,164 @@ warning: something
 
     #[test]
     fn cargo_instrument_toggle_enabled_for_any_value() {
+        let _guard = CARGO_INSTRUMENT_ENV_LOCK.lock().expect("env lock poisoned");
         // SAFETY: test-only env mutation.
         unsafe { std::env::set_var("DJINN_CARGO_INSTRUMENT", "") };
         assert!(cargo_instrument_enabled());
         unsafe { std::env::remove_var("DJINN_CARGO_INSTRUMENT") };
+    }
+
+    #[test]
+    fn cargo_warm_execution_plan_absent_toggle_is_status_only_and_does_not_add_verbose() {
+        let plan = cargo_warm_execution_plan(&["check", "--workspace"], false);
+
+        assert_eq!(plan.output_mode, CargoWarmOutputMode::InheritStatusOnly);
+        assert_eq!(plan.args, vec!["check", "--workspace"]);
+        assert!(
+            !plan.args.iter().any(|arg| arg == "-v"),
+            "cheap-off path must not add verbose instrumentation args"
+        );
+    }
+
+    #[test]
+    fn cargo_warm_execution_plan_enabled_toggle_captures_output_and_adds_verbose() {
+        let plan = cargo_warm_execution_plan(&["test", "--no-run"], true);
+
+        assert_eq!(
+            plan.output_mode,
+            CargoWarmOutputMode::CaptureForInstrumentation
+        );
+        assert_eq!(plan.args, vec!["test", "--no-run", "-v"]);
+    }
+
+    #[test]
+    fn run_cargo_warm_step_instrumented_parses_mock_output_and_logs_counts() {
+        let _guard = CARGO_INSTRUMENT_ENV_LOCK.lock().expect("env lock poisoned");
+        // SAFETY: guarded test-only env mutation.
+        unsafe { std::env::set_var("DJINN_CARGO_INSTRUMENT", "1") };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cargo_bin = tmp.path().join("cargo-mock.sh");
+        std::fs::write(
+            &cargo_bin,
+            "#!/bin/sh\nprintf '   Fresh mock-a v0.1.0\\n   Compiling mock-b v0.1.0\\n'\nprintf '   Fresh mock-c v0.1.0\\n' >&2\nexit 0\n",
+        )
+        .expect("write mock cargo");
+        let mut perms = std::fs::metadata(&cargo_bin)
+            .expect("metadata")
+            .permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&cargo_bin, perms).expect("chmod mock cargo");
+        }
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(false)
+            .with_ansi(false)
+            .finish();
+        let dispatch = Dispatch::new(subscriber);
+
+        let ok = tracing::dispatcher::with_default(&dispatch, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .expect("runtime")
+                .block_on(run_cargo_warm_step_with_cargo(
+                    &cargo_bin,
+                    "project-cargo-log",
+                    tmp.path(),
+                    &["check"],
+                    "check",
+                ))
+        });
+
+        // SAFETY: guarded test-only env mutation.
+        unsafe { std::env::remove_var("DJINN_CARGO_INSTRUMENT") };
+
+        assert!(ok, "mock cargo should succeed");
+        let logs = logs.take();
+        assert!(
+            logs.contains("cargo warm: instrumented Fresh/Compiling counts"),
+            "instrumented cargo path should emit the structured count event: {logs}"
+        );
+        assert!(
+            logs.contains("fresh_count=2"),
+            "missing fresh count: {logs}"
+        );
+        assert!(
+            logs.contains("compiling_count=1"),
+            "missing compiling count: {logs}"
+        );
+        assert!(
+            logs.contains("step=\"check\""),
+            "missing step label: {logs}"
+        );
+    }
+
+    #[test]
+    fn run_cargo_warm_step_absent_toggle_uses_status_path_without_instrumentation_log() {
+        let _guard = CARGO_INSTRUMENT_ENV_LOCK.lock().expect("env lock poisoned");
+        // SAFETY: guarded test-only env mutation.
+        unsafe { std::env::remove_var("DJINN_CARGO_INSTRUMENT") };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cargo_bin = tmp.path().join("cargo-mock.sh");
+        std::fs::write(
+            &cargo_bin,
+            "#!/bin/sh\nprintf '   Fresh should-not-be-parsed v0.1.0\\n'\nexit 0\n",
+        )
+        .expect("write mock cargo");
+        let mut perms = std::fs::metadata(&cargo_bin)
+            .expect("metadata")
+            .permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&cargo_bin, perms).expect("chmod mock cargo");
+        }
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(false)
+            .with_ansi(false)
+            .finish();
+        let dispatch = Dispatch::new(subscriber);
+
+        let ok = tracing::dispatcher::with_default(&dispatch, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .expect("runtime")
+                .block_on(run_cargo_warm_step_with_cargo(
+                    &cargo_bin,
+                    "project-cargo-cheap-off",
+                    tmp.path(),
+                    &["check"],
+                    "check",
+                ))
+        });
+
+        assert!(ok, "mock cargo should succeed");
+        let logs = logs.take();
+        assert!(
+            !logs.contains("instrumented Fresh/Compiling counts"),
+            "cheap-off status path must not capture/parse stdout or log instrumentation counts: {logs}"
+        );
+        assert!(
+            logs.contains("cargo warm: step succeeded"),
+            "status path should still log success: {logs}"
+        );
     }
 }
