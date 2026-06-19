@@ -39,6 +39,7 @@ import { useSigmaGraph } from "@/hooks/useSigmaGraph";
 import { useGraphReducers } from "@/hooks/useGraphReducers";
 import { selectCitationIds, useCodeGraphStore } from "@/stores/codeGraphStore";
 import { RendererCapabilityDialog } from "./RendererCapabilityDialog";
+import { GraphToolbar } from "./GraphToolbar";
 import { cn } from "@/lib/utils";
 
 type FetchState =

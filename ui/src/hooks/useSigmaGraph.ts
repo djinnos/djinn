@@ -173,6 +173,8 @@ export function useSigmaGraph(
   const [layoutRunning, setLayoutRunning] = useState(false);
   const [handle, setHandle] = useState<SigmaInstanceHandle | null>(null);
 
+  const layoutMode = useCodeGraphStore((s) => s.layoutMode);
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container || !graph) return;
@@ -407,8 +409,6 @@ export function useSigmaGraph(
         }
       },
     });
-
-    const layoutMode = useCodeGraphStore((s) => s.layoutMode);
 
     // ── ForceAtlas2 supervisor (off main thread) ────────────────
     // Precomputed-layout graphs already carry warm-time server
