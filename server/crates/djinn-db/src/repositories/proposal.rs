@@ -128,6 +128,16 @@ struct ProposalStatusEvent<'a> {
     status_to: &'a str,
 }
 
+struct ProposalRevisionSnapshot<'a> {
+    proposal_id: &'a str,
+    seq: i32,
+    title: &'a str,
+    body: &'a str,
+    body_format: &'a str,
+    acceptance_criteria: &'a serde_json::Value,
+    edited_by: Option<&'a str>,
+}
+
 pub struct ProposalRepository {
     db: Database,
     events: EventBus,
@@ -213,15 +223,15 @@ impl ProposalRepository {
         .await?;
         // Seed revision 1 with the initial spec so every proposal has a head to
         // diff against.
-        self.insert_revision(
-            &id,
-            1,
-            input.title,
-            input.body,
+        self.insert_revision(ProposalRevisionSnapshot {
+            proposal_id: &id,
+            seq: 1,
+            title: input.title,
+            body: input.body,
             body_format,
-            &acceptance_criteria,
-            author_user_id.as_deref(),
-        )
+            acceptance_criteria: &acceptance_criteria,
+            edited_by: author_user_id.as_deref(),
+        })
         .await?;
         let proposal = self.get_required(&id).await?;
         self.events
@@ -298,15 +308,15 @@ impl ProposalRepository {
 
         if content_changed {
             let editor = djinn_core::auth_context::current_user_id();
-            self.insert_revision(
-                id,
-                next_seq,
-                input.title,
-                input.body,
+            self.insert_revision(ProposalRevisionSnapshot {
+                proposal_id: id,
+                seq: next_seq,
+                title: input.title,
+                body: input.body,
                 body_format,
-                &acceptance_criteria,
-                editor.as_deref(),
-            )
+                acceptance_criteria: &acceptance_criteria,
+                edited_by: editor.as_deref(),
+            })
             .await?;
         } else if record_done_status_event {
             let editor = djinn_core::auth_context::current_user_id();
@@ -550,16 +560,7 @@ impl ProposalRepository {
 
     // ── Revisions + sign-offs ────────────────────────────────────────────────
 
-    async fn insert_revision(
-        &self,
-        proposal_id: &str,
-        seq: i32,
-        title: &str,
-        body: &str,
-        body_format: &str,
-        acceptance_criteria: &serde_json::Value,
-        edited_by: Option<&str>,
-    ) -> Result<()> {
+    async fn insert_revision(&self, revision: ProposalRevisionSnapshot<'_>) -> Result<()> {
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
             r#"INSERT INTO proposal_revisions
@@ -567,13 +568,13 @@ impl ProposalRepository {
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision')"#,
         )
         .bind(id)
-        .bind(proposal_id)
-        .bind(seq)
-        .bind(title)
-        .bind(body)
-        .bind(body_format)
-        .bind(acceptance_criteria)
-        .bind(edited_by)
+        .bind(revision.proposal_id)
+        .bind(revision.seq)
+        .bind(revision.title)
+        .bind(revision.body)
+        .bind(revision.body_format)
+        .bind(revision.acceptance_criteria)
+        .bind(revision.edited_by)
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -1223,15 +1224,15 @@ impl ProposalRepository {
         .execute(self.db.pool())
         .await?;
         let editor = djinn_core::auth_context::current_user_id();
-        self.insert_revision(
+        self.insert_revision(ProposalRevisionSnapshot {
             proposal_id,
-            next_revision_seq,
-            &current.title,
-            &current.body,
-            &current.body_format,
-            &acceptance_criteria,
-            editor.as_deref(),
-        )
+            seq: next_revision_seq,
+            title: &current.title,
+            body: &current.body,
+            body_format: &current.body_format,
+            acceptance_criteria: &acceptance_criteria,
+            edited_by: editor.as_deref(),
+        })
         .await?;
 
         let audit_json = serde_json::to_string(&audit_entries)
