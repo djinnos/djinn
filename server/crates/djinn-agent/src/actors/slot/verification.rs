@@ -1,3 +1,4 @@
+// djinn:allow-oversize — verification module will be deleted by sibling task; temporary oversize.
 use crate::context::AgentContext;
 use crate::verification::StepEvent;
 use crate::verification::scoped::resolve_scoped_commands;
@@ -946,11 +947,11 @@ async fn handle_verification_failure(
         );
     }
 
-    // Verification failure counting removed — transition to open for re-dispatch.
+    // Verification failure counting removed — release the review worker back for re-dispatch.
     if let Err(e) = task_repo
         .transition(
             task_id,
-            TransitionAction::Release,
+            TransitionAction::ReleaseTaskReview,
             "agent-supervisor",
             "system",
             Some(feedback),
