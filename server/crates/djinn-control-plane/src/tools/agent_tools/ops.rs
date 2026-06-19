@@ -92,7 +92,6 @@ pub struct AgentMetricEntry {
     pub avg_tokens_in: f64,
     pub avg_tokens_out: f64,
     pub avg_time_seconds: f64,
-    pub verification_pass_rate: f64,
     pub avg_reopens: f64,
     pub completed_task_count: i64,
     pub extraction_quality: ExtractionQualityMetricEntry,
@@ -297,7 +296,6 @@ pub async fn metrics_for_agents(
             .unwrap_or(DbAgentMetrics {
                 success_rate: 0.0,
                 avg_reopens: 0.0,
-                verification_pass_rate: 0.0,
                 completed_task_count: 0,
                 avg_tokens: 0.0,
                 avg_tokens_in: 0.0,
@@ -313,7 +311,6 @@ pub async fn metrics_for_agents(
             learned_prompt: agent.learned_prompt.clone(),
             success_rate: m.success_rate,
             avg_reopens: m.avg_reopens,
-            verification_pass_rate: m.verification_pass_rate,
             completed_task_count: m.completed_task_count,
             avg_tokens: m.avg_tokens,
             avg_tokens_in: m.avg_tokens_in,

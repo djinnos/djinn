@@ -324,7 +324,6 @@ struct AgentMetricsItem {
     avg_tokens_in: Option<f64>,
     avg_tokens_out: Option<f64>,
     avg_time_to_complete_seconds: Option<f64>,
-    verification_pass_rate: Option<f64>,
     reopen_rate: Option<f64>,
     success_rate_trend: Option<f64>,
     history: Vec<serde_json::Value>,
@@ -380,7 +379,6 @@ async fn agent_metrics(
             .unwrap_or(DbAgentMetrics {
                 success_rate: 0.0,
                 avg_reopens: 0.0,
-                verification_pass_rate: 0.0,
                 completed_task_count: 0,
                 avg_tokens: 0.0,
                 avg_tokens_in: 0.0,
@@ -400,7 +398,6 @@ async fn agent_metrics(
             avg_tokens_in: has_data.then_some(m.avg_tokens_in),
             avg_tokens_out: has_data.then_some(m.avg_tokens_out),
             avg_time_to_complete_seconds: has_data.then_some(m.avg_time_seconds),
-            verification_pass_rate: has_data.then_some(m.verification_pass_rate),
             reopen_rate: has_data.then_some(m.avg_reopens),
             success_rate_trend: None,
             history: vec![],

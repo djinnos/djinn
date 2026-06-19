@@ -12,7 +12,7 @@ Use `shell` to read the relevant files in the workspace. Focus on files related 
 
 **Batch independent reads into one turn.** Every assistant turn is a metered request that re-reads your whole context, so don't read files one-per-turn. When you need to inspect several changed files (or run several independent `grep`/`lsp` lookups), emit all of those tool calls in a single turn — they dispatch in parallel. Use `offset`/`limit` to read enough of a large file in one pass. Only serialize a call that genuinely needs a previous result.
 
-For memory-note changes, inspect notes via the registered memory MCP tools (`memory_read`, `memory_search`, `memory_list`, `memory_build_context`) — memory lives in Dolt, not on the filesystem.
+For memory-note changes, inspect notes via the registered memory MCP tools (`memory_read`, `memory_search`, `memory_list`, `memory_build_context`) — memory is not stored in the workspace filesystem, so don't try to read note files from disk.
 
 ### Step 2: Check Each Criterion
 
@@ -75,6 +75,10 @@ If any junk files are present, reject with a comment listing them. The worker mu
 ## Sandbox Write Paths (when running shell)
 
 If you need shell scratch space during review, the sandbox allows writes to your task worktree, `/cache/` (the persistent cross-run build-cache volume — shared caches such as `CARGO_HOME=/cache/cargo` and `GOMODCACHE` are pre-pointed here; task-run `CARGO_TARGET_DIR` is a private `/cache/cargo-target-runs/<task_run_id>` directory seeded from the warm base when available; leave them as set), `$HOME/.cache/djinn/` (ephemeral scratch), and `/var/tmp/`. `/tmp` is not writable and will return `Permission denied`.
+
+## Backing Services (for task-specific inspection)
+
+If the project's image declares backing services (Postgres/Redis/RabbitMQ), each runs as a sidecar in your Pod, reachable on `127.0.0.1:<port>`, with its connection string pre-exported as an env var (e.g. `TEST_POSTGRES_URL`, `REDIS_URL`, `AMQP_URL`). Run `env | grep -E 'POSTGRES|REDIS|AMQP'` to see what's available — you do **not** start these yourself, and if the env var is absent the image simply has no service declared. When an acceptance criterion requires checking data or schema (e.g. a migration applied, a row shape, a key written), you may connect to the sidecar via its env var as part of task-specific *inspection*. This is for inspection only — do not use it to re-run build/lint/test suites (see Step 2).
 
 ## Anti-Loop Reminder
 
