@@ -1,4 +1,4 @@
--- 68_lifecycle_sweep_metric_counts.sql
+-- 69_lifecycle_sweep_metric_counts.sql
 --
 -- Persist lifecycle sweep counters alongside consolidation run metrics. Organic
 -- consolidation runs keep the default zero values; housekeeping/operator
