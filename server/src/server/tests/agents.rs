@@ -87,7 +87,12 @@ async fn put_update_rejects_direct_learned_prompt_set() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["error"].as_str().unwrap().contains("Direct learned_prompt setting is deprecated"));
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("Direct learned_prompt setting is deprecated")
+    );
 
     let persisted = AgentRepository::new(db, EventBus::noop())
         .get(&default_agent.id)
@@ -142,4 +147,3 @@ async fn delete_clear_learned_prompt_clears_derived_state() {
         .unwrap();
     assert!(persisted.learned_prompt.is_none());
 }
-

@@ -108,7 +108,9 @@ pub struct AgentUpdateParams {
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub learned_prompt: Option<String>,
-    /// Set to true to clear learned_prompt back to NULL. Takes precedence over learned_prompt.
+    /// Set to true to clear machine-managed learned_prompt back to NULL.
+    /// Admin/operator reset path; learned_prompt is otherwise managed through
+    /// agent_amend_prompt and the evaluator loop.
     pub clear_learned_prompt: Option<bool>,
 }
 
