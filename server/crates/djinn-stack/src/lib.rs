@@ -22,9 +22,10 @@ pub mod test_runners;
 
 pub use detect::{detect, detect_blocking};
 pub use environment::{
-    ClangLanguage, ConfigSource, DotnetLanguage, EnvironmentConfig, EnvironmentConfigError,
-    GoLanguage, HookCommand, JavaLanguage, Languages, LifecycleHooks, NodeLanguage, PythonLanguage,
-    RubyLanguage, RustLanguage, SCHEMA_VERSION, Verification, VerificationRule, Workspace,
+    CargoCachePolicy, CargoCachePolicyOverride, CargoWarmCommand, ClangLanguage, ConfigSource,
+    DotnetLanguage, EnvironmentConfig, EnvironmentConfigError, GoLanguage, HookCommand,
+    JavaLanguage, Languages, LifecycleHooks, NodeLanguage, PythonLanguage, RubyLanguage,
+    RustLanguage, SCHEMA_VERSION, Verification, VerificationRule, Workspace,
 };
 pub use schema::{LanguageStat, ManifestSignals, Runtimes, Stack};
 pub use slug::workspace_slug;
