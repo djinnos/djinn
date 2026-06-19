@@ -1,137 +1,137 @@
 {
-   "describe" : {
-      "columns" : [
-         {
-            "type_info" : "Varchar",
-            "name" : "id",
-            "ordinal" : 0
-         },
-         {
-            "name" : "project_id",
-            "type_info" : "Varchar",
-            "ordinal" : 1
-         },
-         {
-            "name" : "task_id",
-            "type_info" : "Varchar",
-            "ordinal" : 2
-         },
-         {
-            "type_info" : "Varchar",
-            "name" : "model_id",
-            "ordinal" : 3
-         },
-         {
-            "ordinal" : 4,
-            "name" : "agent_type",
-            "type_info" : "Varchar"
-         },
-         {
-            "type_info" : "Varchar",
-            "name" : "started_at",
-            "ordinal" : 5
-         },
-         {
-            "type_info" : "Varchar",
-            "name" : "ended_at",
-            "ordinal" : 6
-         },
-         {
-            "ordinal" : 7,
-            "type_info" : "Varchar",
-            "name" : "status!"
-         },
-         {
-            "name" : "tokens_in",
-            "type_info" : "Int8",
-            "ordinal" : 8
-         },
-         {
-            "ordinal" : 9,
-            "name" : "tokens_out",
-            "type_info" : "Int8"
-         },
-         {
-            "ordinal" : 10,
-            "type_info" : "Int8",
-            "name" : "cache_read_tokens"
-         },
-         {
-            "name" : "cache_write_tokens",
-            "type_info" : "Int8",
-            "ordinal" : 11
-         },
-         {
-            "type_info" : "Varchar",
-            "name" : "task_run_id",
-            "ordinal" : 12
-         },
-         {
-            "name" : "title",
-            "type_info" : "Varchar",
-            "ordinal" : 13
-         },
-         {
-            "ordinal" : 14,
-            "type_info" : "Text",
-            "name" : "parked_reason?"
-         },
-         {
-            "type_info" : "Float8",
-            "name" : "cost_usd",
-            "ordinal" : 15
-         },
-         {
-            "ordinal" : 16,
-            "type_info" : "Float8",
-            "name" : "input_price_per_million_snapshot"
-         },
-         {
-            "ordinal" : 17,
-            "type_info" : "Float8",
-            "name" : "output_price_per_million_snapshot"
-         },
-         {
-            "name" : "cache_read_price_per_million_snapshot",
-            "type_info" : "Float8",
-            "ordinal" : 18
-         },
-         {
-            "ordinal" : 19,
-            "type_info" : "Float8",
-            "name" : "cache_write_price_per_million_snapshot"
-         }
-      ],
-      "nullable" : [
-         false,
-         true,
-         true,
-         false,
-         false,
-         false,
-         true,
-         false,
-         false,
-         false,
-         false,
-         false,
-         true,
-         true,
-         true,
-         true,
-         true,
-         true,
-         true,
-         true
-      ],
-      "parameters" : {
-         "Left" : [
-            "Text",
-            "Text"
-         ]
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\",\n                cost_usd, input_price_per_million_snapshot,\n                output_price_per_million_snapshot,\n                cache_read_price_per_million_snapshot,\n                cache_write_price_per_million_snapshot\n             FROM sessions WHERE project_id = $1 AND id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "task_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "model_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "agent_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "started_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "ended_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "status!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "tokens_in",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "tokens_out",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "cache_read_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "cache_write_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
+        "name": "task_run_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 14,
+        "name": "parked_reason?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "cost_usd",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 16,
+        "name": "input_price_per_million_snapshot",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 17,
+        "name": "output_price_per_million_snapshot",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 18,
+        "name": "cache_read_price_per_million_snapshot",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 19,
+        "name": "cache_write_price_per_million_snapshot",
+        "type_info": "Float8"
       }
-   },
-   "db_name" : "PostgreSQL",
-   "query" : "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\",\n                cost_usd, input_price_per_million_snapshot,\n                output_price_per_million_snapshot,\n                cache_read_price_per_million_snapshot,\n                cache_write_price_per_million_snapshot\n             FROM sessions WHERE project_id = $1 AND id = $2",
-   "hash" : "57066998789a0529efa7dbece23c8528c6a282d88b874c93acbbed4ac67057d0"
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "57066998789a0529efa7dbece23c8528c6a282d88b874c93acbbed4ac67057d0"
 }
