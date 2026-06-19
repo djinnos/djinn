@@ -176,6 +176,90 @@ async fn orphan_detection_excludes_singletons_and_catalog_from_listing_and_healt
     assert_eq!(health.orphan_note_count, orphans.len() as i64);
     assert_eq!(health.stale_note_count, 0);
     assert_eq!(health.low_confidence_note_count, 0);
+    assert_eq!(health.lifecycle.active_notes, 6);
+    assert_eq!(health.lifecycle.archived_notes, 0);
+    assert_eq!(health.lifecycle.deprecated_notes, 0);
+    assert_eq!(health.recent_sweep.last_decayed_count, 0);
+    assert_eq!(health.recent_sweep.last_archived_count, 0);
+    assert_eq!(health.recent_sweep.last_superseded_source_count, 0);
+    assert!(health.recent_sweep.last_sweep_at.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_reports_lifecycle_counts_and_recent_sweep_metrics() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let consolidation_repo = crate::repositories::note::NoteConsolidationRepository::new(db.clone());
+
+    // Create notes with different statuses.
+    let _active1 = repo
+        .create(&project.id, "Active Note One", "body", "adr", "[]")
+        .await
+        .unwrap();
+    let _active2 = repo
+        .create(&project.id, "Active Note Two", "body", "pattern", "[]")
+        .await
+        .unwrap();
+    let archived = repo
+        .create(&project.id, "Archived Note", "body", "case", "[]")
+        .await
+        .unwrap();
+    let deprecated = repo
+        .create(&project.id, "Deprecated Note", "body", "pitfall", "[]")
+        .await
+        .unwrap();
+
+    // Flip statuses.
+    sqlx::query("UPDATE notes SET status = 'archived' WHERE id = $1")
+        .bind(&archived.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE notes SET status = 'deprecated' WHERE id = $1")
+        .bind(&deprecated.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    // Insert a lifecycle sweep metric row.
+    consolidation_repo
+        .create_run_metric(crate::repositories::note::CreateConsolidationRunMetric {
+            project_id: &project.id,
+            note_type: "lifecycle_sweep",
+            status: "completed",
+            scanned_note_count: 10,
+            candidate_cluster_count: 0,
+            consolidated_cluster_count: 0,
+            consolidated_note_count: 0,
+            source_note_count: 0,
+            decayed_note_count: 2,
+            archived_note_count: 1,
+            superseded_source_note_count: 3,
+            admission_dropped_note_count: 0,
+            started_at: "2026-06-19T10:00:00.000Z",
+            completed_at: Some("2026-06-19T10:01:00.000Z"),
+            error_message: None,
+        })
+        .await
+        .unwrap();
+
+    let health = repo.health(&project.id).await.unwrap();
+
+    assert_eq!(health.total_notes, 4);
+    assert_eq!(health.lifecycle.active_notes, 2);
+    assert_eq!(health.lifecycle.archived_notes, 1);
+    assert_eq!(health.lifecycle.deprecated_notes, 1);
+    assert_eq!(health.recent_sweep.last_decayed_count, 2);
+    assert_eq!(health.recent_sweep.last_archived_count, 1);
+    assert_eq!(health.recent_sweep.last_superseded_source_count, 3);
+    assert_eq!(
+        health.recent_sweep.last_sweep_at,
+        Some("2026-06-19T10:01:00.000Z".to_string())
+    );
+    assert_eq!(health.admission_dropped_note_count, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
