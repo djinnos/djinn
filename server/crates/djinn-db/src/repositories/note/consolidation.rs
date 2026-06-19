@@ -22,6 +22,8 @@ pub struct CreateConsolidationRunMetric<'a> {
     pub consolidated_cluster_count: i64,
     pub consolidated_note_count: i64,
     pub source_note_count: i64,
+    pub decayed_note_count: i64,
+    pub archived_note_count: i64,
     pub superseded_source_note_count: i64,
     pub started_at: &'a str,
     pub completed_at: Option<&'a str>,
@@ -573,9 +575,10 @@ impl NoteConsolidationRepository {
                 id, project_id, status, note_type,
                 scanned_note_count, candidate_cluster_count,
                 consolidated_cluster_count, consolidated_note_count,
-                source_note_count, superseded_source_note_count,
+                source_note_count, decayed_note_count, archived_note_count,
+                superseded_source_note_count,
                 started_at, completed_at, error_message
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
         )
         .bind(&id)
         .bind(params.project_id)
@@ -586,6 +589,8 @@ impl NoteConsolidationRepository {
         .bind(params.consolidated_cluster_count)
         .bind(params.consolidated_note_count)
         .bind(params.source_note_count)
+        .bind(params.decayed_note_count)
+        .bind(params.archived_note_count)
         .bind(params.superseded_source_note_count)
         .bind(params.started_at)
         .bind(params.completed_at)
@@ -615,6 +620,8 @@ impl NoteConsolidationRepository {
                     CAST(consolidated_cluster_count AS BIGINT) AS consolidated_cluster_count,
                     CAST(consolidated_note_count AS BIGINT) AS consolidated_note_count,
                     CAST(source_note_count AS BIGINT) AS source_note_count,
+                    CAST(decayed_note_count AS BIGINT) AS decayed_note_count,
+                    CAST(archived_note_count AS BIGINT) AS archived_note_count,
                     CAST(superseded_source_note_count AS BIGINT) AS superseded_source_note_count,
                     started_at, completed_at, error_message
              FROM consolidation_run_metrics
@@ -669,6 +676,8 @@ impl NoteConsolidationRepository {
                     CAST(consolidated_cluster_count AS BIGINT) AS consolidated_cluster_count,
                     CAST(consolidated_note_count AS BIGINT) AS consolidated_note_count,
                     CAST(source_note_count AS BIGINT) AS source_note_count,
+                    CAST(decayed_note_count AS BIGINT) AS decayed_note_count,
+                    CAST(archived_note_count AS BIGINT) AS archived_note_count,
                     CAST(superseded_source_note_count AS BIGINT) AS superseded_source_note_count,
                     started_at, completed_at, error_message
              FROM consolidation_run_metrics
