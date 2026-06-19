@@ -47,20 +47,15 @@ use crate::repo_graph::{RepoDependencyGraph, RepoGraphNodeKind, RepoNodeKey};
 /// Controls the granularity of community detection.  Higher resolution
 /// produces more, smaller communities; lower resolution produces fewer,
 /// larger communities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Resolution {
     /// More communities, smaller minimum size (min_community_size = 1).
     Fine,
     /// Default balanced resolution (min_community_size = 2).
+    #[default]
     Medium,
     /// Fewer communities, larger minimum size (min_community_size = 4).
     Coarse,
-}
-
-impl Default for Resolution {
-    fn default() -> Self {
-        Resolution::Medium
-    }
 }
 
 /// Map a [`Resolution`] to the minimum community member count.
@@ -88,7 +83,7 @@ const KEYWORDS_PER_COMMUNITY: usize = 5;
 /// [`min_community_size_for`].  The default ([`Resolution::Medium`])
 /// uses a minimum of 2 members — singletons are dropped since they
 /// carry no clustering signal.
-
+///
 /// A detected community of related nodes.
 ///
 /// Persisted as a sidecar on [`RepoDependencyGraph`]; the snapshot
@@ -553,10 +548,9 @@ fn derive_label(graph: &RepoDependencyGraph, members: &[usize]) -> String {
             if let Some((seg, &count)) = segment_counts
                 .iter()
                 .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+                && count * 2 >= members_with_path
             {
-                if count * 2 >= members_with_path {
-                    return seg.clone();
-                }
+                return seg.clone();
             }
         }
 
