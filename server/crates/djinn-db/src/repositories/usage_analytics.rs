@@ -479,14 +479,27 @@ impl UsageAnalyticsRepository {
     ///
     /// Uses shared-credit attribution: each completed task counts for every
     /// model that ran at least one worker session on it.  Success rate,
-    /// average reopens, and verification pass rate reuse the same pattern as
-    /// `AgentRepository::get_metrics`.
+    /// average reopens, and verification pass rate are computed over distinct
+    /// shared-credit tasks per model (not raw worker-session rows) so that
+    /// multiple sessions on the same task cannot inflate rates above 1.0.
     async fn fetch_model_effectiveness(
         &self,
         params: &UsageAnalyticsQuery,
     ) -> Result<Vec<ModelEffectivenessRow>> {
         let (from_clause, where_clause, binds) = Self::build_effectiveness_from_where(params);
 
+        // Use CTEs to separate session-level aggregates (spend, tokens,
+        // sessions) from task-level outcome metrics.  Task outcomes are
+        // computed over DISTINCT (model_id, task_id) pairs so that multiple
+        // worker sessions on the same task cannot overweight success_rate,
+        // avg_reopens, or verification_pass_rate.
+        //
+        // `filtered_sessions` — rows matching the effectiveness WHERE clause
+        //     (date range, worker scope, optional project/model filters).
+        // `session_agg` — per-model session/spend/tokens rollup.
+        // `task_agg` — per-model task-outcome rollup over distinct
+        //     (model_id, task_id) pairs, using task properties from the
+        //     tasks table (which are functionally dependent on task_id).
         let sql = format!(
             "SELECT \
                 s.model_id                               AS \"model_id!\", \

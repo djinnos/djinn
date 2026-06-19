@@ -218,6 +218,7 @@ pub mod cargo_warm_step {
     /// Stable labels for the cargo warm step. Keep this list closed so the
     /// `step` label cardinality stays bounded.
     pub const STEP_CLIPPY: &str = "clippy";
+    pub const STEP_CLIPPY_DEFAULT_FEATURES: &str = "clippy_default";
     pub const STEP_BUILD_FALLBACK: &str = "build_fallback";
     pub const STEP_TEST_NO_RUN: &str = "test_no_run";
 
