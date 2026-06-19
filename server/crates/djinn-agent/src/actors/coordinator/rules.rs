@@ -1429,6 +1429,7 @@ mod tests {
                 body: "",
                 acceptance_criteria: None,
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();
@@ -1498,6 +1499,7 @@ mod tests {
                 body: "",
                 acceptance_criteria: None,
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();
@@ -1562,6 +1564,7 @@ mod tests {
                 body: "v1",
                 acceptance_criteria: Some(r#"[{"criterion":"do X","met":false}]"#),
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();
@@ -1620,6 +1623,7 @@ mod tests {
                 body: "v1",
                 acceptance_criteria: Some(r#"[{"criterion":"do X","met":false}]"#),
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();
@@ -1697,6 +1701,7 @@ mod tests {
                 body: "v1",
                 acceptance_criteria: Some(r#"[{"criterion":"do X","met":false}]"#),
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();
@@ -1771,6 +1776,7 @@ mod tests {
                 body: "v1",
                 acceptance_criteria: Some(r#"[{"criterion":"do X","met":false}]"#),
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();
@@ -1798,6 +1804,7 @@ mod tests {
                 body: "v1",
                 acceptance_criteria: Some(r#"[{"criterion":"do Y","met":false}]"#),
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();
@@ -1849,6 +1856,7 @@ mod tests {
                 body: "",
                 acceptance_criteria: None,
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();
@@ -1890,6 +1898,7 @@ mod tests {
                 body: "original body",
                 acceptance_criteria: None,
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();
@@ -1995,6 +2004,7 @@ mod tests {
                 body: "body",
                 acceptance_criteria: None,
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();

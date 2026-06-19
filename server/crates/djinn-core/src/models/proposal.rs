@@ -11,8 +11,10 @@ pub struct Proposal {
     /// Globally unique short id (NOT per-project, unlike epics).
     pub short_id: String,
     pub title: String,
-    /// Markdown spec body.
+    /// Spec body (markdown or MDX depending on `body_format`).
     pub body: String,
+    /// Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
+    pub body_format: String,
     /// JSON array of acceptance-criteria strings (stored as JSONB, surfaced as
     /// text — parse with [`crate::models::parse_json_array`]).
     pub acceptance_criteria: String,
@@ -57,6 +59,8 @@ pub struct ProposalRevision {
     pub seq: i32,
     pub title: String,
     pub body: String,
+    /// Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
+    pub body_format: String,
     /// JSON array text (parse with [`crate::models::parse_json_array`] or the
     /// structured AC parser).
     pub acceptance_criteria: String,

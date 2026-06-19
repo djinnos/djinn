@@ -1158,6 +1158,7 @@ dependencies = [
  "globset",
  "http",
  "insta",
+ "regex",
  "reqwest 0.13.2",
  "rmcp",
  "schemars 1.2.1",

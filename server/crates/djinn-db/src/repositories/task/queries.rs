@@ -892,6 +892,7 @@ mod ready_projection_tests {
                 body: "",
                 acceptance_criteria: None,
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();
