@@ -507,6 +507,19 @@ mod tests {
         repo.update_status(&archived.id, djinn_memory::note_status::ARCHIVED)
             .await
             .unwrap();
+        let deprecated = repo
+            .create_db_note(
+                &project_id,
+                "Lifecycle Deprecated Note",
+                "deprecated lifecycle list note",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        repo.update_status(&deprecated.id, djinn_memory::note_status::DEPRECATED)
+            .await
+            .unwrap();
 
         let default_list = ops::memory_list(
             &setup.server,
@@ -522,6 +535,12 @@ mod tests {
         assert!(default_list.error.is_none(), "{:?}", default_list.error);
         assert!(default_list.notes.iter().any(|note| note.id == active.id));
         assert!(default_list.notes.iter().all(|note| note.id != archived.id));
+        assert!(
+            default_list
+                .notes
+                .iter()
+                .all(|note| note.id != deprecated.id)
+        );
 
         let archived_list = ops::memory_list(
             &setup.server,
@@ -542,6 +561,47 @@ mod tests {
                 .any(|note| note.id == archived.id)
         );
         assert!(archived_list.notes.iter().all(|note| note.id != active.id));
+        assert!(
+            archived_list
+                .notes
+                .iter()
+                .all(|note| note.id != deprecated.id)
+        );
+
+        let deprecated_list = ops::memory_list(
+            &setup.server,
+            ListParams {
+                project: setup.project.clone(),
+                folder: None,
+                note_type: Some("reference".to_string()),
+                status: Some("deprecated".to_string()),
+                depth: Some(0),
+            },
+        )
+        .await;
+        assert!(
+            deprecated_list.error.is_none(),
+            "{:?}",
+            deprecated_list.error
+        );
+        assert!(
+            deprecated_list
+                .notes
+                .iter()
+                .any(|note| note.id == deprecated.id)
+        );
+        assert!(
+            deprecated_list
+                .notes
+                .iter()
+                .all(|note| note.id != active.id)
+        );
+        assert!(
+            deprecated_list
+                .notes
+                .iter()
+                .all(|note| note.id != archived.id)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
