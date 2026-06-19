@@ -600,10 +600,13 @@ pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
 /// Warm, verify, and task-run pods must use the SAME compile strategy or the
 /// warm base is wasted (cargo fingerprints fold in `CARGO_INCREMENTAL` and the
 /// rustc wrapper). All three therefore force `CARGO_INCREMENTAL=1` and clear
-/// any repo `rustc-wrapper = "sccache"` (`RUSTC_WRAPPER=""`). The clone-config
-/// normalization step (`djinn_workspace::normalize_cargo_config_at`) guarantees
-/// this even when a project pins `sccache`/`CARGO_INCREMENTAL=0 force=true` in
-/// its own `.cargo/config.toml`, which env vars alone cannot override.
+/// any repo `rustc-wrapper = "sccache"` (`RUSTC_WRAPPER=""`). A project that
+/// hard-pins `CARGO_INCREMENTAL=0 force=true` in its own `.cargo/config.toml`
+/// can still beat env, but that clamps warm AND worker identically, so
+/// warm==worker parity (and seed reuse) holds — only the incremental speedup
+/// that project opted out of is lost. We deliberately do NOT rewrite the
+/// clone's config, since the worker auto-commit (`git add -A`) would otherwise
+/// commit the rewrite into every PR.
 ///
 /// `policy` is accepted for signature parity with the other builders but no
 /// longer flips incremental: incremental-on is now an invariant across all

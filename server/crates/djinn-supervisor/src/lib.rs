@@ -601,14 +601,6 @@ impl TaskRunSupervisor {
         // fails the run.
         workspace.normalize_mtimes().await;
 
-        // Force djinn's cache strategy onto the cloned tree's `.cargo/config.toml`
-        // (strip `rustc-wrapper = "sccache"` + any `CARGO_INCREMENTAL` force-clamp,
-        // set incremental on). The pod env sets CARGO_INCREMENTAL=1 / RUSTC_WRAPPER="",
-        // but a project's `force = true` clamp beats env — only a config rewrite
-        // wins. This is the worker side of the warm == verify == worker parity
-        // invariant. Best-effort; never fails the run.
-        djinn_workspace::normalize_cargo_config_at(workspace.path()).await;
-
         // Proactive dispatch-time sync.  The task branch is REUSED across
         // cycles (clone_ephemeral + ensure_branch above never recreate it), so
         // without re-anchoring it onto the moving target it drifts behind
