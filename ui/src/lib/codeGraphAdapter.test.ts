@@ -936,6 +936,36 @@ describe("buildGraphFromSnapshot", () => {
       expect(graph.getNodeAttribute(id, "y")).toBe(0);
     }
   });
+
+  it("produces identical positions across two consecutive calls (determinism)", () => {
+    // The adapter delegates to computeForceLayout (or sequential/radial)
+    // which uses deterministic hash-based jitter — no Math.random().
+    // Two calls on the same snapshot must yield bitwise-identical x/y.
+    const graph1 = buildGraphFromSnapshot(fixtureSnapshot);
+    const graph2 = buildGraphFromSnapshot(fixtureSnapshot);
+
+    expect(graph1.order).toBe(graph2.order);
+    for (const id of graph1.nodes()) {
+      expect(graph2.hasNode(id)).toBe(true);
+      const x1 = graph1.getNodeAttribute(id, "x");
+      const y1 = graph1.getNodeAttribute(id, "y");
+      const x2 = graph2.getNodeAttribute(id, "x");
+      const y2 = graph2.getNodeAttribute(id, "y");
+      expect(x1).toBe(x2);
+      expect(y1).toBe(y2);
+    }
+  });
+
+  it("produces identical positions across calls for all layout modes (determinism)", () => {
+    for (const mode of ["force", "sequential", "radial"] as const) {
+      const graph1 = buildGraphFromSnapshot(fixtureSnapshot, { layoutMode: mode });
+      const graph2 = buildGraphFromSnapshot(fixtureSnapshot, { layoutMode: mode });
+      for (const id of graph1.nodes()) {
+        expect(graph1.getNodeAttribute(id, "x")).toBe(graph2.getNodeAttribute(id, "x"));
+        expect(graph1.getNodeAttribute(id, "y")).toBe(graph2.getNodeAttribute(id, "y"));
+      }
+    }
+  });
 });
 
 describe("massForNode", () => {

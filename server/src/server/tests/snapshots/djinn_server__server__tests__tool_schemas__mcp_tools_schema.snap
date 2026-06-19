@@ -6933,11 +6933,16 @@ expression: signatures
             "archived_notes": {
               "format": "int64",
               "type": "integer"
+            },
+            "deprecated_notes": {
+              "format": "int64",
+              "type": "integer"
             }
           },
           "required": [
             "active_notes",
-            "archived_notes"
+            "archived_notes",
+            "deprecated_notes"
           ],
           "type": "object"
         },
