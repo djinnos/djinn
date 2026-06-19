@@ -113,6 +113,8 @@ pub struct ProposalCreateParams {
     pub title: String,
     /// Markdown spec body.
     pub body: Option<String>,
+    /// Body format discriminator: `markdown` (default) or `mdx` (block-aware).
+    pub body_format: Option<String>,
     /// Acceptance criteria: plain strings or `{criterion, met}` objects.
     pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
     /// Target projects (UUIDs or owner/repo slugs) this proposal touches.
@@ -150,6 +152,8 @@ pub struct ProposalUpdateParams {
     pub id: String,
     pub title: Option<String>,
     pub body: Option<String>,
+    /// Body format discriminator: `markdown` (default) or `mdx` (block-aware).
+    pub body_format: Option<String>,
     /// Acceptance criteria: plain strings or `{criterion, met}` objects.
     pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
     /// draft | in_review | approved | building | done | rejected | archived | superseded.
@@ -307,6 +311,7 @@ impl DjinnMcpServer {
             .create(djinn_db::ProposalCreateInput {
                 title: &title,
                 body,
+                body_format: p.body_format.as_deref(),
                 acceptance_criteria: Some(&ac_json),
                 status,
             })
@@ -513,6 +518,7 @@ impl DjinnMcpServer {
                 djinn_db::ProposalUpdateInput {
                     title: &title,
                     body,
+                    body_format: p.body_format.as_deref(),
                     acceptance_criteria: &ac_json,
                     status,
                     superseded_by: superseded_by.as_deref(),
@@ -1543,6 +1549,7 @@ mod stop_build_tests {
             .create(ProposalCreateInput {
                 title: "Stop me",
                 body: "",
+                body_format: None,
                 acceptance_criteria: None,
                 status: None,
             })
