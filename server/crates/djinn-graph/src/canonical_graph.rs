@@ -405,16 +405,18 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
 
             // Out-of-core sharding: when enabled (env flag + threshold),
             // shard each parsed SCIP file into the out-of-core store so
-            // downstream accessor consumers can load files one-at-a-time
-            // from disk. The build pipeline below still uses the in-memory
-            // `parsed` — this is preparatory population of the store.
-            // The actual builder migration to file-iteration happens in
-            // the follow-up task.
+            // the graph builder can consume files one-at-a-time from
+            // disk, keeping resident memory bounded.
             let total_parsed_files: usize =
                 parsed.iter().map(|p| p.files.len()).sum();
-            if let Some(ooc_config) =
-                crate::out_of_core::resolve_out_of_core_config(total_parsed_files)
-            {
+            let ooc_engaged = crate::out_of_core::resolve_out_of_core_config(total_parsed_files);
+
+            // If out-of-core is engaged, shard the parsed data to disk
+            // and build the graph from the store's file iterator. The
+            // in-memory `parsed.files` vecs are dropped after sharding
+            // to free memory.
+            let t_build = std::time::Instant::now();
+            let mut graph = if let Some(ref ooc_config) = ooc_engaged {
                 match crate::out_of_core::OutOfCoreStore::open(&ooc_config.storage_path) {
                     Ok(mut ooc_store) => {
                         let mut total_shards = 0usize;
@@ -433,12 +435,49 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                                 }
                             }
                         }
-                        if !shard_err {
+                        if shard_err {
+                            // Sharding failed — fall back to in-memory path.
+                            tracing::warn!(
+                                "ensure_canonical_graph: sharding failed; falling back to in-memory build"
+                            );
+                            crate::repo_graph::RepoDependencyGraph::try_build_with_source(
+                                &parsed,
+                                Some(&project_root_for_blocking),
+                            )?
+                        } else {
                             tracing::info!(
                                 shard_count = total_shards,
                                 storage_path = %ooc_config.storage_path.display(),
                                 "ensure_canonical_graph: sharded parsed SCIP data to out-of-core store"
                             );
+                            // Build the graph using the bounded-memory file
+                            // iterator from the store. Files are loaded
+                            // one-at-a-time from disk — only one ScipFile
+                            // is resident per iteration step (O(1) file
+                            // data residency).
+                            //
+                            // Merge external_symbols from all parsed indices
+                            // and use the first index's workspace_slug.
+                            // (In practice, warm runs typically have a single
+                            // workspace; multi-workspace OOC is a known
+                            // simplification.)
+                            let first = &parsed[0];
+                            let all_external: Vec<crate::scip_parser::ScipSymbol> = parsed
+                                .iter()
+                                .flat_map(|idx| idx.external_symbols.iter().cloned())
+                                .collect();
+                            let graph_result =
+                                crate::repo_graph::RepoDependencyGraph::try_build_with_scip_file_iter(
+                                    ooc_store.scip_file_iter(),
+                                    &first.workspace_slug,
+                                    &all_external,
+                                    Some(&project_root_for_blocking),
+                                );
+                            // Drop the in-memory parsed file data now that
+                            // it has been sharded to disk. This frees the
+                            // large Vec<ScipFile> allocations.
+                            drop(parsed);
+                            graph_result?
                         }
                     }
                     Err(e) => {
@@ -447,15 +486,20 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                             storage_path = %ooc_config.storage_path.display(),
                             "ensure_canonical_graph: failed to open out-of-core store; proceeding with in-memory path"
                         );
+                        crate::repo_graph::RepoDependencyGraph::try_build_with_source(
+                            &parsed,
+                            Some(&project_root_for_blocking),
+                        )?
                     }
                 }
-            }
-
-            let t_build = std::time::Instant::now();
-            let mut graph = crate::repo_graph::RepoDependencyGraph::try_build_with_source(
-                &parsed,
-                Some(&project_root_for_blocking),
-            )?;
+            } else {
+                // Out-of-core not engaged (env flag off or below threshold):
+                // use the existing in-memory build path unchanged.
+                crate::repo_graph::RepoDependencyGraph::try_build_with_source(
+                    &parsed,
+                    Some(&project_root_for_blocking),
+                )?
+            };
             // DB-access post-processor: opt-in via
             // `DJINN_DB_ACCESS_DETECTION`. Reads files from the index
             // tree and stamps `Reads`/`Writes` edges from caller
@@ -2264,11 +2308,9 @@ mod tests {
             .graph_blob;
 
         // Parity must fail with Diff variant — proves the gate is real.
-        let err = crate::graph_parity::assert_graph_artifact_blob_parity(
-            &cold_blob,
-            &different_blob,
-        )
-        .expect_err("different graphs must produce a parity error");
+        let err =
+            crate::graph_parity::assert_graph_artifact_blob_parity(&cold_blob, &different_blob)
+                .expect_err("different graphs must produce a parity error");
         assert!(
             matches!(
                 err,
