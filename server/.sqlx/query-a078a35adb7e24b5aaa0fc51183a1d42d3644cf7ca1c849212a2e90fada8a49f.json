@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE sessions\n             SET tokens_in = $1,\n                 tokens_out = $2,\n                 cache_read_tokens = $3,\n                 cache_write_tokens = $4,\n                 cost_usd = CASE\n                     WHEN input_price_per_million_snapshot IS NOT NULL\n                      AND output_price_per_million_snapshot IS NOT NULL\n                      AND cache_read_price_per_million_snapshot IS NOT NULL\n                      AND cache_write_price_per_million_snapshot IS NOT NULL\n                     THEN (\n                         $1::double precision * input_price_per_million_snapshot\n                         + $2::double precision * output_price_per_million_snapshot\n                         + $3::double precision * cache_read_price_per_million_snapshot\n                         + $4::double precision * cache_write_price_per_million_snapshot\n                     ) / 1000000.0\n                     ELSE NULL\n                 END\n             WHERE id = $5 AND status = 'running'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a078a35adb7e24b5aaa0fc51183a1d42d3644cf7ca1c849212a2e90fada8a49f"
+}

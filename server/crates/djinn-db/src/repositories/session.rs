@@ -171,10 +171,10 @@ impl SessionRepository {
                       AND cache_read_price_per_million_snapshot IS NOT NULL
                       AND cache_write_price_per_million_snapshot IS NOT NULL
                      THEN (
-                         $2 * input_price_per_million_snapshot
-                         + $3 * output_price_per_million_snapshot
-                         + $4 * cache_read_price_per_million_snapshot
-                         + $5 * cache_write_price_per_million_snapshot
+                         $2::double precision * input_price_per_million_snapshot
+                         + $3::double precision * output_price_per_million_snapshot
+                         + $4::double precision * cache_read_price_per_million_snapshot
+                         + $5::double precision * cache_write_price_per_million_snapshot
                      ) / 1000000.0
                      ELSE NULL
                  END,
@@ -596,10 +596,10 @@ impl SessionRepository {
                       AND cache_read_price_per_million_snapshot IS NOT NULL
                       AND cache_write_price_per_million_snapshot IS NOT NULL
                      THEN (
-                         $1 * input_price_per_million_snapshot
-                         + $2 * output_price_per_million_snapshot
-                         + $3 * cache_read_price_per_million_snapshot
-                         + $4 * cache_write_price_per_million_snapshot
+                         $1::double precision * input_price_per_million_snapshot
+                         + $2::double precision * output_price_per_million_snapshot
+                         + $3::double precision * cache_read_price_per_million_snapshot
+                         + $4::double precision * cache_write_price_per_million_snapshot
                      ) / 1000000.0
                      ELSE NULL
                  END
