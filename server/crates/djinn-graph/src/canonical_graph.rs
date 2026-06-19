@@ -7,6 +7,17 @@ use tokio::sync::RwLock;
 use crate::WarmContext;
 use crate::architect::ArchitectWarmToken;
 
+pub type CachedLayoutPositions =
+    std::collections::BTreeMap<String, crate::layout::GraphLayoutPosition>;
+pub type CrateMap = std::collections::BTreeMap<PathBuf, String>;
+
+type DerivedGraphCaches = (
+    Arc<crate::repo_graph::RepoGraphRanking>,
+    Arc<CachedSccs>,
+    Arc<CachedLayoutPositions>,
+    Arc<CrateMap>,
+);
+
 /// Output bundle of the CPU-bound canonical graph build pipeline,
 /// produced on a `spawn_blocking` thread and consumed by the async tail that
 /// writes DB caches and installs the in-memory canonical slot.
@@ -15,8 +26,8 @@ type CanonicalGraphBuildOutput = (
     Vec<u8>,
     Arc<crate::repo_graph::RepoGraphRanking>,
     Arc<CachedSccs>,
-    Arc<std::collections::BTreeMap<String, crate::layout::GraphLayoutPosition>>,
-    Arc<std::collections::BTreeMap<PathBuf, String>>,
+    Arc<CachedLayoutPositions>,
+    Arc<CrateMap>,
     u64,
     u64,
     u64,
@@ -97,9 +108,8 @@ pub struct CachedGraph {
     pub git_head: String,
     pub pagerank: Arc<crate::repo_graph::RepoGraphRanking>,
     pub sccs: Arc<CachedSccs>,
-    pub layout_positions:
-        Arc<std::collections::BTreeMap<String, crate::layout::GraphLayoutPosition>>,
-    pub crate_map: Arc<std::collections::BTreeMap<PathBuf, String>>,
+    pub layout_positions: Arc<CachedLayoutPositions>,
+    pub crate_map: Arc<CrateMap>,
 }
 
 impl CachedGraph {
@@ -117,12 +127,7 @@ pub static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
 pub fn derive_graph_caches(
     graph: &crate::repo_graph::RepoDependencyGraph,
     project_root: &Path,
-) -> (
-    Arc<crate::repo_graph::RepoGraphRanking>,
-    Arc<CachedSccs>,
-    Arc<std::collections::BTreeMap<String, crate::layout::GraphLayoutPosition>>,
-    Arc<std::collections::BTreeMap<PathBuf, String>>,
-) {
+) -> DerivedGraphCaches {
     use crate::repo_graph::RepoGraphNodeKind;
     let pagerank = Arc::new(graph.rank());
     let sccs = Arc::new(CachedSccs {
@@ -135,7 +140,7 @@ pub fn derive_graph_caches(
     (pagerank, sccs, layout_positions, crate_map)
 }
 
-pub fn derive_crate_map(project_root: &Path) -> std::collections::BTreeMap<PathBuf, String> {
+pub fn derive_crate_map(project_root: &Path) -> CrateMap {
     let manifest_path = project_root.join("Cargo.toml");
     let Ok(manifest) = std::fs::read_to_string(&manifest_path) else {
         return std::collections::BTreeMap::new();
@@ -148,12 +153,12 @@ pub fn derive_crate_map(project_root: &Path) -> std::collections::BTreeMap<PathB
     let mut out = std::collections::BTreeMap::new();
     for member in members {
         for member_dir in expand_workspace_member(project_root, &member) {
-            let member_manifest = if member_dir.file_name() == Some(std::ffi::OsStr::new("Cargo.toml"))
-            {
-                member_dir.clone()
-            } else {
-                member_dir.join("Cargo.toml")
-            };
+            let member_manifest =
+                if member_dir.file_name() == Some(std::ffi::OsStr::new("Cargo.toml")) {
+                    member_dir.clone()
+                } else {
+                    member_dir.join("Cargo.toml")
+                };
             let Ok(member_manifest_text) = std::fs::read_to_string(&member_manifest) else {
                 continue;
             };
@@ -176,16 +181,16 @@ fn workspace_members_from_manifest(manifest: &str) -> Vec<String> {
         .ok()
         .and_then(|value| {
             value
-        .get("workspace")
-        .and_then(|workspace| workspace.get("members"))
-        .and_then(toml::Value::as_array)
-        .map(|members| {
-            members
-                .iter()
-                .filter_map(toml::Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
+                .get("workspace")
+                .and_then(|workspace| workspace.get("members"))
+                .and_then(toml::Value::as_array)
+                .map(|members| {
+                    members
+                        .iter()
+                        .filter_map(toml::Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
         })
         .unwrap_or_default();
     if !toml_members.is_empty() {
@@ -232,10 +237,10 @@ fn workspace_members_from_manifest(manifest: &str) -> Vec<String> {
 fn package_name_from_manifest(manifest: &str) -> Option<String> {
     if let Some(name) = manifest.parse::<toml::Value>().ok().and_then(|value| {
         value
-        .get("package")
-        .and_then(|package| package.get("name"))
-        .and_then(toml::Value::as_str)
-        .map(str::to_string)
+            .get("package")
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_string)
     }) {
         return Some(name);
     }
@@ -1263,19 +1268,17 @@ pub async fn load_canonical_graph<C: WarmContext>(
     // partial writes) the same as "not warmed yet". The architect warm pass
     // will rewrite the row; surfacing the raw bincode error to the user is
     // never useful.
-    let (graph, pagerank, sccs, layout_positions, crate_map) = load_cached_artifact(
-        row.graph_blob,
-        index_tree_path.clone(),
-    )
-    .await
-    .map_err(|e| {
-            tracing::warn!(
-                project_id = %project_id,
-                error = %e,
-                "load_canonical_graph: stale or unreadable graph_blob; reporting as not-warmed"
-            );
-            GRAPH_NOT_WARMED_ERR.to_string()
-        })?;
+    let (graph, pagerank, sccs, layout_positions, crate_map) =
+        load_cached_artifact(row.graph_blob, index_tree_path.clone())
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    project_id = %project_id,
+                    error = %e,
+                    "load_canonical_graph: stale or unreadable graph_blob; reporting as not-warmed"
+                );
+                GRAPH_NOT_WARMED_ERR.to_string()
+            })?;
     install_as_canonical(
         index_tree_path,
         row.commit_sha,
@@ -2276,7 +2279,8 @@ edition = "2024"
         let expected_node_count = {
             let graph = build_test_graph_fixture();
             let node_count = graph.node_count();
-            let (pagerank, sccs, layout_positions, crate_map) = derive_graph_caches(&graph, &project_root);
+            let (pagerank, sccs, layout_positions, crate_map) =
+                derive_graph_caches(&graph, &project_root);
             let mut cache = GRAPH_CACHE.write().await;
             *cache = Some(CachedGraph {
                 graph,
