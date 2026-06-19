@@ -533,147 +533,25 @@ enum DispatchOutcome {
     Error(String),
 }
 
-/// Inner retry loop for verification dispatch — pure control flow with no
-/// DB writes. The caller injects a `mark_error` callback so this function
-/// can be unit-tested without a live database pool (which is incompatible
-/// with `tokio::test(start_paused = true)` because sqlx's connection pool
-/// acquire timeout fires instantly when the clock is frozen).
+/// Inner retry loop for verification dispatch — stubbed after the
+/// verification pre-PR gate was removed. Always returns an error so the
+/// surrounding pipeline surfaces a clear message.
 async fn dispatch_verification_inner<F, Fut>(
-    runtime_ops: &dyn djinn_control_plane::bridge::RuntimeOps,
-    run_id: &str,
-    project_id: &str,
-    task_branch: &str,
-    target_branch: &str,
+    _runtime_ops: &dyn djinn_control_plane::bridge::RuntimeOps,
+    _run_id: &str,
+    _project_id: &str,
+    _task_branch: &str,
+    _target_branch: &str,
     mark_error: &mut F,
 ) -> DispatchOutcome
 where
     F: FnMut(&str) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    // First attempt — most verifications dispatch on the first try (image
-    // is already ready). Only the transient not-ready path takes the
-    // retry loop below.
-    match runtime_ops
-        .dispatch_verification(run_id, project_id, task_branch, target_branch)
-        .await
-    {
-        Ok(()) => DispatchOutcome::Dispatched,
-        Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
-            project_id: err_project_id,
-            image_status,
-            tag,
-            transient,
-        }) => {
-            let project_id_owned = err_project_id.clone();
-            if !transient {
-                // Permanent: project has no catalog image assigned. The
-                // operator needs to assign one. Mark the row errored
-                // immediately so the poll loop sees a clear terminal
-                // status and the surrounding pipeline surfaces a clear
-                // failure to the worker.
-                let msg = format!(
-                    "verification dispatch: project {err_project_id} has no catalog image assigned \
-                     (image_status: {image_status}); assign a catalog image before verifying"
-                );
-                mark_error(&msg).await;
-                return DispatchOutcome::Error(msg);
-            }
-            // Transient: catalog image is being rebuilt (or first-time
-            // assignment is pending). Requeue with backoff until the
-            // image is ready or the bounded budget elapses. The row
-            // stays in `pending` so the poll loop keeps waiting.
-            let started = std::time::Instant::now();
-            let mut backoff = IMAGE_READINESS_INITIAL_BACKOFF;
-            let mut attempt: u32 = 0;
-            loop {
-                if started.elapsed() >= IMAGE_READINESS_TOTAL_BUDGET {
-                    let msg = format!(
-                        "verification dispatch: project {err_project_id} image not ready after \
-                         {}s (last status: {image_status}{}); the catalog image is still \
-                         rebuilding; verify manually once it lands",
-                        IMAGE_READINESS_TOTAL_BUDGET.as_secs(),
-                        tag.as_deref()
-                            .map(|t| format!(", tag: {t}"))
-                            .unwrap_or_default()
-                    );
-                    mark_error(&msg).await;
-                    return DispatchOutcome::Error(msg);
-                }
-                attempt += 1;
-                tracing::info!(
-                    run_id = %run_id,
-                    project_id = %err_project_id,
-                    attempt = attempt,
-                    backoff_ms = backoff.as_millis() as u64,
-                    image_status = %image_status,
-                    "verification dispatch: image not ready, retrying"
-                );
-                tokio::time::sleep(backoff).await;
-                match runtime_ops
-                    .dispatch_verification(run_id, &project_id_owned, task_branch, target_branch)
-                    .await
-                {
-                    Ok(()) => {
-                        tracing::info!(
-                            run_id = %run_id,
-                            project_id = %project_id,
-                            attempt = attempt,
-                            "verification dispatch: image became ready, dispatched"
-                        );
-                        return DispatchOutcome::Dispatched;
-                    }
-                    Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
-                        transient: false,
-                        ..
-                    }) => {
-                        // The image went from `building` to
-                        // "no catalog image assigned" mid-retry — same
-                        // permanent-failure path as above. Avoid
-                        // bouncing on the backoff loop.
-                        let msg = format!(
-                            "verification dispatch: project {err_project_id} has no catalog \
-                             image assigned (image_status: {image_status})"
-                        );
-                        mark_error(&msg).await;
-                        return DispatchOutcome::Error(msg);
-                    }
-                    Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
-                        image_status: new_status,
-                        ..
-                    }) => {
-                        // Still not ready (probably still building,
-                        // maybe just flipped to `failed`). Log and
-                        // continue backing off; the outer elapsed
-                        // check enforces the budget.
-                        tracing::debug!(
-                            run_id = %run_id,
-                            project_id = %err_project_id,
-                            attempt = attempt,
-                            image_status = %new_status,
-                            "verification dispatch: image still not ready; continuing backoff"
-                        );
-                    }
-                    Err(djinn_control_plane::bridge::RuntimeDispatchError::Backend(e)) => {
-                        let msg = format!(
-                            "verification dispatch: runtime backend error after {attempt} \
-                             requeue attempts: {e}"
-                        );
-                        mark_error(&msg).await;
-                        return DispatchOutcome::Error(msg);
-                    }
-                }
-                // Exponential backoff with cap. Keep doubling until we
-                // hit the cap; the outer elapsed check stops the loop
-                // regardless.
-                backoff = (backoff * 2).min(IMAGE_READINESS_MAX_BACKOFF);
-            }
-        }
-        Err(djinn_control_plane::bridge::RuntimeDispatchError::Backend(e)) => {
-            let msg = format!("verification dispatch failed: {e}");
-            mark_error(&msg).await;
-            DispatchOutcome::Error(msg)
-        }
-    }
+    let msg =
+        "verification dispatch removed: verification pre-PR gate is being retired".to_string();
+    mark_error(&msg).await;
+    DispatchOutcome::Error(msg)
 }
 
 async fn dispatch_verification_with_retry(
