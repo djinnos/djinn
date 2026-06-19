@@ -538,6 +538,109 @@ mod tests {
         assert_eq!(decide(&pre, &post, 20), EvalDecision::Discard);
     }
 
+    // ── Boundary cases ──────────────────────────────────────────────────────
+
+    #[test]
+    fn token_decrease_exactly_10pct_no_success_change_confirms() {
+        let pre = metrics(0.70, 1000.0, 20);
+        // tokens decreased exactly 10%, success unchanged → Confirmed
+        let post = metrics(0.70, 900.0, 20);
+        assert_eq!(decide(&pre, &post, 20), EvalDecision::Confirmed);
+    }
+
+    #[test]
+    fn token_decrease_just_under_10pct_no_success_change_probation() {
+        let pre = metrics(0.70, 1000.0, 20);
+        // tokens decreased 9.99% — just under the 10% threshold
+        let post = metrics(0.70, 900.01, 20);
+        assert_eq!(decide(&pre, &post, 20), EvalDecision::Probation);
+    }
+
+    #[test]
+    fn success_improvement_exactly_5pct_confirms() {
+        let pre = metrics(0.70, 1000.0, 20);
+        // success improved exactly 5% — boundary, should confirm
+        let post = metrics(0.75, 1000.0, 20);
+        assert_eq!(decide(&pre, &post, 20), EvalDecision::Confirmed);
+    }
+
+    #[test]
+    fn token_decrease_with_acceptable_success_regression_confirms() {
+        let pre = metrics(0.70, 1000.0, 20);
+        // tokens decreased 15%, success regressed only 3% (within -5% tolerance)
+        let post = metrics(0.67, 850.0, 20);
+        assert_eq!(decide(&pre, &post, 20), EvalDecision::Confirmed);
+    }
+
+    #[test]
+    fn token_decrease_with_success_regression_exactly_at_tolerance_confirms() {
+        let pre = metrics(0.70, 1000.0, 20);
+        // tokens decreased 12%, success regressed exactly 5% (at -5% tolerance boundary)
+        // success_delta = -0.05, tolerance check: success_delta >= -0.05 → true
+        let post = metrics(0.65, 880.0, 20);
+        assert_eq!(decide(&pre, &post, 20), EvalDecision::Confirmed);
+    }
+
+    #[test]
+    fn token_decrease_with_success_regression_just_beyond_tolerance_discards() {
+        let pre = metrics(0.70, 1000.0, 20);
+        // tokens decreased 12%, success regressed 6% (beyond -5% tolerance)
+        let post = metrics(0.64, 880.0, 20);
+        assert_eq!(decide(&pre, &post, 20), EvalDecision::Discard);
+    }
+
+    #[test]
+    fn success_improvement_with_token_increase_confirms() {
+        let pre = metrics(0.70, 1000.0, 20);
+        // success improved 6%, even though tokens increased 20%
+        // The success improvement path is checked first, so this confirms.
+        let post = metrics(0.76, 1200.0, 20);
+        assert_eq!(decide(&pre, &post, 20), EvalDecision::Confirmed);
+    }
+
+    #[test]
+    fn zero_pre_avg_tokens_with_success_improvement_confirms() {
+        // Edge case: pre avg_tokens = 0 (first amendment ever, no prior sessions)
+        let pre = metrics(0.0, 0.0, 0);
+        let post = metrics(0.80, 500.0, 20);
+        // success_delta = 0.80 > 0.05 → Confirmed
+        assert_eq!(decide(&pre, &post, 20), EvalDecision::Confirmed);
+    }
+
+    #[test]
+    fn zero_pre_avg_tokens_with_no_success_improvement_probation() {
+        // Edge case: pre avg_tokens = 0, post avg_tokens = 500, no success change
+        // token_delta_ratio: (0 - 500) / 0 → 0.0 (guard: pre.avg_tokens <= 0)
+        let pre = metrics(0.70, 0.0, 20);
+        let post = metrics(0.70, 500.0, 20);
+        // success_delta = 0.0 (in probation zone [-0.02, 0.05))
+        // token_delta_ratio = 0.0 (abs < 0.10) → Probation
+        assert_eq!(decide(&pre, &post, 20), EvalDecision::Probation);
+    }
+
+    #[test]
+    fn not_ready_when_zero_post_tasks() {
+        let pre = metrics(0.70, 1000.0, 20);
+        let post = metrics(0.0, 0.0, 0); // no tasks at all
+        assert_eq!(decide(&pre, &post, 20), EvalDecision::NotReady);
+    }
+
+    #[test]
+    fn not_ready_with_failed_tasks_only_below_threshold() {
+        let pre = metrics(0.70, 1000.0, 20);
+        // 10 failed + 0 completed = 10 total < 20 → NotReady
+        let post = metrics_with_failed(0.0, 0.0, 0, 10);
+        assert_eq!(decide(&pre, &post, 20), EvalDecision::NotReady);
+    }
+
+    #[test]
+    fn discard_when_both_success_and_tokens_worsen() {
+        let pre = metrics(0.70, 1000.0, 20);
+        // success dropped 10%, tokens increased 15%
+        let post = metrics(0.60, 1150.0, 20);
+        assert_eq!(decide(&pre, &post, 20), EvalDecision::Discard);
+    }
+
     // ── parse_metrics_snapshot ────────────────────────────────────────────────
 
     #[test]
