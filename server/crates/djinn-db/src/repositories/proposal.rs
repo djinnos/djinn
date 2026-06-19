@@ -550,6 +550,7 @@ impl ProposalRepository {
 
     // ── Revisions + sign-offs ────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     async fn insert_revision(
         &self,
         proposal_id: &str,
