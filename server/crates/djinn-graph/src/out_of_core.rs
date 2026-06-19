@@ -259,7 +259,8 @@ impl OutOfCoreStore {
             if !self.index.contains_key(&entry.id) {
                 self.order.push(entry.id.clone());
             }
-            self.index.insert(entry.id.clone(), PathBuf::from(&filename));
+            self.index
+                .insert(entry.id.clone(), PathBuf::from(&filename));
             count += 1;
         }
         self.persist_index()?;
@@ -376,13 +377,8 @@ impl OutOfCoreStore {
     /// Each file is JSON-serialized into the shard payload independently,
     /// so downstream consumers can load one file at a time without holding
     /// the entire parsed index in memory.
-    pub fn put_parsed_index(&mut self, index: &ParsedScipIndex,
-    ) -> Result<usize, OutOfCoreError> {
-        let entries: Vec<ScopeEntry> = index
-            .files
-            .iter()
-            .map(ScopeEntry::from_scip_file)
-            .collect();
+    pub fn put_parsed_index(&mut self, index: &ParsedScipIndex) -> Result<usize, OutOfCoreError> {
+        let entries: Vec<ScopeEntry> = index.files.iter().map(ScopeEntry::from_scip_file).collect();
         self.put_batch(&entries)
     }
 
@@ -1243,7 +1239,11 @@ mod tests {
             accessor.store.put(entry).unwrap();
         }
 
-        assert_eq!(accessor.shard_count(), 1000, "store must contain 1000 shards");
+        assert_eq!(
+            accessor.shard_count(),
+            1000,
+            "store must contain 1000 shards"
+        );
 
         // Iterate all via for_each_scope, asserting resident_count stays bounded.
         // We cannot check resident_count inside the closure because for_each_scope
@@ -1260,7 +1260,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(visited, 1000, "for_each_scope must visit all 1000 shards");
-        assert_eq!(accessor.shard_count(), 1000, "shard count must be 1000 after iteration");
+        assert_eq!(
+            accessor.shard_count(),
+            1000,
+            "shard count must be 1000 after iteration"
+        );
         assert!(
             accessor.resident_count() <= capacity,
             "resident_count {} must not exceed capacity {capacity} after full iteration",
@@ -1273,7 +1277,10 @@ mod tests {
             .map(|i| ShardId(format!("shard-{i:04}")))
             .collect();
         for id in &ids {
-            let _entry = accessor.get_scope(id).unwrap().expect("entry must be accessible");
+            let _entry = accessor
+                .get_scope(id)
+                .unwrap()
+                .expect("entry must be accessible");
             assert!(
                 accessor.resident_count() <= capacity,
                 "resident_count {} must not exceed capacity {capacity} after loading {id:?}",
@@ -1340,7 +1347,10 @@ mod tests {
         let single_ids = single_store.enumerate_ids();
         assert_eq!(batch_ids.len(), single_ids.len());
         for id in &batch_ids {
-            assert!(single_ids.contains(id), "single store must contain id {id:?}");
+            assert!(
+                single_ids.contains(id),
+                "single store must contain id {id:?}"
+            );
             let batch_entry = batch_store.get(id).unwrap().unwrap();
             let single_entry = single_store.get(id).unwrap().unwrap();
             assert_eq!(batch_entry, single_entry, "entries for {id:?} must match");
@@ -1370,7 +1380,10 @@ mod tests {
 
         // Re-open the store and verify the entry is still readable.
         let reopened = OutOfCoreStore::open(td.path()).unwrap();
-        let loaded = reopened.get(&entry.id).unwrap().expect("entry must exist after reopen");
+        let loaded = reopened
+            .get(&entry.id)
+            .unwrap()
+            .expect("entry must exist after reopen");
         assert_eq!(loaded, entry);
     }
 
