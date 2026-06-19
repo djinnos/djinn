@@ -243,6 +243,32 @@ impl CoordinatorActor {
             return;
         };
 
+        // Reconcile is only meaningful after the initial proposal breakdown has
+        // graduated at least one epic. Before that, the still-open initial
+        // breakdown task naturally re-reads the latest proposal revision when it
+        // runs, so spawning a second planner task would race it and have no
+        // graduated graph to reconcile.
+        match repo.graduated_epics(&proposal.id).await {
+            Ok(epics) if epics.is_empty() => {
+                tracing::debug!(
+                    proposal_id = %proposal.id,
+                    proposal_short_id = %proposal.short_id,
+                    trigger,
+                    "CoordinatorActor: skipping proposal reconcile until initial breakdown graduates epics"
+                );
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal.id,
+                    error = %e,
+                    "CoordinatorActor: failed to load graduated epics for proposal reconcile — skipping"
+                );
+                return;
+            }
+        }
+
         // Dedup: don't stack a second reconcile while one is still open. The
         // open task must single-flight/coalesce any later revisions.
         if self
@@ -1911,6 +1937,11 @@ mod tests {
             .add_target(&proposal.id, &project.id, "primary")
             .await
             .unwrap();
+        let epic = make_epic(&db, &project.id, &tx).await;
+        proposal_repo
+            .link_epic(&proposal.id, &epic.id, &project.id)
+            .await
+            .unwrap();
         proposal_repo
             .set_building(&proposal.id, &build_owner.id)
             .await
@@ -1995,6 +2026,136 @@ mod tests {
         assert!(ac_text.contains("leaves unrelated epics untouched"));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_update_before_initial_breakdown_skips_reconcile() {
+        use djinn_db::{
+            ProposalCreateInput, ProposalRepository, ProposalUpdateInput, UserRepository,
+        };
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let proposal_repo = ProposalRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let build_owner = UserRepository::new(db.clone())
+            .upsert_from_github(43, "initial-build-owner", None, None)
+            .await
+            .unwrap();
+
+        let proposal = proposal_repo
+            .create(ProposalCreateInput {
+                title: "Initial Breakdown Drift",
+                body: "original body",
+                acceptance_criteria: None,
+                status: None,
+            })
+            .await
+            .unwrap();
+        proposal_repo
+            .add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+
+        let breakdown = task_repo
+            .create_in_project(
+                &project.id,
+                None,
+                &format!("Break down proposal: {}", proposal.title),
+                "Call proposal_show before decomposing the proposal.",
+                "Call proposal_show before decomposing the proposal.",
+                IssueType::EpicBreakdown.as_str(),
+                PRIORITY_CRITICAL,
+                "planner",
+                Some("open"),
+                None,
+            )
+            .await
+            .unwrap();
+        proposal_repo
+            .set_breakdown_task(&proposal.id, &breakdown.id)
+            .await
+            .unwrap();
+        proposal_repo
+            .set_building(&proposal.id, &build_owner.id)
+            .await
+            .unwrap();
+
+        let drifted = proposal_repo
+            .update(
+                &proposal.id,
+                ProposalUpdateInput {
+                    title: "Initial Breakdown Drift",
+                    body: "amended body before breakdown runs",
+                    acceptance_criteria: "[]",
+                    status: "building",
+                    superseded_by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(drifted.last_reconciled_revision_seq, Some(1));
+        assert_eq!(drifted.latest_revision_seq, 2);
+        assert!(drifted.pending_reconcile);
+        assert!(
+            proposal_repo
+                .graduated_epics(&proposal.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut actor = make_coordinator_actor(&db, &tx);
+        actor
+            .handle_event(DjinnEventEnvelope::proposal_updated(&drifted))
+            .await;
+        actor
+            .dispatch_proposal_reconcile(&proposal_repo, &drifted, "proposal_updated")
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            reconcile_task_count(&task_repo, &project.id, &proposal.short_id).await,
+            0,
+            "proposal updates before any graduated epic must not spawn reconcile"
+        );
+        let open_breakdowns: Vec<_> = task_repo
+            .list_by_project(&project.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|t| {
+                t.issue_type.as_str() == IssueType::EpicBreakdown.as_str()
+                    && t.status != "closed"
+                    && t.title == format!("Break down proposal: {}", proposal.title)
+            })
+            .collect();
+        assert_eq!(
+            open_breakdowns.len(),
+            1,
+            "only the original pending breakdown should remain open"
+        );
+        assert!(
+            open_breakdowns[0].design.contains("proposal_show"),
+            "pending initial breakdown still re-reads the proposal head when it runs"
+        );
+
+        let epic = make_epic(&db, &project.id, &tx).await;
+        proposal_repo
+            .link_epic(&proposal.id, &epic.id, &project.id)
+            .await
+            .unwrap();
+        let reconciled = proposal_repo
+            .get(&proposal.id)
+            .await
+            .unwrap()
+            .expect("proposal should exist");
+        assert_eq!(
+            reconciled.last_reconciled_revision_seq,
+            Some(drifted.latest_revision_seq)
+        );
+        assert!(!reconciled.pending_reconcile);
+    }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn proposal_updated_event_ignores_without_building_revision_drift() {
         use djinn_db::{ProposalCreateInput, ProposalRepository};

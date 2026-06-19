@@ -202,6 +202,11 @@ export interface CodeGraphHighlightState {
    */
   complexityAvailable: boolean;
   /**
+   * `true` when the canvas has a ready snapshot with at least one node.
+   * Drives the toolbar's disabled state when loading or empty.
+   */
+  graphReady: boolean;
+  /**
    * Semantic zoom mode — `auto` lets the canvas choose symbol vs
    * community based on the snapshot node threshold; `symbol`/`community`
    * force the level. Default `"auto"`. See {@link SemanticZoomMode}.
@@ -239,6 +244,8 @@ export interface CodeGraphHighlightActions {
   setLayoutMode: (mode: LayoutMode) => void;
   /** Iter 30: canvas reports whether complexity data is present in the snapshot. */
   setComplexityAvailable: (available: boolean) => void;
+  /** Canvas reports whether the graph is ready (loaded with at least one node). */
+  setGraphReady: (ready: boolean) => void;
   /** Set the semantic zoom mode override (auto/symbol/community). */
   setSemanticZoomMode: (mode: SemanticZoomMode) => void;
   /**
@@ -287,6 +294,7 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   colorMode: DEFAULT_COLOR_MODE,
   layoutMode: DEFAULT_LAYOUT_MODE,
   complexityAvailable: false,
+  graphReady: false,
   semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
   expandedCommunityIds: new Set<string>(),
   selectedWorkspaceSlug: null,
@@ -394,6 +402,10 @@ export const useCodeGraphStore = create<
     });
   },
 
+  setGraphReady: (ready) => {
+    set({ graphReady: ready });
+  },
+
   setSelectedWorkspaceSlug: (slug) => {
     set({ selectedWorkspaceSlug: slug });
   },
@@ -442,6 +454,7 @@ export const useCodeGraphStore = create<
       colorMode: DEFAULT_COLOR_MODE,
       layoutMode: state.layoutMode,
       complexityAvailable: false,
+      graphReady: false,
       semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
       expandedCommunityIds: new Set(),
     }));

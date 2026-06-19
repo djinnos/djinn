@@ -767,6 +767,7 @@ impl ProposalRepository {
         project_id: &str,
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
+        let had_graduated_epics = !self.graduated_epics(proposal_id).await?.is_empty();
         sqlx::query!(
             "INSERT INTO proposal_epics (proposal_id, epic_id, project_id) VALUES ($1, $2, $3)
              ON CONFLICT (proposal_id, epic_id) DO NOTHING",
@@ -779,11 +780,18 @@ impl ProposalRepository {
         if let Some(proposal) = self.get(proposal_id).await?
             && proposal.status == "building"
         {
-            let seq = proposal
-                .last_reconciled_revision_seq
-                .unwrap_or(proposal.latest_revision_seq);
+            let seq = if had_graduated_epics {
+                proposal
+                    .last_reconciled_revision_seq
+                    .unwrap_or(proposal.latest_revision_seq)
+            } else {
+                proposal.latest_revision_seq
+            };
             self.record_epic_reconciliation(proposal_id, epic_id, seq)
                 .await?;
+            if !had_graduated_epics {
+                self.mark_reconciled(proposal_id).await?;
+            }
         }
         Ok(())
     }
