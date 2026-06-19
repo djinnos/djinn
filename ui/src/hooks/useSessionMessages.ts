@@ -246,12 +246,12 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
 
             // If there's a reason, parse it as a command result
             if (reason) {
-              const setupFailMatch = reason.match(/^(Setup|Verification) command '([^']+)' failed(?: \(exit (\d+)\))?\s*(.*)/s);
+              const setupFailMatch = reason.match(/^Setup command '([^']+)' failed(?: \(exit (\d+)\))?\s*(.*)/s);
               if (setupFailMatch) {
-                const [, phase, command, exitCodeStr, body] = setupFailMatch;
+                const [, command, exitCodeStr, body] = setupFailMatch;
                 entries.push({
                   kind: "command",
-                  name: phase?.toLowerCase() ?? "setup",
+                  name: "setup",
                   body: body?.trim() ?? "",
                   passed: false,
                   exitCode: exitCodeStr ? Number(exitCodeStr) : undefined,
@@ -282,7 +282,7 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
               });
             }
           }
-        } else if (entry.event_type === "verification" || entry.event_type === "setup") {
+        } else if (entry.event_type === "setup") {
           const body = ((entry.payload as Record<string, unknown>)?.body as string) ?? "";
           entries.push({
             kind: "command",

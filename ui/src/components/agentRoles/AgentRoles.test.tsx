@@ -42,7 +42,6 @@ const mockRole = (overrides: Partial<agentsApi.Agent> = {}): agentsApi.Agent => 
   mcp_servers: ["github"],
   skills: ["code-review"],
   model_preference: null,
-  verification_command: null,
   is_default: false,
   learned_prompt: null,
   ...overrides,
