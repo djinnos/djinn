@@ -408,6 +408,8 @@ export function useSigmaGraph(
       },
     });
 
+    const layoutMode = useCodeGraphStore((s) => s.layoutMode);
+
     // ── ForceAtlas2 supervisor (off main thread) ────────────────
     // Precomputed-layout graphs already carry warm-time server
     // coordinates for every node — FA2 has nothing to converge on
@@ -422,7 +424,7 @@ export function useSigmaGraph(
       PRECOMPUTED_LAYOUT_ATTRIBUTE,
     );
 
-    if (!precomputedLayout) {
+    if (!precomputedLayout && layoutMode === "force") {
       const inferred = forceAtlas2.inferSettings(graph);
       const tuned = fa2Settings(graph.order);
       const supervisor = new FA2LayoutSupervisor(graph, {
@@ -469,6 +471,17 @@ export function useSigmaGraph(
           // Sigma may already be killed by unmount; ignore.
         }
       }, runMs);
+    } else if (!precomputedLayout) {
+      // Non-force deterministic modes (sequential / radial) skip the
+      // FA2 supervisor and noverlap pass so positions stay exactly as
+      // computed by the pure layout module. Just refresh Sigma and
+      // reset the camera once on mount.
+      try {
+        sigma?.refresh();
+        sigma?.getCamera().animatedReset({ duration: 400 });
+      } catch {
+        // Sigma may already be killed by unmount; ignore.
+      }
     }
 
     return () => {
@@ -489,7 +502,7 @@ export function useSigmaGraph(
       setLayoutRunning(false);
       setHandle(null);
     };
-  }, [containerRef, graph]);
+  }, [containerRef, graph, layoutMode]);
 
   // Camera-nudge on selection change — Sigma 3 caches edge geometry
   // across frames, so an imperceptible zoom jiggle is the cheapest way

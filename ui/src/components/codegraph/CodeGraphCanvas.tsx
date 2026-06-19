@@ -112,6 +112,7 @@ export function CodeGraphCanvas({
     (s) => s.selectedWorkspaceSlug,
   );
   const semanticZoomMode = useCodeGraphStore((s) => s.semanticZoomMode);
+  const layoutMode = useCodeGraphStore((s) => s.layoutMode);
   const expandedCommunityIds = useCodeGraphStore((s) => s.expandedCommunityIds);
   const expandCommunity = useCodeGraphStore((s) => s.expandCommunity);
   const collapseCommunity = useCodeGraphStore((s) => s.collapseCommunity);
@@ -251,8 +252,8 @@ export function CodeGraphCanvas({
 
   const graph = useMemo(() => {
     if (!visibleSnapshot) return null;
-    return buildGraphFromSnapshot(visibleSnapshot);
-  }, [visibleSnapshot]);
+    return buildGraphFromSnapshot(visibleSnapshot, { layoutMode });
+  }, [visibleSnapshot, layoutMode]);
 
   // The reducers hook needs the live Sigma handle to call refresh()
   // when store slices change. We init `null` and lift the handle from
@@ -431,6 +432,12 @@ export function CodeGraphCanvas({
         state={state}
         visibleSnapshot={visibleSnapshot}
         level={effectiveLevel}
+      />
+      <GraphToolbar
+        disabled={
+          state.status !== "ready" ||
+          (state.snapshot?.nodes.length ?? 0) === 0
+        }
       />
       {layoutRunning && visibleSnapshot?.nodes.length ? (
         <LayoutOptimizingPill />
