@@ -7,7 +7,7 @@ expression: section
 - `task_activity_list(id, actor_role?, event_type?, limit?)` — Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.
 - `memory_read(identifier)` — Read a note by permalink or title.
 - `memory_search(query, folder?, limit?, task_id?, type?)` — Search notes in project memory.
-- `memory_list(depth?, folder?, type?)` — List notes in project memory. Returns compact summaries without full content.
+- `memory_list(depth?, folder?, status?, type?)` — List notes in project memory. Returns compact summaries without full content.
 - `shell(command, timeout_ms?)` — Execute shell commands in the task worktree. Commands always run from the worktree root.
 - `read(file_path, limit?, offset?, project?)` — Read a file with line numbers and pagination. Rejects binary files. Pass `project` (UUID or owner/repo slug) to read a file from ANOTHER registered repo — served read-only from its default branch (no checkout); omit it to read your task worktree.
 - `code_search(query, ignore_case?, max_results?, path?, project?)` — Search code across registered repos with `git grep` (basic regex). Pass `project` (UUID or owner/repo slug) to search one repo, or omit it (or pass "*") to search ALL registered projects at once — e.g. find every caller of a gRPC service org-wide. Served from each repo's default branch (no checkout). For your own task repo's working tree (your uncommitted changes), use shell grep instead.
