@@ -30,7 +30,7 @@
 //! flake bites, re-run in isolation with
 //!   `cargo test -p djinn-agent --test phase1_supervisor -- --test-threads=1`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -69,7 +69,6 @@ fn test_agent_context(db: Database) -> AgentContext {
         db,
         event_bus: EventBus::noop(),
         git_actors: Arc::new(Mutex::new(HashMap::new())),
-        verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
         role_registry: Arc::new(RoleRegistry::new()),
         health_tracker: HealthTracker::new(),
         file_time: Arc::new(FileTime::new()),

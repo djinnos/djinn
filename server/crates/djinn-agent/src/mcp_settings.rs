@@ -1,7 +1,16 @@
+//! Per-role MCP server + skill resolution against a project's MCP registry
+//! and `environment_config` defaults.
+//!
+//! This module was previously named `verification::settings` and lived next
+//! to the (now-removed) verification pipeline. The "verification" name
+//! was a misnomer — nothing in this file is verification-specific; it
+//! computes the effective MCP server list and skill list for a role given
+//! the project's `agent_mcp_defaults` and `global_skills` settings, plus
+//! the resolved MCP server registry from [`crate::mcp_json`].
+
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 /// Configuration for a single named MCP server, as discovered from
 /// `mcp.json`-style files at the project root.
@@ -14,7 +23,7 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     /// Command to launch the MCP server over stdio (e.g. `my-mcp-server --flag`).
     pub command: Option<String>,
-    /// Positional arguments for `command` when using stdio transport.
+    /// Positional arguments to `command` when using stdio transport.
     #[serde(default)]
     pub args: Vec<String>,
     /// Environment variables to provide to the launched MCP server.
@@ -88,7 +97,7 @@ pub fn effective_skill_names(global_skills: &[String], role_skills: &[String]) -
 pub fn load_mcp_server_registry(
     worktree_path: &std::path::Path,
 ) -> HashMap<String, McpServerConfig> {
-    crate::verification::mcp_json::load_mcp_server_registry(worktree_path)
+    crate::mcp_json::load_mcp_server_registry(worktree_path)
 }
 
 /// Resolve a list of role-level MCP server names against the project's registry.
@@ -134,20 +143,6 @@ pub fn resolve_mcp_servers<'a>(
         }
     }
     resolved
-}
-
-/// Compute the verification cache key from a commit SHA and the resolved scoped command set.
-///
-/// The key encodes both the commit identity and the exact commands run so that different
-/// scoped command sets for the same commit produce different cache entries.
-pub fn verification_cache_key(commit_sha: &str, scoped_commands: &[String]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(commit_sha.as_bytes());
-    for cmd in scoped_commands {
-        hasher.update(b"\x00");
-        hasher.update(cmd.as_bytes());
-    }
-    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -254,7 +249,7 @@ mod tests {
         registry.insert(
             "known-server".to_string(),
             McpServerConfig {
-                url: Some("http://localhost:9000/mcp".to_string()),
+                url: Some("https://example.com/mcp".to_string()),
                 command: None,
                 args: Vec::new(),
                 env: HashMap::new(),
@@ -265,7 +260,7 @@ mod tests {
         let names = vec!["known-server".to_string(), "unknown-server".to_string()];
         let resolved = resolve_mcp_servers("t2", "specialist", &names, &registry);
 
-        // Only the known server is returned; unknown is silently skipped.
+        // Only the known server is in the result; unknown is silently skipped.
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].0, "known-server");
     }
@@ -277,7 +272,7 @@ mod tests {
         registry.insert(
             "some-server".to_string(),
             McpServerConfig {
-                url: Some("http://localhost:9000/mcp".to_string()),
+                url: Some("https://example.com/mcp".to_string()),
                 command: None,
                 args: Vec::new(),
                 env: HashMap::new(),

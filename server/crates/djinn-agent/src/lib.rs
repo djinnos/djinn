@@ -1,5 +1,5 @@
 // Agent-domain code extracted from djinn-server.
-// Covers: commands, agent context/roles/lifecycle, verification, actors.
+// Covers: commands, agent context/roles/lifecycle, environment/MCP config, actors.
 //
 // The `tool_code_graph()` schema uses `serde_json::json!` via the local
 // `object!` macro. After Phase 2 added seven new ops, the macro
@@ -19,12 +19,22 @@ pub mod context;
 // Extension tools: `pub(crate)` internals, `chat_tools` re-exports the chat-safe subset.
 pub mod chat_tools;
 pub mod direct_services;
+// Project `environment_config` column accessors used by MCP/skills/hooks
+// resolution. (Was previously inside `src/verification/`, but had nothing
+// verification-specific about it.)
+pub(crate) mod environment;
 pub(crate) mod extension;
 pub mod file_time;
 pub(crate) mod github_error_render;
 pub(crate) mod knowledge_promotion;
 pub mod lsp;
 pub mod mcp_client;
+// Project-level MCP server discovery (formerly `verification::mcp_json`) and
+// the role/skill MCP server resolution helpers (formerly
+// `verification::settings`). The "verification" name was a misnomer — these
+// modules have nothing verification-specific about them.
+pub(crate) mod mcp_json;
+pub(crate) mod mcp_settings;
 pub(crate) mod oauth;
 pub(crate) mod output_parser;
 pub mod output_stash;
@@ -41,10 +51,6 @@ pub(crate) mod supervisor_impl;
 pub mod task_merge;
 pub(crate) mod truncate;
 pub mod warmer;
-
-// ─── Verification (was src/verification/) ────────────────────────────────────
-
-pub mod verification;
 
 // ─── Resource monitoring ─────────────────────────────────────────────────────
 

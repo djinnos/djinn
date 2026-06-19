@@ -1,7 +1,7 @@
 use super::*;
 
-/// Return the most recent N high-signal comments (lead, reviewer, verification)
-/// from the activity log, in chronological order (oldest first).
+/// Return the most recent N high-signal comments (lead, reviewer) from the
+/// activity log, in chronological order (oldest first).
 /// Each entry is formatted as "**Label:** body".
 pub(crate) fn recent_feedback(
     activity: &[djinn_core::models::ActivityEntry],
@@ -16,8 +16,7 @@ pub(crate) fn recent_feedback(
                     || e.actor_role == "pm"
                     || e.actor_role == "architect"
                     || e.actor_role == "reviewer"
-                    || e.actor_role == "task_reviewer"
-                    || e.actor_role == "verification")
+                    || e.actor_role == "task_reviewer")
         })
         .take(max)
         .collect();
@@ -33,28 +32,22 @@ pub(crate) fn recent_feedback(
                 "lead" | "pm" => "Lead guidance",
                 "architect" => "Architect directive",
                 "reviewer" | "task_reviewer" => "Reviewer feedback",
-                "verification" => "Verification failure",
                 _ => "Feedback",
             };
-            let trimmed = if e.actor_role == "verification" {
-                truncate_feedback(body, MAX_VERIFICATION_CHARS)
-            } else {
-                body.to_string()
-            };
-            Some(format!("**{label}:**\n{trimmed}"))
+            Some(format!("**{label}:**\n{body}"))
         })
         .collect()
 }
 
-/// Extract worker submission summary/concerns and the last verification failure
-/// from the activity log so the reviewer sees why the worker made certain changes.
+/// Extract worker submission summary/concerns from the activity log so the
+/// reviewer sees why the worker made certain changes.
 ///
-/// Returns `(worker_summary, worker_concerns, verification_failure)`.
+/// Returns `(worker_summary, worker_concerns)`.
 pub(crate) fn extract_worker_context(
     activity: &Option<Vec<djinn_core::models::ActivityEntry>>,
-) -> (Option<String>, Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>) {
     let Some(entries) = activity else {
-        return (None, None, None);
+        return (None, None);
     };
 
     // Last work_submitted entry — contains summary and remaining_concerns.
@@ -91,21 +84,7 @@ pub(crate) fn extract_worker_context(
         })
         .unwrap_or((None, None));
 
-    // Last verification failure comment.
-    let verification_failure = entries
-        .iter()
-        .rev()
-        .find(|e| e.event_type == "comment" && e.actor_role == "verification")
-        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.payload).ok())
-        .and_then(|payload| {
-            payload
-                .get("body")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| truncate_feedback(s, MAX_VERIFICATION_CHARS))
-        });
-
-    (worker_summary, worker_concerns, verification_failure)
+    (worker_summary, worker_concerns)
 }
 
 /// Build a formatted PR review feedback section for the worker prompt.

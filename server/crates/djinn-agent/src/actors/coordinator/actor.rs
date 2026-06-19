@@ -93,6 +93,13 @@ pub(super) struct CoordinatorActor {
     // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
     pub(super) dispatch_failure_streak: HashMap<String, u32>,
     /// Shared tracker for in-flight verification background tasks.
+    ///
+    /// The pre-PR verification pipeline was removed (Wave 1 of the sehj
+    /// epic), so this tracker is no longer consulted by the recovery
+    /// sweep. The field is kept around as `()`-equivalent dead state to
+    /// avoid churning the coordinator's construction sites; it can be
+    /// fully deleted in a follow-up.
+    #[allow(dead_code)]
     pub(super) verification_tracker: VerificationTracker,
     /// Per-task state of the PR poller's offloaded clean-merge fast path. The
     /// heavy mechanical merge (fetch + ephemeral clone + merge + push) runs in a
@@ -765,7 +772,6 @@ impl CoordinatorActor {
             db: self.db.clone(),
             event_bus: crate::events::event_bus_for(&self.events_tx),
             git_actors: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            verifying_tasks: self.verification_tracker.clone(),
             role_registry: self.role_registry.clone(),
             health_tracker: self.health.clone(),
             file_time: Arc::new(crate::file_time::FileTime::new()),
@@ -1259,9 +1265,7 @@ impl CoordinatorActor {
             // `project_has_indexable_code` resolves through the assigned
             // catalog image — catalog projects keep an empty per-project
             // languages block by design.
-            if !crate::verification::environment::project_has_indexable_code(&self.db, &project.id)
-                .await
-            {
+            if !crate::environment::project_has_indexable_code(&self.db, &project.id).await {
                 skipped_no_code += 1;
                 tracing::debug!(
                     project_id = %project.id,

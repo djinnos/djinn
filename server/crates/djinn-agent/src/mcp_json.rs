@@ -1,9 +1,26 @@
+//! MCP server discovery via `mcp.json`-style files in the project root.
+//!
+//! Historically this module lived next to the verification pipeline (it
+//! reads the same `environment_config` + settings.json surface that the
+//! verification pipeline uses to discover per-role MCP servers), but it
+//! has nothing to do with verification itself — it is project-level MCP
+//! server discovery. The companion [`crate::mcp_settings`] module wraps
+//! the raw [`McpServerConfig`] registry with the role/skill naming
+//! resolution the lifecycle uses.
+//!
+//! ## Discovery order
+//!
+//! [`DISCOVERY_PATHS`] is the order: root `mcp.json` first, then
+//! `.cursor/mcp.json`, then `.opencode/mcp.json`; duplicate server names
+//! resolve first-found-wins. Invalid files are logged and skipped — a
+//! malformed file never blocks discovery from a later path.
+
 use std::collections::HashMap;
 use std::path::Path;
 
 use serde::Deserialize;
 
-use super::settings::McpServerConfig;
+use crate::mcp_settings::McpServerConfig;
 
 const DISCOVERY_PATHS: [&str; 3] = ["mcp.json", ".cursor/mcp.json", ".opencode/mcp.json"];
 
@@ -45,7 +62,7 @@ impl From<McpServerEntry> for McpServerConfig {
 /// `.cursor/mcp.json`, then `.opencode/mcp.json`); duplicate server names
 /// resolve first-found-wins. Invalid files are logged and skipped — a
 /// malformed file never blocks discovery from a later path.
-pub fn load_mcp_server_registry(worktree_path: &Path) -> HashMap<String, McpServerConfig> {
+pub(crate) fn load_mcp_server_registry(worktree_path: &Path) -> HashMap<String, McpServerConfig> {
     let mut registry = HashMap::new();
 
     for relative_path in DISCOVERY_PATHS {
@@ -187,7 +204,6 @@ mod tests {
         );
 
         let registry = load_mcp_server_registry(dir.path());
-
         assert_eq!(
             registry["shared"].url.as_deref(),
             Some("https://root.example/mcp")
@@ -242,7 +258,6 @@ mod tests {
         );
 
         let registry = load_mcp_server_registry(dir.path());
-
         assert_eq!(registry.len(), 1);
         assert_eq!(
             registry["cursor"].url.as_deref(),

@@ -20,7 +20,7 @@ use djinn_runtime::GraphWarmerService;
 use djinn_workspace::MirrorManager;
 use tokio::sync::Mutex;
 
-use crate::actors::coordinator::{CoordinatorHandle, VerificationTracker};
+use crate::actors::coordinator::CoordinatorHandle;
 use crate::file_time::FileTime;
 use crate::lsp::LspManager;
 use crate::roles::RoleRegistry;
@@ -43,7 +43,6 @@ pub struct AgentContext {
     pub db: Database,
     pub event_bus: EventBus,
     pub git_actors: Arc<Mutex<HashMap<PathBuf, GitActorHandle>>>,
-    pub verifying_tasks: VerificationTracker,
     pub role_registry: Arc<RoleRegistry>,
     pub health_tracker: HealthTracker,
     pub file_time: Arc<FileTime>,
@@ -700,30 +699,6 @@ impl AgentContext {
     pub async fn git_actor(&self, path: &Path) -> Result<GitActorHandle, GitError> {
         let mut map = self.git_actors.lock().await;
         djinn_git::get_or_spawn(&mut map, path)
-    }
-
-    /// Register a task as having an in-flight verification pipeline.
-    pub fn register_verification(&self, task_id: &str) {
-        self.verifying_tasks
-            .lock()
-            .expect("poisoned")
-            .insert(task_id.to_string());
-    }
-
-    /// Deregister a task's verification pipeline (completed or crashed).
-    pub fn deregister_verification(&self, task_id: &str) {
-        self.verifying_tasks
-            .lock()
-            .expect("poisoned")
-            .remove(task_id);
-    }
-
-    /// Check whether a task has a live verification pipeline.
-    pub fn has_verification(&self, task_id: &str) -> bool {
-        self.verifying_tasks
-            .lock()
-            .expect("poisoned")
-            .contains(task_id)
     }
 
     /// Register a task as active and return the shared timestamp atomic.

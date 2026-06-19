@@ -92,12 +92,9 @@ fn make_ctx() -> TaskContext {
         merge_target_branch: None,
         merge_failure_context: None,
         setup_commands: None,
-        verification_commands: None,
-        verification_rules: None,
         activity: None,
         worker_summary: None,
         worker_concerns: None,
-        verification_failure: None,
         epic_context: None,
         knowledge_context: None,
         code_graph_context: None,
@@ -267,7 +264,6 @@ fn worker_prompt_includes_setup_commands_when_present() {
     let task = make_task();
     let ctx = TaskContext {
         setup_commands: Some("- `npm install`\n- `npm run build`".into()),
-        verification_commands: Some("- `npm test`".into()),
         ..make_ctx()
     };
     let prompt = render_prompt(AgentType::Worker, &task, &ctx);
@@ -276,7 +272,6 @@ fn worker_prompt_includes_setup_commands_when_present() {
     assert!(prompt.contains("Do not run them yourself"));
     assert!(prompt.contains("npm install"));
     assert!(!prompt.contains("{{setup_commands_section}}"));
-    assert!(!prompt.contains("{{verification_section}}"));
 }
 
 #[test]
@@ -287,25 +282,6 @@ fn worker_prompt_omits_setup_section_when_no_commands() {
 
     assert!(!prompt.contains("Automated Commands"));
     assert!(!prompt.contains("{{setup_commands_section}}"));
-}
-
-#[test]
-fn reviewer_prompt_includes_verification_section_when_present() {
-    let task = make_task();
-    let ctx = TaskContext {
-        diff: Some("+ fn foo() {}".into()),
-        commits: Some("abc1234 Add widget".into()),
-        start_commit: Some("abc0000".into()),
-        end_commit: Some("abc1234".into()),
-        verification_commands: Some("- `cargo test`".into()),
-        ..make_ctx()
-    };
-    let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
-
-    assert!(prompt.contains("Automated Verification"));
-    assert!(prompt.contains("Focus on acceptance criteria"));
-    assert!(prompt.contains("cargo test"));
-    assert!(!prompt.contains("{{verification_section}}"));
 }
 
 #[test]
@@ -321,7 +297,6 @@ fn reviewer_prompt_omits_verification_section_when_no_commands() {
     let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
 
     assert!(!prompt.contains("Automated Verification"));
-    assert!(!prompt.contains("{{verification_section}}"));
 }
 
 #[test]
@@ -398,45 +373,6 @@ fn worker_prompt_includes_conflict_files_for_conflict_context() {
         prompt.contains("main"),
         "worker prompt should include merge target branch"
     );
-}
-
-#[test]
-fn worker_prompt_includes_verification_rules_when_present() {
-    let task = make_task();
-    let ctx = TaskContext {
-            verification_rules: Some(
-                "- `crates/djinn-control-plane/**`: `cargo test -p djinn-control-plane`, `cargo clippy -p djinn-control-plane -- -D warnings`".into(),
-            ),
-            ..make_ctx()
-        };
-    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
-
-    assert!(
-        prompt.contains("Verification Rules"),
-        "worker prompt should include verification rules section heading"
-    );
-    assert!(
-        prompt.contains("crates/djinn-control-plane/**"),
-        "worker prompt should include rule pattern"
-    );
-    assert!(
-        prompt.contains("cargo test -p djinn-control-plane"),
-        "worker prompt should include rule commands"
-    );
-    assert!(!prompt.contains("{{verification_rules_section}}"));
-}
-
-#[test]
-fn worker_prompt_omits_verification_rules_when_empty() {
-    let task = make_task();
-    let ctx = make_ctx(); // verification_rules: None
-    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
-
-    assert!(
-        !prompt.contains("Verification Rules"),
-        "worker prompt should not include verification rules section when empty"
-    );
-    assert!(!prompt.contains("{{verification_rules_section}}"));
 }
 
 #[test]

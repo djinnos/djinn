@@ -23,7 +23,6 @@ pub(crate) struct PostSessionParams {
 }
 
 pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
-    params.app_state.register_verification(&params.task_id);
     tokio::spawn(async move {
         let PostSessionParams {
             task_id,
@@ -125,8 +124,6 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
             tokens_out,
         )
         .await;
-
-        app_state.deregister_verification(&task_id);
     });
 }
 

@@ -12,8 +12,12 @@ use super::*;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/// Max characters for verification output included in user messages.
+/// Max characters for CI-failure output included in user messages.
 /// Keeps the user-message payload reasonable (clippy stderr can be huge).
+/// Formerly the cap for the pre-PR verification pipeline; the pre-PR
+/// pipeline was removed in Wave 1 of the sehj epic but the constant is
+/// retained for the CI feedback path (`raw_ci_feedback_in_cycle`).
+#[allow(dead_code)]
 const MAX_VERIFICATION_CHARS: usize = 3000;
 
 /// Max characters for a single inline PR review comment included in the prompt.
