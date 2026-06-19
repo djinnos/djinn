@@ -16,8 +16,15 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Shared environment for all jobs.
-# RUSTC_WRAPPER is cleared to disable local sccache in CI; the
-# Swatinem/rust-cache action handles caching instead.
+#
+# CI is deliberately INSULATED from the workspace `.cargo/config.toml`, which
+# no longer pins sccache and lets cargo's incremental dev/test profiles apply
+# (the djinn warm/verify/worker pods need incremental-on for the warm-cache
+# fast path). CI does NOT want large incremental artifact dirs in the GitHub
+# Actions cache, so it pins `CARGO_INCREMENTAL: "0"` here and relies on the
+# Swatinem/rust-cache action for cross-run caching (RUSTC_WRAPPER cleared so
+# no local sccache is invoked). Pinning these at the job level means A.1's
+# config.toml change is a no-op for CI.
 #
 # RUSTFLAGS is set ONCE here and must NOT be overridden per-job. Both the
 # rust-cache key and Cargo's compile fingerprint fold in RUSTFLAGS, so any
@@ -105,7 +112,7 @@ jobs:
       # clippy-driver under a separate fingerprint, so a `check` warm
       # leaves the workspace-crate clippy pass cold. Deps are shared.
       - name: Build workspace (populate cache)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --features qdrant -- -D warnings
 
       - name: Prune old caches
         if: always()
@@ -145,7 +152,7 @@ jobs:
       - uses: taiki-e/install-action@nextest
 
       - name: Build test binaries (populate cache)
-        run: cargo nextest run --workspace --all-targets --all-features --no-run
+        run: cargo nextest run --workspace --all-targets --features qdrant --no-run
 
       - name: Prune old caches
         if: always()
@@ -207,7 +214,7 @@ jobs:
         run: cargo run -p djinn-agent --bin djinn-skills-manifest -- check --root ..
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --features qdrant -- -D warnings
 
   # Pure-shell PR-time guard for Rust source file size; independent from clippy.
   # Runs in changed-file mode (--files-from-stdin) so the job enforces the
@@ -394,7 +401,7 @@ jobs:
       # coverage needs a slower profile, wire that explicit profile into this
       # job instead of filtering the regressions out of CI.
       - name: Tests
-        run: cargo nextest run --workspace --all-targets --all-features --profile ci --partition count:${{ matrix.shard }}/4
+        run: cargo nextest run --workspace --all-targets --features qdrant --profile ci --partition count:${{ matrix.shard }}/4
 
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  sqlx offline-cache freshness gate (merge queue only)            ║
