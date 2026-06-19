@@ -31,7 +31,6 @@ impl CoordinatorActor {
             db: self.db.clone(),
             event_bus: crate::events::event_bus_for(&self.events_tx),
             git_actors: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            verifying_tasks: self.verification_tracker.clone(),
             role_registry: self.role_registry.clone(),
             health_tracker: self.health.clone(),
             file_time: Arc::new(crate::file_time::FileTime::new()),

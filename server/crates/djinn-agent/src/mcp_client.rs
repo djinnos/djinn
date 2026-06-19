@@ -23,7 +23,7 @@ use rmcp::transport::{
 
 use crate::context::AgentContext;
 use crate::extension::shared_schemas;
-use crate::verification::settings::McpServerConfig;
+use crate::mcp_settings::McpServerConfig;
 use djinn_provider::repos::CredentialRepository;
 
 static PLACEHOLDER_RE: LazyLock<Regex> =

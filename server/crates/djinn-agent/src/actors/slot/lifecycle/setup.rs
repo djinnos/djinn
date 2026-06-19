@@ -12,7 +12,7 @@ use std::path::Path;
 use crate::actors::slot::helpers::format_command_details;
 use crate::commands::run_commands;
 use crate::context::AgentContext;
-use crate::verification::environment::hook_commands_to_specs;
+use crate::environment_config::hook_commands_to_specs;
 
 /// Resolved prompt-context fragments produced after running project setup
 /// commands and resolving the verification configuration.

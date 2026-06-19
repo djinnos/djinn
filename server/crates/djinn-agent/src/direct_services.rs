@@ -230,7 +230,7 @@ impl SupervisorServices for DirectServices {
         &self,
         project_id: String,
     ) -> Result<EnvironmentConfig, String> {
-        let cfg = crate::verification::environment::environment_config_for_project_id(
+        let cfg = crate::environment_config::environment_config_for_project_id(
             &self.callbacks.agent_context.db,
             &project_id,
         )

@@ -92,8 +92,6 @@ pub(super) struct CoordinatorActor {
     /// successful stage transition to a different dispatch role.
     // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
     pub(super) dispatch_failure_streak: HashMap<String, u32>,
-    /// Shared tracker for in-flight verification background tasks.
-    pub(super) verification_tracker: VerificationTracker,
     /// Per-task state of the PR poller's offloaded clean-merge fast path. The
     /// heavy mechanical merge (fetch + ephemeral clone + merge + push) runs in a
     /// spawned background task instead of inline on this tick; the poller reads
@@ -341,7 +339,6 @@ impl CoordinatorActor {
             catalog,
             health,
             role_registry,
-            verification_tracker,
             lsp,
             graph_warmer,
             consolidation_runner,
@@ -373,7 +370,6 @@ impl CoordinatorActor {
             inflight_dispatches: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
-            verification_tracker,
             auto_merge_tracker: Arc::new(std::sync::Mutex::new(HashMap::new())),
             consolidation_runner: consolidation_runner
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
@@ -765,7 +761,6 @@ impl CoordinatorActor {
             db: self.db.clone(),
             event_bus: crate::events::event_bus_for(&self.events_tx),
             git_actors: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            verifying_tasks: self.verification_tracker.clone(),
             role_registry: self.role_registry.clone(),
             health_tracker: self.health.clone(),
             file_time: Arc::new(crate::file_time::FileTime::new()),
@@ -1259,9 +1254,7 @@ impl CoordinatorActor {
             // `project_has_indexable_code` resolves through the assigned
             // catalog image — catalog projects keep an empty per-project
             // languages block by design.
-            if !crate::verification::environment::project_has_indexable_code(&self.db, &project.id)
-                .await
-            {
+            if !crate::environment_config::project_has_indexable_code(&self.db, &project.id).await {
                 skipped_no_code += 1;
                 tracing::debug!(
                     project_id = %project.id,
@@ -1690,7 +1683,6 @@ mod tests {
                 CatalogService::new(),
                 HealthTracker::new(),
                 Arc::new(RoleRegistry::new()),
-                VerificationTracker::default(),
                 crate::lsp::LspManager::new(),
             ),
             receiver,

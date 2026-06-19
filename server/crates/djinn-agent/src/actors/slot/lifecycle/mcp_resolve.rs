@@ -16,11 +16,11 @@
 use std::path::Path;
 
 use crate::context::AgentContext;
+use crate::environment_config::environment_config_for_path;
 use crate::mcp_client::McpToolRegistry;
+use crate::mcp_settings::{effective_mcp_server_names, effective_skill_names};
 use crate::roles::AgentRole;
 use crate::skills::ResolvedSkill;
-use crate::verification::environment::environment_config_for_path;
-use crate::verification::settings::{effective_mcp_server_names, effective_skill_names};
 
 /// Resolved MCP + skills bundle for the upcoming session.
 ///
@@ -81,8 +81,8 @@ pub(crate) async fn resolve_mcp_and_skills(
     //
     // Default roles have empty mcp_servers, so this block is a no-op for them.
     let resolved_mcp_servers = if !effective_mcp_servers.is_empty() {
-        let registry = crate::verification::settings::load_mcp_server_registry(worktree_path);
-        let resolved = crate::verification::settings::resolve_mcp_servers(
+        let registry = crate::mcp_settings::load_mcp_server_registry(worktree_path);
+        let resolved = crate::mcp_settings::resolve_mcp_servers(
             task_short_id,
             runtime_role.config().name,
             &effective_mcp_servers,

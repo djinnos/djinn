@@ -837,7 +837,6 @@ mod tests {
             djinn_provider::catalog::CatalogService::new(),
             HealthTracker::new(),
             Arc::new(RoleRegistry::new()),
-            VerificationTracker::default(),
             crate::lsp::LspManager::new(),
         ))
     }
@@ -883,7 +882,6 @@ mod tests {
                 djinn_provider::catalog::CatalogService::new(),
                 HealthTracker::new(),
                 Arc::new(RoleRegistry::new()),
-                VerificationTracker::default(),
                 crate::lsp::LspManager::new(),
             ),
             receiver,
@@ -1294,7 +1292,6 @@ mod tests {
                 djinn_provider::catalog::CatalogService::new(),
                 HealthTracker::new(),
                 Arc::new(RoleRegistry::new()),
-                VerificationTracker::default(),
                 crate::lsp::LspManager::new(),
             ),
             receiver,
@@ -1356,7 +1353,6 @@ mod tests {
                 djinn_provider::catalog::CatalogService::new(),
                 HealthTracker::new(),
                 Arc::new(RoleRegistry::new()),
-                VerificationTracker::default(),
                 crate::lsp::LspManager::new(),
             ),
             receiver,

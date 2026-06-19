@@ -1,5 +1,5 @@
 // Agent-domain code extracted from djinn-server.
-// Covers: commands, agent context/roles/lifecycle, verification, actors.
+// Covers: commands, agent context/roles/lifecycle, actors.
 //
 // The `tool_code_graph()` schema uses `serde_json::json!` via the local
 // `object!` macro. After Phase 2 added seven new ops, the macro
@@ -42,9 +42,10 @@ pub mod task_merge;
 pub(crate) mod truncate;
 pub mod warmer;
 
-// ─── Verification (was src/verification/) ────────────────────────────────────
+// ─── Environment config + MCP settings (extracted from former verification/) ──
 
-pub mod verification;
+pub mod environment_config;
+pub mod mcp_settings;
 
 // ─── Resource monitoring ─────────────────────────────────────────────────────
 

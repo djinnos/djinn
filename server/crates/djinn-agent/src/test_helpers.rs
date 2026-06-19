@@ -69,7 +69,6 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
         db,
         event_bus: EventBus::noop(),
         git_actors: Arc::new(Mutex::new(HashMap::new())),
-        verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
         role_registry: Arc::new(RoleRegistry::new()),
         health_tracker: HealthTracker::new(),
         file_time: Arc::new(FileTime::new()),

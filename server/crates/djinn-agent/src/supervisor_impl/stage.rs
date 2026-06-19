@@ -476,19 +476,13 @@ pub(crate) async fn execute_stage(
         .get_environment_config(task.project_id.clone())
         .await
         .map_err(|e| StageError::Setup(format!("env_config: {e}")))?;
-    let verification_rules = crate::verification::environment::verification_for_project_id(
-        &agent_context.db,
-        &task.project_id,
-    )
-    .await
-    .rules;
     let SetupAndVerificationContext {
         prompt_setup_commands,
         prompt_verification_commands,
         prompt_verification_rules,
     } = match resolve_setup_and_verification_context(
         env_config.lifecycle.pre_verification,
-        verification_rules,
+        vec![],
         role_verification_command.as_deref(),
         worktree_path,
         &task.id,

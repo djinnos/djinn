@@ -51,7 +51,7 @@ pub use handle::CoordinatorHandle;
 pub use types::{
     AutoMergeTracker, BreakerDebugEntry, CoordinatorDebugSnapshot, CoordinatorDeps,
     CoordinatorError, CoordinatorStatus, DebugCooldown, DebugDispatchState, DebugFailureStreak,
-    DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView, VerificationTracker,
+    DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
 };
 
 // Re-export internal types for sibling submodules that use `use super::*;`.

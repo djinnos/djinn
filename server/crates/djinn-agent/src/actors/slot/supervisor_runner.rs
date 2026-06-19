@@ -128,7 +128,7 @@ async fn surface_credential_revocation(
 ///   error and still emits `SlotEvent::Free`.
 pub(crate) async fn run_supervisor_dispatch(
     task_id: String,
-    project_path: String,
+    _project_path: String,
     model_id: String,
     app_state: AgentContext,
     kill: CancellationToken,
@@ -687,49 +687,7 @@ pub(crate) async fn run_supervisor_dispatch(
             ),
         }
 
-        // BUG 1 re-attach: in the in-pod verification design the worker writes a
-        // terminal `verification_runs` row (and persists its `WorkerSubmitted`
-        // report) BEFORE the pod can die out-of-band. When the pod is TTL-GC'd
-        // the report frame is no longer buffered on `events_rx`, so the streamed
-        // report is gone and we fall back to the `Interrupted` teardown stub
-        // below — whose outcome is NOT `WorkerSubmitted`, so the host
-        // verification pipeline never gets armed and the task is left `verifying`
-        // with no pipeline. The coordinator's stuck-`verifying` sweep then resets
-        // it `verifying → open`, discarding completed-and-verified work.
-        //
-        // Detect that case at the seam: if a USABLE terminal in-pod
-        // `verification_runs` row exists for this task, re-arm the slot-free host
-        // pipeline against it directly. `spawn_verification_with_in_pod_run`
-        // consumes the existing row (idempotent against the unchanged commit) —
-        // exactly what the clean `WorkerSubmitted` path does below. We do this
-        // BEFORE the teardown-stub fallback so the re-attach wins the race with
-        // the coordinator sweep.
-        match djinn_db::VerificationRunRepository::new(app_state.db.clone())
-            .latest_terminal_for_task(&task.id)
-            .await
-        {
-            Ok(Some(run_id)) => {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    verification_run_id = %run_id,
-                    "supervisor dispatch: infra death after in-pod verification wrote terminal row; \
-                     re-arming host verification pipeline instead of discarding the run"
-                );
-                crate::actors::slot::verification::spawn_verification_with_in_pod_run(
-                    task.id.clone(),
-                    project_path.clone(),
-                    app_state.clone(),
-                    Some(run_id),
-                );
-            }
-            Ok(None) => {}
-            Err(e) => tracing::warn!(
-                task_id = %task.short_id,
-                error = %e,
-                "supervisor dispatch: failed to look up in-pod verification row after infra death; \
-                 leaving recovery to the coordinator sweep"
-            ),
-        }
+        // (verification re-attach removed — verification gate deleted)
     }
 
     match (report_result, teardown) {
@@ -747,42 +705,6 @@ pub(crate) async fn run_supervisor_dispatch(
                 runtime = ?runtime_kind,
                 "supervisor dispatch: task-run complete"
             );
-            // Verify BEFORE review. The worker stage completed and the in-pod
-            // supervisor fired `submit_verification` (in_progress → verifying);
-            // the task-run pod is gone and the model slot is about to free. Spawn
-            // the slot-free verification pipeline on the HOST (which owns the
-            // MirrorManager): it checks out the durable task_branch, runs the
-            // scoped verification commands (a cache hit when the commit is
-            // unchanged), and on green transitions verifying → needs_task_review
-            // (re-dispatched as a reviewer-only ReviewResume), on red releases the
-            // task for worker rework with the failure feedback. `spawn_verification`
-            // registers the task in the shared `verifying_tasks` tracker, so the
-            // coordinator's stuck-`verifying` recovery sweep ("no active
-            // verification pipeline") covers a server restart mid-verification.
-            //
-            // Guarded on the outcome (not just the status) so a stale/late report
-            // can't double-spawn: only a clean `WorkerSubmitted` arms it. The
-            // pipeline is idempotent against the cache for an unchanged commit
-            // regardless.
-            if matches!(report.outcome, TaskRunOutcome::WorkerSubmitted) {
-                tracing::info!(
-                    task_id = %task.short_id,
-                    in_pod_verification_run_id = ?report.verification_run_id,
-                    "supervisor dispatch: worker submitted to verification; spawning slot-free verification pipeline"
-                );
-                // If the worker ran verification IN-POD (reusing its compiled
-                // artifacts before its target dir was torn down), it shipped the
-                // terminal `verification_runs.id` on the report — the pipeline
-                // consumes that row directly instead of dispatching a second
-                // verify Job (the double-compile fix). `None` keeps the
-                // separate-pod fallback.
-                crate::actors::slot::verification::spawn_verification_with_in_pod_run(
-                    task.id.clone(),
-                    project_path.clone(),
-                    app_state.clone(),
-                    report.verification_run_id.clone(),
-                );
-            }
 
             persist_loop_guard_activity(&task_repo, &task.id, &report).await;
             // Feed the model circuit-breaker on a productive run. A terminal

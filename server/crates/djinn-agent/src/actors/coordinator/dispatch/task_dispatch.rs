@@ -247,39 +247,14 @@ impl CoordinatorActor {
                     .into_iter()
                     .map(|t| t.task_id)
                     .collect();
-                // A task-run that has handed off to the verification stage no
-                // longer uses the model (in-pod verify runs `cargo`/`clippy`,
-                // zero model tokens) even though its slot/pod is still held and
-                // the pool still reports it as a running task. Drop those from
-                // the ledger so the per-model cap is released at the
-                // worker→verify transition — mirroring the `t.status <>
-                // 'verifying'` exclusion in `count_active_by_user_and_model`, so
-                // the DB seed and the `max(db, ledger)` overlay agree and a
-                // verify-stage run cannot be re-counted via the ledger floor.
-                let verifying: std::collections::HashSet<String> = match self
-                    .task_repo()
-                    .list_by_status("verifying")
-                    .await
-                {
-                    Ok(tasks) => tasks.into_iter().map(|t| t.id).collect(),
-                    Err(e) => {
-                        // Conservative on error: keep counting verifying
-                        // tasks (may briefly defer a dispatch) rather than
-                        // risk an under-count that overshoots the cap.
-                        tracing::warn!(error = %e, "CoordinatorActor: list verifying tasks failed during cap seed; not releasing verify-stage cap this pass");
-                        std::collections::HashSet::new()
-                    }
-                };
-                let live_non_verifying =
-                    |task_id: &String| live.contains(task_id) && !verifying.contains(task_id);
                 let stale_inflight_task_ids: Vec<String> = self
                     .inflight_dispatches
                     .keys()
-                    .filter(|task_id| !live_non_verifying(task_id))
+                    .filter(|task_id| !live.contains(*task_id))
                     .cloned()
                     .collect();
                 self.inflight_dispatches
-                    .retain(|task_id, _| live_non_verifying(task_id));
+                    .retain(|task_id, _| live.contains(task_id));
                 for task_id in stale_inflight_task_ids {
                     self.persist_durable_dispatch_state_update(
                         &task_id,
@@ -948,23 +923,6 @@ impl CoordinatorActor {
                     paused_at = %pause.paused_at,
                     reason = %pause.reason,
                     "CoordinatorActor: dispatch deferred by administrative pause"
-                );
-                continue;
-            }
-            // Defensive guard: NEVER dispatch an agent for a task in a host-owned
-            // transient status. `verifying` in particular is driven by the
-            // slot-free verification pipeline on the host (spawned after the
-            // worker stage submits) — NOT by an agent run. It is already excluded
-            // from the ready set (`list_ready` returns `open` only, and the review
-            // sweep lists only needs_task_review / needs_lead_intervention), but
-            // `flow_for_task_dispatch` / `role_for_task_dispatch` would route a
-            // `verifying` task to the worker (NewTask) if one ever leaked in — so
-            // skip it explicitly. A stuck `verifying` task (no live pipeline) is
-            // recovered by `detect_and_recover_stuck_filtered`, not re-dispatched.
-            if task.status == "verifying" {
-                tracing::debug!(
-                    task_id = %task.short_id,
-                    "CoordinatorActor: skipping dispatch for verifying task (host-owned verification pipeline)"
                 );
                 continue;
             }
@@ -1872,7 +1830,6 @@ mod inflight_ledger_tests {
             inflight_dispatches: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
-            verification_tracker: VerificationTracker::default(),
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
                 crate::actors::coordinator::consolidation::DbConsolidationRunner::new(db.clone()),
