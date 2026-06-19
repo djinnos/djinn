@@ -859,4 +859,214 @@ mod tests {
             "expected Diff variant, got {err:?}"
         );
     }
+
+    /// td55 canonical warm cache-reuse toggle regression.
+    ///
+    /// This is a focused structure guard proving the production canonical
+    /// warm cache-reuse env toggle (`DJINN_GRAPH_CACHE_REUSE_ENABLED` /
+    /// `DJINN_CACHE_REUSE_ENABLED` / `CACHE_REUSE_ENABLED`) routes through
+    /// [`crate::canonical_graph::resolve_canonical_warm_cache_reuse`] into
+    /// [`crate::scip_parser::parse_scip_artifacts_with_cache_reuse`] — the
+    /// SAME whole-artifact parse/build seam exercised by the td55 parity
+    /// tests above. The goal is to prevent future code from bypassing the
+    /// equivalence gate with a separate partial/incremental graph assembly
+    /// path.
+    ///
+    /// Cache reuse is allowed ONLY as an input/artifact reuse optimization
+    /// before the whole-graph build, NOT as changed-file-only graph
+    /// resolution. This test verifies that the cache-reuse-enabled path:
+    /// 1. parses the COMPLETE artifact set (no changed-file-only subset);
+    /// 2. produces a graph artifact that passes
+    ///    [`assert_graph_artifact_blob_parity`] against a cold/full build
+    ///    of the same complete set;
+    /// 3. uses an isolated temp cache root (no DB, no K8s, no Docker, no
+    ///    real SCIP binaries, no network, no credentials).
+    #[test]
+    fn canonical_warm_cache_reuse_toggle_reaches_parity_seam() {
+        // SAFETY: this test manipulates env vars for the duration of the
+        // test. `std::env::set_var` / `remove_var` are marked unsafe in
+        // Rust 2024 because they race with concurrent getenv readers. This
+        // test does not spawn threads and the env mutation is local to this
+        // single-threaded unit test body, so the access is serialized.
+        // Save and restore the env state to avoid leaking into other tests.
+        let saved = [
+            "DJINN_GRAPH_CACHE_REUSE_ENABLED",
+            "DJINN_CACHE_REUSE_ENABLED",
+            "CACHE_REUSE_ENABLED",
+        ]
+        .map(|name| (name, std::env::var(name).ok()));
+        for &name in [
+            "DJINN_GRAPH_CACHE_REUSE_ENABLED",
+            "DJINN_CACHE_REUSE_ENABLED",
+            "CACHE_REUSE_ENABLED",
+        ]
+        .iter()
+        {
+            unsafe {
+                std::env::remove_var(name);
+            }
+        }
+        let restore = || {
+            for (name, value) in &saved {
+                unsafe {
+                    if let Some(v) = value {
+                        std::env::set_var(name, v);
+                    } else {
+                        std::env::remove_var(name);
+                    }
+                }
+            }
+        };
+
+        // --- Structure guard 1: toggle resolves to the same seam ---
+        //
+        // With the env toggle enabled, the canonical warm resolution must
+        // report cache reuse as active (unless a stale sentinel forces a
+        // full rebuild). This proves the toggle is wired to
+        // `resolve_canonical_warm_cache_reuse`.
+        unsafe {
+            std::env::set_var("DJINN_GRAPH_CACHE_REUSE_ENABLED", "1");
+        }
+        assert!(
+            crate::canonical_graph::resolve_canonical_warm_cache_reuse(false),
+            "cache-reuse env toggle must resolve to enabled when force_full_rebuild=false"
+        );
+        // Force-full-rebuild (stale sentinel) must disable cache reuse even
+        // when the toggle is on — this is the safety rail, not a changed-
+        // file-only bypass.
+        assert!(
+            !crate::canonical_graph::resolve_canonical_warm_cache_reuse(true),
+            "stale-sentinel forced full rebuild must disable cache reuse"
+        );
+
+        // With the toggle off, cache reuse must be disabled.
+        unsafe {
+            std::env::set_var("DJINN_GRAPH_CACHE_REUSE_ENABLED", "0");
+        }
+        assert!(
+            !crate::canonical_graph::resolve_canonical_warm_cache_reuse(false),
+            "cache-reuse disabled env value must resolve to disabled"
+        );
+
+        // Also verify the alias env names work.
+        unsafe {
+            std::env::remove_var("DJINN_GRAPH_CACHE_REUSE_ENABLED");
+            std::env::set_var("DJINN_CACHE_REUSE_ENABLED", "on");
+        }
+        assert!(
+            crate::canonical_graph::resolve_canonical_warm_cache_reuse(false),
+            "DJINN_CACHE_REUSE_ENABLED alias must be honored"
+        );
+
+        unsafe {
+            std::env::remove_var("DJINN_CACHE_REUSE_ENABLED");
+            std::env::set_var("CACHE_REUSE_ENABLED", "true");
+        }
+        assert!(
+            crate::canonical_graph::resolve_canonical_warm_cache_reuse(false),
+            "CACHE_REUSE_ENABLED alias must be honored"
+        );
+
+        // Restore env for the parity-build portion: enable the toggle so the
+        // path under test matches production cache-reuse-on behavior.
+        unsafe {
+            std::env::set_var("DJINN_GRAPH_CACHE_REUSE_ENABLED", "1");
+        }
+
+        // --- Structure guard 2: the enabled toggle routes through the same
+        // whole-artifact parse/build seam as the td55 parity tests ---
+        //
+        // `resolve_canonical_warm_cache_reuse(true_value)` returns the same
+        // boolean that `ensure_canonical_graph` passes to
+        // `parse_scip_artifacts_with_cache_reuse`. When true, that function
+        // constructs a `ScipCacheStore::from_environment()`. We isolate the
+        // cache root via `DJINN_SCIP_CACHE_DIR` so the test is deterministic
+        // and does not touch the real cache.
+        //
+        // SAFETY: isolated single-threaded env mutation — no threads spawned.
+        let cache_root = crate::test_helpers::workspace_tempdir("td55-toggle-seam-cache-");
+        let saved_cache_dir = std::env::var("DJINN_SCIP_CACHE_DIR").ok();
+        unsafe {
+            std::env::set_var("DJINN_SCIP_CACHE_DIR", cache_root.path());
+        }
+
+        // Cold build of the COMPLETE fixture set (no cache).
+        let cold_fixture = crate::test_helpers::td55_cache_reuse_scip_fixture();
+        let cold_parsed = crate::scip_parser::parse_scip_artifacts_with_cache_store(
+            &cold_fixture.artifacts,
+            None,
+        )
+        .expect("cold parse should succeed");
+        let mut cold_graph =
+            crate::repo_graph::RepoDependencyGraph::try_build_with_source(&cold_parsed, None)
+                .expect("cold graph build should succeed");
+        cold_graph.set_layout_positions(crate::layout::derive_layout_positions(&cold_graph));
+        let cold_blob = bincode::serialize(&cold_graph.to_artifact())
+            .expect("serialize cold graph artifact blob");
+
+        // Cache-reuse-enabled build: use the SAME seam as
+        // `ensure_canonical_graph` (resolve_canonical_warm_cache_reuse →
+        // parse_scip_artifacts_with_cache_reuse) with the COMPLETE artifact
+        // set. A fresh fixture ensures temp file paths differ but SCIP
+        // content is byte-identical, so the content-addressed cache key
+        // matches after the first population call.
+        let reuse_fixture = crate::test_helpers::td55_cache_reuse_scip_fixture();
+        // Population pass — fills the cache store.
+        let _ = crate::scip_parser::parse_scip_artifacts_with_cache_reuse(
+            &reuse_fixture.artifacts,
+            crate::canonical_graph::resolve_canonical_warm_cache_reuse(false),
+        )
+        .expect("cache-reuse parse (population) should succeed");
+        // Hit pass — exercises the reuse path through the same seam.
+        let reuse_parsed = crate::scip_parser::parse_scip_artifacts_with_cache_reuse(
+            &reuse_fixture.artifacts,
+            crate::canonical_graph::resolve_canonical_warm_cache_reuse(false),
+        )
+        .expect("cache-reuse parse (hit) should succeed");
+        let mut reuse_graph =
+            crate::repo_graph::RepoDependencyGraph::try_build_with_source(&reuse_parsed, None)
+                .expect("cache-reuse graph build should succeed");
+        reuse_graph.set_layout_positions(crate::layout::derive_layout_positions(&reuse_graph));
+        let reuse_blob = bincode::serialize(&reuse_graph.to_artifact())
+            .expect("serialize cache-reuse graph artifact blob");
+
+        // Both graphs must include a cross-file edge — a changed-file-only
+        // path would drop it, and the parity check would catch that.
+        for (label, blob) in [("cold", &cold_blob), ("cache-reuse", &reuse_blob)] {
+            let artifact = deserialize_repo_graph_artifact_bincode(blob)
+                .unwrap_or_else(|err| panic!("{label} blob should deserialize: {err}"));
+            let is_cross_file_ref = |edge: &RepoGraphArtifactEdge| {
+                matches!(
+                    edge.kind,
+                    RepoGraphEdgeKind::SymbolReference
+                        | RepoGraphEdgeKind::Reads
+                        | RepoGraphEdgeKind::Writes
+                        | RepoGraphEdgeKind::FileReference
+                ) && artifact.nodes[edge.source].file_path != artifact.nodes[edge.target].file_path
+            };
+            assert!(
+                artifact.edges.iter().any(is_cross_file_ref),
+                "{label} fixture graph should include a cross-file reference edge"
+            );
+        }
+
+        // The essential gate: the toggle-enabled path produces a graph
+        // artifact that passes artifact parity against the cold/full build.
+        // This proves the toggle routes through the same whole-artifact
+        // build seam — a separate partial/incremental assembly path would
+        // fail here.
+        assert_graph_artifact_blob_parity(&cold_blob, &reuse_blob).expect(
+            "canonical warm cache-reuse toggle must produce a graph equivalent to the cold/full build",
+        );
+
+        // Restore all env state.
+        unsafe {
+            if let Some(v) = saved_cache_dir {
+                std::env::set_var("DJINN_SCIP_CACHE_DIR", v);
+            } else {
+                std::env::remove_var("DJINN_SCIP_CACHE_DIR");
+            }
+        }
+        restore();
+    }
 }

@@ -317,6 +317,7 @@ mod tests {
             system_packages: vec![],
             env: Default::default(),
             lifecycle: djinn_stack::environment::LifecycleHooks::default(),
+            cargo_cache_policy: None,
             agent_mcp_defaults: Default::default(),
             global_skills: vec![],
         }
