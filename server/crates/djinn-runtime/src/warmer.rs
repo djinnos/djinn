@@ -62,48 +62,6 @@ pub trait GraphWarmerService: Send + Sync {
         timeout: Duration,
     ) -> Result<(), WarmerError>;
 
-    /// Dispatch a one-shot verification "test" run for a candidate rule set in
-    /// the project's image, writing pass/fail + per-command output to the
-    /// `verification_test_runs` row identified by `test_id`. Fire-and-forget:
-    /// returns once the Job is created, not once it finishes (poll the row).
-    ///
-    /// Default impl errors — only a backend that owns a kube client + runtime
-    /// config (the `K8sGraphWarmer`) can dispatch the Job. The MCP layer calls
-    /// this through the `RuntimeOps` bridge. (Lives on this trait because the
-    /// K8s warmer is the one persistent handle that already owns the one-shot
-    /// Job dispatcher + project-image resolution.)
-    async fn dispatch_verification_test(
-        &self,
-        _test_id: &str,
-        _project_id: &str,
-    ) -> Result<(), WarmerError> {
-        Err(WarmerError::Backend(
-            "verification test dispatch requires the kubernetes runtime".to_string(),
-        ))
-    }
-
-    /// Dispatch a one-shot pre-PR verification run in the project's image,
-    /// writing per-command results + pass/fail to the `verification_runs` row
-    /// identified by `run_id`. The Job clones `target_branch`, fetches +
-    /// checks out `task_branch`, then runs the real verification pipeline.
-    /// Fire-and-forget: returns once the Job is created, not once it finishes
-    /// (the server polls the row).
-    ///
-    /// Default impl errors — only a backend that owns a kube client + runtime
-    /// config (the `K8sGraphWarmer`) can dispatch the Job. Non-Kubernetes
-    /// runtimes run verification inline on the host instead.
-    async fn dispatch_verification(
-        &self,
-        _run_id: &str,
-        _project_id: &str,
-        _task_branch: &str,
-        _target_branch: &str,
-    ) -> Result<(), WarmerError> {
-        Err(WarmerError::Backend(
-            "verification dispatch requires the kubernetes runtime".to_string(),
-        ))
-    }
-
     /// Foreground-delete the canonical task-run Job (`djinn-taskrun-{task_run_id}`).
     ///
     /// Default impl errors — only a backend that owns a kube client (the
@@ -197,10 +155,8 @@ mod tests {
     use super::*;
 
     // Pin the discriminator contract that the K8s graph warmer's
-    // `dispatch_verification_with_retry` and the MCP verification-test
-    // requeue both rely on. The structured `transient` flag is the
-    // single source of truth: callers MUST NOT parse the `Display`
-    // string to recover this classification.
+    // The structured `transient` flag is the single source of truth:
+    // callers MUST NOT parse the `Display` string to recover this classification.
     #[test]
     fn warmer_error_image_not_ready_transient_vs_permanent() {
         let transient = WarmerError::ImageNotReady {

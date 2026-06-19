@@ -37,5 +37,5 @@ pub use self::memory_enrichment_bridge::{
     EnrichmentClaim, EnrichmentEdge, EnrichmentEntity, EnrichmentReport, EnrichmentStatus,
     MemoryEnrichmentOps,
 };
-pub use self::runtime_bridge::{RuntimeDispatchError, RuntimeOps, TaskrunJobRef};
+pub use self::runtime_bridge::{RuntimeOps, TaskrunJobRef};
 pub use self::slot_pool_bridge::{ModelPoolStatus, PoolStatus, RunningTaskInfo, SlotPoolOps};

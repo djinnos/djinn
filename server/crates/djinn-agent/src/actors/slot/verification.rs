@@ -435,29 +435,6 @@ async fn run_verification_on_host(
 /// compiles + runs the project's verification commands.
 const VERIFICATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Initial backoff for the image-readiness requeue loop in
-/// [`run_verification_in_pod`]. A short initial value (5s) lets a quick
-/// rebuild (typical mirror-fetch + image-controller round-trip) land before
-/// we burn a second DB read; the loop doubles up to a cap below.
-const IMAGE_READINESS_INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Maximum backoff between image-readiness retries. Capped at 60s so a long
-/// rebuild doesn't push the requeue cadence into multi-minute silent windows
-/// — the next tick still re-checks the dispatch image status within a
-/// minute.
-const IMAGE_READINESS_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Total bound on how long [`run_verification_in_pod`] will keep retrying
-/// dispatch while the catalog image is transiently `building` (or
-/// not-yet-assigned). After this elapsed time the verification is marked
-/// `error` with a clear message; the surrounding verification pipeline
-/// timeout (`MIN_PIPELINE_TIMEOUT_SECS`) is the outer bound, so 10 minutes
-/// here is well within the 1-hour pipeline budget. Sized to comfortably
-/// outlast a typical image rebuild (a few minutes; see
-/// `[[cases/plan-a-warm-cargo-base-reuse-validated-working-v0-6-11-0-6-12]]`)
-/// while still failing closed if the image genuinely never lands.
-const IMAGE_READINESS_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(600);
-
 /// Production (Kubernetes) verification — dispatch a one-shot Job in the
 /// project's image and poll its `verification_runs` row.
 ///
@@ -492,228 +469,27 @@ fn project_verification_semaphore(project_id: &str) -> Arc<tokio::sync::Semaphor
         .clone()
 }
 
-/// Dispatch a verification Job, retrying on transient `ImageNotReady` until
-/// the bounded budget elapses or the image becomes ready.
-///
-/// The pre-fix behavior marked the `verification_runs` row as `error` the
-/// moment the catalog image was observed `building` — typically a few-second
-/// transient window during a routine rebuild (see [[ga7l]]). A verification
-/// should not terminally fail a task for a transient image condition; the
-/// whole point of having a shared catalog image is that the image is
-/// reusable, so a momentary mid-rebuild is not the verification's problem
-/// to surface.
-///
-/// Strategy: when the runtime returns `ImageNotReady { transient: true, .. }`
-/// we DO NOT mark the row as `error` — we leave it in `pending` and re-poll
-/// `resolve_dispatch_image` with exponential backoff (capped). When the
-/// image lands (catalog image is `ready` again) the dispatch is retried
-/// transparently. After [`IMAGE_READINESS_TOTAL_BUDGET`] the retry loop
-/// gives up and surfaces a clear terminal error: this preserves the
-/// backstop the acceptance criteria require ("a real, persistent
-/// missing-image still surfaces a clear error after the bounded wait").
-///
-/// Returns `Ok(())` on successful dispatch (the Job is created in the
-/// cluster). Returns `Err` (a clear terminal error) for:
-/// * `ImageNotReady { transient: false, .. }` (project has no catalog
-///   image assigned at all — operator must fix configuration),
-/// * `Backend(_)` (K8s API / dispatcher failure),
-/// * `ImageNotReady { transient: true, .. }` after the bounded budget
-///   elapses (image genuinely never landed in time).
-///
-/// The verification `_run_id` row is updated in place on the terminal
-/// failure path so the poll loop can observe a clear status without
-/// re-querying the row.
-/// Outcome of [`dispatch_verification_inner`]. The caller is responsible
-/// for persisting the row status if the outcome is [`DispatchOutcome::Error`].
-#[derive(Debug)]
-enum DispatchOutcome {
-    /// The dispatch succeeded — the Job is created in the cluster.
-    Dispatched,
-    /// A terminal error. The caller should mark the verification row as
-    /// `error` with this message, then propagate the error.
-    Error(String),
-}
-
-/// Inner retry loop for verification dispatch — pure control flow with no
-/// DB writes. The caller injects a `mark_error` callback so this function
-/// can be unit-tested without a live database pool (which is incompatible
-/// with `tokio::test(start_paused = true)` because sqlx's connection pool
-/// acquire timeout fires instantly when the clock is frozen).
-async fn dispatch_verification_inner<F, Fut>(
-    runtime_ops: &dyn djinn_control_plane::bridge::RuntimeOps,
-    run_id: &str,
-    project_id: &str,
-    task_branch: &str,
-    target_branch: &str,
-    mark_error: &mut F,
-) -> DispatchOutcome
-where
-    F: FnMut(&str) -> Fut,
-    Fut: std::future::Future<Output = ()>,
-{
-    // First attempt — most verifications dispatch on the first try (image
-    // is already ready). Only the transient not-ready path takes the
-    // retry loop below.
-    match runtime_ops
-        .dispatch_verification(run_id, project_id, task_branch, target_branch)
-        .await
-    {
-        Ok(()) => DispatchOutcome::Dispatched,
-        Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
-            project_id: err_project_id,
-            image_status,
-            tag,
-            transient,
-        }) => {
-            let project_id_owned = err_project_id.clone();
-            if !transient {
-                // Permanent: project has no catalog image assigned. The
-                // operator needs to assign one. Mark the row errored
-                // immediately so the poll loop sees a clear terminal
-                // status and the surrounding pipeline surfaces a clear
-                // failure to the worker.
-                let msg = format!(
-                    "verification dispatch: project {err_project_id} has no catalog image assigned \
-                     (image_status: {image_status}); assign a catalog image before verifying"
-                );
-                mark_error(&msg).await;
-                return DispatchOutcome::Error(msg);
-            }
-            // Transient: catalog image is being rebuilt (or first-time
-            // assignment is pending). Requeue with backoff until the
-            // image is ready or the bounded budget elapses. The row
-            // stays in `pending` so the poll loop keeps waiting.
-            let started = std::time::Instant::now();
-            let mut backoff = IMAGE_READINESS_INITIAL_BACKOFF;
-            let mut attempt: u32 = 0;
-            loop {
-                if started.elapsed() >= IMAGE_READINESS_TOTAL_BUDGET {
-                    let msg = format!(
-                        "verification dispatch: project {err_project_id} image not ready after \
-                         {}s (last status: {image_status}{}); the catalog image is still \
-                         rebuilding; verify manually once it lands",
-                        IMAGE_READINESS_TOTAL_BUDGET.as_secs(),
-                        tag.as_deref()
-                            .map(|t| format!(", tag: {t}"))
-                            .unwrap_or_default()
-                    );
-                    mark_error(&msg).await;
-                    return DispatchOutcome::Error(msg);
-                }
-                attempt += 1;
-                tracing::info!(
-                    run_id = %run_id,
-                    project_id = %err_project_id,
-                    attempt = attempt,
-                    backoff_ms = backoff.as_millis() as u64,
-                    image_status = %image_status,
-                    "verification dispatch: image not ready, retrying"
-                );
-                tokio::time::sleep(backoff).await;
-                match runtime_ops
-                    .dispatch_verification(run_id, &project_id_owned, task_branch, target_branch)
-                    .await
-                {
-                    Ok(()) => {
-                        tracing::info!(
-                            run_id = %run_id,
-                            project_id = %project_id,
-                            attempt = attempt,
-                            "verification dispatch: image became ready, dispatched"
-                        );
-                        return DispatchOutcome::Dispatched;
-                    }
-                    Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
-                        transient: false,
-                        ..
-                    }) => {
-                        // The image went from `building` to
-                        // "no catalog image assigned" mid-retry — same
-                        // permanent-failure path as above. Avoid
-                        // bouncing on the backoff loop.
-                        let msg = format!(
-                            "verification dispatch: project {err_project_id} has no catalog \
-                             image assigned (image_status: {image_status})"
-                        );
-                        mark_error(&msg).await;
-                        return DispatchOutcome::Error(msg);
-                    }
-                    Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
-                        image_status: new_status,
-                        ..
-                    }) => {
-                        // Still not ready (probably still building,
-                        // maybe just flipped to `failed`). Log and
-                        // continue backing off; the outer elapsed
-                        // check enforces the budget.
-                        tracing::debug!(
-                            run_id = %run_id,
-                            project_id = %err_project_id,
-                            attempt = attempt,
-                            image_status = %new_status,
-                            "verification dispatch: image still not ready; continuing backoff"
-                        );
-                    }
-                    Err(djinn_control_plane::bridge::RuntimeDispatchError::Backend(e)) => {
-                        let msg = format!(
-                            "verification dispatch: runtime backend error after {attempt} \
-                             requeue attempts: {e}"
-                        );
-                        mark_error(&msg).await;
-                        return DispatchOutcome::Error(msg);
-                    }
-                }
-                // Exponential backoff with cap. Keep doubling until we
-                // hit the cap; the outer elapsed check stops the loop
-                // regardless.
-                backoff = (backoff * 2).min(IMAGE_READINESS_MAX_BACKOFF);
-            }
-        }
-        Err(djinn_control_plane::bridge::RuntimeDispatchError::Backend(e)) => {
-            let msg = format!("verification dispatch failed: {e}");
-            mark_error(&msg).await;
-            DispatchOutcome::Error(msg)
-        }
-    }
-}
-
+/// Verification job dispatch has been removed with the pre-PR verification gate.
+/// Mark the stale run row as errored if this legacy path is invoked.
 async fn dispatch_verification_with_retry(
-    runtime_ops: &dyn djinn_control_plane::bridge::RuntimeOps,
+    _runtime_ops: &dyn djinn_control_plane::bridge::RuntimeOps,
     run_id: &str,
-    project_id: &str,
-    task_branch: &str,
-    target_branch: &str,
+    _project_id: &str,
+    _task_branch: &str,
+    _target_branch: &str,
     run_repo: &djinn_db::VerificationRunRepository,
 ) -> anyhow::Result<()> {
-    let run_id_owned = run_id.to_string();
-    let mut mark_error = |msg: &str| {
-        let run_id_owned = run_id_owned.clone();
-        let msg_owned = msg.to_string();
-        async move {
-            let _ = run_repo
-                .complete(
-                    &run_id_owned,
-                    djinn_db::VerificationRunStatus::ERROR,
-                    "[]",
-                    "[]",
-                    Some(&msg_owned),
-                )
-                .await;
-        }
-    };
-    match dispatch_verification_inner(
-        runtime_ops,
-        run_id,
-        project_id,
-        task_branch,
-        target_branch,
-        &mut mark_error,
-    )
-    .await
-    {
-        DispatchOutcome::Dispatched => Ok(()),
-        DispatchOutcome::Error(msg) => anyhow::bail!(msg),
-    }
+    let msg = "verification dispatch has been removed".to_string();
+    let _ = run_repo
+        .complete(
+            run_id,
+            djinn_db::VerificationRunStatus::ERROR,
+            "[]",
+            "[]",
+            Some(&msg),
+        )
+        .await;
+    anyhow::bail!(msg)
 }
 
 /// FAST PATH: consume a terminal `verification_runs` row the worker wrote

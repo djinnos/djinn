@@ -403,20 +403,6 @@ pub struct TaskRunReport {
     pub task_run_id: String,
     pub outcome: TaskRunOutcome,
     pub stages_completed: Vec<RoleKind>,
-    /// `verification_runs.id` of an IN-POD pre-PR verification the worker ran
-    /// itself, right after committing to the task branch and BEFORE its private
-    /// Cargo target dir was torn down — reusing those already-compiled artifacts
-    /// instead of re-seeding the warm base in a separate verify Job (the
-    /// double-compile this avoids). `Some(id)` means the row is already terminal
-    /// (`passed`/`failed`/`error`); the host's verification pipeline consumes it
-    /// directly instead of dispatching its own Job. `None` (the default, and the
-    /// only value on the host/test runtimes or when in-pod verify wasn't
-    /// applicable) keeps the existing separate-pod path as the fallback.
-    ///
-    /// Added LAST and `#[serde(default)]` so the worker→host bincode frame
-    /// (positional fields) decodes older reports that omit it as `None`.
-    #[serde(default)]
-    pub verification_run_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -482,29 +468,11 @@ mod tests {
             task_run_id: "run-ws".to_string(),
             outcome: TaskRunOutcome::WorkerSubmitted,
             stages_completed: vec![RoleKind::Worker],
-            verification_run_id: None,
         };
         let bytes = bincode::serialize(&report).expect("serialize");
         let back: TaskRunReport = bincode::deserialize(&bytes).expect("deserialize");
         assert!(matches!(back.outcome, TaskRunOutcome::WorkerSubmitted));
         assert_eq!(back.stages_completed, vec![RoleKind::Worker]);
-        assert_eq!(back.verification_run_id, None);
-    }
-
-    #[test]
-    fn worker_submitted_carries_in_pod_verification_run_id_over_bincode() {
-        // The in-pod verification run id must survive the worker→host bincode
-        // frame so the host can consume the row instead of dispatching a second
-        // verify Job (the double-compile fix).
-        let report = TaskRunReport {
-            task_run_id: "run-ws".to_string(),
-            outcome: TaskRunOutcome::WorkerSubmitted,
-            stages_completed: vec![RoleKind::Worker],
-            verification_run_id: Some("vr-019e6a03".to_string()),
-        };
-        let bytes = bincode::serialize(&report).expect("serialize");
-        let back: TaskRunReport = bincode::deserialize(&bytes).expect("deserialize");
-        assert_eq!(back.verification_run_id.as_deref(), Some("vr-019e6a03"));
     }
 
     #[test]
@@ -554,7 +522,6 @@ mod tests {
                 sha: "deadbeef".to_string(),
             },
             stages_completed: vec![RoleKind::Planner, RoleKind::Worker],
-            verification_run_id: None,
         };
 
         let bytes = bincode::serialize(&report).expect("serialize");
@@ -589,7 +556,6 @@ mod tests {
                 body_excerpt: None,
             },
             stages_completed: vec![RoleKind::Worker],
-            verification_run_id: None,
         };
 
         let bytes = bincode::serialize(&report).expect("serialize");
@@ -632,7 +598,6 @@ mod tests {
                 body_excerpt: None,
             },
             stages_completed: vec![RoleKind::Worker],
-            verification_run_id: None,
         };
 
         let bytes = bincode::serialize(&report).expect("serialize");
@@ -675,7 +640,6 @@ mod tests {
                 task_run_id: "run-loop-guard".to_string(),
                 outcome: loop_guard_outcome(kind),
                 stages_completed: vec![RoleKind::Worker],
-                verification_run_id: None,
             };
 
             let bytes = bincode::serialize(&report).expect("serialize");

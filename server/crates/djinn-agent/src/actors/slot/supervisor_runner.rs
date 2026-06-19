@@ -767,7 +767,6 @@ pub(crate) async fn run_supervisor_dispatch(
             if matches!(report.outcome, TaskRunOutcome::WorkerSubmitted) {
                 tracing::info!(
                     task_id = %task.short_id,
-                    in_pod_verification_run_id = ?report.verification_run_id,
                     "supervisor dispatch: worker submitted to verification; spawning slot-free verification pipeline"
                 );
                 // If the worker ran verification IN-POD (reusing its compiled
@@ -780,7 +779,7 @@ pub(crate) async fn run_supervisor_dispatch(
                     task.id.clone(),
                     project_path.clone(),
                     app_state.clone(),
-                    report.verification_run_id.clone(),
+                    None,
                 );
             }
 
@@ -1446,7 +1445,6 @@ mod tests {
             task_run_id: id.to_string(),
             outcome,
             stages_completed: stages,
-            verification_run_id: None,
         }
     }
 

@@ -261,32 +261,6 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
         // Slot-pool/coordinator reconfiguration is owned by the server-side
         // AppState impl. No-op for the agent-internal runtime.
     }
-    async fn dispatch_verification_test(
-        &self,
-        _test_id: &str,
-        _project_id: &str,
-    ) -> Result<(), djinn_control_plane::bridge::RuntimeDispatchError> {
-        // Verification-test dispatch is owned by the server-side AppState impl
-        // (it routes to the K8s graph warmer). The agent-internal runtime has
-        // no kube client.
-        Err(djinn_control_plane::bridge::RuntimeDispatchError::Backend(
-            "dispatch_verification_test not supported on the agent-internal runtime".to_string(),
-        ))
-    }
-    async fn dispatch_verification(
-        &self,
-        _run_id: &str,
-        _project_id: &str,
-        _task_branch: &str,
-        _target_branch: &str,
-    ) -> Result<(), djinn_control_plane::bridge::RuntimeDispatchError> {
-        // Verification dispatch is owned by the server-side AppState impl (it
-        // routes to the K8s graph warmer). The agent-internal runtime has no
-        // kube client; the verification pipeline falls back to host execution.
-        Err(djinn_control_plane::bridge::RuntimeDispatchError::Backend(
-            "dispatch_verification not supported on the agent-internal runtime".to_string(),
-        ))
-    }
     async fn teardown_taskrun_job(&self, _task_run_id: &str) -> Result<(), String> {
         // Task-run Job deletion is owned by the server-side AppState impl via
         // the K8s graph warmer. Agent-internal/test contexts have no kube
