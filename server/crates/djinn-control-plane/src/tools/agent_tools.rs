@@ -89,6 +89,14 @@ pub struct AgentListParams {
     pub offset: Option<i64>,
 }
 
+fn learned_prompt_was_supplied<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let _ = serde_json::Value::deserialize(deserializer)?;
+    Ok(true)
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct AgentUpdateParams {
     /// Absolute project path.
@@ -106,8 +114,8 @@ pub struct AgentUpdateParams {
     /// semantics. Use `agent_amend_prompt` (Planner) or the clear endpoint instead.
     /// If provided, the update will be rejected with an error.
     #[schemars(skip)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub learned_prompt: Option<String>,
+    #[serde(default, deserialize_with = "learned_prompt_was_supplied")]
+    pub learned_prompt: bool,
     /// Set to true to clear machine-managed learned_prompt back to NULL.
     /// Admin/operator reset path; learned_prompt is otherwise managed through
     /// agent_amend_prompt and the evaluator loop.
@@ -339,7 +347,20 @@ impl DjinnMcpServer {
             .as_ref()
             .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()))
             .unwrap_or_else(|| role.skills.clone());
-        // Resolve learned_prompt: clear wins over set; otherwise keep existing.
+        // Reject direct learned_prompt setting before any clear/update side
+        // effect — it bypasses history/evaluator semantics, and mixed
+        // learned_prompt + clear_learned_prompt requests must be atomic errors.
+        if p.learned_prompt {
+            return Json(AgentSingleResponse {
+                agent: None,
+                error: Some(
+                    "Direct learned_prompt setting is deprecated. Use agent_amend_prompt (Planner) or the clear endpoint instead."
+                        .to_string(),
+                ),
+            });
+        }
+
+        // Resolve learned_prompt: clear means NULL; otherwise keep existing.
         // Since learned_prompt is now derived from history rows, clearing means
         // marking all active amendments as discarded.
         if p.clear_learned_prompt.unwrap_or(false)
@@ -348,16 +369,6 @@ impl DjinnMcpServer {
             return Json(AgentSingleResponse {
                 agent: None,
                 error: Some(format!("failed to clear amendments: {e}")),
-            });
-        }
-        // Reject direct learned_prompt setting — it bypasses history/evaluator semantics.
-        if p.learned_prompt.is_some() {
-            return Json(AgentSingleResponse {
-                agent: None,
-                error: Some(
-                    "Direct learned_prompt setting is deprecated. Use agent_amend_prompt (Planner) or the clear endpoint instead."
-                        .to_string(),
-                ),
             });
         }
         let learned_prompt_value: Option<&str> = if p.clear_learned_prompt.unwrap_or(false) {

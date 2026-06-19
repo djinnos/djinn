@@ -214,9 +214,22 @@ async fn update_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    Json(body): Json<UpdateBody>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Json<AgentResponse>, (StatusCode, String)> {
     require_admin(&state, &headers).await?;
+    if body
+        .as_object()
+        .is_some_and(|payload| payload.contains_key("learned_prompt"))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Direct learned_prompt setting is deprecated. Use agent_amend_prompt (Planner) or the clear endpoint instead."
+                .to_string(),
+        ));
+    }
+    let body: UpdateBody =
+        serde_json::from_value(body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
     let repo = AgentRepository::new(state.db().clone(), state.event_bus());
     let existing = repo
         .get(&id)

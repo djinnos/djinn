@@ -83,16 +83,11 @@ async fn put_update_rejects_direct_learned_prompt_set() {
         .unwrap();
 
     let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap()
-            .contains("Direct learned_prompt setting is deprecated")
-    );
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("Direct learned_prompt setting is deprecated"));
 
     let persisted = AgentRepository::new(db, EventBus::noop())
         .get(&default_agent.id)
