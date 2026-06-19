@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 510
 expression: signatures
 ---
 [
@@ -98,7 +99,7 @@ expression: signatures
           "type": "boolean"
         },
         "learned_prompt": {
-          "description": "Auto-improvement loop amendments. None if not yet set.",
+          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces;\nmutations flow through agent_amend_prompt (Planner) and the\nevaluator/confirmation loop.",
           "nullable": true,
           "type": "string"
         },
@@ -195,7 +196,7 @@ expression: signatures
               "type": "boolean"
             },
             "learned_prompt": {
-              "description": "Auto-improvement loop amendments. None if not yet set.",
+              "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces;\nmutations flow through agent_amend_prompt (Planner) and the\nevaluator/confirmation loop.",
               "nullable": true,
               "type": "string"
             },
@@ -484,7 +485,7 @@ expression: signatures
           "type": "boolean"
         },
         "learned_prompt": {
-          "description": "Auto-improvement loop amendments. None if not yet set.",
+          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces;\nmutations flow through agent_amend_prompt (Planner) and the\nevaluator/confirmation loop.",
           "nullable": true,
           "type": "string"
         },
@@ -539,7 +540,7 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "clear_learned_prompt": {
-          "description": "Set to true to clear learned_prompt back to NULL. Takes precedence over learned_prompt.",
+          "description": "Set to true to clear machine-managed learned_prompt back to NULL.\nAdmin/operator reset path; learned_prompt is otherwise managed through\nagent_amend_prompt and the evaluator loop.",
           "nullable": true,
           "type": "boolean"
         },
@@ -549,11 +550,6 @@ expression: signatures
         },
         "id": {
           "description": "Agent UUID or name.",
-          "type": "string"
-        },
-        "learned_prompt": {
-          "description": "Set a new learned_prompt value (auto-improvement loop only).",
-          "nullable": true,
           "type": "string"
         },
         "mcp_servers": {
@@ -624,7 +620,7 @@ expression: signatures
           "type": "boolean"
         },
         "learned_prompt": {
-          "description": "Auto-improvement loop amendments. None if not yet set.",
+          "description": "Machine-managed prompt learning state. Derived from active\nlearned_prompt_history amendments. Read-only in public surfaces;\nmutations flow through agent_amend_prompt (Planner) and the\nevaluator/confirmation loop.",
           "nullable": true,
           "type": "string"
         },

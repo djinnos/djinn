@@ -21,7 +21,10 @@ pub struct AgentModel {
     pub mcp_servers: Vec<AnyJson>,
     pub skills: Vec<AnyJson>,
     pub is_default: bool,
-    /// Auto-improvement loop amendments. None if not yet set.
+    /// Machine-managed prompt learning state. Derived from active
+    /// learned_prompt_history amendments. Read-only in public surfaces;
+    /// mutations flow through agent_amend_prompt (Planner) and the
+    /// evaluator/confirmation loop.
     pub learned_prompt: Option<String>,
     pub created_at: String,
     pub updated_at: String,

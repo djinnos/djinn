@@ -24,6 +24,7 @@ const PR_POLLER_TRACKED: &str = "djinn_pr_poller_tracked";
 const MERGE_FAILURES_TOTAL: &str = "djinn_merge_failures_total";
 const DOCTOR_FINDINGS: &str = "djinn_doctor_findings";
 const DOCTOR_RUN_DURATION_SECONDS: &str = "djinn_doctor_run_duration_seconds";
+const CARGO_TARGET_SEED_TOTAL: &str = "djinn_cargo_target_seed_total";
 const CARGO_SEED_HIT_TOTAL: &str = "djinn_cargo_seed_hit_total";
 const CARGO_SEED_COLD_TOTAL: &str = "djinn_cargo_seed_cold_total";
 const CARGO_WARM_BASE_FRESHNESS_SECONDS: &str = "djinn_cargo_warm_base_freshness_seconds";
@@ -182,6 +183,42 @@ pub mod cargo_cache {
     }
 }
 
+pub mod cargo_target_seed {
+    pub const FALLBACK_REASON_BASE_MISSING: &str = "base_missing";
+    pub const FALLBACK_REASON_BASE_NOT_DIRECTORY: &str = "base_not_directory";
+    pub const FALLBACK_REASON_BASE_UNUSABLE: &str = "base_unusable";
+    pub const FALLBACK_REASON_SCAN_FAILED: &str = "scan_failed";
+    pub const FALLBACK_REASON_CLONE_FAILED: &str = "clone_failed";
+    pub const FALLBACK_REASON_UNKNOWN: &str = "unknown";
+
+    const OUTCOME_HIT: &str = "hit";
+    const OUTCOME_FALLBACK: &str = "fallback";
+
+    /// Increment the Cargo target seed counter for a warm-base hit.
+    pub fn increment_seed_hit() {
+        metrics::counter!(
+            super::CARGO_TARGET_SEED_TOTAL,
+            "outcome" => OUTCOME_HIT,
+            "fallback_reason" => ""
+        )
+        .increment(1);
+    }
+
+    /// Increment the Cargo target seed counter for a cold fallback reason.
+    ///
+    /// Callers should pass one of the `FALLBACK_REASON_*` constants. Unexpected
+    /// local failures should be mapped to `FALLBACK_REASON_UNKNOWN` rather than
+    /// passed through as free-form labels.
+    pub fn increment_seed_fallback(reason: &'static str) {
+        metrics::counter!(
+            super::CARGO_TARGET_SEED_TOTAL,
+            "outcome" => OUTCOME_FALLBACK,
+            "fallback_reason" => reason
+        )
+        .increment(1);
+    }
+}
+
 /// Render the current registry in Prometheus text format.
 ///
 /// Calling this before `init()` is supported: it initializes the recorder first
@@ -316,6 +353,27 @@ fn register_metrics() {
         DOCTOR_RUN_DURATION_SECONDS,
         "Doctor check run duration in seconds for the most recent recorded run. The only label is the stable DoctorCheck::name() value as check."
     );
+    metrics::describe_counter!(
+        CARGO_TARGET_SEED_TOTAL,
+        "Cargo target seed outcomes partitioned by bounded outcome and fallback_reason labels."
+    );
+    metrics::counter!(CARGO_TARGET_SEED_TOTAL, "outcome" => "hit", "fallback_reason" => "")
+        .absolute(0);
+    for reason in [
+        cargo_target_seed::FALLBACK_REASON_BASE_MISSING,
+        cargo_target_seed::FALLBACK_REASON_BASE_NOT_DIRECTORY,
+        cargo_target_seed::FALLBACK_REASON_BASE_UNUSABLE,
+        cargo_target_seed::FALLBACK_REASON_SCAN_FAILED,
+        cargo_target_seed::FALLBACK_REASON_CLONE_FAILED,
+        cargo_target_seed::FALLBACK_REASON_UNKNOWN,
+    ] {
+        metrics::counter!(
+            CARGO_TARGET_SEED_TOTAL,
+            "outcome" => "fallback",
+            "fallback_reason" => reason
+        )
+        .absolute(0);
+    }
     metrics::describe_counter!(
         CARGO_SEED_HIT_TOTAL,
         "Cargo target warm-base seed successes partitioned by project id."
