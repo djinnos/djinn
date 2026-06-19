@@ -1,3 +1,4 @@
+// djinn:allow-oversize — verification module will be deleted by sibling task; temporary oversize.
 use crate::context::AgentContext;
 use crate::verification::StepEvent;
 use crate::verification::scoped::resolve_scoped_commands;

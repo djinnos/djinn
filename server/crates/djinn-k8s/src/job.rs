@@ -659,7 +659,9 @@ fn task_run_cache_env_vars(
         &cargo_target_run_dir(task_run_id).display().to_string(),
     ));
     let (incremental, clear_wrapper) = match policy {
-        Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_)) if override_.sccache => {
+        Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_))
+            if override_.sccache =>
+        {
             ("0", false)
         }
         _ => ("1", true),

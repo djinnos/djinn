@@ -127,7 +127,7 @@ fn feedback_truncates_large_stdout() {
     assert!(feedback.len() < 7_000);
 }
 
-fn setup_verifying_task_with_count_blocking(count: i64) -> (TaskRepository, String, AgentContext) {
+fn setup_verifying_task_with_count_blocking(_count: i64) -> (TaskRepository, String, AgentContext) {
     std::thread::scope(|s| {
         s.spawn(|| {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -173,7 +173,7 @@ fn setup_verifying_task_with_count_blocking(count: i64) -> (TaskRepository, Stri
     })
 }
 
-async fn setup_verifying_task_with_count(count: i64) -> (TaskRepository, String, AgentContext) {
+async fn setup_verifying_task_with_count(_count: i64) -> (TaskRepository, String, AgentContext) {
     let db = create_test_db();
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
     let project = create_test_project(&db).await;
