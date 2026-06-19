@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 510
 expression: signatures
 ---
 [
@@ -5855,6 +5854,9 @@ expression: signatures
               "nullable": true,
               "type": "string"
             },
+            "status": {
+              "type": "string"
+            },
             "tags": {
               "items": {
                 "type": "string"
@@ -5876,6 +5878,7 @@ expression: signatures
             "file_path",
             "note_type",
             "folder",
+            "status",
             "tags",
             "content",
             "created_at",
@@ -6282,6 +6285,10 @@ expression: signatures
           "type": "string"
         },
         "retrieval_anchor": {
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
           "nullable": true,
           "type": "string"
         },
@@ -6799,6 +6806,11 @@ expression: signatures
         "project": {
           "type": "string"
         },
+        "status": {
+          "description": "Explicit lifecycle status filter. Defaults to active; use archived or\ndeprecated to list non-live notes.",
+          "nullable": true,
+          "type": "string"
+        },
         "type": {
           "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\").",
           "nullable": true,
@@ -6831,6 +6843,9 @@ expression: signatures
             "scope_paths": {
               "type": "string"
             },
+            "status": {
+              "type": "string"
+            },
             "title": {
               "type": "string"
             },
@@ -6844,6 +6859,7 @@ expression: signatures
             "title",
             "note_type",
             "folder",
+            "status",
             "updated_at",
             "scope_paths"
           ],
@@ -6951,6 +6967,10 @@ expression: signatures
           "type": "string"
         },
         "retrieval_anchor": {
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
           "nullable": true,
           "type": "string"
         },
@@ -7127,6 +7147,10 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "status": {
+          "nullable": true,
+          "type": "string"
+        },
         "tags": {
           "items": {
             "type": "string"
@@ -7200,6 +7224,9 @@ expression: signatures
             "scope_paths": {
               "type": "string"
             },
+            "status": {
+              "type": "string"
+            },
             "title": {
               "type": "string"
             },
@@ -7213,6 +7240,7 @@ expression: signatures
             "title",
             "note_type",
             "folder",
+            "status",
             "updated_at",
             "scope_paths"
           ],
@@ -7627,6 +7655,10 @@ expression: signatures
           "type": "string"
         },
         "retrieval_anchor": {
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
           "nullable": true,
           "type": "string"
         },
