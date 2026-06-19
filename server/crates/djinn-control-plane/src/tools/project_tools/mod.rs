@@ -25,9 +25,6 @@ pub use self::config_ops::{
     ProjectEnvironmentConfigGetParams, ProjectEnvironmentConfigGetResponse,
     ProjectEnvironmentConfigResetParams, ProjectEnvironmentConfigResetResponse,
     ProjectEnvironmentConfigSetParams, ProjectEnvironmentConfigSetResponse,
-    ProjectVerificationGetParams, ProjectVerificationGetResponse, ProjectVerificationSetParams,
-    ProjectVerificationSetResponse, ProjectVerificationTestParams, ProjectVerificationTestResponse,
-    ProjectVerificationTestStatusParams, ProjectVerificationTestStatusResponse,
 };
 pub use self::github_ops::{GithubListReposParams, GithubListReposResponse, GithubRepoEntry};
 pub use self::indexer_ops::{

@@ -34,10 +34,6 @@ export namespace AgentCreateInputSchema {
    * Additional system prompt content appended to the base role prompt.
    */
   system_prompt_extensions?: string
-  /**
-   * Custom verification command (falls back to project default).
-   */
-  verification_command?: string
   [k: string]: any
   }
 
@@ -64,7 +60,6 @@ export namespace AgentCreateOutputSchema {
   skills?: AnyJson[]
   system_prompt_extensions?: string
   updated_at?: string
-  verification_command?: string
   [k: string]: any
   }
 
@@ -116,7 +111,6 @@ export namespace AgentListOutputSchema {
   skills: AnyJson[]
   system_prompt_extensions: string
   updated_at: string
-  verification_command?: string
   [k: string]: any
   }
 
@@ -152,7 +146,6 @@ export namespace AgentMetricsOutputSchema {
   extraction_quality: ExtractionQualityMetricEntry
   learned_prompt?: string
   success_rate: number
-  verification_pass_rate: number
   [k: string]: any
   }
   export interface ExtractionQualityMetricEntry {
@@ -201,7 +194,6 @@ export namespace AgentShowOutputSchema {
   skills?: AnyJson[]
   system_prompt_extensions?: string
   updated_at?: string
-  verification_command?: string
   [k: string]: any
   }
 
@@ -233,7 +225,6 @@ export namespace AgentUpdateInputSchema {
   project: string
   skills?: AnyJson[]
   system_prompt_extensions?: string
-  verification_command?: string
   [k: string]: any
   }
 
@@ -260,7 +251,6 @@ export namespace AgentUpdateOutputSchema {
   skills?: AnyJson[]
   system_prompt_extensions?: string
   updated_at?: string
-  verification_command?: string
   [k: string]: any
   }
 
@@ -1807,7 +1797,6 @@ export namespace EpicTasksOutputSchema {
   status: string
   title: string
   updated_at: string
-  verification_failure_count: number
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
@@ -6741,10 +6730,8 @@ export namespace TaskListOutputSchema {
   status: string
   title: string
   total_reopen_count: number
-  total_verification_failure_count: number
   unresolved_blocker_count: number
   updated_at: string
-  verification_failure_count: number
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {

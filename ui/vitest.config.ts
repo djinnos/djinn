@@ -11,6 +11,12 @@ export default mergeConfig(
       css: false,
       include: ["src/**/*.test.{ts,tsx}"],
       exclude: ["node_modules", ".cache", ".djinn", "dist"],
+      maxWorkers: 2,
+      poolOptions: {
+        vmThreads: {
+          memoryLimit: "512MB",
+        },
+      },
       passWithNoTests: true,
     },
   }),
