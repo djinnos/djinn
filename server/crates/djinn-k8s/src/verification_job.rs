@@ -34,7 +34,9 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use uuid::Uuid;
 
 use crate::config::KubernetesConfig;
-use crate::sidecar::{BackingServiceSpec, sidecar_container, sidecar_conn_env, sidecar_dshm_volume};
+use crate::sidecar::{
+    BackingServiceSpec, sidecar_conn_env, sidecar_container, sidecar_dshm_volume,
+};
 use crate::warm_job::{
     MIRROR_MOUNT_DIR, VOLUME_MIRROR, VOLUME_WORKSPACE, WARM_COMMAND_BIN, WORKSPACE_MOUNT_DIR,
     sanitize_id, short_uuid,

@@ -28,6 +28,8 @@ const CARGO_TARGET_SEED_TOTAL: &str = "djinn_cargo_target_seed_total";
 const CARGO_SEED_HIT_TOTAL: &str = "djinn_cargo_seed_hit_total";
 const CARGO_SEED_COLD_TOTAL: &str = "djinn_cargo_seed_cold_total";
 const CARGO_WARM_BASE_FRESHNESS_SECONDS: &str = "djinn_cargo_warm_base_freshness_seconds";
+const CARGO_WARM_STEP_FRESH_COUNT: &str = "djinn_cargo_warm_step_fresh_count";
+const CARGO_WARM_STEP_COMPILING_COUNT: &str = "djinn_cargo_warm_step_compiling_count";
 const SLOT_POOL_STATES: [&str; 2] = ["free", "busy"];
 const JIT_PITFALL_HINTS_TOTAL: &str = "djinn_jit_pitfall_hints_total";
 const JIT_PITFALL_OUTCOMES: [&str; 7] = [
@@ -156,6 +158,8 @@ pub mod cargo_cache {
     pub const SEED_HIT_TOTAL: &str = super::CARGO_SEED_HIT_TOTAL;
     pub const SEED_COLD_TOTAL: &str = super::CARGO_SEED_COLD_TOTAL;
     pub const WARM_BASE_FRESHNESS_SECONDS: &str = super::CARGO_WARM_BASE_FRESHNESS_SECONDS;
+    pub const WARM_STEP_FRESH_COUNT: &str = super::CARGO_WARM_STEP_FRESH_COUNT;
+    pub const WARM_STEP_COMPILING_COUNT: &str = super::CARGO_WARM_STEP_COMPILING_COUNT;
 
     /// Increment the Cargo target warm-base seed hit counter for a project.
     pub fn record_seed_hit(project_id: &str) {
@@ -180,6 +184,26 @@ pub mod cargo_cache {
             "project_id" => project_id.to_owned()
         )
         .set(age_secs);
+    }
+
+    /// Set the number of Cargo units reported as `Fresh` for one warm step.
+    pub fn record_warm_step_fresh_count(project_id: &str, step: &str, count: usize) {
+        metrics::gauge!(
+            super::CARGO_WARM_STEP_FRESH_COUNT,
+            "project_id" => project_id.to_owned(),
+            "step" => step.to_owned()
+        )
+        .set(count as f64);
+    }
+
+    /// Set the number of Cargo units reported as `Compiling` for one warm step.
+    pub fn record_warm_step_compiling_count(project_id: &str, step: &str, count: usize) {
+        metrics::gauge!(
+            super::CARGO_WARM_STEP_COMPILING_COUNT,
+            "project_id" => project_id.to_owned(),
+            "step" => step.to_owned()
+        )
+        .set(count as f64);
     }
 }
 
@@ -385,6 +409,14 @@ fn register_metrics() {
     metrics::describe_gauge!(
         CARGO_WARM_BASE_FRESHNESS_SECONDS,
         "Seconds elapsed while producing the most recent warm Cargo target base for a project."
+    );
+    metrics::describe_gauge!(
+        CARGO_WARM_STEP_FRESH_COUNT,
+        "Cargo warm-step crate count reported as Fresh, partitioned by project id and step."
+    );
+    metrics::describe_gauge!(
+        CARGO_WARM_STEP_COMPILING_COUNT,
+        "Cargo warm-step crate count reported as Compiling, partitioned by project id and step."
     );
 }
 
