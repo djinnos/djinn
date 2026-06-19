@@ -1,3 +1,4 @@
+// djinn:allow-oversize — agent repository over size-guard threshold; already oversized on main, split when touched substantively.
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Agent;
 

@@ -127,7 +127,9 @@ fn feedback_truncates_large_stdout() {
     assert!(feedback.len() < 7_000);
 }
 
-fn setup_needs_review_task_with_count_blocking(_count: i64) -> (TaskRepository, String, AgentContext) {
+fn setup_needs_review_task_with_count_blocking(
+    _count: i64,
+) -> (TaskRepository, String, AgentContext) {
     std::thread::scope(|s| {
         s.spawn(|| {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -153,17 +155,6 @@ fn setup_needs_review_task_with_count_blocking(_count: i64) -> (TaskRepository, 
                     )
                     .await
                     .expect("transition to in_progress");
-                task_repo
-                    .transition(
-                        &task.id,
-                        TransitionAction::SubmitTaskReview,
-                        "test",
-                        "system",
-                        None,
-                        None,
-                    )
-                    .await
-                    .expect("transition to needs_task_review");
 
                 (task_repo, task.id, app_state)
             })
@@ -192,17 +183,6 @@ async fn setup_needs_review_task_with_count(_count: i64) -> (TaskRepository, Str
         )
         .await
         .expect("transition to in_progress");
-    task_repo
-        .transition(
-            &task.id,
-            TransitionAction::SubmitTaskReview,
-            "test",
-            "system",
-            None,
-            None,
-        )
-        .await
-        .expect("transition to needs_task_review");
 
     (task_repo, task.id, app_state)
 }
@@ -513,47 +493,9 @@ async fn handle_verification_failure_second_failure_still_goes_open() {
     assert_eq!(task.status, "open");
 }
 
-#[tokio::test]
-async fn handle_verification_failure_threshold_escalates_directly() {
-    let (task_repo, task_id, app_state) = setup_needs_review_task_with_count(2).await;
-    handle_verification_failure(&task_id, "third failure", &task_repo, &app_state).await;
-    let task = task_repo
-        .get(&task_id)
-        .await
-        .expect("get task")
-        .expect("task exists");
-    assert_eq!(task.status, "needs_lead_intervention");
-
-    let activity = task_repo
-        .list_activity(&task_id)
-        .await
-        .expect("list activity");
-    let statuses: Vec<serde_json::Value> = activity
-        .iter()
-        .filter(|e| e.event_type == "status_changed")
-        .map(|e| serde_json::from_str(&e.payload).expect("status payload json"))
-        .collect();
-    // After setup, we should NOT see an intermediate open status
-    // when escalating directly to Lead; the transition should be verifying->needs_lead_intervention
-    assert!(!statuses.iter().any(|p| p["to_status"] == "open"));
-    assert!(
-        statuses
-            .iter()
-            .any(|p| p["to_status"] == "needs_lead_intervention")
-    );
-}
-
-#[tokio::test]
-async fn handle_verification_failure_past_threshold_escalates() {
-    let (task_repo, task_id, app_state) = setup_needs_review_task_with_count(5).await;
-    handle_verification_failure(&task_id, "many failures", &task_repo, &app_state).await;
-    let task = task_repo
-        .get(&task_id)
-        .await
-        .expect("get task")
-        .expect("task exists");
-    assert_eq!(task.status, "needs_lead_intervention");
-}
+// (escalation tests removed — verification failure counting/escalation was removed
+//  from the core model; `handle_verification_failure` now always transitions to
+//  open for re-dispatch.)
 
 // ── regression: image-not-ready requeues rather than erroring ──────────
 //
