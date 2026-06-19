@@ -18,9 +18,10 @@ pub use self::graph_bridge::RepoGraphOps;
 pub use self::graph_data::{
     ApiImpactEntry, ApiImpactResult, ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef,
     Candidate, ChangeKind, ChangedRange, ChurnEntry, ComplexityMetrics, ComplexityResult,
-    CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup, CycleMember, DeadSymbolEntry,
-    DeprecatedHit, DetectedChangesResult, DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory,
-    EdgeEntry, FileComplexityEntry, FileGroupEntry, FlowHit, FlowResult, FunctionComplexityEntry,
+    CoupledPairEntry, CouplingEntry, CouplingHubEntry, CrateEdgeEntry, CrateGraphRequest,
+    CrateGraphResponse, CrateNodeEntry, CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit,
+    DetectedChangesResult, DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory, EdgeEntry,
+    FileComplexityEntry, FileGroupEntry, FlowHit, FlowResult, FunctionComplexityEntry,
     GraphNeighbor, GraphStatus, GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactEntry,
     ImpactResult, MethodMeta, MethodParam, MetricsAtResult, NeighborsResult, OrphanEntry,
     PagerankTier, PathHop, PathResult, ProcessRef, ProjectCtx, QuerySubgraphBudget,
