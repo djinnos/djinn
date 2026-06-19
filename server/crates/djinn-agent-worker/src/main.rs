@@ -64,6 +64,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod cargo_cache_policy;
 pub mod cargo_metrics;
 mod cargo_target_seed;
 mod lifecycle;
@@ -808,24 +809,89 @@ async fn run_cargo_warm_step(
     args: &[&str],
     label: &str,
 ) -> bool {
+    let cargo_instrumented = std::env::var("DJINN_CARGO_INSTRUMENT").is_ok();
+
+    if !cargo_instrumented {
+        return match tokio::process::Command::new("cargo")
+            .args(args)
+            .current_dir(workspace_dir)
+            .status()
+            .await
+        {
+            Ok(status) if status.success() => {
+                info!(project_id, step = label, "cargo warm: step succeeded");
+                true
+            }
+            Ok(status) => {
+                warn!(
+                    project_id,
+                    step = label,
+                    code = ?status.code(),
+                    "cargo warm: step failed (non-fatal; continuing warm)"
+                );
+                false
+            }
+            Err(err) => {
+                warn!(
+                    project_id,
+                    step = label,
+                    error = %err,
+                    "cargo warm: failed to spawn `cargo` (non-fatal; continuing warm)"
+                );
+                false
+            }
+        };
+    }
+
+    let mut instrumented_args = args.to_vec();
+    instrumented_args.push("-v");
+
     match tokio::process::Command::new("cargo")
-        .args(args)
+        .args(&instrumented_args)
         .current_dir(workspace_dir)
-        .status()
+        .output()
         .await
     {
-        Ok(status) if status.success() => {
-            info!(project_id, step = label, "cargo warm: step succeeded");
-            true
-        }
-        Ok(status) => {
-            warn!(
+        Ok(output) => {
+            let (stdout_fresh_count, stdout_compiling_count) =
+                cargo_fresh_compiling_counts(&output.stdout);
+            let (stderr_fresh_count, stderr_compiling_count) =
+                cargo_fresh_compiling_counts(&output.stderr);
+            let fresh_count = stdout_fresh_count + stderr_fresh_count;
+            let compiling_count = stdout_compiling_count + stderr_compiling_count;
+
+            info!(
                 project_id,
                 step = label,
-                code = ?status.code(),
-                "cargo warm: step failed (non-fatal; continuing warm)"
+                step_label = label,
+                workspace_dir = %workspace_dir.display(),
+                fresh_count,
+                compiling_count,
+                "cargo warm: instrumented Fresh/Compiling counts"
             );
-            false
+            djinn_telemetry::cargo_cache::record_warm_step_fresh_count(
+                project_id,
+                label,
+                fresh_count,
+            );
+            djinn_telemetry::cargo_cache::record_warm_step_compiling_count(
+                project_id,
+                label,
+                compiling_count,
+            );
+
+            if output.status.success() {
+                info!(project_id, step = label, "cargo warm: step succeeded");
+                true
+            } else {
+                warn!(
+                    project_id,
+                    step = label,
+                    code = ?output.status.code(),
+                    "cargo warm: step failed (non-fatal; continuing warm)"
+                );
+                false
+            }
         }
         Err(err) => {
             warn!(
@@ -837,6 +903,21 @@ async fn run_cargo_warm_step(
             false
         }
     }
+}
+
+fn cargo_fresh_compiling_counts(output: &[u8]) -> (usize, usize) {
+    let mut fresh_count = 0;
+    let mut compiling_count = 0;
+
+    for line in String::from_utf8_lossy(output).lines() {
+        match line.split_whitespace().next() {
+            Some("Fresh") => fresh_count += 1,
+            Some("Compiling") => compiling_count += 1,
+            _ => {}
+        }
+    }
+
+    (fresh_count, compiling_count)
 }
 
 struct CargoTargetRunDirGuard {
