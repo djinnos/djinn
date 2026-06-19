@@ -2264,11 +2264,9 @@ mod tests {
             .graph_blob;
 
         // Parity must fail with Diff variant — proves the gate is real.
-        let err = crate::graph_parity::assert_graph_artifact_blob_parity(
-            &cold_blob,
-            &different_blob,
-        )
-        .expect_err("different graphs must produce a parity error");
+        let err =
+            crate::graph_parity::assert_graph_artifact_blob_parity(&cold_blob, &different_blob)
+                .expect_err("different graphs must produce a parity error");
         assert!(
             matches!(
                 err,
@@ -2276,5 +2274,111 @@ mod tests {
             ),
             "expected Diff variant, got {err:?}"
         );
+    }
+
+    /// Positive equivalence test: cache-reuse path produces a byte-identical
+    /// graph blob to a full cold warm on the same commit.
+    ///
+    /// The first warm runs with no env vars set (cold warm, no cache reuse).
+    /// The second warm runs with `DJINN_GRAPH_CACHE_REUSE_ENABLED=1` set.
+    /// Both must produce the same graph blob.
+    #[tokio::test]
+    async fn cache_reuse_produces_identical_graph_blob() {
+        let tmp = workspace_tempdir("cache-reuse-equiv-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create("test-cache-reuse", "test", "test-cache-reuse")
+            .await
+            .expect("create project");
+
+        let head_out = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&project_root)
+            .output()
+            .await
+            .unwrap();
+        let commit_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+
+        // --- Cold warm: no env vars, full pipeline ---
+        let result = ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await;
+        assert!(result.is_ok(), "cold warm failed: {result:?}");
+
+        let cold_blob = cache_repo
+            .get(&project.id, &commit_sha)
+            .await
+            .expect("get cold blob")
+            .expect("cold blob should exist in DB")
+            .graph_blob;
+
+        // --- Drop in-memory GRAPH_CACHE and corrupt the DB cache so the next warm
+        // must re-run the indexer, not hit any cache layer ---
+        clear_test_caches().await;
+        let garbage = b"this is definitely not a valid graph artifact";
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: &commit_sha,
+                graph_blob: garbage,
+            })
+            .await
+            .expect("corrupt DB cache row");
+
+        // --- Warm with cache reuse enabled ---
+        let _guard = EnvVarGuard::set("DJINN_GRAPH_CACHE_REUSE_ENABLED", "1");
+        let result = ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await;
+        assert!(result.is_ok(), "warm with cache reuse failed: {result:?}");
+
+        let warm_blob = cache_repo
+            .get(&project.id, &commit_sha)
+            .await
+            .expect("get warm blob")
+            .expect("warm blob should exist in DB")
+            .graph_blob;
+
+        // --- Parity gate: cold and warm blobs must match ---
+        crate::graph_parity::assert_graph_artifact_blob_parity(&cold_blob, &warm_blob)
+            .expect("cache-reuse == full parity violation: cold and warm blobs must match");
+    }
+
+    struct EnvVarGuard {
+        name: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let original = std::env::var(name).ok();
+            // SAFETY: test-only env mutation is serialized by the test runner
+            // (tokio::test runs tests sequentially by default).
+            unsafe { std::env::set_var(name, value) };
+            Self { name, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: test-only env mutation is serialized by the test runner.
+            match &self.original {
+                Some(v) => unsafe { std::env::set_var(self.name, v) },
+                None => unsafe { std::env::remove_var(self.name) },
+            }
+        }
     }
 }
