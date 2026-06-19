@@ -877,7 +877,7 @@ async fn warm_cargo_target_base(
         project_id,
         &workspace_dir,
         &clippy_args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        commands[0].label.as_str(),
+        commands[0].label,
     )
     .await;
 
@@ -3062,7 +3062,7 @@ mod tests {
         let sentinel = target.path().join("sentinel.rlib");
         std::fs::write(&sentinel, b"precompiled-artifact").unwrap();
 
-        let run_id = run_in_pod_verification(&db, project_id, &task, ws.path())
+        let _run_id = run_in_pod_verification(&db, project_id, &task, ws.path())
             .await
             .expect("in-pod verification");
 

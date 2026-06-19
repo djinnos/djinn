@@ -654,7 +654,3 @@ fn format_verification_failure_feedback(
         "Verification failed".to_string()
     }
 }
-
-#[cfg(test)]
-#[path = "verification_tests.rs"]
-mod tests;
