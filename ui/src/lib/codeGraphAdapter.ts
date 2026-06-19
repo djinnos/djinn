@@ -16,6 +16,11 @@
  */
 
 import Graph from "graphology";
+import {
+  computeForceLayout,
+  computeSequentialLayout,
+  computeRadialLayout,
+} from "@/lib/codeGraphLayouts";
 
 export type SnapshotNodeKind = "file" | "folder" | "symbol" | "community";
 
@@ -546,6 +551,8 @@ export interface BuildGraphOptions {
   dropSelfLoops?: boolean;
   /** Drop `MemberOf` edges (scaffolding). Default `false`. */
   dropMemberOf?: boolean;
+  /** Layout mode to apply. Default `"force"`. */
+  layoutMode?: "force" | "sequential" | "radial";
 }
 
 /**
@@ -604,6 +611,7 @@ export function buildGraphFromSnapshot(
 ): Graph {
   const dropSelfLoops = options.dropSelfLoops ?? true;
   const dropMemberOf = options.dropMemberOf ?? false;
+  const layoutMode = options.layoutMode ?? "force";
   const graph = new Graph({ multi: true, type: "directed" });
 
   const nodes = snapshot.nodes;
@@ -639,140 +647,18 @@ export function buildGraphFromSnapshot(
     return graph;
   }
 
-  const structuralSpread = Math.sqrt(Math.max(nodeCount, 1)) * 40;
-  const childJitter = Math.sqrt(Math.max(nodeCount, 1)) * 3;
-  const clusterJitter = Math.sqrt(Math.max(nodeCount, 1)) * 1.5;
-
-  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
-
-  // Build parent → children map from hierarchy edges. Only structural
-  // / declaration relationships count as "parent owns child" — call
-  // graph edges (SymbolReference) deliberately don't influence layout
-  // since they're noise during seeding.
-  const HIERARCHY_KINDS = new Set([
-    "ContainsDefinition",
-    "DeclaredInFile",
-    "FileReference",
-  ]);
-  const childToParent = new Map<string, string>();
-  for (const edge of snapshot.edges) {
-    if (!HIERARCHY_KINDS.has(edge.kind)) continue;
-    if (!nodeMap.has(edge.from) || !nodeMap.has(edge.to)) continue;
-    if (!childToParent.has(edge.to)) childToParent.set(edge.to, edge.from);
-  }
-  const parentToChildren = new Map<string, string[]>();
-  for (const [child, parent] of childToParent) {
-    const list = parentToChildren.get(parent) ?? [];
-    list.push(child);
-    parentToChildren.set(parent, list);
-  }
-
-  const structuralNodes = nodes.filter(
-    (n) =>
-      n.kind === "folder" ||
-      n.kind === "file" ||
-      n.kind === "community",
-  );
-
-  // Cluster centers — golden-angle distributed; sqrt(idx) radius
-  // produces an even areal density rather than a compressed center.
-  const clusterCenters = new Map<string, { x: number; y: number }>();
-  const communityIds = new Set<string>();
-  for (const n of nodes) if (n.community_id) communityIds.add(n.community_id);
-  if (communityIds.size > 0) {
-    const clusterSpread = structuralSpread * 0.8;
-    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-    const total = communityIds.size;
-    let i = 0;
-    for (const cid of communityIds) {
-      const angle = i * goldenAngle;
-      const radius = clusterSpread * Math.sqrt((i + 1) / total);
-      clusterCenters.set(cid, {
-        x: radius * Math.cos(angle),
-        y: radius * Math.sin(angle),
-      });
-      i += 1;
-    }
-  }
-
-  const positions = new Map<string, { x: number; y: number }>();
-
-  // Structural nodes go down first — their children cluster around them.
-  const structuralCount = Math.max(structuralNodes.length, 1);
-  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-  structuralNodes.forEach((node, index) => {
-    const angle = index * goldenAngle;
-    const radius =
-      structuralSpread * Math.sqrt((index + 1) / structuralCount);
-    const jitter = structuralSpread * 0.15;
-    const x = radius * Math.cos(angle) + (Math.random() - 0.5) * jitter;
-    const y = radius * Math.sin(angle) + (Math.random() - 0.5) * jitter;
-    positions.set(node.id, { x, y });
-    addNode(graph, node, { x, y }, maxRank, nodeCount);
-  });
-
-  const SYMBOL_CLUSTER_KINDS = new Set([
-    "function",
-    "method",
-    "class",
-    "struct",
-    "interface",
-    "enum",
-    "constructor",
-    "trait",
-    "impl",
-  ]);
-
-  const placeNode = (id: string) => {
-    if (graph.hasNode(id)) return;
-    const node = nodeMap.get(id);
-    if (!node) return;
-
-    let pos: { x: number; y: number } | null = null;
-    const cid = node.community_id;
-    const isClusterableSymbol =
-      node.kind === "symbol" && SYMBOL_CLUSTER_KINDS.has(node.symbol_kind ?? "");
-
-    if (isClusterableSymbol && cid && clusterCenters.has(cid)) {
-      const c = clusterCenters.get(cid)!;
-      pos = {
-        x: c.x + (Math.random() - 0.5) * clusterJitter,
-        y: c.y + (Math.random() - 0.5) * clusterJitter,
-      };
-    } else {
-      const parentId = childToParent.get(id);
-      const parentPos = parentId ? positions.get(parentId) : null;
-      if (parentPos) {
-        pos = {
-          x: parentPos.x + (Math.random() - 0.5) * childJitter,
-          y: parentPos.y + (Math.random() - 0.5) * childJitter,
-        };
-      } else {
-        pos = {
-          x: (Math.random() - 0.5) * structuralSpread * 0.5,
-          y: (Math.random() - 0.5) * structuralSpread * 0.5,
-        };
-      }
-    }
-    positions.set(id, pos);
-    addNode(graph, node, pos, maxRank, nodeCount);
-  };
-
-  // BFS from structural nodes so parents always exist before children.
-  const queue: string[] = [...structuralNodes.map((n) => n.id)];
-  const visited = new Set<string>(queue);
-  while (queue.length > 0) {
-    const cur = queue.shift()!;
-    const children = parentToChildren.get(cur) ?? [];
-    for (const childId of children) {
-      if (visited.has(childId)) continue;
-      visited.add(childId);
-      placeNode(childId);
-      queue.push(childId);
-    }
-  }
+  // Deterministic layout branch: delegate to the pure layout module.
+  // For force mode we still seed with computeForceLayout so the adapter
+  // stays jitter-free; the FA2 supervisor in useSigmaGraph runs on top.
+  const layoutPositions =
+    layoutMode === "sequential"
+      ? computeSequentialLayout(snapshot)
+      : layoutMode === "radial"
+        ? computeRadialLayout(snapshot, null)
+        : computeForceLayout(snapshot);
   for (const node of nodes) {
-    if (!graph.hasNode(node.id)) placeNode(node.id);
+    const pos = layoutPositions.get(node.id) ?? { x: 0, y: 0 };
+    addNode(graph, node, pos, maxRank, nodeCount);
   }
 
   // Edges — per-kind colors, base scaled by graph density, modulated
@@ -783,6 +669,12 @@ export function buildGraphFromSnapshot(
     dropSelfLoops,
     dropMemberOf,
   });
+
+  // Non-force modes are deterministic — flag the graph so useSigmaGraph
+  // skips the FA2 supervisor and noverlap pass.
+  if (layoutMode !== "force") {
+    graph.setAttribute(PRECOMPUTED_LAYOUT_ATTRIBUTE, true);
+  }
 
   return graph;
 }
@@ -819,7 +711,7 @@ function addEdgesFromSnapshot(
       size: baseSize * style.sizeMultiplier * confidenceFactor * (isCrossWorkspace ? 2.4 : 1),
       color: crossWorkspaceColor ?? style.color,
       type: "curved",
-      curvature: (isCrossWorkspace ? 0.28 : 0.12) + Math.random() * 0.08,
+      curvature: (isCrossWorkspace ? 0.28 : 0.12) + 0.04,
       zIndex: isCrossWorkspace ? 20 : 1,
       lineStyle: isCrossWorkspace ? "dashed" : "solid",
     });
