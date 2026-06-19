@@ -10,7 +10,53 @@ import { relativeTime } from "@/components/memory/memoryUtils";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
-import type { ProposalDetail } from "@/lib/proposalQueries";
+import type {
+  ProposalDetail,
+  ProposalHistoryEntry,
+} from "@/lib/proposalQueries";
+
+function revisionBodyFormat(revision: ProposalHistoryEntry): string {
+  const bodyFormat = (revision as { body_format?: unknown }).body_format;
+  return typeof bodyFormat === "string" && bodyFormat.trim()
+    ? bodyFormat.trim().toLowerCase()
+    : "markdown";
+}
+
+function truncatePreview(text: string, maxLength = 140): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+
+  const clipped = normalized.slice(0, maxLength - 1);
+  const lastBoundary = Math.max(
+    clipped.lastIndexOf(" "),
+    clipped.lastIndexOf("."),
+    clipped.lastIndexOf(","),
+  );
+  const safeClip = lastBoundary >= 60 ? clipped.slice(0, lastBoundary) : clipped;
+  return `${safeClip.trimEnd()}…`;
+}
+
+function revisionBodyPreview(revision: ProposalHistoryEntry): string {
+  const body = revision.body.trim();
+  if (!body) return "No body.";
+
+  const format = revisionBodyFormat(revision);
+  if (format !== "mdx") return truncatePreview(body);
+
+  const blockTags = Array.from(
+    body.matchAll(/<([a-z][\w-]*)(?:\s[^>]*)?>/gi),
+    (match) => match[1],
+  );
+  const uniqueBlockTags = [...new Set(blockTags)];
+  const textPreview = truncatePreview(
+    body.replace(/<\/?[a-z][\w-]*(?:\s[^>]*)?>/gi, " "),
+  );
+
+  if (uniqueBlockTags.length === 0) return truncatePreview(body);
+
+  const blockSummary = `MDX blocks: ${uniqueBlockTags.join(", ")}`;
+  return textPreview ? `${blockSummary} · ${textPreview}` : blockSummary;
+}
 
 /**
  * Revision history for a proposal's spec. Every material edit (title/body/AC)
@@ -68,6 +114,7 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
           const isHead = r.seq === proposal.latest_revision_seq;
           const isOpen = open.includes(r.id);
           const isSpecRevision = r.event_kind === "spec_revision";
+          const bodyFormat = revisionBodyFormat(r);
           const titleChanged = !!prev && prev.title !== r.title;
           if (!isSpecRevision) {
             const statusLabel =
@@ -96,9 +143,13 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                           : "—"}
                     </span>
                   </span>
-                  <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                  <time
+                    dateTime={r.created_at}
+                    title={r.created_at}
+                    className="ml-auto shrink-0 text-xs text-muted-foreground"
+                  >
                     {relativeTime(r.created_at)}
-                  </span>
+                  </time>
                 </div>
               </li>
             );
@@ -123,10 +174,18 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                 >
                   rev {r.seq}
                 </Badge>
+                <Badge variant="secondary" className="font-mono">
+                  {r.event_kind}
+                </Badge>
+                {bodyFormat !== "markdown" && (
+                  <Badge variant="outline" className="font-mono uppercase">
+                    {bodyFormat.toUpperCase()}
+                  </Badge>
+                )}
                 {isHead && (
                   <span className="text-xs text-muted-foreground">current</span>
                 )}
-                <span className="flex min-w-0 items-center gap-1.5">
+                <span className="flex min-w-0 items-center gap-1.5 self-start pt-0.5">
                   <UserAvatar user={editor} className="size-4" />
                   <span className="truncate">
                     {editor
@@ -136,9 +195,16 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
                         : "—"}
                   </span>
                 </span>
-                <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                  {relativeTime(r.created_at)}
+                <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                  {revisionBodyPreview(r)}
                 </span>
+                <time
+                  dateTime={r.created_at}
+                  title={r.created_at}
+                  className="ml-auto shrink-0 text-xs text-muted-foreground"
+                >
+                  {relativeTime(r.created_at)}
+                </time>
               </button>
               {isOpen && (
                 <div className="space-y-2 px-3 pb-3">
