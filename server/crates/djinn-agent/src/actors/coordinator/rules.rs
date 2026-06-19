@@ -2048,6 +2048,7 @@ mod tests {
                 body: "original body",
                 acceptance_criteria: None,
                 status: None,
+                body_format: None,
             })
             .await
             .unwrap();
@@ -2089,6 +2090,7 @@ mod tests {
                     acceptance_criteria: "[]",
                     status: "building",
                     superseded_by: None,
+                    body_format: None,
                 },
             )
             .await

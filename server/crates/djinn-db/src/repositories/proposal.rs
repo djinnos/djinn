@@ -1497,8 +1497,13 @@ mod tests {
         let p = repo.create(create_input("My Proposal")).await.unwrap();
         assert_eq!(p.title, "My Proposal");
         assert_eq!(p.status, "draft");
+        assert_eq!(p.body_format, "markdown");
         assert_eq!(p.short_id.len(), 4);
         assert_eq!(p.acceptance_criteria, "[]");
+
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(revisions[0].body_format, "markdown");
 
         let events = captured.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -1528,15 +1533,19 @@ mod tests {
                     acceptance_criteria: "[\"ac1\"]",
                     status: "archived",
                     superseded_by: None,
-                    body_format: None,
+                    body_format: Some("mdx"),
                 },
             )
             .await
             .unwrap();
         assert_eq!(updated.title, "Up2");
         assert_eq!(updated.status, "archived");
+        assert_eq!(updated.body_format, "mdx");
         assert_eq!(updated.acceptance_criteria, "[\"ac1\"]");
         assert!(updated.closed_at.is_some());
+
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        assert_eq!(revisions.last().unwrap().body_format, "mdx");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
