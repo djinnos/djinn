@@ -156,8 +156,8 @@ where
 /// 1. Creates a fresh worktree from the task branch
 /// 2. Runs setup commands
 /// 3. Runs verification commands
-/// 4. On pass: transitions to `needs_task_review` (VerificationPass)
-/// 5. On fail: logs the failure as an activity comment, transitions to `open` (VerificationFail)
+/// 4. On pass: transitions to `needs_task_review`
+/// 5. On fail: logs the failure as an activity comment, transitions to `open`
 /// 6. Cleans up the worktree
 /// 7. Triggers redispatch for the project
 #[allow(dead_code)]

@@ -100,8 +100,8 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
         }
 
         // K8s flow: the djinn-supervisor stage loop is the SOLE transition
-        // authority. The legacy role.on_complete() returned actions like
-        // SubmitVerification / SubmitTaskReview that raced with the supervisor
+        // authority. The legacy role.on_complete() returned post-session
+        // transition actions that raced with the supervisor
         // body's Start / submit_task_review / task_review_approve calls,
         // moving the task into `verifying` before the supervisor's
         // submit_task_review could fire (then bouncing it back to `open`
@@ -204,7 +204,7 @@ pub(crate) async fn apply_transition_and_dispatch(
         if is_conflict_rejection || is_orphaned_tool_call {
             interrupt_paused_worker_session(task_id, app_state).await;
         }
-        // SubmitVerification removed; verification no longer runs after session teardown.
+        // Verification handoff removed; no extra post-session transition runs here.
     } else {
         tracing::info!(
             task_id = %task_id,

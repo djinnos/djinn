@@ -26,7 +26,7 @@
       ]
     },
     "nullable": [
-      null,
+      true,
       null,
       null
     ]
