@@ -24,7 +24,6 @@ export type SSEEventType =
   | "session_started"
   | "session_ended"
   | "sync_completed"
-  | "verification_step"
   | "lifecycle_step"
   | "dispatch_pause_changed"
   | "credential_created"

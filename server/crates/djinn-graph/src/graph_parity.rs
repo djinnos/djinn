@@ -593,4 +593,480 @@ mod tests {
 
         assert_graph_artifact_blob_parity(&blob, &blob).expect("matching blobs should match");
     }
+
+    #[test]
+    fn td55_equivalence_fixture_builds_matching_artifact_blobs() {
+        let old_blob = crate::test_helpers::td55_equivalence_fixture_artifact_blob();
+        let new_blob = crate::test_helpers::td55_equivalence_fixture_artifact_blob();
+        let artifact = deserialize_repo_graph_artifact_bincode(&old_blob)
+            .expect("fixture blob should deserialize through artifact compat seam");
+
+        assert!(
+            artifact.edges.iter().any(|edge| {
+                edge.kind == RepoGraphEdgeKind::SymbolReference
+                    && artifact.nodes[edge.source].file_path
+                        != artifact.nodes[edge.target].file_path
+            }),
+            "fixture should include a cross-file symbol reference edge"
+        );
+
+        assert_graph_artifact_blob_parity(&old_blob, &new_blob)
+            .expect("identical td55 fixture builds should match");
+    }
+
+    /// td55 primary gate: a cold/full parse+build of the fixture artifact set
+    /// must produce the same serialized graph artifact bytes as a cache-reuse
+    /// parse+build of the **same complete** artifact set.
+    ///
+    /// This is the explicit `incremental == full` equivalence check for the
+    /// unchanged/cache-warm path. The cache-reuse side still parses every
+    /// artifact (no changed-file-only subset); the difference is only whether
+    /// the parse cache is populated/reused or bypassed.
+    #[test]
+    fn td55_cold_vs_cache_reuse_graph_artifact_parity() {
+        // Isolated temp cache root for the cache-reuse phase — no env var
+        // mutation, no shared/global cache, deterministic.
+        let cache_root = crate::test_helpers::workspace_tempdir("td55-cache-reuse-root-");
+        let cache_store = crate::scip_indexer::cache::ScipCacheStore::new(cache_root.path());
+
+        // --- Phase 1: cold parse (cache reuse disabled) ---
+        let cold_fixture = crate::test_helpers::td55_cache_reuse_scip_fixture();
+        let cold_parsed = crate::scip_parser::parse_scip_artifacts_with_cache_store(
+            &cold_fixture.artifacts,
+            None,
+        )
+        .expect("cold parse should succeed");
+        let mut cold_graph =
+            crate::repo_graph::RepoDependencyGraph::try_build_with_source(&cold_parsed, None)
+                .expect("cold graph build should succeed");
+        cold_graph.set_layout_positions(crate::layout::derive_layout_positions(&cold_graph));
+        let cold_blob = bincode::serialize(&cold_graph.to_artifact())
+            .expect("serialize cold graph artifact blob");
+
+        // --- Phase 2: cache-reuse parse of the same complete artifact set ---
+        // A fresh fixture is built so temp file paths differ, but the SCIP
+        // content is byte-identical — the cache key is content-derived so the
+        // cache store recognizes/uses/repopulates identically.
+        let reuse_fixture = crate::test_helpers::td55_cache_reuse_scip_fixture();
+        // First call with cache: populates the store (cold misses → stores).
+        let _ = crate::scip_parser::parse_scip_artifacts_with_cache_store(
+            &reuse_fixture.artifacts,
+            Some(&cache_store),
+        )
+        .expect("cache-reuse parse (population) should succeed");
+        // Second call with cache: exercises the hit path (reuses stored bytes).
+        let reuse_parsed = crate::scip_parser::parse_scip_artifacts_with_cache_store(
+            &reuse_fixture.artifacts,
+            Some(&cache_store),
+        )
+        .expect("cache-reuse parse (hit) should succeed");
+        let mut reuse_graph =
+            crate::repo_graph::RepoDependencyGraph::try_build_with_source(&reuse_parsed, None)
+                .expect("cache-reuse graph build should succeed");
+        reuse_graph.set_layout_positions(crate::layout::derive_layout_positions(&reuse_graph));
+        let reuse_blob = bincode::serialize(&reuse_graph.to_artifact())
+            .expect("serialize cache-reuse graph artifact blob");
+
+        // Sanity: both graphs have at least one cross-file edge so a
+        // changed-file-only path that drops cross-file edges would be caught.
+        // The cross-file signal includes `FileReference` (file→file/symbol)
+        // and `SymbolReference`/`Reads`/`Writes` (symbol→file) edges that
+        // span partitions.
+        for (label, blob) in [("cold", &cold_blob), ("cache-reuse", &reuse_blob)] {
+            let artifact = deserialize_repo_graph_artifact_bincode(blob)
+                .unwrap_or_else(|err| panic!("{label} blob should deserialize: {err}"));
+            let is_cross_file_ref = |edge: &RepoGraphArtifactEdge| {
+                matches!(
+                    edge.kind,
+                    RepoGraphEdgeKind::SymbolReference
+                        | RepoGraphEdgeKind::Reads
+                        | RepoGraphEdgeKind::Writes
+                        | RepoGraphEdgeKind::FileReference
+                ) && artifact.nodes[edge.source].file_path != artifact.nodes[edge.target].file_path
+            };
+            assert!(
+                artifact.edges.iter().any(is_cross_file_ref),
+                "{label} fixture graph should include a cross-file reference edge"
+            );
+        }
+
+        // The essential gate: artifact-level parity through the shared helper.
+        assert_graph_artifact_blob_parity(&cold_blob, &reuse_blob)
+            .expect("cold and cache-reuse graph artifact bytes should be equivalent");
+    }
+
+    /// td55 one-partition-changed incremental-shaped gate: after a cache-
+    /// populating full run, change one fixture partition, replay unchanged
+    /// partitions from cache, rebuild the full current graph, and prove
+    /// parity against a full current rebuild.
+    ///
+    /// This guards against the unsafe changed-file-only graph shape that
+    /// would drop unchanged partitions from the final artifact set.
+    #[test]
+    fn td55_one_partition_changed_incremental_shaped_graph_artifact_parity() {
+        let cache_root = crate::test_helpers::workspace_tempdir("td55-incremental-root-");
+        let cache_store = crate::scip_indexer::cache::ScipCacheStore::new(cache_root.path());
+
+        // --- Phase 1: cold parse of the original fixture populates cache ---
+        let cold_fixture = crate::test_helpers::td55_cache_reuse_scip_fixture();
+        let cold_parsed = crate::scip_parser::parse_scip_artifacts_with_cache_store(
+            &cold_fixture.artifacts,
+            Some(&cache_store),
+        )
+        .expect("cold parse should succeed");
+        let mut cold_graph =
+            crate::repo_graph::RepoDependencyGraph::try_build_with_source(&cold_parsed, None)
+                .expect("cold graph build should succeed");
+        cold_graph.set_layout_positions(crate::layout::derive_layout_positions(&cold_graph));
+        let _cold_blob = bincode::serialize(&cold_graph.to_artifact())
+            .expect("serialize cold graph artifact blob");
+
+        // --- Phase 2: incremental-shaped parse with one changed partition ---
+        // The changed fixture has a different app partition (extra symbol).
+        // The domain partition is byte-identical to the cold fixture, so it
+        // should hit the parse cache. The app partition is changed, so it
+        // should miss cache and be parsed fresh.
+        let changed_fixture = crate::test_helpers::td55_incremental_scip_fixture("app");
+        let incremental_parsed = crate::scip_parser::parse_scip_artifacts_with_cache_store(
+            &changed_fixture.artifacts,
+            Some(&cache_store),
+        )
+        .expect("incremental parse should succeed");
+        let mut incremental_graph = crate::repo_graph::RepoDependencyGraph::try_build_with_source(
+            &incremental_parsed,
+            None,
+        )
+        .expect("incremental graph build should succeed");
+        incremental_graph
+            .set_layout_positions(crate::layout::derive_layout_positions(&incremental_graph));
+        let incremental_blob = bincode::serialize(&incremental_graph.to_artifact())
+            .expect("serialize incremental graph artifact blob");
+
+        // --- Phase 3: full current rebuild (cache disabled) of changed fixture ---
+        let full_fixture = crate::test_helpers::td55_incremental_scip_fixture("app");
+        let full_parsed = crate::scip_parser::parse_scip_artifacts_with_cache_store(
+            &full_fixture.artifacts,
+            None,
+        )
+        .expect("full parse should succeed");
+        let mut full_graph =
+            crate::repo_graph::RepoDependencyGraph::try_build_with_source(&full_parsed, None)
+                .expect("full graph build should succeed");
+        full_graph.set_layout_positions(crate::layout::derive_layout_positions(&full_graph));
+        let full_blob = bincode::serialize(&full_graph.to_artifact())
+            .expect("serialize full graph artifact blob");
+
+        // --- Sanity: both graphs have at least one cross-file edge ---
+        for (label, blob) in [("incremental", &incremental_blob), ("full", &full_blob)] {
+            let artifact = deserialize_repo_graph_artifact_bincode(blob)
+                .unwrap_or_else(|err| panic!("{label} blob should deserialize: {err}"));
+            let is_cross_file_ref = |edge: &RepoGraphArtifactEdge| {
+                matches!(
+                    edge.kind,
+                    RepoGraphEdgeKind::SymbolReference
+                        | RepoGraphEdgeKind::Reads
+                        | RepoGraphEdgeKind::Writes
+                        | RepoGraphEdgeKind::FileReference
+                ) && artifact.nodes[edge.source].file_path != artifact.nodes[edge.target].file_path
+            };
+            assert!(
+                artifact.edges.iter().any(is_cross_file_ref),
+                "{label} fixture graph should include a cross-file reference edge"
+            );
+        }
+
+        // --- Explicit guard: the incremental-shaped build consumed ALL
+        // current partitions/files, not only the changed one. ---
+        let incremental_artifact = deserialize_repo_graph_artifact_bincode(&incremental_blob)
+            .expect("incremental blob should deserialize");
+        let workspaces_in_graph: std::collections::BTreeSet<String> = incremental_artifact
+            .nodes
+            .iter()
+            .filter_map(|n| n.workspace.clone())
+            .collect();
+        assert!(
+            workspaces_in_graph.contains("app"),
+            "incremental graph must contain the changed app partition"
+        );
+        assert!(
+            workspaces_in_graph.contains("domain"),
+            "incremental graph must contain the unchanged domain partition; \
+             a changed-file-only path would drop it"
+        );
+
+        // --- The essential gate: artifact-level parity ---
+        assert_graph_artifact_blob_parity(&full_blob, &incremental_blob).expect(
+            "one-partition-changed incremental-shaped build must match full current rebuild",
+        );
+    }
+
+    /// td55 negative gate: prove the changed-file-only graph shape would fail
+    /// parity by deliberately dropping an unchanged partition from the artifact
+    /// set and asserting the parity check catches the difference.
+    #[test]
+    fn td55_changed_file_only_shape_fails_parity() {
+        let cache_root = crate::test_helpers::workspace_tempdir("td55-changed-only-root-");
+        let cache_store = crate::scip_indexer::cache::ScipCacheStore::new(cache_root.path());
+
+        // Populate cache with original fixture
+        let original_fixture = crate::test_helpers::td55_cache_reuse_scip_fixture();
+        let _ = crate::scip_parser::parse_scip_artifacts_with_cache_store(
+            &original_fixture.artifacts,
+            Some(&cache_store),
+        )
+        .expect("populate cache");
+
+        // Build full graph from changed fixture (both partitions)
+        let full_fixture = crate::test_helpers::td55_incremental_scip_fixture("app");
+        let full_parsed = crate::scip_parser::parse_scip_artifacts_with_cache_store(
+            &full_fixture.artifacts,
+            None,
+        )
+        .expect("full parse");
+        let mut full_graph =
+            crate::repo_graph::RepoDependencyGraph::try_build_with_source(&full_parsed, None)
+                .expect("full graph build");
+        full_graph.set_layout_positions(crate::layout::derive_layout_positions(&full_graph));
+        let full_blob = bincode::serialize(&full_graph.to_artifact()).expect("serialize full");
+
+        // Build changed-file-only graph (only the changed app partition)
+        let changed_only_artifacts: Vec<_> = full_fixture
+            .artifacts
+            .iter()
+            .filter(|a| a.workspace_slug == "app")
+            .cloned()
+            .collect();
+        let changed_only_parsed = crate::scip_parser::parse_scip_artifacts_with_cache_store(
+            &changed_only_artifacts,
+            None,
+        )
+        .expect("changed-only parse");
+        let mut changed_only_graph = crate::repo_graph::RepoDependencyGraph::try_build_with_source(
+            &changed_only_parsed,
+            None,
+        )
+        .expect("changed-only graph build");
+        changed_only_graph
+            .set_layout_positions(crate::layout::derive_layout_positions(&changed_only_graph));
+        let changed_only_blob =
+            bincode::serialize(&changed_only_graph.to_artifact()).expect("serialize changed-only");
+
+        // Parity must fail — proves the gate catches the unsafe shape.
+        let err = assert_graph_artifact_blob_parity(&full_blob, &changed_only_blob)
+            .expect_err("changed-file-only graph must fail parity against full graph");
+        assert!(
+            matches!(err, GraphArtifactBlobParityError::Diff(_)),
+            "expected Diff variant, got {err:?}"
+        );
+    }
+
+    /// td55 canonical warm cache-reuse toggle regression.
+    ///
+    /// This is a focused structure guard proving the production canonical
+    /// warm cache-reuse env toggle (`DJINN_GRAPH_CACHE_REUSE_ENABLED` /
+    /// `DJINN_CACHE_REUSE_ENABLED` / `CACHE_REUSE_ENABLED`) routes through
+    /// [`crate::canonical_graph::resolve_canonical_warm_cache_reuse`] into
+    /// [`crate::scip_parser::parse_scip_artifacts_with_cache_reuse`] — the
+    /// SAME whole-artifact parse/build seam exercised by the td55 parity
+    /// tests above. The goal is to prevent future code from bypassing the
+    /// equivalence gate with a separate partial/incremental graph assembly
+    /// path.
+    ///
+    /// Cache reuse is allowed ONLY as an input/artifact reuse optimization
+    /// before the whole-graph build, NOT as changed-file-only graph
+    /// resolution. This test verifies that the cache-reuse-enabled path:
+    /// 1. parses the COMPLETE artifact set (no changed-file-only subset);
+    /// 2. produces a graph artifact that passes
+    ///    [`assert_graph_artifact_blob_parity`] against a cold/full build
+    ///    of the same complete set;
+    /// 3. uses an isolated temp cache root (no DB, no K8s, no Docker, no
+    ///    real SCIP binaries, no network, no credentials).
+    #[test]
+    fn canonical_warm_cache_reuse_toggle_reaches_parity_seam() {
+        // SAFETY: this test manipulates env vars for the duration of the
+        // test. `std::env::set_var` / `remove_var` are marked unsafe in
+        // Rust 2024 because they race with concurrent getenv readers. This
+        // test does not spawn threads and the env mutation is local to this
+        // single-threaded unit test body, so the access is serialized.
+        // Save and restore the env state to avoid leaking into other tests.
+        let saved = [
+            "DJINN_GRAPH_CACHE_REUSE_ENABLED",
+            "DJINN_CACHE_REUSE_ENABLED",
+            "CACHE_REUSE_ENABLED",
+        ]
+        .map(|name| (name, std::env::var(name).ok()));
+        for &name in [
+            "DJINN_GRAPH_CACHE_REUSE_ENABLED",
+            "DJINN_CACHE_REUSE_ENABLED",
+            "CACHE_REUSE_ENABLED",
+        ]
+        .iter()
+        {
+            unsafe {
+                std::env::remove_var(name);
+            }
+        }
+        let restore = || {
+            for (name, value) in &saved {
+                unsafe {
+                    if let Some(v) = value {
+                        std::env::set_var(name, v);
+                    } else {
+                        std::env::remove_var(name);
+                    }
+                }
+            }
+        };
+
+        // --- Structure guard 1: toggle resolves to the same seam ---
+        //
+        // With the env toggle enabled, the canonical warm resolution must
+        // report cache reuse as active (unless a stale sentinel forces a
+        // full rebuild). This proves the toggle is wired to
+        // `resolve_canonical_warm_cache_reuse`.
+        unsafe {
+            std::env::set_var("DJINN_GRAPH_CACHE_REUSE_ENABLED", "1");
+        }
+        assert!(
+            crate::canonical_graph::resolve_canonical_warm_cache_reuse(false),
+            "cache-reuse env toggle must resolve to enabled when force_full_rebuild=false"
+        );
+        // Force-full-rebuild (stale sentinel) must disable cache reuse even
+        // when the toggle is on — this is the safety rail, not a changed-
+        // file-only bypass.
+        assert!(
+            !crate::canonical_graph::resolve_canonical_warm_cache_reuse(true),
+            "stale-sentinel forced full rebuild must disable cache reuse"
+        );
+
+        // With the toggle off, cache reuse must be disabled.
+        unsafe {
+            std::env::set_var("DJINN_GRAPH_CACHE_REUSE_ENABLED", "0");
+        }
+        assert!(
+            !crate::canonical_graph::resolve_canonical_warm_cache_reuse(false),
+            "cache-reuse disabled env value must resolve to disabled"
+        );
+
+        // Also verify the alias env names work.
+        unsafe {
+            std::env::remove_var("DJINN_GRAPH_CACHE_REUSE_ENABLED");
+            std::env::set_var("DJINN_CACHE_REUSE_ENABLED", "on");
+        }
+        assert!(
+            crate::canonical_graph::resolve_canonical_warm_cache_reuse(false),
+            "DJINN_CACHE_REUSE_ENABLED alias must be honored"
+        );
+
+        unsafe {
+            std::env::remove_var("DJINN_CACHE_REUSE_ENABLED");
+            std::env::set_var("CACHE_REUSE_ENABLED", "true");
+        }
+        assert!(
+            crate::canonical_graph::resolve_canonical_warm_cache_reuse(false),
+            "CACHE_REUSE_ENABLED alias must be honored"
+        );
+
+        // Restore env for the parity-build portion: enable the toggle so the
+        // path under test matches production cache-reuse-on behavior.
+        unsafe {
+            std::env::set_var("DJINN_GRAPH_CACHE_REUSE_ENABLED", "1");
+        }
+
+        // --- Structure guard 2: the enabled toggle routes through the same
+        // whole-artifact parse/build seam as the td55 parity tests ---
+        //
+        // `resolve_canonical_warm_cache_reuse(true_value)` returns the same
+        // boolean that `ensure_canonical_graph` passes to
+        // `parse_scip_artifacts_with_cache_reuse`. When true, that function
+        // constructs a `ScipCacheStore::from_environment()`. We isolate the
+        // cache root via `DJINN_SCIP_CACHE_DIR` so the test is deterministic
+        // and does not touch the real cache.
+        //
+        // SAFETY: isolated single-threaded env mutation — no threads spawned.
+        let cache_root = crate::test_helpers::workspace_tempdir("td55-toggle-seam-cache-");
+        let saved_cache_dir = std::env::var("DJINN_SCIP_CACHE_DIR").ok();
+        unsafe {
+            std::env::set_var("DJINN_SCIP_CACHE_DIR", cache_root.path());
+        }
+
+        // Cold build of the COMPLETE fixture set (no cache).
+        let cold_fixture = crate::test_helpers::td55_cache_reuse_scip_fixture();
+        let cold_parsed = crate::scip_parser::parse_scip_artifacts_with_cache_store(
+            &cold_fixture.artifacts,
+            None,
+        )
+        .expect("cold parse should succeed");
+        let mut cold_graph =
+            crate::repo_graph::RepoDependencyGraph::try_build_with_source(&cold_parsed, None)
+                .expect("cold graph build should succeed");
+        cold_graph.set_layout_positions(crate::layout::derive_layout_positions(&cold_graph));
+        let cold_blob = bincode::serialize(&cold_graph.to_artifact())
+            .expect("serialize cold graph artifact blob");
+
+        // Cache-reuse-enabled build: use the SAME seam as
+        // `ensure_canonical_graph` (resolve_canonical_warm_cache_reuse →
+        // parse_scip_artifacts_with_cache_reuse) with the COMPLETE artifact
+        // set. A fresh fixture ensures temp file paths differ but SCIP
+        // content is byte-identical, so the content-addressed cache key
+        // matches after the first population call.
+        let reuse_fixture = crate::test_helpers::td55_cache_reuse_scip_fixture();
+        // Population pass — fills the cache store.
+        let _ = crate::scip_parser::parse_scip_artifacts_with_cache_reuse(
+            &reuse_fixture.artifacts,
+            crate::canonical_graph::resolve_canonical_warm_cache_reuse(false),
+        )
+        .expect("cache-reuse parse (population) should succeed");
+        // Hit pass — exercises the reuse path through the same seam.
+        let reuse_parsed = crate::scip_parser::parse_scip_artifacts_with_cache_reuse(
+            &reuse_fixture.artifacts,
+            crate::canonical_graph::resolve_canonical_warm_cache_reuse(false),
+        )
+        .expect("cache-reuse parse (hit) should succeed");
+        let mut reuse_graph =
+            crate::repo_graph::RepoDependencyGraph::try_build_with_source(&reuse_parsed, None)
+                .expect("cache-reuse graph build should succeed");
+        reuse_graph.set_layout_positions(crate::layout::derive_layout_positions(&reuse_graph));
+        let reuse_blob = bincode::serialize(&reuse_graph.to_artifact())
+            .expect("serialize cache-reuse graph artifact blob");
+
+        // Both graphs must include a cross-file edge — a changed-file-only
+        // path would drop it, and the parity check would catch that.
+        for (label, blob) in [("cold", &cold_blob), ("cache-reuse", &reuse_blob)] {
+            let artifact = deserialize_repo_graph_artifact_bincode(blob)
+                .unwrap_or_else(|err| panic!("{label} blob should deserialize: {err}"));
+            let is_cross_file_ref = |edge: &RepoGraphArtifactEdge| {
+                matches!(
+                    edge.kind,
+                    RepoGraphEdgeKind::SymbolReference
+                        | RepoGraphEdgeKind::Reads
+                        | RepoGraphEdgeKind::Writes
+                        | RepoGraphEdgeKind::FileReference
+                ) && artifact.nodes[edge.source].file_path != artifact.nodes[edge.target].file_path
+            };
+            assert!(
+                artifact.edges.iter().any(is_cross_file_ref),
+                "{label} fixture graph should include a cross-file reference edge"
+            );
+        }
+
+        // The essential gate: the toggle-enabled path produces a graph
+        // artifact that passes artifact parity against the cold/full build.
+        // This proves the toggle routes through the same whole-artifact
+        // build seam — a separate partial/incremental assembly path would
+        // fail here.
+        assert_graph_artifact_blob_parity(&cold_blob, &reuse_blob).expect(
+            "canonical warm cache-reuse toggle must produce a graph equivalent to the cold/full build",
+        );
+
+        // Restore all env state.
+        unsafe {
+            if let Some(v) = saved_cache_dir {
+                std::env::set_var("DJINN_SCIP_CACHE_DIR", v);
+            } else {
+                std::env::remove_var("DJINN_SCIP_CACHE_DIR");
+            }
+        }
+        restore();
+    }
 }

@@ -41,6 +41,17 @@ struct GraphCacheShrinkWarning {
     workspace_status_summary: String,
 }
 
+/// Read the production canonical warm cache-reuse env toggle.
+///
+/// When enabled, the canonical warm path reuses already-parsed SCIP artifacts
+/// from the content-addressed parse cache as an **input** optimization. The
+/// full artifact set is still parsed (or served from cache) and the whole
+/// graph is still built — cache reuse must NEVER become a changed-file-only
+/// or partial graph resolution path. The returned value flows through
+/// [`resolve_canonical_warm_cache_reuse`] into
+/// [`crate::scip_parser::parse_scip_artifacts_with_cache_reuse`], which is
+/// the same whole-artifact parse/build seam exercised by the td55 parity
+/// tests in [`crate::graph_parity`].
 fn cache_reuse_enabled() -> bool {
     std::env::var("DJINN_GRAPH_CACHE_REUSE_ENABLED")
         .or_else(|_| std::env::var("DJINN_CACHE_REUSE_ENABLED"))
@@ -52,6 +63,23 @@ fn cache_reuse_enabled() -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+/// Resolve whether the canonical warm path should reuse cached parse results.
+///
+/// This is the single decision point that feeds the `cache_reuse_enabled`
+/// argument to
+/// [`crate::scip_parser::parse_scip_artifacts_with_cache_reuse`] from
+/// [`ensure_canonical_graph`]. The td55 regression
+/// `canonical_warm_cache_reuse_toggle_reaches_parity_seam` guards that this
+/// resolution stays wired to the same whole-artifact parse/build seam
+/// covered by the td55 equivalence gate.
+///
+/// Cache reuse is allowed ONLY as an input/artifact reuse optimization
+/// before the whole-graph build — it must NOT introduce a changed-file-only
+/// or partial graph assembly path.
+pub(crate) fn resolve_canonical_warm_cache_reuse(force_full_rebuild: bool) -> bool {
+    cache_reuse_enabled() && !force_full_rebuild
 }
 
 /// Pre-computed strongly-connected components, one set per `kind_filter`
@@ -391,7 +419,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let project_root_for_blocking = handle.path().to_path_buf();
     // Capture recovery flag for the blocking thread — when a stale sentinel
     // was detected, disable parse cache reuse to force a clean rebuild.
-    let effective_cache_reuse = cache_reuse_enabled() && !force_full_rebuild;
+    let effective_cache_reuse = resolve_canonical_warm_cache_reuse(force_full_rebuild);
     let blocking =
         tokio::task::spawn_blocking(move || -> Result<CanonicalGraphBuildOutput, String> {
             let t_parse = std::time::Instant::now();
@@ -403,11 +431,103 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             let parse_ms = t_parse.elapsed().as_millis() as u64;
             let _ = std::fs::remove_dir_all(&output_dir_for_blocking);
 
+            // Out-of-core sharding: when enabled (env flag + threshold),
+            // shard each parsed SCIP file into the out-of-core store so
+            // the graph builder can consume files one-at-a-time from
+            // disk, keeping resident memory bounded.
+            let total_parsed_files: usize =
+                parsed.iter().map(|p| p.files.len()).sum();
+            let ooc_engaged = crate::out_of_core::resolve_out_of_core_config(total_parsed_files);
+
+            // If out-of-core is engaged, shard the parsed data to disk
+            // and build the graph from the store's file iterator. The
+            // in-memory `parsed.files` vecs are dropped after sharding
+            // to free memory.
             let t_build = std::time::Instant::now();
-            let mut graph = crate::repo_graph::RepoDependencyGraph::try_build_with_source(
-                &parsed,
-                Some(&project_root_for_blocking),
-            )?;
+            let mut graph = if let Some(ref ooc_config) = ooc_engaged {
+                match crate::out_of_core::OutOfCoreStore::open(&ooc_config.storage_path) {
+                    Ok(mut ooc_store) => {
+                        let mut total_shards = 0usize;
+                        let mut shard_err = false;
+                        for index in &parsed {
+                            match ooc_store.put_parsed_index(index) {
+                                Ok(count) => total_shards += count,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        workspace = %index.workspace_slug,
+                                        "ensure_canonical_graph: failed to shard parsed index to out-of-core store"
+                                    );
+                                    shard_err = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if shard_err {
+                            // Sharding failed — fall back to in-memory path.
+                            tracing::warn!(
+                                "ensure_canonical_graph: sharding failed; falling back to in-memory build"
+                            );
+                            crate::repo_graph::RepoDependencyGraph::try_build_with_source(
+                                &parsed,
+                                Some(&project_root_for_blocking),
+                            )?
+                        } else {
+                            tracing::info!(
+                                shard_count = total_shards,
+                                storage_path = %ooc_config.storage_path.display(),
+                                "ensure_canonical_graph: sharded parsed SCIP data to out-of-core store"
+                            );
+                            // Build the graph using the bounded-memory file
+                            // iterator from the store. Files are loaded
+                            // one-at-a-time from disk — only one ScipFile
+                            // is resident per iteration step (O(1) file
+                            // data residency).
+                            //
+                            // Merge external_symbols from all parsed indices
+                            // and use the first index's workspace_slug.
+                            // (In practice, warm runs typically have a single
+                            // workspace; multi-workspace OOC is a known
+                            // simplification.)
+                            let first = &parsed[0];
+                            let all_external: Vec<crate::scip_parser::ScipSymbol> = parsed
+                                .iter()
+                                .flat_map(|idx| idx.external_symbols.iter().cloned())
+                                .collect();
+                            let graph_result =
+                                crate::repo_graph::RepoDependencyGraph::try_build_with_scip_file_iter(
+                                    ooc_store.scip_file_iter(),
+                                    &first.workspace_slug,
+                                    &all_external,
+                                    Some(&project_root_for_blocking),
+                                );
+                            // Drop the in-memory parsed file data now that
+                            // it has been sharded to disk. This frees the
+                            // large Vec<ScipFile> allocations.
+                            drop(parsed);
+                            graph_result?
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            storage_path = %ooc_config.storage_path.display(),
+                            "ensure_canonical_graph: failed to open out-of-core store; proceeding with in-memory path"
+                        );
+                        crate::repo_graph::RepoDependencyGraph::try_build_with_source(
+                            &parsed,
+                            Some(&project_root_for_blocking),
+                        )?
+                    }
+                }
+            } else {
+                // Out-of-core not engaged (env flag off or below threshold):
+                // use the existing in-memory build path unchanged.
+                crate::repo_graph::RepoDependencyGraph::try_build_with_source(
+                    &parsed,
+                    Some(&project_root_for_blocking),
+                )?
+            };
             // DB-access post-processor: opt-in via
             // `DJINN_DB_ACCESS_DETECTION`. Reads files from the index
             // tree and stamps `Reads`/`Writes` edges from caller
@@ -1281,6 +1401,8 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_db::{ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository};
 
+    static OUT_OF_CORE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     async fn make_project(tmp: &std::path::Path) -> std::path::PathBuf {
         let project_root = tmp.join("repo");
         tokio::fs::create_dir_all(&project_root).await.unwrap();
@@ -1305,6 +1427,168 @@ mod tests {
         run(&["add", "a.txt"]).await;
         run(&["commit", "-q", "-m", "init"]).await;
         project_root
+    }
+
+    fn graph_artifact_blob_from_graph(
+        mut graph: crate::repo_graph::RepoDependencyGraph,
+    ) -> Vec<u8> {
+        graph.set_layout_positions(crate::layout::derive_layout_positions(&graph));
+        bincode::serialize(&graph.to_artifact()).expect("serialize graph artifact")
+    }
+
+    fn in_memory_graph_artifact_blob(index: &crate::scip_parser::ParsedScipIndex) -> Vec<u8> {
+        let graph = crate::repo_graph::RepoDependencyGraph::try_build_with_source(
+            std::slice::from_ref(index),
+            None,
+        )
+        .expect("in-memory graph build must succeed");
+        graph_artifact_blob_from_graph(graph)
+    }
+
+    fn out_of_core_graph_artifact_blob(
+        index: &crate::scip_parser::ParsedScipIndex,
+        storage_path: &std::path::Path,
+    ) -> Vec<u8> {
+        let config = crate::out_of_core::resolve_out_of_core_config(index.files.len())
+            .expect("out-of-core config must engage for fixture file count");
+        assert_eq!(
+            config.storage_path, storage_path,
+            "test must exercise the configured out-of-core storage path"
+        );
+
+        let mut store = crate::out_of_core::OutOfCoreStore::open(&config.storage_path)
+            .expect("open out-of-core store");
+        let shard_count = store
+            .put_parsed_index(index)
+            .expect("shard parsed SCIP index into out-of-core store");
+        assert_eq!(
+            shard_count,
+            index.files.len(),
+            "one out-of-core shard must be written per parsed SCIP file"
+        );
+
+        let graph = crate::repo_graph::RepoDependencyGraph::try_build_with_scip_file_iter(
+            store.scip_file_iter(),
+            &index.workspace_slug,
+            &index.external_symbols,
+            None,
+        )
+        .expect("out-of-core bounded graph build must succeed");
+        graph_artifact_blob_from_graph(graph)
+    }
+
+    fn add_extra_occurrence_to_first_file(index: &mut crate::scip_parser::ParsedScipIndex) {
+        use crate::scip_parser::{
+            ScipOccurrence, ScipRange, ScipSymbol, ScipSymbolKind, ScipSymbolRole, ScipVisibility,
+        };
+
+        let symbol = "scip-rust pkg src/helper.rs `extra_helper`().".to_string();
+        let occurrence = ScipOccurrence {
+            symbol: symbol.clone(),
+            range: ScipRange {
+                start_line: 2,
+                start_character: 0,
+                end_line: 2,
+                end_character: 12,
+            },
+            enclosing_range: None,
+            roles: std::collections::BTreeSet::from([ScipSymbolRole::Definition]),
+            syntax_kind: None,
+            override_documentation: vec![],
+        };
+        let file = index
+            .files
+            .first_mut()
+            .expect("test fixture must contain at least one file");
+        file.definitions.push(occurrence.clone());
+        file.occurrences.push(occurrence);
+        file.symbols.push(ScipSymbol {
+            symbol,
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("extra_helper".to_string()),
+            signature: Some("fn extra_helper()".to_string()),
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(ScipVisibility::Public),
+            signature_parts: None,
+        });
+    }
+
+    #[test]
+    fn test_out_of_core_graph_parity_with_in_memory() {
+        let _guard = OUT_OF_CORE_ENV_LOCK.lock().unwrap();
+        let tmp = workspace_tempdir("ooc-graph-parity-");
+        let store_path = tmp.path().join("store");
+
+        unsafe {
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_PATH");
+        }
+        let index = build_test_parsed_index_fixture();
+        let in_memory_blob = in_memory_graph_artifact_blob(&index);
+
+        unsafe {
+            std::env::set_var("DJINN_GRAPH_OUT_OF_CORE", "1");
+            std::env::set_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES", "1");
+            std::env::set_var("DJINN_GRAPH_OUT_OF_CORE_PATH", &store_path);
+        }
+        let out_of_core_blob = out_of_core_graph_artifact_blob(&index, &store_path);
+
+        crate::graph_parity::assert_graph_artifact_blob_parity(&in_memory_blob, &out_of_core_blob)
+            .expect(
+                "out-of-core graph artifact must be structurally identical to in-memory artifact",
+            );
+
+        unsafe {
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_PATH");
+        }
+    }
+
+    #[test]
+    fn test_out_of_core_graph_diverges_on_file_change() {
+        let _guard = OUT_OF_CORE_ENV_LOCK.lock().unwrap();
+        let tmp = workspace_tempdir("ooc-graph-diverge-");
+        let store_path = tmp.path().join("store");
+
+        unsafe {
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_PATH");
+        }
+        let base_index = build_test_parsed_index_fixture();
+        let in_memory_blob = in_memory_graph_artifact_blob(&base_index);
+
+        let mut changed_index = base_index.clone();
+        add_extra_occurrence_to_first_file(&mut changed_index);
+
+        unsafe {
+            std::env::set_var("DJINN_GRAPH_OUT_OF_CORE", "1");
+            std::env::set_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES", "1");
+            std::env::set_var("DJINN_GRAPH_OUT_OF_CORE_PATH", &store_path);
+        }
+        let changed_out_of_core_blob = out_of_core_graph_artifact_blob(&changed_index, &store_path);
+
+        let err = crate::graph_parity::assert_graph_artifact_blob_parity(
+            &in_memory_blob,
+            &changed_out_of_core_blob,
+        )
+        .expect_err("changed file occurrence must trip the out-of-core parity gate");
+        assert!(
+            matches!(
+                err,
+                crate::graph_parity::GraphArtifactBlobParityError::Diff(_)
+            ),
+            "expected structured graph diff for changed file occurrence, got {err:?}"
+        );
+
+        unsafe {
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_PATH");
+        }
     }
 
     #[test]
@@ -2039,6 +2323,192 @@ mod tests {
         assert!(
             result.is_ok(),
             "declared overlay must not block the run; got {result:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Incremental == full equivalence regression gate.
+    //
+    // Two consecutive `ensure_canonical_graph` calls on the same project
+    // + commit, with the in-memory GRAPH_CACHE cleared between them,
+    // must produce graph-artifact blobs that satisfy
+    // `assert_graph_artifact_blob_parity`.  The first call seeds the DB
+    // cache with a fixture graph artifact (simulating a full/cold
+    // pipeline run); the second call exercises the DB cache-hit
+    // (warm/incremental) path.
+    //
+    // The negative test proves the harness is a real gate: two
+    // *different* fixture graphs must fail the parity check with a
+    // `GraphArtifactBlobParityError::Diff` variant.
+    // -------------------------------------------------------------------
+
+    /// Positive equivalence test: cold-warm and warm (incremental) blobs
+    /// for the same commit must pass `assert_graph_artifact_blob_parity`.
+    #[tokio::test]
+    async fn incremental_full_equivalence_same_commit() {
+        let tmp = workspace_tempdir("incremental-equiv-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create("test-equiv", "test", "test-equiv")
+            .await
+            .expect("create project");
+
+        // Resolve HEAD commit SHA from the tempdir git repo.
+        let head_out = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&project_root)
+            .output()
+            .await
+            .unwrap();
+        let commit_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+        // Seed the DB cache with a fixture graph artifact — simulates
+        // the output of a full (cold) pipeline run.
+        let graph = build_test_graph_fixture();
+        let seeded_blob =
+            bincode::serialize(&graph.to_artifact()).expect("serialize fixture graph");
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: &commit_sha,
+                graph_blob: &seeded_blob,
+            })
+            .await
+            .expect("seed cache");
+
+        // --- Cold warm: ensure_canonical_graph reads from DB cache ---
+        let result = ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await;
+        assert!(result.is_ok(), "cold warm failed: {result:?}");
+
+        let cold_blob = cache_repo
+            .get(&project.id, &commit_sha)
+            .await
+            .expect("get cold blob")
+            .expect("cold blob should exist in DB")
+            .graph_blob;
+
+        // --- Drop in-memory GRAPH_CACHE so the next call must re-read DB ---
+        clear_test_caches().await;
+
+        // --- Warm (incremental) warm: DB cache-hit path ---
+        let result = ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await;
+        assert!(result.is_ok(), "warm (incremental) warm failed: {result:?}");
+
+        let warm_blob = cache_repo
+            .get(&project.id, &commit_sha)
+            .await
+            .expect("get warm blob")
+            .expect("warm blob should exist in DB")
+            .graph_blob;
+
+        // --- Parity gate: cold and warm blobs must match ---
+        crate::graph_parity::assert_graph_artifact_blob_parity(&cold_blob, &warm_blob)
+            .expect("incremental == full parity violation: cold and warm blobs must match");
+    }
+
+    /// Negative equivalence test: two different fixture graphs (base vs.
+    /// base + extra file) seeded at different commit SHAs must fail the
+    /// parity check with a `Diff` variant.  This proves the harness is
+    /// a real gate, not a tautology.
+    #[tokio::test]
+    async fn incremental_full_equivalence_differs_for_different_commits() {
+        let tmp = workspace_tempdir("incremental-neg-");
+        let _project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create("test-equiv-neg", "test", "test-equiv-neg")
+            .await
+            .expect("create project");
+
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+
+        // Commit A: base fixture graph.
+        let graph_a = build_test_graph_fixture();
+        let blob_a = bincode::serialize(&graph_a.to_artifact()).expect("serialize graph A");
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "commit-a-sha",
+                graph_blob: &blob_a,
+            })
+            .await
+            .expect("seed cache A");
+
+        // Commit B: base fixture + an extra file — different graph.
+        let mut index_b = build_test_parsed_index_fixture();
+        use crate::scip_parser::{ScipOccurrence, ScipRange, ScipSymbolRole};
+        index_b.files.push(crate::scip_parser::ScipFile {
+            language: "rust".to_string(),
+            relative_path: std::path::PathBuf::from("src/extra.rs"),
+            definitions: vec![ScipOccurrence {
+                symbol: "scip-rust pkg src/extra.rs `extra_fn`().".to_string(),
+                range: ScipRange {
+                    start_line: 0,
+                    start_character: 0,
+                    end_line: 0,
+                    end_character: 9,
+                },
+                enclosing_range: None,
+                roles: std::collections::BTreeSet::from([ScipSymbolRole::Definition]),
+                syntax_kind: None,
+                override_documentation: vec![],
+            }],
+            references: vec![],
+            occurrences: vec![],
+            symbols: vec![],
+        });
+        let graph_b = crate::repo_graph::RepoDependencyGraph::build(&[index_b]);
+        let blob_b = bincode::serialize(&graph_b.to_artifact()).expect("serialize graph B");
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "commit-b-sha",
+                graph_blob: &blob_b,
+            })
+            .await
+            .expect("seed cache B");
+
+        // Read both blobs back from DB.
+        let cold_blob = cache_repo
+            .get(&project.id, "commit-a-sha")
+            .await
+            .expect("get blob A")
+            .expect("blob A should exist")
+            .graph_blob;
+        let different_blob = cache_repo
+            .get(&project.id, "commit-b-sha")
+            .await
+            .expect("get blob B")
+            .expect("blob B should exist")
+            .graph_blob;
+
+        // Parity must fail with Diff variant — proves the gate is real.
+        let err =
+            crate::graph_parity::assert_graph_artifact_blob_parity(&cold_blob, &different_blob)
+                .expect_err("different graphs must produce a parity error");
+        assert!(
+            matches!(
+                err,
+                crate::graph_parity::GraphArtifactBlobParityError::Diff(_)
+            ),
+            "expected Diff variant, got {err:?}"
         );
     }
 }

@@ -42,7 +42,6 @@ const mockRole = (overrides: Partial<agentsApi.Agent> = {}): agentsApi.Agent => 
   mcp_servers: ["github"],
   skills: ["code-review"],
   model_preference: null,
-  verification_command: "cargo test",
   is_default: false,
   learned_prompt: null,
   ...overrides,
@@ -87,8 +86,9 @@ describe("AgentRoles shell", () => {
     render(<AgentRoles />);
 
     expect(
-      await screen.findByText(/No roles configured yet/i),
+      await screen.findByText(/No project-default agents are available yet/i),
     ).toBeInTheDocument();
+    expect(screen.getByText(/No specialists configured yet/i)).toBeInTheDocument();
   });
 
   it("invokes the delete mutation when an admin confirms deletion", async () => {

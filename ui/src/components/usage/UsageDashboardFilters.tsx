@@ -42,6 +42,7 @@ const AGENT_TYPES: { value: string; label: string }[] = [
   { value: "reviewer", label: "Reviewer" },
   { value: "lead", label: "Lead" },
   { value: "planner", label: "Planner" },
+  { value: "architect", label: "Architect" },
 ];
 
 interface ProjectOption {

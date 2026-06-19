@@ -104,10 +104,15 @@ function DiscardedSection({ discarded }: { discarded: LearnedPromptAmendment[] }
 
 interface LearnedPromptSectionProps {
   role: Agent;
-  onCleared: () => void;
+  onCleared?: () => void;
+  canClear?: boolean;
 }
 
-export function LearnedPromptSection({ role, onCleared }: LearnedPromptSectionProps) {
+export function LearnedPromptSection({
+  role,
+  onCleared,
+  canClear = false,
+}: LearnedPromptSectionProps) {
   const [expanded, setExpanded] = useState(false);
   const [history, setHistory] = useState<LearnedPromptHistory | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -139,7 +144,7 @@ export function LearnedPromptSection({ role, onCleared }: LearnedPromptSectionPr
       await clearLearnedPrompt(role.id);
       setHistory(null);
       setExpanded(false);
-      onCleared();
+      onCleared?.();
     } catch (err) {
       setHistoryError(err instanceof Error ? err.message : "Failed to clear learned prompt");
     } finally {
@@ -147,30 +152,31 @@ export function LearnedPromptSection({ role, onCleared }: LearnedPromptSectionPr
     }
   };
 
-  const hasLearnedPrompt = !!role.learned_prompt;
+  const hasLearnedPrompt = role.learned_prompt !== null;
 
   return (
-    <div className="border-t border-border pt-2 mt-2">
-      <div className="flex items-center justify-between gap-2">
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <span
-            className={cn(
-              "rounded-full w-1.5 h-1.5 shrink-0",
-              hasLearnedPrompt ? "bg-blue-500" : "bg-muted-foreground/40",
+    <div className="border-t border-border pt-3 mt-3 space-y-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 space-y-1">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+            <span
+              className={cn(
+                "rounded-full w-1.5 h-1.5 shrink-0",
+                hasLearnedPrompt ? "bg-blue-500" : "bg-muted-foreground/40",
+              )}
+            />
+            Machine-managed learned prompt
+            {hasLearnedPrompt && (
+              <span className="text-blue-600 dark:text-blue-400">(active)</span>
             )}
-          />
-          Learned prompt
-          {hasLearnedPrompt && (
-            <span className="text-blue-600 dark:text-blue-400">(active)</span>
-          )}
-          <span className="text-muted-foreground/60">{expanded ? "▴" : "▾"}</span>
-        </button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Generated from agent outcomes and shown read-only. Edit human-authored
+            system prompt extensions separately.
+          </p>
+        </div>
 
-        {hasLearnedPrompt && (
+        {hasLearnedPrompt && canClear && (
           <ConfirmButton
             title="Clear learned prompt"
             description={`Clear the learned prompt for "${role.name}"? The auto-improvement history will be preserved.`}
@@ -184,6 +190,26 @@ export function LearnedPromptSection({ role, onCleared }: LearnedPromptSectionPr
           </ConfirmButton>
         )}
       </div>
+
+      {hasLearnedPrompt && (
+        <div
+          aria-label="Current machine-managed learned prompt"
+          className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs leading-relaxed"
+        >
+          <div className="prose prose-sm max-w-none dark:prose-invert text-xs leading-relaxed">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{role.learned_prompt}</ReactMarkdown>
+          </div>
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+      >
+        {expanded ? "Hide learned prompt history" : "Show learned prompt history"}
+        <span className="text-muted-foreground/60">{expanded ? "▴" : "▾"}</span>
+      </button>
 
       {expanded && (
         <div className="mt-3 space-y-3">

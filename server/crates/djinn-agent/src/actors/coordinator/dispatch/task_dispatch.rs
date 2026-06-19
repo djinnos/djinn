@@ -1935,6 +1935,7 @@ mod inflight_ledger_tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .expect("materialize delayed wnd1 running session row")
@@ -2452,6 +2453,9 @@ mod inflight_ledger_tests {
         // Flip the task into the verification stage. The slot/pod is still held
         // (the controlled runner is still blocked), so the pool STILL reports
         // the task as running — but the model is no longer in use.
+        // Use the runtime-checked query API here so this test helper does not
+        // require a dedicated sqlx offline metadata entry just to flip fixture
+        // state.
         sqlx::query("UPDATE tasks SET status = 'verifying' WHERE id = $1")
             .bind(&task_id)
             .execute(db.pool())
@@ -2801,6 +2805,7 @@ mod inflight_ledger_tests {
                     agent_type,
                     metadata_json: None,
                     task_run_id: None,
+                    pricing: None,
                 })
                 .await
                 .expect("create mixed-role running session");

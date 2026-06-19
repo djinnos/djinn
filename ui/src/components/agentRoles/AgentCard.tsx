@@ -3,6 +3,7 @@ import { ConfirmButton } from "@/components/ConfirmButton";
 import { cn } from "@/lib/utils";
 import { getAgentIdentity } from "@/lib/agentIdentity";
 import type { Agent } from "@/api/agents";
+import { LearnedPromptSection } from "@/components/agentRoles/LearnedPromptSection";
 import { Delete02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
@@ -13,13 +14,24 @@ export interface AgentCardProps {
   isDeleting: boolean;
   /** Editing agents (incl. their MCP servers + skills) is admin-only. */
   canEdit: boolean;
+  editLabel?: string;
+  onLearnedPromptCleared?: () => void;
 }
 
-export function AgentCard({ role, onEdit, onDelete, isDeleting, canEdit }: AgentCardProps) {
+export function AgentCard({
+  role,
+  onEdit,
+  onDelete,
+  isDeleting,
+  canEdit,
+  editLabel,
+  onLearnedPromptCleared,
+}: AgentCardProps) {
   const identity = getAgentIdentity(role.base_role);
   const mcpCount = role.mcp_servers?.length ?? 0;
   const skillCount = role.skills?.length ?? 0;
   const extCount = role.system_prompt_extensions.length;
+  const resolvedEditLabel = editLabel ?? (role.is_default ? "Edit instructions" : "Edit");
 
   return (
     <div className="group relative flex flex-col rounded-xl border border-border bg-card overflow-hidden transition-colors hover:border-border/80">
@@ -34,7 +46,7 @@ export function AgentCard({ role, onEdit, onDelete, isDeleting, canEdit }: Agent
         {canEdit && (
           <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
             <Button variant="outline" size="sm" className="h-7 px-2 text-xs bg-card" onClick={onEdit}>
-              Edit
+              {resolvedEditLabel}
             </Button>
             {!role.is_default && (
               <ConfirmButton
@@ -61,7 +73,7 @@ export function AgentCard({ role, onEdit, onDelete, isDeleting, canEdit }: Agent
           <span className={cn("text-[11px] font-medium", identity.color)}>
             {identity.label}
           </span>
-          {role.learned_prompt && (
+          {role.learned_prompt !== null && (
             <span className="shrink-0 rounded-full w-2 h-2 bg-blue-500" title="Learned prompt active" />
           )}
           {role.is_default && (
@@ -93,6 +105,13 @@ export function AgentCard({ role, onEdit, onDelete, isDeleting, canEdit }: Agent
               </span>
             )}
           </div>
+        )}
+        {role.learned_prompt !== null && (
+          <LearnedPromptSection
+            role={role}
+            canClear={canEdit}
+            onCleared={onLearnedPromptCleared}
+          />
         )}
       </div>
     </div>

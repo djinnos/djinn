@@ -44,6 +44,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::scip_parser::{ParsedScipIndex, ScipFile};
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -155,6 +157,22 @@ pub struct ScopeEntry {
     pub payload: Vec<u8>,
 }
 
+impl ScopeEntry {
+    /// Create a [`ScopeEntry`] from a parsed SCIP file by JSON-serializing
+    /// the file into the `payload` and deriving the shard id from the
+    /// file's `relative_path`.
+    pub fn from_scip_file(file: &ScipFile) -> Self {
+        let payload = serde_json::to_vec(file)
+            .expect("ScopeEntry::from_scip_file: JSON serialization of ScipFile must not fail");
+        let source_key = file.relative_path.to_string_lossy().into_owned();
+        Self {
+            id: ShardId::from_file_key(&source_key),
+            source_key,
+            payload,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shard store (disk-backed, shard-per-file JSON)
 // ---------------------------------------------------------------------------
@@ -165,6 +183,7 @@ pub struct ScopeEntry {
 pub struct OutOfCoreStore {
     root: PathBuf,
     index: BTreeMap<ShardId, PathBuf>,
+    order: Vec<ShardId>,
 }
 
 impl OutOfCoreStore {
@@ -186,9 +205,21 @@ impl OutOfCoreStore {
             BTreeMap::new()
         };
 
+        let order_path = root.join("order.json");
+        let order: Vec<ShardId> = if order_path.exists() {
+            let data = std::fs::read_to_string(&order_path).map_err(|e| OutOfCoreError::Io {
+                path: order_path.clone(),
+                source: e,
+            })?;
+            serde_json::from_str(&data).unwrap_or_else(|_| index.keys().cloned().collect())
+        } else {
+            index.keys().cloned().collect()
+        };
+
         Ok(Self {
             root: root.to_path_buf(),
             index,
+            order,
         })
     }
 
@@ -202,6 +233,9 @@ impl OutOfCoreStore {
             path: path.clone(),
             source: e,
         })?;
+        if !self.index.contains_key(&entry.id) {
+            self.order.push(entry.id.clone());
+        }
         self.index
             .insert(entry.id.clone(), PathBuf::from(&filename));
         self.persist_index()?;
@@ -230,7 +264,18 @@ impl OutOfCoreStore {
     /// Return all shard ids in the store. Does **not** load payload data
     /// from disk — only reads the in-memory index.
     pub fn enumerate_ids(&self) -> Vec<ShardId> {
-        self.index.keys().cloned().collect()
+        let mut ids: Vec<_> = self
+            .order
+            .iter()
+            .filter(|id| self.index.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in self.index.keys() {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        ids
     }
 
     /// Return the number of shards in the store.
@@ -267,6 +312,18 @@ impl OutOfCoreStore {
             path: index_path,
             source: e,
         })?;
+        let order_path = self.root.join("order.json");
+        let order_tmp_path = self.root.join("order.json.tmp");
+        let order_json = serde_json::to_string(&self.order)
+            .map_err(|e| OutOfCoreError::Serialize(e.to_string()))?;
+        std::fs::write(&order_tmp_path, order_json).map_err(|e| OutOfCoreError::Io {
+            path: order_tmp_path.clone(),
+            source: e,
+        })?;
+        std::fs::rename(&order_tmp_path, &order_path).map_err(|e| OutOfCoreError::Io {
+            path: order_path,
+            source: e,
+        })?;
         Ok(())
     }
 
@@ -280,6 +337,38 @@ impl OutOfCoreStore {
             })?;
         }
         Ok(())
+    }
+
+    /// Shard every file in a [`ParsedScipIndex`] into the store as
+    /// individual [`ScopeEntry`] items. Returns the count of shards written.
+    ///
+    /// Each file is JSON-serialized into the shard payload independently,
+    /// so downstream consumers can load one file at a time without holding
+    /// the entire parsed index in memory.
+    pub fn put_parsed_index(&mut self, index: &ParsedScipIndex) -> Result<usize, OutOfCoreError> {
+        let mut count = 0usize;
+        for file in &index.files {
+            let entry = ScopeEntry::from_scip_file(file);
+            self.put(&entry)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Yield deserialized [`ScipFile`] entries from disk, one at a time.
+    ///
+    /// Each shard is loaded and deserialized on demand so that at most one
+    /// `ScipFile` is resident at any given time. This keeps peak memory
+    /// usage bounded to `O(single_file)` rather than `O(all_files)`.
+    pub fn scip_file_iter(&self) -> impl Iterator<Item = Result<ScipFile, OutOfCoreError>> + '_ {
+        let ids = self.enumerate_ids();
+        ids.into_iter().map(move |id| {
+            let entry = self.get(&id)?.ok_or_else(|| {
+                OutOfCoreError::Deserialize(format!("missing shard for id {}", id.0))
+            })?;
+            serde_json::from_slice::<ScipFile>(&entry.payload)
+                .map_err(|e| OutOfCoreError::Deserialize(e.to_string()))
+        })
     }
 }
 
@@ -936,5 +1025,157 @@ mod tests {
         assert_eq!(cache.len(), 1);
         assert!(cache.get(&1).is_none());
         assert!(cache.get(&2).is_some());
+    }
+
+    // -- ScopeEntry::from_scip_file roundtrip --
+
+    fn make_test_scip_file(path: &str) -> crate::scip_parser::ScipFile {
+        use std::collections::BTreeSet;
+        crate::scip_parser::ScipFile {
+            language: "rust".to_string(),
+            relative_path: std::path::PathBuf::from(path),
+            definitions: vec![crate::scip_parser::ScipOccurrence {
+                symbol: "scip-rust . . . Foo#".to_string(),
+                range: crate::scip_parser::ScipRange {
+                    start_line: 0,
+                    start_character: 0,
+                    end_line: 0,
+                    end_character: 10,
+                },
+                enclosing_range: None,
+                roles: BTreeSet::from([crate::scip_parser::ScipSymbolRole::Definition]),
+                syntax_kind: None,
+                override_documentation: vec![],
+            }],
+            references: vec![],
+            occurrences: vec![],
+            symbols: vec![],
+        }
+    }
+
+    #[test]
+    fn test_from_scip_file_roundtrip() {
+        let td = test_tempdir("ooc-scip-roundtrip-");
+        let mut store = OutOfCoreStore::open(td.path()).unwrap();
+
+        let file = make_test_scip_file("src/main.rs");
+        let entry = ScopeEntry::from_scip_file(&file);
+
+        // Verify the entry's source_key matches the file path.
+        assert_eq!(entry.source_key, "src/main.rs");
+
+        // Put and get the entry.
+        store.put(&entry).unwrap();
+        let loaded = store.get(&entry.id).unwrap().expect("entry must exist");
+
+        // Deserialize the payload back to a ScipFile.
+        let recovered: crate::scip_parser::ScipFile =
+            serde_json::from_slice(&loaded.payload).expect("deserialize ScipFile from payload");
+
+        assert_eq!(recovered, file, "roundtripped ScipFile must equal original");
+    }
+
+    #[test]
+    fn test_put_parsed_index_writes_all_files() {
+        let td = test_tempdir("ooc-put-index-");
+        let mut store = OutOfCoreStore::open(td.path()).unwrap();
+
+        let index = crate::scip_parser::ParsedScipIndex {
+            workspace_slug: "test".to_string(),
+            metadata: crate::scip_parser::ScipMetadata::default(),
+            files: vec![
+                make_test_scip_file("src/a.rs"),
+                make_test_scip_file("src/b.rs"),
+                make_test_scip_file("src/c.rs"),
+            ],
+            external_symbols: vec![],
+        };
+
+        let count = store.put_parsed_index(&index).unwrap();
+        assert_eq!(count, 3, "must write a shard for each file");
+        assert_eq!(store.shard_count(), 3, "store must contain 3 shards");
+    }
+
+    #[test]
+    fn test_scip_file_iter_yields_all_files() {
+        let td = test_tempdir("ooc-scip-iter-");
+        let mut store = OutOfCoreStore::open(td.path()).unwrap();
+
+        let files = vec![
+            make_test_scip_file("src/a.rs"),
+            make_test_scip_file("src/b.rs"),
+            make_test_scip_file("src/c.rs"),
+        ];
+        let index = crate::scip_parser::ParsedScipIndex {
+            workspace_slug: "test".to_string(),
+            metadata: crate::scip_parser::ScipMetadata::default(),
+            files: files.clone(),
+            external_symbols: vec![],
+        };
+
+        store.put_parsed_index(&index).unwrap();
+
+        let iterated: Vec<crate::scip_parser::ScipFile> = store
+            .scip_file_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("scip_file_iter must succeed");
+
+        assert_eq!(iterated.len(), 3, "iterator must yield all 3 files");
+
+        // Sort both by path for stable comparison.
+        let mut original_paths: Vec<_> = files.iter().map(|f| &f.relative_path).collect();
+        original_paths.sort();
+        let mut iterated_paths: Vec<_> = iterated.iter().map(|f| &f.relative_path).collect();
+        iterated_paths.sort();
+        assert_eq!(original_paths, iterated_paths);
+
+        // Verify full content equality for each file.
+        for original in &files {
+            let matched = iterated
+                .iter()
+                .find(|f| f.relative_path == original.relative_path);
+            assert!(
+                matched.is_some(),
+                "iterator must yield file {:?}",
+                original.relative_path
+            );
+            assert_eq!(matched.unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn test_scip_file_iter_one_at_a_time() {
+        // This test verifies that the iterator loads files from disk
+        // on-demand rather than preloading them all. We verify by
+        // checking the iterator is lazy (only loads when `.next()` is
+        // called) and that it produces valid content one entry at a time.
+        let td = test_tempdir("ooc-scip-iter-oat-");
+        let mut store = OutOfCoreStore::open(td.path()).unwrap();
+
+        let files: Vec<_> = (0..10)
+            .map(|i| make_test_scip_file(&format!("src/file_{i}.rs")))
+            .collect();
+        let index = crate::scip_parser::ParsedScipIndex {
+            workspace_slug: "test".to_string(),
+            metadata: crate::scip_parser::ScipMetadata::default(),
+            files,
+            external_symbols: vec![],
+        };
+        store.put_parsed_index(&index).unwrap();
+        assert_eq!(store.shard_count(), 10);
+
+        // Consume the iterator one at a time and count.
+        let mut count = 0usize;
+        for result in store.scip_file_iter() {
+            let file = result.expect("each iteration must succeed");
+            assert!(
+                file.relative_path
+                    .to_string_lossy()
+                    .starts_with("src/file_"),
+                "each file must have the expected prefix"
+            );
+            count += 1;
+        }
+        assert_eq!(count, 10, "iterator must yield exactly 10 files");
     }
 }

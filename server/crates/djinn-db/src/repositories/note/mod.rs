@@ -21,6 +21,7 @@ mod housekeeping;
 mod indexing;
 mod lexical_search;
 pub(crate) mod lifecycle;
+mod note_quality;
 pub mod replay_validation;
 pub mod rrf;
 mod scoring;
@@ -40,7 +41,7 @@ pub use consolidation::{
 pub use djinn_memory::{
     BuildContextResponse, ConsolidatedNoteProvenance, ConsolidationCandidateEdge,
     ConsolidationCluster, ConsolidationNote, ConsolidationRunMetric, ContradictionCandidate,
-    DbNoteGroup, NoteDedupCandidate,
+    DbNoteGroup, NoteDedupCandidate, NoteQualityAssessment,
 };
 pub use embeddings::{
     EmbeddedNote, EmbeddingQueryContext, NoopNoteVectorStore, NoteEmbeddingMatch,
@@ -54,6 +55,7 @@ pub use lexical_search::{
     executable_lexical_search_sql, lexical_search_threshold, normalize_lexical_score,
     sanitize_postgres_tsquery, sanitize_sqlite_fts5_query, validate_postgres_tsvector_threshold,
 };
+pub use note_quality::{assess_note_quality, looks_task_local, required_sections};
 pub use replay_validation::{
     PromptBudgetReport, QueryReplayReport, RankedHit, RankingReport, ReplayCriteria, ReplayFixture,
     ReplayNote, ReplayQuery, ReplayReport, anchor_embedding_replay_fixture,
@@ -103,7 +105,7 @@ macro_rules! note_select_where_id {
     ($id:expr) => {
         ::sqlx::query_as::<_, ::djinn_memory::Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                storage, note_type, folder, tags::text AS tags, content,
+                storage, note_type, folder, status, tags::text AS tags, content,
                 retrieval_anchor, created_at, updated_at, last_accessed,
                 access_count, confidence, abstract as abstract_, overview,
                 scope_paths::text AS scope_paths

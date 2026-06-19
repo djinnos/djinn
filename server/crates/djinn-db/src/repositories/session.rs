@@ -1,5 +1,6 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
+use djinn_core::models::provider::Pricing;
 use djinn_core::models::{SessionRecord, SessionStatus};
 use serde_json::Value;
 
@@ -24,6 +25,15 @@ pub struct CreateSessionParams<'a> {
     /// Link this session to a task-run row (Phase 1 supervisor path). `None`
     /// preserves the pre-supervisor behaviour where sessions are standalone.
     pub task_run_id: Option<&'a str>,
+    /// Optional start-time pricing snapshot resolved by the agent host from
+    /// the catalog.  When `Some`, the four per-million rate snapshot columns
+    /// are populated; when `None` the snapshot columns (and `cost_usd`) stay
+    /// `NULL` — uncatalogued/unpriced sessions are never treated as free.
+    ///
+    /// Owned by the agent layer (`djinn-agent` performs the catalog lookup and
+    /// passes plain pricing data here) so `djinn-db` has no dependency on
+    /// `djinn-provider`.
+    pub pricing: Option<&'a Pricing>,
 }
 
 impl SessionRepository {
@@ -45,15 +55,23 @@ impl SessionRepository {
         sqlx::query!(
             "INSERT INTO sessions
                 (id, project_id, task_id, model_id, agent_type, status,
-                 created_by_user_id, task_run_id)
-             VALUES ($1, $2, $3, $4, $5, 'running', $6, $7)",
+                 created_by_user_id, task_run_id,
+                 input_price_per_million_snapshot,
+                 output_price_per_million_snapshot,
+                 cache_read_price_per_million_snapshot,
+                 cache_write_price_per_million_snapshot)
+             VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8, $9, $10, $11)",
             id,
             params.project_id,
             params.task_id,
             params.model,
             params.agent_type,
             created_by_user_id,
-            params.task_run_id
+            params.task_run_id,
+            params.pricing.map(|p| p.input_per_million),
+            params.pricing.map(|p| p.output_per_million),
+            params.pricing.map(|p| p.cache_read_per_million),
+            params.pricing.map(|p| p.cache_write_per_million),
         )
         .execute(self.db.pool())
         .await?;
@@ -63,7 +81,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -94,7 +116,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -132,6 +158,15 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
 
         let status_str = status.as_str();
+        // Token params are bound twice: once as i64 for the bigint SET
+        // columns ($2-$5) and once as f64 for the cost computation
+        // ($8-$11).  Reusing the same positional parameter in both a
+        // bigint and a double-precision context makes PostgreSQL report
+        // "inconsistent types deduced", so we use separate positions.
+        let ti_f = tokens_in as f64;
+        let to_f = tokens_out as f64;
+        let cr_f = cache_read as f64;
+        let cw_f = cache_write as f64;
         sqlx::query(
             r#"UPDATE sessions
              SET status = $1,
@@ -139,6 +174,19 @@ impl SessionRepository {
                  tokens_out = $3,
                  cache_read_tokens = $4,
                  cache_write_tokens = $5,
+                 cost_usd = CASE
+                     WHEN input_price_per_million_snapshot IS NOT NULL
+                      AND output_price_per_million_snapshot IS NOT NULL
+                      AND cache_read_price_per_million_snapshot IS NOT NULL
+                      AND cache_write_price_per_million_snapshot IS NOT NULL
+                     THEN (
+                         $8 * input_price_per_million_snapshot
+                         + $9 * output_price_per_million_snapshot
+                         + $10 * cache_read_price_per_million_snapshot
+                         + $11 * cache_write_price_per_million_snapshot
+                     ) / 1000000.0
+                     ELSE NULL
+                 END,
                  ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                  parked_reason = COALESCE($7, parked_reason)
              WHERE id = $6"#,
@@ -150,6 +198,10 @@ impl SessionRepository {
         .bind(cache_write)
         .bind(id)
         .bind(parked_reason)
+        .bind(ti_f)
+        .bind(to_f)
+        .bind(cr_f)
+        .bind(cw_f)
         .execute(self.db.pool())
         .await?;
 
@@ -166,7 +218,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE status = 'running'"#
         )
         .fetch_all(self.db.pool())
@@ -202,7 +258,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE task_id = $1 AND status = 'running'"#,
             task_id
         )
@@ -237,7 +297,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -256,7 +320,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE project_id = $1 AND id = $2"#,
             project_id,
             id
@@ -272,7 +340,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE task_id = $1 ORDER BY started_at DESC"#,
             task_id
         )
@@ -289,7 +361,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status, tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
         )
         .bind(task_run_id)
@@ -308,7 +384,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions
              WHERE project_id = $1 AND task_id = $2 ORDER BY started_at DESC"#,
             project_id,
@@ -325,7 +405,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions
              WHERE status = 'running' ORDER BY started_at DESC"#
         )
@@ -385,7 +469,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions
              WHERE project_id = $1 AND status = 'running' ORDER BY started_at DESC"#,
             project_id
@@ -407,7 +495,11 @@ impl SessionRepository {
                     s.status AS "status!", s.tokens_in, s.tokens_out,
                     s.cache_read_tokens, s.cache_write_tokens,
                     s.task_run_id, s.title,
-                    s.parked_reason AS "parked_reason?"
+                    s.parked_reason AS "parked_reason?",
+                    s.cost_usd, s.input_price_per_million_snapshot,
+                    s.output_price_per_million_snapshot,
+                    s.cache_read_price_per_million_snapshot,
+                    s.cache_write_price_per_million_snapshot
              FROM sessions s
              INNER JOIN tasks t ON t.id = s.task_id
              WHERE s.status = 'running' AND s.agent_type = 'planner' AND t.epic_id = $1
@@ -425,7 +517,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions
              WHERE task_id = $1 AND status = 'running' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -501,19 +597,45 @@ impl SessionRepository {
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query!(
+        // Token params are bound twice: once as i64 for the bigint SET
+        // columns ($1-$4) and once as f64 for the cost computation
+        // ($5-$8).  Reusing the same positional parameter in both a
+        // bigint and a double-precision context makes PostgreSQL report
+        // "inconsistent types deduced", so we use separate positions.
+        let ti_f = tokens_in as f64;
+        let to_f = tokens_out as f64;
+        let cr_f = cache_read as f64;
+        let cw_f = cache_write as f64;
+        sqlx::query(
             r#"UPDATE sessions
              SET tokens_in = $1,
                  tokens_out = $2,
                  cache_read_tokens = $3,
-                 cache_write_tokens = $4
-             WHERE id = $5 AND status = 'running'"#,
-            tokens_in,
-            tokens_out,
-            cache_read,
-            cache_write,
-            id
+                 cache_write_tokens = $4,
+                 cost_usd = CASE
+                     WHEN input_price_per_million_snapshot IS NOT NULL
+                      AND output_price_per_million_snapshot IS NOT NULL
+                      AND cache_read_price_per_million_snapshot IS NOT NULL
+                      AND cache_write_price_per_million_snapshot IS NOT NULL
+                     THEN (
+                         $5 * input_price_per_million_snapshot
+                         + $6 * output_price_per_million_snapshot
+                         + $7 * cache_read_price_per_million_snapshot
+                         + $8 * cache_write_price_per_million_snapshot
+                     ) / 1000000.0
+                     ELSE NULL
+                 END
+             WHERE id = $9 AND status = 'running'"#,
         )
+        .bind(tokens_in)
+        .bind(tokens_out)
+        .bind(cache_read)
+        .bind(cache_write)
+        .bind(ti_f)
+        .bind(to_f)
+        .bind(cr_f)
+        .bind(cw_f)
+        .bind(id)
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -538,7 +660,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -617,7 +743,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' AND agent_type = $2
              ORDER BY started_at DESC LIMIT 1"#,
@@ -681,7 +811,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -741,7 +875,11 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status AS "status!", tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?"
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -764,7 +902,11 @@ impl SessionRepository {
                     s.status AS "status!", s.tokens_in, s.tokens_out,
                     s.cache_read_tokens, s.cache_write_tokens,
                     s.task_run_id, s.title,
-                    s.parked_reason AS "parked_reason?"
+                    s.parked_reason AS "parked_reason?",
+                    s.cost_usd, s.input_price_per_million_snapshot,
+                    s.output_price_per_million_snapshot,
+                    s.cache_read_price_per_million_snapshot,
+                    s.cache_write_price_per_million_snapshot
              FROM sessions s
              LEFT JOIN (
                 SELECT session_id, MAX(created_at) AS last_at
@@ -797,7 +939,11 @@ impl SessionRepository {
                     s.status AS "status!", s.tokens_in, s.tokens_out,
                     s.cache_read_tokens, s.cache_write_tokens,
                     s.task_run_id, s.title,
-                    s.parked_reason AS "parked_reason?"
+                    s.parked_reason AS "parked_reason?",
+                    s.cost_usd, s.input_price_per_million_snapshot,
+                    s.output_price_per_million_snapshot,
+                    s.cache_read_price_per_million_snapshot,
+                    s.cache_write_price_per_million_snapshot
              FROM sessions s
              LEFT JOIN (
                 SELECT session_id, MAX(created_at) AS last_at
@@ -983,6 +1129,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -995,6 +1142,7 @@ mod tests {
             agent_type: "worker",
             metadata_json: None,
             task_run_id: None,
+            pricing: None,
         })
         .await
         .unwrap();
@@ -1106,6 +1254,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1141,6 +1290,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1194,6 +1344,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1210,6 +1361,148 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_record_maps_nullable_cost_and_snapshot_fields() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .unwrap();
+
+        // New sessions have no pricing snapshot or cost yet — all five
+        // nullable columns must be NULL, never zero.
+        assert!(created.cost_usd.is_none());
+        assert!(created.input_price_per_million_snapshot.is_none());
+        assert!(created.output_price_per_million_snapshot.is_none());
+        assert!(created.cache_read_price_per_million_snapshot.is_none());
+        assert!(created.cache_write_price_per_million_snapshot.is_none());
+
+        // Populate the columns directly (later tasks wire this up from the
+        // catalog) and verify the repository projections read them back.
+        sqlx::query(
+            r#"UPDATE sessions
+               SET cost_usd = $1,
+                   input_price_per_million_snapshot = $2,
+                   output_price_per_million_snapshot = $3,
+                   cache_read_price_per_million_snapshot = $4,
+                   cache_write_price_per_million_snapshot = $5
+               WHERE id = $6"#,
+        )
+        .bind(0.0123_f64)
+        .bind(1.5_f64)
+        .bind(6.0_f64)
+        .bind(0.15_f64)
+        .bind(1.875_f64)
+        .bind(&created.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.cost_usd, Some(0.0123));
+        assert_eq!(fetched.input_price_per_million_snapshot, Some(1.5));
+        assert_eq!(fetched.output_price_per_million_snapshot, Some(6.0));
+        assert_eq!(fetched.cache_read_price_per_million_snapshot, Some(0.15));
+        assert_eq!(fetched.cache_write_price_per_million_snapshot, Some(1.875));
+
+        // The list-for-task projection must also carry the new fields.
+        let listed = repo.list_for_task(&task_id).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].cost_usd, Some(0.0123));
+        assert_eq!(listed[0].input_price_per_million_snapshot, Some(1.5));
+        assert_eq!(listed[0].output_price_per_million_snapshot, Some(6.0));
+        assert_eq!(listed[0].cache_read_price_per_million_snapshot, Some(0.15));
+        assert_eq!(
+            listed[0].cache_write_price_per_million_snapshot,
+            Some(1.875)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_persists_pricing_snapshot_when_priced() {
+        use djinn_core::models::provider::Pricing;
+
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let pricing = Pricing {
+            input_per_million: 1.5,
+            output_per_million: 6.0,
+            cache_read_per_million: 0.15,
+            cache_write_per_million: 1.875,
+        };
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&pricing),
+            })
+            .await
+            .unwrap();
+
+        // Snapshot columns must reflect the pricing passed at creation.
+        assert_eq!(created.input_price_per_million_snapshot, Some(1.5));
+        assert_eq!(created.output_price_per_million_snapshot, Some(6.0));
+        assert_eq!(created.cache_read_price_per_million_snapshot, Some(0.15));
+        assert_eq!(created.cache_write_price_per_million_snapshot, Some(1.875));
+
+        // cost_usd must remain NULL at creation — token counts are still zero,
+        // cost recomputation belongs to later token-write paths.
+        assert!(created.cost_usd.is_none());
+
+        // Round-trip via repo.get to confirm the projection carries the values.
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.input_price_per_million_snapshot, Some(1.5));
+        assert_eq!(fetched.output_price_per_million_snapshot, Some(6.0));
+        assert_eq!(fetched.cache_read_price_per_million_snapshot, Some(0.15));
+        assert_eq!(fetched.cache_write_price_per_million_snapshot, Some(1.875));
+        assert!(fetched.cost_usd.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_leaves_snapshot_null_when_unpriced() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        // Uncatalogued/unpriced session — pricing is None.
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "uncatalogued/model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .unwrap();
+
+        // All snapshot fields and cost_usd must be NULL, never zero/free.
+        assert!(created.input_price_per_million_snapshot.is_none());
+        assert!(created.output_price_per_million_snapshot.is_none());
+        assert!(created.cache_read_price_per_million_snapshot.is_none());
+        assert!(created.cache_write_price_per_million_snapshot.is_none());
+        assert!(created.cost_usd.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_sets_parked_reason_without_clobbering_on_none() {
         let db = test_db();
         let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
@@ -1223,6 +1516,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1271,6 +1565,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1303,6 +1598,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1360,6 +1656,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1372,6 +1669,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1385,6 +1683,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1397,6 +1696,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1478,6 +1778,7 @@ mod tests {
                 agent_type: "planner",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1491,6 +1792,7 @@ mod tests {
                 agent_type: "planner",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1504,6 +1806,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1517,6 +1820,7 @@ mod tests {
                 agent_type: "planner",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1570,6 +1874,7 @@ mod tests {
                 agent_type: "planner",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -1684,6 +1989,251 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_recomputes_cost_usd_from_snapshot_and_token_values() {
+        use djinn_core::models::provider::Pricing;
+
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let pricing = Pricing {
+            input_per_million: 1.5,
+            output_per_million: 6.0,
+            cache_read_per_million: 0.15,
+            cache_write_per_million: 1.875,
+        };
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&pricing),
+            })
+            .await
+            .unwrap();
+        assert!(created.cost_usd.is_none());
+
+        // Final update with token counts — cost should be recomputed.
+        let updated = repo
+            .update(
+                &created.id,
+                SessionStatus::Completed,
+                1_000_000,
+                2_000_000,
+                500_000,
+                200_000,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Expected: (1_000_000 * 1.5 + 2_000_000 * 6.0 + 500_000 * 0.15 + 200_000 * 1.875) / 1_000_000
+        // = 1.5 + 12.0 + 0.075 + 0.375 = 13.95
+        assert!(
+            (updated.cost_usd.unwrap() - 13.95).abs() < 0.0001,
+            "expected cost_usd ~13.95, got {:?}",
+            updated.cost_usd
+        );
+
+        // Round-trip via get confirms the stored value.
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert!(
+            (fetched.cost_usd.unwrap() - 13.95).abs() < 0.0001,
+            "expected fetched cost_usd ~13.95, got {:?}",
+            fetched.cost_usd
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_leaves_cost_usd_null_when_any_snapshot_rate_is_null() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        // Create with no pricing snapshot — all snapshot columns NULL.
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "uncatalogued/model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .unwrap();
+        assert!(created.cost_usd.is_none());
+
+        // Update with tokens — cost_usd must stay NULL because snapshots are NULL.
+        let updated = repo
+            .update(
+                &created.id,
+                SessionStatus::Completed,
+                1_000_000,
+                2_000_000,
+                500_000,
+                200_000,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            updated.cost_usd.is_none(),
+            "NULL snapshot must keep cost_usd NULL"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_tokens_recomputes_cost_usd_for_running_sessions() {
+        use djinn_core::models::provider::Pricing;
+
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let pricing = Pricing {
+            input_per_million: 2.0,
+            output_per_million: 8.0,
+            cache_read_per_million: 0.5,
+            cache_write_per_million: 2.5,
+        };
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&pricing),
+            })
+            .await
+            .unwrap();
+        assert!(created.cost_usd.is_none());
+
+        // Mid-flight flush while still running.
+        repo.flush_tokens(&created.id, 500_000, 1_000_000, 250_000, 100_000)
+            .await
+            .unwrap();
+
+        // Expected: (500_000 * 2.0 + 1_000_000 * 8.0 + 250_000 * 0.5 + 100_000 * 2.5) / 1_000_000
+        // = 1.0 + 8.0 + 0.125 + 0.25 = 9.375
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert!(
+            (fetched.cost_usd.unwrap() - 9.375).abs() < 0.0001,
+            "expected cost_usd ~9.375 after flush, got {:?}",
+            fetched.cost_usd
+        );
+        assert_eq!(fetched.status, "running");
+
+        // A second flush with updated counts should recompute cost.
+        repo.flush_tokens(&created.id, 600_000, 1_200_000, 300_000, 150_000)
+            .await
+            .unwrap();
+        let fetched2 = repo.get(&created.id).await.unwrap().unwrap();
+        // Expected: (600_000 * 2.0 + 1_200_000 * 8.0 + 300_000 * 0.5 + 150_000 * 2.5) / 1_000_000
+        // = 1.2 + 9.6 + 0.15 + 0.375 = 11.325
+        assert!(
+            (fetched2.cost_usd.unwrap() - 11.325).abs() < 0.0001,
+            "expected cost_usd ~11.325 after second flush, got {:?}",
+            fetched2.cost_usd
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_tokens_leaves_cost_usd_null_for_uncatalogued_sessions() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "uncatalogued/model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .unwrap();
+
+        repo.flush_tokens(&created.id, 500_000, 1_000_000, 250_000, 100_000)
+            .await
+            .unwrap();
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert!(
+            fetched.cost_usd.is_none(),
+            "uncatalogued session must keep cost_usd NULL after flush"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_tokens_does_not_resurrect_terminal_sessions() {
+        use djinn_core::models::provider::Pricing;
+
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let pricing = Pricing {
+            input_per_million: 1.0,
+            output_per_million: 2.0,
+            cache_read_per_million: 0.1,
+            cache_write_per_million: 0.2,
+        };
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&pricing),
+            })
+            .await
+            .unwrap();
+
+        // Complete the session first.
+        repo.update(
+            &created.id,
+            SessionStatus::Completed,
+            100,
+            200,
+            50,
+            25,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Flush racing against the completed session must be a no-op.
+        repo.flush_tokens(&created.id, 999, 999, 999, 999)
+            .await
+            .unwrap();
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, "completed");
+        assert_eq!(fetched.tokens_in, 100);
+        assert_eq!(fetched.tokens_out, 200);
+        assert_eq!(fetched.cache_read_tokens, 50);
+        assert_eq!(fetched.cache_write_tokens, 25);
+        // cost_usd from the final update, not the flush.
+        assert!(
+            (fetched.cost_usd.unwrap() - 0.00051).abs() < 0.000001,
+            "expected cost from final update, got {:?}",
+            fetched.cost_usd
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn last_message_at_returns_latest_created_at() {
         let db = test_db();
         let bus = EventBus::noop();
@@ -1698,6 +2248,7 @@ mod tests {
                 agent_type: "planner",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();

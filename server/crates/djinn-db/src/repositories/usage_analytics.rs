@@ -17,6 +17,58 @@ use sqlx::Row;
 use crate::Result;
 use crate::database::Database;
 
+// ── Model effectiveness / project-model matrix types ─────────────────────
+
+/// Per-model effectiveness row computed over **worker sessions only**.
+///
+/// Completed-task attribution uses *shared-credit*: every model that ran at
+/// least one worker session on a completed task receives credit for that task.
+/// This means the sum of `shared_credit_completed_task_count` across models
+/// can exceed the actual number of completed tasks when multiple models worked
+/// on the same task.  UI code should label this field accordingly.
+#[derive(Clone, Debug, Default)]
+pub struct ModelEffectivenessRow {
+    pub model_id: String,
+    pub sessions: i64,
+    /// Aggregate cost in USD for worker sessions of this model.
+    /// `None` when all sessions used unpriced models (NULL cost_usd).
+    pub spend_usd: Option<f64>,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    /// Shared-credit completed-task count: number of distinct completed tasks
+    /// that had at least one worker session using this model.
+    pub shared_credit_completed_task_count: i64,
+    /// Fraction of closed tasks that completed successfully (0.0–1.0).
+    pub success_rate: Option<f64>,
+    /// Average total_reopen_count across closed tasks attributed to this model.
+    pub avg_reopens: Option<f64>,
+    /// Fraction of closed tasks with zero verification failures (0.0–1.0).
+    pub verification_pass_rate: Option<f64>,
+    /// Cost per completed task. `None` when no completed tasks or all sessions
+    /// were unpriced (NULL cost_usd).
+    pub cost_per_completed_task: Option<f64>,
+    /// Average total tokens (in + out) per completed task.
+    pub tokens_per_task: Option<f64>,
+}
+
+/// Project × model matrix entry for frontend consumption.
+///
+/// Groups usage by project and model across all agent types matching the
+/// endpoint filters. NULL-project sessions (chat sessions without a task)
+/// are preserved with an empty-string project_id.
+#[derive(Clone, Debug, Default)]
+pub struct ProjectModelMatrixRow {
+    /// Project ID, or empty string for sessions without a project.
+    pub project_id: String,
+    pub model_id: String,
+    pub sessions: i64,
+    /// Aggregate cost in USD. `None` when ANY session in the group had a NULL
+    /// cost_usd (unpriced model).
+    pub spend_usd: Option<f64>,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+}
+
 // ── Public types ──────────────────────────────────────────────────────────
 
 /// Grouping dimensions supported by the analytics breakdown query.
@@ -202,10 +254,6 @@ impl UsageAnalyticsRepository {
         if let Some(ref agent_type) = params.agent_type {
             conditions.push(format!("s.agent_type = ${bind_idx}"));
             binds.push(agent_type.clone());
-            #[allow(unused_assignments)]
-            {
-                bind_idx += 1;
-            }
         }
 
         // When grouping by proposal, only include sessions that trace to a
@@ -234,7 +282,7 @@ impl UsageAnalyticsRepository {
     }
 
     /// Bind parameters onto a `sqlx::query()` builder.
-    async fn bind_all<'q>(
+    fn bind_all<'q>(
         query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
         binds: &'q [String],
     ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
@@ -265,7 +313,7 @@ impl UsageAnalyticsRepository {
         );
 
         let query = sqlx::query(&sql);
-        let query = Self::bind_all(query, &binds).await;
+        let query = Self::bind_all(query, &binds);
         let row = query.fetch_one(self.db.pool()).await?;
 
         Ok(UsageTotals {
@@ -304,7 +352,7 @@ impl UsageAnalyticsRepository {
         );
 
         let query = sqlx::query(&sql);
-        let query = Self::bind_all(query, &binds).await;
+        let query = Self::bind_all(query, &binds);
         let rows = query.fetch_all(self.db.pool()).await?;
 
         Ok(rows
@@ -346,7 +394,7 @@ impl UsageAnalyticsRepository {
         );
 
         let query = sqlx::query(&sql);
-        let query = Self::bind_all(query, &binds).await;
+        let query = Self::bind_all(query, &binds);
         let rows = query.fetch_all(self.db.pool()).await?;
 
         Ok(rows
@@ -360,6 +408,203 @@ impl UsageAnalyticsRepository {
                 cache_read_tokens: r.get("cache_read_tokens"),
                 cache_write_tokens: r.get("cache_write_tokens"),
                 total_cost_usd: r.get("total_cost_usd"),
+            })
+            .collect())
+    }
+
+    // ── Model effectiveness (worker-scoped) ──────────────────────────────
+
+    /// Run effectiveness and project-model matrix queries and return the
+    /// combined result.  Effectiveness is always scoped to worker sessions;
+    /// the matrix obeys all endpoint filters.
+    pub async fn query_effectiveness(
+        &self,
+        params: &UsageAnalyticsQuery,
+    ) -> Result<(Vec<ModelEffectivenessRow>, Vec<ProjectModelMatrixRow>)> {
+        self.db.ensure_initialized().await?;
+
+        let effectiveness = self.fetch_model_effectiveness(params).await?;
+        let matrix = self.fetch_project_model_matrix(params).await?;
+
+        Ok((effectiveness, matrix))
+    }
+
+    /// Build FROM + WHERE for the model effectiveness query.
+    ///
+    /// Always scopes to `agent_type = 'worker'`.  Applies date range,
+    /// `project_id`, and `model_id` endpoint filters; the `agent_type`
+    /// filter from the endpoint query is intentionally ignored here because
+    /// effectiveness is defined over worker sessions only.
+    fn build_effectiveness_from_where(
+        params: &UsageAnalyticsQuery,
+    ) -> (String, String, Vec<String>) {
+        let mut conditions: Vec<String> = Vec::new();
+        let mut binds: Vec<String> = Vec::new();
+        let mut bind_idx: usize = 1;
+
+        // Date range (same as base query).
+        conditions.push(format!("s.started_at >= ${bind_idx}"));
+        binds.push(params.from.clone());
+        bind_idx += 1;
+
+        conditions.push(format!("s.started_at < ${bind_idx}"));
+        binds.push(params.to.clone());
+        bind_idx += 1;
+
+        // Always worker-scoped.
+        conditions.push(format!("s.agent_type = ${bind_idx}"));
+        binds.push("worker".to_string());
+        bind_idx += 1;
+
+        if let Some(ref project_id) = params.project_id {
+            conditions.push(format!("s.project_id = ${bind_idx}"));
+            binds.push(project_id.clone());
+            bind_idx += 1;
+        }
+
+        if let Some(ref model_id) = params.model_id {
+            conditions.push(format!("s.model_id = ${bind_idx}"));
+            binds.push(model_id.clone());
+            // bind_idx not incremented — last use
+        }
+
+        let from_clause = "FROM sessions s \
+             JOIN tasks t ON t.id = s.task_id"
+            .to_string();
+
+        let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+        (from_clause, where_clause, binds)
+    }
+
+    /// Per-model effectiveness metrics over worker sessions.
+    ///
+    /// Uses shared-credit attribution: each completed task counts for every
+    /// model that ran at least one worker session on it.  Success rate,
+    /// average reopens, and verification pass rate reuse the same pattern as
+    /// `AgentRepository::get_metrics`.
+    async fn fetch_model_effectiveness(
+        &self,
+        params: &UsageAnalyticsQuery,
+    ) -> Result<Vec<ModelEffectivenessRow>> {
+        let (from_clause, where_clause, binds) = Self::build_effectiveness_from_where(params);
+
+        let sql = format!(
+            "SELECT \
+                s.model_id                               AS \"model_id!\", \
+                COUNT(*)                                 AS \"sessions!\", \
+                CASE \
+                    WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
+                    ELSE SUM(s.cost_usd) \
+                END                                      AS \"spend_usd\", \
+                COALESCE(SUM(s.tokens_in), 0)            AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out), 0)           AS \"tokens_out!\", \
+                COUNT(DISTINCT \
+                    CASE WHEN t.status = 'closed' \
+                              AND t.close_reason = 'completed' \
+                         THEN t.id END \
+                )                                        AS \"shared_credit_completed_task_count!\", \
+                CAST(SUM(CASE WHEN t.status = 'closed' AND t.close_reason = 'completed' THEN 1 ELSE 0 END) AS DOUBLE PRECISION) \
+                    / CAST(GREATEST(1, COUNT(DISTINCT \
+                        CASE WHEN t.status = 'closed' THEN t.id END \
+                    )) AS DOUBLE PRECISION)              AS \"success_rate: f64\", \
+                COALESCE(AVG(CASE WHEN t.status = 'closed' \
+                    THEN CAST(t.total_reopen_count AS DOUBLE PRECISION) \
+                    ELSE NULL END), 0.0)                 AS \"avg_reopens!: f64\", \
+                CAST(SUM(CASE WHEN t.status = 'closed' AND t.total_verification_failure_count = 0 THEN 1 ELSE 0 END) AS DOUBLE PRECISION) \
+                    / CAST(GREATEST(1, COUNT(DISTINCT \
+                        CASE WHEN t.status = 'closed' THEN t.id END \
+                    )) AS DOUBLE PRECISION)              AS \"verification_pass_rate: f64\" \
+             {from_clause} {where_clause} \
+             GROUP BY s.model_id \
+             ORDER BY s.model_id"
+        );
+
+        let mut query = sqlx::query(&sql);
+        for val in &binds {
+            query = query.bind(val.clone());
+        }
+        let rows = query.fetch_all(self.db.pool()).await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let sessions: i64 = r.get("sessions");
+                let spend_usd: Option<f64> = r.get("spend_usd");
+                let tokens_in: i64 = r.get("tokens_in");
+                let tokens_out: i64 = r.get("tokens_out");
+                let completed: i64 = r.get("shared_credit_completed_task_count");
+
+                // cost_per_completed_task: NULL when no completed tasks or
+                // all sessions were unpriced (NULL cost_usd).
+                let cost_per_completed_task = match (spend_usd, completed) {
+                    (Some(cost), c) if c > 0 => Some(cost / c as f64),
+                    _ => None,
+                };
+                // tokens_per_task: NULL when no completed tasks.
+                let tokens_per_task = if completed > 0 {
+                    Some((tokens_in + tokens_out) as f64 / completed as f64)
+                } else {
+                    None
+                };
+
+                ModelEffectivenessRow {
+                    model_id: r.get("model_id"),
+                    sessions,
+                    spend_usd,
+                    tokens_in,
+                    tokens_out,
+                    shared_credit_completed_task_count: completed,
+                    success_rate: r.get("success_rate"),
+                    avg_reopens: r.get("avg_reopens"),
+                    verification_pass_rate: r.get("verification_pass_rate"),
+                    cost_per_completed_task,
+                    tokens_per_task,
+                }
+            })
+            .collect())
+    }
+
+    // ── Project × model matrix ───────────────────────────────────────────
+
+    /// Project × model usage matrix.  Groups all sessions (all agent types)
+    /// by project and model, applying all endpoint filters.  NULL-project
+    /// sessions are preserved with an empty-string project_id.
+    async fn fetch_project_model_matrix(
+        &self,
+        params: &UsageAnalyticsQuery,
+    ) -> Result<Vec<ProjectModelMatrixRow>> {
+        let (from_clause, where_clause, binds) = Self::build_from_where(params);
+
+        let sql = format!(
+            "SELECT \
+                COALESCE(s.project_id, '')               AS \"project_id!\", \
+                s.model_id                               AS \"model_id!\", \
+                COUNT(*)                                 AS \"sessions!\", \
+                CASE \
+                    WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
+                    ELSE SUM(s.cost_usd) \
+                END                                      AS \"spend_usd\", \
+                COALESCE(SUM(s.tokens_in), 0)            AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out), 0)           AS \"tokens_out!\" \
+             {from_clause} {where_clause} \
+             GROUP BY COALESCE(s.project_id, ''), s.model_id \
+             ORDER BY project_id, model_id"
+        );
+
+        let query = sqlx::query(&sql);
+        let query = Self::bind_all(query, &binds);
+        let rows = query.fetch_all(self.db.pool()).await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| ProjectModelMatrixRow {
+                project_id: r.get("project_id"),
+                model_id: r.get("model_id"),
+                sessions: r.get("sessions"),
+                spend_usd: r.get("spend_usd"),
+                tokens_in: r.get("tokens_in"),
+                tokens_out: r.get("tokens_out"),
             })
             .collect())
     }
@@ -478,5 +723,54 @@ mod tests {
         assert_eq!(result.totals.session_count, 0);
         assert!(result.series.is_empty());
         assert!(result.breakdown.is_empty());
+    }
+
+    #[test]
+    fn model_effectiveness_row_default() {
+        let row = ModelEffectivenessRow::default();
+        assert_eq!(row.model_id, "");
+        assert_eq!(row.sessions, 0);
+        assert!(row.spend_usd.is_none());
+        assert_eq!(row.tokens_in, 0);
+        assert_eq!(row.tokens_out, 0);
+        assert_eq!(row.shared_credit_completed_task_count, 0);
+        assert!(row.success_rate.is_none());
+        assert!(row.avg_reopens.is_none());
+        assert!(row.verification_pass_rate.is_none());
+        assert!(row.cost_per_completed_task.is_none());
+        assert!(row.tokens_per_task.is_none());
+    }
+
+    #[test]
+    fn project_model_matrix_row_default() {
+        let row = ProjectModelMatrixRow::default();
+        assert_eq!(row.project_id, "");
+        assert_eq!(row.model_id, "");
+        assert_eq!(row.sessions, 0);
+        assert!(row.spend_usd.is_none());
+        assert_eq!(row.tokens_in, 0);
+        assert_eq!(row.tokens_out, 0);
+    }
+
+    #[test]
+    fn model_effectiveness_row_clone_debug() {
+        let row = ModelEffectivenessRow {
+            model_id: "gpt-4".into(),
+            sessions: 5,
+            spend_usd: Some(1.23),
+            tokens_in: 100,
+            tokens_out: 50,
+            shared_credit_completed_task_count: 3,
+            success_rate: Some(0.67),
+            avg_reopens: Some(0.5),
+            verification_pass_rate: Some(0.8),
+            cost_per_completed_task: Some(0.41),
+            tokens_per_task: Some(50.0),
+        };
+        let row2 = row.clone();
+        assert_eq!(row2.model_id, "gpt-4");
+        assert_eq!(row2.shared_credit_completed_task_count, 3);
+        // Debug doesn't panic.
+        let _dbg = format!("{row:?}");
     }
 }

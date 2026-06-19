@@ -539,7 +539,7 @@ impl CredentialRepository {
     /// falls back to the org-shared one), this asks the strict question "does
     /// *this* identity already hold its own value?". Use it for "start an OAuth
     /// connect flow" short-circuits: an admin connecting a provider on the
-    /// automation service user's behalf must not latch onto their *own* (or the
+    /// another user's behalf must not latch onto their *own* (or the
     /// org-shared) token and wrongly report the target as already connected.
     pub async fn get_decrypted_exact_owner(
         &self,

@@ -140,7 +140,10 @@ async fn consolidate_clusters(
         consolidated_cluster_count: qualifying_clusters.len() as i64,
         consolidated_note_count,
         source_note_count,
+        decayed_note_count: 0,
+        archived_note_count: 0,
         superseded_source_note_count,
+        admission_dropped_note_count: 0,
         started_at,
         completed_at: Some(&completed_at),
         error_message: None,
@@ -520,6 +523,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -692,6 +696,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -703,6 +708,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -714,6 +720,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -879,6 +886,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();
@@ -890,6 +898,7 @@ mod tests {
                 agent_type: "worker",
                 metadata_json: None,
                 task_run_id: None,
+                pricing: None,
             })
             .await
             .unwrap();

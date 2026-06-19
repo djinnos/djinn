@@ -16,7 +16,6 @@ import {
   queryClient,
 } from "@/lib/queryClient";
 import { fetchProjects } from "@/api/server";
-import { verificationStore, type StepEntry } from "./verificationStore";
 import { showToast } from "@/lib/toast";
 import type { Task, Epic, Proposal } from "@/api/types";
 import { applyDispatchPauseSsePayload, type DispatchPauseSsePayload } from "./dispatchPauseStore";
@@ -48,7 +47,7 @@ function unwrapPayload(raw: unknown): Record<string, unknown> {
       }
     }
 
-    // Non-entity events (session, verification, etc.) — return payload directly
+    // Non-entity events (session, sync, etc.) — return payload directly
     return payload;
   }
 
@@ -131,7 +130,7 @@ export function initSSEEventHandlers(): () => void {
     // for in-flight statuses. If the task moved back to open/closed, clear
     // the session so stale avatars don't linger.
     const IN_FLIGHT = new Set([
-      "in_progress", "verifying", "needs_task_review",
+      "in_progress", "needs_task_review",
       "in_task_review", "needs_lead_intervention", "in_lead_intervention",
     ]);
     const existing = taskStore.getState().getTask(task.id);
@@ -147,14 +146,6 @@ export function initSSEEventHandlers(): () => void {
     }
     if (!("session_count" in task)) task.session_count = existing.session_count;
     if (!("duration_seconds" in task)) task.duration_seconds = existing.duration_seconds;
-
-    // When a task leaves in_progress, clear any stale lifecycle steps so the
-    // "setting up" badge doesn't linger. This matters when a lifecycle aborts
-    // pre-session (credential load, worktree prep, etc.) and never emits the
-    // session_started / session_ended events that normally trigger cleanup.
-    if (existing.status === "in_progress" && task.status !== "in_progress") {
-      verificationStore.getState().clearLifecycleSteps(task.id);
-    }
 
     taskStore.getState().updateTask(task);
     queryClient.setQueryData(["tasks"], (current: Task[] | undefined) =>
@@ -260,8 +251,6 @@ export function initSSEEventHandlers(): () => void {
     if (!payload.task_id) return;
     const existing = taskStore.getState().getTask(payload.task_id);
     if (!existing) return;
-    // Setup is complete — clear lifecycle steps so "setting up" badge disappears
-    verificationStore.getState().clearLifecycleSteps(payload.task_id);
     taskStore.getState().updateTask({
       ...existing,
       active_session: {
@@ -279,7 +268,6 @@ export function initSSEEventHandlers(): () => void {
     if (!payload.task_id) return;
     const existing = taskStore.getState().getTask(payload.task_id);
     if (!existing) return;
-    verificationStore.getState().clearLifecycleSteps(payload.task_id);
     taskStore.getState().updateTask({
       ...existing,
       active_session: undefined,
@@ -310,116 +298,6 @@ export function initSSEEventHandlers(): () => void {
     fetchProjects()
       .then((projects) => projectStore.getState().setProjects(projects))
       .catch((err) => console.error("Failed to refetch projects after SSE event:", err));
-  });
-
-  const verificationStepUnsub = subscribe("verification_step", (event: SSEEvent) => {
-    const payload = unwrapPayload(event.data) as {
-      project_id?: string;
-      task_id?: string;
-      phase?: "setup" | "verification";
-      step?: Record<string, unknown>;
-    };
-
-    if (!payload.project_id || !payload.phase || !payload.step) return;
-
-    const key = payload.task_id ?? payload.project_id;
-    const [variant] = Object.keys(payload.step);
-    const body = payload.step[variant] as Record<string, unknown> | undefined;
-
-    if (!variant) return;
-
-    if (variant === "Started" && body) {
-      verificationStore.getState().clearRun(key);
-      const step: StepEntry = {
-        index: Number(body.index ?? 0),
-        name: String(body.name ?? "step"),
-        command: typeof body.command === "string" ? body.command : undefined,
-        phase: payload.phase,
-        status: "running",
-      };
-      verificationStore.getState().addStep(key, step, {
-        projectId: payload.project_id,
-        taskId: payload.task_id,
-        startedAt: new Date().toISOString(),
-      });
-      return;
-    }
-
-    if (variant === "Finished" && body) {
-      const index = Number(body.index ?? 0);
-      const exitCode = typeof body.exit_code === "number" ? body.exit_code : undefined;
-      const store = verificationStore.getState();
-      const run = store.runs.get(key);
-      const stepExists = run?.steps.some((s) => s.index === index);
-
-      if (!stepExists) {
-        // Backend may emit Finished without a prior Started (e.g. emit_verification_steps).
-        // Create the step so it appears in the UI.
-        const step: StepEntry = {
-          index,
-          name: String(body.name ?? "step"),
-          command: typeof body.command === "string" ? body.command : undefined,
-          phase: payload.phase,
-          status: exitCode === 0 ? "passed" : "failed",
-          exitCode,
-          durationMs: typeof body.duration_ms === "number" ? body.duration_ms : undefined,
-          stdout: typeof body.stdout === "string" ? body.stdout : undefined,
-          stderr: typeof body.stderr === "string" ? body.stderr : undefined,
-        };
-        store.addStep(key, step, {
-          projectId: payload.project_id,
-          taskId: payload.task_id,
-          startedAt: new Date().toISOString(),
-        });
-      } else {
-        store.updateStep(key, index, {
-          exitCode,
-          durationMs: typeof body.duration_ms === "number" ? body.duration_ms : undefined,
-          stdout: typeof body.stdout === "string" ? body.stdout : undefined,
-          stderr: typeof body.stderr === "string" ? body.stderr : undefined,
-          status: exitCode === 0 ? "passed" : "failed",
-        });
-      }
-      return;
-    }
-
-    if (variant === "PhaseComplete" && body) {
-      const phaseStatus = String(body.status ?? "").toLowerCase();
-      verificationStore.getState().setRunStatus(
-        key,
-        phaseStatus === "passed" ? "passed" : phaseStatus === "failed" ? "failed" : "running",
-      );
-      return;
-    }
-
-    if (variant === "CacheHit") {
-      verificationStore.getState().setRunStatus(key, "cache_hit");
-    }
-  });
-
-  const lifecycleStepUnsub = subscribe("lifecycle_step", (event: SSEEvent) => {
-    const payload = unwrapPayload(event.data) as {
-      task_id?: string;
-      step?: string;
-      detail?: string;
-    };
-
-    if (!payload.task_id || !payload.step) return;
-
-    // detail is a serde_json::Value — stringify objects to a compact human-readable form
-    let detail: string | undefined;
-    if (typeof payload.detail === "string") {
-      detail = payload.detail;
-    } else if (payload.detail && typeof payload.detail === "object") {
-      const vals = Object.values(payload.detail as Record<string, unknown>);
-      detail = vals.length === 1 ? String(vals[0]) : undefined;
-    }
-
-    verificationStore.getState().addLifecycleStep(payload.task_id, {
-      step: payload.step,
-      detail,
-      timestamp: new Date().toISOString(),
-    });
   });
 
   // A stored credential was rejected (401) and marked revoked server-side —
@@ -457,8 +335,6 @@ export function initSSEEventHandlers(): () => void {
     sessionStartedUnsub?.();
     sessionEndedUnsub?.();
     syncCompletedUnsub?.();
-    verificationStepUnsub?.();
-    lifecycleStepUnsub?.();
     flushDebouncedInvalidations();
   };
 }

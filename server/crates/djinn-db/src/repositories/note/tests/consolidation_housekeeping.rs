@@ -445,7 +445,10 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
             consolidated_cluster_count: 1,
             consolidated_note_count: 1,
             source_note_count: 3,
+            decayed_note_count: 0,
+            archived_note_count: 0,
             superseded_source_note_count: 0,
+            admission_dropped_note_count: 0,
             started_at: "2026-03-25T10:00:00.000Z",
             completed_at: Some("2026-03-25T10:01:00.000Z"),
             error_message: None,
@@ -463,7 +466,10 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
             consolidated_cluster_count: 0,
             consolidated_note_count: 0,
             source_note_count: 0,
+            decayed_note_count: 0,
+            archived_note_count: 0,
             superseded_source_note_count: 0,
+            admission_dropped_note_count: 0,
             started_at: "2026-03-25T11:00:00.000Z",
             completed_at: Some("2026-03-25T11:02:00.000Z"),
             error_message: Some("llm timeout"),
@@ -481,7 +487,10 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
             consolidated_cluster_count: 1,
             consolidated_note_count: 1,
             source_note_count: 4,
+            decayed_note_count: 0,
+            archived_note_count: 0,
             superseded_source_note_count: 0,
+            admission_dropped_note_count: 0,
             started_at: "2026-03-25T12:00:00.000Z",
             completed_at: Some("2026-03-25T12:03:00.000Z"),
             error_message: None,
@@ -496,6 +505,7 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].id, second.id);
     assert_eq!(listed[0].error_message.as_deref(), Some("llm timeout"));
+    assert_eq!(listed[0].admission_dropped_note_count, 0);
     assert_eq!(listed[1].id, first.id);
 
     let filtered = consolidation_repo
@@ -507,6 +517,7 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
     assert_eq!(filtered[0].consolidated_cluster_count, 1);
     assert_eq!(filtered[0].consolidated_note_count, 1);
     assert_eq!(filtered[0].source_note_count, 3);
+    assert_eq!(filtered[0].admission_dropped_note_count, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -893,6 +904,45 @@ async fn create_canonical_without_source_note_ids_preserves_legacy_behavior() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_run_metric_round_trips_admission_dropped_note_count() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let project = make_project(&db, tmp.path()).await;
+    let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+    let metric = consolidation_repo
+        .create_run_metric(CreateConsolidationRunMetric {
+            project_id: &project.id,
+            note_type: "case",
+            status: "completed",
+            scanned_note_count: 5,
+            candidate_cluster_count: 0,
+            consolidated_cluster_count: 0,
+            consolidated_note_count: 0,
+            source_note_count: 0,
+            decayed_note_count: 0,
+            archived_note_count: 0,
+            superseded_source_note_count: 0,
+            admission_dropped_note_count: 5,
+            started_at: "2026-06-18T10:00:00.000Z",
+            completed_at: Some("2026-06-18T10:01:00.000Z"),
+            error_message: None,
+        })
+        .await
+        .unwrap();
+
+    let fetched = consolidation_repo.get_run_metric(&metric.id).await.unwrap();
+    assert_eq!(fetched.admission_dropped_note_count, 5);
+
+    let listed = consolidation_repo
+        .list_run_metrics(&project.id, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].admission_dropped_note_count, 5);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supersession_metric_round_trips_superseded_source_note_count() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
@@ -909,7 +959,10 @@ async fn supersession_metric_round_trips_superseded_source_note_count() {
             consolidated_cluster_count: 1,
             consolidated_note_count: 1,
             source_note_count: 3,
+            decayed_note_count: 0,
+            archived_note_count: 0,
             superseded_source_note_count: 3,
+            admission_dropped_note_count: 0,
             started_at: "2026-06-17T10:00:00.000Z",
             completed_at: Some("2026-06-17T10:01:00.000Z"),
             error_message: None,
