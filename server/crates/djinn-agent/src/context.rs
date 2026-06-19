@@ -260,6 +260,8 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
         // Slot-pool/coordinator reconfiguration is owned by the server-side
         // AppState impl. No-op for the agent-internal runtime.
     }
+    // TODO(yoqr): Remove once `RuntimeOps::dispatch_verification_test` is
+    // deleted from djinn-control-plane (verification gate removed).
     async fn dispatch_verification_test(
         &self,
         _test_id: &str,
@@ -272,6 +274,8 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
             "dispatch_verification_test not supported on the agent-internal runtime".to_string(),
         ))
     }
+    // TODO(yoqr): Remove once `RuntimeOps::dispatch_verification` is
+    // deleted from djinn-control-plane (verification gate removed).
     async fn dispatch_verification(
         &self,
         _run_id: &str,

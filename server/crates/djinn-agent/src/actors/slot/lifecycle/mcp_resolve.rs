@@ -2,11 +2,10 @@
 //!
 //! This is a pure code-motion extraction from `run_task_lifecycle` (task #14
 //! preparatory work). It reads the MCP default + global-skill fields of
-//! `environment_config` from Dolt (verification config already moved there —
-//! see `crate::verification::environment`), resolves the effective MCP
-//! servers and skills (role-level list merged with project defaults),
-//! connects to the resolved MCP servers (best-effort; unreachable servers are
-//! logged and skipped), and loads skill markdown files from the worktree.
+//! `environment_config` from Dolt, resolves the effective MCP servers and
+//! skills (role-level list merged with project defaults), connects to the
+//! resolved MCP servers (best-effort; unreachable servers are logged and
+//! skipped), and loads skill markdown files from the worktree.
 //!
 //! No failure modes here propagate errors: missing environment config, unknown
 //! server names, unreachable endpoints, and missing skill files are all
@@ -28,12 +27,6 @@ use crate::skills::ResolvedSkill;
 /// lists used for downstream telemetry (the reply-loop context records them
 /// for session-log provenance); `mcp_registry` / `resolved_skills` are the
 /// fully-hydrated forms used for tool dispatch / prompt building.
-///
-/// Setup / verification-rule fields previously came in on a
-/// `DjinnSettings` handle returned here; they were moved to Dolt's
-/// `projects.environment_config.verification` as part of the P8 cut-over.
-/// Downstream callers fetch that block directly via
-/// [`crate::verification::environment::verification_for_project_id`].
 pub(crate) struct McpAndSkills {
     pub effective_mcp_servers: Vec<String>,
     pub effective_skills: Vec<String>,

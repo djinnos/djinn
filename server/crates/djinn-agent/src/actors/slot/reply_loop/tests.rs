@@ -2277,7 +2277,7 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         "remaining concerns should carry the budget-park prefix: {remaining_concerns}"
     );
 
-    let (worker_summary, worker_concerns, verification_failure) =
+    let (worker_summary, worker_concerns) =
         extract_worker_context(&Some(entries));
     assert_eq!(
         worker_summary.as_deref(),
@@ -2290,7 +2290,6 @@ async fn hard_budget_wind_down_captures_budget_summary() {
             .is_some_and(|concerns| concerns.contains("budget-parked:")),
         "budget-park concern should surface through work_submitted extraction: {worker_concerns:?}"
     );
-    assert!(verification_failure.is_none());
 }
 
 #[tokio::test]

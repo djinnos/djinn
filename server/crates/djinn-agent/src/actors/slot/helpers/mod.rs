@@ -12,10 +12,6 @@ use super::*;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/// Max characters for verification output included in user messages.
-/// Keeps the user-message payload reasonable (clippy stderr can be huge).
-const MAX_VERIFICATION_CHARS: usize = 3000;
-
 /// Max characters for a single inline PR review comment included in the prompt.
 const MAX_PR_COMMENT_CHARS: usize = 500;
 

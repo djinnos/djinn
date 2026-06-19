@@ -55,9 +55,6 @@ pub(crate) struct PromptContext {
     pub worker_summary: Option<String>,
     /// Last `work_submitted` remaining concerns (reviewer context).
     pub worker_concerns: Option<String>,
-    /// Body of the last verification-failure comment (worker-on-retry
-    /// context).
-    pub verification_failure: Option<String>,
     /// Epic context block (lead / roles that call `needs_epic_context`).
     pub epic_context: Option<String>,
     /// Knowledge-notes block scoped to the task's paths.
@@ -81,13 +78,8 @@ pub(crate) struct PromptContext {
     /// Final prompt: extensions + resolved skills section.  This is what gets
     /// pushed into the conversation as the system message.
     pub system_prompt: String,
-    /// Cloned-forward setup-command description (session log provenance +
-    /// downstream mcp/verification plumbing).
+    /// Cloned-forward setup-command description (session log provenance).
     pub prompt_setup_commands: Option<String>,
-    /// Cloned-forward verification-command description.
-    pub prompt_verification_commands: Option<String>,
-    /// Cloned-forward verification-rules markdown.
-    pub prompt_verification_rules: Option<String>,
 }
 
 /// A sibling project flagged as relevant to this task (read-only multi-repo).
@@ -149,8 +141,6 @@ pub(crate) struct PromptContextInputs<'a> {
     pub conflict_ctx: Option<&'a MergeConflictMetadata>,
     pub merge_validation_ctx: Option<String>,
     pub prompt_setup_commands: Option<String>,
-    pub prompt_verification_commands: Option<String>,
-    pub prompt_verification_rules: Option<String>,
     pub system_prompt_extensions: &'a str,
     pub learned_prompt: Option<&'a str>,
     pub resolved_skills: &'a [ResolvedSkill],
@@ -177,8 +167,6 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
         conflict_ctx,
         merge_validation_ctx,
         prompt_setup_commands,
-        prompt_verification_commands,
-        prompt_verification_rules,
         system_prompt_extensions,
         learned_prompt,
         resolved_skills,
@@ -200,7 +188,7 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
     let activity_entries = task_repo.list_activity(&task.id).await.ok();
     let activity_text = match &activity_entries {
         Some(entries) if !entries.is_empty() => {
-            // Last 3 high-signal comments (lead, reviewer, verification)
+            // Last 3 high-signal comments (lead, reviewer)
             let feedback = recent_feedback(entries, 3);
 
             // Count comments by role for the summary line
@@ -239,10 +227,9 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
         _ => None,
     };
 
-    // Extract worker submission summary/concerns and last verification failure
-    // from the activity log so the reviewer can see why certain changes were made.
-    let (worker_summary, worker_concerns, verification_failure) =
-        extract_worker_context(&activity_entries);
+    // Extract worker submission summary/concerns from the activity log so the
+    // reviewer can see why certain changes were made.
+    let (worker_summary, worker_concerns) = extract_worker_context(&activity_entries);
 
     // ── Build epic context for roles that need it (e.g. lead) ─────────────────
     let epic_context = if role_for_epic_check.needs_epic_context() {
@@ -383,12 +370,9 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
             merge_target_branch: conflict_ctx.map(|m| m.merge_target.clone()),
             merge_failure_context: merge_validation_ctx.clone(),
             setup_commands: prompt_setup_commands.clone(),
-            verification_commands: prompt_verification_commands.clone(),
-            verification_rules: prompt_verification_rules.clone(),
             activity: activity_text.clone(),
             worker_summary: worker_summary.clone(),
             worker_concerns: worker_concerns.clone(),
-            verification_failure: verification_failure.clone(),
             epic_context: epic_context.clone(),
             knowledge_context: knowledge_context.clone(),
             code_graph_context: code_graph_context.clone(),
@@ -412,7 +396,6 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
         activity_text,
         worker_summary,
         worker_concerns,
-        verification_failure,
         epic_context,
         knowledge_context,
         code_graph_context,
@@ -421,8 +404,6 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
         system_prompt_with_extensions,
         system_prompt,
         prompt_setup_commands,
-        prompt_verification_commands,
-        prompt_verification_rules,
     }
 }
 

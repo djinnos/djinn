@@ -1174,43 +1174,6 @@ async fn init_git_repo(path: &Path) {
     assert!(output.status.success(), "git commit failed: {:?}", output);
 }
 
-/// so tests can register/deregister tasks to simulate background work.
-fn spawn_coordinator_with_tracker(
-    db: &Database,
-    tx: &broadcast::Sender<DjinnEventEnvelope>,
-) -> CoordinatorHandle {
-    let cancel = CancellationToken::new();
-    let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
-    let pool = SlotPoolHandle::spawn(
-        ctx,
-        cancel.clone(),
-        SlotPoolConfig {
-            models: vec![ModelSlotConfig {
-                model_id: DEFAULT_MODEL_ID.to_owned(),
-                max_slots: 2,
-                roles: ["worker", "reviewer"]
-                    .into_iter()
-                    .map(ToOwned::to_owned)
-                    .collect(),
-            }],
-            role_priorities: HashMap::new(),
-        },
-    );
-    let catalog = CatalogService::new();
-    let health = HealthTracker::new();
-    let handle = CoordinatorHandle::spawn(CoordinatorDeps::new(
-        tx.clone(),
-        cancel,
-        db.clone(),
-        pool,
-        catalog,
-        health,
-        Arc::new(RoleRegistry::new()),
-        crate::lsp::LspManager::new(),
-    ));
-    handle
-}
-
 // ── Planner intervention for stuck tasks (trigger A) ──────────────────────
 
 /// Create an `open` worker-eligible task and drive its `reopen_count` to

@@ -12,8 +12,6 @@
 //! - `learned_prompt` — auto-improvement amendments, also appended.
 //! - `mcp_servers` / `skills` — per-role tool/skill lists (override project
 //!   defaults from `settings.json`).
-//! - `verification_command` — role-level override for the project's
-//!   `environment_config.verification` rules (fetched from Dolt in P8+).
 //! - `model_preference` — role-level preference that dispatch uses to seed
 //!   `TaskRunSpec::model_id_per_role`.
 //!
@@ -48,7 +46,7 @@ use crate::roles::{AgentRole, role_impl_for};
 
 /// Per-stage role-config bundle consumed by `execute_stage` when composing
 /// `PromptContextInputs`, `resolve_mcp_and_skills`, and
-/// `resolve_setup_and_verification_context`.
+/// `resolve_setup_context`.
 ///
 /// All fields have sensible empty defaults so the stage can proceed even when
 /// the project has no DB-level role rows configured.
@@ -69,8 +67,6 @@ pub(crate) struct ResolvedRoleOverrides {
     /// Skill names from the DB row's `skills` JSON array.  Empty when no DB
     /// row exists.
     pub skills: Vec<String>,
-    /// Role-level override for the project's verification command.
-    pub verification_command: Option<String>,
     /// Role-level `model_preference` (consulted by the supervisor-runner for
     /// `TaskRunSpec::model_id_per_role` seeding; threaded here for
     /// completeness and future use).
@@ -90,7 +86,6 @@ impl ResolvedRoleOverrides {
             learned_prompt: None,
             mcp_servers: None,
             skills: Vec::new(),
-            verification_command: None,
             model_preference: None,
             specialist_overrode_runtime_role: false,
         }
@@ -103,7 +98,6 @@ impl ResolvedRoleOverrides {
         self.learned_prompt = agent.learned_prompt.clone();
         self.mcp_servers = Some(parse_json_array(&agent.mcp_servers));
         self.skills = parse_json_array(&agent.skills);
-        self.verification_command = agent.verification_command.clone();
         self.model_preference = agent.model_preference.clone();
     }
 }
@@ -132,11 +126,11 @@ fn agent_type_for_role_kind(kind: RoleKind) -> AgentType {
 /// 1. If `task.agent_type` names a specialist that resolves to an `Agent`
 ///    row, the specialist wins: its `base_role` picks the runtime
 ///    `AgentRole`, and its field values (prompt extensions, learned prompt,
-///    MCP servers, skills, verification command, model preference) populate
-///    every override slot.  If the specialist's `base_role` string fails to
-///    parse, we keep the injected role but still pick up the specialist's
-///    override fields (legacy-parity behaviour — `AgentType::from_str`
-///    failure was logged and the role was left alone).
+///    MCP servers, skills, model preference) populate every override slot.
+///    If the specialist's `base_role` string fails to parse, we keep the
+///    injected role but still pick up the specialist's override fields
+///    (legacy-parity behaviour — `AgentType::from_str` failure was logged
+///    and the role was left alone).
 ///
 ///    Specialist override is only consulted for the Worker stage because
 ///    specialists are defined as worker specializations (see
@@ -303,7 +297,6 @@ mod tests {
         assert!(out.learned_prompt.is_none());
         assert_eq!(out.mcp_servers, Some(Vec::<String>::new()));
         assert!(out.skills.is_empty());
-        assert!(out.verification_command.is_none());
         assert!(out.model_preference.is_none());
         assert!(!out.specialist_overrode_runtime_role);
         // Injected role stays put.
@@ -345,7 +338,6 @@ mod tests {
         assert_eq!(out.system_prompt_extensions, "always write tests");
         assert_eq!(out.mcp_servers, Some(vec!["github".to_string()]));
         assert_eq!(out.skills, vec!["tdd".to_string(), "rust".to_string()]);
-        assert_eq!(out.verification_command.as_deref(), Some("cargo test"));
         assert_eq!(out.model_preference.as_deref(), Some("claude-opus-4-6"));
         assert!(!out.specialist_overrode_runtime_role);
         assert_eq!(out.runtime_role.config().name, "worker");

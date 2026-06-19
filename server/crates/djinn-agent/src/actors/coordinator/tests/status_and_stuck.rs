@@ -67,52 +67,13 @@ async fn trigger_dispatch_increments_counter_for_review_tasks() {
 
 // ── Stuck detection ───────────────────────────────────────────────────────
 
+/// VerificationTracker was removed — this test exercised the tracker-based
+/// background-work protection for stuck detection. With the tracker gone, the
+/// test is obsolete and replaced with a no-op placeholder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stuck_detection_skips_task_with_background_post_session_work() {
-    let db = test_helpers::create_test_db();
-    let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db, tx.clone()).await;
-    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-
-    // Create a task and manually put it in in_task_review (simulating a
-    // reviewer session that just ended — slot freed, but background merge
-    // is still running).
-    let task = repo
-        .create(&epic.id, "Reviewing", "", "", "task", 0, "", Some("open"))
-        .await
-        .unwrap();
-    repo.set_status(&task.id, "in_task_review").await.unwrap();
-
-    let (handle, tracker) = spawn_coordinator_with_tracker(&db, &tx);
-
-    // Register the task in the verification tracker (same as
-    // spawn_post_session_work does for real sessions).
-    tracker.lock().unwrap().insert(task.id.clone());
-
-    // Trigger stuck scan — task should NOT be recovered because it has
-    // registered background work.
-    handle.trigger_stuck_scan().await.unwrap();
-    // Give the actor time to process.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    let updated = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(
-        updated.status, "in_task_review",
-        "task with background work should NOT be recovered"
-    );
-
-    // Now deregister — simulating background work completing.
-    tracker.lock().unwrap().remove(&task.id);
-
-    // Trigger stuck scan again — this time the task should be recovered.
-    handle.trigger_stuck_scan().await.unwrap();
-    handle.wait_for_status(|s| s.sessions_recovered >= 1).await;
-
-    let final_task = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(
-        final_task.status, "needs_task_review",
-        "task without background work should be recovered to needs_task_review"
-    );
+async fn stuck_detection_skips_task_with_background_post_session_work_obsolete() {
+    // No-op: VerificationTracker removed. Kept as a placeholder to document
+    // that the tracker-based background-work protection is intentionally gone.
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
