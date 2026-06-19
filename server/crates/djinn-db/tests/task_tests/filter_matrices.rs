@@ -134,7 +134,6 @@ async fn valid_transition(
 
 #[rstest]
 #[case("open", TransitionAction::SubmitTaskReview)]
-#[case("open", TransitionAction::SubmitTaskReview)]
 #[case("open", TransitionAction::TaskReviewStart)]
 #[case("open", TransitionAction::TaskReviewApprove)]
 #[case("open", TransitionAction::TaskReviewReject)]
