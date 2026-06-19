@@ -22,6 +22,7 @@ use crate::repo_graph::{CrateEdge, CrateGraph, CrateNode, RepoDependencyGraph, R
 ///
 /// Aggregates cross-crate edges: for each edge where source node's crate ≠
 /// target node's crate, adds or accumulates a `CrateEdge` between those crates.
+#[allow(dead_code)] // consumed by sibling tasks 35is & wz2o (not yet implemented)
 pub(crate) fn build_crate_graph(
     graph: &RepoDependencyGraph,
     crate_map: &BTreeMap<PathBuf, String>,
@@ -153,17 +154,11 @@ pub(crate) fn build_crate_graph(
     }
     // Ensure <external> and any edge-only crates are present.
     for edge in &edges {
-        all_crates
-            .entry(edge.source.clone())
-            .or_insert_with(PathBuf::new);
-        all_crates
-            .entry(edge.target.clone())
-            .or_insert_with(PathBuf::new);
+        all_crates.entry(edge.source.clone()).or_default();
+        all_crates.entry(edge.target.clone()).or_default();
     }
-    for (crate_name, _) in &node_counts {
-        all_crates
-            .entry(crate_name.clone())
-            .or_insert_with(PathBuf::new);
+    for crate_name in node_counts.keys() {
+        all_crates.entry(crate_name.clone()).or_default();
     }
 
     let mut crates: Vec<CrateNode> = all_crates
@@ -186,6 +181,7 @@ pub(crate) fn build_crate_graph(
 
 /// Resolve a file path to its crate name using the longest matching prefix in
 /// `crate_map`.
+#[allow(dead_code)] // exercised via build_crate_graph in tests
 fn resolve_crate(path: &std::path::Path, crate_map: &BTreeMap<PathBuf, String>) -> String {
     let mut best_match: Option<(&PathBuf, &String)> = None;
     for (prefix, crate_name) in crate_map {
