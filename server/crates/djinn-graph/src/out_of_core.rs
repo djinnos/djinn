@@ -1,3 +1,4 @@
+// djinn:allow-oversize — out-of-core store; split pending.
 //! Default-off out-of-core scope/parse store with bounded LRU accessors.
 //!
 //! This module provides a disk-backed, shard-per-file scope/parse store for
