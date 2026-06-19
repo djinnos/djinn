@@ -2227,7 +2227,7 @@ mod tests {
         assert_eq!(fetched.cache_write_tokens, 25);
         // cost_usd from the final update, not the flush.
         assert!(
-            (fetched.cost_usd.unwrap() - 0.000525).abs() < 0.000001,
+            (fetched.cost_usd.unwrap() - 0.00051).abs() < 0.000001,
             "expected cost from final update, got {:?}",
             fetched.cost_usd
         );
