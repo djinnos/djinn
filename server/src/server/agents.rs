@@ -77,6 +77,8 @@ struct AgentResponse {
     model_preference: Option<String>,
     verification_command: Option<String>,
     is_default: bool,
+    /// Machine-managed prompt learning state. Read-only in public surfaces;
+    /// mutations flow through agent_amend_prompt (Planner) and the evaluator loop.
     learned_prompt: Option<String>,
     created_at: String,
     updated_at: String,

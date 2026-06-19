@@ -102,7 +102,11 @@ pub struct AgentUpdateParams {
     pub verification_command: Option<String>,
     pub mcp_servers: Option<Vec<AnyJson>>,
     pub skills: Option<Vec<AnyJson>>,
-    /// Set a new learned_prompt value (auto-improvement loop only).
+    /// Deprecated: direct setting of learned_prompt bypasses history and evaluator
+    /// semantics. Use `agent_amend_prompt` (Planner) or the clear endpoint instead.
+    /// If provided, the update will be rejected with an error.
+    #[schemars(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub learned_prompt: Option<String>,
     /// Set to true to clear learned_prompt back to NULL. Takes precedence over learned_prompt.
     pub clear_learned_prompt: Option<bool>,
@@ -230,8 +234,10 @@ impl DjinnMcpServer {
     }
 
     /// Update a non-default agent's fields. Cannot modify is_default.
+    /// learned_prompt is machine-managed: use agent_amend_prompt (Planner) or
+    /// the clear endpoint; direct setting via agent_update is rejected.
     #[tool(
-        description = "Update a specialist agent (name, description, system_prompt_extensions, model_preference, verification_command, mcp_servers, skills). Cannot modify default agents' is_default flag. Accepts agent UUID or name."
+        description = "Update a specialist agent (name, description, system_prompt_extensions, model_preference, verification_command, mcp_servers, skills). Cannot modify default agents' is_default flag. Accepts agent UUID or name. learned_prompt is machine-managed and cannot be set directly here."
     )]
     pub async fn agent_update(
         &self,
@@ -342,10 +348,18 @@ impl DjinnMcpServer {
                 error: Some(format!("failed to clear amendments: {e}")),
             });
         }
+        // Reject direct learned_prompt setting — it bypasses history/evaluator semantics.
+        if p.learned_prompt.is_some() {
+            return Json(AgentSingleResponse {
+                agent: None,
+                error: Some(
+                    "Direct learned_prompt setting is deprecated. Use agent_amend_prompt (Planner) or the clear endpoint instead."
+                        .to_string(),
+                ),
+            });
+        }
         let learned_prompt_value: Option<&str> = if p.clear_learned_prompt.unwrap_or(false) {
             None
-        } else if let Some(ref lp) = p.learned_prompt {
-            Some(lp.as_str())
         } else {
             role.learned_prompt.as_deref()
         };
