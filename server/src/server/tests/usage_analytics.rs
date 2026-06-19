@@ -103,24 +103,25 @@ async fn get_usage(app: &axum::Router, query: &str, cookie: Option<&str>) -> (St
     (status, json)
 }
 
+struct SessionSeed<'a> {
+    project_id: &'a str,
+    model_id: &'a str,
+    agent_type: &'a str,
+    started_at: &'a str,
+    tokens_in: i64,
+    tokens_out: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+    cost_usd: Option<f64>,
+}
+
 /// Seed raw session rows directly into the database for integration-level
 /// contract tests that need actual query results.
 ///
 /// Inserts sessions with the given `started_at` prefix (first 10 chars must be
 /// a valid ISO date), `model_id`, `agent_type`, `project_id`, and optional
 /// `cost_usd`.
-async fn seed_session_row(
-    db: &djinn_db::Database,
-    project_id: &str,
-    model_id: &str,
-    agent_type: &str,
-    started_at: &str,
-    tokens_in: i64,
-    tokens_out: i64,
-    cache_read_tokens: i64,
-    cache_write_tokens: i64,
-    cost_usd: Option<f64>,
-) {
+async fn seed_session_row(db: &djinn_db::Database, seed: SessionSeed<'_>) {
     let id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO sessions \
@@ -129,15 +130,15 @@ async fn seed_session_row(
          VALUES ($1, $2, NULL, $3, $4, 'completed', $5, $6, $7, $8, $9, $10)",
     )
     .bind(&id)
-    .bind(project_id)
-    .bind(model_id)
-    .bind(agent_type)
-    .bind(started_at)
-    .bind(tokens_in)
-    .bind(tokens_out)
-    .bind(cache_read_tokens)
-    .bind(cache_write_tokens)
-    .bind(cost_usd)
+    .bind(seed.project_id)
+    .bind(seed.model_id)
+    .bind(seed.agent_type)
+    .bind(seed.started_at)
+    .bind(seed.tokens_in)
+    .bind(seed.tokens_out)
+    .bind(seed.cache_read_tokens)
+    .bind(seed.cache_write_tokens)
+    .bind(seed.cost_usd)
     .execute(db.pool())
     .await
     .expect("failed to seed session row");
@@ -315,41 +316,47 @@ async fn weekly_rollup_and_previous_window_with_seeded_data() {
     //   Previous window (2025-03-03..2025-03-10): 1 session
     seed_session_row(
         &db,
-        "proj-rollup",
-        "model-a",
-        "worker",
-        "2025-03-11T10:00:00Z",
-        100,
-        50,
-        10,
-        5,
-        Some(0.50),
+        SessionSeed {
+            project_id: "proj-rollup",
+            model_id: "model-a",
+            agent_type: "worker",
+            started_at: "2025-03-11T10:00:00Z",
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_read_tokens: 10,
+            cache_write_tokens: 5,
+            cost_usd: Some(0.50),
+        },
     )
     .await;
     seed_session_row(
         &db,
-        "proj-rollup",
-        "model-a",
-        "worker",
-        "2025-03-12T10:00:00Z",
-        200,
-        100,
-        20,
-        10,
-        Some(1.00),
+        SessionSeed {
+            project_id: "proj-rollup",
+            model_id: "model-a",
+            agent_type: "worker",
+            started_at: "2025-03-12T10:00:00Z",
+            tokens_in: 200,
+            tokens_out: 100,
+            cache_read_tokens: 20,
+            cache_write_tokens: 10,
+            cost_usd: Some(1.00),
+        },
     )
     .await;
     seed_session_row(
         &db,
-        "proj-rollup",
-        "model-a",
-        "worker",
-        "2025-03-05T10:00:00Z",
-        300,
-        150,
-        30,
-        15,
-        Some(1.50),
+        SessionSeed {
+            project_id: "proj-rollup",
+            model_id: "model-a",
+            agent_type: "worker",
+            started_at: "2025-03-05T10:00:00Z",
+            tokens_in: 300,
+            tokens_out: 150,
+            cache_read_tokens: 30,
+            cache_write_tokens: 15,
+            cost_usd: Some(1.50),
+        },
     )
     .await;
 
@@ -402,41 +409,47 @@ async fn monthly_rollup_with_seeded_data() {
     // Seed sessions across two months.
     seed_session_row(
         &db,
-        "proj-monthly",
-        "model-a",
-        "worker",
-        "2025-01-15T10:00:00Z",
-        100,
-        50,
-        10,
-        5,
-        Some(0.50),
+        SessionSeed {
+            project_id: "proj-monthly",
+            model_id: "model-a",
+            agent_type: "worker",
+            started_at: "2025-01-15T10:00:00Z",
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_read_tokens: 10,
+            cache_write_tokens: 5,
+            cost_usd: Some(0.50),
+        },
     )
     .await;
     seed_session_row(
         &db,
-        "proj-monthly",
-        "model-a",
-        "worker",
-        "2025-01-20T10:00:00Z",
-        200,
-        100,
-        20,
-        10,
-        Some(1.00),
+        SessionSeed {
+            project_id: "proj-monthly",
+            model_id: "model-a",
+            agent_type: "worker",
+            started_at: "2025-01-20T10:00:00Z",
+            tokens_in: 200,
+            tokens_out: 100,
+            cache_read_tokens: 20,
+            cache_write_tokens: 10,
+            cost_usd: Some(1.00),
+        },
     )
     .await;
     seed_session_row(
         &db,
-        "proj-monthly",
-        "model-b",
-        "worker",
-        "2025-02-10T10:00:00Z",
-        300,
-        150,
-        30,
-        15,
-        Some(1.50),
+        SessionSeed {
+            project_id: "proj-monthly",
+            model_id: "model-b",
+            agent_type: "worker",
+            started_at: "2025-02-10T10:00:00Z",
+            tokens_in: 300,
+            tokens_out: 150,
+            cache_read_tokens: 30,
+            cache_write_tokens: 15,
+            cost_usd: Some(1.50),
+        },
     )
     .await;
 
@@ -477,15 +490,17 @@ async fn null_cost_fields_serialize_as_json_null() {
     // Seed a session with NULL cost_usd.
     seed_session_row(
         &db,
-        "proj-nullcost",
-        "unpriced-model",
-        "worker",
-        "2025-03-11T10:00:00Z",
-        100,
-        50,
-        10,
-        5,
-        None, // unpriced
+        SessionSeed {
+            project_id: "proj-nullcost",
+            model_id: "unpriced-model",
+            agent_type: "worker",
+            started_at: "2025-03-11T10:00:00Z",
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_read_tokens: 10,
+            cache_write_tokens: 5,
+            cost_usd: None, // unpriced
+        },
     )
     .await;
 
