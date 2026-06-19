@@ -1402,6 +1402,7 @@ mod tests {
     use djinn_db::{ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository};
 
     static OUT_OF_CORE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static CACHE_REUSE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct EnvVarGuard {
         key: &'static str,
@@ -2658,6 +2659,170 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
 
         crate::graph_parity::assert_graph_artifact_blob_parity(&cold_blob, &warm_blob)
             .expect("out-of-core warm graph blob must match in-memory warm graph blob");
+    }
+
+    /// Cache-reuse warm regression: with the cache-reuse flag enabled,
+    /// a rebuild for the same commit must persist a graph blob identical
+    /// to the default non-cache-reuse warm path.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn cache_reuse_produces_identical_graph_blob() {
+        let _env_lock = CACHE_REUSE_ENV_LOCK.lock().unwrap();
+
+        // Remove any pre-existing cache-reuse env var.
+        unsafe {
+            std::env::remove_var("DJINN_GRAPH_CACHE_REUSE_ENABLED");
+            std::env::remove_var("DJINN_CACHE_REUSE_ENABLED");
+            std::env::remove_var("CACHE_REUSE_ENABLED");
+        }
+
+        let tmp = workspace_tempdir("cache-reuse-parity-");
+        let project_root = make_project(tmp.path()).await;
+        // `Cargo.toml` must declare a `[workspace]` section so the
+        // RustAnalyzer indexer's workspace discovery picks up this
+        // fixture. Without `[workspace]`, no Rust workspace is
+        // discovered, the fake rust-analyzer never runs, the parsed
+        // SCIP set is empty, and `ensure_canonical_graph` skips the
+        // cache upsert (the `node_count == 0` guard at the bottom of
+        // the warm pipeline).
+        tokio::fs::write(
+            project_root.join("Cargo.toml"),
+            "[package]\nname = \"cache_reuse_parity\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n",
+        )
+        .await
+        .expect("write Cargo.toml");
+        tokio::fs::create_dir_all(project_root.join("src"))
+            .await
+            .expect("create src dir");
+        tokio::fs::write(
+            project_root.join("src/lib.rs"),
+            "pub fn answer() -> u32 { 42 }\n",
+        )
+        .await
+        .expect("write src/lib.rs");
+        let commit_output = tokio::process::Command::new("git")
+            .args(["add", "Cargo.toml", "src/lib.rs"])
+            .current_dir(&project_root)
+            .output()
+            .await
+            .expect("git add rust fixture");
+        assert!(
+            commit_output.status.success(),
+            "git add rust fixture failed: {commit_output:?}"
+        );
+        let commit_output = tokio::process::Command::new("git")
+            .args(["commit", "-q", "-m", "add rust fixture"])
+            .current_dir(&project_root)
+            .output()
+            .await
+            .expect("git commit rust fixture");
+        assert!(
+            commit_output.status.success(),
+            "git commit rust fixture failed: {commit_output:?}"
+        );
+
+        let (fake_bin, fixture_path) = write_fake_rust_analyzer(tmp.path());
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path =
+            std::env::join_paths(std::iter::once(fake_bin).chain(std::env::split_paths(&path)))
+                .expect("join PATH with fake rust-analyzer");
+
+        // Save previous env vars so we can restore them after the test.
+        let prev_path = std::env::var_os("PATH");
+        let prev_fixture = std::env::var_os("DJINN_TEST_SCIP_FIXTURE");
+
+        unsafe {
+            std::env::set_var("PATH", joined_path);
+            std::env::set_var("DJINN_TEST_SCIP_FIXTURE", &fixture_path);
+        }
+
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create("test-cache-reuse-parity", "test", "test-cache-reuse-parity")
+            .await
+            .expect("create project");
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+
+        // --- Cold warm: no cache-reuse env var ---
+        let result = ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await;
+        assert!(result.is_ok(), "cold warm failed: {result:?}");
+
+        let head_out = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&project_root)
+            .output()
+            .await
+            .expect("resolve HEAD commit");
+        assert!(
+            head_out.status.success(),
+            "git rev-parse failed: {head_out:?}"
+        );
+        let commit_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+        let cold_blob = cache_repo
+            .get(&project.id, &commit_sha)
+            .await
+            .expect("get cold blob")
+            .expect("cold blob should exist")
+            .graph_blob;
+
+        // --- Poison cache and clear in-memory caches to force rebuild ---
+        clear_test_caches().await;
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: &commit_sha,
+                graph_blob: b"stale graph blob that forces a rebuild",
+            })
+            .await
+            .expect("poison cache row to force cache-reuse rebuild");
+        clear_test_caches().await;
+
+        // --- Warm with cache-reuse enabled ---
+        unsafe {
+            std::env::set_var("DJINN_GRAPH_CACHE_REUSE_ENABLED", "1");
+        }
+
+        let result = ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await;
+        assert!(result.is_ok(), "cache-reuse warm failed: {result:?}");
+
+        let warm_blob = cache_repo
+            .get(&project.id, &commit_sha)
+            .await
+            .expect("get warm blob")
+            .expect("warm blob should exist")
+            .graph_blob;
+
+        // --- Restore env vars ---
+        unsafe {
+            std::env::remove_var("DJINN_GRAPH_CACHE_REUSE_ENABLED");
+            std::env::remove_var("DJINN_CACHE_REUSE_ENABLED");
+            std::env::remove_var("CACHE_REUSE_ENABLED");
+            match prev_path {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+            match prev_fixture {
+                Some(f) => std::env::set_var("DJINN_TEST_SCIP_FIXTURE", f),
+                None => std::env::remove_var("DJINN_TEST_SCIP_FIXTURE"),
+            }
+        }
+
+        crate::graph_parity::assert_graph_artifact_blob_parity(&cold_blob, &warm_blob)
+            .expect("cache-reuse warm graph blob must match cold warm graph blob");
     }
 
     /// Negative equivalence test: two different fixture graphs (base vs.
