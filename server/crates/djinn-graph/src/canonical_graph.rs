@@ -1328,6 +1328,13 @@ mod tests {
     use crate::test_helpers::{TestWarmContext, create_test_db, workspace_tempdir};
     use djinn_core::events::EventBus;
     use djinn_db::{ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository};
+    use protobuf::{EnumOrUnknown, Message, MessageField, SpecialFields};
+    use scip::types::{
+        Document, Index, Metadata, Occurrence, SymbolInformation, ToolInfo, symbol_information,
+    };
+
+    static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     async fn make_project(tmp: &std::path::Path) -> std::path::PathBuf {
         let project_root = tmp.join("repo");
@@ -1347,12 +1354,120 @@ mod tests {
         run(&["init", "-q", "-b", "main"]).await;
         run(&["config", "user.email", "t@t"]).await;
         run(&["config", "user.name", "t"]).await;
-        tokio::fs::write(project_root.join("a.txt"), "hi")
+        tokio::fs::create_dir_all(project_root.join("src"))
             .await
             .unwrap();
-        run(&["add", "a.txt"]).await;
+        tokio::fs::write(
+            project_root.join("Cargo.toml"),
+            "[package]\nname = \"cache-reuse-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            project_root.join("src/lib.rs"),
+            "pub fn helper() -> usize { 1 }\npub fn call() -> usize { helper() }\n",
+        )
+        .await
+        .unwrap();
+        run(&["add", "Cargo.toml", "src/lib.rs"]).await;
         run(&["commit", "-q", "-m", "init"]).await;
         project_root
+    }
+
+    fn fixture_index_bytes() -> Vec<u8> {
+        let mut index = Index::new();
+        index.metadata = MessageField::some(Metadata {
+            project_root: "file:///workspace/repo".to_string(),
+            tool_info: MessageField::some(ToolInfo {
+                name: "rust-analyzer".to_string(),
+                version: "1.0.0".to_string(),
+                arguments: vec![],
+                special_fields: SpecialFields::new(),
+            }),
+            ..Metadata::new()
+        });
+
+        let helper_symbol = "scip-rust . . . helper().".to_string();
+        let call_symbol = "scip-rust . . . call().".to_string();
+
+        let mut document = Document::new();
+        document.language = "rust".to_string();
+        document.relative_path = "src/lib.rs".to_string();
+        document.occurrences = vec![
+            Occurrence {
+                range: vec![0, 7, 13],
+                symbol: helper_symbol.clone(),
+                symbol_roles: 1,
+                ..Occurrence::new()
+            },
+            Occurrence {
+                range: vec![1, 7, 11],
+                symbol: call_symbol.clone(),
+                symbol_roles: 1,
+                ..Occurrence::new()
+            },
+            Occurrence {
+                range: vec![1, 27, 33],
+                symbol: helper_symbol.clone(),
+                symbol_roles: 8,
+                enclosing_range: vec![1, 0, 1, 37],
+                ..Occurrence::new()
+            },
+        ];
+        document.symbols = vec![
+            SymbolInformation {
+                symbol: helper_symbol,
+                display_name: "helper".to_string(),
+                kind: EnumOrUnknown::new(symbol_information::Kind::Function),
+                ..SymbolInformation::new()
+            },
+            SymbolInformation {
+                symbol: call_symbol,
+                display_name: "call".to_string(),
+                kind: EnumOrUnknown::new(symbol_information::Kind::Function),
+                ..SymbolInformation::new()
+            },
+        ];
+        index.documents.push(document);
+
+        index.write_to_bytes().expect("encode fixture index")
+    }
+
+    async fn install_fake_rust_analyzer(tmp: &std::path::Path) -> (EnvVarGuard, EnvVarGuard) {
+        let bin_dir = tmp.join("bin");
+        tokio::fs::create_dir_all(&bin_dir).await.unwrap();
+        let fixture_path = tmp.join("fixture.scip");
+        tokio::fs::write(&fixture_path, fixture_index_bytes())
+            .await
+            .unwrap();
+
+        let script_path = bin_dir.join("rust-analyzer");
+        tokio::fs::write(
+            &script_path,
+            "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${1:-}\" == \"--version\" || \"${1:-}\" == \"version\" ]]; then\n  echo 'rust-analyzer 1.0.0'\n  exit 0\nfi\nout=\"\"\nwhile [[ $# -gt 0 ]]; do\n  case \"$1\" in\n    --output) out=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nif [[ -z \"$out\" ]]; then echo 'missing --output' >&2; exit 2; fi\nmkdir -p \"$(dirname \"$out\")\"\ncp \"$DJINN_TEST_SCIP_FIXTURE\" \"$out\"\n",
+        )
+        .await
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = tokio::fs::metadata(&script_path)
+                .await
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o755);
+            tokio::fs::set_permissions(&script_path, perms)
+                .await
+                .unwrap();
+        }
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let path = format!("{}:{old_path}", bin_dir.display());
+        (
+            EnvVarGuard::set("PATH", &path),
+            EnvVarGuard::set("DJINN_TEST_SCIP_FIXTURE", fixture_path.to_str().unwrap()),
+        )
     }
 
     #[test]
@@ -2284,8 +2399,20 @@ mod tests {
     /// Both must produce the same graph blob.
     #[tokio::test]
     async fn cache_reuse_produces_identical_graph_blob() {
+        let _env_lock = ENV_LOCK.lock().await;
         let tmp = workspace_tempdir("cache-reuse-equiv-");
         let project_root = make_project(tmp.path()).await;
+        let (_path_guard, _fixture_guard) = install_fake_rust_analyzer(tmp.path()).await;
+        let _cache_reuse_guard = EnvVarGuard::unset("DJINN_GRAPH_CACHE_REUSE_ENABLED");
+        let _legacy_cache_reuse_guard = EnvVarGuard::unset("DJINN_CACHE_REUSE_ENABLED");
+        let _legacy_short_cache_reuse_guard = EnvVarGuard::unset("CACHE_REUSE_ENABLED");
+        let scip_cache_dir = tmp.path().join("scip-cache");
+        let _scip_cache_guard = EnvVarGuard::set(
+            "DJINN_SCIP_CACHE_DIR",
+            scip_cache_dir
+                .to_str()
+                .expect("scip cache path must be UTF-8"),
+        );
         let db = create_test_db();
         let ctx = TestWarmContext::new(db.clone());
         let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
@@ -2335,7 +2462,7 @@ mod tests {
             .expect("corrupt DB cache row");
 
         // --- Warm with cache reuse enabled ---
-        let _guard = EnvVarGuard::set("DJINN_GRAPH_CACHE_REUSE_ENABLED", "1");
+        let _cache_reuse_enabled_guard = EnvVarGuard::set("DJINN_GRAPH_CACHE_REUSE_ENABLED", "1");
         let result = ensure_canonical_graph(
             &ctx,
             &project.id,
@@ -2365,16 +2492,22 @@ mod tests {
     impl EnvVarGuard {
         fn set(name: &'static str, value: &str) -> Self {
             let original = std::env::var(name).ok();
-            // SAFETY: test-only env mutation is serialized by the test runner
-            // (tokio::test runs tests sequentially by default).
+            // SAFETY: test-only env mutation is serialized by ENV_LOCK.
             unsafe { std::env::set_var(name, value) };
+            Self { name, original }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let original = std::env::var(name).ok();
+            // SAFETY: test-only env mutation is serialized by ENV_LOCK.
+            unsafe { std::env::remove_var(name) };
             Self { name, original }
         }
     }
 
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            // SAFETY: test-only env mutation is serialized by the test runner.
+            // SAFETY: test-only env mutation is serialized by ENV_LOCK.
             match &self.original {
                 Some(v) => unsafe { std::env::set_var(self.name, v) },
                 None => unsafe { std::env::remove_var(self.name) },
