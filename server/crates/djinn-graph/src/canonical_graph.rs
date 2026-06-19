@@ -41,6 +41,17 @@ struct GraphCacheShrinkWarning {
     workspace_status_summary: String,
 }
 
+/// Read the production canonical warm cache-reuse env toggle.
+///
+/// When enabled, the canonical warm path reuses already-parsed SCIP artifacts
+/// from the content-addressed parse cache as an **input** optimization. The
+/// full artifact set is still parsed (or served from cache) and the whole
+/// graph is still built — cache reuse must NEVER become a changed-file-only
+/// or partial graph resolution path. The returned value flows through
+/// [`resolve_canonical_warm_cache_reuse`] into
+/// [`crate::scip_parser::parse_scip_artifacts_with_cache_reuse`], which is
+/// the same whole-artifact parse/build seam exercised by the td55 parity
+/// tests in [`crate::graph_parity`].
 fn cache_reuse_enabled() -> bool {
     std::env::var("DJINN_GRAPH_CACHE_REUSE_ENABLED")
         .or_else(|_| std::env::var("DJINN_CACHE_REUSE_ENABLED"))
@@ -52,6 +63,23 @@ fn cache_reuse_enabled() -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+/// Resolve whether the canonical warm path should reuse cached parse results.
+///
+/// This is the single decision point that feeds the `cache_reuse_enabled`
+/// argument to
+/// [`crate::scip_parser::parse_scip_artifacts_with_cache_reuse`] from
+/// [`ensure_canonical_graph`]. The td55 regression
+/// `canonical_warm_cache_reuse_toggle_reaches_parity_seam` guards that this
+/// resolution stays wired to the same whole-artifact parse/build seam
+/// covered by the td55 equivalence gate.
+///
+/// Cache reuse is allowed ONLY as an input/artifact reuse optimization
+/// before the whole-graph build — it must NOT introduce a changed-file-only
+/// or partial graph assembly path.
+pub(crate) fn resolve_canonical_warm_cache_reuse(force_full_rebuild: bool) -> bool {
+    cache_reuse_enabled() && !force_full_rebuild
 }
 
 /// Pre-computed strongly-connected components, one set per `kind_filter`
@@ -391,7 +419,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let project_root_for_blocking = handle.path().to_path_buf();
     // Capture recovery flag for the blocking thread — when a stale sentinel
     // was detected, disable parse cache reuse to force a clean rebuild.
-    let effective_cache_reuse = cache_reuse_enabled() && !force_full_rebuild;
+    let effective_cache_reuse = resolve_canonical_warm_cache_reuse(force_full_rebuild);
     let blocking =
         tokio::task::spawn_blocking(move || -> Result<CanonicalGraphBuildOutput, String> {
             let t_parse = std::time::Instant::now();
