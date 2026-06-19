@@ -38,6 +38,13 @@ function acceptanceCriterionLine(
   return `- [${checked}] ${item.criterion}`;
 }
 
+function revisionBodyFormat(revision: ProposalRevision): string {
+  const bodyFormat = (revision as { body_format?: unknown }).body_format;
+  return typeof bodyFormat === "string" && bodyFormat.trim()
+    ? bodyFormat.trim().toLowerCase()
+    : "markdown";
+}
+
 /**
  * Best-effort markdown snapshot for diff display, not a markdown renderer.
  * Keeping stable section headings makes title, body, and acceptance-criteria
@@ -47,11 +54,12 @@ export function proposalRevisionMarkdown(revision: ProposalRevision): string {
   const criteria = revision.acceptance_criteria.length
     ? revision.acceptance_criteria.map(acceptanceCriterionLine).join("\n")
     : "_No acceptance criteria._";
+  const bodyFormat = revisionBodyFormat(revision);
 
   return [
     `# ${revision.title}`,
     "",
-    "## Body",
+    `## Body (${bodyFormat})`,
     revision.body.trimEnd() || "_No body._",
     "",
     "## Acceptance criteria",
