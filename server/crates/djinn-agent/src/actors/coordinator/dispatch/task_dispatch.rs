@@ -1872,7 +1872,6 @@ mod inflight_ledger_tests {
             inflight_dispatches: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
-            verification_tracker: VerificationTracker::default(),
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
                 crate::actors::coordinator::consolidation::DbConsolidationRunner::new(db.clone()),

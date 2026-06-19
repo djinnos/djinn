@@ -85,9 +85,7 @@ use crate::actors::slot::lifecycle::prompt_context::{
 use crate::actors::slot::lifecycle::role_overrides::{
     ResolvedRoleOverrides, resolve_role_overrides,
 };
-use crate::actors::slot::lifecycle::setup::{
-    SetupAndVerificationContext, SetupError, resolve_setup_and_verification_context,
-};
+use crate::actors::slot::lifecycle::setup::{SetupContext, SetupError, resolve_setup_context};
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
 use crate::actors::slot::reply_loop::error_handling::BudgetWindDownIgnored;
 use crate::actors::slot::reply_loop::loop_guard::{
@@ -345,7 +343,7 @@ async fn advertise_read_sources(
 
 /// Execute one role stage against the shared workspace.
 ///
-/// Resolves the role → model credential → project setup/verification config →
+/// Resolves the role → model credential → project setup config →
 /// MCP + skills → creates a fresh session record linked to `task_run_id` →
 /// builds a degenerate prompt → invokes the reply loop → finalizes the
 /// session record → maps the result to [`StageOutcome`].
@@ -367,7 +365,7 @@ pub(crate) async fn execute_stage(
 
     // ── Role-level overrides: specialist (Worker stage) or project default ────
     // Picks up `system_prompt_extensions`, `learned_prompt`, role-level MCP
-    // server + skill lists, `verification_command`, and swaps `runtime_role`
+    // server + skill lists, and swaps `runtime_role`
     // when a Worker stage's `task.agent_type` names a specialist whose
     // `base_role` differs from the injected RoleKind.  Non-Worker stages
     // always use the default-role path.
@@ -463,17 +461,14 @@ pub(crate) async fn execute_stage(
     .await;
 
     // ── Setup commands context ────────────────────────────────────────────────
-    // Pre-verification hooks (now just `lifecycle.pre_verification` setup
-    // commands) come from the SupervisorServices RPC. The pre-PR verification
-    // gate was removed (Wave 1 of the sehj epic), so no rules/commands
-    // pipeline runs after the session.
+    // Setup hooks come from the SupervisorServices RPC.
     let env_config = services
         .get_environment_config(task.project_id.clone())
         .await
         .map_err(|e| StageError::Setup(format!("env_config: {e}")))?;
-    let SetupAndVerificationContext {
+    let SetupContext {
         prompt_setup_commands,
-    } = match resolve_setup_and_verification_context(
+    } = match resolve_setup_context(
         env_config.lifecycle.pre_verification,
         worktree_path,
         &task.id,

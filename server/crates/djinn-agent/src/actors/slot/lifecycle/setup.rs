@@ -15,11 +15,11 @@ use crate::environment::hook_commands_to_specs;
 
 /// Resolved prompt-context fragments produced after running project setup
 /// commands.
-pub(crate) struct SetupAndVerificationContext {
+pub(crate) struct SetupContext {
     pub prompt_setup_commands: Option<String>,
 }
 
-/// Failure from [`resolve_setup_and_verification_context`].
+/// Failure from [`resolve_setup_context`].
 ///
 /// Carries the human-readable reason string that the caller will thread into
 /// the task-status transition (preserving the original error-to-transition
@@ -43,13 +43,13 @@ pub(crate) struct SetupError {
 ///
 /// The caller is responsible for all task-status transitions and worktree
 /// teardown on error — this function does not touch either.
-pub(crate) async fn resolve_setup_and_verification_context(
+pub(crate) async fn resolve_setup_context(
     pre_verification_hooks: Vec<djinn_stack::environment::HookCommand>,
     worktree_path: &Path,
     task_id: &str,
     task_short_id: &str,
     app_state: &AgentContext,
-) -> Result<SetupAndVerificationContext, SetupError> {
+) -> Result<SetupContext, SetupError> {
     let emit_step = |step: &str, detail: serde_json::Value| {
         app_state
             .event_bus
@@ -138,7 +138,7 @@ pub(crate) async fn resolve_setup_and_verification_context(
             }
         }
     }
-    Ok(SetupAndVerificationContext {
+    Ok(SetupContext {
         prompt_setup_commands,
     })
 }

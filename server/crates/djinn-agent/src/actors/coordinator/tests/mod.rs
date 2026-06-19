@@ -194,7 +194,6 @@ fn spawn_coordinator(
     );
     let catalog = CatalogService::new();
     let health = HealthTracker::new();
-    let verification_tracker = VerificationTracker::default();
     let role_registry = Arc::new(RoleRegistry::new());
     CoordinatorHandle::spawn(CoordinatorDeps::new(
         tx.clone(),
@@ -204,7 +203,6 @@ fn spawn_coordinator(
         catalog,
         health,
         role_registry,
-        verification_tracker,
         crate::lsp::LspManager::new(),
     ))
 }
@@ -466,7 +464,6 @@ fn coordinator_actor_for_tests(
         inflight_dispatches: HashMap::new(),
         dispatch_cooldowns: HashMap::new(),
         dispatch_failure_streak: HashMap::new(),
-        verification_tracker: VerificationTracker::default(),
         auto_merge_tracker: AutoMergeTracker::default(),
         consolidation_runner: Arc::new(consolidation::DbConsolidationRunner::new(db.clone())),
         last_stale_sweep: StdInstant::now(),
@@ -1182,7 +1179,7 @@ async fn init_git_repo(path: &Path) {
 fn spawn_coordinator_with_tracker(
     db: &Database,
     tx: &broadcast::Sender<DjinnEventEnvelope>,
-) -> (CoordinatorHandle, VerificationTracker) {
+) -> CoordinatorHandle {
     let cancel = CancellationToken::new();
     let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
     let pool = SlotPoolHandle::spawn(
@@ -1202,9 +1199,7 @@ fn spawn_coordinator_with_tracker(
     );
     let catalog = CatalogService::new();
     let health = HealthTracker::new();
-    let verification_tracker = VerificationTracker::default();
-    let tracker_clone = verification_tracker.clone();
-    let handle = CoordinatorHandle::spawn(CoordinatorDeps::new(
+    CoordinatorHandle::spawn(CoordinatorDeps::new(
         tx.clone(),
         cancel,
         db.clone(),
@@ -1212,10 +1207,8 @@ fn spawn_coordinator_with_tracker(
         catalog,
         health,
         Arc::new(RoleRegistry::new()),
-        verification_tracker,
         crate::lsp::LspManager::new(),
-    ));
-    (handle, tracker_clone)
+    ))
 }
 
 // ── Planner intervention for stuck tasks (trigger A) ──────────────────────

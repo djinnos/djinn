@@ -46,7 +46,7 @@ use crate::roles::{AgentRole, role_impl_for};
 
 /// Per-stage role-config bundle consumed by `execute_stage` when composing
 /// `PromptContextInputs`, `resolve_mcp_and_skills`, and
-/// `resolve_setup_and_verification_context`.
+/// `resolve_setup_context`.
 ///
 /// All fields have sensible empty defaults so the stage can proceed even when
 /// the project has no DB-level role rows configured.
@@ -98,11 +98,6 @@ impl ResolvedRoleOverrides {
         self.learned_prompt = agent.learned_prompt.clone();
         self.mcp_servers = Some(parse_json_array(&agent.mcp_servers));
         self.skills = parse_json_array(&agent.skills);
-        // Verification command is ignored at runtime now that the
-        // pre-PR verification pipeline was removed. The DB column is
-        // still populated by 34pj's own removal; this client no longer
-        // threads the value into setup or prompt construction.
-        let _ = &agent.verification_command;
         self.model_preference = agent.model_preference.clone();
     }
 }

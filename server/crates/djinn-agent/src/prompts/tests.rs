@@ -285,21 +285,6 @@ fn worker_prompt_omits_setup_section_when_no_commands() {
 }
 
 #[test]
-fn reviewer_prompt_omits_verification_section_when_no_commands() {
-    let task = make_task();
-    let ctx = TaskContext {
-        diff: Some("+ fn foo() {}".into()),
-        commits: Some("abc1234 Add widget".into()),
-        start_commit: Some("abc0000".into()),
-        end_commit: Some("abc1234".into()),
-        ..make_ctx()
-    };
-    let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
-
-    assert!(!prompt.contains("Automated Verification"));
-}
-
-#[test]
 fn system_prompt_truncated_when_exceeding_hard_cap() {
     let task = make_task();
     // Inject a massive activity log that blows past the 30k char cap.

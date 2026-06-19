@@ -92,15 +92,6 @@ pub(super) struct CoordinatorActor {
     /// successful stage transition to a different dispatch role.
     // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
     pub(super) dispatch_failure_streak: HashMap<String, u32>,
-    /// Shared tracker for in-flight verification background tasks.
-    ///
-    /// The pre-PR verification pipeline was removed (Wave 1 of the sehj
-    /// epic), so this tracker is no longer consulted by the recovery
-    /// sweep. The field is kept around as `()`-equivalent dead state to
-    /// avoid churning the coordinator's construction sites; it can be
-    /// fully deleted in a follow-up.
-    #[allow(dead_code)]
-    pub(super) verification_tracker: VerificationTracker,
     /// Per-task state of the PR poller's offloaded clean-merge fast path. The
     /// heavy mechanical merge (fetch + ephemeral clone + merge + push) runs in a
     /// spawned background task instead of inline on this tick; the poller reads
@@ -348,7 +339,6 @@ impl CoordinatorActor {
             catalog,
             health,
             role_registry,
-            verification_tracker,
             lsp,
             graph_warmer,
             consolidation_runner,
@@ -380,7 +370,6 @@ impl CoordinatorActor {
             inflight_dispatches: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
-            verification_tracker,
             auto_merge_tracker: Arc::new(std::sync::Mutex::new(HashMap::new())),
             consolidation_runner: consolidation_runner
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
@@ -1694,7 +1683,6 @@ mod tests {
                 CatalogService::new(),
                 HealthTracker::new(),
                 Arc::new(RoleRegistry::new()),
-                VerificationTracker::default(),
                 crate::lsp::LspManager::new(),
             ),
             receiver,
