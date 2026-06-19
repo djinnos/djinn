@@ -69,10 +69,7 @@ impl BlockType {
 
     /// Try to match a tag name to a known block type.
     pub fn from_tag(tag: &str) -> Option<BlockType> {
-        Self::all()
-            .iter()
-            .find(|bt| bt.mdx_tag() == tag)
-            .copied()
+        Self::all().iter().find(|bt| bt.mdx_tag() == tag).copied()
     }
 }
 
@@ -123,16 +120,16 @@ pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedBlock>, String> {
             .find(&closing_tag)
             .map(|pos| open_end + pos)
             .ok_or_else(|| {
-                format!("unclosed <{}> block (no closing {} found)", tag_name, closing_tag)
+                format!(
+                    "unclosed <{}> block (no closing {} found)",
+                    tag_name, closing_tag
+                )
             })?;
 
         let raw_content = body[open_end..close_start].to_string();
 
         let attributes = parse_attributes(attrs_str);
-        let id = attributes
-            .get("id")
-            .cloned()
-            .unwrap_or_default();
+        let id = attributes.get("id").cloned().unwrap_or_default();
 
         blocks.push(ParsedBlock {
             block_type,
@@ -155,7 +152,11 @@ fn parse_attributes(attrs_str: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for cap in re.captures_iter(attrs_str) {
         let key = cap[1].to_string();
-        let value = cap.get(2).or(cap.get(3)).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let value = cap
+            .get(2)
+            .or(cap.get(3))
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         map.insert(key, value);
     }
     map
@@ -175,10 +176,7 @@ pub fn validate_block_ids(blocks: &[ParsedBlock]) -> Result<(), String> {
             ));
         }
         if !seen.insert(&block.id) {
-            return Err(format!(
-                "duplicate block id: `{}`",
-                block.block_id()
-            ));
+            return Err(format!("duplicate block id: `{}`", block.block_id()));
         }
     }
     Ok(())
