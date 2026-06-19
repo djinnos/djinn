@@ -301,10 +301,10 @@ impl UsageAnalyticsRepository {
         let sql = format!(
             "SELECT \
                 COUNT(*)                          AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in), 0)     AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)    AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens), 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens), 0) AS \"cache_write_tokens!\", \
+                COALESCE(SUM(s.tokens_in)::BIGINT, 0)     AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::BIGINT, 0)    AS \"tokens_out!\", \
+                COALESCE(SUM(s.cache_read_tokens)::BIGINT, 0)  AS \"cache_read_tokens!\", \
+                COALESCE(SUM(s.cache_write_tokens)::BIGINT, 0) AS \"cache_write_tokens!\", \
                 CASE \
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
@@ -338,10 +338,10 @@ impl UsageAnalyticsRepository {
             "SELECT \
                 substring(s.started_at, 1, 10)    AS \"day!\", \
                 COUNT(*)                          AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in), 0)     AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)    AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens), 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens), 0) AS \"cache_write_tokens!\", \
+                COALESCE(SUM(s.tokens_in)::BIGINT, 0)     AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::BIGINT, 0)    AS \"tokens_out!\", \
+                COALESCE(SUM(s.cache_read_tokens)::BIGINT, 0)  AS \"cache_read_tokens!\", \
+                COALESCE(SUM(s.cache_write_tokens)::BIGINT, 0) AS \"cache_write_tokens!\", \
                 CASE \
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
@@ -380,10 +380,10 @@ impl UsageAnalyticsRepository {
                 {group_expr}                     AS \"group_key!\", \
                 substring(s.started_at, 1, 10)   AS \"day!\", \
                 COUNT(*)                         AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in), 0)    AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)   AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens), 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens), 0) AS \"cache_write_tokens!\", \
+                COALESCE(SUM(s.tokens_in)::BIGINT, 0)    AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::BIGINT, 0)   AS \"tokens_out!\", \
+                COALESCE(SUM(s.cache_read_tokens)::BIGINT, 0)  AS \"cache_read_tokens!\", \
+                COALESCE(SUM(s.cache_write_tokens)::BIGINT, 0) AS \"cache_write_tokens!\", \
                 CASE \
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
@@ -497,8 +497,8 @@ impl UsageAnalyticsRepository {
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
                 END                                      AS \"spend_usd\", \
-                COALESCE(SUM(s.tokens_in), 0)            AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)           AS \"tokens_out!\", \
+                COALESCE(SUM(s.tokens_in)::BIGINT, 0)            AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::BIGINT, 0)           AS \"tokens_out!\", \
                 COUNT(DISTINCT \
                     CASE WHEN t.status = 'closed' \
                               AND t.close_reason = 'completed' \
@@ -585,8 +585,8 @@ impl UsageAnalyticsRepository {
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
                 END                                      AS \"spend_usd\", \
-                COALESCE(SUM(s.tokens_in), 0)            AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)           AS \"tokens_out!\" \
+                COALESCE(SUM(s.tokens_in)::BIGINT, 0)            AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::BIGINT, 0)           AS \"tokens_out!\" \
              {from_clause} {where_clause} \
              GROUP BY COALESCE(s.project_id, ''), s.model_id \
              ORDER BY project_id, model_id"
@@ -813,7 +813,7 @@ mod usage_analytics_regression_tests {
 
     async fn seed_epic(db: &Database, project_id: &str, title: &str) -> String {
         let id = uuid::Uuid::now_v7().to_string();
-        let short_id = &id[..4];
+        let short_id = &id[id.len() - 4..];
         sqlx::query(
             "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs) \
              VALUES ($1, $2, $3, $4, 'analytics epic', '📊', 'blue', 'analytics', '[]'::jsonb)",
@@ -837,7 +837,7 @@ mod usage_analytics_regression_tests {
         created_by_user_id: Option<&str>,
     ) -> String {
         let id = uuid::Uuid::now_v7().to_string();
-        let short_id = &id[..4];
+        let short_id = &id[id.len() - 4..];
         sqlx::query(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design, issue_type, \
                  status, priority, owner, labels, acceptance_criteria, memory_refs, close_reason, \
@@ -967,7 +967,7 @@ mod usage_analytics_regression_tests {
         let task_id = seed_task(&db, &project_id, Some(&epic_id), "open", None, None).await;
         let proposal_id = uuid::Uuid::now_v7().to_string();
         sqlx::query("INSERT INTO proposals (id, short_id, title, body) VALUES ($1, $2, 'Analytics proposal', 'body')")
-            .bind(&proposal_id).bind(&proposal_id[..4]).execute(db.pool()).await.unwrap();
+            .bind(&proposal_id).bind(&proposal_id[proposal_id.len() - 4..]).execute(db.pool()).await.unwrap();
         sqlx::query(
             "INSERT INTO proposal_epics (proposal_id, epic_id, project_id) VALUES ($1, $2, $3)",
         )
