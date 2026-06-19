@@ -1030,8 +1030,9 @@ impl SessionRepository {
     /// **Approximate historical pricing:** the pricing data passed in comes from
     /// the *current* catalog and does not reflect what the model cost when the
     /// session actually ran.  Callers should log this caveat.  Sessions whose
-    /// `model_id` is not present in `pricing_by_model` are intentionally
-    /// skipped — they remain all-NULL for snapshots and `cost_usd`.
+    /// `model_id` is not present in `pricing_by_model`, or whose supplied
+    /// pricing is all-zero/default, are intentionally skipped — they remain
+    /// all-NULL for snapshots and `cost_usd`.
     ///
     /// Only sessions with all four snapshot columns `NULL` are touched;
     /// sessions that already captured a start-time snapshot are preserved.
@@ -1047,6 +1048,18 @@ impl SessionRepository {
 
         let mut total_updated: u64 = 0;
         for (model_id, pricing) in pricing_by_model {
+            // `Pricing::default()` (all zero rates) represents "pricing
+            // unknown" for custom/seed catalog entries, not a known free
+            // model.  Leave those rows NULL so the analytics layer never
+            // conflates unknown cost with zero cost.
+            if pricing.input_per_million == 0.0
+                && pricing.output_per_million == 0.0
+                && pricing.cache_read_per_million == 0.0
+                && pricing.cache_write_per_million == 0.0
+            {
+                continue;
+            }
+
             let input_rate = pricing.input_per_million;
             let output_rate = pricing.output_per_million;
             let cache_read_rate = pricing.cache_read_per_million;
@@ -2493,6 +2506,49 @@ mod tests {
             fetched.cost_usd.is_none(),
             "uncatalogued session cost_usd must stay NULL"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backfill_pricing_snapshots_skips_default_unpriced_models() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "custom/seed-model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "UPDATE sessions SET tokens_in = 100000, tokens_out = 200000
+             WHERE id = $1",
+        )
+        .bind(&created.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let pricing = vec![("custom/seed-model".to_string(), Pricing::default())];
+        let updated = repo.backfill_pricing_snapshots(&pricing).await.unwrap();
+        assert_eq!(
+            updated, 0,
+            "all-zero/default pricing means unknown, not free, and must not be backfilled"
+        );
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert!(fetched.input_price_per_million_snapshot.is_none());
+        assert!(fetched.output_price_per_million_snapshot.is_none());
+        assert!(fetched.cache_read_price_per_million_snapshot.is_none());
+        assert!(fetched.cache_write_price_per_million_snapshot.is_none());
+        assert!(fetched.cost_usd.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

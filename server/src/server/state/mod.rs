@@ -1463,8 +1463,9 @@ impl AppState {
     /// sessions whose four snapshot columns are all `NULL` are touched; sessions
     /// that already captured a start-time snapshot are left alone.
     ///
-    /// Sessions whose `model_id` is not found in the current catalog remain
-    /// all-NULL (never treated as free).  Idempotent — safe to rerun.
+    /// Sessions whose `model_id` is not found in the current catalog, or whose
+    /// catalog entry is unpriced/default-priced, remain all-NULL (never treated
+    /// as free).  Idempotent — safe to rerun.
     async fn backfill_session_pricing_on_startup(&self) {
         use djinn_db::SessionRepository;
 
@@ -1481,10 +1482,7 @@ impl AppState {
         let repo = SessionRepository::new(self.db().clone(), self.event_bus());
         match repo.backfill_pricing_snapshots(&pricing_vec).await {
             Ok(0) => {
-                tracing::debug!(
-                    model_count,
-                    "pricing backfill: no sessions needed updating"
-                );
+                tracing::debug!(model_count, "pricing backfill: no sessions needed updating");
             }
             Ok(n) => {
                 tracing::info!(

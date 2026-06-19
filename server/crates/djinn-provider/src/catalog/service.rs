@@ -12,6 +12,13 @@ use crate::catalog::builtin::BuiltinProvider;
 const CATALOG_URL: &str = "https://models.dev/api.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn has_nonzero_pricing(pricing: &Pricing) -> bool {
+    pricing.input_per_million != 0.0
+        || pricing.output_per_million != 0.0
+        || pricing.cache_read_per_million != 0.0
+        || pricing.cache_write_per_million != 0.0
+}
+
 /// Build-time embedded snapshot of models.dev/api.json.
 /// Used when no live data is available.
 static EMBEDDED_SNAPSHOT: &[u8] = include_bytes!("snapshot.json");
@@ -185,9 +192,15 @@ impl CatalogService {
         })
     }
 
-    /// Collect per-million-token pricing for every model in the catalog,
+    /// Collect per-million-token pricing for every priced model in the catalog,
     /// keyed by the full `"providerID/modelID"` identifier that sessions store
     /// in `model_id`.
+    ///
+    /// Models whose catalog entry carries `Pricing::default()` (all rates zero)
+    /// are treated as unpriced and intentionally omitted.  Custom-provider seed
+    /// models use that default because no price is known; including them would
+    /// backfill `cost_usd = 0` and incorrectly encode "free" instead of
+    /// "unknown".
     ///
     /// Used by the startup pricing-snapshot backfill to obtain a single
     /// pass-through map from `djinn-provider` → `djinn-db` without coupling
@@ -203,7 +216,9 @@ impl CatalogService {
                 } else {
                     format!("{}/{}", provider.id, model.id)
                 };
-                map.insert(full_id, model.pricing);
+                if has_nonzero_pricing(&model.pricing) {
+                    map.insert(full_id, model.pricing);
+                }
             }
         }
         map
@@ -503,6 +518,40 @@ mod tests {
         for m in &models {
             assert_eq!(m.provider_id, "anthropic");
         }
+    }
+
+    #[test]
+    fn pricing_for_all_models_omits_unpriced_seed_models() {
+        let catalog = CatalogService::new();
+        let provider = Provider {
+            id: "custom-unpriced".to_string(),
+            name: "Custom Unpriced".to_string(),
+            npm: String::new(),
+            env_vars: vec!["CUSTOM_API_KEY".to_string()],
+            base_url: "https://example.invalid/v1".to_string(),
+            docs_url: String::new(),
+            is_openai_compatible: true,
+        };
+        catalog.add_custom_provider(
+            provider,
+            vec![Model {
+                id: "seed-model".to_string(),
+                provider_id: "custom-unpriced".to_string(),
+                name: "Seed Model".to_string(),
+                tool_call: false,
+                reasoning: false,
+                attachment: false,
+                context_window: 0,
+                output_limit: 0,
+                pricing: Pricing::default(),
+            }],
+        );
+
+        let pricing = catalog.pricing_for_all_models();
+        assert!(
+            !pricing.contains_key("custom-unpriced/seed-model"),
+            "all-zero/default pricing means unknown, not free, and must not be backfilled"
+        );
     }
 
     #[test]
