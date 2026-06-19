@@ -876,15 +876,14 @@ async fn warm_cargo_target_base(
         project_id,
         &workspace_dir,
         &clippy_args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        &commands[0].label,
+        commands[0].label,
     )
     .await;
 
     // Run remaining warm commands (all-features clippy, default-features
-    // clippy, build fallback, etc.), skipping the first (already ran) and
-    // the build fallback (index 1) when clippy succeeded.
-    let start = if clippy_ok { 1 } else { 1 };
-    for cmd in commands.iter().skip(start) {
+    // clippy, build fallback, test --no-run, etc.), skipping the first
+    // (already ran). The build fallback is skipped when clippy succeeded.
+    for cmd in commands.iter().skip(1) {
         // Skip the build fallback if clippy already succeeded — it's only
         // needed when clippy fails.
         if !clippy_ok
@@ -907,7 +906,7 @@ async fn warm_cargo_target_base(
             project_id,
             &workspace_dir,
             &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            &cmd.label,
+            cmd.label,
         )
         .await;
     }
