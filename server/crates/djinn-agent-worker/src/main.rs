@@ -863,12 +863,14 @@ async fn warm_cargo_target_base(
 
     // clippy is the heavier of verification's two passes and produces the same
     // check artifacts; fall back to a plain build if clippy is unavailable.
-    let feature_flags = policy.features();
+    // Each command carries its own feature_args — no policy.features()
+    // chaining needed (and omitted to avoid double-adding features in the
+    // dual-pass warm design).
     let clippy_args: Vec<String> = commands[0]
         .args
         .iter()
         .cloned()
-        .chain(feature_flags.iter().cloned())
+        .chain(commands[0].feature_args.iter().cloned())
         .collect();
     let clippy_ok = run_cargo_warm_step(
         project_id,
@@ -877,29 +879,29 @@ async fn warm_cargo_target_base(
         &commands[0].label,
     )
     .await;
-    if !clippy_ok && commands.len() > 1 {
-        let build_args: Vec<String> = commands[1]
-            .args
-            .iter()
-            .cloned()
-            .chain(feature_flags.iter().cloned())
-            .collect();
-        run_cargo_warm_step(
-            project_id,
-            &workspace_dir,
-            &build_args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            &commands[1].label,
-        )
-        .await;
-    }
 
-    // Run remaining warm commands (e.g. test --no-run)
-    for cmd in commands.iter().skip(if clippy_ok { 1 } else { 2 }) {
+    // Run remaining warm commands (all-features clippy, default-features
+    // clippy, build fallback, etc.), skipping the first (already ran) and
+    // the build fallback (index 1) when clippy succeeded.
+    let start = if clippy_ok { 1 } else { 1 };
+    for cmd in commands.iter().skip(start) {
+        // Skip the build fallback if clippy already succeeded — it's only
+        // needed when clippy fails.
+        if !clippy_ok
+            && cmd.label == "build (clippy fallback)"
+            && commands[0].label.starts_with("clippy")
+        {
+            // Already ran clippy (which failed); fall through to build.
+        } else if clippy_ok && cmd.label == "build (clippy fallback)" {
+            // clippy succeeded; build fallback is not needed.
+            continue;
+        }
+
         let args: Vec<String> = cmd
             .args
             .iter()
             .cloned()
-            .chain(feature_flags.iter().cloned())
+            .chain(cmd.feature_args.iter().cloned())
             .collect();
         run_cargo_warm_step(
             project_id,
