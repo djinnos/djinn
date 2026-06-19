@@ -1,134 +1,134 @@
 {
-   "describe" : {
-      "columns" : [
-         {
-            "name" : "id",
-            "type_info" : "Varchar",
-            "ordinal" : 0
-         },
-         {
-            "type_info" : "Varchar",
-            "name" : "project_id",
-            "ordinal" : 1
-         },
-         {
-            "type_info" : "Varchar",
-            "name" : "task_id",
-            "ordinal" : 2
-         },
-         {
-            "type_info" : "Varchar",
-            "name" : "model_id",
-            "ordinal" : 3
-         },
-         {
-            "ordinal" : 4,
-            "type_info" : "Varchar",
-            "name" : "agent_type"
-         },
-         {
-            "ordinal" : 5,
-            "name" : "started_at",
-            "type_info" : "Varchar"
-         },
-         {
-            "name" : "ended_at",
-            "type_info" : "Varchar",
-            "ordinal" : 6
-         },
-         {
-            "type_info" : "Varchar",
-            "name" : "status!",
-            "ordinal" : 7
-         },
-         {
-            "type_info" : "Int8",
-            "name" : "tokens_in",
-            "ordinal" : 8
-         },
-         {
-            "ordinal" : 9,
-            "type_info" : "Int8",
-            "name" : "tokens_out"
-         },
-         {
-            "ordinal" : 10,
-            "name" : "cache_read_tokens",
-            "type_info" : "Int8"
-         },
-         {
-            "ordinal" : 11,
-            "type_info" : "Int8",
-            "name" : "cache_write_tokens"
-         },
-         {
-            "ordinal" : 12,
-            "name" : "task_run_id",
-            "type_info" : "Varchar"
-         },
-         {
-            "name" : "title",
-            "type_info" : "Varchar",
-            "ordinal" : 13
-         },
-         {
-            "type_info" : "Text",
-            "name" : "parked_reason?",
-            "ordinal" : 14
-         },
-         {
-            "type_info" : "Float8",
-            "name" : "cost_usd",
-            "ordinal" : 15
-         },
-         {
-            "ordinal" : 16,
-            "name" : "input_price_per_million_snapshot",
-            "type_info" : "Float8"
-         },
-         {
-            "name" : "output_price_per_million_snapshot",
-            "type_info" : "Float8",
-            "ordinal" : 17
-         },
-         {
-            "ordinal" : 18,
-            "type_info" : "Float8",
-            "name" : "cache_read_price_per_million_snapshot"
-         },
-         {
-            "name" : "cache_write_price_per_million_snapshot",
-            "type_info" : "Float8",
-            "ordinal" : 19
-         }
-      ],
-      "nullable" : [
-         false,
-         true,
-         true,
-         false,
-         false,
-         false,
-         true,
-         false,
-         false,
-         false,
-         false,
-         false,
-         true,
-         true,
-         true,
-         true,
-         true,
-         true,
-         true,
-         true
-      ],
-      "parameters" : {
-         "Left" : []
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.status AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.cache_read_tokens, s.cache_write_tokens,\n                    s.task_run_id, s.title,\n                    s.parked_reason AS \"parked_reason?\",\n                    s.cost_usd, s.input_price_per_million_snapshot,\n                    s.output_price_per_million_snapshot,\n                    s.cache_read_price_per_million_snapshot,\n                    s.cache_write_price_per_million_snapshot\n             FROM sessions s\n             LEFT JOIN (\n                SELECT session_id, MAX(created_at) AS last_at\n                FROM session_messages\n                GROUP BY session_id\n             ) m ON m.session_id = s.id\n             WHERE s.agent_type = 'chat'\n             ORDER BY COALESCE(m.last_at, s.started_at) DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "task_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "model_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "agent_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "started_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "ended_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "status!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "tokens_in",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "tokens_out",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "cache_read_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "cache_write_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
+        "name": "task_run_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 14,
+        "name": "parked_reason?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "cost_usd",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 16,
+        "name": "input_price_per_million_snapshot",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 17,
+        "name": "output_price_per_million_snapshot",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 18,
+        "name": "cache_read_price_per_million_snapshot",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 19,
+        "name": "cache_write_price_per_million_snapshot",
+        "type_info": "Float8"
       }
-   },
-   "db_name" : "PostgreSQL",
-   "query" : "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.status AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.cache_read_tokens, s.cache_write_tokens,\n                    s.task_run_id, s.title,\n                    s.parked_reason AS \"parked_reason?\",\n                    s.cost_usd, s.input_price_per_million_snapshot,\n                    s.output_price_per_million_snapshot,\n                    s.cache_read_price_per_million_snapshot,\n                    s.cache_write_price_per_million_snapshot\n             FROM sessions s\n             LEFT JOIN (\n                SELECT session_id, MAX(created_at) AS last_at\n                FROM session_messages\n                GROUP BY session_id\n             ) m ON m.session_id = s.id\n             WHERE s.agent_type = 'chat'\n             ORDER BY COALESCE(m.last_at, s.started_at) DESC",
-   "hash" : "af049dd0e0153fe421a7d1862efe96dedfc09608679cb575789edbecf1fe3f63"
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "af049dd0e0153fe421a7d1862efe96dedfc09608679cb575789edbecf1fe3f63"
 }

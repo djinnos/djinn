@@ -12,7 +12,6 @@ pub struct AgentCreateInput<'a> {
     pub description: &'a str,
     pub system_prompt_extensions: &'a str,
     pub model_preference: Option<&'a str>,
-    pub verification_command: Option<&'a str>,
     pub mcp_servers: Option<&'a str>,
     pub skills: Option<&'a str>,
     pub is_default: bool,
@@ -23,7 +22,6 @@ pub struct AgentUpdateInput<'a> {
     pub description: &'a str,
     pub system_prompt_extensions: &'a str,
     pub model_preference: Option<&'a str>,
-    pub verification_command: Option<&'a str>,
     pub mcp_servers: &'a str,
     pub skills: &'a str,
     /// Final learned_prompt value to persist. Pass None to clear (set NULL).
@@ -154,7 +152,7 @@ impl AgentRepository {
                 description AS "description!",
                 CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
                      THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
-                model_preference, verification_command,
+                model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
@@ -230,7 +228,7 @@ impl AgentRepository {
                 description AS "description!",
                 CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
                      THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
-                model_preference, verification_command,
+                model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
@@ -261,7 +259,7 @@ impl AgentRepository {
                 description AS "description!",
                 CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
                      THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
-                model_preference, verification_command,
+                model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
@@ -296,7 +294,7 @@ impl AgentRepository {
                 description AS "description!",
                 CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
                      THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
-                model_preference, verification_command,
+                model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
@@ -324,7 +322,7 @@ impl AgentRepository {
                 description AS "description!",
                 CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
                      THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
-                model_preference, verification_command,
+                model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
@@ -364,9 +362,9 @@ impl AgentRepository {
         sqlx::query!(
             "INSERT INTO agents (
                 id, project_id, name, base_role, description,
-                system_prompt_extensions, model_preference, verification_command,
+                system_prompt_extensions, model_preference,
                 mcp_servers, skills, is_default
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             id,
             project_id,
             input.name,
@@ -374,7 +372,6 @@ impl AgentRepository {
             input.description,
             system_prompt_value,
             input.model_preference,
-            input.verification_command,
             mcp_servers_value,
             skills_value,
             is_default_bool
@@ -400,15 +397,14 @@ impl AgentRepository {
         sqlx::query!(
             r#"UPDATE agents
              SET name = $1, description = $2, system_prompt_extensions = $3,
-                 model_preference = $4, verification_command = $5,
-                 mcp_servers = $6, skills = $7, learned_prompt = $8,
+                 model_preference = $4,
+                 mcp_servers = $5, skills = $6, learned_prompt = $7,
                  updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE id = $9"#,
+             WHERE id = $8"#,
             input.name,
             input.description,
             system_prompt_value,
             input.model_preference,
-            input.verification_command,
             mcp_servers_value,
             skills_value,
             input.learned_prompt,
@@ -537,7 +533,7 @@ impl AgentRepository {
             r#"SELECT id, project_id, name, base_role, description,
                     CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
                          THEN system_prompt_extensions #>> '{{}}' ELSE '' END AS system_prompt_extensions,
-                    model_preference, verification_command,
+                    model_preference,
                     mcp_servers::text AS mcp_servers, skills::text AS skills, is_default,
                     (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
                      FROM learned_prompt_history h
@@ -966,7 +962,6 @@ mod tests {
                     description: "Database migrations specialist",
                     system_prompt_extensions: "Focus on safe migrations.",
                     model_preference: None,
-                    verification_command: None,
                     mcp_servers: None,
                     skills: None,
                     is_default: false,
@@ -997,7 +992,6 @@ mod tests {
                 description: "",
                 system_prompt_extensions: "",
                 model_preference: None,
-                verification_command: None,
                 mcp_servers: None,
                 skills: None,
                 is_default: false,
@@ -1015,7 +1009,6 @@ mod tests {
                     description: "",
                     system_prompt_extensions: "",
                     model_preference: None,
-                    verification_command: None,
                     mcp_servers: None,
                     skills: None,
                     is_default: false,
@@ -1041,7 +1034,6 @@ mod tests {
                     description: "original",
                     system_prompt_extensions: "",
                     model_preference: None,
-                    verification_command: None,
                     mcp_servers: None,
                     skills: None,
                     is_default: false,
@@ -1058,7 +1050,6 @@ mod tests {
                     description: "updated",
                     system_prompt_extensions: "extra prompt",
                     model_preference: Some("claude-opus-4-6"),
-                    verification_command: Some("cargo test"),
                     mcp_servers: "[]",
                     skills: "[]",
                     learned_prompt: None,
@@ -1087,7 +1078,6 @@ mod tests {
                     description: "",
                     system_prompt_extensions: "",
                     model_preference: None,
-                    verification_command: None,
                     mcp_servers: None,
                     skills: None,
                     is_default: false,
@@ -1137,7 +1127,6 @@ mod tests {
                     description: "",
                     system_prompt_extensions: "",
                     model_preference: None,
-                    verification_command: None,
                     mcp_servers: None,
                     skills: None,
                     is_default: true,
@@ -1155,7 +1144,6 @@ mod tests {
                     description: "",
                     system_prompt_extensions: "",
                     model_preference: None,
-                    verification_command: None,
                     mcp_servers: None,
                     skills: None,
                     is_default: false,
@@ -1188,7 +1176,6 @@ mod tests {
                 description: "",
                 system_prompt_extensions: "",
                 model_preference: None,
-                verification_command: None,
                 mcp_servers: None,
                 skills: None,
                 is_default: true,
@@ -1208,7 +1195,6 @@ mod tests {
                     description: "",
                     system_prompt_extensions: "",
                     model_preference: None,
-                    verification_command: None,
                     mcp_servers: None,
                     skills: None,
                     is_default: true,
@@ -1263,7 +1249,6 @@ mod tests {
                 description: "",
                 system_prompt_extensions: "",
                 model_preference: None,
-                verification_command: None,
                 mcp_servers: None,
                 skills: None,
                 is_default: false,
@@ -1291,7 +1276,6 @@ mod tests {
                 description: "test worker",
                 system_prompt_extensions: "",
                 model_preference: None,
-                verification_command: None,
                 mcp_servers: None,
                 skills: None,
                 is_default: false,

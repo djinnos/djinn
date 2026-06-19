@@ -192,7 +192,8 @@ async fn health_reports_lifecycle_counts_and_recent_sweep_metrics() {
     let (tx, _rx) = broadcast::channel(256);
     let project = make_project(&db, tmp.path()).await;
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
-    let consolidation_repo = crate::repositories::note::NoteConsolidationRepository::new(db.clone());
+    let consolidation_repo =
+        crate::repositories::note::NoteConsolidationRepository::new(db.clone());
 
     // Create notes with different statuses.
     let _active1 = repo
