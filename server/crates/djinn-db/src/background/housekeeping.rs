@@ -527,6 +527,7 @@ async fn run_project_housekeeping(
             decayed_note_count: decayed_notes as i64,
             archived_note_count: archived_notes as i64,
             superseded_source_note_count: superseded_source_notes as i64,
+            admission_dropped_note_count: 0,
             started_at: &completed_at,
             completed_at: Some(&completed_at),
             error_message: None,
