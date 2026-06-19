@@ -1277,4 +1277,325 @@ mod tests {
         assert_eq!(events[0].entity_type, "agent");
         assert_eq!(events[0].action, "created");
     }
+
+    // ── Learned prompt lifecycle regression tests ───────────────────────────
+
+    /// Helper: create a worker agent and return its id.
+    async fn create_worker_agent(db: &Database, project_id: &str, name: &str) -> Agent {
+        let repo = AgentRepository::new(db.clone(), EventBus::noop());
+        repo.create_for_project(
+            project_id,
+            AgentCreateInput {
+                name,
+                base_role: "worker",
+                description: "test worker",
+                system_prompt_extensions: "",
+                model_preference: None,
+                verification_command: None,
+                mcp_servers: None,
+                skills: None,
+                is_default: false,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn append_learned_prompt_records_history_and_derives_active() {
+        let db = test_db();
+        let project_id = create_project(&db).await;
+        let agent = create_worker_agent(&db, &project_id, "w1").await;
+        let repo = AgentRepository::new(db, EventBus::noop());
+
+        // Before amendment: learned_prompt should be None.
+        let before = repo.get(&agent.id).await.unwrap().unwrap();
+        assert!(before.learned_prompt.is_none());
+
+        // Append an amendment.
+        let updated = repo
+            .append_learned_prompt(&agent.id, "Always write tests first.", None)
+            .await
+            .unwrap();
+
+        // Derived learned_prompt should now contain the amendment text.
+        let lp = updated.learned_prompt.as_deref().unwrap();
+        assert!(
+            lp.contains("Always write tests first."),
+            "derived learned_prompt should contain the amendment: {lp:?}"
+        );
+
+        // History should have exactly one entry.
+        let history = repo.get_history(&agent.id).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].proposed_text, "Always write tests first.");
+        assert_eq!(history[0].action, "keep");
+        assert!(history[0].metrics_after.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multiple_amendments_concat_in_derived_prompt() {
+        let db = test_db();
+        let project_id = create_project(&db).await;
+        let agent = create_worker_agent(&db, &project_id, "w2").await;
+        let repo = AgentRepository::new(db, EventBus::noop());
+
+        repo.append_learned_prompt(&agent.id, "First amendment.", None)
+            .await
+            .unwrap();
+        let updated = repo
+            .append_learned_prompt(&agent.id, "Second amendment.", None)
+            .await
+            .unwrap();
+
+        let lp = updated.learned_prompt.as_deref().unwrap();
+        assert!(lp.contains("First amendment."));
+        assert!(lp.contains("Second amendment."));
+
+        let history = repo.get_history(&agent.id).await.unwrap();
+        assert_eq!(history.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_pending_evaluations_returns_pending_entries() {
+        let db = test_db();
+        let project_id = create_project(&db).await;
+        let agent = create_worker_agent(&db, &project_id, "w3").await;
+        let repo = AgentRepository::new(db, EventBus::noop());
+
+        // Before any amendment, no pending evaluations.
+        let pending = repo.get_pending_evaluations(&project_id).await.unwrap();
+        assert!(pending.is_empty());
+
+        // Append an amendment.
+        repo.append_learned_prompt(&agent.id, "Pending amendment.", None)
+            .await
+            .unwrap();
+
+        let pending = repo.get_pending_evaluations(&project_id).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].agent_id, agent.id);
+        assert_eq!(pending[0].proposed_text, "Pending amendment.");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_pending_amendment_confirmed_keeps_in_derived_prompt() {
+        let db = test_db();
+        let project_id = create_project(&db).await;
+        let agent = create_worker_agent(&db, &project_id, "w4").await;
+        let repo = AgentRepository::new(db, EventBus::noop());
+
+        repo.append_learned_prompt(&agent.id, "Good amendment.", None)
+            .await
+            .unwrap();
+
+        let pending = repo.get_pending_evaluations(&project_id).await.unwrap();
+        assert_eq!(pending.len(), 1);
+
+        let metrics_json = serde_json::json!({
+            "success_rate": 0.85,
+            "avg_tokens": 900.0,
+            "completed_task_count": 25,
+            "failed_task_count": 2,
+        })
+        .to_string();
+
+        // Resolve as confirmed.
+        repo.resolve_pending_amendment(&pending[0].history_id, "confirmed", &metrics_json)
+            .await
+            .unwrap();
+
+        // Should no longer be pending.
+        let pending_after = repo.get_pending_evaluations(&project_id).await.unwrap();
+        assert!(pending_after.is_empty());
+
+        // Derived prompt should still contain the amendment (action='confirmed' is active).
+        let agent_after = repo.get(&agent.id).await.unwrap().unwrap();
+        let lp = agent_after.learned_prompt.as_deref().unwrap();
+        assert!(lp.contains("Good amendment."));
+
+        // History should show 'confirmed' with metrics_after populated.
+        let history = repo.get_history(&agent.id).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].action, "confirmed");
+        assert!(history[0].metrics_after.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_pending_amendment_discard_removes_from_derived_prompt() {
+        let db = test_db();
+        let project_id = create_project(&db).await;
+        let agent = create_worker_agent(&db, &project_id, "w5").await;
+        let repo = AgentRepository::new(db, EventBus::noop());
+
+        repo.append_learned_prompt(&agent.id, "Bad amendment.", None)
+            .await
+            .unwrap();
+
+        // Confirm it's in the derived prompt.
+        let before = repo.get(&agent.id).await.unwrap().unwrap();
+        assert!(
+            before
+                .learned_prompt
+                .as_deref()
+                .unwrap()
+                .contains("Bad amendment.")
+        );
+
+        let pending = repo.get_pending_evaluations(&project_id).await.unwrap();
+        assert_eq!(pending.len(), 1);
+
+        let metrics_json = serde_json::json!({
+            "success_rate": 0.50,
+            "avg_tokens": 1200.0,
+            "completed_task_count": 20,
+            "failed_task_count": 10,
+        })
+        .to_string();
+
+        // Resolve as discard.
+        repo.resolve_pending_amendment(&pending[0].history_id, "discard", &metrics_json)
+            .await
+            .unwrap();
+
+        // Derived prompt should no longer contain the discarded amendment.
+        let after = repo.get(&agent.id).await.unwrap().unwrap();
+        assert!(
+            after.learned_prompt.is_none(),
+            "derived prompt should be None after discard: {:?}",
+            after.learned_prompt
+        );
+
+        // History should show 'discard' with metrics_after populated.
+        let history = repo.get_history(&agent.id).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].action, "discard");
+        assert!(history[0].metrics_after.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clear_amendments_discards_all_active_amendments() {
+        let db = test_db();
+        let project_id = create_project(&db).await;
+        let agent = create_worker_agent(&db, &project_id, "w6").await;
+        let repo = AgentRepository::new(db, EventBus::noop());
+
+        // Append two amendments.
+        repo.append_learned_prompt(&agent.id, "Amendment A.", None)
+            .await
+            .unwrap();
+        repo.append_learned_prompt(&agent.id, "Amendment B.", None)
+            .await
+            .unwrap();
+
+        // Both should be in the derived prompt.
+        let before = repo.get(&agent.id).await.unwrap().unwrap();
+        let lp = before.learned_prompt.as_deref().unwrap();
+        assert!(lp.contains("Amendment A."));
+        assert!(lp.contains("Amendment B."));
+
+        // Clear all amendments.
+        repo.clear_amendments(&agent.id).await.unwrap();
+
+        // Derived prompt should now be None.
+        let after = repo.get(&agent.id).await.unwrap().unwrap();
+        assert!(
+            after.learned_prompt.is_none(),
+            "derived prompt should be None after clear_amendments: {:?}",
+            after.learned_prompt
+        );
+
+        // History should show both as 'discard'.
+        let history = repo.get_history(&agent.id).await.unwrap();
+        assert_eq!(history.len(), 2);
+        for entry in &history {
+            assert_eq!(entry.action, "discard");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn append_learned_prompt_with_metrics_snapshot_round_trips() {
+        let db = test_db();
+        let project_id = create_project(&db).await;
+        let agent = create_worker_agent(&db, &project_id, "w7").await;
+        let repo = AgentRepository::new(db, EventBus::noop());
+
+        let metrics_json = serde_json::json!({
+            "success_rate": 0.72,
+            "avg_tokens": 1100.0,
+            "completed_task_count": 15,
+            "failed_task_count": 3,
+        })
+        .to_string();
+
+        repo.append_learned_prompt(&agent.id, "Amendment with metrics.", Some(&metrics_json))
+            .await
+            .unwrap();
+
+        let history = repo.get_history(&agent.id).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(history[0].metrics_before.is_some());
+        let before_json = history[0].metrics_before.as_ref().unwrap();
+        assert!(before_json.contains("0.72"));
+        assert!(before_json.contains("1100"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn discard_revert_learns_from_confirmed_and_keeps_confirmed() {
+        // Scenario: Two amendments, first is confirmed, second is discarded.
+        // The derived prompt should only include the confirmed one.
+        let db = test_db();
+        let project_id = create_project(&db).await;
+        let agent = create_worker_agent(&db, &project_id, "w8").await;
+        let repo = AgentRepository::new(db, EventBus::noop());
+
+        // First amendment: will be confirmed.
+        repo.append_learned_prompt(&agent.id, "Confirmed rule.", None)
+            .await
+            .unwrap();
+
+        let pending = repo.get_pending_evaluations(&project_id).await.unwrap();
+        let metrics_json = serde_json::json!({
+            "success_rate": 0.90,
+            "avg_tokens": 800.0,
+            "completed_task_count": 25,
+            "failed_task_count": 1,
+        })
+        .to_string();
+        repo.resolve_pending_amendment(&pending[0].history_id, "confirmed", &metrics_json)
+            .await
+            .unwrap();
+
+        // Second amendment: will be discarded.
+        repo.append_learned_prompt(&agent.id, "Discarded rule.", None)
+            .await
+            .unwrap();
+
+        let pending2 = repo.get_pending_evaluations(&project_id).await.unwrap();
+        let metrics_json2 = serde_json::json!({
+            "success_rate": 0.60,
+            "avg_tokens": 1200.0,
+            "completed_task_count": 20,
+            "failed_task_count": 8,
+        })
+        .to_string();
+        repo.resolve_pending_amendment(&pending2[0].history_id, "discard", &metrics_json2)
+            .await
+            .unwrap();
+
+        // Derived prompt should contain only the confirmed amendment.
+        let agent_after = repo.get(&agent.id).await.unwrap().unwrap();
+        let lp = agent_after.learned_prompt.as_deref().unwrap();
+        assert!(lp.contains("Confirmed rule."));
+        assert!(!lp.contains("Discarded rule."));
+
+        // History: two entries, first confirmed, second discarded.
+        let history = repo.get_history(&agent.id).await.unwrap();
+        assert_eq!(history.len(), 2);
+        // History is newest first.
+        assert_eq!(history[0].action, "discard");
+        assert_eq!(history[0].proposed_text, "Discarded rule.");
+        assert_eq!(history[1].action, "confirmed");
+        assert_eq!(history[1].proposed_text, "Confirmed rule.");
+    }
 }
