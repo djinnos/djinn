@@ -2272,6 +2272,7 @@ mod tests {
         let tmp = workspace_tempdir("incremental-equiv-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
+        db.ensure_initialized().await.expect("ensure test db initialized");
         let ctx = TestWarmContext::new(db.clone());
         let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = proj_repo
@@ -2354,6 +2355,7 @@ mod tests {
         let tmp = workspace_tempdir("incremental-neg-");
         let _project_root = make_project(tmp.path()).await;
         let db = create_test_db();
+        db.ensure_initialized().await.expect("ensure test db initialized");
         let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = proj_repo
             .create("test-equiv-neg", "test", "test-equiv-neg")
@@ -2458,6 +2460,7 @@ mod tests {
                 .expect("scip cache path must be UTF-8"),
         );
         let db = create_test_db();
+        db.ensure_initialized().await.expect("ensure test db initialized");
         let ctx = TestWarmContext::new(db.clone());
         let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = proj_repo
