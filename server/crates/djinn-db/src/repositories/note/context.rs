@@ -46,7 +46,9 @@ impl NoteRepository {
 
         let budget = budget.unwrap_or(4096);
 
-        // Get the seed note with full content
+        // Get the seed note with full content. Archived/deprecated notes remain
+        // addressable through administrative APIs, but prompt-context assembly
+        // is active-only by repository default.
         let Some(seed) = self.get_by_permalink(project_id, seed_permalink).await? else {
             return Ok(BuildContextResponse {
                 primary: vec![],
@@ -54,6 +56,13 @@ impl NoteRepository {
                 related_l0: vec![],
             });
         };
+        if seed.status != djinn_memory::note_status::ACTIVE {
+            return Ok(BuildContextResponse {
+                primary: vec![],
+                related_l1: vec![],
+                related_l0: vec![],
+            });
+        }
 
         // Get direct neighbors via wikilink graph
         let direct_neighbor_ids = self.get_direct_neighbors(project_id, &seed.id).await?;
@@ -154,14 +163,14 @@ impl NoteRepository {
 
     /// Get direct wikilink neighbors (one hop from seed).
     async fn get_direct_neighbors(&self, project_id: &str, seed_id: &str) -> Result<Vec<String>> {
-        let rows = sqlx::query_scalar!(
+        let rows = sqlx::query_scalar::<_, String>(
             r#"SELECT target_id AS "target_id!: String" FROM note_links
              WHERE source_id = $1
                AND target_id IS NOT NULL
-               AND target_id IN (SELECT id FROM notes WHERE project_id = $2)"#,
-            seed_id,
-            project_id
+               AND target_id IN (SELECT id FROM notes WHERE project_id = $2 AND status = 'active')"#,
         )
+        .bind(seed_id)
+        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
