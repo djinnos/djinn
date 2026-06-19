@@ -158,6 +158,15 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
 
         let status_str = status.as_str();
+        // Token params are bound twice: once as i64 for the bigint SET
+        // columns ($2-$5) and once as f64 for the cost computation
+        // ($8-$11).  Reusing the same positional parameter in both a
+        // bigint and a double-precision context makes PostgreSQL report
+        // "inconsistent types deduced", so we use separate positions.
+        let ti_f = tokens_in as f64;
+        let to_f = tokens_out as f64;
+        let cr_f = cache_read as f64;
+        let cw_f = cache_write as f64;
         sqlx::query(
             r#"UPDATE sessions
              SET status = $1,
@@ -165,6 +174,19 @@ impl SessionRepository {
                  tokens_out = $3,
                  cache_read_tokens = $4,
                  cache_write_tokens = $5,
+                 cost_usd = CASE
+                     WHEN input_price_per_million_snapshot IS NOT NULL
+                      AND output_price_per_million_snapshot IS NOT NULL
+                      AND cache_read_price_per_million_snapshot IS NOT NULL
+                      AND cache_write_price_per_million_snapshot IS NOT NULL
+                     THEN (
+                         $8 * input_price_per_million_snapshot
+                         + $9 * output_price_per_million_snapshot
+                         + $10 * cache_read_price_per_million_snapshot
+                         + $11 * cache_write_price_per_million_snapshot
+                     ) / 1000000.0
+                     ELSE NULL
+                 END,
                  ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                  parked_reason = COALESCE($7, parked_reason)
              WHERE id = $6"#,
@@ -176,6 +198,10 @@ impl SessionRepository {
         .bind(cache_write)
         .bind(id)
         .bind(parked_reason)
+        .bind(ti_f)
+        .bind(to_f)
+        .bind(cr_f)
+        .bind(cw_f)
         .execute(self.db.pool())
         .await?;
 
@@ -571,19 +597,45 @@ impl SessionRepository {
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query!(
+        // Token params are bound twice: once as i64 for the bigint SET
+        // columns ($1-$4) and once as f64 for the cost computation
+        // ($5-$8).  Reusing the same positional parameter in both a
+        // bigint and a double-precision context makes PostgreSQL report
+        // "inconsistent types deduced", so we use separate positions.
+        let ti_f = tokens_in as f64;
+        let to_f = tokens_out as f64;
+        let cr_f = cache_read as f64;
+        let cw_f = cache_write as f64;
+        sqlx::query(
             r#"UPDATE sessions
              SET tokens_in = $1,
                  tokens_out = $2,
                  cache_read_tokens = $3,
-                 cache_write_tokens = $4
-             WHERE id = $5 AND status = 'running'"#,
-            tokens_in,
-            tokens_out,
-            cache_read,
-            cache_write,
-            id
+                 cache_write_tokens = $4,
+                 cost_usd = CASE
+                     WHEN input_price_per_million_snapshot IS NOT NULL
+                      AND output_price_per_million_snapshot IS NOT NULL
+                      AND cache_read_price_per_million_snapshot IS NOT NULL
+                      AND cache_write_price_per_million_snapshot IS NOT NULL
+                     THEN (
+                         $5 * input_price_per_million_snapshot
+                         + $6 * output_price_per_million_snapshot
+                         + $7 * cache_read_price_per_million_snapshot
+                         + $8 * cache_write_price_per_million_snapshot
+                     ) / 1000000.0
+                     ELSE NULL
+                 END
+             WHERE id = $9 AND status = 'running'"#,
         )
+        .bind(tokens_in)
+        .bind(tokens_out)
+        .bind(cache_read)
+        .bind(cache_write)
+        .bind(ti_f)
+        .bind(to_f)
+        .bind(cr_f)
+        .bind(cw_f)
+        .bind(id)
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -1934,6 +1986,251 @@ mod tests {
         // Missing → None.
         let missing = uuid::Uuid::now_v7().to_string();
         assert_eq!(repo.chat_session_owner(&missing).await.unwrap(), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_recomputes_cost_usd_from_snapshot_and_token_values() {
+        use djinn_core::models::provider::Pricing;
+
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let pricing = Pricing {
+            input_per_million: 1.5,
+            output_per_million: 6.0,
+            cache_read_per_million: 0.15,
+            cache_write_per_million: 1.875,
+        };
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&pricing),
+            })
+            .await
+            .unwrap();
+        assert!(created.cost_usd.is_none());
+
+        // Final update with token counts — cost should be recomputed.
+        let updated = repo
+            .update(
+                &created.id,
+                SessionStatus::Completed,
+                1_000_000,
+                2_000_000,
+                500_000,
+                200_000,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Expected: (1_000_000 * 1.5 + 2_000_000 * 6.0 + 500_000 * 0.15 + 200_000 * 1.875) / 1_000_000
+        // = 1.5 + 12.0 + 0.075 + 0.375 = 13.95
+        assert!(
+            (updated.cost_usd.unwrap() - 13.95).abs() < 0.0001,
+            "expected cost_usd ~13.95, got {:?}",
+            updated.cost_usd
+        );
+
+        // Round-trip via get confirms the stored value.
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert!(
+            (fetched.cost_usd.unwrap() - 13.95).abs() < 0.0001,
+            "expected fetched cost_usd ~13.95, got {:?}",
+            fetched.cost_usd
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_leaves_cost_usd_null_when_any_snapshot_rate_is_null() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        // Create with no pricing snapshot — all snapshot columns NULL.
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "uncatalogued/model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .unwrap();
+        assert!(created.cost_usd.is_none());
+
+        // Update with tokens — cost_usd must stay NULL because snapshots are NULL.
+        let updated = repo
+            .update(
+                &created.id,
+                SessionStatus::Completed,
+                1_000_000,
+                2_000_000,
+                500_000,
+                200_000,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            updated.cost_usd.is_none(),
+            "NULL snapshot must keep cost_usd NULL"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_tokens_recomputes_cost_usd_for_running_sessions() {
+        use djinn_core::models::provider::Pricing;
+
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let pricing = Pricing {
+            input_per_million: 2.0,
+            output_per_million: 8.0,
+            cache_read_per_million: 0.5,
+            cache_write_per_million: 2.5,
+        };
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&pricing),
+            })
+            .await
+            .unwrap();
+        assert!(created.cost_usd.is_none());
+
+        // Mid-flight flush while still running.
+        repo.flush_tokens(&created.id, 500_000, 1_000_000, 250_000, 100_000)
+            .await
+            .unwrap();
+
+        // Expected: (500_000 * 2.0 + 1_000_000 * 8.0 + 250_000 * 0.5 + 100_000 * 2.5) / 1_000_000
+        // = 1.0 + 8.0 + 0.125 + 0.25 = 9.375
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert!(
+            (fetched.cost_usd.unwrap() - 9.375).abs() < 0.0001,
+            "expected cost_usd ~9.375 after flush, got {:?}",
+            fetched.cost_usd
+        );
+        assert_eq!(fetched.status, "running");
+
+        // A second flush with updated counts should recompute cost.
+        repo.flush_tokens(&created.id, 600_000, 1_200_000, 300_000, 150_000)
+            .await
+            .unwrap();
+        let fetched2 = repo.get(&created.id).await.unwrap().unwrap();
+        // Expected: (600_000 * 2.0 + 1_200_000 * 8.0 + 300_000 * 0.5 + 150_000 * 2.5) / 1_000_000
+        // = 1.2 + 9.6 + 0.15 + 0.375 = 11.325
+        assert!(
+            (fetched2.cost_usd.unwrap() - 11.325).abs() < 0.0001,
+            "expected cost_usd ~11.325 after second flush, got {:?}",
+            fetched2.cost_usd
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_tokens_leaves_cost_usd_null_for_uncatalogued_sessions() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "uncatalogued/model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .unwrap();
+
+        repo.flush_tokens(&created.id, 500_000, 1_000_000, 250_000, 100_000)
+            .await
+            .unwrap();
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert!(
+            fetched.cost_usd.is_none(),
+            "uncatalogued session must keep cost_usd NULL after flush"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_tokens_does_not_resurrect_terminal_sessions() {
+        use djinn_core::models::provider::Pricing;
+
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let pricing = Pricing {
+            input_per_million: 1.0,
+            output_per_million: 2.0,
+            cache_read_per_million: 0.1,
+            cache_write_per_million: 0.2,
+        };
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&pricing),
+            })
+            .await
+            .unwrap();
+
+        // Complete the session first.
+        repo.update(
+            &created.id,
+            SessionStatus::Completed,
+            100,
+            200,
+            50,
+            25,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Flush racing against the completed session must be a no-op.
+        repo.flush_tokens(&created.id, 999, 999, 999, 999)
+            .await
+            .unwrap();
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, "completed");
+        assert_eq!(fetched.tokens_in, 100);
+        assert_eq!(fetched.tokens_out, 200);
+        assert_eq!(fetched.cache_read_tokens, 50);
+        assert_eq!(fetched.cache_write_tokens, 25);
+        // cost_usd from the final update, not the flush.
+        assert!(
+            (fetched.cost_usd.unwrap() - 0.00051).abs() < 0.000001,
+            "expected cost from final update, got {:?}",
+            fetched.cost_usd
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

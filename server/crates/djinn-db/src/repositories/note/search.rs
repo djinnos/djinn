@@ -459,7 +459,7 @@ impl NoteRepository {
         // named `scope_paths!`, which `FromRow` can't map to `NoteCompact`.
         let sql = if hours > 0 {
             format!(
-                r#"SELECT id, permalink, title, note_type, folder, updated_at, scope_paths::text AS scope_paths
+                r#"SELECT id, permalink, title, note_type, folder, status, updated_at, scope_paths::text AS scope_paths
                  FROM notes
                  WHERE project_id = $1
                    AND status = 'active'
@@ -467,8 +467,8 @@ impl NoteRepository {
                  ORDER BY updated_at DESC LIMIT $2"#
             )
         } else {
-            r#"SELECT id, permalink, title, note_type, folder, updated_at, scope_paths::text AS scope_paths
-             FROM notes WHERE project_id = $1
+            r#"SELECT id, permalink, title, note_type, folder, status, updated_at, scope_paths::text AS scope_paths
+             FROM notes WHERE project_id = $1 AND status = 'active'
              ORDER BY updated_at DESC LIMIT $2"#
                 .to_owned()
         };
@@ -489,16 +489,17 @@ impl NoteRepository {
         folder: Option<&str>,
         note_type: Option<&str>,
         depth: i64,
+        status: Option<&str>,
     ) -> Result<Vec<NoteCompact>> {
-        self.list_compact_by_status(project_id, folder, note_type, depth, Some("active"))
+        self.list_compact_by_status(project_id, folder, note_type, depth, status)
             .await
     }
 
     /// List compact note summaries with an explicit lifecycle status filter.
     ///
     /// Passing `Some("archived")` is the reversible/listable archive path used
-    /// by lifecycle tooling. Passing `None` lists all statuses for administrative
-    /// callers; default browsing should use [`Self::list_compact`].
+    /// by lifecycle tooling. Passing `None` or an empty status defaults to active
+    /// for normal browsing.
     pub async fn list_compact_by_status(
         &self,
         project_id: &str,
@@ -508,24 +509,24 @@ impl NoteRepository {
         status: Option<&str>,
     ) -> Result<Vec<NoteCompact>> {
         self.db.ensure_initialized().await?;
+        let status = djinn_memory::note_status::normalize(status);
+        if !djinn_memory::note_status::is_valid(&status) {
+            return Err(Error::InvalidData(format!(
+                "invalid note lifecycle status: {status}"
+            )));
+        }
 
         // NOTE: dynamic SQL (folder/note_type/status clauses appended at runtime) — compile-time check not possible.
         // Postgres positional binds: project_id is $1; appended clauses number
         // their placeholders from $2 onward. Plain `AS scope_paths` alias (the
         // `!` non-null assertion is macro-only — see `recent`).
-        let mut sql = r#"SELECT id, permalink, title, note_type, folder, updated_at, scope_paths::text AS scope_paths
-             FROM notes WHERE project_id = $1"#
+        let mut sql = r#"SELECT id, permalink, title, note_type, folder, status, updated_at, scope_paths::text AS scope_paths
+             FROM notes WHERE project_id = $1 AND status = $2"#
             .to_owned();
 
-        let mut binds: Vec<String> = vec![project_id.to_string()];
-        // Next free placeholder index ($1 is project_id).
-        let mut next = 2;
-
-        if let Some(status) = status {
-            sql.push_str(&format!(" AND status = ${next}"));
-            next += 1;
-            binds.push(status.to_string());
-        }
+        let mut binds: Vec<String> = vec![project_id.to_string(), status];
+        // Next free placeholder index ($1 is project_id, $2 is status).
+        let mut next = 3;
 
         if let Some(f) = folder {
             if depth == 1 {
@@ -619,12 +620,13 @@ impl NoteRepository {
         // with plain aliases so `FromRow` maps them onto the `String` fields.
         let sql = format!(
             "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path,
-                    n.storage, n.note_type, n.folder, n.tags::text AS tags, n.content,
+                    n.storage, n.note_type, n.folder, n.status, n.tags::text AS tags, n.content,
                     n.retrieval_anchor, n.created_at, n.updated_at, n.last_accessed,
                     n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
                     n.scope_paths::text AS scope_paths
              FROM notes n
              WHERE n.project_id = $1
+               AND n.status = 'active'
                AND n.note_type IN ({types_in})
                AND n.status = 'active'
                AND n.confidence >= $2
@@ -688,7 +690,7 @@ impl NoteRepository {
         // plain aliases for `FromRow`.
         let sql = format!(
             "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path,
-                    n.storage, n.note_type, n.folder, n.tags::text AS tags, n.content,
+                    n.storage, n.note_type, n.folder, n.status, n.tags::text AS tags, n.content,
                     n.retrieval_anchor, n.created_at, n.updated_at, n.last_accessed,
                     n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
                     n.scope_paths::text AS scope_paths

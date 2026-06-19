@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use djinn_memory::{ExtractedNoteAuditCategory, ExtractedNoteAuditFinding};
+use djinn_memory::{
+    ExtractedNoteAuditCategory, ExtractedNoteAuditFinding, LifecycleHealth, RecentSweepMetrics,
+};
 use sqlx::Row;
 
 use super::*;
@@ -216,6 +218,50 @@ impl NoteRepository {
         .fetch_one(self.db.pool())
         .await?;
 
+        let active_notes: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM notes WHERE project_id = $1 AND status = 'active'"#,
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+        let archived_notes: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM notes WHERE project_id = $1 AND status = 'archived'"#,
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+
+        let recent_sweep_row = sqlx::query(
+            r#"SELECT completed_at,
+                      CAST(decayed_note_count AS BIGINT) AS decayed_note_count,
+                      CAST(archived_note_count AS BIGINT) AS archived_note_count,
+                      CAST(superseded_source_note_count AS BIGINT) AS superseded_source_note_count
+               FROM consolidation_run_metrics
+               WHERE project_id = $1
+                 AND note_type = 'lifecycle_sweep'
+               ORDER BY COALESCE(completed_at, started_at) DESC, id DESC
+               LIMIT 1"#,
+        )
+        .bind(project_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        let recent_sweep = if let Some(row) = recent_sweep_row {
+            RecentSweepMetrics {
+                last_sweep_at: row.try_get("completed_at")?,
+                last_decayed_count: row.try_get("decayed_note_count")?,
+                last_archived_count: row.try_get("archived_note_count")?,
+                last_superseded_source_count: row.try_get("superseded_source_note_count")?,
+            }
+        } else {
+            RecentSweepMetrics {
+                last_sweep_at: None,
+                last_decayed_count: 0,
+                last_archived_count: 0,
+                last_superseded_source_count: 0,
+            }
+        };
+
         Ok(HealthReport {
             total_notes,
             broken_link_count,
@@ -223,6 +269,11 @@ impl NoteRepository {
             low_confidence_note_count,
             stale_note_count,
             stale_notes_by_folder,
+            lifecycle: LifecycleHealth {
+                active_notes,
+                archived_notes,
+            },
+            recent_sweep,
         })
     }
 
@@ -232,12 +283,13 @@ impl NoteRepository {
 
         let notes = sqlx::query_as::<_, Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                    storage, note_type, folder, tags::text AS tags, content,
+                    storage, note_type, folder, status, tags::text AS tags, content,
                     retrieval_anchor, created_at, updated_at, last_accessed,
                     access_count, confidence, abstract AS abstract_, overview,
                     scope_paths::text AS scope_paths
              FROM notes
              WHERE project_id = $1
+               AND status = 'active'
                AND note_type IN ('case', 'pattern', 'pitfall')
              ORDER BY note_type, permalink"#,
         )

@@ -97,17 +97,28 @@ export function AgentRoles() {
     }
   };
 
-  const handleUpdate = async (id: string, data: Omit<CreateAgentRequest, "project_id">) => {
+  const handleUpdate = async (
+    role: Agent,
+    data: Omit<CreateAgentRequest, "project_id">,
+  ) => {
     setEditBusy(true);
     try {
-      const updated = await updateAgent(id, {
-        name: data.name,
-        description: data.description,
+      const safeConfiguration = {
         system_prompt_extensions: data.system_prompt_extensions,
         mcp_servers: data.mcp_servers,
         skills: data.skills,
-      });
-      setRoles((prev) => prev.map((r) => (r.id === id ? updated : r)));
+      };
+      const updated = await updateAgent(
+        role.id,
+        role.is_default
+          ? safeConfiguration
+          : {
+              name: data.name,
+              description: data.description,
+              ...safeConfiguration,
+            },
+      );
+      setRoles((prev) => prev.map((r) => (r.id === role.id ? updated : r)));
       setEditingId(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update agent");
@@ -126,6 +137,12 @@ export function AgentRoles() {
     } finally {
       setDeletingId(null);
     }
+  };
+
+  const handleLearnedPromptCleared = (id: string) => {
+    setRoles((prev) =>
+      prev.map((role) => (role.id === id ? { ...role, learned_prompt: null } : role)),
+    );
   };
 
   // Full-page form takeover for create/edit
@@ -161,11 +178,15 @@ export function AgentRoles() {
             skills: editingRole.skills,
           }}
           fixedBaseRole={editingRole.base_role}
+          isDefaultEdit={editingRole.is_default}
           submitLabel="Save"
           isBusy={editBusy}
           availableMcpServers={availableMcpServers}
           availableSkills={availableSkills}
-          onSubmit={(data) => void handleUpdate(editingRole.id, data)}
+          learnedPromptRole={editingRole}
+          canClearLearnedPrompt={isAdmin}
+          onLearnedPromptCleared={() => handleLearnedPromptCleared(editingRole.id)}
+          onSubmit={(data) => void handleUpdate(editingRole, data)}
           onCancel={() => setEditingId(null)}
         />
       </div>
@@ -221,6 +242,7 @@ export function AgentRoles() {
                 isDeleting={deletingId === role.id}
                 canEdit={isAdmin}
                 editLabel="Edit instructions"
+                onLearnedPromptCleared={() => handleLearnedPromptCleared(role.id)}
               />
             ))}
           </div>
@@ -262,6 +284,7 @@ export function AgentRoles() {
                 onDelete={() => void handleDelete(role.id)}
                 isDeleting={deletingId === role.id}
                 canEdit={isAdmin}
+                onLearnedPromptCleared={() => handleLearnedPromptCleared(role.id)}
               />
             ))}
           </div>

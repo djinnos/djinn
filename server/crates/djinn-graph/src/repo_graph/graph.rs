@@ -21,7 +21,7 @@ use petgraph::visit::EdgeRef;
 
 use crate::complexity::ComplexityWalker;
 use crate::layout::GraphLayoutPosition;
-use crate::scip_parser::{ParsedScipIndex, ScipSymbolKind, ScipVisibility};
+use crate::scip_parser::{ParsedScipIndex, ScipFile, ScipSymbol, ScipSymbolKind, ScipVisibility};
 
 use super::artifact::RouteExclusionConfig;
 use super::constants::EDGE_CONFIDENCE_LOCAL_PENALTY;
@@ -313,11 +313,6 @@ impl RepoDependencyGraph {
         project_root: Option<&Path>,
         options: RepoGraphBuildOptions,
     ) -> Result<Self, String> {
-        // The builder lives in `super::builder` (task `3hrr` placeholder
-        // until that follow-up lands) and is reachable through `super`
-        // because `graph` is a child of the parent module. For now this
-        // is the only caller — the rest of the crate goes through
-        // `RepoDependencyGraph::build`.
         let mut builder = super::RepoDependencyGraphBuilder {
             project_root: project_root.map(|p| p.to_path_buf()),
             ..Default::default()
@@ -325,6 +320,95 @@ impl RepoDependencyGraph {
         for index in indices {
             builder.add_index(index);
         }
+        Self::finish_builder(builder, project_root, options)
+    }
+
+    /// Build the graph from a lazy iterator of `ScipFile` references
+    /// without requiring the full [`ParsedScipIndex`] to be resident
+    /// in memory. This is the bounded-memory entry point for the
+    /// out-of-core pipeline.
+    ///
+    /// # Memory invariant
+    ///
+    /// Files are processed one-at-a-time from the iterator. Only one
+    /// `ScipFile` is borrowed per iteration step — resident file data
+    /// is **O(1)**, not `O(total_files)`.
+    pub fn try_build_with_scip_files<'a, I>(
+        files: I,
+        workspace_slug: &str,
+        external_symbols: &[ScipSymbol],
+        project_root: Option<&Path>,
+    ) -> Result<Self, String>
+    where
+        I: Iterator<Item = &'a ScipFile>,
+    {
+        Self::try_build_with_scip_files_options(
+            files,
+            workspace_slug,
+            external_symbols,
+            project_root,
+            RepoGraphBuildOptions::from_env(),
+        )
+    }
+
+    /// Like [`Self::try_build_with_scip_files`] with explicit build options.
+    pub fn try_build_with_scip_files_options<'a, I>(
+        files: I,
+        workspace_slug: &str,
+        external_symbols: &[ScipSymbol],
+        project_root: Option<&Path>,
+        options: RepoGraphBuildOptions,
+    ) -> Result<Self, String>
+    where
+        I: Iterator<Item = &'a ScipFile>,
+    {
+        let mut builder = super::RepoDependencyGraphBuilder {
+            project_root: project_root.map(|p| p.to_path_buf()),
+            ..Default::default()
+        };
+        builder.add_scip_files(workspace_slug, external_symbols, files);
+        Self::finish_builder(builder, project_root, options)
+    }
+
+    /// Build the graph from a **fallible** iterator of `ScipFile` entries.
+    ///
+    /// This variant is designed for the out-of-core pipeline where files
+    /// are loaded from disk one-at-a-time and each load may fail
+    /// (e.g. I/O error, deserialization error). Processing stops at the
+    /// first error.
+    ///
+    /// # Memory invariant
+    ///
+    /// Only one `ScipFile` is resident per iteration step — resident
+    /// file data is **O(1)**.
+    pub fn try_build_with_scip_file_iter<I, F, E>(
+        files: I,
+        workspace_slug: &str,
+        external_symbols: &[ScipSymbol],
+        project_root: Option<&Path>,
+    ) -> Result<Self, String>
+    where
+        I: Iterator<Item = Result<F, E>>,
+        F: std::borrow::Borrow<ScipFile>,
+        E: std::fmt::Display,
+    {
+        let mut builder = super::RepoDependencyGraphBuilder {
+            project_root: project_root.map(|p| p.to_path_buf()),
+            ..Default::default()
+        };
+        builder.add_scip_files_fallible(workspace_slug, external_symbols, files)?;
+        Self::finish_builder(builder, project_root, RepoGraphBuildOptions::from_env())
+    }
+
+    /// Common post-build pipeline: entry-point detection, process
+    /// tracing, and complexity attachment. Shared by all build entry
+    /// points (`try_build_with_source`, `try_build_with_scip_files`,
+    /// `try_build_with_scip_file_iter`).
+    fn finish_builder(
+        builder: super::RepoDependencyGraphBuilder,
+        project_root: Option<&Path>,
+        options: RepoGraphBuildOptions,
+    ) -> Result<Self, String> {
         let mut graph = builder.finish();
         // PR F1: post-build entry-point detection. Stamps `EntryPointOf`
         // edges from file → symbol so `dead_symbols` (and downstream

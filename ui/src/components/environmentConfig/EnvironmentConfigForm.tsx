@@ -1,7 +1,7 @@
 /**
  * EnvironmentConfigForm — the form-based editor for a single project's
  * `environment_config`. Panes: Base image, Workspaces, System packages,
- * Env vars, Lifecycle hooks, Verification.
+ * Env vars, Lifecycle hooks.
  *
  * Workspaces are the primary unit of toolchain config: each workspace
  * pins its own language + toolchain/version, and the image-builder
@@ -55,8 +55,8 @@ export function EnvironmentConfigForm({ config, onChange }: Props) {
 }
 
 // Base image distro/variant is intentionally not in the form. Djinn's
-// image runs verification only (clippy/check/test/lint) — it doesn't
-// ship anything, so libc flavor and package-manager choice are a detail
+// image is for build/runtime tooling rather than shipping a production
+// artifact, so libc flavor and package-manager choice are a detail
 // almost no one should be reasoning about. The `base` field still exists
 // on `EnvironmentConfig` and round-trips through the Raw JSON editor for
 // the rare case where someone genuinely needs alpine.
@@ -406,14 +406,13 @@ function LifecycleSection({ config, onChange }: Props) {
   return (
     <Section
       title="Lifecycle hooks"
-      description="post_build bakes into the image (paid once). The three pre_* hooks run every Pod start (paid every time)."
+      description="post_build bakes into the image (paid once). pre_anything and pre_task run on Pod start paths (paid every time)."
     >
       <Tabs defaultValue="post_build" className="flex w-full flex-col">
         <TabsList className="w-fit">
           <TabsTrigger value="post_build">post_build</TabsTrigger>
           <TabsTrigger value="pre_anything">pre_anything</TabsTrigger>
           <TabsTrigger value="pre_task">pre_task</TabsTrigger>
-          <TabsTrigger value="pre_verification">pre_verification</TabsTrigger>
         </TabsList>
         <TabsContent value="post_build" className="mt-3">
           <HookCommandList
@@ -440,18 +439,6 @@ function LifecycleSection({ config, onChange }: Props) {
               onChange({ ...config, lifecycle: { ...config.lifecycle, pre_task: next } })
             }
             emptyHint="Task-run Pods only. Runs after pre_anything, before the supervisor starts."
-          />
-        </TabsContent>
-        <TabsContent value="pre_verification" className="mt-3">
-          <HookCommandList
-            hooks={config.lifecycle.pre_verification}
-            onChange={(next) =>
-              onChange({
-                ...config,
-                lifecycle: { ...config.lifecycle, pre_verification: next },
-              })
-            }
-            emptyHint="Runs once per task, before any verification rule fires. Typical use: pnpm install, cargo build, etc."
           />
         </TabsContent>
       </Tabs>
