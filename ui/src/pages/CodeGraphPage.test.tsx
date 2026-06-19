@@ -5,7 +5,7 @@ import { CodeGraphPage } from "@/pages/CodeGraphPage";
 import { projectStore } from "@/stores/projectStore";
 import { useCodeGraphStore } from "@/stores/codeGraphStore";
 import type { Project } from "@/api/types";
-import type { CodeGraphWorkspace } from "@/api/codeGraph";
+import type { CodeGraphWorkspace, SnapshotLevel } from "@/api/codeGraph";
 
 // Sigma + WebGL aren't worth wiring up in jsdom; we stub the constructor so
 // the smoke test only validates the React surface (project picker shell,
@@ -45,7 +45,7 @@ vi.mock("graphology-layout-forceatlas2/worker", () => ({
 // snapshots (iter 30: with cognitive complexity for the heatmap tests).
 type SnapshotResponse = { snapshot: Record<string, unknown> };
 const fetchSnapshotMock = vi.fn<
-  (project: string, nodeCap?: number) => Promise<SnapshotResponse>
+  (project: string, nodeCap?: number, level?: SnapshotLevel) => Promise<SnapshotResponse>
 >();
 const fetchWorkspacesMock = vi.fn<
   (project: string) => Promise<CodeGraphWorkspace[]>
@@ -57,7 +57,7 @@ vi.mock("@/api/codeGraph", async () => {
   );
   return {
     ...actual,
-    fetchSnapshot: (...args: [string, number?]) => fetchSnapshotMock(...args),
+    fetchSnapshot: (...args: [string, number?, SnapshotLevel?]) => fetchSnapshotMock(...args),
     fetchWorkspaces: (project: string) => fetchWorkspacesMock(project),
   };
 });
@@ -128,7 +128,7 @@ describe("CodeGraphPage", () => {
     expect(screen.getByTestId("code-graph-canvas")).toBeInTheDocument();
     expect(screen.getByLabelText(/select project/i)).toBeInTheDocument();
     await waitFor(() => {
-      expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", 10_000);
+      expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", 10_000, "symbol");
     });
   });
 
@@ -220,7 +220,7 @@ describe("CodeGraphPage", () => {
     fireEvent.change(selector, { target: { value: "api" } });
     expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("api");
     expect(fetchSnapshotMock).toHaveBeenCalledTimes(1);
-    expect(fetchSnapshotMock).toHaveBeenLastCalledWith("project-a", 10_000);
+    expect(fetchSnapshotMock).toHaveBeenLastCalledWith("project-a", 10_000, "symbol");
 
     fireEvent.change(selector, { target: { value: "" } });
     expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
