@@ -445,10 +445,10 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
             consolidated_cluster_count: 1,
             consolidated_note_count: 1,
             source_note_count: 3,
-            decayed_note_count: 0,
-            archived_note_count: 0,
-            superseded_source_note_count: 0,
-            admission_dropped_note_count: 0,
+            decayed_note_count: 1,
+            archived_note_count: 2,
+            superseded_source_note_count: 3,
+            admission_dropped_note_count: 4,
             started_at: "2026-03-25T10:00:00.000Z",
             completed_at: Some("2026-03-25T10:01:00.000Z"),
             error_message: None,
@@ -505,8 +505,15 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].id, second.id);
     assert_eq!(listed[0].error_message.as_deref(), Some("llm timeout"));
+    assert_eq!(listed[0].decayed_note_count, 0);
+    assert_eq!(listed[0].archived_note_count, 0);
+    assert_eq!(listed[0].superseded_source_note_count, 0);
     assert_eq!(listed[0].admission_dropped_note_count, 0);
     assert_eq!(listed[1].id, first.id);
+    assert_eq!(listed[1].decayed_note_count, 1);
+    assert_eq!(listed[1].archived_note_count, 2);
+    assert_eq!(listed[1].superseded_source_note_count, 3);
+    assert_eq!(listed[1].admission_dropped_note_count, 4);
 
     let filtered = consolidation_repo
         .list_run_metrics(&project.id, Some("pattern"), 10)
@@ -517,7 +524,51 @@ async fn consolidation_run_metrics_round_trip_and_filter() {
     assert_eq!(filtered[0].consolidated_cluster_count, 1);
     assert_eq!(filtered[0].consolidated_note_count, 1);
     assert_eq!(filtered[0].source_note_count, 3);
-    assert_eq!(filtered[0].admission_dropped_note_count, 0);
+    assert_eq!(filtered[0].decayed_note_count, 1);
+    assert_eq!(filtered[0].archived_note_count, 2);
+    assert_eq!(filtered[0].superseded_source_note_count, 3);
+    assert_eq!(filtered[0].admission_dropped_note_count, 4);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn consolidation_run_metric_schema_defaults_lifecycle_counts_to_zero() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let project = make_project(&db, tmp.path()).await;
+    let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+    sqlx::query(
+        r#"INSERT INTO consolidation_run_metrics (
+                id, project_id, note_type, status,
+                scanned_note_count, candidate_cluster_count,
+                consolidated_cluster_count, consolidated_note_count,
+                source_note_count, started_at, completed_at, error_message
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+    )
+    .bind("legacy-metric-default-counts")
+    .bind(&project.id)
+    .bind("pattern")
+    .bind("completed")
+    .bind(11_i64)
+    .bind(2_i64)
+    .bind(1_i64)
+    .bind(1_i64)
+    .bind(3_i64)
+    .bind("2026-03-25T13:00:00.000Z")
+    .bind(Option::<&str>::None)
+    .bind(Option::<&str>::None)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let fetched = consolidation_repo
+        .get_run_metric("legacy-metric-default-counts")
+        .await
+        .unwrap();
+    assert_eq!(fetched.decayed_note_count, 0);
+    assert_eq!(fetched.archived_note_count, 0);
+    assert_eq!(fetched.superseded_source_note_count, 0);
+    assert_eq!(fetched.admission_dropped_note_count, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -979,6 +1030,60 @@ async fn supersession_metric_round_trips_superseded_source_note_count() {
         .unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].superseded_source_note_count, 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_sweep_run_metric_round_trips_decayed_and_archived_counts() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let project = make_project(&db, tmp.path()).await;
+    let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+    let metric = consolidation_repo
+        .create_run_metric(CreateConsolidationRunMetric {
+            project_id: &project.id,
+            note_type: "lifecycle_sweep",
+            status: "completed",
+            scanned_note_count: 20,
+            candidate_cluster_count: 0,
+            consolidated_cluster_count: 0,
+            consolidated_note_count: 0,
+            source_note_count: 0,
+            decayed_note_count: 7,
+            archived_note_count: 3,
+            superseded_source_note_count: 0,
+            admission_dropped_note_count: 0,
+            started_at: "2026-06-19T10:00:00.000Z",
+            completed_at: Some("2026-06-19T10:01:00.000Z"),
+            error_message: None,
+        })
+        .await
+        .unwrap();
+
+    // Round-trip via get_run_metric.
+    let fetched = consolidation_repo.get_run_metric(&metric.id).await.unwrap();
+    assert_eq!(fetched.decayed_note_count, 7);
+    assert_eq!(fetched.archived_note_count, 3);
+    assert_eq!(fetched.superseded_source_note_count, 0);
+    assert_eq!(fetched.admission_dropped_note_count, 0);
+
+    // Round-trip via list_run_metrics.
+    let listed = consolidation_repo
+        .list_run_metrics(&project.id, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].decayed_note_count, 7);
+    assert_eq!(listed[0].archived_note_count, 3);
+
+    // Filter by lifecycle_sweep note_type.
+    let filtered = consolidation_repo
+        .list_run_metrics(&project.id, Some("lifecycle_sweep"), 10)
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].decayed_note_count, 7);
+    assert_eq!(filtered[0].archived_note_count, 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

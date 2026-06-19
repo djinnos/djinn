@@ -807,9 +807,9 @@ fn resolve_cargo_workspace_dir(
 async fn warm_cargo_target_base(
     project_id: &str,
     project_root: &Path,
-    env_config: Option<&djinn_stack::environment::EnvironmentConfig>,
+    policy: &cargo_cache_policy::CargoCachePolicy,
 ) {
-    let Some(workspace_dir) = resolve_cargo_workspace_dir(project_root, env_config) else {
+    let Some(workspace_dir) = resolve_cargo_workspace_dir(project_root, None) else {
         info!(
             project_id,
             project_root = %project_root.display(),
@@ -852,40 +852,63 @@ async fn warm_cargo_target_base(
     );
     let started = std::time::Instant::now();
 
+    let commands = &policy.warm_commands;
+    if commands.is_empty() {
+        info!(
+            project_id,
+            "cargo warm: no warm commands in policy; skipping"
+        );
+        return;
+    }
+
     // clippy is the heavier of verification's two passes and produces the same
     // check artifacts; fall back to a plain build if clippy is unavailable.
+    let feature_flags = policy.features();
+    let clippy_args: Vec<String> = commands[0]
+        .args
+        .iter()
+        .cloned()
+        .chain(feature_flags.iter().cloned())
+        .collect();
     let clippy_ok = run_cargo_warm_step(
         project_id,
         &workspace_dir,
-        &["clippy", "--workspace", "--all-targets", "--all-features"],
-        "clippy",
+        &clippy_args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        &commands[0].label,
     )
     .await;
-    if !clippy_ok {
+    if !clippy_ok && commands.len() > 1 {
+        let build_args: Vec<String> = commands[1]
+            .args
+            .iter()
+            .cloned()
+            .chain(feature_flags.iter().cloned())
+            .collect();
         run_cargo_warm_step(
             project_id,
             &workspace_dir,
-            &["build", "--workspace", "--all-targets"],
-            "build (clippy fallback)",
+            &build_args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            &commands[1].label,
         )
         .await;
     }
 
-    // Compile (but don't run) the test harnesses so verification's
-    // `cargo test --no-run` reuses these artifacts.
-    run_cargo_warm_step(
-        project_id,
-        &workspace_dir,
-        &[
-            "test",
-            "--workspace",
-            "--all-targets",
-            "--all-features",
-            "--no-run",
-        ],
-        "test --no-run",
-    )
-    .await;
+    // Run remaining warm commands (e.g. test --no-run)
+    for cmd in commands.iter().skip(if clippy_ok { 1 } else { 2 }) {
+        let args: Vec<String> = cmd
+            .args
+            .iter()
+            .cloned()
+            .chain(feature_flags.iter().cloned())
+            .collect();
+        run_cargo_warm_step(
+            project_id,
+            &workspace_dir,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            &cmd.label,
+        )
+        .await;
+    }
 
     let elapsed = started.elapsed();
     cargo_metrics::record_warm_base_freshness(project_id, elapsed.as_millis() as u64);
@@ -2017,7 +2040,10 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
     // lands on `<root>/server` — the exact dir verification's `cd server`
     // compiles in. Best-effort: never fails the graph warm.
     djinn_workspace::normalize_mtimes_at(&lifecycle_root).await;
-    warm_cargo_target_base(project_id, &lifecycle_root, env_config.as_ref()).await;
+    let policy =
+        cargo_cache_policy::resolve_cargo_cache_policy(&lifecycle_root, env_config.as_ref())
+            .unwrap_or_default();
+    warm_cargo_target_base(project_id, &lifecycle_root, &policy).await;
 
     // Architect-only warm path: this subcommand binary is dispatched
     // exclusively by `K8sGraphWarmer`, which is wired into the
