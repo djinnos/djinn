@@ -98,6 +98,32 @@ use crate::scip_parser::ParsedScipIndex;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrateNode {
+    pub name: String,
+    pub manifest_path: PathBuf,
+    pub loc: usize,
+    pub node_count: usize,
+    pub fan_in: f64,
+    pub fan_out: f64,
+    pub inbound_weight: f64,
+    pub outbound_weight: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrateEdge {
+    pub source: String,
+    pub target: String,
+    pub weight: f64,
+    pub edge_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrateGraph {
+    pub crates: Vec<CrateNode>,
+    pub edges: Vec<CrateEdge>,
+}
+
 #[cfg(test)]
 use self::graph::is_owned_by_changed_file;
 use self::graph::{build_name_index, build_process_lookup, derive_edge_confidence};
