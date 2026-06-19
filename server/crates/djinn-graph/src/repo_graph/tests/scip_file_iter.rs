@@ -12,8 +12,9 @@ fn scip_file_iter_parity_with_try_build_with_source() {
     let index = fixture_index();
 
     // Build using the existing in-memory path.
-    let source_graph = RepoDependencyGraph::try_build_with_source(&[index.clone()], None)
-        .expect("try_build_with_source must succeed");
+    let source_graph =
+        RepoDependencyGraph::try_build_with_source(std::slice::from_ref(&index), None)
+            .expect("try_build_with_source must succeed");
 
     // Build using the new bounded-memory file iterator path.
     let iter_graph = RepoDependencyGraph::try_build_with_scip_files(
@@ -49,8 +50,9 @@ fn scip_file_iter_fallible_parity_with_try_build_with_source() {
     let index = fixture_index();
 
     // Build using the existing in-memory path.
-    let source_graph = RepoDependencyGraph::try_build_with_source(&[index.clone()], None)
-        .expect("try_build_with_source must succeed");
+    let source_graph =
+        RepoDependencyGraph::try_build_with_source(std::slice::from_ref(&index), None)
+            .expect("try_build_with_source must succeed");
 
     // Build using the fallible file iterator path (all items are Ok).
     let iter_graph = RepoDependencyGraph::try_build_with_scip_file_iter(
@@ -124,8 +126,9 @@ fn scip_file_iter_preserves_external_symbols() {
     index.external_symbols.push(external_sym.clone());
 
     // Build using the source path.
-    let source_graph = RepoDependencyGraph::try_build_with_source(&[index.clone()], None)
-        .expect("try_build_with_source must succeed");
+    let source_graph =
+        RepoDependencyGraph::try_build_with_source(std::slice::from_ref(&index), None)
+            .expect("try_build_with_source must succeed");
 
     // Build using the file iterator path.
     let iter_graph = RepoDependencyGraph::try_build_with_scip_files(

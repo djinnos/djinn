@@ -16,8 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 use djinn_core::message::{ContentBlock, Message, Role};
 use djinn_db::{
-    CreateSessionParams, EpicCreateInput, EpicRepository, NoteDedupCandidate, NoteRepository,
-    ProjectRepository, SessionRepository, TaskRepository,
+    CreateSessionParams, EpicCreateInput, EpicRepository, NoteConsolidationRepository,
+    NoteDedupCandidate, NoteRepository, ProjectRepository, SessionRepository, TaskRepository,
 };
 
 use crate::actors::slot::llm_extraction::{
@@ -1935,5 +1935,109 @@ async fn admission_gate_does_not_affect_human_writes() {
     assert!(
         stored_json.is_none(),
         "no extraction run means no admission_dropped counter is written"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_with_gate_drops_surfaces_nonzero_admission_dropped_in_health() {
+    // Run extraction with a case missing `## Reusable lesson` (same fixture
+    // shape as `admission_gate_drops_case_missing_required_section`). After
+    // extraction, call `NoteRepository::health()` and assert that the
+    // `admission_dropped_note_count` is >= 1 — proving the metric row was
+    // written from the extraction path and is surfaced via health.
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 2,
+        errors: 1,
+        tools_used: 4,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    let body = case_body_missing_reusable_lesson();
+
+    let json = serde_json::json!({
+        "cases": [{
+            "title": "Dropped In Health Case",
+            "content": body
+        }],
+        "patterns": [],
+        "pitfalls": []
+    })
+    .to_string();
+    let provider = Arc::new(FakeProvider::text(&json));
+
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let health = note_repo
+        .health(&fixture.project.id)
+        .await
+        .expect("health report");
+    assert!(
+        health.admission_dropped_note_count >= 1,
+        "health() must surface a non-zero admission_dropped_note_count when the gate drops a candidate, got {}",
+        health.admission_dropped_note_count
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_with_zero_gate_drops_writes_zero_admission_dropped_metric() {
+    // Run extraction with one complete case that passes the gate. Read the
+    // emitted consolidation_run_metrics row and assert admission_dropped is 0.
+    // Also assert health() reports 0.
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 2,
+        errors: 1,
+        tools_used: 4,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    let json = serde_json::json!({
+        "cases": [{
+            "title": "Complete No-Drop Case",
+            "content": complete_case_body(),
+            "applies_when": "When a complete case passes the gate cleanly."
+        }],
+        "patterns": [],
+        "pitfalls": []
+    })
+    .to_string();
+    let provider = Arc::new(FakeProvider::text(&json));
+
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let consolidation_repo = NoteConsolidationRepository::new(fixture.db.clone());
+    let metrics = consolidation_repo
+        .list_run_metrics(&fixture.project.id, Some("extraction"), 10)
+        .await
+        .expect("list run metrics");
+    let extraction_metric = metrics
+        .iter()
+        .find(|m| m.note_type == "extraction")
+        .expect("at least one extraction metric row must be written");
+    assert_eq!(
+        extraction_metric.admission_dropped_note_count, 0,
+        "admission_dropped_note_count must be 0 when no candidates are dropped"
+    );
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let health = note_repo
+        .health(&fixture.project.id)
+        .await
+        .expect("health report");
+    assert_eq!(
+        health.admission_dropped_note_count, 0,
+        "health() must report 0 admission drops when no candidates were dropped"
     );
 }
