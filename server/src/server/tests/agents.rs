@@ -46,10 +46,10 @@ fn rand_github_id() -> i64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn put_update_accepts_default_agent_and_preserves_learned_prompt() {
+async fn put_update_rejects_direct_learned_prompt_set() {
     let db = test_helpers::create_test_db();
     let project = ProjectRepository::new(db.clone(), EventBus::noop())
-        .create("agents-rest-defaults", "djinn", "agents-rest-defaults")
+        .create("agents-rest-lp-reject", "djinn", "agents-rest-lp-reject")
         .await
         .unwrap();
     let admin_cookie = seed_admin_session(&db).await;
@@ -72,10 +72,7 @@ async fn put_update_accepts_default_agent_and_preserves_learned_prompt() {
     let app = test_helpers::create_test_app_with_db(db.clone());
     let payload = serde_json::json!({
         "system_prompt_extensions": ["Human-authored architect instructions"],
-        "mcp_servers": ["github"],
-        "skills": ["architecture"],
-        "model_preference": "anthropic/claude-sonnet-4-5",
-        "verification_command": "cargo test -p djinn-server agents",
+        "learned_prompt": "Direct override attempt",
     });
     let request = Request::builder()
         .method("PUT")
@@ -86,45 +83,62 @@ async fn put_update_accepts_default_agent_and_preserves_learned_prompt() {
         .unwrap();
 
     let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["id"].as_str(), Some(default_agent.id.as_str()));
-    assert_eq!(json["base_role"].as_str(), Some("architect"));
-    assert_eq!(json["is_default"].as_bool(), Some(true));
-    assert_eq!(
-        json["system_prompt_extensions"],
-        serde_json::json!(["Human-authored architect instructions"])
-    );
-    assert_eq!(json["mcp_servers"], serde_json::json!(["github"]));
-    assert_eq!(json["skills"], serde_json::json!(["architecture"]));
-    assert_eq!(
-        json["model_preference"].as_str(),
-        Some("anthropic/claude-sonnet-4-5")
-    );
-    assert_eq!(
-        json["verification_command"].as_str(),
-        Some("cargo test -p djinn-server agents")
-    );
-    assert_eq!(
-        json["learned_prompt"].as_str(),
-        Some("Prefer bounded-context design notes.")
-    );
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("Direct learned_prompt setting is deprecated"));
 
     let persisted = AgentRepository::new(db, EventBus::noop())
         .get(&default_agent.id)
         .await
         .unwrap()
         .unwrap();
-    assert!(persisted.is_default);
-    assert_eq!(persisted.base_role, "architect");
-    assert_eq!(
-        persisted.system_prompt_extensions,
-        "Human-authored architect instructions"
-    );
     assert_eq!(
         persisted.learned_prompt.as_deref(),
         Some("Prefer bounded-context design notes.")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_clear_learned_prompt_clears_derived_state() {
+    let db = test_helpers::create_test_db();
+    let project = ProjectRepository::new(db.clone(), EventBus::noop())
+        .create("agents-rest-lp-clear", "djinn", "agents-rest-lp-clear")
+        .await
+        .unwrap();
+    let admin_cookie = seed_admin_session(&db).await;
+
+    let agent_repo = AgentRepository::new(db.clone(), EventBus::noop());
+    let default_agent = agent_repo
+        .get_default_for_base_role(&project.id, "architect")
+        .await
+        .unwrap()
+        .expect("project creation should seed an architect default agent");
+    agent_repo
+        .append_learned_prompt(
+            &default_agent.id,
+            "Prefer bounded-context design notes.",
+            Some(r#"{"success_rate":0.9}"#),
+        )
+        .await
+        .unwrap();
+
+    let app = test_helpers::create_test_app_with_db(db.clone());
+    let request = Request::builder()
+        .method("DELETE")
+        .uri(format!("/api/agents/{}/learned-prompt", default_agent.id))
+        .header("cookie", format!("djinn_session={admin_cookie}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let persisted = AgentRepository::new(db, EventBus::noop())
+        .get(&default_agent.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(persisted.learned_prompt.is_none());
 }

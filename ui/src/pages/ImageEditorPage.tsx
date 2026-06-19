@@ -293,7 +293,7 @@ export function ImageEditorPage() {
             <div className="flex flex-col gap-0.5">
               <Label className="text-sm font-medium">Injected services</Label>
               <p className="text-xs text-muted-foreground">
-                These services are injected as sidecars into every task-run and verification
+                These services are injected as sidecars into every task-run
                 Pod that uses this image — reachable on 127.0.0.1 with the connection string in
                 the preset's env var (e.g. TEST_POSTGRES_URL).
               </p>
