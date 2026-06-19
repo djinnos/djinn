@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 use djinn_core::events::EventBus;
 use djinn_db::Database;
+use protobuf::{EnumOrUnknown, Message};
+use scip::types::{Document, Index, Occurrence, SymbolInformation, symbol_information};
 
 use crate::WarmContext;
 use crate::communities::Community;
@@ -235,4 +237,129 @@ fn community(id: &str, member_ids: Vec<usize>) -> Community {
         cohesion: 1.0,
         keywords: Vec::new(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// td55 cold-vs-cache-reuse fixture: on-disk SCIP artifacts
+// ---------------------------------------------------------------------------
+
+/// Handle to the on-disk synthetic SCIP artifact set used by the td55
+/// cold-vs-cache-reuse parity test.
+///
+/// The `tempdir` keeps the written `.scip` files alive for the duration of
+/// the parse/build phases. Dropping it cleans up automatically.
+pub(crate) struct Td55ScipFixture {
+    pub artifacts: Vec<crate::scip_indexer::ScipArtifact>,
+    _tempdir: tempfile::TempDir,
+}
+
+/// Build the td55 cold-vs-cache-reuse fixture as a set of on-disk SCIP
+/// protobuf artifact files.
+///
+/// The fixture mirrors [`td55_equivalence_fixture_artifact_blob`] but goes
+/// through the **real parse/build path**: two synthetic SCIP indexes are
+/// written to temp `.scip` files (one per workspace/partition) with a
+/// cross-file `SymbolReference` edge from `app::run` to `domain::double`.
+///
+/// Each [`ScipArtifact`] points at the temp file so
+/// [`crate::scip_parser::parse_scip_artifacts_with_cache_store`] (and the
+/// cache-reuse variant) read and parse real protobuf bytes — no real
+/// indexer binaries, Docker, or network are involved.
+///
+/// The returned `Vec` always contains the **complete** fixture artifact
+/// set. Callers must pass the whole set to both the cold and cache-reuse
+/// phases so the graph is built from every artifact, not a changed subset.
+pub(crate) fn td55_cache_reuse_scip_fixture() -> Td55ScipFixture {
+    let tempdir = workspace_tempdir("td55-cache-reuse-scip-");
+
+    // Write one SCIP index per workspace. The domain artifact defines
+    // `double` and the app artifact defines `run` and references `double`,
+    // establishing a cross-file/partition symbol reference edge.  Both
+    // artifacts together form the complete fixture set.
+    //
+    // The domain artifact is placed first in the artifact list so the graph
+    // builder registers `double`'s file before the app's reference resolves
+    // the cross-file edge.
+    let domain_bytes = synthetic_scip_index_bytes(
+        "src/domain/math.rs",
+        &[("double", "scip-rust . . . domain double().")],
+        &[],
+    );
+    let app_bytes = synthetic_scip_index_bytes(
+        "src/app.rs",
+        &[("run", "scip-rust . . . app run().")],
+        &[("scip-rust . . . domain double().", 8)],
+    );
+
+    let domain_path = tempdir.path().join("domain.scip");
+    let app_path = tempdir.path().join("app.scip");
+    std::fs::write(&domain_path, &domain_bytes).expect("write domain SCIP fixture");
+    std::fs::write(&app_path, &app_bytes).expect("write app SCIP fixture");
+
+    let artifacts = vec![
+        crate::scip_indexer::ScipArtifact {
+            path: domain_path,
+            indexer: Some(crate::scip_indexer::SupportedIndexer::RustAnalyzer),
+            workspace_slug: "domain".to_string(),
+            workspace_root: PathBuf::new(),
+        },
+        crate::scip_indexer::ScipArtifact {
+            path: app_path,
+            indexer: Some(crate::scip_indexer::SupportedIndexer::RustAnalyzer),
+            workspace_slug: "app".to_string(),
+            workspace_root: PathBuf::new(),
+        },
+    ];
+
+    Td55ScipFixture {
+        artifacts,
+        _tempdir: tempdir,
+    }
+}
+
+/// Encode a minimal synthetic SCIP `Index` protobuf for a single document.
+///
+/// `definitions` are `(display_name, symbol)` tuples that become symbol
+/// definitions (role bit = Definition).  `references` are `(symbol,
+/// symbol_roles)` occurrences without the definition bit so they are
+/// treated as references/calls — used to establish cross-file edges.
+fn synthetic_scip_index_bytes(
+    relative_path: &str,
+    definitions: &[(&str, &str)],
+    references: &[(&str, i32)],
+) -> Vec<u8> {
+    let mut doc = Document::new();
+    doc.language = "rust".to_string();
+    doc.relative_path = relative_path.to_string();
+
+    let mut occurrences = Vec::new();
+    let mut symbols = Vec::new();
+    for &(display_name, symbol) in definitions {
+        occurrences.push(Occurrence {
+            range: vec![0, 0, 5],
+            symbol: symbol.to_string(),
+            symbol_roles: 1, // Definition role bit
+            ..Occurrence::new()
+        });
+        symbols.push(SymbolInformation {
+            symbol: symbol.to_string(),
+            display_name: display_name.to_string(),
+            kind: EnumOrUnknown::new(symbol_information::Kind::Function),
+            ..SymbolInformation::new()
+        });
+    }
+    for &(symbol, roles) in references {
+        occurrences.push(Occurrence {
+            range: vec![1, 0, 5],
+            symbol: symbol.to_string(),
+            symbol_roles: roles,
+            ..Occurrence::new()
+        });
+    }
+    doc.occurrences = occurrences;
+    doc.symbols = symbols;
+
+    let mut index = Index::new();
+    index.documents = vec![doc];
+    index.write_to_bytes().expect("encode synthetic SCIP index")
 }

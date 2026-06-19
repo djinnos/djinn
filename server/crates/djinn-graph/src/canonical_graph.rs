@@ -2264,11 +2264,9 @@ mod tests {
             .graph_blob;
 
         // Parity must fail with Diff variant — proves the gate is real.
-        let err = crate::graph_parity::assert_graph_artifact_blob_parity(
-            &cold_blob,
-            &different_blob,
-        )
-        .expect_err("different graphs must produce a parity error");
+        let err =
+            crate::graph_parity::assert_graph_artifact_blob_parity(&cold_blob, &different_blob)
+                .expect_err("different graphs must produce a parity error");
         assert!(
             matches!(
                 err,
