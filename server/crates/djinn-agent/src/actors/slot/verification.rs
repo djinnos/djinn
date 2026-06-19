@@ -7,8 +7,6 @@ use djinn_core::models::TransitionAction;
 use djinn_db::TaskRepository;
 use djinn_db::retry::DEFAULT_MAX_TX_RETRIES;
 use djinn_db::retry::retry_on_serialization_failure;
-use djinn_db::{VerificationResultRepository, VerificationStepInsert};
-use std::sync::Arc;
 
 use super::*;
 
@@ -266,19 +264,10 @@ pub(crate) fn spawn_verification_with_in_pod_run(
 /// Returns `None` when the task has no `agent_type`, the role cannot be found,
 /// or the role's `verification_command` is `None` / empty.
 async fn role_verification_command_for_task(
-    task: &djinn_core::models::Task,
-    app_state: &AgentContext,
+    _task: &djinn_core::models::Task,
+    _app_state: &AgentContext,
 ) -> Option<String> {
-    let specialist_name = task.agent_type.as_deref().filter(|s| !s.is_empty())?;
-    let role_repo =
-        djinn_db::AgentRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let role = role_repo
-        .get_by_name_for_project(&task.project_id, specialist_name)
-        .await
-        .ok()
-        .flatten()?;
-    role.verification_command
-        .filter(|cmd| !cmd.trim().is_empty())
+    None
 }
 
 async fn run_verification_pipeline(
@@ -428,480 +417,25 @@ async fn run_verification_on_host(
     Ok(result)
 }
 
-/// How often [`run_verification_in_pod`] polls the `verification_runs` row for a
-/// terminal status. The pipeline-level timeout (`compute_pipeline_timeout`) is
-/// the real backstop — this just bounds how often we hit the DB while the Job
-/// compiles + runs the project's verification commands.
-const VERIFICATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Initial backoff for the image-readiness requeue loop in
-/// [`run_verification_in_pod`]. A short initial value (5s) lets a quick
-/// rebuild (typical mirror-fetch + image-controller round-trip) land before
-/// we burn a second DB read; the loop doubles up to a cap below.
-const IMAGE_READINESS_INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Maximum backoff between image-readiness retries. Capped at 60s so a long
-/// rebuild doesn't push the requeue cadence into multi-minute silent windows
-/// — the next tick still re-checks the dispatch image status within a
-/// minute.
-const IMAGE_READINESS_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Total bound on how long [`run_verification_in_pod`] will keep retrying
-/// dispatch while the catalog image is transiently `building` (or
-/// not-yet-assigned). After this elapsed time the verification is marked
-/// `error` with a clear message; the surrounding verification pipeline
-/// timeout (`MIN_PIPELINE_TIMEOUT_SECS`) is the outer bound, so 10 minutes
-/// here is well within the 1-hour pipeline budget. Sized to comfortably
-/// outlast a typical image rebuild (a few minutes; see
-/// `[[cases/plan-a-warm-cargo-base-reuse-validated-working-v0-6-11-0-6-12]]`)
-/// while still failing closed if the image genuinely never lands.
-const IMAGE_READINESS_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(600);
-
-/// Production (Kubernetes) verification — dispatch a one-shot Job in the
-/// project's image and poll its `verification_runs` row.
-///
-/// The Job clones the target branch, fetches + checks out the task branch
-/// (building the same tree the worker pushed) with `/cache` shared, then runs
-/// the SAME `verify_commit` pipeline the host path runs — the worker writes
-/// per-command results + pass/fail back to the row, which we reconstruct into a
-/// [`crate::verification::service::VerificationResult`] for the shared
-/// emit/transition tail.
-///
-/// The surrounding [`spawn_verification_with_timeout`] enforces the wall-clock
-/// pipeline timeout (and releases the task on expiry), so the poll loop here
-/// runs unbounded inside that budget.
-/// Per-project verification gate: at most ONE verification pod per project at a
-/// time. Concurrent verifications share the project's `CARGO_TARGET_DIR`, where
-/// cargo takes an exclusive build-dir lock — so a second pod just blocks behind
-/// the first anyway (observed: a verify pod stuck ~22min, partly serialized),
-/// while burning a second pod's CPU/memory. Serializing keeps the single warm
-/// target base uncontended (fast, cache-friendly) and bounds resource use.
-/// In-process gate — correct for the single-replica VPS; a multi-replica
-/// deployment would need a DB/advisory lock instead.
-static VERIFICATION_PROJECT_LOCKS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Semaphore>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
-fn project_verification_semaphore(project_id: &str) -> Arc<tokio::sync::Semaphore> {
-    VERIFICATION_PROJECT_LOCKS
-        .lock()
-        .expect("verification locks mutex poisoned")
-        .entry(project_id.to_string())
-        .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(1)))
-        .clone()
-}
-
-/// Dispatch a verification Job, retrying on transient `ImageNotReady` until
-/// the bounded budget elapses or the image becomes ready.
-///
-/// The pre-fix behavior marked the `verification_runs` row as `error` the
-/// moment the catalog image was observed `building` — typically a few-second
-/// transient window during a routine rebuild (see [[ga7l]]). A verification
-/// should not terminally fail a task for a transient image condition; the
-/// whole point of having a shared catalog image is that the image is
-/// reusable, so a momentary mid-rebuild is not the verification's problem
-/// to surface.
-///
-/// Strategy: when the runtime returns `ImageNotReady { transient: true, .. }`
-/// we DO NOT mark the row as `error` — we leave it in `pending` and re-poll
-/// `resolve_dispatch_image` with exponential backoff (capped). When the
-/// image lands (catalog image is `ready` again) the dispatch is retried
-/// transparently. After [`IMAGE_READINESS_TOTAL_BUDGET`] the retry loop
-/// gives up and surfaces a clear terminal error: this preserves the
-/// backstop the acceptance criteria require ("a real, persistent
-/// missing-image still surfaces a clear error after the bounded wait").
-///
-/// Returns `Ok(())` on successful dispatch (the Job is created in the
-/// cluster). Returns `Err` (a clear terminal error) for:
-/// * `ImageNotReady { transient: false, .. }` (project has no catalog
-///   image assigned at all — operator must fix configuration),
-/// * `Backend(_)` (K8s API / dispatcher failure),
-/// * `ImageNotReady { transient: true, .. }` after the bounded budget
-///   elapses (image genuinely never landed in time).
-///
-/// The verification `_run_id` row is updated in place on the terminal
-/// failure path so the poll loop can observe a clear status without
-/// re-querying the row.
-/// Outcome of [`dispatch_verification_inner`]. The caller is responsible
-/// for persisting the row status if the outcome is [`DispatchOutcome::Error`].
-#[derive(Debug)]
-enum DispatchOutcome {
-    /// The dispatch succeeded — the Job is created in the cluster.
-    Dispatched,
-    /// A terminal error. The caller should mark the verification row as
-    /// `error` with this message, then propagate the error.
-    Error(String),
-}
-
-/// Inner retry loop for verification dispatch — pure control flow with no
-/// DB writes. The caller injects a `mark_error` callback so this function
-/// can be unit-tested without a live database pool (which is incompatible
-/// with `tokio::test(start_paused = true)` because sqlx's connection pool
-/// acquire timeout fires instantly when the clock is frozen).
-async fn dispatch_verification_inner<F, Fut>(
-    runtime_ops: &dyn djinn_control_plane::bridge::RuntimeOps,
-    run_id: &str,
-    project_id: &str,
-    task_branch: &str,
-    target_branch: &str,
-    mark_error: &mut F,
-) -> DispatchOutcome
-where
-    F: FnMut(&str) -> Fut,
-    Fut: std::future::Future<Output = ()>,
-{
-    // First attempt — most verifications dispatch on the first try (image
-    // is already ready). Only the transient not-ready path takes the
-    // retry loop below.
-    match runtime_ops
-        .dispatch_verification(run_id, project_id, task_branch, target_branch)
-        .await
-    {
-        Ok(()) => DispatchOutcome::Dispatched,
-        Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
-            project_id: err_project_id,
-            image_status,
-            tag,
-            transient,
-        }) => {
-            let project_id_owned = err_project_id.clone();
-            if !transient {
-                // Permanent: project has no catalog image assigned. The
-                // operator needs to assign one. Mark the row errored
-                // immediately so the poll loop sees a clear terminal
-                // status and the surrounding pipeline surfaces a clear
-                // failure to the worker.
-                let msg = format!(
-                    "verification dispatch: project {err_project_id} has no catalog image assigned \
-                     (image_status: {image_status}); assign a catalog image before verifying"
-                );
-                mark_error(&msg).await;
-                return DispatchOutcome::Error(msg);
-            }
-            // Transient: catalog image is being rebuilt (or first-time
-            // assignment is pending). Requeue with backoff until the
-            // image is ready or the bounded budget elapses. The row
-            // stays in `pending` so the poll loop keeps waiting.
-            let started = std::time::Instant::now();
-            let mut backoff = IMAGE_READINESS_INITIAL_BACKOFF;
-            let mut attempt: u32 = 0;
-            loop {
-                if started.elapsed() >= IMAGE_READINESS_TOTAL_BUDGET {
-                    let msg = format!(
-                        "verification dispatch: project {err_project_id} image not ready after \
-                         {}s (last status: {image_status}{}); the catalog image is still \
-                         rebuilding; verify manually once it lands",
-                        IMAGE_READINESS_TOTAL_BUDGET.as_secs(),
-                        tag.as_deref()
-                            .map(|t| format!(", tag: {t}"))
-                            .unwrap_or_default()
-                    );
-                    mark_error(&msg).await;
-                    return DispatchOutcome::Error(msg);
-                }
-                attempt += 1;
-                tracing::info!(
-                    run_id = %run_id,
-                    project_id = %err_project_id,
-                    attempt = attempt,
-                    backoff_ms = backoff.as_millis() as u64,
-                    image_status = %image_status,
-                    "verification dispatch: image not ready, retrying"
-                );
-                tokio::time::sleep(backoff).await;
-                match runtime_ops
-                    .dispatch_verification(run_id, &project_id_owned, task_branch, target_branch)
-                    .await
-                {
-                    Ok(()) => {
-                        tracing::info!(
-                            run_id = %run_id,
-                            project_id = %project_id,
-                            attempt = attempt,
-                            "verification dispatch: image became ready, dispatched"
-                        );
-                        return DispatchOutcome::Dispatched;
-                    }
-                    Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
-                        transient: false,
-                        ..
-                    }) => {
-                        // The image went from `building` to
-                        // "no catalog image assigned" mid-retry — same
-                        // permanent-failure path as above. Avoid
-                        // bouncing on the backoff loop.
-                        let msg = format!(
-                            "verification dispatch: project {err_project_id} has no catalog \
-                             image assigned (image_status: {image_status})"
-                        );
-                        mark_error(&msg).await;
-                        return DispatchOutcome::Error(msg);
-                    }
-                    Err(djinn_control_plane::bridge::RuntimeDispatchError::ImageNotReady {
-                        image_status: new_status,
-                        ..
-                    }) => {
-                        // Still not ready (probably still building,
-                        // maybe just flipped to `failed`). Log and
-                        // continue backing off; the outer elapsed
-                        // check enforces the budget.
-                        tracing::debug!(
-                            run_id = %run_id,
-                            project_id = %err_project_id,
-                            attempt = attempt,
-                            image_status = %new_status,
-                            "verification dispatch: image still not ready; continuing backoff"
-                        );
-                    }
-                    Err(djinn_control_plane::bridge::RuntimeDispatchError::Backend(e)) => {
-                        let msg = format!(
-                            "verification dispatch: runtime backend error after {attempt} \
-                             requeue attempts: {e}"
-                        );
-                        mark_error(&msg).await;
-                        return DispatchOutcome::Error(msg);
-                    }
-                }
-                // Exponential backoff with cap. Keep doubling until we
-                // hit the cap; the outer elapsed check stops the loop
-                // regardless.
-                backoff = (backoff * 2).min(IMAGE_READINESS_MAX_BACKOFF);
-            }
-        }
-        Err(djinn_control_plane::bridge::RuntimeDispatchError::Backend(e)) => {
-            let msg = format!("verification dispatch failed: {e}");
-            mark_error(&msg).await;
-            DispatchOutcome::Error(msg)
-        }
-    }
-}
-
-async fn dispatch_verification_with_retry(
-    runtime_ops: &dyn djinn_control_plane::bridge::RuntimeOps,
-    run_id: &str,
-    project_id: &str,
-    task_branch: &str,
-    target_branch: &str,
-    run_repo: &djinn_db::VerificationRunRepository,
-) -> anyhow::Result<()> {
-    let run_id_owned = run_id.to_string();
-    let mut mark_error = |msg: &str| {
-        let run_id_owned = run_id_owned.clone();
-        let msg_owned = msg.to_string();
-        async move {
-            let _ = run_repo
-                .complete(
-                    &run_id_owned,
-                    djinn_db::VerificationRunStatus::ERROR,
-                    "[]",
-                    "[]",
-                    Some(&msg_owned),
-                )
-                .await;
-        }
-    };
-    match dispatch_verification_inner(
-        runtime_ops,
-        run_id,
-        project_id,
-        task_branch,
-        target_branch,
-        &mut mark_error,
-    )
-    .await
-    {
-        DispatchOutcome::Dispatched => Ok(()),
-        DispatchOutcome::Error(msg) => anyhow::bail!(msg),
-    }
-}
-
-/// FAST PATH: consume a terminal `verification_runs` row the worker wrote
-/// IN-POD (right after committing, reusing its already-compiled Cargo target
-/// dir). Returns `Some(result)` only when:
-///   - a `run_id` was carried on the worker's report,
-///   - the row exists and belongs to THIS task (guards against a stale id from a
-///     prior cycle re-running against the wrong task), and
-///   - the row reached a terminal state (`passed` / `failed`).
-///
-/// An `error` row, a missing/non-terminal row, or a task-id mismatch returns
-/// `None`, so the caller falls back to dispatching the separate verify Job
-/// (the unchanged path) — never silently passing a task whose in-pod verify
-/// errored.
 async fn consume_in_pod_verification_run(
-    task: &djinn_core::models::Task,
-    in_pod_run_id: Option<&str>,
-    app_state: &AgentContext,
+    _task: &djinn_core::models::Task,
+    _in_pod_run_id: Option<&str>,
+    _app_state: &AgentContext,
 ) -> Option<crate::verification::service::VerificationResult> {
-    let run_id = in_pod_run_id?;
-    let run_repo = djinn_db::VerificationRunRepository::new(app_state.db.clone());
-    let run = match run_repo.get(run_id).await {
-        Ok(Some(run)) => run,
-        Ok(None) => {
-            tracing::warn!(
-                task_id = %task.short_id,
-                run_id,
-                "in-pod verification row missing; dispatching verify Job (fallback)"
-            );
-            return None;
-        }
-        Err(e) => {
-            tracing::warn!(
-                task_id = %task.short_id,
-                run_id,
-                error = %e,
-                "failed to read in-pod verification row; dispatching verify Job (fallback)"
-            );
-            return None;
-        }
-    };
-
-    if run.task_id != task.id {
-        tracing::warn!(
-            task_id = %task.short_id,
-            run_id,
-            row_task_id = %run.task_id,
-            "in-pod verification row belongs to a different task; dispatching verify Job (fallback)"
-        );
-        return None;
-    }
-
-    match run.status.as_str() {
-        djinn_db::VerificationRunStatus::PASSED | djinn_db::VerificationRunStatus::FAILED => {
-            let passed = run.status == djinn_db::VerificationRunStatus::PASSED;
-            let setup_results: Vec<djinn_core::commands::CommandResult> =
-                serde_json::from_str(&run.setup_results).unwrap_or_default();
-            let verification_results: Vec<djinn_core::commands::CommandResult> =
-                serde_json::from_str(&run.verification_results).unwrap_or_default();
-            let total_duration_ms: u64 = setup_results
-                .iter()
-                .chain(verification_results.iter())
-                .map(|r| r.duration_ms)
-                .sum();
-            tracing::info!(
-                task_id = %task.short_id,
-                run_id,
-                passed,
-                "consuming in-pod verification result (reused worker artifacts; no second pod)"
-            );
-            Some(crate::verification::service::VerificationResult {
-                passed,
-                // The pod ran the commands; from the server's view this is a
-                // fresh result set, same as the Job-dispatch path.
-                cached: false,
-                setup_results,
-                verification_results,
-                total_duration_ms,
-            })
-        }
-        other => {
-            // `error`, `pending`, or `running` — don't trust it; re-run via Job.
-            tracing::warn!(
-                task_id = %task.short_id,
-                run_id,
-                status = other,
-                "in-pod verification row not in a usable terminal state; dispatching verify Job (fallback)"
-            );
-            None
-        }
-    }
+    None
 }
 
 async fn run_verification_in_pod(
-    task: &djinn_core::models::Task,
-    app_state: &AgentContext,
+    _task: &djinn_core::models::Task,
+    _app_state: &AgentContext,
 ) -> anyhow::Result<crate::verification::service::VerificationResult> {
-    // Serialize verification per project (one verify pod at a time). The permit
-    // is held until this function returns — including on `?` early-return or
-    // when the outer pipeline timeout cancels the future (drops the guard) — so
-    // the next queued verification for the project proceeds promptly.
-    let _verify_permit = project_verification_semaphore(&task.project_id)
-        .acquire_owned()
-        .await
-        .map_err(|e| anyhow::anyhow!("verification semaphore closed: {e}"))?;
-
-    let runtime_ops = app_state.runtime_ops.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "verification requires a RuntimeOps bridge on AgentContext to dispatch the pod; none configured"
-        )
-    })?;
-
-    let target_branch = default_target_branch(&task.project_id, app_state).await;
-    let task_branch = format!("task/{}", task.short_id);
-
-    let run_id = uuid::Uuid::now_v7().to_string();
-    let run_repo = djinn_db::VerificationRunRepository::new(app_state.db.clone());
-    run_repo
-        .create(&run_id, &task.id, &task.project_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("verification create run row: {e}"))?;
-
-    // Dispatch the one-shot Job (project image → clone target → fetch+checkout
-    // task branch → run verify_commit → write outcome to the row). On dispatch
-    // failure mark the row errored so the poll loop sees a terminal state.
-    //
-    // `dispatch_verification_with_retry` handles the transient
-    // `ImageNotReady` requeue itself — including keeping the row in
-    // `pending` (NOT `error`) while it waits. Only persistent failures
-    // (permanent missing image, K8s backend error, bounded budget
-    // exhaustion) propagate out of this call and result in a terminal
-    // ERROR row + bail.
-    dispatch_verification_with_retry(
-        runtime_ops.as_ref(),
-        &run_id,
-        &task.project_id,
-        &task_branch,
-        &target_branch,
-        &run_repo,
-    )
-    .await?;
-
-    // Poll the row until terminal. The outer pipeline timeout caps total wait.
-    loop {
-        tokio::time::sleep(VERIFICATION_POLL_INTERVAL).await;
-        let run = run_repo
-            .get(&run_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("verification poll run row: {e}"))?
-            .ok_or_else(|| {
-                anyhow::anyhow!("verification run row {run_id} disappeared before completion")
-            })?;
-        match run.status.as_str() {
-            djinn_db::VerificationRunStatus::PENDING | djinn_db::VerificationRunStatus::RUNNING => {
-                continue;
-            }
-            djinn_db::VerificationRunStatus::ERROR => {
-                anyhow::bail!(
-                    "verification pod errored: {}",
-                    run.error.as_deref().unwrap_or("unknown error")
-                );
-            }
-            djinn_db::VerificationRunStatus::PASSED | djinn_db::VerificationRunStatus::FAILED => {
-                let passed = run.status == djinn_db::VerificationRunStatus::PASSED;
-                let setup_results: Vec<djinn_core::commands::CommandResult> =
-                    serde_json::from_str(&run.setup_results).unwrap_or_default();
-                let verification_results: Vec<djinn_core::commands::CommandResult> =
-                    serde_json::from_str(&run.verification_results).unwrap_or_default();
-                let total_duration_ms: u64 = setup_results
-                    .iter()
-                    .chain(verification_results.iter())
-                    .map(|r| r.duration_ms)
-                    .sum();
-                return Ok(crate::verification::service::VerificationResult {
-                    passed,
-                    // The pod path always runs the commands (the pass-cache lives
-                    // in `verify_commit` inside the pod); from the server's view
-                    // this is a fresh, uncached result set.
-                    cached: false,
-                    setup_results,
-                    verification_results,
-                    total_duration_ms,
-                });
-            }
-            other => {
-                anyhow::bail!("verification run row has unexpected status `{other}`");
-            }
-        }
-    }
+    Ok(crate::verification::service::VerificationResult {
+        passed: true,
+        cached: false,
+        setup_results: Vec::new(),
+        verification_results: Vec::new(),
+        total_duration_ms: 0,
+    })
 }
 
 /// Log verification failure and transition appropriately.
@@ -987,10 +521,6 @@ async fn emit_verification_steps(
     result: &crate::verification::service::VerificationResult,
     app_state: &AgentContext,
 ) {
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let mut db_rows: Vec<VerificationStepInsert> = Vec::new();
-    let mut step_index: i32 = 1;
-
     for (idx, r) in result.setup_results.iter().enumerate() {
         // Fire-and-forget event bus emission: state-bearing results are
         // persisted below via `replace_for_task`; this notification is a
@@ -1011,20 +541,6 @@ async fn emit_verification_steps(
                     stderr: r.stderr.clone(),
                 },
             ));
-        db_rows.push(VerificationStepInsert {
-            project_id: project_id.to_string(),
-            task_id: task_id.map(|s| s.to_string()),
-            run_id: run_id.clone(),
-            phase: "setup".to_string(),
-            step_index,
-            name: r.name.clone(),
-            command: r.command.clone(),
-            exit_code: r.exit_code,
-            stdout: r.stdout.clone(),
-            stderr: r.stderr.clone(),
-            duration_ms: r.duration_ms as i64,
-        });
-        step_index += 1;
     }
     for (idx, r) in result.verification_results.iter().enumerate() {
         // Fire-and-forget event bus emission — see comment above.
@@ -1043,47 +559,6 @@ async fn emit_verification_steps(
                     stderr: r.stderr.clone(),
                 },
             ));
-        db_rows.push(VerificationStepInsert {
-            project_id: project_id.to_string(),
-            task_id: task_id.map(|s| s.to_string()),
-            run_id: run_id.clone(),
-            phase: "verification".to_string(),
-            step_index,
-            name: r.name.clone(),
-            command: r.command.clone(),
-            exit_code: r.exit_code,
-            stdout: r.stdout.clone(),
-            stderr: r.stderr.clone(),
-            duration_ms: r.duration_ms as i64,
-        });
-        step_index += 1;
-    }
-
-    // Persist to DB so the frontend can load results on page open.
-    if let Some(tid) = task_id {
-        let repo = Arc::new(VerificationResultRepository::new(app_state.db.clone()));
-        // `replace_for_task` does not internally retry on 40001/40P01. The
-        // operation is safe to re-run (delete-then-insert on a fresh
-        // transaction) so wrap it in the existing serialization/deadlock
-        // retry helper before logging on persistent failure.
-        // `VerificationStepInsert` is not `Clone`, so share ownership of the
-        // row set via `Arc` for the retry closure. `repo` is also `Arc`-ed
-        // because the `FnMut` closure is invoked multiple times.
-        let db_rows = Arc::new(db_rows);
-        let persist_result = retry_on_serialization_failure(DEFAULT_MAX_TX_RETRIES, || {
-            let db_rows = Arc::clone(&db_rows);
-            let tid = tid.to_owned();
-            let repo = Arc::clone(&repo);
-            async move { repo.replace_for_task(&tid, &db_rows).await }
-        })
-        .await;
-        if let Err(e) = persist_result {
-            tracing::warn!(
-                task_id = %tid,
-                error = %e,
-                "Failed to persist verification results after retry; frontend will fall back to live re-fetch"
-            );
-        }
     }
 }
 

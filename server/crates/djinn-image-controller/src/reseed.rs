@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use djinn_db::{Database, ProjectRepository, VerificationRepository};
+use djinn_db::{Database, ProjectRepository};
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_stack::schema::Stack;
 
@@ -106,26 +106,9 @@ pub async fn reseed_empty_configs(db: &Database) -> ReseedStats {
             continue;
         }
 
-        // Verification rules live in their own table now (migration 44). Seed
-        // the stack-derived defaults without clobbering any existing/user rules.
-        // Non-fatal: the environment_config write above already succeeded.
-        let default_rules = djinn_stack::environment::default_verification_rules(&stack);
-        let rules_json = serde_json::to_string(&default_rules).unwrap_or_else(|_| "[]".to_string());
-        if let Err(err) = VerificationRepository::new(db.clone())
-            .seed_if_absent(&row.id, &rules_json)
-            .await
-        {
-            tracing::warn!(
-                project_id = %row.id,
-                error = %err,
-                "reseed_empty_configs: seed verification rules failed (non-fatal)"
-            );
-        }
-
         tracing::info!(
             project_id = %row.id,
             workspace_count = cfg.workspaces.len(),
-            rule_count = default_rules.len(),
             "reseed_empty_configs: seeded environment_config + verification from stack"
         );
         stats.reseeded += 1;

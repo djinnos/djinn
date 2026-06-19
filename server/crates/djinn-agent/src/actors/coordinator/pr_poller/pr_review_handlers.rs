@@ -721,10 +721,10 @@ impl CoordinatorActor {
         &self,
         task_id: &str,
     ) -> Option<String> {
-        match sqlx::query_scalar!(
-            "SELECT created_by_user_id FROM tasks WHERE id = $1",
-            task_id,
+        match sqlx::query_scalar::<_, Option<String>>(
+            "SELECT created_by_user_id FROM tasks WHERE id = ",
         )
+        .bind(task_id)
         .fetch_optional(self.db.pool())
         .await
         {

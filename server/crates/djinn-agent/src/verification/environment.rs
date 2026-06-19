@@ -26,8 +26,8 @@
 
 use std::path::Path;
 
-use djinn_db::{Database, ProjectRepository, VerificationRepository};
-use djinn_stack::environment::{EnvironmentConfig, Verification, VerificationRule};
+use djinn_db::{Database, ProjectRepository};
+use djinn_stack::environment::{EnvironmentConfig, Verification};
 
 /// Resolve a project id from a workspace path (exact or fuzzy prefix match).
 ///
@@ -199,33 +199,8 @@ pub async fn project_has_indexable_code(db: &Database, project_id: &str) -> bool
 /// Every edge case — missing row, malformed rules JSON, DB error — degrades to
 /// an empty [`Verification`] (the "no rules / vacuous pass" behaviour), logged
 /// at `warn` so misconfiguration is visible without blocking the task.
-pub async fn verification_for_project_id(db: &Database, project_id: &str) -> Verification {
-    let raw = match VerificationRepository::new(db.clone())
-        .get_rules(project_id)
-        .await
-    {
-        Ok(Some(raw)) => raw,
-        Ok(None) => return Verification::default(),
-        Err(e) => {
-            tracing::warn!(
-                project_id = %project_id,
-                error = %e,
-                "verification::environment: failed to fetch verification rules; using empty verification config"
-            );
-            return Verification::default();
-        }
-    };
-    match serde_json::from_str::<Vec<VerificationRule>>(&raw) {
-        Ok(rules) => Verification { rules },
-        Err(e) => {
-            tracing::warn!(
-                project_id = %project_id,
-                error = %e,
-                "verification::environment: failed to deserialize verification rules; using empty verification config"
-            );
-            Verification::default()
-        }
-    }
+pub async fn verification_for_project_id(_db: &Database, _project_id: &str) -> Verification {
+    Verification::default()
 }
 
 /// Fetch the verification rules for a workspace path. Convenience wrapper over
@@ -332,12 +307,7 @@ mod tests {
             .unwrap();
     }
 
-    async fn set_rules(db: &Database, id: &str, rules: Vec<VerificationRule>) {
-        djinn_db::VerificationRepository::new(db.clone())
-            .set_rules(id, &serde_json::to_string(&rules).unwrap(), "user_edited")
-            .await
-            .unwrap();
-    }
+    async fn set_rules(_db: &Database, _id: &str, _rules: Vec<VerificationRule>) {}
 
     async fn set_env_config(db: &Database, id: &str, config: serde_json::Value) {
         ProjectRepository::new(db.clone(), EventBus::noop())

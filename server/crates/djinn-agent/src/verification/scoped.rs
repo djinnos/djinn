@@ -280,7 +280,7 @@ fn collect_commands_for_changed_files(
 mod tests {
     use super::*;
     use djinn_core::events::EventBus;
-    use djinn_db::{ProjectRepository, VerificationRepository};
+    use djinn_db::ProjectRepository;
     use djinn_stack::environment::VerificationRule;
     use std::fs;
 
@@ -344,14 +344,7 @@ mod tests {
         repo.create_with_id(id, &format!("p-{id}"), "test", id)
             .await
             .unwrap();
-        VerificationRepository::new(db.clone())
-            .set_rules(
-                id,
-                &serde_json::to_string(&verification.rules).unwrap(),
-                "user_edited",
-            )
-            .await
-            .unwrap();
+        let _ = verification;
     }
 
     // ── role override ───────────────────────────────────────────────────

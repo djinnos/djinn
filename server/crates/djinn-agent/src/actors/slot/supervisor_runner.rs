@@ -310,15 +310,14 @@ pub(crate) async fn run_supervisor_dispatch(
     // directly. A lookup error or missing column is non-fatal: we just resolve
     // org-shared / fall back to the bot identity, preserving historical
     // behaviour.
-    let created_by_user_id: Option<String> = sqlx::query_scalar!(
-        "SELECT created_by_user_id FROM tasks WHERE id = $1",
-        task.id
-    )
-    .fetch_optional(app_state.db.pool())
-    .await
-    .ok()
-    .flatten()
-    .flatten();
+    let created_by_user_id: Option<String> =
+        sqlx::query_scalar::<_, Option<String>>("SELECT created_by_user_id FROM tasks WHERE id = ")
+            .bind(&task.id)
+            .fetch_optional(app_state.db.pool())
+            .await
+            .ok()
+            .flatten()
+            .flatten();
 
     // ── Resolve the commit-author identity (Vercel-friendly attribution) ──
     //
@@ -688,48 +687,6 @@ pub(crate) async fn run_supervisor_dispatch(
         }
 
         // BUG 1 re-attach: in the in-pod verification design the worker writes a
-        // terminal `verification_runs` row (and persists its `WorkerSubmitted`
-        // report) BEFORE the pod can die out-of-band. When the pod is TTL-GC'd
-        // the report frame is no longer buffered on `events_rx`, so the streamed
-        // report is gone and we fall back to the `Interrupted` teardown stub
-        // below — whose outcome is NOT `WorkerSubmitted`, so the host
-        // verification pipeline never gets armed and the task is left `verifying`
-        // with no pipeline. The coordinator's stuck-`verifying` sweep then resets
-        // it `verifying → open`, discarding completed-and-verified work.
-        //
-        // Detect that case at the seam: if a USABLE terminal in-pod
-        // `verification_runs` row exists for this task, re-arm the slot-free host
-        // pipeline against it directly. `spawn_verification_with_in_pod_run`
-        // consumes the existing row (idempotent against the unchanged commit) —
-        // exactly what the clean `WorkerSubmitted` path does below. We do this
-        // BEFORE the teardown-stub fallback so the re-attach wins the race with
-        // the coordinator sweep.
-        match djinn_db::VerificationRunRepository::new(app_state.db.clone())
-            .latest_terminal_for_task(&task.id)
-            .await
-        {
-            Ok(Some(run_id)) => {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    verification_run_id = %run_id,
-                    "supervisor dispatch: infra death after in-pod verification wrote terminal row; \
-                     re-arming host verification pipeline instead of discarding the run"
-                );
-                crate::actors::slot::verification::spawn_verification_with_in_pod_run(
-                    task.id.clone(),
-                    project_path.clone(),
-                    app_state.clone(),
-                    Some(run_id),
-                );
-            }
-            Ok(None) => {}
-            Err(e) => tracing::warn!(
-                task_id = %task.short_id,
-                error = %e,
-                "supervisor dispatch: failed to look up in-pod verification row after infra death; \
-                 leaving recovery to the coordinator sweep"
-            ),
-        }
     }
 
     match (report_result, teardown) {

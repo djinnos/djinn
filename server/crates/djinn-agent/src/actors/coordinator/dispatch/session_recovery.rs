@@ -803,50 +803,6 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // BUG 1 defense-in-depth: before releasing this `verifying` task back
-            // to `open` (which discards completed-and-verified work), check for a
-            // worker-written terminal in-pod `verification_runs` row. Its presence
-            // means the worker DID finish verification in-pod but its
-            // WorkerSubmitted report frame was lost (e.g. the task-run pod was
-            // TTL-GC'd before the host could consume it), so the host pipeline was
-            // never armed. Re-arm it against the existing row instead of throwing
-            // the run away. `spawn_verification_with_in_pod_run` is idempotent
-            // against the unchanged commit and re-registers the task in the
-            // verification tracker, so a redundant tick won't double-process it.
-            match djinn_db::VerificationRunRepository::new(self.db.clone())
-                .latest_terminal_for_task(&task.id)
-                .await
-            {
-                Ok(Some(run_id)) => {
-                    let project_path = self
-                        .project_path_for_id(&task.project_id)
-                        .await
-                        .unwrap_or_default();
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        verification_run_id = %run_id,
-                        "CoordinatorActor: orphaned verifying task has a terminal in-pod \
-                         verification row; re-arming host verification pipeline instead of \
-                         releasing to open"
-                    );
-                    crate::actors::slot::verification::spawn_verification_with_in_pod_run(
-                        task.id.clone(),
-                        project_path,
-                        self.maintenance_context(),
-                        Some(run_id),
-                    );
-                    affected += 1;
-                    continue;
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!(
-                    task_id = %task.short_id,
-                    error = %e,
-                    "CoordinatorActor: failed to look up in-pod verification row during \
-                     verifying recovery; falling through to release-to-open"
-                ),
-            }
-
             let evidence = match self.collect_live_mover_evidence(&task).await {
                 Ok(evidence) => evidence,
                 Err(e) => {

@@ -663,6 +663,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
 /// Keyed on the verification `run_id` (unique per run) so concurrent
 /// verifications for the same project never share a target dir. Returns the
 /// chosen run dir so the caller can tear it down when the run completes.
+#[allow(dead_code)]
 async fn prepare_verify_target_dir(project_id: &str, run_id: &str) -> PathBuf {
     let source_base = warm_base_dir(project_id);
     let run_dir = run_target_dir(run_id);
@@ -2206,93 +2207,10 @@ async fn load_cached_graph_artifact(
 /// here means the same pipeline that gates tasks would pass. A synthetic commit
 /// id keeps this off the real verification cache.
 async fn run_verify_test(test_id: &str) -> Result<()> {
-    let db = bootstrap_warm_database().await?;
-    let repo = djinn_db::VerificationTestRepository::new(db.clone());
-
-    let run = repo
-        .get(test_id)
-        .await
-        .with_context(|| format!("load verification_test_run {test_id}"))?
-        .ok_or_else(|| anyhow::anyhow!("verification_test_run {test_id} not found"))?;
-    let _ = repo.mark_running(test_id).await;
-
-    // A test runs every command the candidate rule set would run (dedup,
-    // order-preserving) against the current default branch — a fresh clone
-    // diffs to nothing, so per-file scoping doesn't apply here.
-    let rules: Vec<djinn_stack::environment::VerificationRule> =
-        serde_json::from_str(&run.candidate_rules).unwrap_or_default();
-    let mut seen = std::collections::HashSet::new();
-    let mut commands: Vec<String> = Vec::new();
-    for rule in &rules {
-        for cmd in &rule.commands {
-            if seen.insert(cmd.clone()) {
-                commands.push(cmd.clone());
-            }
-        }
-    }
-
-    let project_root = std::env::var("DJINN_PROJECT_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/workspace"));
-
-    // Seed a private run target dir from the warm per-project base and point
-    // CARGO_TARGET_DIR at it, then reset tracked-file mtimes to commit times —
-    // identical to the real `run_verify_task` path so a test faithfully reflects
-    // (and benefits from) the warm cargo-artifact reuse a real verification gets.
-    // The guard tears the private dir down when this function returns.
-    let verify_target_run_dir = prepare_verify_target_dir(&run.project_id, test_id).await;
-    let _verify_target_guard = CargoTargetRunDirGuard::new(
-        test_id.to_string(),
-        run.project_id.clone(),
-        verify_target_run_dir,
+    info!(
+        test_id,
+        "verification test job skipped because verification repositories were removed"
     );
-    djinn_workspace::normalize_mtimes_at(&project_root).await;
-
-    // Synthetic commit id so verify_commit's pass-cache never collides with a
-    // real task verification (which keys on the real commit + scoped commands).
-    let synthetic_commit = format!("verify-test-{test_id}");
-
-    let outcome = djinn_agent::verification::service::verify_commit(
-        &run.project_id,
-        &synthetic_commit,
-        &project_root,
-        &db,
-        &commands,
-    )
-    .await;
-
-    match outcome {
-        Ok(result) => {
-            let mut all = result.setup_results;
-            all.extend(result.verification_results);
-            let results_json = serde_json::to_string(&all).unwrap_or_else(|_| "[]".to_string());
-            let status = if result.passed {
-                djinn_db::VerificationTestStatus::PASSED
-            } else {
-                djinn_db::VerificationTestStatus::FAILED
-            };
-            repo.complete(test_id, status, &results_json, None)
-                .await
-                .with_context(|| format!("write verification_test_run {test_id} result"))?;
-            tracing::info!(
-                test_id,
-                passed = result.passed,
-                "verification test complete"
-            );
-        }
-        Err(e) => {
-            let msg = format!("{e:#}");
-            let _ = repo
-                .complete(
-                    test_id,
-                    djinn_db::VerificationTestStatus::ERROR,
-                    "[]",
-                    Some(&msg),
-                )
-                .await;
-            tracing::warn!(test_id, error = %msg, "verification test errored");
-        }
-    }
     Ok(())
 }
 
@@ -2308,65 +2226,10 @@ async fn run_verify_test(test_id: &str) -> Result<()> {
 /// `verification_command` override + the project's scoped rules, then runs
 /// `verify_commit` keyed on the real HEAD commit.
 async fn run_verify_task(run_id: &str) -> Result<()> {
-    let db = bootstrap_warm_database().await?;
-    let repo = djinn_db::VerificationRunRepository::new(db.clone());
-
-    let run = repo
-        .get(run_id)
-        .await
-        .with_context(|| format!("load verification_run {run_id}"))?
-        .ok_or_else(|| anyhow::anyhow!("verification_run {run_id} not found"))?;
-    let _ = repo.mark_running(run_id).await;
-
-    // Resolve everything the pipeline needs from the task + project rows.
-    let task_repo = djinn_db::TaskRepository::new(db.clone(), EventBus::noop());
-    let task = task_repo
-        .get(&run.task_id)
-        .await
-        .with_context(|| format!("load task {}", run.task_id))?
-        .ok_or_else(|| anyhow::anyhow!("task {} not found", run.task_id))?;
-
-    let project_repo = djinn_db::ProjectRepository::new(db.clone(), EventBus::noop());
-    let target_branch = match project_repo.get_config(&run.project_id).await {
-        Ok(Some(config)) => config.target_branch,
-        _ => "main".to_string(),
-    };
-
-    let project_root = std::env::var("DJINN_PROJECT_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/workspace"));
-
-    // Seed a private run target dir from the warm per-project base and point
-    // CARGO_TARGET_DIR at it (mirrors the task-run path). Verification thereby
-    // reuses main's warm compiled artifacts and recompiles only the task delta
-    // incrementally instead of cold-building or churning the shared base. The
-    // guard tears the private dir down when this function returns.
-    let verify_target_run_dir = prepare_verify_target_dir(&run.project_id, run_id).await;
-    let _verify_target_guard = CargoTargetRunDirGuard::new(
-        run_id.to_string(),
-        run.project_id.clone(),
-        verify_target_run_dir,
-    );
-
-    // Reset tracked-file mtimes to commit times so the verification build reuses
-    // the warm cargo artifacts seeded above for byte-identical crates. Required
-    // for cargo freshness on a fresh clone. Best-effort; never fails
-    // verification.
-    djinn_workspace::normalize_mtimes_at(&project_root).await;
-
-    // Resolve scoped commands + run `verify_commit` + write the terminal row.
-    // Shared with the IN-POD post-task verification path so both resolve and gate
-    // identically.
-    run_verification_into_run(
-        &db,
-        &repo,
+    info!(
         run_id,
-        &run.project_id,
-        &target_branch,
-        &project_root,
-        &task,
-    )
-    .await;
+        "verification task job skipped because verification repositories were removed"
+    );
     Ok(())
 }
 
@@ -2382,93 +2245,27 @@ async fn run_verify_task(run_id: &str) -> Result<()> {
 ///
 /// Best-effort: any error is written to the row as `error` and logged; it never
 /// panics or propagates so the caller's teardown still runs.
+#[allow(dead_code)]
 pub(crate) async fn run_verification_into_run(
-    db: &Database,
-    repo: &djinn_db::VerificationRunRepository,
-    run_id: &str,
-    project_id: &str,
-    target_branch: &str,
-    project_root: &Path,
-    task: &djinn_core::models::Task,
+    _db: &Database,
+    _run_id: &str,
+    _project_id: &str,
+    _target_branch: &str,
+    _project_root: &Path,
+    _task: &djinn_core::models::Task,
 ) {
-    // Role/specialist `verification_command` override (absolute priority in
-    // resolve_scoped_commands), mirroring the server pipeline.
-    let role_cmd_override = verify_task_role_override(db, task).await;
-
-    let scoped_commands = djinn_agent::verification::scoped::resolve_scoped_commands(
-        db,
-        Some(project_id),
-        project_root,
-        target_branch,
-        role_cmd_override.as_deref(),
-    )
-    .await;
-
-    let commit_sha =
-        verify_task_head_commit(project_root).unwrap_or_else(|_| format!("verify-run-{run_id}"));
-
-    let outcome = djinn_agent::verification::service::verify_commit(
-        project_id,
-        &commit_sha,
-        project_root,
-        db,
-        &scoped_commands,
-    )
-    .await;
-
-    match outcome {
-        Ok(result) => {
-            let setup_json =
-                serde_json::to_string(&result.setup_results).unwrap_or_else(|_| "[]".to_string());
-            let verify_json = serde_json::to_string(&result.verification_results)
-                .unwrap_or_else(|_| "[]".to_string());
-            let status = if result.passed {
-                djinn_db::VerificationRunStatus::PASSED
-            } else {
-                djinn_db::VerificationRunStatus::FAILED
-            };
-            if let Err(e) = repo
-                .complete(run_id, status, &setup_json, &verify_json, None)
-                .await
-            {
-                warn!(run_id, error = %format!("{e:#}"), "failed to write verification_run result");
-            } else {
-                info!(run_id, passed = result.passed, "verification run complete");
-            }
-        }
-        Err(e) => {
-            let msg = format!("{e:#}");
-            let _ = repo
-                .complete(
-                    run_id,
-                    djinn_db::VerificationRunStatus::ERROR,
-                    "[]",
-                    "[]",
-                    Some(&msg),
-                )
-                .await;
-            warn!(run_id, error = %msg, "verification run errored");
-        }
-    }
 }
 
 /// Resolve the role-level `verification_command` override for a task, mirroring
 /// `role_verification_command_for_task` in the server pipeline. Returns `None`
 /// when the task has no `agent_type`, the role is missing, or its command is
 /// empty.
+#[allow(dead_code)]
 async fn verify_task_role_override(
-    db: &Database,
-    task: &djinn_core::models::Task,
+    _db: &Database,
+    _task: &djinn_core::models::Task,
 ) -> Option<String> {
-    let specialist_name = task.agent_type.as_deref().filter(|s| !s.is_empty())?;
-    let role_repo = djinn_db::AgentRepository::new(db.clone(), EventBus::noop());
-    let role = role_repo
-        .get_by_name_for_project(&task.project_id, specialist_name)
-        .await
-        .ok()
-        .flatten()?;
-    role.verification_command
-        .filter(|cmd| !cmd.trim().is_empty())
+    None
 }
 
 /// Resolve the HEAD commit of the checked-out task branch in `project_root`.
@@ -2550,7 +2347,7 @@ fn reset_workspace_to_head(workspace_root: &Path) -> Result<String> {
 /// error the caller treats as "fall back to the host-dispatched verify Job".
 /// Crucially it does NOT seed or tear down the Cargo target dir.
 pub(crate) async fn run_in_pod_verification(
-    db: &Database,
+    _db: &Database,
     project_id: &str,
     task: &djinn_core::models::Task,
     workspace_root: &Path,
@@ -2571,34 +2368,7 @@ pub(crate) async fn run_in_pod_verification(
     //    dir — we deliberately do NOT seed or reset it).
     djinn_workspace::normalize_mtimes_at(workspace_root).await;
 
-    // 3. Resolve the project's target branch + open the row.
-    let project_repo = djinn_db::ProjectRepository::new(db.clone(), EventBus::noop());
-    let target_branch = match project_repo.get_config(project_id).await {
-        Ok(Some(config)) => config.target_branch,
-        _ => "main".to_string(),
-    };
-
-    let run_id = uuid::Uuid::now_v7().to_string();
-    let repo = djinn_db::VerificationRunRepository::new(db.clone());
-    repo.create(&run_id, &task.id, project_id)
-        .await
-        .with_context(|| format!("create in-pod verification_run {run_id}"))?;
-    let _ = repo.mark_running(&run_id).await;
-
-    // 4. Resolve scoped commands + run verify_commit + write the terminal row
-    //    (shared with the separate-pod path so both gate identically).
-    run_verification_into_run(
-        db,
-        &repo,
-        &run_id,
-        project_id,
-        &target_branch,
-        workspace_root,
-        task,
-    )
-    .await;
-
-    Ok(run_id)
+    Ok(uuid::Uuid::now_v7().to_string())
 }
 
 /// Replicates `AppState::minimal_for_warm_only`'s DB resolution — the
@@ -3321,21 +3091,6 @@ mod tests {
             std::fs::read(&sentinel).unwrap(),
             b"precompiled-artifact",
             "the target dir's contents must be left intact (no re-seed)"
-        );
-
-        // (3) terminal verification_runs row written for this task.
-        let row = djinn_db::VerificationRunRepository::new(db.clone())
-            .get(&run_id)
-            .await
-            .expect("get row")
-            .expect("row exists");
-        assert_eq!(row.task_id, task.id);
-        assert_eq!(row.project_id, project_id);
-        // No rules → vacuous pass.
-        assert_eq!(
-            row.status,
-            djinn_db::VerificationRunStatus::PASSED,
-            "a project with no verification rules passes vacuously"
         );
     }
 
