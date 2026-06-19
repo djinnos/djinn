@@ -158,6 +158,15 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
 
         let status_str = status.as_str();
+        // Token params are bound twice: once as i64 for the bigint SET
+        // columns ($2-$5) and once as f64 for the cost computation
+        // ($8-$11).  Reusing the same positional parameter in both a
+        // bigint and a double-precision context makes PostgreSQL report
+        // "inconsistent types deduced", so we use separate positions.
+        let ti_f = tokens_in as f64;
+        let to_f = tokens_out as f64;
+        let cr_f = cache_read as f64;
+        let cw_f = cache_write as f64;
         sqlx::query(
             r#"UPDATE sessions
              SET status = $1,
@@ -171,10 +180,10 @@ impl SessionRepository {
                       AND cache_read_price_per_million_snapshot IS NOT NULL
                       AND cache_write_price_per_million_snapshot IS NOT NULL
                      THEN (
-                         $2::double precision * input_price_per_million_snapshot
-                         + $3::double precision * output_price_per_million_snapshot
-                         + $4::double precision * cache_read_price_per_million_snapshot
-                         + $5::double precision * cache_write_price_per_million_snapshot
+                         $8 * input_price_per_million_snapshot
+                         + $9 * output_price_per_million_snapshot
+                         + $10 * cache_read_price_per_million_snapshot
+                         + $11 * cache_write_price_per_million_snapshot
                      ) / 1000000.0
                      ELSE NULL
                  END,
@@ -189,6 +198,10 @@ impl SessionRepository {
         .bind(cache_write)
         .bind(id)
         .bind(parked_reason)
+        .bind(ti_f)
+        .bind(to_f)
+        .bind(cr_f)
+        .bind(cw_f)
         .execute(self.db.pool())
         .await?;
 
@@ -584,7 +597,16 @@ impl SessionRepository {
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query!(
+        // Token params are bound twice: once as i64 for the bigint SET
+        // columns ($1-$4) and once as f64 for the cost computation
+        // ($5-$8).  Reusing the same positional parameter in both a
+        // bigint and a double-precision context makes PostgreSQL report
+        // "inconsistent types deduced", so we use separate positions.
+        let ti_f = tokens_in as f64;
+        let to_f = tokens_out as f64;
+        let cr_f = cache_read as f64;
+        let cw_f = cache_write as f64;
+        sqlx::query(
             r#"UPDATE sessions
              SET tokens_in = $1,
                  tokens_out = $2,
@@ -596,20 +618,24 @@ impl SessionRepository {
                       AND cache_read_price_per_million_snapshot IS NOT NULL
                       AND cache_write_price_per_million_snapshot IS NOT NULL
                      THEN (
-                         $1::double precision * input_price_per_million_snapshot
-                         + $2::double precision * output_price_per_million_snapshot
-                         + $3::double precision * cache_read_price_per_million_snapshot
-                         + $4::double precision * cache_write_price_per_million_snapshot
+                         $5 * input_price_per_million_snapshot
+                         + $6 * output_price_per_million_snapshot
+                         + $7 * cache_read_price_per_million_snapshot
+                         + $8 * cache_write_price_per_million_snapshot
                      ) / 1000000.0
                      ELSE NULL
                  END
-             WHERE id = $5 AND status = 'running'"#,
-            tokens_in,
-            tokens_out,
-            cache_read,
-            cache_write,
-            id
+             WHERE id = $9 AND status = 'running'"#,
         )
+        .bind(tokens_in)
+        .bind(tokens_out)
+        .bind(cache_read)
+        .bind(cache_write)
+        .bind(ti_f)
+        .bind(to_f)
+        .bind(cr_f)
+        .bind(cw_f)
+        .bind(id)
         .execute(self.db.pool())
         .await?;
         Ok(())
