@@ -1403,6 +1403,36 @@ mod tests {
 
     static OUT_OF_CORE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(previous) => std::env::set_var(self.key, previous),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     async fn make_project(tmp: &std::path::Path) -> std::path::PathBuf {
         let project_root = tmp.join("repo");
         tokio::fs::create_dir_all(&project_root).await.unwrap();
@@ -2420,6 +2450,214 @@ mod tests {
         // --- Parity gate: cold and warm blobs must match ---
         crate::graph_parity::assert_graph_artifact_blob_parity(&cold_blob, &warm_blob)
             .expect("incremental == full parity violation: cold and warm blobs must match");
+    }
+
+    fn write_fake_rust_analyzer(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        use protobuf::{EnumOrUnknown, Message};
+        use scip::types::{Document, Index, Occurrence, SymbolInformation, symbol_information};
+
+        let fixture_path = tmp.join("fixture.scip");
+        let mut doc = Document::new();
+        doc.relative_path = "src/lib.rs".to_string();
+        doc.language = "rust".to_string();
+        doc.occurrences = vec![Occurrence {
+            range: vec![0, 7, 13],
+            symbol: "scip-rust test src/lib.rs `answer`().".to_string(),
+            symbol_roles: scip::types::SymbolRole::Definition as i32,
+            ..Occurrence::new()
+        }];
+        doc.symbols = vec![SymbolInformation {
+            symbol: "scip-rust test src/lib.rs `answer`().".to_string(),
+            display_name: "answer".to_string(),
+            kind: EnumOrUnknown::new(symbol_information::Kind::Function),
+            ..SymbolInformation::new()
+        }];
+
+        let mut index = Index::new();
+        index.documents = vec![doc];
+        std::fs::write(
+            &fixture_path,
+            index.write_to_bytes().expect("encode SCIP fixture"),
+        )
+        .expect("write SCIP fixture");
+
+        let fake_bin = tmp.join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).expect("create fake indexer bin dir");
+        let script_path = fake_bin.join("rust-analyzer");
+        std::fs::write(
+            &script_path,
+            r#"#!/bin/sh
+set -eu
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then
+    shift
+    out="$1"
+  fi
+  shift || true
+done
+if [ -z "$out" ]; then
+  echo "missing --output" >&2
+  exit 2
+fi
+mkdir -p "$(dirname "$out")"
+cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
+"#,
+        )
+        .expect("write fake rust-analyzer");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path)
+                .expect("fake rust-analyzer metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).expect("chmod fake rust-analyzer");
+        }
+
+        (fake_bin, fixture_path)
+    }
+
+    /// Out-of-core warm regression: with the out-of-core flag forced on
+    /// (threshold=0), a rebuild for the same commit must persist a graph blob
+    /// byte-identical to the default in-memory warm path.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn out_of_core_warm_produces_identical_graph_blob() {
+        let _env_lock = OUT_OF_CORE_ENV_LOCK.lock().unwrap();
+        let _ooc_flag = EnvVarGuard::remove("DJINN_GRAPH_OUT_OF_CORE");
+        let _ooc_min_nodes = EnvVarGuard::remove("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES");
+        let _ooc_path = EnvVarGuard::remove("DJINN_GRAPH_OUT_OF_CORE_PATH");
+
+        let tmp = workspace_tempdir("ooc-warm-parity-");
+        let project_root = make_project(tmp.path()).await;
+        // `Cargo.toml` must declare a `[workspace]` section so the
+        // RustAnalyzer indexer's workspace discovery picks up this
+        // fixture. Without `[workspace]`, no Rust workspace is
+        // discovered, the fake rust-analyzer never runs, the parsed
+        // SCIP set is empty, and `ensure_canonical_graph` skips the
+        // cache upsert (the `node_count == 0` guard at the bottom of
+        // the warm pipeline).
+        tokio::fs::write(
+            project_root.join("Cargo.toml"),
+            "[package]\nname = \"ooc_warm_parity\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n",
+        )
+        .await
+        .expect("write Cargo.toml");
+        tokio::fs::create_dir_all(project_root.join("src"))
+            .await
+            .expect("create src dir");
+        tokio::fs::write(
+            project_root.join("src/lib.rs"),
+            "pub fn answer() -> u32 { 42 }\n",
+        )
+        .await
+        .expect("write src/lib.rs");
+        let commit_output = tokio::process::Command::new("git")
+            .args(["add", "Cargo.toml", "src/lib.rs"])
+            .current_dir(&project_root)
+            .output()
+            .await
+            .expect("git add rust fixture");
+        assert!(
+            commit_output.status.success(),
+            "git add rust fixture failed: {commit_output:?}"
+        );
+        let commit_output = tokio::process::Command::new("git")
+            .args(["commit", "-q", "-m", "add rust fixture"])
+            .current_dir(&project_root)
+            .output()
+            .await
+            .expect("git commit rust fixture");
+        assert!(
+            commit_output.status.success(),
+            "git commit rust fixture failed: {commit_output:?}"
+        );
+
+        let (fake_bin, fixture_path) = write_fake_rust_analyzer(tmp.path());
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path =
+            std::env::join_paths(std::iter::once(fake_bin).chain(std::env::split_paths(&path)))
+                .expect("join PATH with fake rust-analyzer");
+        let _path_guard = EnvVarGuard::set("PATH", joined_path);
+        let _fixture_guard = EnvVarGuard::set("DJINN_TEST_SCIP_FIXTURE", &fixture_path);
+
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create("test-ooc-warm-parity", "test", "test-ooc-warm-parity")
+            .await
+            .expect("create project");
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+
+        let result = ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await;
+        assert!(result.is_ok(), "in-memory warm failed: {result:?}");
+
+        let head_out = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&project_root)
+            .output()
+            .await
+            .expect("resolve HEAD commit");
+        assert!(
+            head_out.status.success(),
+            "git rev-parse failed: {head_out:?}"
+        );
+        let commit_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+        let cold_blob = cache_repo
+            .get(&project.id, &commit_sha)
+            .await
+            .expect("get in-memory warm blob")
+            .expect("in-memory warm blob should exist")
+            .graph_blob;
+
+        clear_test_caches().await;
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: &commit_sha,
+                graph_blob: b"stale graph blob that forces a rebuild",
+            })
+            .await
+            .expect("poison cache row to force out-of-core rebuild");
+        clear_test_caches().await;
+
+        let _ooc_flag = EnvVarGuard::set("DJINN_GRAPH_OUT_OF_CORE", "1");
+        let _ooc_min_nodes = EnvVarGuard::set("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES", "0");
+        // Pin the out-of-core storage path under the test tempdir so the
+        // shard store stays inside the workspace's writable region and
+        // gets cleaned up alongside the test fixtures on drop. Without
+        // this, the default path falls back to `/tmp/djinn-ooc-<pid>`,
+        // which is outside the sandbox's allowed write list and
+        // produces intermittent OOC open failures.
+        let ooc_storage_path = tmp.path().join("ooc-store");
+        let _ooc_path = EnvVarGuard::set("DJINN_GRAPH_OUT_OF_CORE_PATH", &ooc_storage_path);
+
+        let result = ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await;
+        assert!(result.is_ok(), "out-of-core warm failed: {result:?}");
+
+        let warm_blob = cache_repo
+            .get(&project.id, &commit_sha)
+            .await
+            .expect("get out-of-core warm blob")
+            .expect("out-of-core warm blob should exist")
+            .graph_blob;
+
+        crate::graph_parity::assert_graph_artifact_blob_parity(&cold_blob, &warm_blob)
+            .expect("out-of-core warm graph blob must match in-memory warm graph blob");
     }
 
     /// Negative equivalence test: two different fixture graphs (base vs.

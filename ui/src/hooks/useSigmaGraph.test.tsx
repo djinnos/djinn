@@ -27,6 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRef } from "react";
 import Graph from "graphology";
 import { PRECOMPUTED_LAYOUT_ATTRIBUTE } from "@/lib/codeGraphAdapter";
+import { useCodeGraphStore } from "@/stores/codeGraphStore";
 
 // Module mocks must be hoisted — keep factory bodies self-contained
 // (no top-level references to vars defined below).
@@ -279,6 +280,63 @@ describe("useSigmaGraph — FA2 supervisor gating", () => {
     expect(noverlapMock).not.toHaveBeenCalled();
     // FA2 supervisor was never created.
     expect(fa2Instances).toHaveLength(0);
+    expect(result.current?.layoutRunning).toBe(false);
+  });
+
+  it("skips the FA2 supervisor when layoutMode is 'sequential'", () => {
+    useCodeGraphStore.setState({ layoutMode: "sequential" });
+    const graph = makeGraph();
+    expect(graph.getAttribute(PRECOMPUTED_LAYOUT_ATTRIBUTE)).toBeUndefined();
+
+    const result = mountHarness(graph);
+
+    // Sigma still mounted, but the FA2 supervisor was never created.
+    expect(sigmaInstances).toHaveLength(1);
+    expect(fa2Instances).toHaveLength(0);
+    expect(result.current?.ready).toBe(true);
+    expect(result.current?.layoutRunning).toBe(false);
+  });
+
+  it("skips the FA2 supervisor when layoutMode is 'radial'", () => {
+    useCodeGraphStore.setState({ layoutMode: "radial" });
+    const graph = makeGraph();
+
+    const result = mountHarness(graph);
+
+    expect(sigmaInstances).toHaveLength(1);
+    expect(fa2Instances).toHaveLength(0);
+    expect(result.current?.ready).toBe(true);
+    expect(result.current?.layoutRunning).toBe(false);
+  });
+
+  it("starts the FA2 supervisor when layoutMode is 'force' (default)", () => {
+    useCodeGraphStore.setState({ layoutMode: "force" });
+    const graph = makeGraph();
+
+    const result = mountHarness(graph);
+
+    expect(sigmaInstances).toHaveLength(1);
+    expect(fa2Instances).toHaveLength(1);
+    expect(fa2Instances[0]!.start).toHaveBeenCalledTimes(1);
+    expect(result.current?.ready).toBe(true);
+    expect(result.current?.layoutRunning).toBe(true);
+  });
+
+  it("does not schedule a stop-timer or call noverlap in sequential mode", () => {
+    vi.useFakeTimers();
+    useCodeGraphStore.setState({ layoutMode: "sequential" });
+    const graph = makeGraph();
+
+    const result = mountHarness(graph);
+
+    expect(fa2Instances).toHaveLength(0);
+    expect(result.current?.layoutRunning).toBe(false);
+
+    // Advance well past the default 15s window — noverlap must not fire.
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(noverlapMock).not.toHaveBeenCalled();
     expect(result.current?.layoutRunning).toBe(false);
   });
 });
