@@ -359,6 +359,8 @@ pub struct MemoryHealthResponse {
     pub low_confidence_note_count: Option<i64>,
     pub stale_note_count: Option<i64>,
     pub stale_notes_by_folder: Option<Vec<djinn_memory::StaleFolder>>,
+    pub lifecycle: Option<djinn_memory::LifecycleHealth>,
+    pub recent_sweep: Option<djinn_memory::RecentSweepMetrics>,
     pub error: Option<String>,
 }
 

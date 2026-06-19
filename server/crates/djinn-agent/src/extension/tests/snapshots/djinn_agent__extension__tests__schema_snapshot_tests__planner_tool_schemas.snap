@@ -1203,7 +1203,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "memory_health",
-    "description": "Returns aggregate health report: total notes, broken link count, orphan note count, duplicate cluster count, low-confidence note count, stale note count, stale notes by folder.",
+    "description": "Returns aggregate health report: total notes, broken link count, orphan note count, low-confidence note count, stale note count, stale notes by folder, lifecycle counts, and recent lifecycle sweep metrics.",
     "inputSchema": {
       "type": "object",
       "properties": {}

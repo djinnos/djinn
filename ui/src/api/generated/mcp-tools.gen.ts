@@ -34,10 +34,6 @@ export namespace AgentCreateInputSchema {
    * Additional system prompt content appended to the base role prompt.
    */
   system_prompt_extensions?: string
-  /**
-   * Custom verification command (falls back to project default).
-   */
-  verification_command?: string
   [k: string]: any
   }
 
@@ -64,7 +60,6 @@ export namespace AgentCreateOutputSchema {
   skills?: AnyJson[]
   system_prompt_extensions?: string
   updated_at?: string
-  verification_command?: string
   [k: string]: any
   }
 
@@ -116,7 +111,6 @@ export namespace AgentListOutputSchema {
   skills: AnyJson[]
   system_prompt_extensions: string
   updated_at: string
-  verification_command?: string
   [k: string]: any
   }
 
@@ -152,7 +146,6 @@ export namespace AgentMetricsOutputSchema {
   extraction_quality: ExtractionQualityMetricEntry
   learned_prompt?: string
   success_rate: number
-  verification_pass_rate: number
   [k: string]: any
   }
   export interface ExtractionQualityMetricEntry {
@@ -201,7 +194,6 @@ export namespace AgentShowOutputSchema {
   skills?: AnyJson[]
   system_prompt_extensions?: string
   updated_at?: string
-  verification_command?: string
   [k: string]: any
   }
 
@@ -233,7 +225,6 @@ export namespace AgentUpdateInputSchema {
   project: string
   skills?: AnyJson[]
   system_prompt_extensions?: string
-  verification_command?: string
   [k: string]: any
   }
 
@@ -260,7 +251,6 @@ export namespace AgentUpdateOutputSchema {
   skills?: AnyJson[]
   system_prompt_extensions?: string
   updated_at?: string
-  verification_command?: string
   [k: string]: any
   }
 
@@ -1807,7 +1797,6 @@ export namespace EpicTasksOutputSchema {
   status: string
   title: string
   updated_at: string
-  verification_failure_count: number
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
@@ -2467,13 +2456,6 @@ export namespace ImageCreateInputSchema {
    * Runs in the task-run Pod before the supervisor starts.
    */
   pre_task?: HookCommand[]
-  /**
-   * Runs once in the task-run Pod, before any verification rule fires.
-   * Typically `pnpm install` / `cargo build` / similar — commands that
-   * prepare the workspace so the `verification.rules` commands succeed.
-   * Previously lived as `verification.setup`.
-   */
-  pre_verification?: HookCommand[]
   [k: string]: any
   }
   export interface Workspace {
@@ -2673,13 +2655,6 @@ export namespace ImageListOutputSchema {
    * Runs in the task-run Pod before the supervisor starts.
    */
   pre_task?: HookCommand[]
-  /**
-   * Runs once in the task-run Pod, before any verification rule fires.
-   * Typically `pnpm install` / `cargo build` / similar — commands that
-   * prepare the workspace so the `verification.rules` commands succeed.
-   * Previously lived as `verification.setup`.
-   */
-  pre_verification?: HookCommand[]
   [k: string]: any
   }
   export interface Workspace {
@@ -2855,13 +2830,6 @@ export namespace ImageUpdateInputSchema {
    * Runs in the task-run Pod before the supervisor starts.
    */
   pre_task?: HookCommand[]
-  /**
-   * Runs once in the task-run Pod, before any verification rule fires.
-   * Typically `pnpm install` / `cargo build` / similar — commands that
-   * prepare the workspace so the `verification.rules` commands succeed.
-   * Previously lived as `verification.setup`.
-   */
-  pre_verification?: HookCommand[]
   [k: string]: any
   }
   export interface Workspace {
@@ -4139,13 +4107,6 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
    * Runs in the task-run Pod before the supervisor starts.
    */
   pre_task?: HookCommand[]
-  /**
-   * Runs once in the task-run Pod, before any verification rule fires.
-   * Typically `pnpm install` / `cargo build` / similar — commands that
-   * prepare the workspace so the `verification.rules` commands succeed.
-   * Previously lived as `verification.setup`.
-   */
-  pre_verification?: HookCommand[]
   [k: string]: any
   }
   export interface Workspace {
@@ -4305,13 +4266,6 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
    * Runs in the task-run Pod before the supervisor starts.
    */
   pre_task?: HookCommand[]
-  /**
-   * Runs once in the task-run Pod, before any verification rule fires.
-   * Typically `pnpm install` / `cargo build` / similar — commands that
-   * prepare the workspace so the `verification.rules` commands succeed.
-   * Previously lived as `verification.setup`.
-   */
-  pre_verification?: HookCommand[]
   [k: string]: any
   }
   export interface Workspace {
@@ -4464,13 +4418,6 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
    * Runs in the task-run Pod before the supervisor starts.
    */
   pre_task?: HookCommand[]
-  /**
-   * Runs once in the task-run Pod, before any verification rule fires.
-   * Typically `pnpm install` / `cargo build` / similar — commands that
-   * prepare the workspace so the `verification.rules` commands succeed.
-   * Previously lived as `verification.setup`.
-   */
-  pre_verification?: HookCommand[]
   [k: string]: any
   }
   export interface Workspace {
@@ -4644,166 +4591,6 @@ export namespace ProjectSetImageOutputSchema {
 
 }
 export type ProjectSetImageOutput = ProjectSetImageOutputSchema.ProjectSetImageOutput;
-export namespace ProjectVerificationGetInputSchema {
-  export interface ProjectVerificationGetInput {
-  /**
-   * Project UUID or `owner/repo` slug.
-   */
-  project: string
-  [k: string]: any
-  }
-
-}
-export type ProjectVerificationGetInput = ProjectVerificationGetInputSchema.ProjectVerificationGetInput;
-export namespace ProjectVerificationGetOutputSchema {
-  export interface ProjectVerificationGetOutput {
-  error?: string
-  /**
-   * Verification rules from the `project_verifications` table (migration
-   * 44). Empty when the project has none.
-   */
-  rules: VerificationRule[]
-  status: string
-  [k: string]: any
-  }
-  /**
-   * One verification rule.
-   * 
-   * Field names and semantics match the pre-cut-over
-   * `djinn_db::repositories::project::VerificationRule`, so the P5 boot hook
-   * can copy `projects.verification_rules` straight into
-   * `environment_config.verification.rules` without a translation step.
-   */
-  export interface VerificationRule {
-  commands: string[]
-  match_pattern: string
-  }
-
-}
-export type ProjectVerificationGetOutput = ProjectVerificationGetOutputSchema.ProjectVerificationGetOutput;
-export namespace ProjectVerificationSetInputSchema {
-  export interface ProjectVerificationSetInput {
-  /**
-   * Project UUID or `owner/repo` slug.
-   */
-  project: string
-  /**
-   * Full replacement set of verification rules (glob `match_pattern` +
-   * shell `commands`). Validated server-side before persisting.
-   */
-  rules: VerificationRule[]
-  /**
-   * Id from a prior `project_verification_test` whose run PASSED, proving
-   * these exact rules work. REQUIRED when `rules` is non-empty (the save is
-   * rejected otherwise, so a broken rule can't disrupt live tasks); an empty
-   * rule set needs no test.
-   */
-  test_id?: string
-  [k: string]: any
-  }
-  /**
-   * One verification rule.
-   * 
-   * Field names and semantics match the pre-cut-over
-   * `djinn_db::repositories::project::VerificationRule`, so the P5 boot hook
-   * can copy `projects.verification_rules` straight into
-   * `environment_config.verification.rules` without a translation step.
-   */
-  export interface VerificationRule {
-  commands: string[]
-  match_pattern: string
-  }
-
-}
-export type ProjectVerificationSetInput = ProjectVerificationSetInputSchema.ProjectVerificationSetInput;
-export namespace ProjectVerificationSetOutputSchema {
-  export interface ProjectVerificationSetOutput {
-  error?: string
-  status: string
-  [k: string]: any
-  }
-
-}
-export type ProjectVerificationSetOutput = ProjectVerificationSetOutputSchema.ProjectVerificationSetOutput;
-export namespace ProjectVerificationTestInputSchema {
-  export interface ProjectVerificationTestInput {
-  /**
-   * Project UUID or `owner/repo` slug.
-   */
-  project: string
-  /**
-   * Candidate verification rules to test (not saved). Their commands run in
-   * the project's image against the default branch.
-   */
-  rules: VerificationRule[]
-  [k: string]: any
-  }
-  /**
-   * One verification rule.
-   * 
-   * Field names and semantics match the pre-cut-over
-   * `djinn_db::repositories::project::VerificationRule`, so the P5 boot hook
-   * can copy `projects.verification_rules` straight into
-   * `environment_config.verification.rules` without a translation step.
-   */
-  export interface VerificationRule {
-  commands: string[]
-  match_pattern: string
-  }
-
-}
-export type ProjectVerificationTestInput = ProjectVerificationTestInputSchema.ProjectVerificationTestInput;
-export namespace ProjectVerificationTestOutputSchema {
-  export interface ProjectVerificationTestOutput {
-  error?: string
-  status: string
-  /**
-   * Poll `project_verification_test_status` with this id for the result,
-   * then pass it to `project_verification_set` once it has passed.
-   */
-  test_id?: string
-  [k: string]: any
-  }
-
-}
-export type ProjectVerificationTestOutput = ProjectVerificationTestOutputSchema.ProjectVerificationTestOutput;
-export namespace ProjectVerificationTestStatusInputSchema {
-  export interface ProjectVerificationTestStatusInput {
-  /**
-   * The `test_id` returned by `project_verification_test`.
-   */
-  test_id: string
-  [k: string]: any
-  }
-
-}
-export type ProjectVerificationTestStatusInput = ProjectVerificationTestStatusInputSchema.ProjectVerificationTestStatusInput;
-export namespace ProjectVerificationTestStatusOutputSchema {
-  export interface ProjectVerificationTestStatusOutput {
-  error?: string
-  /**
-   * True once `run_status == "passed"`.
-   */
-  passed: boolean
-  /**
-   * Per-command results as a JSON array string
-   * (`[{name,command,exit_code,stdout,stderr,duration_ms}]`).
-   */
-  results_json: string
-  /**
-   * Populated when the run itself errored (couldn't dispatch/clone/etc.).
-   */
-  run_error?: string
-  /**
-   * Test-run lifecycle: pending | running | passed | failed | error.
-   */
-  run_status: string
-  status: string
-  [k: string]: any
-  }
-
-}
-export type ProjectVerificationTestStatusOutput = ProjectVerificationTestStatusOutputSchema.ProjectVerificationTestStatusOutput;
 export namespace ProposalAddTargetInputSchema {
   export interface ProposalAddTargetInput {
   /**
@@ -6943,10 +6730,8 @@ export namespace TaskListOutputSchema {
   status: string
   title: string
   total_reopen_count: number
-  total_verification_failure_count: number
   unresolved_blocker_count: number
   updated_at: string
-  verification_failure_count: number
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
@@ -7056,7 +6841,6 @@ export namespace TaskTimelineOutputSchema {
   error?: string
   messages?: TimelineMessage[]
   sessions?: SessionToolSession[]
-  verification_steps?: TimelineVerificationStep[]
   [k: string]: any
   }
   export interface TimelineActivity {
@@ -7115,25 +6899,13 @@ export namespace TaskTimelineOutputSchema {
   workspace_path?: string
   [k: string]: any
   }
-  export interface TimelineVerificationStep {
-  command: string
-  duration_ms: number
-  exit_code: number
-  index: number
-  name: string
-  phase: string
-  stderr: string
-  stdout: string
-  [k: string]: any
-  }
 
 }
 export type TaskTimelineOutput = TaskTimelineOutputSchema.TaskTimelineOutput;
 export namespace TaskTransitionInputSchema {
   export interface TaskTransitionInput {
   /**
-   * Transition action: start, submit_verification,
-   * verification_pass, verification_fail, release_verification,
+   * Transition action: start,
    * submit_task_review, task_review_start,
    * task_review_reject, task_review_reject_conflict, task_review_approve,
    * pr_created, pr_undraft, pr_ci_failed, pr_conflict,
@@ -7153,15 +6925,14 @@ export namespace TaskTransitionInputSchema {
    */
   project: string
   /**
-   * Required for: verification_fail, release_verification,
-   * task_review_reject, task_review_reject_conflict,
+   * Required for: task_review_reject, task_review_reject_conflict,
    * pr_changes_requested,
    * reopen, release, release_task_review, force_close.
    */
   reason?: string
   /**
    * Required when action = "user_override". Allowed values: open, in_progress,
-   * verifying, needs_task_review, in_task_review, approved, pr_draft, pr_review, closed.
+   * needs_task_review, in_task_review, approved, pr_draft, pr_review, closed.
    */
   target_status?: string
   [k: string]: any
@@ -7369,7 +7140,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "project_verification_get" | "project_verification_set" | "project_verification_test" | "project_verification_test_status" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -7451,10 +7222,6 @@ export interface McpToolMap {
   "project_list": { input: ProjectListInput; output: ProjectListOutput };
   "project_remove": { input: ProjectRemoveInput; output: ProjectRemoveOutput };
   "project_set_image": { input: ProjectSetImageInput; output: ProjectSetImageOutput };
-  "project_verification_get": { input: ProjectVerificationGetInput; output: ProjectVerificationGetOutput };
-  "project_verification_set": { input: ProjectVerificationSetInput; output: ProjectVerificationSetOutput };
-  "project_verification_test": { input: ProjectVerificationTestInput; output: ProjectVerificationTestOutput };
-  "project_verification_test_status": { input: ProjectVerificationTestStatusInput; output: ProjectVerificationTestStatusOutput };
   "proposal_add_target": { input: ProposalAddTargetInput; output: ProposalAddTargetOutput };
   "proposal_create": { input: ProposalCreateInput; output: ProposalCreateOutput };
   "proposal_delete": { input: ProposalDeleteInput; output: ProposalDeleteOutput };
