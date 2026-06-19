@@ -595,6 +595,37 @@ mod tests {
     }
 
     #[test]
+    fn parity_accepts_repeated_warm() {
+        let artifact = base_artifact();
+        let blob = bincode::serialize(&artifact).expect("serialize artifact");
+
+        assert_graph_artifact_blob_parity(&blob, &blob)
+            .expect("repeated warm blob should match itself");
+    }
+
+    #[test]
+    fn parity_reports_diff_when_file_added_between_warms() {
+        let old_blob = bincode::serialize(&base_artifact()).expect("serialize old artifact");
+
+        let mut new_artifact = base_artifact();
+        new_artifact.nodes.push(file_node("src/added.rs"));
+        let new_blob = bincode::serialize(&new_artifact).expect("serialize new artifact");
+
+        let err = assert_graph_artifact_blob_parity(&old_blob, &new_blob)
+            .expect_err("added file should produce a parity diff");
+        match err {
+            GraphArtifactBlobParityError::Diff(diff) => {
+                assert!(
+                    diff.files.added_count >= 1,
+                    "expected at least one added file, got {}",
+                    diff.files.added_count
+                );
+            }
+            other => panic!("expected Diff variant, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn td55_equivalence_fixture_builds_matching_artifact_blobs() {
         let old_blob = crate::test_helpers::td55_equivalence_fixture_artifact_blob();
         let new_blob = crate::test_helpers::td55_equivalence_fixture_artifact_blob();

@@ -323,7 +323,7 @@ pub(crate) fn td55_cache_reuse_scip_fixture() -> Td55ScipFixture {
 /// definitions (role bit = Definition).  `references` are `(symbol,
 /// symbol_roles)` occurrences without the definition bit so they are
 /// treated as references/calls — used to establish cross-file edges.
-
+///
 /// Build a td55 incremental-shaped fixture where one partition's SCIP
 /// content is deterministically changed, producing a different cache key
 /// for that partition while the other partition remains byte-identical.
