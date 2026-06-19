@@ -183,6 +183,25 @@ pub struct HealthReport {
     pub low_confidence_note_count: i64,
     pub stale_note_count: i64,
     pub stale_notes_by_folder: Vec<StaleFolder>,
+    pub lifecycle: LifecycleHealth,
+    pub recent_sweep: RecentSweepMetrics,
+}
+
+/// Lifecycle-status counts for a project's notes.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LifecycleHealth {
+    pub active_notes: i64,
+    pub archived_notes: i64,
+}
+
+/// Most recent housekeeping/operator lifecycle sweep counters surfaced through
+/// `memory_health`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RecentSweepMetrics {
+    pub last_sweep_at: Option<String>,
+    pub last_decayed_count: i64,
+    pub last_archived_count: i64,
+    pub last_superseded_source_count: i64,
 }
 
 /// Classification assigned during ADR-054 extracted-note corpus audits.
