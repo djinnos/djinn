@@ -4,7 +4,7 @@ use super::*;
 // close is valid from every non-closed state
 #[case("open", TransitionAction::Close, "closed", None)]
 #[case("in_progress", TransitionAction::Close, "closed", None)]
-#[case("verifying", TransitionAction::Close, "closed", None)]
+// (verifying status removed; Close from any non-closed state is still covered)
 #[case("needs_task_review", TransitionAction::Close, "closed", None)]
 #[case("in_task_review", TransitionAction::Close, "closed", None)]
 #[case("approved", TransitionAction::Close, "closed", None)]
@@ -133,7 +133,7 @@ async fn valid_transition(
 // guard masking the state-machine error.
 
 #[rstest]
-#[case("open", TransitionAction::SubmitVerification)]
+#[case("open", TransitionAction::SubmitTaskReview)]
 #[case("open", TransitionAction::SubmitTaskReview)]
 #[case("open", TransitionAction::TaskReviewStart)]
 #[case("open", TransitionAction::TaskReviewApprove)]

@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueType {
-    /// Standard implementation task — full worker lifecycle with verification and review.
+    /// Standard implementation task — full worker lifecycle with review.
     Task,
     /// A product feature — same full lifecycle as `task`.
     Feature,
@@ -62,7 +62,7 @@ impl IssueType {
     }
 
     /// Returns `true` for types that use the simple lifecycle
-    /// (open → in_progress → closed), skipping verification and review phases.
+    /// (open → in_progress → closed), skipping review phase.
     pub fn uses_simple_lifecycle(&self) -> bool {
         matches!(
             self,
@@ -128,9 +128,7 @@ pub struct Task {
     pub acceptance_criteria: String,
     pub reopen_count: i64,
     pub continuation_count: i64,
-    pub verification_failure_count: i64,
     pub total_reopen_count: i64,
-    pub total_verification_failure_count: i64,
     pub intervention_count: i64,
     pub last_intervention_at: Option<String>,
     pub created_at: String,
@@ -143,7 +141,7 @@ pub struct Task {
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub pr_url: Option<String>,
     /// JSON metadata about an active merge conflict (set by conflict transitions
-    /// and worktree rebase failures; cleared on submit_verification/close).
+    /// and worktree rebase failures; cleared on close).
     pub merge_conflict_metadata: Option<String>,
     /// JSON array of memory note permalinks associated with this task.
     pub memory_refs: String,
@@ -186,7 +184,6 @@ pub struct ActivityEntry {
 pub enum TaskStatus {
     Open,
     InProgress,
-    Verifying,
     NeedsTaskReview,
     InTaskReview,
     /// Reviewer approved; waiting for PR to be created (or GitHub App to create it).
@@ -206,7 +203,6 @@ impl TaskStatus {
         match self {
             Self::Open => "open",
             Self::InProgress => "in_progress",
-            Self::Verifying => "verifying",
             Self::NeedsTaskReview => "needs_task_review",
             Self::InTaskReview => "in_task_review",
             Self::Approved => "approved",
@@ -223,7 +219,6 @@ impl TaskStatus {
         match s {
             "open" => Ok(Self::Open),
             "in_progress" => Ok(Self::InProgress),
-            "verifying" => Ok(Self::Verifying),
             "needs_task_review" => Ok(Self::NeedsTaskReview),
             "in_task_review" => Ok(Self::InTaskReview),
             "approved" => Ok(Self::Approved),
@@ -255,16 +250,11 @@ pub enum TransitionAction {
     /// submitted; when its branch is NOT durable the host routes a worker redo
     /// (`ReviewResponse`), but the worker can't walk `start` (legal only from
     /// `open`) so the run never moved off `needs_task_review` and the post-worker
-    /// `submit_verification` (legal only from `in_progress`) no-op'd — verification
-    /// was skipped and the task got review-dispatched without it. This action
+    /// submission no-op'd — the task got review-dispatched without it. This action
     /// walks `needs_task_review → in_progress` so the redo ends with a legal
-    /// `submit_verification`, identical to the `NewTask` path. No AC/blocker gate
+    /// submit, identical to the `NewTask` path. No AC/blocker gate
     /// (the task already passed `start` once).
     ResumeWorker,
-    SubmitVerification,
-    VerificationPass,
-    VerificationFail,
-    ReleaseVerification,
     SubmitTaskReview,
     TaskReviewStart,
     TaskReviewReject,
@@ -312,9 +302,7 @@ impl TransitionAction {
     pub fn requires_reason(&self) -> bool {
         matches!(
             self,
-            Self::VerificationFail
-                | Self::ReleaseVerification
-                | Self::TaskReviewReject
+            Self::TaskReviewReject
                 | Self::TaskReviewRejectStale
                 | Self::TaskReviewRejectConflict
                 | Self::Reopen
@@ -332,10 +320,6 @@ impl TransitionAction {
         match s {
             "start" => Ok(Self::Start),
             "resume_worker" => Ok(Self::ResumeWorker),
-            "submit_verification" => Ok(Self::SubmitVerification),
-            "verification_pass" => Ok(Self::VerificationPass),
-            "verification_fail" => Ok(Self::VerificationFail),
-            "release_verification" => Ok(Self::ReleaseVerification),
             "submit_task_review" => Ok(Self::SubmitTaskReview),
             "task_review_start" => Ok(Self::TaskReviewStart),
             "task_review_reject" => Ok(Self::TaskReviewReject),
@@ -380,10 +364,6 @@ pub struct TransitionApply {
     pub reset_continuation: bool,
     /// Increment `continuation_count` by 1 (for stale reopen detection).
     pub increment_continuation: bool,
-    /// Increment `verification_failure_count` by 1.
-    pub increment_verification_failure: bool,
-    /// Reset `verification_failure_count` to 0.
-    pub reset_verification_failure: bool,
     /// Set `closed_at` to the current timestamp.
     pub set_closed_at: bool,
     /// Set `closed_at` to NULL.
@@ -409,8 +389,6 @@ impl Default for TransitionApply {
             increment_reopen: false,
             reset_continuation: false,
             increment_continuation: false,
-            increment_verification_failure: false,
-            reset_verification_failure: false,
             set_closed_at: false,
             clear_closed_at: false,
             close_reason: None,
@@ -456,7 +434,6 @@ pub fn compute_transition(
             // legal from `needs_task_review`; carries no AC/blocker gate (unlike
             // `Start`) because the task already cleared those when it first
             // started. Lands at `in_progress` so the post-worker
-            // `submit_verification` walk succeeds and verification runs before
             // the next review — same as the `NewTask` path.
             if *from != TaskStatus::NeedsTaskReview {
                 return bad("resume_worker is only valid from needs_task_review");
@@ -464,49 +441,9 @@ pub fn compute_transition(
             TransitionApply::simple(TaskStatus::InProgress)
         }
 
-        TransitionAction::SubmitVerification => {
-            if *from != TaskStatus::InProgress {
-                return bad("submit_verification is only valid from in_progress");
-            }
-            TransitionApply {
-                to_status: Some(TaskStatus::Verifying),
-                clear_merge_conflict_metadata: true,
-                ..Default::default()
-            }
-        }
-
-        TransitionAction::VerificationPass => {
-            if *from != TaskStatus::Verifying {
-                return bad("verification_pass is only valid from verifying");
-            }
-            TransitionApply {
-                to_status: Some(TaskStatus::NeedsTaskReview),
-                reset_verification_failure: true,
-                ..Default::default()
-            }
-        }
-
-        TransitionAction::VerificationFail => {
-            if *from != TaskStatus::Verifying {
-                return bad("verification_fail is only valid from verifying");
-            }
-            TransitionApply {
-                to_status: Some(TaskStatus::Open),
-                increment_verification_failure: true,
-                ..Default::default()
-            }
-        }
-
-        TransitionAction::ReleaseVerification => {
-            if *from != TaskStatus::Verifying {
-                return bad("release_verification is only valid from verifying");
-            }
-            TransitionApply::simple(TaskStatus::Open)
-        }
-
         TransitionAction::SubmitTaskReview => {
-            if !matches!(from, TaskStatus::InProgress | TaskStatus::Verifying) {
-                return bad("submit_task_review is only valid from in_progress or verifying");
+            if *from != TaskStatus::InProgress {
+                return bad("submit_task_review is only valid from in_progress");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::NeedsTaskReview),
@@ -643,14 +580,9 @@ pub fn compute_transition(
         TransitionAction::Escalate => {
             if !matches!(
                 from,
-                TaskStatus::Open
-                    | TaskStatus::InProgress
-                    | TaskStatus::InTaskReview
-                    | TaskStatus::Verifying
+                TaskStatus::Open | TaskStatus::InProgress | TaskStatus::InTaskReview
             ) {
-                return bad(
-                    "escalate is only valid from open, in_progress, in_task_review, or verifying",
-                );
+                return bad("escalate is only valid from open, in_progress, or in_task_review");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::NeedsLeadIntervention),
@@ -680,7 +612,6 @@ pub fn compute_transition(
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
                 reset_continuation: true,
-                reset_verification_failure: true,
                 record_intervention: true,
                 ..Default::default()
             }
@@ -791,7 +722,7 @@ pub fn compute_transition(
 ///
 /// For `spike`, `research`, `decomposition`, and `review` task types the simple
 /// lifecycle applies: `open → in_progress → closed`.  Actions that belong only to
-/// the full worker lifecycle (submit_verification, verification_*, task_review_*,
+/// the full worker lifecycle (task_review_*,
 /// lead_intervention_*) are rejected for these types.
 ///
 /// All other issue types (task, feature, bug) use the full lifecycle via
@@ -844,10 +775,9 @@ pub fn compute_transition_for_issue_type(
 mod tests {
     use super::*;
 
-    const STATUSES: [TaskStatus; 11] = [
+    const STATUSES: [TaskStatus; 10] = [
         TaskStatus::Open,
         TaskStatus::InProgress,
-        TaskStatus::Verifying,
         TaskStatus::NeedsTaskReview,
         TaskStatus::InTaskReview,
         TaskStatus::Approved,
@@ -858,13 +788,9 @@ mod tests {
         TaskStatus::Closed,
     ];
 
-    const ACTIONS: [TransitionAction; 30] = [
+    const ACTIONS: [TransitionAction; 26] = [
         TransitionAction::Start,
         TransitionAction::ResumeWorker,
-        TransitionAction::SubmitVerification,
-        TransitionAction::VerificationPass,
-        TransitionAction::VerificationFail,
-        TransitionAction::ReleaseVerification,
         TransitionAction::SubmitTaskReview,
         TransitionAction::TaskReviewStart,
         TransitionAction::TaskReviewReject,
@@ -897,20 +823,9 @@ mod tests {
             (TransitionAction::ResumeWorker, TaskStatus::NeedsTaskReview) => {
                 Some(TaskStatus::InProgress)
             }
-            (TransitionAction::SubmitVerification, TaskStatus::InProgress) => {
-                Some(TaskStatus::Verifying)
-            }
-            (TransitionAction::VerificationPass, TaskStatus::Verifying) => {
+            (TransitionAction::SubmitTaskReview, TaskStatus::InProgress) => {
                 Some(TaskStatus::NeedsTaskReview)
             }
-            (TransitionAction::VerificationFail, TaskStatus::Verifying) => Some(TaskStatus::Open),
-            (TransitionAction::ReleaseVerification, TaskStatus::Verifying) => {
-                Some(TaskStatus::Open)
-            }
-            (
-                TransitionAction::SubmitTaskReview,
-                TaskStatus::InProgress | TaskStatus::Verifying,
-            ) => Some(TaskStatus::NeedsTaskReview),
             (TransitionAction::TaskReviewStart, TaskStatus::NeedsTaskReview) => {
                 Some(TaskStatus::InTaskReview)
             }
@@ -937,10 +852,7 @@ mod tests {
             }
             (
                 TransitionAction::Escalate,
-                TaskStatus::Open
-                | TaskStatus::InProgress
-                | TaskStatus::InTaskReview
-                | TaskStatus::Verifying,
+                TaskStatus::Open | TaskStatus::InProgress | TaskStatus::InTaskReview,
             ) => Some(TaskStatus::NeedsLeadIntervention),
             (TransitionAction::LeadInterventionStart, TaskStatus::NeedsLeadIntervention) => {
                 Some(TaskStatus::InLeadIntervention)
@@ -1012,77 +924,13 @@ mod tests {
     }
 
     #[test]
-    fn verify_before_review_walk() {
-        // The intended post-worker walk under the "verify before review"
-        // pipeline: worker submits → verifying → (green) → needs_task_review.
-        // The reviewer leg arrives later as a separate ReviewResume dispatch.
-        let submit = compute_transition(
-            &TransitionAction::SubmitVerification,
-            &TaskStatus::InProgress,
-            None,
-        )
-        .expect("submit_verification from in_progress is valid");
-        assert_eq!(submit.to_status, Some(TaskStatus::Verifying));
-        // The conflict metadata is cleared on entry to verification (a fresh
-        // verify run shouldn't carry a prior cycle's conflict context).
-        assert!(submit.clear_merge_conflict_metadata);
-
-        let pass = compute_transition(
-            &TransitionAction::VerificationPass,
-            &TaskStatus::Verifying,
-            None,
-        )
-        .expect("verification_pass from verifying is valid");
-        assert_eq!(pass.to_status, Some(TaskStatus::NeedsTaskReview));
-        // A clean verification resets the consecutive-failure counter.
-        assert!(pass.reset_verification_failure);
-    }
-
-    #[test]
-    fn review_response_worker_redo_walk_reaches_verifying() {
-        // Regression for the skipped-verifying hop (task u4fx): a non-durable
-        // `needs_task_review` routes a worker redo. The worker pre-stage can't
-        // walk `start` (legal only from `open`), so the supervisor uses
-        // `resume_worker` to move `needs_task_review → in_progress`; the
-        // post-worker `submit_verification` then succeeds and the task enters
-        // `verifying` — verification runs before the next review, exactly like
-        // the NewTask path.
-        let resume = compute_transition(
-            &TransitionAction::ResumeWorker,
-            &TaskStatus::NeedsTaskReview,
-            None,
-        )
-        .expect("resume_worker from needs_task_review is valid");
-        assert_eq!(resume.to_status, Some(TaskStatus::InProgress));
-
-        let submit = compute_transition(
-            &TransitionAction::SubmitVerification,
-            &resume.to_status.clone().expect("resume sets status"),
-            None,
-        )
-        .expect("submit_verification from in_progress (after resume) is valid");
-        assert_eq!(submit.to_status, Some(TaskStatus::Verifying));
-
-        // And the green leg continues to needs_task_review, ready for the
-        // reviewer-only ReviewResume dispatch.
-        let pass = compute_transition(
-            &TransitionAction::VerificationPass,
-            &TaskStatus::Verifying,
-            None,
-        )
-        .expect("verification_pass from verifying is valid");
-        assert_eq!(pass.to_status, Some(TaskStatus::NeedsTaskReview));
-    }
-
-    #[test]
     fn resume_worker_invalid_outside_needs_task_review() {
         // `resume_worker` is the redo-only re-entry; it must NOT be a backdoor
         // into in_progress from any other state (e.g. open uses `start` with its
-        // AC/blocker gate; verifying/in_task_review have their own legal exits).
+        // AC/blocker gate; in_task_review has its own legal exits).
         for from in [
             TaskStatus::Open,
             TaskStatus::InProgress,
-            TaskStatus::Verifying,
             TaskStatus::InTaskReview,
             TaskStatus::Approved,
             TaskStatus::Closed,
@@ -1092,55 +940,6 @@ mod tests {
                 "resume_worker must be invalid from {from:?}"
             );
         }
-    }
-
-    #[test]
-    fn verification_fail_returns_to_open_and_increments() {
-        // Red verification releases the task for worker rework and bumps the
-        // failure counter (the escalation ladder consults it).
-        let fail = compute_transition(
-            &TransitionAction::VerificationFail,
-            &TaskStatus::Verifying,
-            None,
-        )
-        .expect("verification_fail from verifying is valid");
-        assert_eq!(fail.to_status, Some(TaskStatus::Open));
-        assert!(fail.increment_verification_failure);
-    }
-
-    #[test]
-    fn verification_actions_invalid_outside_their_source_states() {
-        // Guard rails: the verification entry/exit transitions are only legal
-        // from their intended source states, so a stray dispatch can't walk a
-        // task through verification from the wrong place.
-        assert!(
-            compute_transition(
-                &TransitionAction::VerificationPass,
-                &TaskStatus::InProgress,
-                None
-            )
-            .is_err()
-        );
-        assert!(
-            compute_transition(
-                &TransitionAction::SubmitVerification,
-                &TaskStatus::NeedsTaskReview,
-                None
-            )
-            .is_err()
-        );
-        // submit_task_review remains legal from BOTH in_progress and verifying
-        // (the legacy direct-to-review path stays available for the host /
-        // recovery), so verifying → needs_task_review can also be reached that
-        // way without going through verification_pass.
-        assert!(
-            compute_transition(
-                &TransitionAction::SubmitTaskReview,
-                &TaskStatus::Verifying,
-                None
-            )
-            .is_ok()
-        );
     }
 
     #[test]
@@ -1308,15 +1107,6 @@ mod tests {
         assert!(!pm_conflict.clear_merge_conflict_metadata);
 
         // Clearing transitions
-        let submit_verify = compute_transition(
-            &TransitionAction::SubmitVerification,
-            &TaskStatus::InProgress,
-            None,
-        )
-        .unwrap();
-        assert!(submit_verify.clear_merge_conflict_metadata);
-        assert!(!submit_verify.set_merge_conflict_metadata);
-
         let submit_review = compute_transition(
             &TransitionAction::SubmitTaskReview,
             &TaskStatus::InProgress,
