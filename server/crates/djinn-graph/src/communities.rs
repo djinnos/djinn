@@ -522,38 +522,46 @@ fn derive_label(graph: &RepoDependencyGraph, members: &[usize]) -> String {
 
     if !member_segments.is_empty() {
         // Find the first component index where not all members agree.
-        let min_len = member_segments.iter().map(|s| s.len()).min().unwrap_or(0);
+        // Length differences count as distinguishing: if one path ends
+        // while another has another segment, the extra segment can be
+        // useful. If every path has exactly the same remaining segments,
+        // there is no distinguishing path component and we should use
+        // keyword-derived tokens instead of returning a shared prefix like
+        // "crates" or "src".
+        let max_len = member_segments.iter().map(|s| s.len()).max().unwrap_or(0);
         let mut distinguishing_idx: Option<usize> = None;
-        for i in 0..min_len {
-            let first = &member_segments[0][i];
-            if member_segments.iter().any(|s| &s[i] != first) {
+        for i in 0..max_len {
+            let first = member_segments[0].get(i).map(String::as_str);
+            if member_segments
+                .iter()
+                .any(|s| s.get(i).map(String::as_str) != first)
+            {
                 distinguishing_idx = Some(i);
                 break;
             }
         }
 
-        // Vote on the component at the distinguishing index (or index 0
-        // if all segments are identical — in which case the dominant vote
-        // will still pass the ≥ 50% threshold).
-        let vote_idx = distinguishing_idx.unwrap_or(0);
-        let mut segment_counts: BTreeMap<String, usize> = BTreeMap::new();
-        let members_with_path = member_segments.len();
-        for segs in &member_segments {
-            if segs.len() > vote_idx {
-                *segment_counts.entry(segs[vote_idx].clone()).or_default() += 1;
+        if let Some(vote_idx) = distinguishing_idx {
+            let mut segment_counts: BTreeMap<String, usize> = BTreeMap::new();
+            let members_with_path = member_segments.len();
+            for segs in &member_segments {
+                if segs.len() > vote_idx {
+                    *segment_counts.entry(segs[vote_idx].clone()).or_default() += 1;
+                }
+            }
+
+            if let Some((seg, &count)) = segment_counts
+                .iter()
+                .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+            {
+                if count * 2 >= members_with_path {
+                    return seg.clone();
+                }
             }
         }
 
-        if let Some((seg, &count)) = segment_counts
-            .iter()
-            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
-        {
-            if count * 2 >= members_with_path {
-                return seg.clone();
-            }
-        }
-
-        // No segment dominates — fall back to top keyword token.
+        // No segment distinguishes this community (or no distinguishing
+        // segment dominates) — fall back to top keyword token.
         let keywords = derive_keywords(graph, members, KEYWORDS_PER_COMMUNITY);
         if let Some(top) = keywords.into_iter().next() {
             return top;
@@ -1118,6 +1126,62 @@ mod tests {
             "community labels should be pairwise distinct, got: {:?}",
             labels
         );
+    }
+
+    #[test]
+    fn label_falls_back_to_keywords_when_paths_are_not_distinguishing() {
+        use crate::repo_graph::{
+            REPO_GRAPH_ARTIFACT_VERSION, RepoGraphArtifact, RepoGraphArtifactEdge,
+        };
+
+        let mk_node = |name: &str| RepoGraphNode {
+            id: RepoNodeKey::Symbol(format!("symbol:{name}")),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: name.to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(PathBuf::from("server/crates/djinn-payments/src/lib.rs")),
+            symbol: Some(format!("symbol:{name}")),
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: vec![],
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: Some("server".to_string()),
+            route_framework: None,
+            route_handler_symbol: None,
+        };
+
+        let edge = |s, t| RepoGraphArtifactEdge {
+            source: s,
+            target: t,
+            kind: RepoGraphEdgeKind::SymbolReference,
+            weight: 5.0,
+            evidence_count: 1,
+            confidence: 0.9,
+            reason: None,
+            step: None,
+        };
+
+        let artifact = RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes: vec![
+                mk_node("payments_processor"),
+                mk_node("payments_gateway"),
+                mk_node("payments_refund"),
+            ],
+            edges: vec![edge(0, 1), edge(1, 0), edge(1, 2), edge(2, 1)],
+            symbol_ranges: BTreeMap::new(),
+            communities: Vec::new(),
+            processes: Vec::new(),
+            route_exclusion_config: Default::default(),
+            layout_positions: BTreeMap::new(),
+        };
+        let graph = RepoDependencyGraph::from_artifact(&artifact);
+
+        assert_eq!(derive_label(&graph, &[0, 1, 2]), "payments");
     }
 
     #[test]
