@@ -169,10 +169,7 @@ fn find_next_block(body: &str, offset: usize) -> Option<(String, String, String,
 
         // Skip self-closing tags like `<br/>` and non-block tags.
         // Find end of opening tag '>'.
-        let gt_in_after = match after_open.find('>') {
-            Some(i) => i,
-            None => return None,
-        };
+        let gt_in_after = after_open.find('>')?;
         let attrs_str = after_open[tag_end_in_after..gt_in_after].trim();
 
         // Look for matching closing tag.
