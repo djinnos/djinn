@@ -248,7 +248,7 @@ where
         }
         "shell" => {
             let root = state.working_root_for(worktree_path);
-            call_shell(state, &call.arguments, &root).await
+            call_shell(state, &call.arguments, &root, session_role).await
         }
         "read" => {
             let root = state.working_root_for(worktree_path);
