@@ -77,6 +77,10 @@ pub fn record_resolved_workspace_dir(project_id: &str, workspace_dir: &str) {
 fn warm_step_metric_label(label: &str) -> &'static str {
     match label {
         "clippy" => djinn_telemetry::cargo_warm_step::STEP_CLIPPY,
+        "clippy (all-features)" => djinn_telemetry::cargo_warm_step::STEP_CLIPPY,
+        "clippy (default-features)" => {
+            djinn_telemetry::cargo_warm_step::STEP_CLIPPY_DEFAULT_FEATURES
+        }
         "build (clippy fallback)" => djinn_telemetry::cargo_warm_step::STEP_BUILD_FALLBACK,
         "test --no-run" => djinn_telemetry::cargo_warm_step::STEP_TEST_NO_RUN,
         _ => djinn_telemetry::cargo_warm_step::STEP_BUILD_FALLBACK,
@@ -123,6 +127,14 @@ mod tests {
         assert_eq!(
             warm_step_metric_label("clippy"),
             djinn_telemetry::cargo_warm_step::STEP_CLIPPY,
+        );
+        assert_eq!(
+            warm_step_metric_label("clippy (all-features)"),
+            djinn_telemetry::cargo_warm_step::STEP_CLIPPY,
+        );
+        assert_eq!(
+            warm_step_metric_label("clippy (default-features)"),
+            djinn_telemetry::cargo_warm_step::STEP_CLIPPY_DEFAULT_FEATURES,
         );
         assert_eq!(
             warm_step_metric_label("build (clippy fallback)"),
