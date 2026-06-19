@@ -162,26 +162,6 @@ impl RuntimeOps for StubRuntime {
     }
     async fn trigger_graph_warm(&self, _project_id: &str) {}
     async fn apply_user_model_change(&self) {}
-    async fn dispatch_verification_test(
-        &self,
-        _test_id: &str,
-        _project_id: &str,
-    ) -> Result<(), crate::bridge::RuntimeDispatchError> {
-        Err(crate::bridge::RuntimeDispatchError::Backend(
-            "stub: RuntimeOps::dispatch_verification_test not implemented".into(),
-        ))
-    }
-    async fn dispatch_verification(
-        &self,
-        _run_id: &str,
-        _project_id: &str,
-        _task_branch: &str,
-        _target_branch: &str,
-    ) -> Result<(), crate::bridge::RuntimeDispatchError> {
-        Err(crate::bridge::RuntimeDispatchError::Backend(
-            "stub: RuntimeOps::dispatch_verification not implemented".into(),
-        ))
-    }
     async fn teardown_taskrun_job(&self, _task_run_id: &str) -> Result<(), String> {
         Ok(())
     }

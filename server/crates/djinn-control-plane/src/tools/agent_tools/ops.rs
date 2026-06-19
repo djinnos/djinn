@@ -17,7 +17,6 @@ pub struct AgentModel {
     pub description: String,
     pub system_prompt_extensions: String,
     pub model_preference: Option<String>,
-    pub verification_command: Option<String>,
     pub mcp_servers: Vec<AnyJson>,
     pub skills: Vec<AnyJson>,
     pub is_default: bool,
@@ -40,7 +39,6 @@ impl From<&Agent> for AgentModel {
             description: r.description.clone(),
             system_prompt_extensions: r.system_prompt_extensions.clone(),
             model_preference: r.model_preference.clone(),
-            verification_command: r.verification_command.clone(),
             mcp_servers: parse_json_array_any(&r.mcp_servers),
             skills: parse_json_array_any(&r.skills),
             is_default: r.is_default,
@@ -72,8 +70,6 @@ pub struct AgentCreateParams {
     pub system_prompt_extensions: Option<String>,
     /// Preferred model ID (falls back to project default).
     pub model_preference: Option<String>,
-    /// Custom verification command (falls back to project default).
-    pub verification_command: Option<String>,
     /// Additional MCP server refs for this agent.
     pub mcp_servers: Option<Vec<AnyJson>>,
     /// Skills (prompt templates) available to this agent.
@@ -210,7 +206,7 @@ pub async fn create_agent(
                 description: params.description.as_deref().unwrap_or(""),
                 system_prompt_extensions: params.system_prompt_extensions.as_deref().unwrap_or(""),
                 model_preference: params.model_preference.as_deref(),
-                verification_command: params.verification_command.as_deref(),
+                verification_command: None,
                 mcp_servers: mcp_servers_json.as_deref(),
                 skills: skills_json.as_deref(),
                 is_default: false,
