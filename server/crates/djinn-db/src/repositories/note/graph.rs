@@ -262,6 +262,15 @@ impl NoteRepository {
             }
         };
 
+        let admission_dropped_note_count: i64 = sqlx::query_scalar(
+            r#"SELECT COALESCE(SUM(admission_dropped_note_count), 0)::BIGINT
+               FROM consolidation_run_metrics
+               WHERE project_id = $1"#,
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+
         Ok(HealthReport {
             total_notes,
             broken_link_count,
@@ -269,6 +278,7 @@ impl NoteRepository {
             low_confidence_note_count,
             stale_note_count,
             stale_notes_by_folder,
+            admission_dropped_note_count,
             lifecycle: LifecycleHealth {
                 active_notes,
                 archived_notes,
@@ -543,11 +553,11 @@ impl NoteRepository {
         let mut filtered = Vec::new();
 
         for (id, score) in candidate_scores {
-            let note_type = sqlx::query_scalar!(
-                "SELECT note_type FROM notes WHERE id = $1 AND project_id = $2 LIMIT 1",
-                id,
-                project_id
+            let note_type: Option<String> = sqlx::query_scalar(
+                "SELECT note_type FROM notes WHERE id = $1 AND project_id = $2 AND status = 'active' LIMIT 1",
             )
+            .bind(&id)
+            .bind(project_id)
             .fetch_optional(self.db.pool())
             .await?;
 
@@ -662,7 +672,26 @@ impl NoteRepository {
             }
         }
 
-        let mut ranked: Vec<(String, f64)> = scores.into_iter().collect();
+        let candidate_ids: Vec<String> = scores.keys().cloned().collect();
+        if candidate_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let placeholders = crate::repositories::pg_placeholders(candidate_ids.len(), 2);
+        let sql = format!(
+            "SELECT id FROM notes WHERE project_id = $1 AND status = 'active' AND id IN ({placeholders})"
+        );
+        let mut query = sqlx::query_scalar::<_, String>(&sql).bind(project_id);
+        for note_id in &candidate_ids {
+            query = query.bind(note_id);
+        }
+        let active_ids: std::collections::HashSet<String> =
+            query.fetch_all(self.db.pool()).await?.into_iter().collect();
+
+        let mut ranked: Vec<(String, f64)> = scores
+            .into_iter()
+            .filter(|(note_id, _)| active_ids.contains(note_id))
+            .collect();
         ranked.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
