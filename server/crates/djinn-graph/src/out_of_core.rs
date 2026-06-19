@@ -183,6 +183,7 @@ impl ScopeEntry {
 pub struct OutOfCoreStore {
     root: PathBuf,
     index: BTreeMap<ShardId, PathBuf>,
+    order: Vec<ShardId>,
 }
 
 impl OutOfCoreStore {
@@ -204,9 +205,21 @@ impl OutOfCoreStore {
             BTreeMap::new()
         };
 
+        let order_path = root.join("order.json");
+        let order: Vec<ShardId> = if order_path.exists() {
+            let data = std::fs::read_to_string(&order_path).map_err(|e| OutOfCoreError::Io {
+                path: order_path.clone(),
+                source: e,
+            })?;
+            serde_json::from_str(&data).unwrap_or_else(|_| index.keys().cloned().collect())
+        } else {
+            index.keys().cloned().collect()
+        };
+
         Ok(Self {
             root: root.to_path_buf(),
             index,
+            order,
         })
     }
 
@@ -220,6 +233,9 @@ impl OutOfCoreStore {
             path: path.clone(),
             source: e,
         })?;
+        if !self.index.contains_key(&entry.id) {
+            self.order.push(entry.id.clone());
+        }
         self.index
             .insert(entry.id.clone(), PathBuf::from(&filename));
         self.persist_index()?;
@@ -248,7 +264,18 @@ impl OutOfCoreStore {
     /// Return all shard ids in the store. Does **not** load payload data
     /// from disk — only reads the in-memory index.
     pub fn enumerate_ids(&self) -> Vec<ShardId> {
-        self.index.keys().cloned().collect()
+        let mut ids: Vec<_> = self
+            .order
+            .iter()
+            .filter(|id| self.index.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in self.index.keys() {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        ids
     }
 
     /// Return the number of shards in the store.
@@ -283,6 +310,18 @@ impl OutOfCoreStore {
         })?;
         std::fs::rename(&tmp_path, &index_path).map_err(|e| OutOfCoreError::Io {
             path: index_path,
+            source: e,
+        })?;
+        let order_path = self.root.join("order.json");
+        let order_tmp_path = self.root.join("order.json.tmp");
+        let order_json = serde_json::to_string(&self.order)
+            .map_err(|e| OutOfCoreError::Serialize(e.to_string()))?;
+        std::fs::write(&order_tmp_path, order_json).map_err(|e| OutOfCoreError::Io {
+            path: order_tmp_path.clone(),
+            source: e,
+        })?;
+        std::fs::rename(&order_tmp_path, &order_path).map_err(|e| OutOfCoreError::Io {
+            path: order_path,
             source: e,
         })?;
         Ok(())
