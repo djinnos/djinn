@@ -182,6 +182,7 @@ pub fn build_task_run_job(
     secret_name: &str,
     project_image_tag: &str,
     services: &[BackingServiceSpec],
+    policy: Option<&djinn_stack::environment::CargoCachePolicy>,
 ) -> Job {
     let task_run_id_str = task_run_id.to_string();
     let labels = job_labels(&task_run_id_str);
@@ -189,7 +190,7 @@ pub fn build_task_run_job(
 
     // Worker env carries the base task-run knobs plus one connection env var
     // per injected backing service (e.g. TEST_POSTGRES_URL → 127.0.0.1:5432).
-    let mut worker_env = build_task_run_env(config, &task_run_id_str, project_id);
+    let mut worker_env = build_task_run_env(config, &task_run_id_str, project_id, policy);
     worker_env.extend(services.iter().map(sidecar_conn_env));
 
     let container = Container {
@@ -441,6 +442,7 @@ fn build_task_run_env(
     config: &KubernetesConfig,
     task_run_id_str: &str,
     project_id: &str,
+    policy: Option<&djinn_stack::environment::CargoCachePolicy>,
 ) -> Vec<EnvVar> {
     let mut env = vec![
         env_var("DJINN_SERVER_ADDR", &config.server_addr),
@@ -501,7 +503,7 @@ fn build_task_run_env(
         env.push(env_var("DJINN_DEBUG_PROVIDER_REQUEST", &v));
     }
 
-    env.extend(task_run_cache_env_vars(project_id, task_run_id_str, None));
+    env.extend(task_run_cache_env_vars(project_id, task_run_id_str, policy));
     env
 }
 
@@ -659,7 +661,9 @@ fn task_run_cache_env_vars(
         &cargo_target_run_dir(task_run_id).display().to_string(),
     ));
     let (incremental, clear_wrapper) = match policy {
-        Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_)) if override_.sccache => {
+        Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_))
+            if override_.sccache =>
+        {
             ("0", false)
         }
         _ => ("1", true),
@@ -780,6 +784,7 @@ mod tests {
             secret_name,
             project_image,
             &[],
+            None,
         );
 
         // Metadata.
@@ -1062,6 +1067,7 @@ mod tests {
             "djinn-taskrun-test",
             "registry.example:5000/djinn-project-p:abc123def456",
             &[],
+            None,
         );
 
         let pod = job
@@ -1101,6 +1107,7 @@ mod tests {
             "djinn-taskrun-test",
             "registry.example:5000/djinn-project-p:abc123def456",
             &[],
+            None,
         );
 
         let pod = job
@@ -1511,6 +1518,7 @@ mod tests {
             "djinn-taskrun-first",
             "registry.example:5000/djinn-project-p:abc123def456",
             &[],
+            None,
         );
         let second_job = build_task_run_job(
             &cfg,
@@ -1519,6 +1527,7 @@ mod tests {
             "djinn-taskrun-second",
             "registry.example:5000/djinn-project-p:abc123def456",
             &[],
+            None,
         );
 
         let first_envs = task_run_job_envs(&first_job);
@@ -1582,6 +1591,7 @@ mod tests {
             "djinn-taskrun-test",
             "registry.example:5000/djinn-project-p:abc123def456",
             &[],
+            None,
         );
 
         let pod = job
@@ -1628,6 +1638,7 @@ mod tests {
             "djinn-taskrun-bare",
             "registry.example:5000/djinn-project-p:abc123def456",
             &[],
+            None,
         );
         let bare_pod = bare
             .spec
@@ -1656,6 +1667,7 @@ mod tests {
             "djinn-taskrun-svc",
             "registry.example:5000/djinn-project-p:abc123def456",
             std::slice::from_ref(&postgres),
+            None,
         );
         let pod = job
             .spec
@@ -1691,6 +1703,100 @@ mod tests {
                 .iter()
                 .any(|v| v.name == crate::sidecar::SIDECAR_DSHM_VOLUME),
             "svc-dshm volume must be present when a service is injected"
+        );
+    }
+
+    /// Consistency test (epic AC #4): for a given `CargoCachePolicy::Explicit`,
+    /// `warm_cache_env_vars` and `task_run_cache_env_vars` resolve
+    /// CARGO_INCREMENTAL and RUSTC_WRAPPER consistently — they agree on whether
+    /// sccache is in use and incremental is enabled, respecting the intentional
+    /// warm-vs-worker posture difference:
+    /// - Warm compiles the shared base with incremental disabled (sccache
+    ///   compatible) when sccache=true; worker disables incremental AND keeps
+    ///   RUSTC_WRAPPER so the repo's sccache wrapper applies.
+    /// - Warm does NOT set RUSTC_WRAPPER (the repo's `.cargo/config.toml`
+    ///   handles it); worker only clears RUSTC_WRAPPER when sccache=false so
+    ///   incremental works.
+    #[test]
+    fn policy_derived_env_consistent_across_warm_and_worker() {
+        let project_id = "consistency-test";
+        let task_run_id = Uuid::now_v7().to_string();
+
+        // sccache=true, incremental=false
+        let policy = djinn_stack::environment::CargoCachePolicy::Explicit(
+            djinn_stack::environment::CargoCachePolicyOverride {
+                workspace: true,
+                features: vec![],
+                all_features: false,
+                sccache: true,
+                incremental: false,
+                warm_commands: vec![],
+            },
+        );
+
+        let warm_vars = warm_cache_env_vars(project_id, Some(&policy));
+        let warm_env: BTreeMap<&str, &str> = warm_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
+        let worker_env: BTreeMap<&str, &str> = worker_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        // Both agree sccache is active: CARGO_INCREMENTAL=0
+        assert_eq!(
+            warm_env.get("CARGO_INCREMENTAL").copied(),
+            Some("0"),
+            "warm sets CARGO_INCREMENTAL=0 when sccache=true"
+        );
+        assert_eq!(
+            worker_env.get("CARGO_INCREMENTAL").copied(),
+            Some("0"),
+            "worker sets CARGO_INCREMENTAL=0 when sccache=true (agrees with warm)"
+        );
+
+        // Warm does NOT set RUSTC_WRAPPER — the repo config handles it.
+        assert!(
+            !warm_env.contains_key("RUSTC_WRAPPER"),
+            "warm must not force RUSTC_WRAPPER (repo .cargo/config.toml handles it)"
+        );
+        // Worker keeps RUSTC_WRAPPER (does NOT clear it) when sccache=true,
+        // so the repo's sccache wrapper applies.
+        assert!(
+            !worker_env.contains_key("RUSTC_WRAPPER"),
+            "worker must NOT clear RUSTC_WRAPPER when sccache=true (keep repo wrapper)"
+        );
+
+        // Shared cache routing is identical.
+        assert_eq!(
+            warm_env.get("CARGO_HOME"),
+            worker_env.get("CARGO_HOME"),
+            "CARGO_HOME must be identical between warm and worker"
+        );
+        assert_eq!(
+            warm_env.get("SCCACHE_DIR"),
+            worker_env.get("SCCACHE_DIR"),
+            "SCCACHE_DIR must be identical between warm and worker"
+        );
+
+        // Intentional warm-vs-worker posture difference preserved:
+        // warm writes the shared per-project base; worker uses a private dir.
+        let warm_target = warm_env
+            .get("CARGO_TARGET_DIR")
+            .expect("warm CARGO_TARGET_DIR set");
+        let worker_target = worker_env
+            .get("CARGO_TARGET_DIR")
+            .expect("worker CARGO_TARGET_DIR set");
+        assert_eq!(
+            *warm_target, "/cache/cargo-target/consistency-test",
+            "warm CARGO_TARGET_DIR must be the per-project shared base"
+        );
+        assert!(
+            worker_target.starts_with("/cache/cargo-target-runs/"),
+            "worker CARGO_TARGET_DIR must be a private per-run dir"
         );
     }
 }

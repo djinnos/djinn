@@ -6923,11 +6923,16 @@ expression: signatures
             "archived_notes": {
               "format": "int64",
               "type": "integer"
+            },
+            "deprecated_notes": {
+              "format": "int64",
+              "type": "integer"
             }
           },
           "required": [
             "active_notes",
-            "archived_notes"
+            "archived_notes",
+            "deprecated_notes"
           ],
           "type": "object"
         },
@@ -7713,6 +7718,205 @@ expression: signatures
         "code_chunks_failed"
       ],
       "title": "MemoryRepairEmbeddingsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "memory_run_enrichment",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "background": {
+          "description": "When true, schedule enrichment on a background tokio task and return\nimmediately with `status=\"queued\"`. When false (the default), run the\npass synchronously and embed the structured report in the response.\n\nBackground execution mirrors the diei roadmap's \"best-effort, never\nblocks retrieval\" constraint: the spawn path yields to the runtime so\n`memory_graph` (and the wider MCP surface) keep serving while the\npass runs.",
+          "nullable": true,
+          "type": "boolean"
+        },
+        "project": {
+          "description": "Project path, slug, or id (same forms accepted by other memory tools).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "RunEnrichmentParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "EnrichmentClaim": {
+          "description": "Claim node extracted by the enrichment pass — a decision or assertion the\nmemory records.",
+          "properties": {
+            "evidence_quote": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "source_note_id": {
+              "type": "string"
+            },
+            "statement": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "statement",
+            "source_note_id"
+          ],
+          "type": "object"
+        },
+        "EnrichmentEdge": {
+          "description": "Typed implicit edge between two notes (`builds_on` / `contradicts` /\n`supersedes` / `exemplifies` / `derived_from`).",
+          "properties": {
+            "confidence": {
+              "description": "Confidence in [0.0, 1.0].",
+              "format": "double",
+              "type": "number"
+            },
+            "evidence_quote": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "source_note_id": {
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_note_id",
+            "target_note_id",
+            "kind",
+            "confidence"
+          ],
+          "type": "object"
+        },
+        "EnrichmentEntity": {
+          "description": "Entity node extracted by the enrichment pass — recurring system or concept\n(\"dispatch gate\", \"circuit breaker\", \"slot actor\").",
+          "properties": {
+            "aliases": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "canonical_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "canonical_name"
+          ],
+          "type": "object"
+        },
+        "EnrichmentReport": {
+          "description": "Structured report returned by the enrichment pass.\n\nMirrors `djinn_agent::actors::slot::memory_enrichment::EnrichmentReport`\none-for-one. The server-side bridge converts between the two at the\nimplementation boundary so the MCP wire shape stays stable.",
+          "properties": {
+            "batches_sent": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "claims": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/EnrichmentClaim"
+              },
+              "type": "array"
+            },
+            "edges": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/EnrichmentEdge"
+              },
+              "type": "array"
+            },
+            "edges_dropped_wikilink_dup": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "entities": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/EnrichmentEntity"
+              },
+              "type": "array"
+            },
+            "entity_merges": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "notes_processed": {
+              "description": "Number of source notes processed. Uses `i64` on the MCP wire to avoid\nnonstandard unsigned integer schema formats.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "warnings": {
+              "default": [],
+              "description": "Non-fatal warnings — provider errors, parse failures, etc. The pass\nalways succeeds; warnings are surfaced in the response, never\npropagated as blocking failures.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "project_id",
+            "notes_processed",
+            "batches_sent",
+            "entity_merges",
+            "edges_dropped_wikilink_dup"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "MCP response for `memory_run_enrichment`. The `report` is present when\n`status=\"completed\"` (foreground execution). For\n`status=\"queued\"` (background execution) the report is `None`; the pass\nemits the structured report through its own `INFO` log line at finish.",
+      "properties": {
+        "error": {
+          "description": "Top-level failure: project not found, enrichment subsystem not\nconfigured, provider errors that propagate before the pass begins.\nPer-batch provider failures land in `report.warnings` rather than\nhere — the pass is best-effort and never blocks retrieval.",
+          "nullable": true,
+          "type": "string"
+        },
+        "project_id": {
+          "description": "Resolved DB project id (slug → id translation is performed by the\ntool's project resolver, same as every other memory tool).",
+          "nullable": true,
+          "type": "string"
+        },
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnrichmentReport"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "Structured enrichment report. Present only when\n`status=\"completed\"`. None when queued, and None when the trigger\nfails (in which case `error` is populated)."
+        },
+        "status": {
+          "description": "Status of the trigger call — see [`crate::bridge::EnrichmentStatus`].",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "MemoryRunEnrichmentResponse",
       "type": "object"
     }
   },

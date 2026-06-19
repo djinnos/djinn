@@ -23,6 +23,7 @@ mod move_ops;
 pub mod ops;
 mod reads;
 mod repair_embeddings;
+mod run_enrichment;
 mod search;
 pub(crate) mod summaries;
 mod write_dedup;
@@ -39,6 +40,8 @@ mod associations_tests;
 mod build_context_tests;
 #[cfg(test)]
 mod ops_tests;
+#[cfg(test)]
+mod run_enrichment_tests;
 #[cfg(test)]
 mod search_tests;
 #[cfg(test)]
@@ -58,6 +61,7 @@ impl DjinnMcpServer {
             + Self::memory_search_router()
             + Self::memory_associations_router()
             + Self::memory_repair_embeddings_router()
+            + Self::memory_run_enrichment_router()
     }
 }
 
