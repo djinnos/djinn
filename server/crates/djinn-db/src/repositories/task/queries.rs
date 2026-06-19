@@ -890,6 +890,7 @@ mod ready_projection_tests {
             .create(ProposalCreateInput {
                 title: "Frozen",
                 body: "",
+                body_format: None,
                 acceptance_criteria: None,
                 status: None,
             })

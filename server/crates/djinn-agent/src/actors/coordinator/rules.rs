@@ -1453,6 +1453,7 @@ mod tests {
             .create(ProposalCreateInput {
                 title: "Closeout",
                 body: "",
+            body_format: None,
                 acceptance_criteria: None,
                 status: None,
             })
@@ -1522,6 +1523,7 @@ mod tests {
             .create(ProposalCreateInput {
                 title: "Stranded",
                 body: "",
+            body_format: None,
                 acceptance_criteria: None,
                 status: None,
             })
@@ -1586,6 +1588,7 @@ mod tests {
             .create(ProposalCreateInput {
                 title: "Live spec",
                 body: "v1",
+            body_format: None,
                 acceptance_criteria: Some(r#"[{"criterion":"do X","met":false}]"#),
                 status: None,
             })
@@ -1612,6 +1615,7 @@ mod tests {
                 ProposalUpdateInput {
                     title: "Live spec v2",
                     body: "v2",
+            body_format: None,
                     acceptance_criteria: r#"[{"criterion":"do X better","met":false}]"#,
                     status: "building",
                     superseded_by: None,
@@ -1644,6 +1648,7 @@ mod tests {
             .create(ProposalCreateInput {
                 title: "Coalesce",
                 body: "v1",
+            body_format: None,
                 acceptance_criteria: Some(r#"[{"criterion":"do X","met":false}]"#),
                 status: None,
             })
@@ -1670,6 +1675,7 @@ mod tests {
                 ProposalUpdateInput {
                     title: "Coalesce v2",
                     body: "v2",
+            body_format: None,
                     acceptance_criteria: r#"[{"criterion":"do X v2","met":false}]"#,
                     status: "building",
                     superseded_by: None,
@@ -1683,6 +1689,7 @@ mod tests {
                 ProposalUpdateInput {
                     title: "Coalesce v3",
                     body: "v3",
+            body_format: None,
                     acceptance_criteria: r#"[{"criterion":"do X v3","met":false}]"#,
                     status: "building",
                     superseded_by: None,
@@ -1721,6 +1728,7 @@ mod tests {
             .create(ProposalCreateInput {
                 title: "Missed event",
                 body: "v1",
+            body_format: None,
                 acceptance_criteria: Some(r#"[{"criterion":"do X","met":false}]"#),
                 status: None,
             })
@@ -1748,6 +1756,7 @@ mod tests {
                 ProposalUpdateInput {
                     title: "Missed event v2",
                     body: "v2",
+            body_format: None,
                     acceptance_criteria: r#"[{"criterion":"do X after downtime","met":false}]"#,
                     status: "building",
                     superseded_by: None,
@@ -1795,6 +1804,7 @@ mod tests {
             .create(ProposalCreateInput {
                 title: "Draft drift",
                 body: "v1",
+            body_format: None,
                 acceptance_criteria: Some(r#"[{"criterion":"do X","met":false}]"#),
                 status: None,
             })
@@ -1810,6 +1820,7 @@ mod tests {
                 ProposalUpdateInput {
                     title: "Draft drift v2",
                     body: "v2",
+            body_format: None,
                     acceptance_criteria: r#"[{"criterion":"do X maybe","met":false}]"#,
                     status: "draft",
                     superseded_by: None,
@@ -1822,6 +1833,7 @@ mod tests {
             .create(ProposalCreateInput {
                 title: "Clean build",
                 body: "v1",
+            body_format: None,
                 acceptance_criteria: Some(r#"[{"criterion":"do Y","met":false}]"#),
                 status: None,
             })
@@ -1873,6 +1885,7 @@ mod tests {
             .create(ProposalCreateInput {
                 title: "Draft",
                 body: "",
+            body_format: None,
                 acceptance_criteria: None,
                 status: None,
             })
@@ -1914,6 +1927,7 @@ mod tests {
             .create(ProposalCreateInput {
                 title: "Amended Build",
                 body: "original body",
+            body_format: None,
                 acceptance_criteria: None,
                 status: None,
             })
@@ -1938,6 +1952,7 @@ mod tests {
                 ProposalUpdateInput {
                     title: "Amended Build",
                     body: "amended body",
+            body_format: None,
                     acceptance_criteria: "[]",
                     status: "building",
                     superseded_by: None,
@@ -2031,6 +2046,7 @@ mod tests {
             .create(ProposalCreateInput {
                 title: "Initial Breakdown Drift",
                 body: "original body",
+            body_format: None,
                 acceptance_criteria: None,
                 status: None,
             })
@@ -2071,6 +2087,7 @@ mod tests {
                 ProposalUpdateInput {
                     title: "Initial Breakdown Drift",
                     body: "amended body before breakdown runs",
+            body_format: None,
                     acceptance_criteria: "[]",
                     status: "building",
                     superseded_by: None,
@@ -2154,6 +2171,7 @@ mod tests {
             .create(ProposalCreateInput {
                 title: "No Drift",
                 body: "body",
+            body_format: None,
                 acceptance_criteria: None,
                 status: None,
             })

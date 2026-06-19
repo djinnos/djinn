@@ -14,6 +14,8 @@ pub struct ProposalModel {
     pub short_id: String,
     pub title: String,
     pub body: String,
+    /// Body format: `markdown` (legacy default) or `mdx` (block-aware).
+    pub body_format: String,
     /// Structured acceptance criteria (`{criterion, met}` or plain string),
     /// same shape as tasks. `met` means "agreed during scoping".
     pub acceptance_criteria: Vec<AcceptanceCriterionItem>,
@@ -74,6 +76,7 @@ impl ProposalModel {
             short_id: p.short_id.clone(),
             title: p.title.clone(),
             body: p.body.clone(),
+            body_format: p.body_format.clone(),
             acceptance_criteria: parse_acceptance_criteria(&p.acceptance_criteria),
             status: p.status.clone(),
             author_user_id: p.author_user_id.clone(),
@@ -96,6 +99,8 @@ pub struct ProposalRevisionModel {
     pub seq: i32,
     pub title: String,
     pub body: String,
+    /// Body format: `markdown` (legacy default) or `mdx` (block-aware).
+    pub body_format: String,
     pub acceptance_criteria: Vec<AcceptanceCriterionItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edited_by_user_id: Option<String>,
@@ -118,6 +123,7 @@ impl From<&ProposalRevision> for ProposalRevisionModel {
             seq: r.seq,
             title: r.title.clone(),
             body: r.body.clone(),
+            body_format: r.body_format.clone(),
             acceptance_criteria: parse_acceptance_criteria(&r.acceptance_criteria),
             edited_by_user_id: r.edited_by_user_id.clone(),
             event_kind: r.event_kind.clone(),

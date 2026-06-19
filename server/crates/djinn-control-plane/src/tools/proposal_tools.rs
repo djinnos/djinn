@@ -113,6 +113,9 @@ pub struct ProposalCreateParams {
     pub title: String,
     /// Markdown spec body.
     pub body: Option<String>,
+    /// Body format: `markdown` (legacy default) or `mdx` (block-aware).
+    /// Defaults to `markdown` when omitted.
+    pub body_format: Option<String>,
     /// Acceptance criteria: plain strings or `{criterion, met}` objects.
     pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
     /// Target projects (UUIDs or owner/repo slugs) this proposal touches.
@@ -150,6 +153,8 @@ pub struct ProposalUpdateParams {
     pub id: String,
     pub title: Option<String>,
     pub body: Option<String>,
+    /// Body format: `markdown` (legacy default) or `mdx` (block-aware).
+    pub body_format: Option<String>,
     /// Acceptance criteria: plain strings or `{criterion, met}` objects.
     pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
     /// draft | in_review | approved | building | done | rejected | archived | superseded.
@@ -302,11 +307,13 @@ impl DjinnMcpServer {
         };
         let ac_json = serde_json::to_string(&ac).unwrap_or_else(|_| "[]".to_string());
 
+        let body_format = p.body_format.as_deref();
         let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
         let proposal = match repo
             .create(djinn_db::ProposalCreateInput {
                 title: &title,
                 body,
+                body_format,
                 acceptance_criteria: Some(&ac_json),
                 status,
             })
@@ -507,12 +514,15 @@ impl DjinnMcpServer {
             existing.superseded_by.clone()
         };
 
+        let body_format = p.body_format.as_deref().unwrap_or(&existing.body_format);
+
         match repo
             .update(
                 &existing.id,
                 djinn_db::ProposalUpdateInput {
                     title: &title,
                     body,
+                    body_format,
                     acceptance_criteria: &ac_json,
                     status,
                     superseded_by: superseded_by.as_deref(),
@@ -1543,6 +1553,7 @@ mod stop_build_tests {
             .create(ProposalCreateInput {
                 title: "Stop me",
                 body: "",
+                body_format: None,
                 acceptance_criteria: None,
                 status: None,
             })

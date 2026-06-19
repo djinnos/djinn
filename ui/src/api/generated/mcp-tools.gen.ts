@@ -4649,6 +4649,11 @@ export namespace ProposalCreateInputSchema {
    */
   body?: string
   /**
+   * Body format: `markdown` (legacy default) or `mdx` (block-aware).
+   * Defaults to `markdown` when omitted.
+   */
+  body_format?: string
+  /**
    * Initial status: `triage`, `draft` (default), or `in_review`. Proposer-
    * role authors are always placed in `triage` regardless of this value.
    */
@@ -4680,6 +4685,10 @@ export namespace ProposalCreateOutputSchema {
   acceptance_criteria?: AcceptanceCriterionItem[]
   author_user_id?: string
   body?: string
+  /**
+   * Body format: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format?: string
   /**
    * Build owner once graduated.
    */
@@ -4978,6 +4987,10 @@ export namespace ProposalListOutputSchema {
   author_user_id?: string
   body: string
   /**
+   * Body format: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format: string
+  /**
    * Build owner once graduated.
    */
   build_owner_user_id?: string
@@ -5209,6 +5222,10 @@ export namespace ProposalShowOutputSchema {
   author_user_id?: string
   body: string
   /**
+   * Body format: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format: string
+  /**
    * Build owner once graduated.
    */
   build_owner_user_id?: string
@@ -5251,6 +5268,10 @@ export namespace ProposalShowOutputSchema {
   export interface ProposalRevisionModel {
   acceptance_criteria: AcceptanceCriterionItem[]
   body: string
+  /**
+   * Body format: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format: string
   created_at: string
   edited_by_user_id?: string
   /**
@@ -5512,6 +5533,10 @@ export namespace ProposalUpdateInputSchema {
   acceptance_criteria?: AcceptanceCriterionItem[]
   body?: string
   /**
+   * Body format: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format?: string
+  /**
    * Proposal UUID or short_id.
    */
   id: string
@@ -5545,6 +5570,10 @@ export namespace ProposalUpdateOutputSchema {
   acceptance_criteria?: AcceptanceCriterionItem[]
   author_user_id?: string
   body?: string
+  /**
+   * Body format: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format?: string
   /**
    * Build owner once graduated.
    */
