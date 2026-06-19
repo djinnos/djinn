@@ -196,7 +196,8 @@ impl AgentRepository {
             .collect())
     }
 
-    /// Set a role's `learned_prompt` to NULL and emit an update event.
+    /// Set a role's `learned_prompt` to NULL, discard all active amendments,
+    /// and emit an update event.
     pub async fn clear_learned_prompt(&self, role_id: &str) -> Result<Agent> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
@@ -208,6 +209,9 @@ impl AgentRepository {
         )
         .execute(self.db.pool())
         .await?;
+
+        // Also discard active history rows so the derived learned_prompt stays empty.
+        self.clear_amendments(role_id).await?;
 
         let role = self
             .get(role_id)
