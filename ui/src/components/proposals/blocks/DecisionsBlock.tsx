@@ -1,19 +1,24 @@
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
 import type { BlockProps } from "./types";
 
-/**
- * Stub component for the `decisions` block type.
- *
- * The full rendering (decision list, rationale display) will be implemented by
- * the sibling task that owns the P2 block React components. This minimal stub
- * satisfies the registry/barrel contract so downstream tasks can compile.
- */
 export function DecisionsBlock({ id, children }: BlockProps) {
   return (
     <div id={id} className="rounded-lg border bg-card p-4 shadow-sm">
-      <span className="mb-2 block text-xs font-medium text-muted-foreground">
-        decisions
-      </span>
-      {children}
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-semibold text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          Decisions
+        </span>
+        <span className="font-mono text-xs text-muted-foreground">{id}</span>
+      </div>
+      <div className="prose prose-sm max-w-none dark:prose-invert">
+        {typeof children === "string" ? (
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
+        ) : (
+          children
+        )}
+      </div>
     </div>
   );
 }
