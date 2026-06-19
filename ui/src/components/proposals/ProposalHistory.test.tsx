@@ -136,13 +136,70 @@ describe("ProposalHistory", () => {
     );
 
     expect(screen.getByText("rev 2")).toBeInTheDocument();
-    expect(screen.queryByText("Add rollout notes.")).not.toBeInTheDocument();
+    expect(screen.getByText("Base body Add rollout notes.")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /rev 2/ }));
 
-    expect(screen.getByText("Add rollout notes.")).toBeInTheDocument();
+    expect(screen.getAllByText("Add rollout notes.").length).toBeGreaterThan(0);
     expect(screen.getByText("Original proposal")).toBeInTheDocument();
     expect(screen.getByText("Updated proposal")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getAllByText("Pat Manager").length).toBeGreaterThan(0),
+    );
+  });
+
+  it("lists MDX revision snapshots with a readable preview and raw diff text", async () => {
+    const { container } = render(
+      <ProposalHistory
+        detail={detail([
+          revision(1, {
+            body_format: "mdx",
+            body: [
+              "Initial contract.",
+              '<data-model id="users">',
+              "User { id: uuid }",
+              "</data-model>",
+              '<question-form id="open-questions">',
+              "- Is email required?",
+              "</question-form>",
+            ].join("\n"),
+          }),
+          revision(2, {
+            body_format: "mdx",
+            body: [
+              "Initial contract.",
+              '<data-model id="users">',
+              "User { id: uuid, email: string }",
+              "</data-model>",
+              '<question-form id="open-questions">',
+              "- Is email required?",
+              "- Who owns retention?",
+              "</question-form>",
+            ].join("\n"),
+            created_at: "2026-06-02T00:00:00Z",
+          }),
+        ])}
+      />,
+    );
+
+    expect(screen.getByText("rev 2")).toBeInTheDocument();
+    expect(screen.getAllByText("spec_revision")).toHaveLength(2);
+    expect(screen.getAllByText("MDX")).toHaveLength(2);
+    expect(
+      screen.getAllByText(/MDX blocks: data-model, question-form/).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByTitle("2026-06-02T00:00:00Z")).toBeInTheDocument();
+    expect(screen.queryByText("- Who owns retention?")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /rev 2/ }));
+
+    expect(screen.getByText('<data-model id="users">')).toBeInTheDocument();
+    expect(
+      screen.getByText("User { id: uuid, email: string }"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("- Who owns retention?")).toBeInTheDocument();
+    expect(container.querySelector("data-model")).toBeNull();
+    expect(container.querySelector("question-form")).toBeNull();
     await waitFor(() =>
       expect(screen.getAllByText("Pat Manager").length).toBeGreaterThan(0),
     );
