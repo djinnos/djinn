@@ -171,7 +171,7 @@ pub fn derive_crate_map(project_root: &Path) -> std::collections::BTreeMap<PathB
 }
 
 fn workspace_members_from_manifest(manifest: &str) -> Vec<String> {
-    let toml_members = manifest
+    let toml_members: Vec<String> = manifest
         .parse::<toml::Value>()
         .ok()
         .and_then(|value| {
