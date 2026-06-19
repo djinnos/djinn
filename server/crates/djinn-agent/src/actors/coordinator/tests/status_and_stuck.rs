@@ -148,11 +148,6 @@ async fn stuck_detection_releases_orphaned_in_progress_task() {
     );
 }
 
-/// Bug 2 regression: a `verifying` task whose ONLY task-run is a leaked
-/// `running, ended_at=NULL` row left behind by a pod that died without writing
-/// terminal must NOT be treated as a live in-pod verify forever. Once the
-/// `running` row's `started_at` is older than the liveness grace, recovery
-/// fires (task leaves `verifying`) within minutes instead of waiting on the
 /// Verifying status was removed from the task state machine.
 /// These tests exercised the recovery/protection paths for stuck `verifying`
 /// tasks; with verifying gone they are obsolete and removed.

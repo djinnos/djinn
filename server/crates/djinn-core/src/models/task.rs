@@ -249,7 +249,8 @@ pub enum TransitionAction {
     /// path). A task lands at `needs_task_review` only after the worker already
     /// submitted; when its branch is NOT durable the host routes a worker redo
     /// (`ReviewResponse`), but the worker can't walk `start` (legal only from
-    /// `open`) so the run never moved off `needs_task_review`. This action
+    /// `open`) so the run never moved off `needs_task_review` and the post-worker
+    /// submission no-op'd — the task got review-dispatched without it. This action
     /// walks `needs_task_review → in_progress` so the redo ends with a legal
     /// `submit_task_review`. No AC/blocker gate
     /// (the task already passed `start` once).

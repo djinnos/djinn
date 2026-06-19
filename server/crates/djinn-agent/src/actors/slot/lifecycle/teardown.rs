@@ -100,8 +100,8 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
         }
 
         // K8s flow: the djinn-supervisor stage loop is the SOLE transition
-        // authority. The legacy role.on_complete() returned actions like
-        // SubmitVerification / SubmitTaskReview that raced with the supervisor
+        // authority. The legacy role.on_complete() returned post-session
+        // transition actions that raced with the supervisor
         // body's Start / submit_task_review / task_review_approve calls,
         // moving the task into `verifying` before the supervisor's
         // submit_task_review could fire (then bouncing it back to `open`
@@ -133,7 +133,7 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
 pub(crate) async fn apply_transition_and_dispatch(
     transition: Option<(TransitionAction, Option<String>)>,
     task_id: &str,
-    project_path: &str,
+    _project_path: &str,
     role: &Arc<dyn AgentRole>,
     app_state: &AgentContext,
     tokens_in: i64,
@@ -152,7 +152,6 @@ pub(crate) async fn apply_transition_and_dispatch(
             "Lifecycle: applying session transition"
         );
         let is_conflict_rejection = action == TransitionAction::TaskReviewRejectConflict;
-        let is_submit_verification = false;
         let is_orphaned_tool_call = reason
             .as_deref()
             .map(super::super::reply_loop::error_handling::is_orphaned_tool_call_error_str)
@@ -205,13 +204,7 @@ pub(crate) async fn apply_transition_and_dispatch(
         if is_conflict_rejection || is_orphaned_tool_call {
             interrupt_paused_worker_session(task_id, app_state).await;
         }
-        if is_submit_verification {
-            super::super::verification::spawn_verification(
-                task_id.to_string(),
-                project_path.to_string(),
-                app_state.clone(),
-            );
-        }
+        // Verification handoff removed; no extra post-session transition runs here.
     } else {
         tracing::info!(
             task_id = %task_id,

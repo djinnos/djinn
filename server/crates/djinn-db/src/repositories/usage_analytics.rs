@@ -42,8 +42,6 @@ pub struct ModelEffectivenessRow {
     pub success_rate: Option<f64>,
     /// Average total_reopen_count across closed tasks attributed to this model.
     pub avg_reopens: Option<f64>,
-    /// Fraction of closed tasks with zero verification failures (0.0–1.0).
-    pub verification_pass_rate: Option<f64>,
     /// Cost per completed task. `None` when no completed tasks or all sessions
     /// were unpriced (NULL cost_usd).
     pub cost_per_completed_task: Option<f64>,
@@ -301,10 +299,10 @@ impl UsageAnalyticsRepository {
         let sql = format!(
             "SELECT \
                 COUNT(*)                          AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in), 0)     AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)    AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens), 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens), 0) AS \"cache_write_tokens!\", \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)     AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)    AS \"tokens_out!\", \
+                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS \"cache_read_tokens!\", \
+                COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS \"cache_write_tokens!\", \
                 CASE \
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
@@ -338,17 +336,17 @@ impl UsageAnalyticsRepository {
             "SELECT \
                 substring(s.started_at, 1, 10)    AS \"day!\", \
                 COUNT(*)                          AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in), 0)     AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)    AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens), 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens), 0) AS \"cache_write_tokens!\", \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)     AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)    AS \"tokens_out!\", \
+                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS \"cache_read_tokens!\", \
+                COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS \"cache_write_tokens!\", \
                 CASE \
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
                 END AS \"total_cost_usd\" \
              {from_clause} {where_clause} \
              GROUP BY substring(s.started_at, 1, 10) \
-             ORDER BY day"
+             ORDER BY 1"
         );
 
         let query = sqlx::query(&sql);
@@ -380,17 +378,17 @@ impl UsageAnalyticsRepository {
                 {group_expr}                     AS \"group_key!\", \
                 substring(s.started_at, 1, 10)   AS \"day!\", \
                 COUNT(*)                         AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in), 0)    AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)   AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens), 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens), 0) AS \"cache_write_tokens!\", \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)    AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)   AS \"tokens_out!\", \
+                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS \"cache_read_tokens!\", \
+                COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS \"cache_write_tokens!\", \
                 CASE \
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
                 END AS \"total_cost_usd\" \
              {from_clause} {where_clause} \
              GROUP BY {group_expr}, substring(s.started_at, 1, 10) \
-             ORDER BY day, group_key"
+             ORDER BY 2, 1"
         );
 
         let query = sqlx::query(&sql);
@@ -522,8 +520,8 @@ impl UsageAnalyticsRepository {
                     COUNT(*) AS sessions, \
                     CASE WHEN bool_or(cost_usd IS NULL) \
                          THEN NULL ELSE SUM(cost_usd) END AS spend_usd, \
-                    COALESCE(SUM(tokens_in), 0)  AS tokens_in, \
-                    COALESCE(SUM(tokens_out), 0) AS tokens_out \
+                    COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
+                    COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out \
                 FROM filtered_sessions \
                 GROUP BY model_id \
              ), \
@@ -610,9 +608,8 @@ impl UsageAnalyticsRepository {
                     tokens_in,
                     tokens_out,
                     shared_credit_completed_task_count: completed,
-                    success_rate: Some(r.get("success_rate!")),
-                    avg_reopens: r.get("avg_reopens!"),
-                    verification_pass_rate: Some(r.get("verification_pass_rate!")),
+                    success_rate: r.get("success_rate"),
+                    avg_reopens: r.get("avg_reopens"),
                     cost_per_completed_task,
                     tokens_per_task,
                 }
@@ -640,11 +637,11 @@ impl UsageAnalyticsRepository {
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
                 END                                      AS \"spend_usd\", \
-                COALESCE(SUM(s.tokens_in), 0)            AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)           AS \"tokens_out!\" \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)            AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)           AS \"tokens_out!\" \
              {from_clause} {where_clause} \
              GROUP BY COALESCE(s.project_id, ''), s.model_id \
-             ORDER BY project_id, model_id"
+             ORDER BY 1, 2"
         );
 
         let query = sqlx::query(&sql);
@@ -791,7 +788,6 @@ mod tests {
         assert_eq!(row.shared_credit_completed_task_count, 0);
         assert!(row.success_rate.is_none());
         assert!(row.avg_reopens.is_none());
-        assert!(row.verification_pass_rate.is_none());
         assert!(row.cost_per_completed_task.is_none());
         assert!(row.tokens_per_task.is_none());
     }
@@ -818,7 +814,6 @@ mod tests {
             shared_credit_completed_task_count: 3,
             success_rate: Some(0.67),
             avg_reopens: Some(0.5),
-            verification_pass_rate: Some(0.8),
             cost_per_completed_task: Some(0.41),
             tokens_per_task: Some(50.0),
         };

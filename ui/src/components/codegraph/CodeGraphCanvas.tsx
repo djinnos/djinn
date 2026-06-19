@@ -39,7 +39,6 @@ import { useSigmaGraph } from "@/hooks/useSigmaGraph";
 import { useGraphReducers } from "@/hooks/useGraphReducers";
 import { selectCitationIds, useCodeGraphStore } from "@/stores/codeGraphStore";
 import { RendererCapabilityDialog } from "./RendererCapabilityDialog";
-import { GraphToolbar } from "./GraphToolbar";
 import { cn } from "@/lib/utils";
 
 type FetchState =
@@ -120,6 +119,7 @@ export function CodeGraphCanvas({
   const clearExpandedCommunities = useCodeGraphStore(
     (s) => s.clearExpandedCommunities,
   );
+  const setGraphReady = useCodeGraphStore((s) => s.setGraphReady);
 
   // Lazily-fetched symbol snapshot used to splice member nodes when a
   // community is expanded. Held in state so the `visibleSnapshot` memo
@@ -152,6 +152,7 @@ export function CodeGraphCanvas({
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading" });
+    setGraphReady(false);
 
     // Pick the *initial* fetch level from the toolbar mode.
     //   - "community" → always start at community level
@@ -180,6 +181,7 @@ export function CodeGraphCanvas({
             error:
               "Snapshot response was empty or malformed. The graph may not be warmed yet — try again in a minute.",
           });
+          setGraphReady(false);
           return;
         }
         let level = initialLevel;
@@ -208,19 +210,21 @@ export function CodeGraphCanvas({
 
         if (cancelled) return;
         setState({ status: "ready", snapshot, level });
+        setGraphReady(snapshot.nodes.length > 0);
       } catch (err) {
         if (cancelled) return;
         setState({
           status: "error",
           error: err instanceof Error ? err.message : String(err),
         });
+        setGraphReady(false);
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [projectId, nodeCap, reloadKey, semanticZoomMode]);
+  }, [projectId, nodeCap, reloadKey, semanticZoomMode, setGraphReady]);
 
   const effectiveLevel: SnapshotLevel =
     state.status === "ready" ? state.level : "symbol";
@@ -433,12 +437,6 @@ export function CodeGraphCanvas({
         state={state}
         visibleSnapshot={visibleSnapshot}
         level={effectiveLevel}
-      />
-      <GraphToolbar
-        disabled={
-          state.status !== "ready" ||
-          (state.snapshot?.nodes.length ?? 0) === 0
-        }
       />
       {layoutRunning && visibleSnapshot?.nodes.length ? (
         <LayoutOptimizingPill />

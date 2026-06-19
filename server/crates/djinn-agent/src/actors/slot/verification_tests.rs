@@ -127,7 +127,9 @@ fn feedback_truncates_large_stdout() {
     assert!(feedback.len() < 7_000);
 }
 
-fn setup_verifying_task_with_count_blocking(_count: i64) -> (TaskRepository, String, AgentContext) {
+fn setup_needs_review_task_with_count_blocking(
+    _count: i64,
+) -> (TaskRepository, String, AgentContext) {
     std::thread::scope(|s| {
         s.spawn(|| {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -173,7 +175,7 @@ fn setup_verifying_task_with_count_blocking(_count: i64) -> (TaskRepository, Str
     })
 }
 
-async fn setup_verifying_task_with_count(_count: i64) -> (TaskRepository, String, AgentContext) {
+async fn setup_needs_review_task_with_count(_count: i64) -> (TaskRepository, String, AgentContext) {
     let db = create_test_db();
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
     let project = create_test_project(&db).await;
@@ -391,7 +393,7 @@ async fn consume_in_pod_run_none_on_error_or_mismatch() {
 
 #[tokio::test(start_paused = true)]
 async fn spawn_verification_times_out_deterministically_and_releases_task() {
-    let (_task_repo, task_id, app_state) = setup_verifying_task_with_count_blocking(0);
+    let (_task_repo, task_id, app_state) = setup_needs_review_task_with_count_blocking(0);
     let timeout = Duration::from_secs(5);
 
     app_state.register_verification(&task_id);
@@ -424,7 +426,7 @@ async fn spawn_verification_times_out_deterministically_and_releases_task() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn spawn_verification_defers_without_registering_when_global_pause_is_active() {
-    let (_task_repo, task_id, app_state) = setup_verifying_task_with_count(0).await;
+    let (_task_repo, task_id, app_state) = setup_needs_review_task_with_count(0).await;
     let pause_repo =
         DispatchPauseRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     pause_repo
@@ -448,7 +450,7 @@ async fn spawn_verification_defers_without_registering_when_global_pause_is_acti
 
 #[tokio::test(start_paused = true)]
 async fn aborting_verification_task_releases_tracker_before_timeout() {
-    let (_task_repo, task_id, app_state) = setup_verifying_task_with_count_blocking(0);
+    let (_task_repo, task_id, app_state) = setup_needs_review_task_with_count_blocking(0);
     let timeout = Duration::from_secs(60);
 
     app_state.register_verification(&task_id);
@@ -477,7 +479,7 @@ async fn aborting_verification_task_releases_tracker_before_timeout() {
 
 #[tokio::test]
 async fn handle_verification_failure_first_failure_goes_open() {
-    let (task_repo, task_id, app_state) = setup_verifying_task_with_count(0).await;
+    let (task_repo, task_id, app_state) = setup_needs_review_task_with_count(0).await;
     let feedback = "first failure feedback";
     handle_verification_failure(&task_id, feedback, &task_repo, &app_state).await;
 
@@ -507,7 +509,7 @@ async fn handle_verification_failure_first_failure_goes_open() {
 
 #[tokio::test]
 async fn handle_verification_failure_second_failure_still_goes_open() {
-    let (task_repo, task_id, app_state) = setup_verifying_task_with_count(1).await;
+    let (task_repo, task_id, app_state) = setup_needs_review_task_with_count(1).await;
     handle_verification_failure(&task_id, "second failure", &task_repo, &app_state).await;
     let task = task_repo
         .get(&task_id)
@@ -518,32 +520,8 @@ async fn handle_verification_failure_second_failure_still_goes_open() {
     assert_eq!(task.status, "needs_task_review");
 }
 
-#[tokio::test]
-async fn handle_verification_failure_threshold_escalates_directly() {
-    let (task_repo, task_id, app_state) = setup_verifying_task_with_count(2).await;
-    handle_verification_failure(&task_id, "third failure", &task_repo, &app_state).await;
-    let task = task_repo
-        .get(&task_id)
-        .await
-        .expect("get task")
-        .expect("task exists");
-    // Verification gate removed: Escalate is invalid from needs_task_review,
-    // so the task stays put.
-    assert_eq!(task.status, "needs_task_review");
-}
-
-#[tokio::test]
-async fn handle_verification_failure_past_threshold_escalates() {
-    let (task_repo, task_id, app_state) = setup_verifying_task_with_count(5).await;
-    handle_verification_failure(&task_id, "many failures", &task_repo, &app_state).await;
-    let task = task_repo
-        .get(&task_id)
-        .await
-        .expect("get task")
-        .expect("task exists");
-    // Verification gate removed: task stays in needs_task_review.
-    assert_eq!(task.status, "needs_task_review");
-}
+// (escalation tests removed — verification failure counting/escalation was removed
+//  from the core model.)
 
 // ── regression: image-not-ready requeues rather than erroring ──────────
 //

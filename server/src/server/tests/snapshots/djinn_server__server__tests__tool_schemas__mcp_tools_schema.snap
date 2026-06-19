@@ -362,10 +362,6 @@ expression: signatures
             "success_rate": {
               "format": "double",
               "type": "number"
-            },
-            "verification_pass_rate": {
-              "format": "double",
-              "type": "number"
             }
           },
           "required": [
@@ -377,7 +373,6 @@ expression: signatures
             "avg_tokens_in",
             "avg_tokens_out",
             "avg_time_seconds",
-            "verification_pass_rate",
             "avg_reopens",
             "completed_task_count",
             "extraction_quality"
