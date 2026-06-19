@@ -102,3 +102,60 @@ pub(super) async fn resolve_links_for_note(
     .await?;
     Ok(())
 }
+
+impl NoteRepository {
+    /// Load the set of explicit wikilink edges (`note_links` with resolved
+    /// `target_id`) that connect any pair of notes within the given set.
+    ///
+    /// Each pair is canonicalized so the lexicographically smaller note id is
+    /// first. Used by the memory enrichment pass (diei) to dedup candidate
+    /// implicit edges against existing explicit wikilinks before persisting
+    /// typed associations.
+    ///
+    /// Returns an empty set when `note_ids` is empty.
+    pub async fn wikilink_pairs_for_notes(
+        &self,
+        note_ids: &[String],
+    ) -> Result<std::collections::HashSet<(String, String)>> {
+        use std::collections::HashSet;
+
+        self.db.ensure_initialized().await?;
+        if note_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        let placeholders = crate::repositories::pg_placeholders(note_ids.len(), 1);
+        let placeholders2 =
+            crate::repositories::pg_placeholders(note_ids.len(), note_ids.len() + 1);
+        let sql = format!(
+            "SELECT source_id, target_id FROM note_links \
+             WHERE target_id IS NOT NULL \
+               AND (source_id IN ({p1}) OR target_id IN ({p2}))",
+            p1 = placeholders,
+            p2 = placeholders2,
+        );
+
+        let mut query = sqlx::query_as::<sqlx::Postgres, (String, String)>(&sql);
+        for id in note_ids {
+            query = query.bind(id);
+        }
+        for id in note_ids {
+            query = query.bind(id);
+        }
+        let rows = query.fetch_all(self.db.pool()).await?;
+
+        let id_set: HashSet<&str> = note_ids.iter().map(String::as_str).collect();
+        let mut pairs = HashSet::new();
+        for (source, target) in rows {
+            if id_set.contains(source.as_str()) && id_set.contains(target.as_str()) {
+                let pair = if source <= target {
+                    (source, target)
+                } else {
+                    (target, source)
+                };
+                pairs.insert(pair);
+            }
+        }
+        Ok(pairs)
+    }
+}

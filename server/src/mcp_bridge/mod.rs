@@ -17,6 +17,7 @@ mod bridges;
 pub(crate) mod graph_neighbors;
 mod graph_ops;
 pub(crate) mod hybrid_search;
+mod memory_enrichment;
 mod refactor;
 mod shared;
 mod snapshot;

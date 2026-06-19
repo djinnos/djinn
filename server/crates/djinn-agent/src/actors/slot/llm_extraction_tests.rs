@@ -1,4 +1,5 @@
 #![allow(clippy::too_many_lines)]
+// djinn:allow-oversize — legacy test module over size-guard threshold; split when touched substantively.
 // Tests for the full reflection pipeline and extracted-note persistence.
 //!
 //! Covers:
@@ -923,7 +924,7 @@ async fn llm_extraction_admission_gate_drops_pattern_missing_adr_054_sections() 
     };
 
     let provider = Arc::new(FakeProvider::text(
-        &serde_json::json!({
+        serde_json::json!({
             "cases": [],
             "patterns": [{
                 "title": "Unstructured Pattern Note",

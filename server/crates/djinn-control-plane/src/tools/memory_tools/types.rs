@@ -205,6 +205,21 @@ pub struct RepairEmbeddingsParams {
     pub force: Option<bool>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RunEnrichmentParams {
+    /// Project path, slug, or id (same forms accepted by other memory tools).
+    pub project: String,
+    /// When true, schedule enrichment on a background tokio task and return
+    /// immediately with `status="queued"`. When false (the default), run the
+    /// pass synchronously and embed the structured report in the response.
+    ///
+    /// Background execution mirrors the diei roadmap's "best-effort, never
+    /// blocks retrieval" constraint: the spawn path yields to the runtime so
+    /// `memory_graph` (and the wider MCP surface) keep serving while the
+    /// pass runs.
+    pub background: Option<bool>,
+}
+
 #[derive(Serialize, schemars::JsonSchema, Default)]
 pub struct MemoryRepairEmbeddingFailure {
     pub note_id: String,
@@ -237,6 +252,28 @@ pub struct MemoryRepairEmbeddingsResponse {
     pub code_chunks_up_to_date: i64,
     /// Code chunks whose re-embed attempt failed.
     pub code_chunks_failed: i64,
+}
+
+/// MCP response for `memory_run_enrichment`. The `report` is present when
+/// `status="completed"` (foreground execution). For
+/// `status="queued"` (background execution) the report is `None`; the pass
+/// emits the structured report through its own `INFO` log line at finish.
+#[derive(Serialize, schemars::JsonSchema, Default)]
+pub struct MemoryRunEnrichmentResponse {
+    /// Status of the trigger call — see [`crate::bridge::EnrichmentStatus`].
+    pub status: String,
+    /// Resolved DB project id (slug → id translation is performed by the
+    /// tool's project resolver, same as every other memory tool).
+    pub project_id: Option<String>,
+    /// Structured enrichment report. Present only when
+    /// `status="completed"`. None when queued, and None when the trigger
+    /// fails (in which case `error` is populated).
+    pub report: Option<crate::bridge::EnrichmentReport>,
+    /// Top-level failure: project not found, enrichment subsystem not
+    /// configured, provider errors that propagate before the pass begins.
+    /// Per-batch provider failures land in `report.warnings` rather than
+    /// here — the pass is best-effort and never blocks retrieval.
+    pub error: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
