@@ -403,6 +403,54 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             let parse_ms = t_parse.elapsed().as_millis() as u64;
             let _ = std::fs::remove_dir_all(&output_dir_for_blocking);
 
+            // Out-of-core sharding: when enabled (env flag + threshold),
+            // shard each parsed SCIP file into the out-of-core store so
+            // downstream accessor consumers can load files one-at-a-time
+            // from disk. The build pipeline below still uses the in-memory
+            // `parsed` — this is preparatory population of the store.
+            // The actual builder migration to file-iteration happens in
+            // the follow-up task.
+            let total_parsed_files: usize =
+                parsed.iter().map(|p| p.files.len()).sum();
+            if let Some(ooc_config) =
+                crate::out_of_core::resolve_out_of_core_config(total_parsed_files)
+            {
+                match crate::out_of_core::OutOfCoreStore::open(&ooc_config.storage_path) {
+                    Ok(mut ooc_store) => {
+                        let mut total_shards = 0usize;
+                        let mut shard_err = false;
+                        for index in &parsed {
+                            match ooc_store.put_parsed_index(index) {
+                                Ok(count) => total_shards += count,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        workspace = %index.workspace_slug,
+                                        "ensure_canonical_graph: failed to shard parsed index to out-of-core store"
+                                    );
+                                    shard_err = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !shard_err {
+                            tracing::info!(
+                                shard_count = total_shards,
+                                storage_path = %ooc_config.storage_path.display(),
+                                "ensure_canonical_graph: sharded parsed SCIP data to out-of-core store"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            storage_path = %ooc_config.storage_path.display(),
+                            "ensure_canonical_graph: failed to open out-of-core store; proceeding with in-memory path"
+                        );
+                    }
+                }
+            }
+
             let t_build = std::time::Instant::now();
             let mut graph = crate::repo_graph::RepoDependencyGraph::try_build_with_source(
                 &parsed,
