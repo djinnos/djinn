@@ -24,6 +24,7 @@
 mod artifact;
 mod builder;
 mod constants;
+mod crate_aggregation;
 mod edge;
 mod graph;
 mod node;
@@ -31,6 +32,12 @@ mod ranking;
 
 #[cfg(test)]
 mod tests;
+
+// Downstream callers (tasks 35is: crate_graph op handler, wz2o: agent tool
+// schema) are not yet implemented; suppress the expected unused-import
+// warning until they land.
+#[allow(unused_imports)]
+pub(crate) use self::crate_aggregation::build_crate_graph;
 
 // Re-exports for the public API — see `crates/djinn-control-plane/src/
 // tools/graph_tools.rs`, `server/src/mcp_bridge.rs`, `cluster_doc.rs`,
