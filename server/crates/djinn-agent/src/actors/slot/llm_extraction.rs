@@ -32,12 +32,14 @@ use std::sync::Arc;
 
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{
-    NoteRepository, ProjectRepository, SessionRepository, TaskRepository, assess_note_quality,
-    folder_for_type, permalink_for,
+    CreateConsolidationRunMetric, NoteConsolidationRepository, NoteRepository, ProjectRepository,
+    SessionRepository, TaskRepository, assess_note_quality, folder_for_type, permalink_for,
 };
 use djinn_provider::provider::{LlmProvider, TelemetryMeta, create_provider};
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider_for_user};
 use serde::Deserialize;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use super::session_extraction::SessionTaxonomy;
 use crate::context::{AgentContext, KnowledgeBranchTarget};
@@ -916,6 +918,40 @@ async fn run_llm_extraction_inner(
     taxonomy.extraction_quality = extraction_quality;
 
     persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
+
+    // Write a lightweight consolidation_run_metrics row so the admission-dropped
+    // count is queryable via memory_health and list_run_metrics. The row uses
+    // note_type "extraction" and zeros for consolidation-specific fields. The
+    // row is written even when admission_dropped == 0 so health() returns 0
+    // (not NULL) for sessions with no drops.
+    let now = now_rfc3339();
+    let consolidation_repo = NoteConsolidationRepository::new(app_state.db.clone());
+    if let Err(error) = consolidation_repo
+        .create_run_metric(CreateConsolidationRunMetric {
+            project_id: &project.id,
+            note_type: "extraction",
+            status: "completed",
+            scanned_note_count: deduped_notes.len() as i64,
+            candidate_cluster_count: 0,
+            consolidated_cluster_count: 0,
+            consolidated_note_count: taxonomy.extraction_quality.written as i64,
+            source_note_count: 0,
+            decayed_note_count: 0,
+            archived_note_count: 0,
+            superseded_source_note_count: 0,
+            admission_dropped_note_count: taxonomy.extraction_quality.admission_dropped as i64,
+            started_at: &now,
+            completed_at: Some(&now),
+            error_message: None,
+        })
+        .await
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %error,
+            "llm_extraction: failed to write admission-dropped metric row"
+        );
+    }
 }
 
 async fn persist_extraction_quality(
@@ -945,6 +981,13 @@ async fn persist_extraction_quality(
             "llm_extraction: failed to persist extraction quality taxonomy"
         );
     }
+}
+
+/// Return the current UTC time as an RFC 3339 string.
+fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .expect("rfc3339 timestamp formatting should succeed")
 }
 
 async fn process_extracted_note(
