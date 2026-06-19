@@ -418,9 +418,7 @@ fn record_cargo_target_seed_result(seed_context: &'static str, result: &CargoTar
         ""
     };
 
-    if result.cold_started() {
-        djinn_telemetry::cargo_target_seed::increment_seed_fallback(fallback_reason);
-    } else {
+    if !result.cold_started() {
         djinn_telemetry::cargo_target_seed::increment_seed_hit();
     }
 
