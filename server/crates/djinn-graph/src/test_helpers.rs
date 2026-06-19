@@ -323,6 +323,83 @@ pub(crate) fn td55_cache_reuse_scip_fixture() -> Td55ScipFixture {
 /// definitions (role bit = Definition).  `references` are `(symbol,
 /// symbol_roles)` occurrences without the definition bit so they are
 /// treated as references/calls — used to establish cross-file edges.
+
+/// Build a td55 incremental-shaped fixture where one partition's SCIP
+/// content is deterministically changed, producing a different cache key
+/// for that partition while the other partition remains byte-identical.
+///
+/// The `changed_workspace` argument selects which partition to mutate:
+/// - `"app"` — the app artifact gains an extra symbol `helper` and an extra
+///   reference occurrence, changing the SCIP bytes.
+/// - `"domain"` — the domain artifact gains an extra symbol `triple`.
+///
+/// The unchanged partition stays exactly the same as
+/// [`td55_cache_reuse_scip_fixture`] so the SCIP parse cache hits for it.
+pub(crate) fn td55_incremental_scip_fixture(changed_workspace: &str) -> Td55ScipFixture {
+    let tempdir = workspace_tempdir("td55-incremental-scip-");
+
+    let (domain_bytes, app_bytes) = if changed_workspace == "domain" {
+        let domain = synthetic_scip_index_bytes(
+            "src/domain/math.rs",
+            &[
+                ("double", "scip-rust . . . domain double()."),
+                ("triple", "scip-rust . . . domain triple()."),
+            ],
+            &[],
+        );
+        let app = synthetic_scip_index_bytes(
+            "src/app.rs",
+            &[("run", "scip-rust . . . app run().")],
+            &[("scip-rust . . . domain double().", 8)],
+        );
+        (domain, app)
+    } else {
+        // default / "app" changed
+        let domain = synthetic_scip_index_bytes(
+            "src/domain/math.rs",
+            &[("double", "scip-rust . . . domain double().")],
+            &[],
+        );
+        let app = synthetic_scip_index_bytes(
+            "src/app.rs",
+            &[
+                ("run", "scip-rust . . . app run()."),
+                ("helper", "scip-rust . . . app helper()."),
+            ],
+            &[
+                ("scip-rust . . . domain double().", 8),
+                ("scip-rust . . . app helper().", 8),
+            ],
+        );
+        (domain, app)
+    };
+
+    let domain_path = tempdir.path().join("domain.scip");
+    let app_path = tempdir.path().join("app.scip");
+    std::fs::write(&domain_path, &domain_bytes).expect("write domain SCIP fixture");
+    std::fs::write(&app_path, &app_bytes).expect("write app SCIP fixture");
+
+    let artifacts = vec![
+        crate::scip_indexer::ScipArtifact {
+            path: domain_path,
+            indexer: Some(crate::scip_indexer::SupportedIndexer::RustAnalyzer),
+            workspace_slug: "domain".to_string(),
+            workspace_root: PathBuf::new(),
+        },
+        crate::scip_indexer::ScipArtifact {
+            path: app_path,
+            indexer: Some(crate::scip_indexer::SupportedIndexer::RustAnalyzer),
+            workspace_slug: "app".to_string(),
+            workspace_root: PathBuf::new(),
+        },
+    ];
+
+    Td55ScipFixture {
+        artifacts,
+        _tempdir: tempdir,
+    }
+}
+
 fn synthetic_scip_index_bytes(
     relative_path: &str,
     definitions: &[(&str, &str)],

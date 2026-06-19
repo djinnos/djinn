@@ -159,6 +159,10 @@ expression: tool_schemas_reviewer()
         "type": {
           "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\")",
           "type": "string"
+        },
+        "status": {
+          "description": "Explicit lifecycle status filter. Defaults to active; use archived or deprecated to list non-live notes.",
+          "type": "string"
         }
       },
       "required": [

@@ -466,6 +466,7 @@ pub(crate) fn tool_memory_list() -> RmcpTool {
             "properties": {
                 "folder": {"type": "string", "description": "Filter by folder (e.g. \"decisions\")"},
                 "type": {"type": "string", "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\")"},
+                "status": {"type": "string", "description": "Explicit lifecycle status filter. Defaults to active; use archived or deprecated to list non-live notes."},
                 "depth": {"type": "integer", "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels"}
             }
         }),
