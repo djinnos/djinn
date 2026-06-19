@@ -10,8 +10,8 @@ use djinn_db::{
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
 use crate::bridge::{
-    CoordinatorOps, GitOps, LspOps, RepoGraphOps, RuntimeOps, SemanticQueryEmbedding, SlotPoolOps,
-    TaskrunJobRef,
+    CoordinatorOps, GitOps, LspOps, MemoryEnrichmentOps, RepoGraphOps, RuntimeOps,
+    SemanticQueryEmbedding, SlotPoolOps, TaskrunJobRef,
 };
 
 /// Subset of application state consumed by the MCP layer.
@@ -34,6 +34,11 @@ pub struct McpState {
     runtime: Arc<dyn RuntimeOps>,
     git: Arc<dyn GitOps>,
     repo_graph: Arc<dyn RepoGraphOps>,
+    /// Bridge into `djinn_agent::actors::slot::memory_enrichment`. `None` when
+    /// the server wires a context without the enrichment subsystem (test
+    /// harnesses, off-server contexts). The MCP tool degrades to a clear
+    /// "not configured" error in that case.
+    enrichment_ops: Option<Arc<dyn MemoryEnrichmentOps>>,
 }
 
 impl McpState {
@@ -52,6 +57,43 @@ impl McpState {
         git: Arc<dyn GitOps>,
         repo_graph: Arc<dyn RepoGraphOps>,
     ) -> Self {
+        Self::with_enrichment(
+            db,
+            event_bus,
+            catalog,
+            health_tracker,
+            coordinator,
+            pool,
+            embedding_provider,
+            vector_store,
+            lsp,
+            runtime,
+            git,
+            repo_graph,
+            None,
+        )
+    }
+
+    /// Full constructor — prefer [`McpState::new`] when the caller doesn't
+    /// have an enrichment bridge handy. The server binary uses this
+    /// overload to wire the agent-backed implementation; tests that don't
+    /// exercise enrichment fall through to the simpler constructor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_enrichment(
+        db: Database,
+        event_bus: EventBus,
+        catalog: CatalogService,
+        health_tracker: HealthTracker,
+        coordinator: Option<Arc<dyn CoordinatorOps>>,
+        pool: Option<Arc<dyn SlotPoolOps>>,
+        embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
+        vector_store: Option<Arc<dyn NoteVectorStore>>,
+        lsp: Arc<dyn LspOps>,
+        runtime: Arc<dyn RuntimeOps>,
+        git: Arc<dyn GitOps>,
+        repo_graph: Arc<dyn RepoGraphOps>,
+        enrichment_ops: Option<Arc<dyn MemoryEnrichmentOps>>,
+    ) -> Self {
         Self {
             db,
             event_bus,
@@ -65,6 +107,7 @@ impl McpState {
             runtime,
             git,
             repo_graph,
+            enrichment_ops,
         }
     }
 
@@ -102,6 +145,24 @@ impl McpState {
 
     pub fn lsp(&self) -> &Arc<dyn LspOps> {
         &self.lsp
+    }
+
+    /// Access the memory enrichment bridge. Returns `None` when the server
+    /// wired an `McpState` without the enrichment subsystem; the
+    /// `memory_run_enrichment` tool surfaces a clean "not configured"
+    /// error in that case.
+    pub fn enrichment_ops(&self) -> Option<Arc<dyn crate::bridge::MemoryEnrichmentOps>> {
+        self.enrichment_ops.clone()
+    }
+
+    /// Test-only hook to install an enrichment bridge on an already-built
+    /// `McpState`. Production code uses [`McpState::with_enrichment`] at
+    /// construction time; tests that stand up state via [`McpState::new`]
+    /// (because they don't have a `MemoryEnrichmentOps` handy at the
+    /// call site) can use this to wire the bridge in afterwards.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_enrichment_ops(&mut self, ops: Arc<dyn crate::bridge::MemoryEnrichmentOps>) {
+        self.enrichment_ops = Some(ops);
     }
 
     pub async fn git_actor(

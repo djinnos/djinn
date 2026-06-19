@@ -270,6 +270,20 @@ fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
         .collect()
 }
 
+/// Decode a little-endian f32 blob into a vector of f32 values. Returns
+/// `None` if the blob length is not a multiple of 4.
+fn decode_embedding_blob(blob: &[u8]) -> Option<Vec<f32>> {
+    if !blob.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut result = Vec::with_capacity(blob.len() / 4);
+    for chunk in blob.chunks_exact(4) {
+        let bytes: [u8; 4] = chunk.try_into().ok()?;
+        result.push(f32::from_le_bytes(bytes));
+    }
+    Some(result)
+}
+
 pub fn legacy_embedding_document_text(
     title: &str,
     note_type: &str,
@@ -960,6 +974,26 @@ impl NoteRepository {
         )
         .fetch_optional(self.db.pool())
         .await?)
+    }
+
+    /// Fetch the raw embedding vector (as `Vec<f32>`) for a note from the
+    /// `note_embeddings` table. Returns `None` if the note has no embedding
+    /// or the blob is malformed.
+    ///
+    /// Used by the memory enrichment pass (diei) for entity dedup by cosine
+    /// similarity — this avoids normalized-string matching and leverages the
+    /// persisted embeddings for higher-quality dedup.
+    pub async fn get_note_embedding_vector(&self, note_id: &str) -> Result<Option<Vec<f32>>> {
+        self.db.ensure_initialized().await?;
+        let row: Option<(Vec<u8>,)> =
+            sqlx::query_as("SELECT embedding FROM note_embeddings WHERE note_id = $1")
+                .bind(note_id)
+                .fetch_optional(self.db.pool())
+                .await?;
+        match row {
+            Some((blob,)) => Ok(decode_embedding_blob(&blob)),
+            None => Ok(None),
+        }
     }
 
     /// Fetch the per-note state needed by the `memory_repair_embeddings`

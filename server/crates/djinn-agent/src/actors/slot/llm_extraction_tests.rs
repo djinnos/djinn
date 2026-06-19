@@ -923,7 +923,7 @@ async fn llm_extraction_admission_gate_drops_pattern_missing_adr_054_sections() 
     };
 
     let provider = Arc::new(FakeProvider::text(
-        &serde_json::json!({
+        serde_json::json!({
             "cases": [],
             "patterns": [{
                 "title": "Unstructured Pattern Note",
