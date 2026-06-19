@@ -262,6 +262,35 @@ jobs:
           git diff --name-only --diff-filter=AMR "$BASE_SHA...HEAD" \
             | ./scripts/check-file-size.sh --files-from-stdin
 
+  # Pure-shell PR-time guard: already-applied sqlx migrations are immutable.
+  # Editing/renaming/deleting a migration that exists on the base branch breaks
+  # the `migrate` init container on every EXISTING database (sqlx checksum
+  # mismatch) while still passing on a fresh CI DB — so it only detonates at
+  # deploy time. This guard blocks the merge; schema changes must be a NEW
+  # migration. Wired into the Quality Gate below so it is a hard blocker.
+  server-migrations-guard:
+    name: Server Migrations Guard
+    needs: changes
+    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 so `git diff` can resolve the merge base against the
+      # PR / merge-queue base SHA. A shallow clone would fail on stale bases.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check applied migrations are immutable
+        env:
+          # PR: the PR's base ref HEAD; merge_group: the merge-queue base ref
+          # HEAD; workflow_dispatch / other: empty → the script falls back to
+          # origin/main.
+          BASE_SHA: >-
+            ${{ github.event.pull_request.base.sha
+               || github.event.merge_group.base_sha
+               || '' }}
+        run: ./scripts/check-migrations-immutable.sh
+
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Server Tests (merge queue only)                                 ║
   # ║                                                                  ║
@@ -479,6 +508,7 @@ jobs:
     if: always() && github.event_name != 'push'
     needs:
       - server-clippy
+      - server-migrations-guard
       - server-test
       - server-sqlx-cache
       - ui-frontend
@@ -487,6 +517,7 @@ jobs:
         run: |
           results=(
             "${{ needs.server-clippy.result }}"
+            "${{ needs.server-migrations-guard.result }}"
             "${{ needs.server-test.result }}"
             "${{ needs.server-sqlx-cache.result }}"
             "${{ needs.ui-frontend.result }}"
