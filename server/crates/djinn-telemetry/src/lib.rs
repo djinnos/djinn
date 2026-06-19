@@ -1074,6 +1074,149 @@ mod tests {
             merge_failures_before + 1.0
         );
     }
+
+    // ── cargo_target_seed telemetry tests ───────────────────────────
+
+    // Helper to extract the numeric value from a rendered Prometheus sample line.
+    fn sample_value(sample: &str) -> f64 {
+        sample
+            .rsplit_once(' ')
+            .and_then(|(_, v)| v.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("sample should end with a number: {sample}"))
+    }
+
+    #[test]
+    fn cargo_target_seed_hit_counter_renders_outcome_label() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let before = render().unwrap();
+        let before_sample = rendered_sample(
+            &before,
+            CARGO_TARGET_SEED_TOTAL,
+            &[("outcome", "hit"), ("fallback_reason", "")],
+        );
+        let before_val = sample_value(before_sample);
+
+        cargo_target_seed::increment_seed_hit();
+
+        let after = render().unwrap();
+        let after_sample = rendered_sample(
+            &after,
+            CARGO_TARGET_SEED_TOTAL,
+            &[("outcome", "hit"), ("fallback_reason", "")],
+        );
+        assert_eq!(
+            sample_value(after_sample),
+            before_val + 1.0,
+            "cargo-target-seed hit should increment by 1: {after_sample}"
+        );
+    }
+
+    #[test]
+    fn cargo_target_seed_fallback_counter_renders_fallback_reason_label() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let reason = cargo_target_seed::FALLBACK_REASON_BASE_MISSING;
+        let before = render().unwrap();
+        let before_sample = rendered_sample(
+            &before,
+            CARGO_TARGET_SEED_TOTAL,
+            &[("outcome", "fallback"), ("fallback_reason", reason)],
+        );
+        let before_val = sample_value(before_sample);
+
+        cargo_target_seed::increment_seed_fallback(reason);
+
+        let after = render().unwrap();
+        let after_sample = rendered_sample(
+            &after,
+            CARGO_TARGET_SEED_TOTAL,
+            &[("outcome", "fallback"), ("fallback_reason", reason)],
+        );
+        assert_eq!(
+            sample_value(after_sample),
+            before_val + 1.0,
+            "cargo-target-seed fallback should increment by 1: {after_sample}"
+        );
+    }
+
+    #[test]
+    fn cargo_target_seed_fallback_unknown_reason_renders() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let reason = cargo_target_seed::FALLBACK_REASON_UNKNOWN;
+        let before = render().unwrap();
+        let before_sample = rendered_sample(
+            &before,
+            CARGO_TARGET_SEED_TOTAL,
+            &[("outcome", "fallback"), ("fallback_reason", reason)],
+        );
+        let before_val = sample_value(before_sample);
+
+        cargo_target_seed::increment_seed_fallback(reason);
+
+        let after = render().unwrap();
+        let after_sample = rendered_sample(
+            &after,
+            CARGO_TARGET_SEED_TOTAL,
+            &[("outcome", "fallback"), ("fallback_reason", reason)],
+        );
+        assert_eq!(
+            sample_value(after_sample),
+            before_val + 1.0,
+            "cargo-target-seed unknown-fallback should increment by 1: {after_sample}"
+        );
+    }
+
+    #[test]
+    fn cargo_target_seed_all_fallback_reasons_render_distinctly() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let reasons = [
+            cargo_target_seed::FALLBACK_REASON_BASE_MISSING,
+            cargo_target_seed::FALLBACK_REASON_BASE_NOT_DIRECTORY,
+            cargo_target_seed::FALLBACK_REASON_BASE_UNUSABLE,
+            cargo_target_seed::FALLBACK_REASON_SCAN_FAILED,
+            cargo_target_seed::FALLBACK_REASON_CLONE_FAILED,
+            cargo_target_seed::FALLBACK_REASON_UNKNOWN,
+        ];
+
+        // Snapshot before values.
+        let before = render().unwrap();
+        let before_vals: Vec<f64> = reasons
+            .iter()
+            .map(|reason| {
+                let sample = rendered_sample(
+                    &before,
+                    CARGO_TARGET_SEED_TOTAL,
+                    &[("outcome", "fallback"), ("fallback_reason", reason)],
+                );
+                sample_value(sample)
+            })
+            .collect();
+
+        for reason in &reasons {
+            cargo_target_seed::increment_seed_fallback(reason);
+        }
+
+        let after = render().unwrap();
+        for (i, reason) in reasons.iter().enumerate() {
+            let after_sample = rendered_sample(
+                &after,
+                CARGO_TARGET_SEED_TOTAL,
+                &[("outcome", "fallback"), ("fallback_reason", reason)],
+            );
+            assert_eq!(
+                sample_value(after_sample),
+                before_vals[i] + 1.0,
+                "cargo-target-seed fallback reason {reason} should increment by 1: {after_sample}"
+            );
+        }
+    }
 }
 
 // warm-base validation: v0.6.11 incremental=0 (no-op)
