@@ -79,15 +79,25 @@ pub fn build_warm_job(config: &KubernetesConfig, project_id: &str, project_image
     // `git checkout` fails on every missing blob (`unable to read sha1
     // file of <path>`). We avoid the filter entirely by pulling the
     // upstream URL (with fresh installation token, rotated every 60s by
-    // the mirror fetcher) out of the mirror config and doing a
-    // `--depth 1 --single-branch` clone straight from GitHub. Same
-    // pattern the per-project build Job uses. Once we do it, the
-    // workspace is a full working tree.
+    // the mirror fetcher) out of the mirror config and doing a clone
+    // straight from GitHub. Same pattern the per-project build Job uses.
+    //
+    // `--depth 1000 --single-branch`: SCIP only needs HEAD source, but
+    // the coupling-index phase walks `cursor..HEAD` and needs the saved
+    // cursor's history to be reachable. `--depth 1000` gives ~1000
+    // commits of recent history for free (the typical warm cadence is
+    // <100 new commits, so the saved cursor almost always lands inside
+    // this window) and only adds a few MB over `--depth 1` for typical
+    // repos thanks to git's pack deduplication. Cursors older than 1000
+    // commits are handled by `coupling_index::try_fetch_cursor` falling
+    // back to `git fetch --unshallow`. See
+    // `cases/plan-a-warm-cargo-base-reuse-validated-working-v0-6-11-0-6-12`
+    // for the broader warm-cost discussion.
     let cmd = format!(
         r#"set -euo pipefail
 git config --global --add safe.directory "{mirror_path}"
 UPSTREAM_URL="$(git -C "{mirror_path}" config remote.origin.url)"
-git clone --depth 1 --single-branch "$UPSTREAM_URL" "{project_root}"
+git clone --depth 1000 --single-branch "$UPSTREAM_URL" "{project_root}"
 # Install JS deps before indexing so scip-typescript can resolve
 # tsconfig `extends` that point at workspace packages (e.g. a shared
 # `tsconfig` package in a pnpm/turbo monorepo) — those live under
@@ -404,6 +414,27 @@ mod tests {
         assert_eq!(cmd[0], "/bin/bash");
         assert_eq!(cmd[1], "-c");
         assert!(cmd[2].contains("git clone"), "bash -c script: {}", cmd[2]);
+        // Warm clone must give the coupling index enough history to walk
+        // `cursor..HEAD` without a forced unshallow on every warm. Depth
+        // 1000 covers the typical case (warm cadence is <100 new commits,
+        // so the saved cursor almost always lands in this window). See
+        // `cases/plan-a-warm-cargo-base-reuse-validated-working-v0-6-11-0-6-12`
+        // and `coupling_index::try_fetch_cursor` for the fallback path
+        // when the cursor is older than the clone depth. The substring
+        // match has to look for the leading space — bare `--depth 1`
+        // would otherwise match the first three chars of `--depth 1000`.
+        assert!(
+            cmd[2].contains(" --depth 1000"),
+            "warm clone must use --depth 1000 so the saved coupling cursor is \
+             reachable on a fresh clone: {}",
+            cmd[2]
+        );
+        assert!(
+            !cmd[2].contains(" --depth 1 "),
+            "warm clone must NOT use --depth 1 (forces an unshallow on every \
+             warm): {}",
+            cmd[2]
+        );
         assert!(cmd[2].contains(WARM_COMMAND_BIN));
         assert!(cmd[2].contains("warm-graph \"proj-xyz\""));
         // JS deps are installed (lockfile-gated) before warming so the TS

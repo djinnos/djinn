@@ -28,9 +28,10 @@ pub struct ImageDto {
     /// The image's EnvironmentConfig (build fields).
     #[schemars(with = "djinn_stack::environment::EnvironmentConfig")]
     pub config: ObjectJson,
-    /// Service-preset ids tasks using this image may request (Phase C capability).
+    /// Service-preset ids injected as native sidecars into every Pod that runs
+    /// this image (e.g. a Postgres reachable on 127.0.0.1 with TEST_POSTGRES_URL).
     #[serde(default)]
-    pub allowed_presets: Vec<String>,
+    pub service_presets: Vec<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -79,10 +80,11 @@ pub struct ImageDeleteParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct ImageSetAllowedPresetsParams {
+pub struct ImageSetServicesParams {
     /// Image id.
     pub id: String,
-    /// Service-preset ids this image's tasks may request (full replacement).
+    /// Service-preset ids to inject as native sidecars into every Pod that runs
+    /// this image (full replacement). Empty clears all injected services.
     pub preset_ids: Vec<String>,
 }
 
@@ -142,8 +144,8 @@ impl DjinnMcpServer {
             Ok(rows) => {
                 let mut images = Vec::with_capacity(rows.len());
                 for i in rows {
-                    let allowed_presets =
-                        repo.list_allowed_presets(&i.id).await.unwrap_or_default();
+                    let service_presets =
+                        repo.list_service_presets(&i.id).await.unwrap_or_default();
                     images.push(ImageDto {
                         id: i.id,
                         name: i.name,
@@ -153,7 +155,7 @@ impl DjinnMcpServer {
                             serde_json::from_str::<serde_json::Value>(&i.config)
                                 .unwrap_or_else(|_| serde_json::json!({})),
                         ),
-                        allowed_presets,
+                        service_presets,
                     });
                 }
                 Json(ImageListResponse {
@@ -322,14 +324,14 @@ impl DjinnMcpServer {
     }
 
     #[tool(
-        description = "Set which backing-service presets this image's tasks may request (full replacement). The capability gate for on-demand services."
+        description = "Set which backing-service presets are injected as native sidecars into every task-run / verification Pod that runs this image (full replacement; empty clears all). Each becomes reachable on 127.0.0.1 with its connection string in the preset's env var (e.g. TEST_POSTGRES_URL)."
     )]
-    pub async fn image_set_allowed_presets(
+    pub async fn image_set_services(
         &self,
-        Parameters(input): Parameters<ImageSetAllowedPresetsParams>,
+        Parameters(input): Parameters<ImageSetServicesParams>,
     ) -> Json<ImageMutateResponse> {
         let repo = ImageRepository::new(self.state.db().clone());
-        match repo.set_allowed_presets(&input.id, &input.preset_ids).await {
+        match repo.set_service_presets(&input.id, &input.preset_ids).await {
             Ok(()) => Json(ImageMutateResponse {
                 status: "ok".into(),
                 error: None,
@@ -337,7 +339,7 @@ impl DjinnMcpServer {
             }),
             Err(e) => Json(ImageMutateResponse {
                 status: "error".into(),
-                error: Some(format!("set allowed presets: {e}")),
+                error: Some(format!("set image services: {e}")),
                 id: None,
             }),
         }

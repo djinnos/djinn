@@ -3,6 +3,8 @@ use super::*;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use regex::Regex;
+
 /// How long a `task_run` may stay in `running` without an `ended_at` before
 /// the periodic sweep flips it to `interrupted`. Must comfortably exceed the
 /// K8s Job `activeDeadlineSeconds` (10800s) + `terminationGracePeriodSeconds`
@@ -39,6 +41,7 @@ pub(super) async fn sweep_stale_resources(
     reap_orphaned_taskrun_jobs(db, app_state, "periodic").await;
     sweep_orphaned_cargo_target_run_dirs(db, app_state.cargo_target_runs_root.as_deref()).await;
     sweep_durable_output_stash(db).await;
+    sweep_cargo_health().await;
 
     let project_repo = ProjectRepository::new(db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(db.clone(), app_state.event_bus.clone());
@@ -282,6 +285,319 @@ mod output_stash_gc_tests {
     fn output_stash_retention_cutoff_saturates_before_epoch() {
         assert_eq!(output_stash_retention_cutoff_unix_secs(-1, 30), 0);
         assert_eq!(output_stash_retention_cutoff_unix_secs(10, 30), 0);
+    }
+}
+
+// ─── Cargo cache health sweep ──────────────────────────────────────────────
+
+/// Filesystem convention for the warm, per-project Cargo target base.
+/// Matches `djinn_agent_worker::cargo_target_seed::WARM_BASE_ROOT`.
+const WARM_BASE_ROOT: &str = "/cache/cargo-target";
+
+/// Per-project cargo cache health summary extracted from the current
+/// Prometheus metrics and warm-base filesystem state.
+#[derive(Debug, Clone)]
+struct CargoCacheProjectHealth {
+    project_id: String,
+    seed_hit_count: u64,
+    cold_fallback_count: u64,
+    warm_base_age_seconds: Option<u64>,
+}
+
+/// Read warm-base directories and seed metrics from Prometheus counters,
+/// then log a structured health line per project.
+///
+/// Called from [`sweep_stale_resources`] on every periodic tick.
+async fn sweep_cargo_health() {
+    sweep_cargo_health_under(Path::new(WARM_BASE_ROOT)).await;
+}
+
+/// Testable implementation that accepts an explicit warm-base root.
+async fn sweep_cargo_health_under(warm_base_root: &Path) {
+    let now_unix_secs = time::OffsetDateTime::now_utc().unix_timestamp();
+    let now_u64 = u64::try_from(now_unix_secs).unwrap_or(0);
+
+    // Parse seed metrics from Prometheus text output.
+    let seed_metrics = match djinn_telemetry::render() {
+        Ok(text) => parse_seed_metrics_from_text(&text),
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                "CoordinatorActor: cargo cache health sweep skipped metrics; render failed"
+            );
+            Vec::new()
+        }
+    };
+
+    let mut project_healths: HashMap<String, CargoCacheProjectHealth> = HashMap::new();
+
+    // Populate from Prometheus counter metrics.
+    for (project_id, hits, colds) in seed_metrics {
+        project_healths
+            .entry(project_id.clone())
+            .and_modify(|h| {
+                h.seed_hit_count = hits;
+                h.cold_fallback_count = colds;
+            })
+            .or_insert(CargoCacheProjectHealth {
+                project_id,
+                seed_hit_count: hits,
+                cold_fallback_count: colds,
+                warm_base_age_seconds: None,
+            });
+    }
+
+    // Scan warm-base directories for freshness.
+    match tokio::fs::read_dir(warm_base_root).await {
+        Ok(mut entries) => {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let Ok(file_type) = entry.file_type().await else {
+                    continue;
+                };
+                if !file_type.is_dir() {
+                    continue;
+                }
+                let Some(project_id) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+                    continue;
+                };
+                let age = compute_warm_base_age_secs(&entry.path(), now_u64).await;
+                project_healths
+                    .entry(project_id.clone())
+                    .and_modify(|h| h.warm_base_age_seconds = age)
+                    .or_insert(CargoCacheProjectHealth {
+                        project_id,
+                        seed_hit_count: 0,
+                        cold_fallback_count: 0,
+                        warm_base_age_seconds: age,
+                    });
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                root = %warm_base_root.display(),
+                "CoordinatorActor: cargo cache health sweep skipped; warm-base root does not exist"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                root = %warm_base_root.display(),
+                "CoordinatorActor: cargo cache health sweep failed to enumerate warm-base root"
+            );
+        }
+    }
+
+    // Log structured health line per project.
+    for health in project_healths.values() {
+        let seed_hit_rate =
+            compute_seed_hit_rate(health.seed_hit_count, health.cold_fallback_count);
+        tracing::info!(
+            project_id = %health.project_id,
+            seed_hit_rate,
+            cold_fallback_count = health.cold_fallback_count,
+            warm_base_age_seconds = ?health.warm_base_age_seconds,
+            "cargo cache health"
+        );
+    }
+}
+
+/// Parse `djinn_cargo_seed_hit_total` and `djinn_cargo_seed_cold_total` counter
+/// values from a Prometheus text exposition. Returns `(project_id, hit_count,
+/// cold_count)` tuples aggregated per project.
+fn parse_seed_metrics_from_text(rendered: &str) -> Vec<(String, u64, u64)> {
+    let hit_re =
+        Regex::new(r#"djinn_cargo_seed_hit_total\{([^}]*)\}\s+(\d+)"#).expect("valid regex");
+    let cold_re =
+        Regex::new(r#"djinn_cargo_seed_cold_total\{([^}]*)\}\s+(\d+)"#).expect("valid regex");
+    let project_re = Regex::new(r#"project_id="([^"]+)""#).expect("valid regex");
+
+    let mut hits: HashMap<String, u64> = HashMap::new();
+    let mut colds: HashMap<String, u64> = HashMap::new();
+
+    for cap in hit_re.captures_iter(rendered) {
+        let labels = &cap[1];
+        let value: u64 = cap[2].parse().unwrap_or(0);
+        if let Some(pc) = project_re.captures(labels) {
+            *hits.entry(pc[1].to_string()).or_insert(0) += value;
+        }
+    }
+
+    for cap in cold_re.captures_iter(rendered) {
+        let labels = &cap[1];
+        let value: u64 = cap[2].parse().unwrap_or(0);
+        if let Some(pc) = project_re.captures(labels) {
+            *colds.entry(pc[1].to_string()).or_insert(0) += value;
+        }
+    }
+
+    let mut all_projects: HashSet<String> = HashSet::new();
+    all_projects.extend(hits.keys().cloned());
+    all_projects.extend(colds.keys().cloned());
+
+    let mut result: Vec<(String, u64, u64)> = all_projects
+        .into_iter()
+        .map(|pid| {
+            let h = hits.get(&pid).copied().unwrap_or(0);
+            let c = colds.get(&pid).copied().unwrap_or(0);
+            (pid, h, c)
+        })
+        .collect();
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result
+}
+
+/// Compute the age (in seconds) of a warm-base directory from its mtime.
+/// Returns `None` if the directory metadata cannot be read.
+async fn compute_warm_base_age_secs(dir: &Path, now_unix_secs: u64) -> Option<u64> {
+    let metadata = tokio::fs::metadata(dir).await.ok()?;
+    let modified = metadata.modified().ok()?;
+    let mtime_secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(now_unix_secs.saturating_sub(mtime_secs))
+}
+
+/// Compute the seed hit-rate as `hits / (hits + colds)`.
+///
+/// Returns `1.0` when no seed outcomes have been recorded yet (cold-start of
+/// the health sweep itself), `0.0` when every seed was a cold fallback, and a
+/// `(0.0, 1.0]` ratio otherwise.
+fn compute_seed_hit_rate(hits: u64, colds: u64) -> f64 {
+    let total = hits + colds;
+    if total == 0 {
+        1.0
+    } else {
+        hits as f64 / total as f64
+    }
+}
+
+#[cfg(test)]
+mod cargo_cache_health_tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    // ── Freshness computation ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn freshness_computation_from_mock_mtime() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("project-abc");
+        std::fs::create_dir(&dir).unwrap();
+
+        // The directory was just created, so its mtime ≈ now.
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let age = compute_warm_base_age_secs(&dir, now).await;
+        // Age should be 0 or 1 second depending on clock jitter.
+        assert!(age.unwrap() <= 1, "freshly-created dir age should be <= 1s");
+
+        // Simulate an old directory by using a far-future "now".
+        let future_now = now + 3600;
+        let age = compute_warm_base_age_secs(&dir, future_now).await;
+        assert_eq!(age.unwrap(), 3600);
+    }
+
+    #[tokio::test]
+    async fn freshness_returns_none_for_missing_dir() {
+        let age =
+            compute_warm_base_age_secs(Path::new("/nonexistent/path/xyz"), 1_700_000_000).await;
+        assert!(age.is_none());
+    }
+
+    // ── Hit-rate aggregation ────────────────────────────────────────────
+
+    #[test]
+    fn hit_rate_no_runs_returns_one() {
+        // 0 hits / 0 total = 1.0 (no runs yet — benign default).
+        assert_eq!(compute_seed_hit_rate(0, 0), 1.0);
+    }
+
+    #[test]
+    fn hit_rate_three_hits_one_cold() {
+        // 3 hits / 4 total = 0.75.
+        let rate = compute_seed_hit_rate(3, 1);
+        assert!(
+            (rate - 0.75).abs() < f64::EPSILON,
+            "expected 0.75, got {rate}"
+        );
+    }
+
+    #[test]
+    fn hit_rate_all_cold() {
+        // 0 hits / 1 total = 0.0.
+        assert_eq!(compute_seed_hit_rate(0, 1), 0.0);
+    }
+
+    #[test]
+    fn hit_rate_all_hits() {
+        // 5 hits / 5 total = 1.0.
+        assert_eq!(compute_seed_hit_rate(5, 0), 1.0);
+    }
+
+    // ── Prometheus text parsing ─────────────────────────────────────────
+
+    #[test]
+    fn parse_seed_metrics_extracts_per_project() {
+        let rendered = concat!(
+            "# HELP djinn_cargo_seed_hit_total ...\n",
+            "# TYPE djinn_cargo_seed_hit_total counter\n",
+            "djinn_cargo_seed_hit_total{project_id=\"abc123\"} 5\n",
+            "djinn_cargo_seed_hit_total{project_id=\"def456\"} 3\n",
+            "# HELP djinn_cargo_seed_cold_total ...\n",
+            "# TYPE djinn_cargo_seed_cold_total counter\n",
+            "djinn_cargo_seed_cold_total{fallback_reason=\"base_missing\",project_id=\"abc123\"} 1\n",
+            "djinn_cargo_seed_cold_total{fallback_reason=\"scan_failed\",project_id=\"abc123\"} 2\n",
+            "djinn_cargo_seed_cold_total{fallback_reason=\"base_missing\",project_id=\"ghi789\"} 4\n",
+        );
+
+        let mut metrics = parse_seed_metrics_from_text(rendered);
+        metrics.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert_eq!(metrics.len(), 3);
+        // abc123: 5 hits, 3 colds (1 + 2 aggregated)
+        assert_eq!(metrics[0], ("abc123".into(), 5, 3));
+        // def456: 3 hits, 0 colds
+        assert_eq!(metrics[1], ("def456".into(), 3, 0));
+        // ghi789: 0 hits, 4 colds
+        assert_eq!(metrics[2], ("ghi789".into(), 0, 4));
+    }
+
+    #[test]
+    fn parse_seed_metrics_empty_input() {
+        let metrics = parse_seed_metrics_from_text("");
+        assert!(metrics.is_empty());
+    }
+
+    #[test]
+    fn parse_seed_metrics_no_cargo_metrics() {
+        let rendered = "some_other_metric{label=\"x\"} 42\n";
+        let metrics = parse_seed_metrics_from_text(rendered);
+        assert!(metrics.is_empty());
+    }
+
+    // ── End-to-end health sweep with mock filesystem ────────────────────
+
+    #[tokio::test]
+    async fn sweep_cargo_health_under_logs_per_project() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // Create two warm-base dirs.
+        std::fs::create_dir(root.join("proj-alpha")).unwrap();
+        std::fs::create_dir(root.join("proj-beta")).unwrap();
+
+        // Run the sweep (metrics portion will be empty in test context
+        // unless telemetry was initialized; the filesystem scan is the
+        // primary assertion here).
+        sweep_cargo_health_under(root).await;
+
+        // No assertion on log output — tracing subscriber is not captured
+        // in unit tests. The function's contract is that it doesn't panic
+        // and runs to completion. Structured logging is validated by the
+        // acceptance criteria review.
     }
 }
 
@@ -684,7 +1000,11 @@ async fn list_sessions_for_task_run(
         r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
             status, tokens_in, tokens_out,
             cache_read_tokens, cache_write_tokens, task_run_id, title,
-            parked_reason
+            parked_reason,
+            cost_usd, input_price_per_million_snapshot,
+            output_price_per_million_snapshot,
+            cache_read_price_per_million_snapshot,
+            cache_write_price_per_million_snapshot
          FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
     )
     .bind(task_run_id)

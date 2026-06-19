@@ -61,13 +61,14 @@ impl NoteRepository {
 
         let notes = sqlx::query_as::<_, Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                        storage, note_type, folder, tags::text AS tags, content,
+                        storage, note_type, folder, status, tags::text AS tags, content,
                         retrieval_anchor, created_at, updated_at, last_accessed,
                         access_count, confidence,
                         abstract AS abstract_, overview,
                         scope_paths::text AS scope_paths
              FROM notes n
              WHERE n.project_id = $1
+               AND n.status = 'active'
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
                AND n.last_accessed < to_char((now() at time zone 'utc') - interval '30 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                AND n.access_count = 0
@@ -265,13 +266,14 @@ impl NoteRepository {
         // macro can type-check the query.
         let mut sql = String::from(
             r#"SELECT id, project_id, permalink, title, file_path,
-                      storage, note_type, folder, tags::text AS tags, content,
+                      storage, note_type, folder, status, tags::text AS tags, content,
                       retrieval_anchor, created_at, updated_at, last_accessed,
                       access_count, confidence,
                       abstract AS abstract_, overview,
                       scope_paths::text AS scope_paths
                FROM notes
                WHERE project_id = $1
+                 AND status = 'active'
                  AND note_type NOT IN ('brief', 'roadmap', 'catalog')
                  AND "#,
         );
@@ -821,6 +823,7 @@ mod backfill_tests {
             storage: "db".to_string(),
             note_type: "pattern".to_string(),
             folder: "patterns".to_string(),
+            status: "active".to_string(),
             tags: "[]".to_string(),
             content: String::new(),
             retrieval_anchor: None,
@@ -850,6 +853,7 @@ mod backfill_tests {
             storage: "db".to_string(),
             note_type: "pattern".to_string(),
             folder: "patterns".to_string(),
+            status: "active".to_string(),
             tags: "[]".to_string(),
             content: String::new(),
             retrieval_anchor: None,

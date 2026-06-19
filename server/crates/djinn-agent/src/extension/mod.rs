@@ -4,6 +4,7 @@ pub(crate) mod handlers;
 mod helpers;
 pub(crate) mod shared_schemas;
 pub(crate) mod tool_defs;
+mod tool_defs_code_graph;
 mod types;
 
 use std::path::Path;

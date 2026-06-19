@@ -61,6 +61,12 @@ pub struct HousekeepingFixtureExpectedCounts {
     pub flag_orphan_notes: u64,
     pub rebuild_missing_content_hashes: u64,
     pub repair_broken_wikilinks: u64,
+    /// Number of notes the housekeeping tick's archive sweep is expected to
+    /// flip from `active` to `archived` for this project. The shipped
+    /// multi-project fixture only uses hand-written `reference` notes, so
+    /// this stays at 0 in the default fixture — archive candidates live in
+    /// the dedicated single-project archive aggregation test.
+    pub archive_audit_candidates: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -390,6 +396,7 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
                     flag_orphan_notes: 1,
                     rebuild_missing_content_hashes: 2,
                     repair_broken_wikilinks: 1,
+                    archive_audit_candidates: 0,
                 },
                 orphan_note_id: project_one_orphan.id,
                 repaired_source_note_id: project_one_repair_source.id,
@@ -407,6 +414,7 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
                     flag_orphan_notes: 1,
                     rebuild_missing_content_hashes: 2,
                     repair_broken_wikilinks: 1,
+                    archive_audit_candidates: 0,
                 },
                 orphan_note_id: project_two_orphan.id,
                 repaired_source_note_id: project_two_repair_source.id,

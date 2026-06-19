@@ -669,15 +669,6 @@ impl djinn_control_plane::bridge::RuntimeOps for RequeueingRuntimeOps {
         Ok(())
     }
     async fn trigger_graph_warm(&self, _: &str) {}
-    async fn provision_backing_service(
-        &self,
-        _: djinn_control_plane::bridge::ProvisionServiceRequest,
-    ) -> Result<djinn_control_plane::bridge::ProvisionedService, String> {
-        Err("not used".into())
-    }
-    async fn release_backing_service(&self, _: &str) -> Result<(), String> {
-        Ok(())
-    }
     async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {
         Ok(())
     }
@@ -816,15 +807,6 @@ async fn dispatch_verification_marks_error_on_permanent_image_not_ready() {
             Ok(())
         }
         async fn trigger_graph_warm(&self, _: &str) {}
-        async fn provision_backing_service(
-            &self,
-            _: djinn_control_plane::bridge::ProvisionServiceRequest,
-        ) -> Result<djinn_control_plane::bridge::ProvisionedService, String> {
-            Err("not used".into())
-        }
-        async fn release_backing_service(&self, _: &str) -> Result<(), String> {
-            Ok(())
-        }
         async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {
             Ok(())
         }

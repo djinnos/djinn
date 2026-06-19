@@ -5,8 +5,7 @@
  * Right panel: unified chat thread (ADR-007)
  */
 
-import { useEffect, useRef, useState } from "react";
-import { useStore } from "zustand";
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useSelectedProject } from "@/stores/useProjectStore";
 import { useTaskStore } from "@/stores/useTaskStore";
@@ -27,19 +26,12 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { TaskIdLabel } from "@/components/TaskIdLabel";
-import { verificationStore } from "@/stores/verificationStore";
-import {
-  areSetupVerificationViewsEqual,
-  buildSetupVerificationView,
-  EMPTY_SETUP_VERIFICATION,
-} from "@/lib/setupVerificationView";
 
 // ── Status labels ────────────────────────────────────────────────────────────
 
 const STATUS_LABELS: Record<string, string> = {
   open: "Open",
   in_progress: "Coding",
-  verifying: "Verifying",
   needs_task_review: "Needs Review",
   in_task_review: "In Review",
   needs_lead_intervention: "Lead Intervention",
@@ -50,7 +42,6 @@ const STATUS_LABELS: Record<string, string> = {
 const STATUS_COLORS: Record<string, string> = {
   open: "bg-blue-500/15 text-blue-400",
   in_progress: "bg-emerald-500/15 text-emerald-400",
-  verifying: "bg-yellow-500/15 text-yellow-400",
   needs_task_review: "bg-amber-500/15 text-amber-400",
   in_task_review: "bg-amber-500/15 text-amber-400",
   needs_lead_intervention: "bg-red-500/15 text-red-400",
@@ -181,17 +172,6 @@ export function TaskSessionPage() {
     projectSlug
   );
 
-  // Build setup verification view for the session thread
-  const setupVerificationRaw = useStore(verificationStore);
-  const setupVerificationRef = useRef(EMPTY_SETUP_VERIFICATION);
-  if (taskId) {
-    const next = buildSetupVerificationView(taskId, setupVerificationRaw);
-    if (!areSetupVerificationViewsEqual(setupVerificationRef.current, next)) {
-      setupVerificationRef.current = next;
-    }
-  }
-  const setupVerification = setupVerificationRef.current;
-
   // Determine active agent type for streaming display
   const activeSession = sessions.find(
     (s) => s.status === "running" || s.status === "active"
@@ -260,7 +240,6 @@ export function TaskSessionPage() {
             loading={loading}
             error={error}
             activeAgentType={activeSession?.agentType}
-            setupVerification={setupVerification}
           />
         </div>
       </div>

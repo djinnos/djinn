@@ -1,12 +1,61 @@
 use super::*;
 
+/// Default interactive-shell timeout (ms) when the caller passes no `timeout_ms`.
+/// Overridable via `DJINN_SHELL_TIMEOUT_MS`. Raised well above the old 120s:
+/// cold native builds routinely exceed two minutes, and a too-short ceiling
+/// SIGKILLed compiles mid-flight, leaving the model to retry from cold — the
+/// same guillotine the verification runner already fixed (verification/service.rs).
+fn default_shell_timeout_ms() -> u64 {
+    std::env::var("DJINN_SHELL_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v >= 1000)
+        .unwrap_or(600_000)
+}
+
+/// Minimum timeout (ms) enforced for slow native build/test commands, even when
+/// the caller requests a smaller value. A cold `cargo`/`clippy`/`nextest`/`go`/
+/// `pnpm` compile legitimately runs many minutes; flooring stops a low guess
+/// from killing a build that is still making progress. Overridable via
+/// `DJINN_SHELL_BUILD_TIMEOUT_MS`. Only ever RAISES the effective timeout.
+fn build_command_floor_ms() -> u64 {
+    std::env::var("DJINN_SHELL_BUILD_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v >= 1000)
+        .unwrap_or(1_800_000)
+}
+
+/// Heuristic: does this command invoke a slow native build/test toolchain whose
+/// cold compile can exceed the default timeout? Matches on substrings so the
+/// common `cd server && cargo …` shape is covered. False positives are benign:
+/// a non-build command that happens to contain the needle finishes fast anyway,
+/// so the only effect is a higher (unused) ceiling.
+fn is_build_command(command: &str) -> bool {
+    const NEEDLES: [&str; 8] = [
+        "cargo ", "nextest", "go build", "go test", "pnpm ", "npm run", "make ", "bazel ",
+    ];
+    NEEDLES.iter().any(|needle| command.contains(needle))
+}
+
+/// Resolve the effective shell timeout: the caller's `timeout_ms` (or the
+/// default), clamped to a sane minimum, then floored up for build/test commands.
+fn effective_shell_timeout_ms(requested: Option<u64>, command: &str) -> u64 {
+    let base = requested.unwrap_or_else(default_shell_timeout_ms).max(1000);
+    if is_build_command(command) {
+        base.max(build_command_floor_ms())
+    } else {
+        base
+    }
+}
+
 pub(crate) async fn call_shell(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
     let p: ShellParams = parse_args(arguments)?;
-    let timeout_ms = p.timeout_ms.unwrap_or(120_000).max(1000);
+    let timeout_ms = effective_shell_timeout_ms(p.timeout_ms, &p.command);
 
     // Cross-repo shell: when `project` names a DIFFERENT registered project,
     // lazily check that repo out (read-only, cached per run) into the worktree
@@ -794,4 +843,46 @@ async fn enrich_with_related_files(
         obj.insert("related_files".to_string(), value);
     }
     response
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::{effective_shell_timeout_ms, is_build_command};
+
+    #[test]
+    fn build_commands_are_detected() {
+        assert!(is_build_command("cd server && cargo check -p djinn-db"));
+        assert!(is_build_command("cargo clippy --all-features"));
+        assert!(is_build_command("cargo nextest run"));
+        assert!(is_build_command("go test ./..."));
+        assert!(is_build_command("pnpm install"));
+        assert!(is_build_command("make build"));
+        assert!(!is_build_command("ls -la"));
+        assert!(!is_build_command("git status"));
+        assert!(!is_build_command("grep -r foo src"));
+    }
+
+    #[test]
+    fn build_commands_are_floored_above_a_small_request() {
+        // A 120s request for a cold compile must be raised to the build floor,
+        // not honored verbatim (that was the SIGKILL-mid-build bug).
+        let got = effective_shell_timeout_ms(Some(120_000), "cargo build");
+        assert!(got >= 1_800_000, "build floor not applied: {got}");
+    }
+
+    #[test]
+    fn non_build_commands_keep_the_requested_timeout() {
+        assert_eq!(effective_shell_timeout_ms(Some(5_000), "echo hi"), 5_000);
+    }
+
+    #[test]
+    fn requests_are_clamped_to_a_sane_minimum() {
+        assert_eq!(effective_shell_timeout_ms(Some(10), "echo hi"), 1000);
+    }
+
+    #[test]
+    fn a_large_explicit_build_timeout_is_preserved() {
+        let got = effective_shell_timeout_ms(Some(3_600_000), "cargo test");
+        assert_eq!(got, 3_600_000);
+    }
 }

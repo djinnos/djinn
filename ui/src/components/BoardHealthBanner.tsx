@@ -1,14 +1,8 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
-import { useStore } from "zustand";
+import { useEffect, useState, useMemo } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Alert02Icon, Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { callMcpTool } from "@/api/mcpClient";
-import {
-  verificationStore,
-  type StepEntry,
-  type VerificationRun,
-} from "@/stores/verificationStore";
 
 interface PrError {
   projectId: string;
@@ -18,8 +12,6 @@ interface PrError {
 interface BoardHealthData {
   projectIssues: Record<string, string>;
   prErrors: PrError[];
-  failedSteps: StepEntry[];
-  failedRun: VerificationRun | null;
 }
 
 function useBoardHealth(projectSlugs: string[]): BoardHealthData | null {
@@ -31,31 +23,6 @@ function useBoardHealth(projectSlugs: string[]): BoardHealthData | null {
   // Stabilize the slugs array so deps don't fire on every render
   const slugsKey = projectSlugs.slice().sort().join("\0");
   const stableSlugs = useMemo(() => projectSlugs, [slugsKey]); // eslint-disable-line react-hooks/exhaustive-deps
-  const slugSet = useMemo(() => new Set(stableSlugs), [stableSlugs]);
-
-  const failedRun = useStore(
-    verificationStore,
-    useCallback(
-      (state) => {
-        if (slugSet.size === 0) return null;
-        let latest: VerificationRun | null = null;
-        for (const run of state.runs.values()) {
-          if (!slugSet.has(run.projectId)) continue;
-          if (
-            !latest ||
-            new Date(run.startedAt).getTime() >
-              new Date(latest.startedAt).getTime()
-          ) {
-            latest = run;
-          }
-        }
-        return latest?.status === "failed" ? latest : null;
-      },
-      [slugSet]
-    )
-  );
-
-  const failedSteps = failedRun?.steps.filter((s) => s.status === "failed") ?? [];
 
   useEffect(() => {
     if (stableSlugs.length === 0) return;
@@ -98,12 +65,11 @@ function useBoardHealth(projectSlugs: string[]): BoardHealthData | null {
 
   const hasIssues =
     Object.keys(projectIssues).length > 0 ||
-    prErrors.length > 0 ||
-    failedSteps.length > 0;
+    prErrors.length > 0;
 
   if (!hasIssues) return null;
 
-  return { projectIssues, prErrors, failedSteps, failedRun };
+  return { projectIssues, prErrors };
 }
 
 interface BoardHealthBannerProps {
@@ -120,10 +86,10 @@ export function BoardHealthBanner({ projectSlugs }: BoardHealthBannerProps) {
 
   if (!health || dismissed) return null;
 
-  const { projectIssues, prErrors, failedSteps, failedRun } = health;
+  const { projectIssues, prErrors } = health;
   const issueEntries = Object.entries(projectIssues);
   const totalIssues =
-    issueEntries.length + prErrors.length + failedSteps.length;
+    issueEntries.length + prErrors.length;
 
   return (
     <Card className="mx-4 border-amber-500/20 bg-amber-500/[0.04]">
@@ -191,44 +157,6 @@ export function BoardHealthBanner({ projectSlugs }: BoardHealthBannerProps) {
             );
           })}
 
-          {/* Failed verification/setup steps */}
-          {failedSteps.map((step) => (
-            <div
-              key={`${step.phase}-${step.index}`}
-              className="flex items-start gap-2 text-xs text-red-400"
-            >
-              <span className="mt-px shrink-0 font-medium">
-                {step.phase === "setup" ? "setup" : "verify"} failed:
-              </span>
-              <span className="text-red-300/80">
-                {step.name}
-                {step.command ? (
-                  <code className="ml-1.5 rounded bg-white/5 px-1 py-0.5 font-mono text-[10px]">
-                    {step.command}
-                  </code>
-                ) : null}
-                {step.exitCode != null ? (
-                  <span className="ml-1 text-muted-foreground">
-                    (exit {step.exitCode})
-                  </span>
-                ) : null}
-              </span>
-            </div>
-          ))}
-
-          {/* Show stderr for the first failed step if available */}
-          {failedSteps.length > 0 && failedSteps[0].stderr && (
-            <pre className="mt-1 max-h-24 overflow-auto rounded bg-black/30 p-2 font-mono text-[10px] leading-relaxed text-red-300/70">
-              {failedSteps[0].stderr.trim().slice(0, 500)}
-            </pre>
-          )}
-
-          {/* Show which task failed if it was task-scoped */}
-          {failedRun?.taskId && (
-            <span className="text-[10px] text-muted-foreground">
-              task: {failedRun.taskId}
-            </span>
-          )}
         </div>
       </CardContent>
     </Card>

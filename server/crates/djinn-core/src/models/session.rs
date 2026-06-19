@@ -61,6 +61,29 @@ pub struct SessionRecord {
     /// being treated as an ordinary completion/failure. Added in migration 59.
     #[serde(default)]
     pub parked_reason: Option<String>,
+    /// Total cost of the session in USD, derived from the per-million snapshot
+    /// rates and the session's token counts. `NULL` until pricing logic is
+    /// wired up (unpriced/uncatalogued sessions stay NULL, never $0).
+    /// Added in migration 66.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// Start-time snapshot of the model's per-million input-token price (USD).
+    /// Snapshotted so the cost is stable against later catalog changes.
+    /// Added in migration 66.
+    #[serde(default)]
+    pub input_price_per_million_snapshot: Option<f64>,
+    /// Start-time snapshot of the model's per-million output-token price (USD).
+    /// Added in migration 66.
+    #[serde(default)]
+    pub output_price_per_million_snapshot: Option<f64>,
+    /// Start-time snapshot of the model's per-million prompt-cache read
+    /// (cache hit) token price (USD). Added in migration 66.
+    #[serde(default)]
+    pub cache_read_price_per_million_snapshot: Option<f64>,
+    /// Start-time snapshot of the model's per-million prompt-cache write
+    /// (cache creation) token price (USD). Added in migration 66.
+    #[serde(default)]
+    pub cache_write_price_per_million_snapshot: Option<f64>,
 }
 
 #[cfg(test)]
@@ -84,6 +107,11 @@ mod tests {
             task_run_id: None,
             title: None,
             parked_reason,
+            cost_usd: None,
+            input_price_per_million_snapshot: None,
+            output_price_per_million_snapshot: None,
+            cache_read_price_per_million_snapshot: None,
+            cache_write_price_per_million_snapshot: None,
         }
     }
 
@@ -110,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn session_record_defaults_missing_parked_reason() {
+    fn session_record_defaults_missing_nullable_additions() {
         let json = serde_json::json!({
             "id": "session-1",
             "project_id": "project-1",
@@ -131,5 +159,10 @@ mod tests {
         let decoded: SessionRecord = serde_json::from_value(json).unwrap();
 
         assert!(decoded.parked_reason.is_none());
+        assert!(decoded.cost_usd.is_none());
+        assert!(decoded.input_price_per_million_snapshot.is_none());
+        assert!(decoded.output_price_per_million_snapshot.is_none());
+        assert!(decoded.cache_read_price_per_million_snapshot.is_none());
+        assert!(decoded.cache_write_price_per_million_snapshot.is_none());
     }
 }

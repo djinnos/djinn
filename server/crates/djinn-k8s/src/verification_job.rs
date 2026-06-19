@@ -34,6 +34,9 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use uuid::Uuid;
 
 use crate::config::KubernetesConfig;
+use crate::sidecar::{
+    BackingServiceSpec, sidecar_conn_env, sidecar_container, sidecar_dshm_volume,
+};
 use crate::warm_job::{
     MIRROR_MOUNT_DIR, VOLUME_MIRROR, VOLUME_WORKSPACE, WARM_COMMAND_BIN, WORKSPACE_MOUNT_DIR,
     sanitize_id, short_uuid,
@@ -54,6 +57,10 @@ const LABEL_PROJECT_ID: &str = "djinn.app/project-id";
 /// then runs `verify-task <run_id>` in the project's image (`project_image_tag`
 /// is resolved by the caller — verification needs the project's toolchain image
 /// to be `ready`).
+/// `services` are the backing services declared on the project's image
+/// (resolved via [`crate::sidecar::resolve_image_services`]); each is injected
+/// as a native sidecar so verification runs the same tests against the same
+/// services the worker had. Pass an empty slice for none.
 pub fn build_verification_job(
     config: &KubernetesConfig,
     project_id: &str,
@@ -61,6 +68,7 @@ pub fn build_verification_job(
     run_id: &str,
     task_branch: &str,
     target_branch: &str,
+    services: &[BackingServiceSpec],
 ) -> Job {
     let suffix = Uuid::now_v7();
     let sanitized_project = sanitize_id(project_id);
@@ -134,6 +142,9 @@ exec {bin} verify-task "{run_id}"
     // no Cargo build-dir lock contention. Single-sourced in job.rs; needs the
     // cache volume below.
     env.extend(crate::job::verify_cache_env_vars(project_id));
+    // One connection env var per injected backing service (e.g.
+    // TEST_POSTGRES_URL → 127.0.0.1:5432), matching the task-run pod.
+    env.extend(services.iter().map(sidecar_conn_env));
 
     let container = Container {
         name: "verify".to_string(),
@@ -182,7 +193,7 @@ exec {bin} verify-task "{run_id}"
         ..Container::default()
     };
 
-    let volumes = vec![
+    let mut volumes = vec![
         Volume {
             name: VOLUME_MIRROR.to_string(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
@@ -206,6 +217,16 @@ exec {bin} verify-task "{run_id}"
         },
         crate::env_config::env_config_volume(project_id),
     ];
+    if !services.is_empty() {
+        volumes.push(sidecar_dshm_volume());
+    }
+
+    let init_containers = (!services.is_empty()).then(|| {
+        services
+            .iter()
+            .map(|s| sidecar_container(config, s))
+            .collect::<Vec<_>>()
+    });
 
     let node_selector = (!config.node_selector.is_empty()).then(|| config.node_selector.clone());
     let tolerations: Option<Vec<Toleration>> =
@@ -214,6 +235,7 @@ exec {bin} verify-task "{run_id}"
     let pod_spec = PodSpec {
         service_account_name: Some(config.service_account.clone()),
         restart_policy: Some("Never".to_string()),
+        init_containers,
         containers: vec![container],
         volumes: Some(volumes),
         node_selector,
@@ -276,6 +298,7 @@ mod tests {
             "run-123",
             "task/ab12",
             "main",
+            &[],
         );
         let name = job.metadata.name.unwrap();
         assert!(name.starts_with("djinn-verify-run-123-"), "got {name}");
@@ -375,6 +398,7 @@ mod tests {
             "019ea7ed-7db6-7252-ad45-d4180f934386",
             "task/019ea7ed",
             "main",
+            &[],
         );
         let name = job.metadata.name.unwrap();
         assert!(

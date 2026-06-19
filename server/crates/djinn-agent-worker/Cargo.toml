@@ -20,6 +20,7 @@ djinn-provider = { path = "../djinn-provider" }
 djinn-runtime = { path = "../djinn-runtime" }
 djinn-stack = { path = "../djinn-stack" }
 djinn-supervisor = { path = "../djinn-supervisor" }
+djinn-telemetry = { path = "../djinn-telemetry" }
 djinn-workspace = { path = "../djinn-workspace" }
 anyhow = "1"
 async-trait = "0.1"
@@ -30,6 +31,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
+toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v7"] }

@@ -46,7 +46,9 @@ impl NoteRepository {
 
         let budget = budget.unwrap_or(4096);
 
-        // Get the seed note with full content
+        // Get the seed note with full content. Archived/deprecated notes remain
+        // addressable through administrative APIs, but prompt-context assembly
+        // is active-only by repository default.
         let Some(seed) = self.get_by_permalink(project_id, seed_permalink).await? else {
             return Ok(BuildContextResponse {
                 primary: vec![],
@@ -54,6 +56,13 @@ impl NoteRepository {
                 related_l0: vec![],
             });
         };
+        if seed.status != djinn_memory::note_status::ACTIVE {
+            return Ok(BuildContextResponse {
+                primary: vec![],
+                related_l1: vec![],
+                related_l0: vec![],
+            });
+        }
 
         // Get direct neighbors via wikilink graph
         let direct_neighbor_ids = self.get_direct_neighbors(project_id, &seed.id).await?;
@@ -154,14 +163,14 @@ impl NoteRepository {
 
     /// Get direct wikilink neighbors (one hop from seed).
     async fn get_direct_neighbors(&self, project_id: &str, seed_id: &str) -> Result<Vec<String>> {
-        let rows = sqlx::query_scalar!(
+        let rows = sqlx::query_scalar::<_, String>(
             r#"SELECT target_id AS "target_id!: String" FROM note_links
              WHERE source_id = $1
                AND target_id IS NOT NULL
-               AND target_id IN (SELECT id FROM notes WHERE project_id = $2)"#,
-            seed_id,
-            project_id
+               AND target_id IN (SELECT id FROM notes WHERE project_id = $2 AND status = 'active')"#,
         )
+        .bind(seed_id)
+        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
@@ -251,18 +260,15 @@ impl NoteRepository {
 
     /// Get temporal scores for all notes in project.
     async fn temporal_scores_all(&self, project_id: &str) -> Result<Vec<(String, f64)>> {
-        let rows = sqlx::query!(
+        let rows: Vec<(String, i64, String, String)> = sqlx::query_as(
             "SELECT id, access_count, created_at, updated_at
              FROM notes
-             WHERE project_id = $1",
-            project_id
+             WHERE project_id = $1
+               AND status = 'active'",
         )
+        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
-        let rows: Vec<(String, i64, String, String)> = rows
-            .into_iter()
-            .map(|r| (r.id, r.access_count, r.created_at, r.updated_at))
-            .collect();
 
         use std::time::SystemTime;
 
@@ -309,7 +315,7 @@ impl NoteRepository {
         let sql = format!(
             "SELECT id, permalink, title, note_type, COALESCE(overview, substr(content, 1, 500)) as disclosure_text
              FROM notes
-             WHERE id IN ({})",
+             WHERE status = 'active' AND id IN ({})",
             crate::repositories::pg_placeholders(ids.len(), 1)
         );
 
@@ -366,7 +372,7 @@ impl NoteRepository {
         let sql = format!(
             "SELECT id, permalink, title, note_type, COALESCE(abstract, substr(content, 1, 100)) as disclosure_text
              FROM notes
-             WHERE id IN ({})",
+             WHERE status = 'active' AND id IN ({})",
             crate::repositories::pg_placeholders(ids.len(), 1)
         );
 

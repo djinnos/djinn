@@ -75,15 +75,6 @@ mod tests {
         ) -> Result<(), crate::bridge::RuntimeDispatchError> {
             Ok(())
         }
-        async fn provision_backing_service(
-            &self,
-            _: crate::bridge::ProvisionServiceRequest,
-        ) -> Result<crate::bridge::ProvisionedService, String> {
-            Err("stub".into())
-        }
-        async fn release_backing_service(&self, _: &str) -> Result<(), String> {
-            Ok(())
-        }
         async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
@@ -138,15 +129,6 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<(), crate::bridge::RuntimeDispatchError> {
-            Ok(())
-        }
-        async fn provision_backing_service(
-            &self,
-            _: crate::bridge::ProvisionServiceRequest,
-        ) -> Result<crate::bridge::ProvisionedService, String> {
-            Err("stub".into())
-        }
-        async fn release_backing_service(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
         async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {
@@ -467,6 +449,7 @@ mod tests {
                 project: setup.project.clone(),
                 folder: Some("memory://design/".to_string()),
                 note_type: Some("design".to_string()),
+                status: None,
                 depth: Some(1),
             },
         )
@@ -483,6 +466,82 @@ mod tests {
                 .iter()
                 .any(|note| note.id == design.id && note.permalink == design.permalink)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_list_ops_honors_explicit_archived_status_filter() {
+        let setup = setup_server().await;
+        let project_id = ProjectRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        )
+        .resolve(&setup.project)
+        .await
+        .unwrap()
+        .expect("project id");
+        let repo = NoteRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        );
+
+        let active = repo
+            .create_db_note(
+                &project_id,
+                "Lifecycle Active Note",
+                "active lifecycle list note",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let archived = repo
+            .create_db_note(
+                &project_id,
+                "Lifecycle Archived Note",
+                "archived lifecycle list note",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        repo.update_status(&archived.id, djinn_memory::note_status::ARCHIVED)
+            .await
+            .unwrap();
+
+        let default_list = ops::memory_list(
+            &setup.server,
+            ListParams {
+                project: setup.project.clone(),
+                folder: None,
+                note_type: Some("reference".to_string()),
+                status: None,
+                depth: Some(0),
+            },
+        )
+        .await;
+        assert!(default_list.error.is_none(), "{:?}", default_list.error);
+        assert!(default_list.notes.iter().any(|note| note.id == active.id));
+        assert!(default_list.notes.iter().all(|note| note.id != archived.id));
+
+        let archived_list = ops::memory_list(
+            &setup.server,
+            ListParams {
+                project: setup.project.clone(),
+                folder: None,
+                note_type: Some("reference".to_string()),
+                status: Some("archived".to_string()),
+                depth: Some(0),
+            },
+        )
+        .await;
+        assert!(archived_list.error.is_none(), "{:?}", archived_list.error);
+        assert!(
+            archived_list
+                .notes
+                .iter()
+                .any(|note| note.id == archived.id)
+        );
+        assert!(archived_list.notes.iter().all(|note| note.id != active.id));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -826,6 +885,7 @@ mod tests {
                 project: setup.project.clone(),
                 folder: None,
                 note_type: None,
+                status: None,
                 depth: Some(1),
             }))
             .await
