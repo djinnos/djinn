@@ -72,7 +72,6 @@ const makeAgent = (overrides: Partial<Agent>): Agent => ({
   mcp_servers: [],
   skills: [],
   model_preference: null,
-  verification_command: null,
   is_default: false,
   learned_prompt: null,
   ...overrides,
@@ -376,7 +375,6 @@ describe("AgentRoles", () => {
     vi.mocked(updateAgent).mockResolvedValue({
       ...defaultWorker,
       system_prompt_extensions: ["Prefer small, focused changes.", "Run focused tests."],
-      verification_command: "pnpm test AgentRoles.test.tsx",
     });
 
     render(<AgentRoles />);
@@ -395,7 +393,6 @@ describe("AgentRoles", () => {
 
     const instructions = screen.getByLabelText("Default instructions");
     await user.type(instructions, "\nRun focused tests.");
-    await user.type(screen.getByLabelText("Verification command"), "pnpm test AgentRoles.test.tsx");
 
     await user.click(screen.getByRole("button", { name: "Save" }));
 
@@ -404,7 +401,6 @@ describe("AgentRoles", () => {
         system_prompt_extensions: ["Prefer small, focused changes.", "Run focused tests."],
         mcp_servers: ["github"],
         skills: ["rust-review"],
-        verification_command: "pnpm test AgentRoles.test.tsx",
       });
     });
 

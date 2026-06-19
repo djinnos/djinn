@@ -403,6 +403,54 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             let parse_ms = t_parse.elapsed().as_millis() as u64;
             let _ = std::fs::remove_dir_all(&output_dir_for_blocking);
 
+            // Out-of-core sharding: when enabled (env flag + threshold),
+            // shard each parsed SCIP file into the out-of-core store so
+            // downstream accessor consumers can load files one-at-a-time
+            // from disk. The build pipeline below still uses the in-memory
+            // `parsed` — this is preparatory population of the store.
+            // The actual builder migration to file-iteration happens in
+            // the follow-up task.
+            let total_parsed_files: usize =
+                parsed.iter().map(|p| p.files.len()).sum();
+            if let Some(ooc_config) =
+                crate::out_of_core::resolve_out_of_core_config(total_parsed_files)
+            {
+                match crate::out_of_core::OutOfCoreStore::open(&ooc_config.storage_path) {
+                    Ok(mut ooc_store) => {
+                        let mut total_shards = 0usize;
+                        let mut shard_err = false;
+                        for index in &parsed {
+                            match ooc_store.put_parsed_index(index) {
+                                Ok(count) => total_shards += count,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        workspace = %index.workspace_slug,
+                                        "ensure_canonical_graph: failed to shard parsed index to out-of-core store"
+                                    );
+                                    shard_err = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !shard_err {
+                            tracing::info!(
+                                shard_count = total_shards,
+                                storage_path = %ooc_config.storage_path.display(),
+                                "ensure_canonical_graph: sharded parsed SCIP data to out-of-core store"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            storage_path = %ooc_config.storage_path.display(),
+                            "ensure_canonical_graph: failed to open out-of-core store; proceeding with in-memory path"
+                        );
+                    }
+                }
+            }
+
             let t_build = std::time::Instant::now();
             let mut graph = crate::repo_graph::RepoDependencyGraph::try_build_with_source(
                 &parsed,
@@ -2039,6 +2087,194 @@ mod tests {
         assert!(
             result.is_ok(),
             "declared overlay must not block the run; got {result:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Incremental == full equivalence regression gate.
+    //
+    // Two consecutive `ensure_canonical_graph` calls on the same project
+    // + commit, with the in-memory GRAPH_CACHE cleared between them,
+    // must produce graph-artifact blobs that satisfy
+    // `assert_graph_artifact_blob_parity`.  The first call seeds the DB
+    // cache with a fixture graph artifact (simulating a full/cold
+    // pipeline run); the second call exercises the DB cache-hit
+    // (warm/incremental) path.
+    //
+    // The negative test proves the harness is a real gate: two
+    // *different* fixture graphs must fail the parity check with a
+    // `GraphArtifactBlobParityError::Diff` variant.
+    // -------------------------------------------------------------------
+
+    /// Positive equivalence test: cold-warm and warm (incremental) blobs
+    /// for the same commit must pass `assert_graph_artifact_blob_parity`.
+    #[tokio::test]
+    async fn incremental_full_equivalence_same_commit() {
+        let tmp = workspace_tempdir("incremental-equiv-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create("test-equiv", "test", "test-equiv")
+            .await
+            .expect("create project");
+
+        // Resolve HEAD commit SHA from the tempdir git repo.
+        let head_out = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&project_root)
+            .output()
+            .await
+            .unwrap();
+        let commit_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+        // Seed the DB cache with a fixture graph artifact — simulates
+        // the output of a full (cold) pipeline run.
+        let graph = build_test_graph_fixture();
+        let seeded_blob =
+            bincode::serialize(&graph.to_artifact()).expect("serialize fixture graph");
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: &commit_sha,
+                graph_blob: &seeded_blob,
+            })
+            .await
+            .expect("seed cache");
+
+        // --- Cold warm: ensure_canonical_graph reads from DB cache ---
+        let result = ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await;
+        assert!(result.is_ok(), "cold warm failed: {result:?}");
+
+        let cold_blob = cache_repo
+            .get(&project.id, &commit_sha)
+            .await
+            .expect("get cold blob")
+            .expect("cold blob should exist in DB")
+            .graph_blob;
+
+        // --- Drop in-memory GRAPH_CACHE so the next call must re-read DB ---
+        clear_test_caches().await;
+
+        // --- Warm (incremental) warm: DB cache-hit path ---
+        let result = ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await;
+        assert!(result.is_ok(), "warm (incremental) warm failed: {result:?}");
+
+        let warm_blob = cache_repo
+            .get(&project.id, &commit_sha)
+            .await
+            .expect("get warm blob")
+            .expect("warm blob should exist in DB")
+            .graph_blob;
+
+        // --- Parity gate: cold and warm blobs must match ---
+        crate::graph_parity::assert_graph_artifact_blob_parity(&cold_blob, &warm_blob)
+            .expect("incremental == full parity violation: cold and warm blobs must match");
+    }
+
+    /// Negative equivalence test: two different fixture graphs (base vs.
+    /// base + extra file) seeded at different commit SHAs must fail the
+    /// parity check with a `Diff` variant.  This proves the harness is
+    /// a real gate, not a tautology.
+    #[tokio::test]
+    async fn incremental_full_equivalence_differs_for_different_commits() {
+        let tmp = workspace_tempdir("incremental-neg-");
+        let _project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create("test-equiv-neg", "test", "test-equiv-neg")
+            .await
+            .expect("create project");
+
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+
+        // Commit A: base fixture graph.
+        let graph_a = build_test_graph_fixture();
+        let blob_a = bincode::serialize(&graph_a.to_artifact()).expect("serialize graph A");
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "commit-a-sha",
+                graph_blob: &blob_a,
+            })
+            .await
+            .expect("seed cache A");
+
+        // Commit B: base fixture + an extra file — different graph.
+        let mut index_b = build_test_parsed_index_fixture();
+        use crate::scip_parser::{ScipOccurrence, ScipRange, ScipSymbolRole};
+        index_b.files.push(crate::scip_parser::ScipFile {
+            language: "rust".to_string(),
+            relative_path: std::path::PathBuf::from("src/extra.rs"),
+            definitions: vec![ScipOccurrence {
+                symbol: "scip-rust pkg src/extra.rs `extra_fn`().".to_string(),
+                range: ScipRange {
+                    start_line: 0,
+                    start_character: 0,
+                    end_line: 0,
+                    end_character: 9,
+                },
+                enclosing_range: None,
+                roles: std::collections::BTreeSet::from([ScipSymbolRole::Definition]),
+                syntax_kind: None,
+                override_documentation: vec![],
+            }],
+            references: vec![],
+            occurrences: vec![],
+            symbols: vec![],
+        });
+        let graph_b = crate::repo_graph::RepoDependencyGraph::build(&[index_b]);
+        let blob_b = bincode::serialize(&graph_b.to_artifact()).expect("serialize graph B");
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "commit-b-sha",
+                graph_blob: &blob_b,
+            })
+            .await
+            .expect("seed cache B");
+
+        // Read both blobs back from DB.
+        let cold_blob = cache_repo
+            .get(&project.id, "commit-a-sha")
+            .await
+            .expect("get blob A")
+            .expect("blob A should exist")
+            .graph_blob;
+        let different_blob = cache_repo
+            .get(&project.id, "commit-b-sha")
+            .await
+            .expect("get blob B")
+            .expect("blob B should exist")
+            .graph_blob;
+
+        // Parity must fail with Diff variant — proves the gate is real.
+        let err = crate::graph_parity::assert_graph_artifact_blob_parity(
+            &cold_blob,
+            &different_blob,
+        )
+        .expect_err("different graphs must produce a parity error");
+        assert!(
+            matches!(
+                err,
+                crate::graph_parity::GraphArtifactBlobParityError::Diff(_)
+            ),
+            "expected Diff variant, got {err:?}"
         );
     }
 }

@@ -66,7 +66,7 @@ export interface Workspace {
 }
 
 /**
- * A lifecycle / verification / setup command.
+ * A lifecycle / setup command.
  *
  * Mirrors `djinn_stack::environment::HookCommand`'s `#[serde(untagged)]`
  * union: a shell string, argv array, or named parallel map.
@@ -80,16 +80,6 @@ export interface LifecycleHooks {
   post_build: HookCommand[];
   pre_anything: HookCommand[];
   pre_task: HookCommand[];
-  pre_verification: HookCommand[];
-}
-
-export interface VerificationRule {
-  match_pattern: string;
-  commands: string[];
-}
-
-export interface Verification {
-  rules: VerificationRule[];
 }
 
 export interface EnvironmentConfig {
@@ -140,9 +130,6 @@ export function normalizeConfig(
       pre_anything: preAnything,
       pre_task: Array.isArray(lifecycle.pre_task)
         ? (lifecycle.pre_task as HookCommand[])
-        : [],
-      pre_verification: Array.isArray(lifecycle.pre_verification)
-        ? (lifecycle.pre_verification as HookCommand[])
         : [],
     },
   };
