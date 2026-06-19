@@ -701,7 +701,29 @@ impl GraphWarmerService for K8sGraphWarmer {
             return;
         }
 
-        let job = build_warm_job(&self.config, project_id, &image_tag);
+        // Load the project's EnvironmentConfig to extract the
+        // cargo_cache_policy for the warm Job's env vars. Fail-open:
+        // if the DB lookup or JSON parse fails, proceed with no policy
+        // (backward-compatible default behavior).
+        let cargo_cache_policy: Option<djinn_stack::environment::CargoCachePolicy> = {
+            let repo =
+                ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop());
+            match repo.get_environment_config(project_id).await {
+                Ok(Some(raw)) => {
+                    serde_json::from_str::<djinn_stack::environment::EnvironmentConfig>(&raw)
+                        .ok()
+                        .and_then(|cfg| cfg.cargo_cache_policy)
+                }
+                _ => None,
+            }
+        };
+
+        let job = build_warm_job(
+            &self.config,
+            project_id,
+            &image_tag,
+            cargo_cache_policy.as_ref(),
+        );
         let namespace = self.config.namespace.clone();
         let job_name = match self.dispatcher.dispatch(&namespace, job).await {
             Ok(name) => name,

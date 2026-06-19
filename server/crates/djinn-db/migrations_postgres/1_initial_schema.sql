@@ -153,7 +153,6 @@ CREATE TABLE IF NOT EXISTS notes (
     storage       VARCHAR(32)   NOT NULL DEFAULT 'file',
     note_type     VARCHAR(64)   NOT NULL DEFAULT '',
     folder        VARCHAR(255)  NOT NULL DEFAULT '',
-    status        VARCHAR(32)   NOT NULL DEFAULT 'active',
     tags          JSONB         NOT NULL,
     content       TEXT          NOT NULL,
     created_at    VARCHAR(64)   NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
@@ -172,7 +171,6 @@ CREATE TABLE IF NOT EXISTS notes (
 CREATE INDEX notes_project_id            ON notes(project_id);
 CREATE INDEX notes_folder                ON notes(folder);
 CREATE INDEX notes_type                  ON notes(note_type);
-CREATE INDEX notes_status                ON notes(status);
 CREATE INDEX notes_updated_at            ON notes(updated_at);
 CREATE INDEX notes_project_last_accessed ON notes(project_id, last_accessed);
 CREATE INDEX notes_project_content_hash  ON notes(project_id, content_hash);
@@ -258,10 +256,6 @@ CREATE TABLE IF NOT EXISTS consolidation_run_metrics (
     consolidated_cluster_count  INT         NOT NULL,
     consolidated_note_count     INT         NOT NULL,
     source_note_count           INT         NOT NULL,
-    decayed_note_count           BIGINT      NOT NULL DEFAULT 0,
-    archived_note_count          BIGINT      NOT NULL DEFAULT 0,
-    superseded_source_note_count BIGINT      NOT NULL DEFAULT 0,
-    admission_dropped_note_count BIGINT      NOT NULL DEFAULT 0,
     started_at                  VARCHAR(64) NOT NULL,
     completed_at                VARCHAR(64) NULL,
     error_message               TEXT        NULL,
