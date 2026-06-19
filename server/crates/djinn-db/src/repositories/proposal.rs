@@ -560,6 +560,7 @@ impl ProposalRepository {
 
     // ── Revisions + sign-offs ────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     async fn insert_revision(&self, revision: ProposalRevisionSnapshot<'_>) -> Result<()> {
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
