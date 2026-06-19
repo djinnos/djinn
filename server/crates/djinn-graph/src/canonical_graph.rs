@@ -2531,9 +2531,16 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
 
         let tmp = workspace_tempdir("ooc-warm-parity-");
         let project_root = make_project(tmp.path()).await;
+        // `Cargo.toml` must declare a `[workspace]` section so the
+        // RustAnalyzer indexer's workspace discovery picks up this
+        // fixture. Without `[workspace]`, no Rust workspace is
+        // discovered, the fake rust-analyzer never runs, the parsed
+        // SCIP set is empty, and `ensure_canonical_graph` skips the
+        // cache upsert (the `node_count == 0` guard at the bottom of
+        // the warm pipeline).
         tokio::fs::write(
             project_root.join("Cargo.toml"),
-            "[package]\nname = \"ooc_warm_parity\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            "[package]\nname = \"ooc_warm_parity\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n",
         )
         .await
         .expect("write Cargo.toml");
@@ -2624,6 +2631,14 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
 
         let _ooc_flag = EnvVarGuard::set("DJINN_GRAPH_OUT_OF_CORE", "1");
         let _ooc_min_nodes = EnvVarGuard::set("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES", "0");
+        // Pin the out-of-core storage path under the test tempdir so the
+        // shard store stays inside the workspace's writable region and
+        // gets cleaned up alongside the test fixtures on drop. Without
+        // this, the default path falls back to `/tmp/djinn-ooc-<pid>`,
+        // which is outside the sandbox's allowed write list and
+        // produces intermittent OOC open failures.
+        let ooc_storage_path = tmp.path().join("ooc-store");
+        let _ooc_path = EnvVarGuard::set("DJINN_GRAPH_OUT_OF_CORE_PATH", &ooc_storage_path);
 
         let result = ensure_canonical_graph(
             &ctx,
