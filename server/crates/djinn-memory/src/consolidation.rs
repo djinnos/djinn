@@ -31,8 +31,10 @@ pub struct ConsolidationRunMetric {
     pub archived_note_count: i64,
     /// Number of source notes marked as superseded via `note_associations.kind
     /// = 'supersedes'` edges during this run (yk9t task dm4w).
+    #[serde(default)]
     pub superseded_source_note_count: i64,
     /// Number of extracted-note candidates dropped by the ADR-054 admission gate.
+    #[serde(default)]
     pub admission_dropped_note_count: i64,
     pub started_at: String,
     pub completed_at: Option<String>,
