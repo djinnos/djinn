@@ -356,6 +356,24 @@ async fn archive_sweep_archived_notes_are_hidden_from_retrieval_but_listable_by_
         "archived sweep note must not be injected into build_context"
     );
 
+    let archived_seed_context = repo
+        .build_context(
+            &project_id,
+            &archived.permalink,
+            Some(8192),
+            None,
+            20,
+            Some(0.0),
+        )
+        .await
+        .unwrap();
+    assert!(
+        archived_seed_context.primary.is_empty()
+            && archived_seed_context.related_l1.is_empty()
+            && archived_seed_context.related_l0.is_empty(),
+        "archived seed notes must not produce prompt-context content by default"
+    );
+
     let search_results = repo
         .search(NoteSearchParams {
             project_id: &project_id,
@@ -397,5 +415,56 @@ async fn archive_sweep_archived_notes_are_hidden_from_retrieval_but_listable_by_
     assert!(
         archived_list.iter().any(|note| note.id == archived.id),
         "explicit archived-status list path must keep archived notes visible/restorable"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scoped_path_overlap_excludes_archived_notes_at_repository_level() {
+    let (db, repo, project_id) = setup().await;
+
+    let archived = repo
+        .create_with_scope(
+            &project_id,
+            "Archived Scoped Note",
+            "scope overlap archived sentinel",
+            "pattern",
+            None,
+            "[]",
+            r#"["server/src"]"#,
+        )
+        .await
+        .unwrap();
+    set_status(&db, &archived.id, "archived").await;
+
+    let active = repo
+        .create_with_scope(
+            &project_id,
+            "Active Scoped Note",
+            "scope overlap active sentinel",
+            "pattern",
+            None,
+            "[]",
+            r#"["server/src"]"#,
+        )
+        .await
+        .unwrap();
+
+    let matches = repo
+        .query_scoped_by_path_overlap(
+            &project_id,
+            &["server/src/repositories/note/context.rs".to_string()],
+            20,
+        )
+        .await
+        .unwrap();
+    let ids = matches
+        .iter()
+        .map(|note| note.id.as_str())
+        .collect::<HashSet<_>>();
+
+    assert!(ids.contains(active.id.as_str()));
+    assert!(
+        !ids.contains(archived.id.as_str()),
+        "query_scoped_by_path_overlap must exclude archived notes regardless of caller behavior"
     );
 }
