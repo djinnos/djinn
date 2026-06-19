@@ -489,17 +489,17 @@ impl NoteRepository {
         folder: Option<&str>,
         note_type: Option<&str>,
         depth: i64,
-        _status: Option<&str>,
+        status: Option<&str>,
     ) -> Result<Vec<NoteCompact>> {
-        self.list_compact_by_status(project_id, folder, note_type, depth, Some("active"))
+        self.list_compact_by_status(project_id, folder, note_type, depth, status)
             .await
     }
 
     /// List compact note summaries with an explicit lifecycle status filter.
     ///
     /// Passing `Some("archived")` is the reversible/listable archive path used
-    /// by lifecycle tooling. Passing `None` lists all statuses for administrative
-    /// callers; default browsing should use [`Self::list_compact`].
+    /// by lifecycle tooling. Passing `None` or an empty status defaults to active
+    /// for normal browsing.
     pub async fn list_compact_by_status(
         &self,
         project_id: &str,
