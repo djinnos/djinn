@@ -501,7 +501,7 @@ fn build_task_run_env(
         env.push(env_var("DJINN_DEBUG_PROVIDER_REQUEST", &v));
     }
 
-    env.extend(task_run_cache_env_vars(project_id, task_run_id_str));
+    env.extend(task_run_cache_env_vars(project_id, task_run_id_str, None));
     env
 }
 
@@ -593,29 +593,43 @@ pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
 }
 
 /// Cache env vars for warm Pods that populate the shared per-project cargo
-/// target base. `CARGO_INCREMENTAL=0` — repos that pin `rustc-wrapper = sccache`
-/// in `.cargo/config.toml` (djinn does) crash with "incremental compilation is
-/// prohibited" under `CARGO_INCREMENTAL=1`. Reuse here is sccache (cross-run
-/// rustc cache) PLUS cargo freshness: the warm compiles `main` (with
-/// `normalize_mtimes`) into the base + sccache, then verification seeds the base
-/// and — with matching commit-time mtimes — cargo marks unchanged crates Fresh
-/// and SKIPS them; the rest hit sccache. Freshness does not require incremental.
-pub(crate) fn warm_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
+/// target base. `CARGO_INCREMENTAL` is derived from the policy:
+/// - `None` or `AutoDetected` → `0` (backward compat, sccache-safe)
+/// - `Explicit` with `sccache=true` → `0` (sccache forbids incremental)
+/// - `Explicit` with `sccache=false` → `1` (incremental enabled)
+pub(crate) fn warm_cache_env_vars(
+    project_id: &str,
+    policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+) -> Vec<EnvVar> {
     let mut env = cache_env_vars(project_id);
-    env.push(env_var("CARGO_INCREMENTAL", "0"));
+    let incremental = match policy {
+        Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_)) => {
+            if override_.sccache { "0" } else { "1" }
+        }
+        _ => "0",
+    };
+    env.push(env_var("CARGO_INCREMENTAL", incremental));
     env
 }
 
 /// Cache env vars for verification Pods. Verification reuses the warm
-/// per-project base as a read-only SEED: the worker (`run_verify_task`) seeds a
-/// private run target dir from the warm base and overrides `CARGO_TARGET_DIR`
+/// per-project base as a read-only SEED: the worker (`run_verify_task`) seeds
+/// a private run target dir from the warm base and overrides `CARGO_TARGET_DIR`
 /// to point there before running `verify_commit`, so it never writes the shared
-/// base or contends on Cargo's build-dir lock. `CARGO_INCREMENTAL=0` (sccache
-/// requires it — see `warm_cache_env_vars`); reuse is cargo freshness over the
-/// seeded base (unchanged crates Fresh→skipped) + sccache for what compiles.
-pub(crate) fn verify_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
+/// base or contends on Cargo's build-dir lock. `CARGO_INCREMENTAL` is derived
+/// from the policy (same logic as `warm_cache_env_vars`).
+pub(crate) fn verify_cache_env_vars(
+    project_id: &str,
+    policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+) -> Vec<EnvVar> {
     let mut env = cache_env_vars(project_id);
-    env.push(env_var("CARGO_INCREMENTAL", "0"));
+    let incremental = match policy {
+        Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_)) => {
+            if override_.sccache { "0" } else { "1" }
+        }
+        _ => "0",
+    };
+    env.push(env_var("CARGO_INCREMENTAL", incremental));
     env
 }
 
@@ -629,27 +643,33 @@ pub(crate) fn verify_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
 /// `cargo check`/`clippy`/`test` many times. Incremental compilation is the right
 /// tool there — it recompiles only changed codegen units (seconds) instead of a
 /// full crate rebuild (~9min for a large crate like `djinn-agent`) every edit.
-/// We therefore force `CARGO_INCREMENTAL=1` and disable the sccache wrapper
-/// (`RUSTC_WRAPPER=""`) here — repos that pin `rustc-wrapper = "sccache"` in
-/// `.cargo/config.toml` (djinn does) otherwise crash with "incremental
-/// compilation is prohibited", which previously forced workers to disable
-/// sccache by hand and get NEITHER cache (cold full rebuilds every iteration).
-/// Safe vs the shared base: the warm base is built `CARGO_INCREMENTAL=0` so it
-/// carries no `incremental/` dir to hardlink — the run dir's incremental state is
-/// born fresh and private, so a worker's incremental writes can't corrupt the
-/// shared base. The seeded `.rlib`/`.rmeta` deps stay Fresh (cargo never mutates
-/// them in place). sccache reuse is moot here anyway: a crate the worker is
-/// editing is always a cache miss.
-fn task_run_cache_env_vars(project_id: &str, task_run_id: &str) -> Vec<EnvVar> {
+///
+/// When `policy` indicates sccache=true, `CARGO_INCREMENTAL=0` and `RUSTC_WRAPPER`
+/// is kept (so the repo's `.cargo/config.toml` wrapper applies). When sccache=false
+/// or no policy is given (default), `CARGO_INCREMENTAL=1` and `RUSTC_WRAPPER=""`
+/// to disable any repo-level sccache wrapper so incremental works.
+fn task_run_cache_env_vars(
+    project_id: &str,
+    task_run_id: &str,
+    policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+) -> Vec<EnvVar> {
     let mut env = common_cache_env_vars(project_id);
     env.push(env_var(
         "CARGO_TARGET_DIR",
         &cargo_target_run_dir(task_run_id).display().to_string(),
     ));
-    env.push(env_var("CARGO_INCREMENTAL", "1"));
-    // Override any `.cargo/config.toml` `rustc-wrapper = "sccache"`: sccache
-    // forbids incremental, and the iterative loop wants incremental.
-    env.push(env_var("RUSTC_WRAPPER", ""));
+    let (incremental, clear_wrapper) = match policy {
+        Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_)) if override_.sccache => {
+            ("0", false)
+        }
+        _ => ("1", true),
+    };
+    env.push(env_var("CARGO_INCREMENTAL", incremental));
+    if clear_wrapper {
+        // Override any `.cargo/config.toml` `rustc-wrapper = "sccache"`: sccache
+        // forbids incremental, and the iterative loop wants incremental.
+        env.push(env_var("RUSTC_WRAPPER", ""));
+    }
     env
 }
 
@@ -1153,12 +1173,12 @@ mod tests {
         let project_id = "test-project";
         let task_run_id = Uuid::now_v7().to_string();
 
-        let warm_vars = warm_cache_env_vars(project_id);
+        let warm_vars = warm_cache_env_vars(project_id, None);
         let warm_env: BTreeMap<&str, &str> = warm_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
-        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id);
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, None);
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
@@ -1265,12 +1285,12 @@ mod tests {
         let project_id = "single-crate-project";
         let task_run_id = Uuid::now_v7().to_string();
 
-        let warm_vars = warm_cache_env_vars(project_id);
+        let warm_vars = warm_cache_env_vars(project_id, None);
         let warm_env: BTreeMap<&str, &str> = warm_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
-        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id);
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, None);
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
@@ -1323,6 +1343,158 @@ mod tests {
             "warm must not force RUSTC_WRAPPER (no-sccache shape)"
         );
         assert_eq!(worker_env.get("RUSTC_WRAPPER").copied(), Some(""));
+    }
+
+    /// When an explicit CargoCachePolicy with sccache=false is provided, warm
+    /// and verification should enable incremental (CARGO_INCREMENTAL=1) instead
+    /// of forcing 0. Task-run behavior is unchanged (incremental=1, wrapper
+    /// cleared).
+    #[test]
+    fn explicit_policy_no_sccache_enables_incremental_for_warm_and_verify() {
+        let project_id = "explicit-no-sccache";
+        let task_run_id = Uuid::now_v7().to_string();
+        let policy = djinn_stack::environment::CargoCachePolicy::Explicit(
+            djinn_stack::environment::CargoCachePolicyOverride {
+                workspace: false,
+                features: vec![],
+                all_features: false,
+                sccache: false,
+                incremental: true,
+                warm_commands: vec![],
+            },
+        );
+
+        let warm_vars = warm_cache_env_vars(project_id, Some(&policy));
+        let warm_env: BTreeMap<&str, &str> = warm_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        let verify_vars = verify_cache_env_vars(project_id, Some(&policy));
+        let verify_env: BTreeMap<&str, &str> = verify_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
+        let worker_env: BTreeMap<&str, &str> = worker_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        // Warm/verify with sccache=false → incremental enabled
+        assert_eq!(
+            warm_env.get("CARGO_INCREMENTAL").copied(),
+            Some("1"),
+            "warm must enable incremental when policy.sccache=false"
+        );
+        assert_eq!(
+            verify_env.get("CARGO_INCREMENTAL").copied(),
+            Some("1"),
+            "verify must enable incremental when policy.sccache=false"
+        );
+
+        // Task-run unchanged
+        assert_eq!(
+            worker_env.get("CARGO_INCREMENTAL").copied(),
+            Some("1"),
+            "worker must still enable incremental"
+        );
+        assert_eq!(
+            worker_env.get("RUSTC_WRAPPER").copied(),
+            Some(""),
+            "worker must still clear RUSTC_WRAPPER when policy.sccache=false"
+        );
+    }
+
+    /// When an explicit CargoCachePolicy with sccache=true is provided, warm
+    /// and verification should disable incremental (CARGO_INCREMENTAL=0). Task-run
+    /// also disables incremental and keeps RUSTC_WRAPPER (so the repo's sccache
+    /// wrapper applies).
+    #[test]
+    fn explicit_policy_sccache_disables_incremental_and_keeps_wrapper() {
+        let project_id = "explicit-sccache";
+        let task_run_id = Uuid::now_v7().to_string();
+        let policy = djinn_stack::environment::CargoCachePolicy::Explicit(
+            djinn_stack::environment::CargoCachePolicyOverride {
+                workspace: false,
+                features: vec![],
+                all_features: false,
+                sccache: true,
+                incremental: false,
+                warm_commands: vec![],
+            },
+        );
+
+        let warm_vars = warm_cache_env_vars(project_id, Some(&policy));
+        let warm_env: BTreeMap<&str, &str> = warm_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        let verify_vars = verify_cache_env_vars(project_id, Some(&policy));
+        let verify_env: BTreeMap<&str, &str> = verify_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
+        let worker_env: BTreeMap<&str, &str> = worker_vars
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+
+        // Warm/verify with sccache=true → incremental disabled
+        assert_eq!(
+            warm_env.get("CARGO_INCREMENTAL").copied(),
+            Some("0"),
+            "warm must disable incremental when policy.sccache=true"
+        );
+        assert_eq!(
+            verify_env.get("CARGO_INCREMENTAL").copied(),
+            Some("0"),
+            "verify must disable incremental when policy.sccache=true"
+        );
+
+        // Task-run with sccache=true → incremental disabled, wrapper kept
+        assert_eq!(
+            worker_env.get("CARGO_INCREMENTAL").copied(),
+            Some("0"),
+            "worker must disable incremental when policy.sccache=true"
+        );
+        assert!(
+            !worker_env.contains_key("RUSTC_WRAPPER"),
+            "worker must NOT clear RUSTC_WRAPPER when policy.sccache=true"
+        );
+    }
+
+    /// AutoDetected policy behaves identically to None (backward compat).
+    #[test]
+    fn auto_detected_policy_matches_none_behavior() {
+        let project_id = "auto-detected";
+        let task_run_id = Uuid::now_v7().to_string();
+        let policy = djinn_stack::environment::CargoCachePolicy::AutoDetected;
+
+        let warm_vars_none = warm_cache_env_vars(project_id, None);
+        let warm_vars_auto = warm_cache_env_vars(project_id, Some(&policy));
+        assert_eq!(
+            warm_vars_none, warm_vars_auto,
+            "AutoDetected must match None for warm"
+        );
+
+        let verify_vars_none = verify_cache_env_vars(project_id, None);
+        let verify_vars_auto = verify_cache_env_vars(project_id, Some(&policy));
+        assert_eq!(
+            verify_vars_none, verify_vars_auto,
+            "AutoDetected must match None for verify"
+        );
+
+        let worker_vars_none = task_run_cache_env_vars(project_id, &task_run_id, None);
+        let worker_vars_auto = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
+        assert_eq!(
+            worker_vars_none, worker_vars_auto,
+            "AutoDetected must match None for task-run"
+        );
     }
 
     #[test]

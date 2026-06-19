@@ -455,7 +455,33 @@ fn cargo_target_seed_fallback_reason(reason: Option<&CargoTargetSeedFallback>) -
     }
 }
 
-async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
+async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> PathBuf {
+    // Canonicalize once so every structured event for this task-run shares the
+    // same absolute workspace_dir. The cargo warm path uses the SAME canonical
+    // form (see `warm_cargo_target_base`), so emitting both absolute paths
+    // lets the coordinator health sweep confirm the seed outcome for the
+    // workspace verification will compile in.
+    let workspace_dir = match std::fs::canonicalize(workspace_path) {
+        Ok(canonical) => canonical,
+        Err(err) => {
+            warn!(
+                task_run_id = %spec.task_run_id,
+                project_id = %spec.project_id,
+                workspace_path = %workspace_path.display(),
+                error = %err,
+                "cargo target seed: failed to canonicalize workspace path; \
+                 emitting events with the unresolved path"
+            );
+            workspace_path.to_path_buf()
+        }
+    };
+    let workspace_dir_display = workspace_dir.display().to_string();
+
+    // Surface the resolved workspace dir as a low-cardinality metric so the
+    // coordinator health sweep can correlate the task-run seed outcome with
+    // the warm-step outcome for the same workspace.
+    cargo_metrics::record_resolved_workspace_dir(&spec.project_id, workspace_dir_display.as_str());
+
     let source_base = warm_base_dir(&spec.project_id);
     let fallback_run_dir = run_target_dir(&spec.task_run_id);
     let (destination_run_dir, env_was_present) = match std::env::var_os(CARGO_TARGET_DIR_ENV) {
@@ -481,6 +507,15 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
         }
     };
 
+    // Resolve the destination to its absolute form so the structured event
+    // carries a path the coordinator health sweep can compare against the
+    // warm base path. CARGO_TARGET_DIR env values may be relative or contain
+    // symlinks; canonicalize once and reuse.
+    let cargo_target_dir_display = match std::fs::canonicalize(&destination_run_dir) {
+        Ok(canonical) => canonical.display().to_string(),
+        Err(_) => destination_run_dir.display().to_string(),
+    };
+
     info!(
         task_run_id = %spec.task_run_id,
         project_id = %spec.project_id,
@@ -503,6 +538,25 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
                 .fallback_reason
                 .as_ref()
                 .map(std::string::ToString::to_string);
+            let seed_outcome = if result.cold_started() {
+                "fallback"
+            } else {
+                "hit"
+            };
+            // Single structured event carrying the absolute workspace and
+            // cargo_target_dir plus the seed outcome — this is the surface the
+            // coordinator health sweep consumes to correlate seed outcomes
+            // with workspace paths. Existing rich log lines below carry the
+            // full link/copy/elapsed context unchanged.
+            info!(
+                task_run_id = %spec.task_run_id,
+                project_id = %spec.project_id,
+                workspace_dir = %workspace_dir_display,
+                cargo_target_dir = %cargo_target_dir_display,
+                seed_outcome,
+                fallback_reason = fallback_reason.as_deref().unwrap_or(""),
+                "cargo target seed: workspace and outcome summary"
+            );
             if result.cold_started() {
                 let fallback_reason = fallback_reason.as_deref().unwrap_or("unknown");
                 warn!(
@@ -541,6 +595,16 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
             djinn_telemetry::cargo_target_seed::increment_seed_fallback(
                 djinn_telemetry::cargo_target_seed::FALLBACK_REASON_UNKNOWN,
             );
+            let fallback_reason = format!("seed helper failed: {err}");
+            info!(
+                task_run_id = %spec.task_run_id,
+                project_id = %spec.project_id,
+                workspace_dir = %workspace_dir_display,
+                cargo_target_dir = %cargo_target_dir_display,
+                seed_outcome = "fallback",
+                fallback_reason = %fallback_reason,
+                "cargo target seed: workspace and outcome summary"
+            );
             warn!(
                 task_run_id = %spec.task_run_id,
                 project_id = %spec.project_id,
@@ -551,7 +615,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
                 linked_file_count = 0_u64,
                 copied_file_count = 0_u64,
                 skipped_file_count = 0_u64,
-                fallback_reason = %format!("seed helper failed: {err}"),
+                fallback_reason = %fallback_reason,
                 "cargo target seed: proceeding with cold private target dir after setup error"
             );
         }
@@ -559,6 +623,16 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
             djinn_telemetry::cargo_target_seed::increment_seed_fallback(
                 djinn_telemetry::cargo_target_seed::FALLBACK_REASON_UNKNOWN,
             );
+            let fallback_reason = format!("seed task join failed: {err}");
+            info!(
+                task_run_id = %spec.task_run_id,
+                project_id = %spec.project_id,
+                workspace_dir = %workspace_dir_display,
+                cargo_target_dir = %cargo_target_dir_display,
+                seed_outcome = "fallback",
+                fallback_reason = %fallback_reason,
+                "cargo target seed: workspace and outcome summary"
+            );
             warn!(
                 task_run_id = %spec.task_run_id,
                 project_id = %spec.project_id,
@@ -569,7 +643,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
                 linked_file_count = 0_u64,
                 copied_file_count = 0_u64,
                 skipped_file_count = 0_u64,
-                fallback_reason = %format!("seed task join failed: {err}"),
+                fallback_reason = %fallback_reason,
                 "cargo target seed: proceeding with cold private target dir after setup task failure"
             );
         }
@@ -744,12 +818,37 @@ async fn warm_cargo_target_base(
         return;
     };
 
+    // Canonicalize once so every structured event and metric for this warm
+    // shares the same absolute workspace_dir. Cargo fingerprints embed
+    // absolute source paths, so the canonical form is what verification will
+    // also resolve to at task-run time — emitting it here is what lets the
+    // coordinator health sweep correlate the warm path with the run path.
+    let workspace_dir = match std::fs::canonicalize(&workspace_dir) {
+        Ok(canonical) => canonical,
+        Err(err) => {
+            warn!(
+                project_id,
+                workspace_dir = %workspace_dir.display(),
+                error = %err,
+                "cargo warm: failed to canonicalize resolved workspace dir; \
+                 emitting events with the unresolved path"
+            );
+            workspace_dir
+        }
+    };
+
     let target_dir = std::env::var(CARGO_TARGET_DIR_ENV).unwrap_or_default();
     info!(
         project_id,
         workspace_dir = %workspace_dir.display(),
         cargo_target_dir = %target_dir,
         "cargo warm: compiling main into the warm per-project target base"
+    );
+    // Surface the resolved workspace dir as a low-cardinality metric the
+    // coordinator health sweep can read alongside the warm-step counter.
+    cargo_metrics::record_resolved_workspace_dir(
+        project_id,
+        workspace_dir.to_string_lossy().as_ref(),
     );
     let started = std::time::Instant::now();
 
@@ -764,12 +863,14 @@ async fn warm_cargo_target_base(
 
     // clippy is the heavier of verification's two passes and produces the same
     // check artifacts; fall back to a plain build if clippy is unavailable.
-    let feature_flags = policy.features();
+    // Each command carries its own feature_args — no policy.features()
+    // chaining needed (and omitted to avoid double-adding features in the
+    // dual-pass warm design).
     let clippy_args: Vec<String> = commands[0]
         .args
         .iter()
         .cloned()
-        .chain(feature_flags.iter().cloned())
+        .chain(commands[0].feature_args.iter().cloned())
         .collect();
     let clippy_ok = run_cargo_warm_step(
         project_id,
@@ -778,29 +879,29 @@ async fn warm_cargo_target_base(
         &commands[0].label,
     )
     .await;
-    if !clippy_ok && commands.len() > 1 {
-        let build_args: Vec<String> = commands[1]
-            .args
-            .iter()
-            .cloned()
-            .chain(feature_flags.iter().cloned())
-            .collect();
-        run_cargo_warm_step(
-            project_id,
-            &workspace_dir,
-            &build_args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            &commands[1].label,
-        )
-        .await;
-    }
 
-    // Run remaining warm commands (e.g. test --no-run)
-    for cmd in commands.iter().skip(if clippy_ok { 1 } else { 2 }) {
+    // Run remaining warm commands (all-features clippy, default-features
+    // clippy, build fallback, etc.), skipping the first (already ran) and
+    // the build fallback (index 1) when clippy succeeded.
+    let start = if clippy_ok { 1 } else { 1 };
+    for cmd in commands.iter().skip(start) {
+        // Skip the build fallback if clippy already succeeded — it's only
+        // needed when clippy fails.
+        if !clippy_ok
+            && cmd.label == "build (clippy fallback)"
+            && commands[0].label.starts_with("clippy")
+        {
+            // Already ran clippy (which failed); fall through to build.
+        } else if clippy_ok && cmd.label == "build (clippy fallback)" {
+            // clippy succeeded; build fallback is not needed.
+            continue;
+        }
+
         let args: Vec<String> = cmd
             .args
             .iter()
             .cloned()
-            .chain(feature_flags.iter().cloned())
+            .chain(cmd.feature_args.iter().cloned())
             .collect();
         run_cargo_warm_step(
             project_id,
@@ -825,6 +926,13 @@ async fn warm_cargo_target_base(
 /// Run one `cargo <args>` step inside `workspace_dir` for the warm base.
 /// Returns `true` on success. Never panics; logs failures as warnings so a
 /// compile error can't abort the graph warm.
+///
+/// Emits a structured tracing event with the resolved absolute
+/// `workspace_dir`, the full `cargo_command` argv, the `step_label`, and the
+/// terminal `seed_outcome` ("ok" / "failed" / "spawn_error") so the
+/// coordinator health sweep can correlate warm-step outcomes with workspace
+/// paths and command shapes. The metric `djinn_cargo_warm_step_total` is
+/// incremented with bounded `project_id`, `step`, and `outcome` labels.
 async fn run_cargo_warm_step(
     project_id: &str,
     workspace_dir: &Path,
@@ -843,6 +951,8 @@ async fn run_cargo_warm_step_with_cargo(
 ) -> bool {
     let cargo_instrumented = cargo_instrument_enabled();
     let plan = cargo_warm_execution_plan(args, cargo_instrumented);
+    let cargo_command = format!("cargo {}", plan.args.join(" "));
+    let workspace_dir_display = workspace_dir.display().to_string();
 
     if !cargo_instrumented {
         return match tokio::process::Command::new(cargo_bin.as_ref())
@@ -852,24 +962,52 @@ async fn run_cargo_warm_step_with_cargo(
             .await
         {
             Ok(status) if status.success() => {
-                info!(project_id, step = label, "cargo warm: step succeeded");
+                info!(
+                    project_id,
+                    workspace_dir = %workspace_dir_display,
+                    cargo_command = %cargo_command,
+                    step_label = label,
+                    seed_outcome = "ok",
+                    "cargo warm: step succeeded"
+                );
+                cargo_metrics::record_warm_step(
+                    project_id,
+                    label,
+                    djinn_telemetry::cargo_warm_step::OUTCOME_OK,
+                );
                 true
             }
             Ok(status) => {
                 warn!(
                     project_id,
-                    step = label,
+                    workspace_dir = %workspace_dir_display,
+                    cargo_command = %cargo_command,
+                    step_label = label,
+                    seed_outcome = "failed",
                     code = ?status.code(),
                     "cargo warm: step failed (non-fatal; continuing warm)"
+                );
+                cargo_metrics::record_warm_step(
+                    project_id,
+                    label,
+                    djinn_telemetry::cargo_warm_step::OUTCOME_FAILED,
                 );
                 false
             }
             Err(err) => {
                 warn!(
                     project_id,
-                    step = label,
+                    workspace_dir = %workspace_dir_display,
+                    cargo_command = %cargo_command,
+                    step_label = label,
+                    seed_outcome = "spawn_error",
                     error = %err,
                     "cargo warm: failed to spawn `cargo` (non-fatal; continuing warm)"
+                );
+                cargo_metrics::record_warm_step(
+                    project_id,
+                    label,
+                    djinn_telemetry::cargo_warm_step::OUTCOME_SPAWN_ERROR,
                 );
                 false
             }
@@ -883,42 +1021,64 @@ async fn run_cargo_warm_step_with_cargo(
         .await
     {
         Ok(output) => {
-            let (stdout_fresh_count, stdout_compiling_count) =
-                cargo_fresh_compiling_counts(&output.stdout);
-            let (stderr_fresh_count, stderr_compiling_count) =
-                cargo_fresh_compiling_counts(&output.stderr);
-            let fresh_count = stdout_fresh_count + stderr_fresh_count;
-            let compiling_count = stdout_compiling_count + stderr_compiling_count;
+            if cargo_instrumented {
+                let (stdout_fresh_count, stdout_compiling_count) =
+                    cargo_fresh_compiling_counts(&output.stdout);
+                let (stderr_fresh_count, stderr_compiling_count) =
+                    cargo_fresh_compiling_counts(&output.stderr);
+                let fresh_count = stdout_fresh_count + stderr_fresh_count;
+                let compiling_count = stdout_compiling_count + stderr_compiling_count;
 
-            info!(
-                project_id,
-                step = label,
-                step_label = label,
-                workspace_dir = %workspace_dir.display(),
-                fresh_count,
-                compiling_count,
-                "cargo warm: instrumented Fresh/Compiling counts"
-            );
-            djinn_telemetry::cargo_cache::record_warm_step_fresh_count(
-                project_id,
-                label,
-                fresh_count,
-            );
-            djinn_telemetry::cargo_cache::record_warm_step_compiling_count(
-                project_id,
-                label,
-                compiling_count,
-            );
+                info!(
+                    project_id,
+                    step = label,
+                    step_label = label,
+                    workspace_dir = %workspace_dir_display,
+                    fresh_count,
+                    compiling_count,
+                    "cargo warm: instrumented Fresh/Compiling counts"
+                );
+                djinn_telemetry::cargo_cache::record_warm_step_fresh_count(
+                    project_id,
+                    label,
+                    fresh_count,
+                );
+                djinn_telemetry::cargo_cache::record_warm_step_compiling_count(
+                    project_id,
+                    label,
+                    compiling_count,
+                );
+            }
 
             if output.status.success() {
-                info!(project_id, step = label, "cargo warm: step succeeded");
+                info!(
+                    project_id,
+                    workspace_dir = %workspace_dir_display,
+                    cargo_command = %cargo_command,
+                    step_label = label,
+                    seed_outcome = "ok",
+                    "cargo warm: step succeeded"
+                );
+                cargo_metrics::record_warm_step(
+                    project_id,
+                    label,
+                    djinn_telemetry::cargo_warm_step::OUTCOME_OK,
+                );
                 true
             } else {
                 warn!(
                     project_id,
-                    step = label,
+                    workspace_dir = %workspace_dir_display,
+                    cargo_command = %cargo_command,
+                    step_label = label,
+                    seed_outcome = "failed",
                     code = ?output.status.code(),
                     "cargo warm: step failed (non-fatal; continuing warm)"
+                );
+                cargo_metrics::record_warm_step(
+                    project_id,
+                    label,
+                    djinn_telemetry::cargo_warm_step::OUTCOME_FAILED,
                 );
                 false
             }
@@ -926,9 +1086,17 @@ async fn run_cargo_warm_step_with_cargo(
         Err(err) => {
             warn!(
                 project_id,
-                step = label,
+                workspace_dir = %workspace_dir_display,
+                cargo_command = %cargo_command,
+                step_label = label,
+                seed_outcome = "spawn_error",
                 error = %err,
                 "cargo warm: failed to spawn `cargo` (non-fatal; continuing warm)"
+            );
+            cargo_metrics::record_warm_step(
+                project_id,
+                label,
+                djinn_telemetry::cargo_warm_step::OUTCOME_SPAWN_ERROR,
             );
             false
         }
@@ -1055,7 +1223,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         bincode::deserialize(&spec_bytes).context("bincode deserialize TaskRunSpec")?;
     info!(task_id = %spec.task_id, flow = ?spec.flow, "received spec");
 
-    let cargo_target_run_dir = prepare_cargo_target_dir(&spec).await;
+    let cargo_target_run_dir = prepare_cargo_target_dir(&spec, &args.workspace_path).await;
     let _cargo_target_guard = CargoTargetRunDirGuard::new(
         spec.task_run_id.clone(),
         spec.project_id.clone(),

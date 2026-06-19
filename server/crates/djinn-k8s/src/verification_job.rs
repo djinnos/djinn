@@ -141,7 +141,7 @@ exec {bin} verify-task "{run_id}"
     // task's delta incrementally (CARGO_INCREMENTAL=1) — no shared-base writes,
     // no Cargo build-dir lock contention. Single-sourced in job.rs; needs the
     // cache volume below.
-    env.extend(crate::job::verify_cache_env_vars(project_id));
+    env.extend(crate::job::verify_cache_env_vars(project_id, None));
     // One connection env var per injected backing service (e.g.
     // TEST_POSTGRES_URL → 127.0.0.1:5432), matching the task-run pod.
     env.extend(services.iter().map(sidecar_conn_env));

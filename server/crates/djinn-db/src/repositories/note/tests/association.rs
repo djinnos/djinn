@@ -860,3 +860,237 @@ async fn record_derived_from_uses_typed_helper() {
         "record_derived_from and upsert_typed_association must share max-merge: got {w}"
     );
 }
+
+// ── vrn9 Widen-kind CHECK constraint + TypedEdge + GraphResponse tests ─────
+//
+// These tests cover the Wave-1 substrate widening:
+//   - Migration 70 CHECK constraint accepts all six kind values
+//   - `list_associations_for_note` carries `kind` per entry
+//   - `graph()` populates `typed_edges` filtered to new kinds only
+//   - Cross-project typed edges are excluded from `graph()`
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn supersedes_kind_inserts_without_violation() {
+    // Verify that kind='supersedes' (one of the new widened values) inserts
+    // without constraint violation — the migration 70 CHECK constraint accepts
+    // it.
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    let note_a = make_note(&repo, &project, &tmp, "Superseded Note").await;
+    let note_b = make_note(&repo, &project, &tmp, "Canonical Note").await;
+
+    repo.record_supersedes(&note_b, &note_a, 0.95)
+        .await
+        .unwrap();
+
+    let (weight, kind) = repo
+        .get_association_kind(&note_b, &note_a)
+        .await
+        .unwrap()
+        .expect("supersedes edge present");
+    assert_eq!(kind, "supersedes");
+    assert!((weight - 0.95).abs() < 1e-12);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_associations_for_note_carries_kind() {
+    // Verify that list_associations_for_note returns the `kind` field on each
+    // NoteAssociationEntry. We insert one co_access edge and one typed edge
+    // and assert both carry their kind.
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    let note_a = make_note(&repo, &project, &tmp, "Note A").await;
+    let note_b = make_note(&repo, &project, &tmp, "Note B").await;
+    let note_c = make_note(&repo, &project, &tmp, "Note C").await;
+
+    // Implicit co_access edge.
+    repo.upsert_association(&note_a, &note_b, 1).await.unwrap();
+    // Typed builds_on edge.
+    repo.upsert_typed_association(&note_a, &note_c, NoteAssociationKind::BuildsOn, 0.8)
+        .await
+        .unwrap();
+
+    let entries = repo
+        .list_associations_for_note(&note_a, 0.0, 100)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 2);
+
+    // Find each entry and assert the kind.
+    let entry_ab = entries
+        .iter()
+        .find(|e| (e.note_permalink == "reference/note-b") || (e.note_title == "Note B"))
+        .expect("co_access entry");
+    assert_eq!(entry_ab.kind, "co_access");
+
+    let entry_ac = entries
+        .iter()
+        .find(|e| (e.note_permalink == "reference/note-c") || (e.note_title == "Note C"))
+        .expect("builds_on entry");
+    assert_eq!(entry_ac.kind, "builds_on");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_populates_typed_edges_filtered_to_new_kinds() {
+    // Verify that graph() returns typed_edges for the new kinds
+    // (builds_on, contradicts, supersedes, exemplifies) but NOT for co_access.
+    // Also verifies that derived_from is included (it's a typed kind).
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    let n1 = make_note(&repo, &project, &tmp, "Note 1").await;
+    let n2 = make_note(&repo, &project, &tmp, "Note 2").await;
+    let n3 = make_note(&repo, &project, &tmp, "Note 3").await;
+    let n4 = make_note(&repo, &project, &tmp, "Note 4").await;
+    let n5 = make_note(&repo, &project, &tmp, "Note 5").await;
+
+    // co_access should NOT appear in typed_edges.
+    repo.upsert_association(&n1, &n2, 1).await.unwrap();
+
+    // Insert one edge per new kind.
+    repo.upsert_typed_association(&n1, &n3, NoteAssociationKind::BuildsOn, 0.8)
+        .await
+        .unwrap();
+    repo.upsert_typed_association(&n2, &n3, NoteAssociationKind::Contradicts, 0.9)
+        .await
+        .unwrap();
+    repo.upsert_typed_association(&n3, &n4, NoteAssociationKind::Supersedes, 0.95)
+        .await
+        .unwrap();
+    repo.upsert_typed_association(&n4, &n5, NoteAssociationKind::Exemplifies, 0.7)
+        .await
+        .unwrap();
+
+    let graph = repo.graph(&project.id).await.unwrap();
+
+    // typed_edges must contain exactly the 4 typed edges (not co_access).
+    assert_eq!(
+        graph.typed_edges.len(),
+        4,
+        "expected 4 typed edges, got {}",
+        graph.typed_edges.len()
+    );
+
+    // Verify each kind appears exactly once.
+    let kinds: Vec<&str> = graph.typed_edges.iter().map(|e| e.kind.as_str()).collect();
+    assert!(kinds.contains(&"builds_on"), "builds_on missing");
+    assert!(kinds.contains(&"contradicts"), "contradicts missing");
+    assert!(kinds.contains(&"supersedes"), "supersedes missing");
+    assert!(kinds.contains(&"exemplifies"), "exemplifies missing");
+    assert!(
+        !kinds.contains(&"co_access"),
+        "co_access should not appear in typed_edges"
+    );
+
+    // Verify the builds_on edge content.
+    let builds_on_edge = graph
+        .typed_edges
+        .iter()
+        .find(|e| e.kind == "builds_on")
+        .unwrap();
+    let (expected_a, expected_b) = canonical_pair(&n1, &n3);
+    assert_eq!(builds_on_edge.source_id, expected_a);
+    assert_eq!(builds_on_edge.target_id, expected_b);
+    assert!((builds_on_edge.weight - 0.8).abs() < 1e-12);
+
+    // Verify the supersedes edge content.
+    let supersedes_edge = graph
+        .typed_edges
+        .iter()
+        .find(|e| e.kind == "supersedes")
+        .unwrap();
+    let (expected_a, expected_b) = canonical_pair(&n3, &n4);
+    assert_eq!(supersedes_edge.source_id, expected_a);
+    assert_eq!(supersedes_edge.target_id, expected_b);
+    assert!((supersedes_edge.weight - 0.95).abs() < 1e-12);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_excludes_cross_project_typed_edges() {
+    // Verify that typed edges whose endpoints span different projects are NOT
+    // included in graph() for either project — both endpoints must belong to
+    // the queried project.
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+
+    let project1 = make_project(&db, tmp.path()).await;
+    let project2_path = tmp.path().join("project2");
+    std::fs::create_dir_all(&project2_path).unwrap();
+    let project2 = {
+        db.ensure_initialized().await.unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
+            id,
+            "test-project-2",
+            "test",
+            "test-project-2",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query_as!(
+            djinn_core::models::Project,
+            r#"SELECT id, name,
+                          github_owner AS "github_owner!: String",
+                          github_repo AS "github_repo!: String",
+                          created_at, target_branch,
+                          auto_merge AS "auto_merge!: bool",
+                          sync_enabled AS "sync_enabled!: bool",
+                          sync_remote
+                 FROM projects WHERE id = $1"#,
+            id
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+    };
+
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    let p1_note = make_note(&repo, &project1, &tmp, "P1 Note").await;
+    let p2_note = repo
+        .create(&project2.id, "P2 Note", "content", "reference", "[]")
+        .await
+        .unwrap();
+
+    // Insert a typed supersedes edge spanning both projects.
+    repo.upsert_typed_association(&p1_note, &p2_note.id, NoteAssociationKind::Supersedes, 0.9)
+        .await
+        .unwrap();
+
+    // graph() for project1 should have no typed_edges (cross-project excluded).
+    let g1 = repo.graph(&project1.id).await.unwrap();
+    assert!(
+        g1.typed_edges.is_empty(),
+        "cross-project typed edge should be excluded from project1 graph"
+    );
+
+    // graph() for project2 should also have no typed_edges.
+    let g2 = repo.graph(&project2.id).await.unwrap();
+    assert!(
+        g2.typed_edges.is_empty(),
+        "cross-project typed edge should be excluded from project2 graph"
+    );
+
+    // But the edge must exist in the raw association table.
+    let (w, k) = repo
+        .get_association_kind(&p1_note, &p2_note.id)
+        .await
+        .unwrap()
+        .expect("raw edge present");
+    assert_eq!(k, "supersedes");
+    assert!((w - 0.9).abs() < 1e-12);
+}

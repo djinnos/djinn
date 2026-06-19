@@ -70,8 +70,13 @@ impl Default for CargoCachePolicy {
 pub struct CargoWarmCommand {
     /// Human label for logs/metrics.
     pub label: &'static str,
-    /// Cargo subcommand and arguments (e.g. `["clippy", "--workspace"]`).
+    /// Cargo subcommand and non-feature arguments
+    /// (e.g. `["clippy", "--workspace", "--all-targets"]`).
     pub args: Vec<String>,
+    /// Feature-flag arguments carried by this specific command.
+    /// Separate from `args` so that `warm_cargo_target_base` can build the
+    /// full argv without double-chaining `policy.features()`.
+    pub feature_args: Vec<String>,
 }
 
 /// Resolve the cargo cache policy for a project root.
@@ -87,6 +92,29 @@ pub fn resolve_cargo_cache_policy(
     project_root: &Path,
     env_config: Option<&EnvironmentConfig>,
 ) -> Option<CargoCachePolicy> {
+    if let Some(cfg) = env_config {
+        if let Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_policy)) =
+            &cfg.cargo_cache_policy
+        {
+            return Some(CargoCachePolicy {
+                workspace: override_policy.workspace,
+                features: override_policy.features.clone(),
+                all_features: override_policy.all_features,
+                sccache: override_policy.sccache,
+                incremental: override_policy.incremental,
+                warm_commands: override_policy
+                    .warm_commands
+                    .iter()
+                    .map(|command| CargoWarmCommand {
+                        label: "override",
+                        args: command.args.clone(),
+                        feature_args: Vec::new(),
+                    })
+                    .collect(),
+            });
+        }
+    }
+
     let workspace_dir = resolve_cargo_workspace_dir(project_root, env_config)?;
 
     let is_workspace = detect_workspace_layout(&workspace_dir);
@@ -208,51 +236,80 @@ fn build_warm_commands(
     all_features: bool,
     features: &[String],
 ) -> Vec<CargoWarmCommand> {
-    let feature_args = if all_features {
+    let all_features_args: Vec<String> = if all_features {
         vec!["--all-features".to_string()]
-    } else if !features.is_empty() {
+    } else {
+        Vec::new()
+    };
+
+    let named_features_args: Vec<String> = if !all_features && !features.is_empty() {
         let joined = features.join(",");
         vec!["--features".to_string(), joined]
     } else {
         Vec::new()
     };
 
-    let mut clippy_args = vec!["clippy".to_string()];
+    // Base non-feature args shared by all clippy/build commands.
+    let mut base_args = Vec::new();
     if is_workspace {
-        clippy_args.push("--workspace".to_string());
+        base_args.push("--workspace".to_string());
     }
-    clippy_args.push("--all-targets".to_string());
-    clippy_args.extend(feature_args.clone());
+    base_args.push("--all-targets".to_string());
 
-    let mut build_args = vec!["build".to_string()];
-    if is_workspace {
-        build_args.push("--workspace".to_string());
-    }
-    build_args.push("--all-targets".to_string());
-    build_args.extend(feature_args.clone());
+    let mut commands = Vec::new();
 
-    let mut test_args = vec!["test".to_string()];
-    if is_workspace {
-        test_args.push("--workspace".to_string());
-    }
-    test_args.push("--all-targets".to_string());
-    test_args.extend(feature_args);
-    test_args.push("--no-run".to_string());
+    if all_features && is_workspace {
+        // Dual-pass warm: all-features first (for CI/verification deps),
+        // then default-features (for worker default-feature reuse).
+        let mut clippy_all = vec!["clippy".to_string()];
+        clippy_all.extend(base_args.clone());
+        commands.push(CargoWarmCommand {
+            label: "clippy (all-features)",
+            args: clippy_all,
+            feature_args: all_features_args.clone(),
+        });
 
-    vec![
-        CargoWarmCommand {
+        let mut clippy_default = vec!["clippy".to_string()];
+        clippy_default.extend(base_args.clone());
+        commands.push(CargoWarmCommand {
+            label: "clippy (default-features)",
+            args: clippy_default,
+            feature_args: Vec::new(),
+        });
+
+        let mut build_all = vec!["build".to_string()];
+        build_all.extend(base_args);
+        commands.push(CargoWarmCommand {
+            label: "build (clippy fallback)",
+            args: build_all,
+            feature_args: all_features_args,
+        });
+    } else {
+        // Single-pass warm: clippy with detected features, build fallback.
+        let detected_features = if all_features {
+            all_features_args.clone()
+        } else {
+            named_features_args.clone()
+        };
+
+        let mut clippy_args = vec!["clippy".to_string()];
+        clippy_args.extend(base_args.clone());
+        commands.push(CargoWarmCommand {
             label: "clippy",
             args: clippy_args,
-        },
-        CargoWarmCommand {
+            feature_args: detected_features.clone(),
+        });
+
+        let mut build_args = vec!["build".to_string()];
+        build_args.extend(base_args);
+        commands.push(CargoWarmCommand {
             label: "build (clippy fallback)",
             args: build_args,
-        },
-        CargoWarmCommand {
-            label: "test --no-run",
-            args: test_args,
-        },
-    ]
+            feature_args: detected_features,
+        });
+    }
+
+    commands
 }
 
 // ---------------------------------------------------------------------------
@@ -346,19 +403,21 @@ version = "0.1.0"
         assert!(policy.incremental);
         assert_eq!(policy.features, Vec::<String>::new());
 
-        assert_eq!(policy.warm_commands.len(), 3);
+        // Single crate, default features: 2 commands (clippy + build fallback),
+        // no test --no-run, no feature flags in args.
+        assert_eq!(policy.warm_commands.len(), 2);
         assert_eq!(policy.warm_commands[0].label, "clippy");
         assert_eq!(
             policy.warm_commands[0].args,
             vec!["clippy", "--all-targets"]
         );
-        assert_eq!(
-            policy.warm_commands[2].args,
-            vec!["test", "--all-targets", "--no-run"]
-        );
+        assert!(policy.warm_commands[0].feature_args.is_empty());
+        assert_eq!(policy.warm_commands[1].label, "build (clippy fallback)");
+        assert_eq!(policy.warm_commands[1].args, vec!["build", "--all-targets"]);
+        assert!(policy.warm_commands[1].feature_args.is_empty());
     }
 
-    // (b) workspace with `--all-features` CI
+    // (b) workspace with `--all-features` CI → dual-pass warm
     #[test]
     fn workspace_with_all_features_ci() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -392,20 +451,33 @@ version = "0.1.0"
         assert!(policy.incremental);
         assert_eq!(policy.features, Vec::<String>::new());
 
+        // Dual-pass: 3 commands — clippy (all-features), clippy (default-features),
+        // build (clippy fallback). No test --no-run.
+        assert_eq!(policy.warm_commands.len(), 3);
+
+        // Pass 1: all-features clippy
+        assert_eq!(policy.warm_commands[0].label, "clippy (all-features)");
         assert_eq!(
             policy.warm_commands[0].args,
-            vec!["clippy", "--workspace", "--all-targets", "--all-features"]
+            vec!["clippy", "--workspace", "--all-targets"]
         );
+        assert_eq!(policy.warm_commands[0].feature_args, vec!["--all-features"]);
+
+        // Pass 2: default-features clippy (no feature flags)
+        assert_eq!(policy.warm_commands[1].label, "clippy (default-features)");
+        assert_eq!(
+            policy.warm_commands[1].args,
+            vec!["clippy", "--workspace", "--all-targets"]
+        );
+        assert!(policy.warm_commands[1].feature_args.is_empty());
+
+        // Pass 3: build fallback (all-features)
+        assert_eq!(policy.warm_commands[2].label, "build (clippy fallback)");
         assert_eq!(
             policy.warm_commands[2].args,
-            vec![
-                "test",
-                "--workspace",
-                "--all-targets",
-                "--all-features",
-                "--no-run"
-            ]
+            vec!["build", "--workspace", "--all-targets"]
         );
+        assert_eq!(policy.warm_commands[2].feature_args, vec!["--all-features"]);
     }
 
     // (c) workspace with pinned `rustc-wrapper = "sccache"`
@@ -445,10 +517,14 @@ version = "0.1.0"
         assert!(!policy.incremental);
         assert_eq!(policy.features, Vec::<String>::new());
 
+        // Workspace, default features, sccache: 2 commands, no feature flags.
+        assert_eq!(policy.warm_commands.len(), 2);
+        assert_eq!(policy.warm_commands[0].label, "clippy");
         assert_eq!(
             policy.warm_commands[0].args,
             vec!["clippy", "--workspace", "--all-targets"]
         );
+        assert!(policy.warm_commands[0].feature_args.is_empty());
     }
 
     #[test]
@@ -484,18 +560,20 @@ features = ["foo", "bar"]
         assert_eq!(policy.features, vec!["foo", "bar"]);
         assert!(!policy.all_features);
 
-        // Verify warm commands include --features for named feature sets
+        // Named features: 2 commands, features in feature_args, not in args.
+        assert_eq!(policy.warm_commands.len(), 2);
         assert_eq!(
             policy.warm_commands[0].args,
-            vec!["clippy", "--all-targets", "--features", "foo,bar"]
+            vec!["clippy", "--all-targets"]
         );
         assert_eq!(
-            policy.warm_commands[1].args,
-            vec!["build", "--all-targets", "--features", "foo,bar"]
+            policy.warm_commands[0].feature_args,
+            vec!["--features", "foo,bar"]
         );
+        assert_eq!(policy.warm_commands[1].args, vec!["build", "--all-targets"]);
         assert_eq!(
-            policy.warm_commands[2].args,
-            vec!["test", "--all-targets", "--features", "foo,bar", "--no-run"]
+            policy.warm_commands[1].feature_args,
+            vec!["--features", "foo,bar"]
         );
 
         // Verify features() returns the correct CLI args
@@ -530,24 +608,99 @@ features = "foo bar"
         assert_eq!(policy.features, vec!["foo", "bar"]);
         assert!(!policy.all_features);
 
-        // Verify warm commands include --features for named feature sets
+        // Named features: 2 commands, features in feature_args, not in args.
+        assert_eq!(policy.warm_commands.len(), 2);
         assert_eq!(
             policy.warm_commands[0].args,
-            vec!["clippy", "--all-targets", "--features", "foo,bar"]
+            vec!["clippy", "--all-targets"]
         );
         assert_eq!(
-            policy.warm_commands[1].args,
-            vec!["build", "--all-targets", "--features", "foo,bar"]
+            policy.warm_commands[0].feature_args,
+            vec!["--features", "foo,bar"]
         );
+        assert_eq!(policy.warm_commands[1].args, vec!["build", "--all-targets"]);
         assert_eq!(
-            policy.warm_commands[2].args,
-            vec!["test", "--all-targets", "--features", "foo,bar", "--no-run"]
+            policy.warm_commands[1].feature_args,
+            vec!["--features", "foo,bar"]
         );
 
         // Verify features() returns the correct CLI args
         assert_eq!(
             policy.features(),
             vec!["--features".to_string(), "foo,bar".to_string()]
+        );
+    }
+
+    #[test]
+    fn explicit_env_config_override_takes_precedence_over_detection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["crate-a"]
+"#,
+        )
+        .expect("write Cargo.toml");
+        fs::create_dir_all(root.join(".cargo")).expect("mkdir .cargo");
+        fs::write(
+            root.join(".cargo/config.toml"),
+            r#"[build]
+rustc-wrapper = "sccache"
+features = ["detected"]
+"#,
+        )
+        .expect("write config.toml");
+        fs::create_dir_all(root.join("crate-a/src")).expect("mkdir crate-a/src");
+        fs::write(
+            root.join("crate-a/Cargo.toml"),
+            r#"[package]
+name = "crate-a"
+version = "0.1.0"
+"#,
+        )
+        .expect("write crate-a/Cargo.toml");
+
+        let mut cfg = make_env_config_with_rust_workspace(".");
+        cfg.lifecycle.pre_verification = vec![djinn_stack::environment::HookCommand::Shell(
+            "cargo test --workspace --all-features".into(),
+        )];
+        cfg.cargo_cache_policy = Some(djinn_stack::environment::CargoCachePolicy::Explicit(
+            djinn_stack::environment::CargoCachePolicyOverride {
+                workspace: false,
+                features: vec!["override-a".into(), "override-b".into()],
+                all_features: false,
+                sccache: false,
+                incremental: true,
+                warm_commands: vec![djinn_stack::environment::CargoWarmCommand {
+                    label: "explicit warm".into(),
+                    args: vec![
+                        "check".into(),
+                        "--features".into(),
+                        "override-a,override-b".into(),
+                    ],
+                }],
+            },
+        ));
+
+        let policy = resolve_cargo_cache_policy(root, Some(&cfg)).expect("policy");
+        assert!(!policy.workspace);
+        assert_eq!(policy.features, vec!["override-a", "override-b"]);
+        assert!(!policy.all_features);
+        assert!(!policy.sccache);
+        assert!(policy.incremental);
+        assert_eq!(
+            policy.features(),
+            vec![
+                "--features".to_string(),
+                "override-a,override-b".to_string()
+            ]
+        );
+        assert_eq!(policy.warm_commands.len(), 1);
+        assert_eq!(policy.warm_commands[0].label, "override");
+        assert_eq!(
+            policy.warm_commands[0].args,
+            vec!["check", "--features", "override-a,override-b"]
         );
     }
 }

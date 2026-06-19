@@ -161,7 +161,7 @@ exec {bin} warm-graph "{project_id}"
     // settings. Single-sourced in job.rs to avoid the
     // task-run-updated-but-warm-missed drift that bit DJINN_*_URL.
     // Needs the cache volume mounted below.
-    env.extend(crate::job::warm_cache_env_vars(project_id));
+    env.extend(crate::job::warm_cache_env_vars(project_id, None));
 
     let container = Container {
         name: "warmer".to_string(),
@@ -288,6 +288,18 @@ exec {bin} warm-graph "{project_id}"
             template,
             backoff_limit: Some(0),
             ttl_seconds_after_finished: Some(config.warm_job_ttl_seconds),
+            // Deadline margin: `warm_cargo_target_base` now compiles the
+            // workspace twice — once with `--all-features` (clippy + test)
+            // and once with default features (check + clippy) — so a cold
+            // first warm can take ~40 minutes for a ~12-crate workspace.
+            // The default `warm_job_timeout_seconds` is 3600s (60 min),
+            // leaving ~20 min of margin for the dual-pass worst case.
+            // If a larger workspace consistently hits this deadline the
+            // warm Pod is SIGKILLed mid-compile and the next warm tick
+            // starts over from scratch (backoffLimit: 0) — so raise the
+            // timeout via `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS` rather than
+            // trimming the compile set. See the `warm_job_timeout_seconds`
+            // field doc in `config.rs` for the full timing breakdown.
             active_deadline_seconds: Some(config.warm_job_timeout_seconds),
             ..JobSpec::default()
         }),
