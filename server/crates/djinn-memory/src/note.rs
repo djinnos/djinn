@@ -183,6 +183,8 @@ pub struct HealthReport {
     pub low_confidence_note_count: i64,
     pub stale_note_count: i64,
     pub stale_notes_by_folder: Vec<StaleFolder>,
+    /// Summed admission-dropped count from recent consolidation_run_metrics rows for this project.
+    pub admission_dropped_note_count: i64,
     pub lifecycle: LifecycleHealth,
     pub recent_sweep: RecentSweepMetrics,
 }

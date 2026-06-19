@@ -262,6 +262,15 @@ impl NoteRepository {
             }
         };
 
+        let admission_dropped_note_count: i64 = sqlx::query_scalar(
+            r#"SELECT COALESCE(SUM(admission_dropped_note_count), 0)::BIGINT
+               FROM consolidation_run_metrics
+               WHERE project_id = $1"#,
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+
         Ok(HealthReport {
             total_notes,
             broken_link_count,
@@ -269,6 +278,7 @@ impl NoteRepository {
             low_confidence_note_count,
             stale_note_count,
             stale_notes_by_folder,
+            admission_dropped_note_count,
             lifecycle: LifecycleHealth {
                 active_notes,
                 archived_notes,
