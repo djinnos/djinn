@@ -11,8 +11,8 @@ impl TaskRepository {
             Task,
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
-                    reopen_count, continuation_count, verification_failure_count,
-                    total_reopen_count, total_verification_failure_count,
+                    reopen_count, continuation_count,
+                    total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
@@ -31,8 +31,8 @@ impl TaskRepository {
             Task,
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
-                    reopen_count, continuation_count, verification_failure_count,
-                    total_reopen_count, total_verification_failure_count,
+                    reopen_count, continuation_count,
+                    total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
@@ -69,8 +69,8 @@ impl TaskRepository {
         let sql = format!(
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
-                    reopen_count, continuation_count, verification_failure_count,
-                    total_reopen_count, total_verification_failure_count,
+                    reopen_count, continuation_count,
+                    total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
@@ -96,8 +96,8 @@ impl TaskRepository {
             Task,
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
-                    reopen_count, continuation_count, verification_failure_count,
-                    total_reopen_count, total_verification_failure_count,
+                    reopen_count, continuation_count,
+                    total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
@@ -117,8 +117,8 @@ impl TaskRepository {
             Task,
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
-                    reopen_count, continuation_count, verification_failure_count,
-                    total_reopen_count, total_verification_failure_count,
+                    reopen_count, continuation_count,
+                    total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
@@ -142,8 +142,8 @@ impl TaskRepository {
             Task,
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
-                    reopen_count, continuation_count, verification_failure_count,
-                    total_reopen_count, total_verification_failure_count,
+                    reopen_count, continuation_count,
+                    total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
@@ -169,8 +169,8 @@ impl TaskRepository {
             Task,
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
-                    reopen_count, continuation_count, verification_failure_count,
-                    total_reopen_count, total_verification_failure_count,
+                    reopen_count, continuation_count,
+                    total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
@@ -195,8 +195,8 @@ impl TaskRepository {
         let sql = if project_id.is_some() {
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
-                    reopen_count, continuation_count, verification_failure_count,
-                    total_reopen_count, total_verification_failure_count,
+                    reopen_count, continuation_count,
+                    total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
@@ -208,8 +208,8 @@ impl TaskRepository {
         } else {
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
-                    reopen_count, continuation_count, verification_failure_count,
-                    total_reopen_count, total_verification_failure_count,
+                    reopen_count, continuation_count,
+                    total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
@@ -294,14 +294,14 @@ impl TaskRepository {
                 r#"INSERT INTO tasks (
                     id, project_id, short_id, epic_id, title, description, design,
                     issue_type, status, priority, owner, labels,
-                    acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
-                    total_reopen_count, total_verification_failure_count,
+                    acceptance_criteria, reopen_count, continuation_count,
+                    total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28::jsonb
+                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb
                  )
                  ON CONFLICT (id) DO UPDATE SET
                     project_id          = EXCLUDED.project_id,
@@ -316,9 +316,7 @@ impl TaskRepository {
                     acceptance_criteria = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.acceptance_criteria ELSE tasks.acceptance_criteria END,
                     reopen_count        = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.reopen_count ELSE tasks.reopen_count END,
                     continuation_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.continuation_count ELSE tasks.continuation_count END,
-                    verification_failure_count = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.verification_failure_count ELSE tasks.verification_failure_count END,
                     total_reopen_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.total_reopen_count ELSE tasks.total_reopen_count END,
-                    total_verification_failure_count = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.total_verification_failure_count ELSE tasks.total_verification_failure_count END,
                     intervention_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.intervention_count ELSE tasks.intervention_count END,
                     last_intervention_at = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.last_intervention_at ELSE tasks.last_intervention_at END,
                     closed_at           = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.closed_at ELSE tasks.closed_at END,
@@ -344,9 +342,7 @@ impl TaskRepository {
             .bind(&task.acceptance_criteria)
             .bind(task.reopen_count)
             .bind(task.continuation_count)
-            .bind(task.verification_failure_count)
             .bind(task.total_reopen_count)
-            .bind(task.total_verification_failure_count)
             .bind(task.intervention_count)
             .bind(&task.last_intervention_at)
             .bind(&task.created_at)
@@ -476,14 +472,14 @@ impl TaskRepository {
                 r#"INSERT INTO tasks (
                     id, project_id, short_id, epic_id, title, description, design,
                     issue_type, status, priority, owner, labels,
-                    acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
-                    total_reopen_count, total_verification_failure_count,
+                    acceptance_criteria, reopen_count, continuation_count,
+                    total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28::jsonb
+                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb
                  )
                  ON CONFLICT (id) DO UPDATE SET
                     project_id          = EXCLUDED.project_id,
@@ -498,9 +494,7 @@ impl TaskRepository {
                     acceptance_criteria = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.acceptance_criteria ELSE tasks.acceptance_criteria END,
                     reopen_count        = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.reopen_count ELSE tasks.reopen_count END,
                     continuation_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.continuation_count ELSE tasks.continuation_count END,
-                    verification_failure_count = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.verification_failure_count ELSE tasks.verification_failure_count END,
                     total_reopen_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.total_reopen_count ELSE tasks.total_reopen_count END,
-                    total_verification_failure_count = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.total_verification_failure_count ELSE tasks.total_verification_failure_count END,
                     intervention_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.intervention_count ELSE tasks.intervention_count END,
                     last_intervention_at = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.last_intervention_at ELSE tasks.last_intervention_at END,
                     closed_at           = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.closed_at ELSE tasks.closed_at END,
@@ -526,9 +520,7 @@ impl TaskRepository {
             .bind(&task.acceptance_criteria)
             .bind(task.reopen_count)
             .bind(task.continuation_count)
-            .bind(task.verification_failure_count)
             .bind(task.total_reopen_count)
-            .bind(task.total_verification_failure_count)
             .bind(task.intervention_count)
             .bind(&task.last_intervention_at)
             .bind(&task.created_at)

@@ -195,35 +195,30 @@ impl TaskRepository {
                             reopen_count = reopen_count + $2,
                             total_reopen_count = total_reopen_count + $3,
                             continuation_count = CASE WHEN $4 THEN 0 WHEN $5 THEN continuation_count + 1 ELSE continuation_count END,
-                            verification_failure_count = CASE WHEN $6 THEN 0 WHEN $7 THEN verification_failure_count + 1 ELSE verification_failure_count END,
-                            total_verification_failure_count = total_verification_failure_count + CASE WHEN $8 THEN 1 ELSE 0 END,
-                            intervention_count = CASE WHEN $9 THEN intervention_count + 1 ELSE intervention_count END,
-                            last_intervention_at = CASE WHEN $10 THEN to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE last_intervention_at END,
+                            intervention_count = CASE WHEN $6 THEN intervention_count + 1 ELSE intervention_count END,
+                            last_intervention_at = CASE WHEN $7 THEN to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE last_intervention_at END,
                             closed_at = CASE
-                                WHEN $11 THEN to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-                                WHEN $12 THEN NULL
+                                WHEN $8 THEN to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                                WHEN $9 THEN NULL
                                 ELSE closed_at
                             END,
                             close_reason = CASE
-                                WHEN $13::text IS NOT NULL THEN $14
-                                WHEN $15 THEN NULL
+                                WHEN $10::text IS NOT NULL THEN $11
+                                WHEN $12 THEN NULL
                                 ELSE close_reason
                             END,
                             merge_conflict_metadata = CASE
-                                WHEN $16 THEN NULL
-                                WHEN $17 THEN $18
+                                WHEN $13 THEN NULL
+                                WHEN $14 THEN $15
                                 ELSE merge_conflict_metadata
                             END,
                             updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-                         WHERE id = $19"#,
+                         WHERE id = $16"#,
                         to_str,
                         reopen_inc_val,
                         reopen_inc_val,
                         apply.reset_continuation,
                         apply.increment_continuation,
-                        apply.reset_verification_failure,
-                        apply.increment_verification_failure,
-                        apply.increment_verification_failure,
                         apply.record_intervention,
                         apply.record_intervention,
                         apply.set_closed_at,

@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                CAST(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END) AS DOUBLE PRECISION)\n                    / CAST(GREATEST(1, COUNT(DISTINCT t.id)) AS DOUBLE PRECISION) AS \"success_rate: f64\",\n                COALESCE(AVG(CAST(t.total_reopen_count AS DOUBLE PRECISION)), 0.0) AS \"avg_reopens!: f64\",\n                COUNT(DISTINCT t.id) AS \"completed_task_count!: i64\"\n             FROM tasks t\n             WHERE t.project_id = $1\n               AND t.status = 'closed'\n               AND EXISTS (\n                   SELECT 1 FROM sessions s\n                   WHERE s.task_id = t.id AND s.agent_type = $2\n               )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "success_rate: f64",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 1,
+        "name": "avg_reopens!: f64",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 2,
+        "name": "completed_task_count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "4ac7c18061aba6cb927538ceb228810acf53d7ff94822e38aaec3e134c5eb68b"
+}

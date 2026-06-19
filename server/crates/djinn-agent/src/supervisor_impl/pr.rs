@@ -686,7 +686,6 @@ pub(crate) async fn handle_noop_disposition(
     // to open. If no safe release action exists, downgrade Nudge → Close.
     let release_action = match task.status.as_str() {
         "in_progress" => Some(TransitionAction::Release),
-        "verifying" => Some(TransitionAction::ReleaseVerification),
         _ => None,
     };
 
