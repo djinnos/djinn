@@ -194,7 +194,7 @@ mod tests {
         assert!(persisted.closed_at.is_none());
 
         let activity = repo.list_activity(&task.id).await.unwrap();
-        assert_eq!(activity.len(), 5);
+        assert_eq!(activity.len(), 4);
         let last_payload: serde_json::Value =
             serde_json::from_str(&activity.last().unwrap().payload).unwrap();
         assert_eq!(last_payload["from_status"], "in_task_review");
@@ -207,7 +207,7 @@ mod tests {
         }));
 
         let events = captured.lock().unwrap();
-        assert_eq!(events.len(), 6);
+        assert_eq!(events.len(), 5);
         assert_eq!(events.last().unwrap().entity_type, "task");
         assert_eq!(events.last().unwrap().action, "updated");
     }

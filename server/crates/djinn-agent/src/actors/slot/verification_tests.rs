@@ -486,7 +486,11 @@ async fn handle_verification_failure_first_failure_goes_open() {
         .await
         .expect("get task")
         .expect("task exists");
-    assert_eq!(task.status, "open");
+    // Verification gate removed: the task is already in needs_task_review
+    // and handle_verification_failure cannot transition it (Reopen/Escalate
+    // are invalid from needs_task_review). The task stays put, but the
+    // feedback comment is still recorded.
+    assert_eq!(task.status, "needs_task_review");
 
     let activity = task_repo
         .list_activity(&task_id)
@@ -510,7 +514,8 @@ async fn handle_verification_failure_second_failure_still_goes_open() {
         .await
         .expect("get task")
         .expect("task exists");
-    assert_eq!(task.status, "open");
+    // Verification gate removed: task stays in needs_task_review.
+    assert_eq!(task.status, "needs_task_review");
 }
 
 #[tokio::test]
@@ -522,25 +527,9 @@ async fn handle_verification_failure_threshold_escalates_directly() {
         .await
         .expect("get task")
         .expect("task exists");
-    assert_eq!(task.status, "needs_lead_intervention");
-
-    let activity = task_repo
-        .list_activity(&task_id)
-        .await
-        .expect("list activity");
-    let statuses: Vec<serde_json::Value> = activity
-        .iter()
-        .filter(|e| e.event_type == "status_changed")
-        .map(|e| serde_json::from_str(&e.payload).expect("status payload json"))
-        .collect();
-    // After setup, we should NOT see an intermediate open status
-    // when escalating directly to Lead; the transition should be verifying->needs_lead_intervention
-    assert!(!statuses.iter().any(|p| p["to_status"] == "open"));
-    assert!(
-        statuses
-            .iter()
-            .any(|p| p["to_status"] == "needs_lead_intervention")
-    );
+    // Verification gate removed: Escalate is invalid from needs_task_review,
+    // so the task stays put.
+    assert_eq!(task.status, "needs_task_review");
 }
 
 #[tokio::test]
@@ -552,7 +541,8 @@ async fn handle_verification_failure_past_threshold_escalates() {
         .await
         .expect("get task")
         .expect("task exists");
-    assert_eq!(task.status, "needs_lead_intervention");
+    // Verification gate removed: task stays in needs_task_review.
+    assert_eq!(task.status, "needs_task_review");
 }
 
 // ── regression: image-not-ready requeues rather than erroring ──────────
