@@ -28,6 +28,9 @@ const CARGO_TARGET_SEED_TOTAL: &str = "djinn_cargo_target_seed_total";
 const CARGO_SEED_HIT_TOTAL: &str = "djinn_cargo_seed_hit_total";
 const CARGO_SEED_COLD_TOTAL: &str = "djinn_cargo_seed_cold_total";
 const CARGO_WARM_BASE_FRESHNESS_SECONDS: &str = "djinn_cargo_warm_base_freshness_seconds";
+const CARGO_WARM_STEP_TOTAL: &str = "djinn_cargo_warm_step_total";
+const CARGO_WARM_STEP_OUTCOMES: [&str; 3] = ["ok", "failed", "spawn_error"];
+const CARGO_WARM_STEP_WORKSPACE_PATH_HASH: &str = "djinn_cargo_warm_step_workspace_path_hash";
 const SLOT_POOL_STATES: [&str; 2] = ["free", "busy"];
 const JIT_PITFALL_HINTS_TOTAL: &str = "djinn_jit_pitfall_hints_total";
 const JIT_PITFALL_OUTCOMES: [&str; 7] = [
@@ -180,6 +183,88 @@ pub mod cargo_cache {
             "project_id" => project_id.to_owned()
         )
         .set(age_secs);
+    }
+}
+
+pub mod cargo_warm_step {
+    pub const OUTCOME_OK: &str = "ok";
+    pub const OUTCOME_FAILED: &str = "failed";
+    pub const OUTCOME_SPAWN_ERROR: &str = "spawn_error";
+
+    /// Stable labels for the cargo warm step. Keep this list closed so the
+    /// `step` label cardinality stays bounded.
+    pub const STEP_CLIPPY: &str = "clippy";
+    pub const STEP_BUILD_FALLBACK: &str = "build_fallback";
+    pub const STEP_TEST_NO_RUN: &str = "test_no_run";
+
+    pub const STEP_TOTAL: &str = super::CARGO_WARM_STEP_TOTAL;
+    pub const WORKSPACE_PATH_HASH: &str = super::CARGO_WARM_STEP_WORKSPACE_PATH_HASH;
+
+    /// Increment the cargo warm-step counter for a `(project_id, step, outcome)`
+    /// bucket. The free-form cargo argv is intentionally NOT a label so metric
+    /// cardinality stays bounded; the exact argv is logged via structured tracing
+    /// instead (see `cargo_metrics` in the worker crate).
+    ///
+    /// `step` should be one of the stable `STEP_*` constants below so the label
+    /// space is closed.
+    pub fn increment_step(project_id: &str, step: &'static str, outcome: &'static str) {
+        metrics::counter!(
+            super::CARGO_WARM_STEP_TOTAL,
+            "project_id" => project_id.to_owned(),
+            "step" => step,
+            "outcome" => outcome,
+        )
+        .increment(1);
+    }
+
+    /// Record a stable, low-cardinality fingerprint of the absolute workspace
+    /// directory the worker resolved for the most recent cargo warm step.
+    ///
+    /// Prometheus labels can't safely carry free-form absolute paths (high
+    /// cardinality, possibly sensitive). We hash the path and store the
+    /// 64-bit FNV-1a hash as the gauge value — paired with the matching
+    /// structured tracing event the worker emits alongside (which DOES carry
+    /// the absolute path) the coordinator health sweep can correlate the
+    /// hash with the path without exploding label cardinality.
+    ///
+    /// `project_id` is the only label so cardinality stays bounded by the
+    /// number of projects the worker is servicing, not the number of
+    /// distinct filesystem layouts.
+    pub fn set_workspace_path(project_id: &str, workspace_path: &str) {
+        let hash = fnv1a64(workspace_path.as_bytes());
+        metrics::gauge!(
+            super::CARGO_WARM_STEP_WORKSPACE_PATH_HASH,
+            "project_id" => project_id.to_owned()
+        )
+        .set(hash);
+    }
+
+    /// 64-bit FNV-1a hash. Tiny, no extra deps, stable across processes. Good
+    /// enough for correlating a workspace path to its health-sweep sample
+    /// without exposing the path as a label.
+    fn fnv1a64(bytes: &[u8]) -> f64 {
+        const OFFSET: u64 = 0xcbf29ce484222325;
+        const PRIME: u64 = 0x100000001b3;
+        let mut hash = OFFSET;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+        hash as f64
+    }
+
+    /// Exposed for the public surface so callers can hash a workspace path the
+    /// same way `set_workspace_path` does, when they need to match a tracing
+    /// event to a metric sample.
+    pub fn workspace_path_hash(workspace_path: &str) -> u64 {
+        const OFFSET: u64 = 0xcbf29ce484222325;
+        const PRIME: u64 = 0x100000001b3;
+        let mut hash = OFFSET;
+        for byte in workspace_path.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+        hash
     }
 }
 
@@ -386,6 +471,28 @@ fn register_metrics() {
         CARGO_WARM_BASE_FRESHNESS_SECONDS,
         "Seconds elapsed while producing the most recent warm Cargo target base for a project."
     );
+    metrics::describe_counter!(
+        CARGO_WARM_STEP_TOTAL,
+        "Cargo warm-step invocations partitioned by bounded project_id, step, and outcome labels. The free-form cargo argv is intentionally NOT a label; correlate with the djinn_cargo_warm_step workspace path hash gauge and the worker's structured tracing event for full context."
+    );
+    for outcome in CARGO_WARM_STEP_OUTCOMES {
+        metrics::counter!(
+            CARGO_WARM_STEP_TOTAL,
+            "project_id" => "",
+            "step" => "",
+            "outcome" => outcome
+        )
+        .absolute(0);
+    }
+    metrics::describe_gauge!(
+        CARGO_WARM_STEP_WORKSPACE_PATH_HASH,
+        "Stable 64-bit FNV-1a hash of the absolute workspace directory the worker resolved for the most recent cargo warm step, partitioned by project_id. Pair with the worker's structured tracing event to recover the actual path without unbounded label cardinality."
+    );
+    metrics::gauge!(
+        CARGO_WARM_STEP_WORKSPACE_PATH_HASH,
+        "project_id" => ""
+    )
+    .set(0.0);
 }
 
 pub mod dispatch {
@@ -638,6 +745,16 @@ mod tests {
         assert_sync_unit(|| cargo_cache::record_seed_hit("project-sync"));
         assert_sync_unit(|| cargo_cache::record_seed_cold("project-sync", "base_missing"));
         assert_sync_unit(|| cargo_cache::record_warm_base_freshness("project-sync", 1.0));
+        assert_sync_unit(|| {
+            cargo_warm_step::increment_step(
+                "project-sync",
+                cargo_warm_step::STEP_CLIPPY,
+                cargo_warm_step::OUTCOME_OK,
+            );
+        });
+        assert_sync_unit(|| {
+            cargo_warm_step::set_workspace_path("project-sync", "/workspace/x/server");
+        });
     }
 
     #[test]
@@ -703,6 +820,115 @@ mod tests {
             .and_then(|(_, value)| value.parse::<f64>().ok())
             .expect("freshness gauge sample should end with a number");
         assert!(value > 0.0, "freshness gauge must be positive: {sample}");
+    }
+
+    #[test]
+    fn cargo_warm_step_counter_renders_bounded_project_step_outcome_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let project_id = "project-warm-step-test";
+        cargo_warm_step::increment_step(
+            project_id,
+            cargo_warm_step::STEP_CLIPPY,
+            cargo_warm_step::OUTCOME_OK,
+        );
+        cargo_warm_step::increment_step(
+            project_id,
+            cargo_warm_step::STEP_TEST_NO_RUN,
+            cargo_warm_step::OUTCOME_FAILED,
+        );
+
+        let rendered = render().unwrap();
+        let clippy = rendered_sample(
+            &rendered,
+            cargo_warm_step::STEP_TOTAL,
+            &[
+                ("project_id", project_id),
+                ("step", cargo_warm_step::STEP_CLIPPY),
+                ("outcome", cargo_warm_step::OUTCOME_OK),
+            ],
+        );
+        assert!(clippy.ends_with(" 1"), "unexpected clippy sample: {clippy}");
+
+        let test_no_run = rendered_sample(
+            &rendered,
+            cargo_warm_step::STEP_TOTAL,
+            &[
+                ("project_id", project_id),
+                ("step", cargo_warm_step::STEP_TEST_NO_RUN),
+                ("outcome", cargo_warm_step::OUTCOME_FAILED),
+            ],
+        );
+        assert!(
+            test_no_run.ends_with(" 1"),
+            "unexpected test_no_run sample: {test_no_run}"
+        );
+
+        // No free-form path or argv may leak into a label — the only label
+        // keys we expect on this metric are project_id/step/outcome.
+        for line in rendered.lines() {
+            if !line.starts_with(cargo_warm_step::STEP_TOTAL) {
+                continue;
+            }
+            for forbidden in ["workspace=", "argv=", "command=", "path="] {
+                assert!(
+                    !line.contains(forbidden),
+                    "cargo_warm_step must not carry free-form path/argv labels: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cargo_warm_step_workspace_path_hash_gauge_matches_exposed_helper() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        let project_id = "project-warm-path-hash-test";
+        let workspace = "/workspace/proj-warm-path-hash/server";
+        cargo_warm_step::set_workspace_path(project_id, workspace);
+
+        let rendered = render().unwrap();
+        let sample = rendered_sample(
+            &rendered,
+            cargo_warm_step::WORKSPACE_PATH_HASH,
+            &[("project_id", project_id)],
+        );
+        let value: f64 = sample
+            .rsplit_once(' ')
+            .and_then(|(_, value)| value.parse::<f64>().ok())
+            .expect("workspace path hash gauge should end with a number");
+
+        let expected = cargo_warm_step::workspace_path_hash(workspace) as f64;
+        assert!(
+            (value - expected).abs() < f64::EPSILON,
+            "gauge value must match the workspace_path_hash helper: gauge={value} expected={expected}"
+        );
+
+        // Determinism: hashing the same path twice yields the same value.
+        cargo_warm_step::set_workspace_path(project_id, workspace);
+        let rendered_again = render().unwrap();
+        let sample_again = rendered_sample(
+            &rendered_again,
+            cargo_warm_step::WORKSPACE_PATH_HASH,
+            &[("project_id", project_id)],
+        );
+        let value_again: f64 = sample_again
+            .rsplit_once(' ')
+            .and_then(|(_, value)| value.parse::<f64>().ok())
+            .expect("workspace path hash gauge should end with a number");
+        assert!(
+            (value - value_again).abs() < f64::EPSILON,
+            "workspace path hash must be deterministic"
+        );
+
+        // Different paths must yield different hashes.
+        let other_hash = cargo_warm_step::workspace_path_hash("/workspace/other-proj/server");
+        assert_ne!(
+            value as u64, other_hash,
+            "different workspace paths must produce different hashes"
+        );
     }
 
     #[test]
