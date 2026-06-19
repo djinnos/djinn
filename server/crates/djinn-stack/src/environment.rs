@@ -117,6 +117,22 @@ pub struct EnvironmentConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub lifecycle: LifecycleHooks,
+    /// Project-level override for Cargo target-cache warming/running policy.
+    ///
+    /// The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
+    /// cache strategy from the repository it is about to run, including the
+    /// Cargo workspace layout, `.cargo/config.toml` settings such as
+    /// `rustc-wrapper`, and configured setup/verification command shapes. That
+    /// detection is deliberately read-only. djinn may read `.cargo/config.toml`
+    /// to keep warm-job and worker behavior consistent with the project, but it
+    /// never creates, edits, or rewrites the project's `.cargo/config.toml`.
+    ///
+    /// Set an explicit policy only when project authors need to override the
+    /// detected feature/sccache/incremental choices at the environment-config
+    /// level. `None` is accepted for legacy rows and is treated the same as the
+    /// default auto-detected policy by consumers.
+    #[serde(default = "default_cargo_cache_policy")]
+    pub cargo_cache_policy: Option<CargoCachePolicy>,
     /// Per-agent-role MCP server defaults. Moved here from the pre-cut-over
     /// `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
     /// name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
@@ -144,6 +160,7 @@ impl EnvironmentConfig {
             system_packages: Vec::new(),
             env: BTreeMap::new(),
             lifecycle: LifecycleHooks::default(),
+            cargo_cache_policy: default_cargo_cache_policy(),
             agent_mcp_defaults: BTreeMap::new(),
             global_skills: Vec::new(),
         }
@@ -305,6 +322,134 @@ impl EnvironmentConfig {
         validate_package_list("system_packages", &self.system_packages)?;
         validate_env(&self.env)?;
         self.lifecycle.validate()?;
+        if let Some(policy) = &self.cargo_cache_policy {
+            policy.validate()?;
+        }
+        Ok(())
+    }
+}
+
+fn default_cargo_cache_policy() -> Option<CargoCachePolicy> {
+    Some(CargoCachePolicy::AutoDetected)
+}
+
+// ---- cargo cache policy --------------------------------------------------
+
+/// Per-project Cargo target-cache strategy override.
+///
+/// The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
+/// consumers resolve the policy by reading the project shape (Cargo workspace
+/// layout, `.cargo/config.toml`, and configured setup/verification command
+/// patterns) instead of hardcoding one universal compile set. That resolver is
+/// intentionally non-mutating. It may observe a project's `.cargo/config.toml`,
+/// including `rustc-wrapper = "sccache"` and feature-related settings, but it
+/// must never create or modify `.cargo/config.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case", tag = "mode", content = "policy")]
+pub enum CargoCachePolicy {
+    /// Resolve the policy from the project itself at warm/worker runtime.
+    #[default]
+    AutoDetected,
+    /// Use this explicit, project-authored override instead of detection.
+    Explicit(CargoCachePolicyOverride),
+}
+
+impl CargoCachePolicy {
+    fn validate(&self) -> EnvResult<()> {
+        match self {
+            CargoCachePolicy::AutoDetected => Ok(()),
+            CargoCachePolicy::Explicit(policy) => policy.validate(),
+        }
+    }
+}
+
+/// Explicit Cargo target-cache policy used when auto-detection is overridden.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CargoCachePolicyOverride {
+    /// Whether the Cargo root is a workspace rather than a single package.
+    #[serde(default)]
+    pub workspace: bool,
+    /// Feature names to pass consistently to warm and worker cargo commands.
+    /// Empty means default features only. Use `all_features` for
+    /// `--all-features`; do not include `all-features` in this list.
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// Whether warm and worker cargo commands should pass `--all-features`.
+    #[serde(default)]
+    pub all_features: bool,
+    /// Whether the project should use sccache for rustc invocations.
+    #[serde(default)]
+    pub sccache: bool,
+    /// Whether to enable Cargo incremental compilation.
+    #[serde(default = "default_cargo_incremental")]
+    pub incremental: bool,
+    /// Warm-base cargo commands derived from or overridden for this project.
+    #[serde(default)]
+    pub warm_commands: Vec<CargoWarmCommand>,
+}
+
+impl CargoCachePolicyOverride {
+    fn validate(&self) -> EnvResult<()> {
+        validate_feature_list("cargo_cache_policy.policy.features", &self.features)?;
+        if self.all_features && !self.features.is_empty() {
+            return Err(EnvironmentConfigError::UnsafeIdentifier {
+                field: "cargo_cache_policy.policy.features".into(),
+                value: "features cannot be combined with all_features".into(),
+            });
+        }
+        if self.sccache && self.incremental {
+            return Err(EnvironmentConfigError::UnsafeIdentifier {
+                field: "cargo_cache_policy.policy.incremental".into(),
+                value: "incremental must be false when sccache is true".into(),
+            });
+        }
+        if self.warm_commands.len() > MAX_HOOKS_PER_PHASE {
+            return Err(EnvironmentConfigError::ListTooLong {
+                field: "cargo_cache_policy.policy.warm_commands".into(),
+                len: self.warm_commands.len(),
+                max: MAX_HOOKS_PER_PHASE,
+            });
+        }
+        for (i, command) in self.warm_commands.iter().enumerate() {
+            command.validate(&format!("cargo_cache_policy.policy.warm_commands[{i}]"))?;
+        }
+        Ok(())
+    }
+}
+
+fn default_cargo_incremental() -> bool {
+    true
+}
+
+/// One Cargo command used to warm a project's target cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CargoWarmCommand {
+    /// Human-readable label for logs and metrics.
+    pub label: String,
+    /// Cargo subcommand and arguments, excluding the leading `cargo` binary.
+    pub args: Vec<String>,
+}
+
+impl CargoWarmCommand {
+    fn validate(&self, field: &str) -> EnvResult<()> {
+        validate_plain_string(&format!("{field}.label"), &self.label, MAX_STRING_LEN)?;
+        if self.args.is_empty() {
+            return Err(EnvironmentConfigError::EmptyValue {
+                field: format!("{field}.args"),
+            });
+        }
+        if self.args.len() > MAX_LANGUAGE_LIST {
+            return Err(EnvironmentConfigError::ListTooLong {
+                field: format!("{field}.args"),
+                len: self.args.len(),
+                max: MAX_LANGUAGE_LIST,
+            });
+        }
+        for (i, arg) in self.args.iter().enumerate() {
+            validate_plain_string(&format!("{field}.args[{i}]"), arg, MAX_STRING_LEN)?;
+        }
         Ok(())
     }
 }
@@ -995,6 +1140,42 @@ fn validate_path(field: &str, value: &str) -> EnvResult<()> {
     Ok(())
 }
 
+fn validate_feature_list(field: &str, features: &[String]) -> EnvResult<()> {
+    if features.len() > MAX_LANGUAGE_LIST {
+        return Err(EnvironmentConfigError::ListTooLong {
+            field: field.into(),
+            len: features.len(),
+            max: MAX_LANGUAGE_LIST,
+        });
+    }
+    for feature in features {
+        validate_identifier(field, feature)?;
+    }
+    Ok(())
+}
+
+fn validate_plain_string(field: &str, value: &str, max: usize) -> EnvResult<()> {
+    if value.is_empty() {
+        return Err(EnvironmentConfigError::EmptyValue {
+            field: field.into(),
+        });
+    }
+    if value.len() > max {
+        return Err(EnvironmentConfigError::TooLong {
+            field: field.into(),
+            len: value.len(),
+            max,
+        });
+    }
+    if value.chars().any(|c| matches!(c, '\n' | '\r' | '\0')) {
+        return Err(EnvironmentConfigError::UnsafeIdentifier {
+            field: field.into(),
+            value: value.into(),
+        });
+    }
+    Ok(())
+}
+
 // ---- tests --------------------------------------------------------------
 
 #[cfg(test)]
@@ -1316,6 +1497,75 @@ mod tests {
         assert_eq!(cfg.workspaces[0].name, None);
         assert!(cfg.workspaces[0].tags.is_empty());
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn cargo_cache_policy_defaults_to_auto_detected() {
+        let cfg = EnvironmentConfig::empty();
+        assert_eq!(cfg.cargo_cache_policy, Some(CargoCachePolicy::AutoDetected));
+
+        let parsed: EnvironmentConfig = serde_json::from_str(r#"{"schema_version":1}"#).unwrap();
+        assert_eq!(
+            parsed.cargo_cache_policy,
+            Some(CargoCachePolicy::AutoDetected)
+        );
+        parsed.validate().unwrap();
+    }
+
+    #[test]
+    fn cargo_cache_policy_explicit_round_trips_and_validates() {
+        let mut cfg = EnvironmentConfig::empty();
+        cfg.cargo_cache_policy = Some(CargoCachePolicy::Explicit(CargoCachePolicyOverride {
+            workspace: true,
+            features: vec!["ci".to_owned(), "postgres".to_owned()],
+            all_features: false,
+            sccache: true,
+            incremental: false,
+            warm_commands: vec![CargoWarmCommand {
+                label: "clippy".to_owned(),
+                args: vec![
+                    "clippy".to_owned(),
+                    "--workspace".to_owned(),
+                    "--all-targets".to_owned(),
+                ],
+            }],
+        }));
+
+        cfg.validate().unwrap();
+        let serialized = serde_json::to_string(&cfg).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value["cargo_cache_policy"]["mode"], json!("explicit"));
+        assert_eq!(
+            value["cargo_cache_policy"]["policy"]["features"],
+            json!(["ci", "postgres"])
+        );
+
+        let round_tripped: EnvironmentConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(round_tripped, cfg);
+    }
+
+    #[test]
+    fn cargo_cache_policy_rejects_malformed_override() {
+        let mut cfg = EnvironmentConfig::empty();
+        cfg.cargo_cache_policy = Some(CargoCachePolicy::Explicit(CargoCachePolicyOverride {
+            all_features: true,
+            features: vec!["ci".to_owned()],
+            ..Default::default()
+        }));
+        assert!(matches!(
+            cfg.validate().unwrap_err(),
+            EnvironmentConfigError::UnsafeIdentifier { .. }
+        ));
+
+        cfg.cargo_cache_policy = Some(CargoCachePolicy::Explicit(CargoCachePolicyOverride {
+            sccache: true,
+            incremental: true,
+            ..Default::default()
+        }));
+        assert!(matches!(
+            cfg.validate().unwrap_err(),
+            EnvironmentConfigError::UnsafeIdentifier { .. }
+        ));
     }
 
     #[test]
