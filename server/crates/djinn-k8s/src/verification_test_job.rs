@@ -305,16 +305,10 @@ mod tests {
             Some("/cache/cargo-target/proj-xyz"),
             "verification-test jobs must write the shared warm/verification cargo target base"
         );
-        assert_eq!(
-            envs.get("CARGO_INCREMENTAL").copied(),
-            Some("1"),
-            "warm/verify base uses incremental compilation (warm == verify == worker parity)"
-        );
-        assert_eq!(
-            envs.get("RUSTC_WRAPPER").copied(),
-            Some(""),
-            "verification-test must clear RUSTC_WRAPPER so incremental works"
-        );
+        // The CARGO_INCREMENTAL / RUSTC_WRAPPER compile-strategy invariant is
+        // asserted exhaustively in `crate::job::tests` (warm == verify ==
+        // worker parity); not re-pinned here to avoid coupling this throwaway
+        // shape test to that env-builder.
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),
             Some("/cache/sccache/proj-xyz")
