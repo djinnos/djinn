@@ -1243,6 +1243,13 @@ impl AppState {
         // idempotent if this ordering changes and observes a still-running row.
         self.interrupt_stale_sessions_on_startup().await;
 
+        // Best-effort backfill of pricing snapshot columns for pre-existing
+        // sessions that were created before snapshot capture was added.  Uses
+        // the *current* catalog pricing — an approximation, not exact historical
+        // rates.  Only sessions whose snapshot columns are all NULL are touched;
+        // sessions that already have snapshots are preserved.  Idempotent.
+        self.backfill_session_pricing_on_startup().await;
+
         // Coordinator + slot pool (the dispatch engine) + runtime settings.
         self.initialize_agents().await;
 
@@ -1445,6 +1452,53 @@ impl AppState {
             Ok(0) => {}
             Ok(n) => tracing::info!(count = n, "interrupted stale sessions from previous run"),
             Err(e) => tracing::warn!(error = %e, "failed to interrupt stale sessions"),
+        }
+    }
+
+    /// Best-effort backfill of pricing snapshot columns for sessions that were
+    /// created before snapshot capture existed.
+    ///
+    /// Uses the *current* catalog pricing — this is an approximation that does
+    /// not reflect what the model actually cost when the session ran.  Only
+    /// sessions whose four snapshot columns are all `NULL` are touched; sessions
+    /// that already captured a start-time snapshot are left alone.
+    ///
+    /// Sessions whose `model_id` is not found in the current catalog remain
+    /// all-NULL (never treated as free).  Idempotent — safe to rerun.
+    async fn backfill_session_pricing_on_startup(&self) {
+        use djinn_db::SessionRepository;
+
+        let pricing_map = self.catalog().pricing_for_all_models();
+        if pricing_map.is_empty() {
+            tracing::debug!("pricing backfill: no models in catalog; skipping");
+            return;
+        }
+
+        let pricing_vec: Vec<(String, djinn_core::models::Pricing)> =
+            pricing_map.into_iter().collect();
+        let model_count = pricing_vec.len();
+
+        let repo = SessionRepository::new(self.db().clone(), self.event_bus());
+        match repo.backfill_pricing_snapshots(&pricing_vec).await {
+            Ok(0) => {
+                tracing::debug!(
+                    model_count,
+                    "pricing backfill: no sessions needed updating"
+                );
+            }
+            Ok(n) => {
+                tracing::info!(
+                    rows_updated = n,
+                    model_count,
+                    "pricing backfill: approximate historical pricing applied from current catalog"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "pricing backfill failed — sessions with NULL snapshots remain"
+                );
+            }
         }
     }
 

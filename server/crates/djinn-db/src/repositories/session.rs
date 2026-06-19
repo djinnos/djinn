@@ -1023,6 +1023,66 @@ impl SessionRepository {
         .await?;
         Ok(result.rows_affected())
     }
+
+    /// Best-effort backfill of price snapshot columns for existing sessions
+    /// whose snapshots were never captured at creation time.
+    ///
+    /// **Approximate historical pricing:** the pricing data passed in comes from
+    /// the *current* catalog and does not reflect what the model cost when the
+    /// session actually ran.  Callers should log this caveat.  Sessions whose
+    /// `model_id` is not present in `pricing_by_model` are intentionally
+    /// skipped — they remain all-NULL for snapshots and `cost_usd`.
+    ///
+    /// Only sessions with all four snapshot columns `NULL` are touched;
+    /// sessions that already captured a start-time snapshot are preserved.
+    /// Idempotent: re-running with the same pricing is a no-op on already-
+    /// backfilled rows.
+    ///
+    /// Returns the total number of rows updated across all models.
+    pub async fn backfill_pricing_snapshots(
+        &self,
+        pricing_by_model: &[(String, Pricing)],
+    ) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+
+        let mut total_updated: u64 = 0;
+        for (model_id, pricing) in pricing_by_model {
+            let input_rate = pricing.input_per_million;
+            let output_rate = pricing.output_per_million;
+            let cache_read_rate = pricing.cache_read_per_million;
+            let cache_write_rate = pricing.cache_write_per_million;
+
+            let result = sqlx::query(
+                r#"UPDATE sessions
+                 SET input_price_per_million_snapshot = $1,
+                     output_price_per_million_snapshot = $2,
+                     cache_read_price_per_million_snapshot = $3,
+                     cache_write_price_per_million_snapshot = $4,
+                     cost_usd = (
+                         COALESCE(tokens_in, 0)::double precision * $1
+                         + COALESCE(tokens_out, 0)::double precision * $2
+                         + COALESCE(cache_read_tokens, 0)::double precision * $3
+                         + COALESCE(cache_write_tokens, 0)::double precision * $4
+                     ) / 1000000.0
+                 WHERE model_id = $5
+                   AND input_price_per_million_snapshot IS NULL
+                   AND output_price_per_million_snapshot IS NULL
+                   AND cache_read_price_per_million_snapshot IS NULL
+                   AND cache_write_price_per_million_snapshot IS NULL"#,
+            )
+            .bind(input_rate)
+            .bind(output_rate)
+            .bind(cache_read_rate)
+            .bind(cache_write_rate)
+            .bind(model_id.as_str())
+            .execute(self.db.pool())
+            .await?;
+
+            total_updated += result.rows_affected();
+        }
+
+        Ok(total_updated)
+    }
 }
 
 #[cfg(test)]
@@ -2273,5 +2333,209 @@ mod tests {
 
         let last = repo.last_message_at(&session.id).await.unwrap();
         assert_eq!(last.as_deref(), Some("2026-05-22T10:05:00.000Z"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backfill_pricing_snapshots_fills_null_sessions() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        // Create a session with no pricing snapshot (pre-backfill row).
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .unwrap();
+        assert!(created.input_price_per_million_snapshot.is_none());
+
+        // Simulate existing token counts on the session (e.g. from a prior run).
+        sqlx::query(
+            "UPDATE sessions SET tokens_in = 500000, tokens_out = 1000000,
+             cache_read_tokens = 250000, cache_write_tokens = 100000
+             WHERE id = $1",
+        )
+        .bind(&created.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let pricing = vec![(
+            "openai/gpt-5".to_string(),
+            Pricing {
+                input_per_million: 2.0,
+                output_per_million: 8.0,
+                cache_read_per_million: 0.5,
+                cache_write_per_million: 2.5,
+            },
+        )];
+
+        let updated = repo.backfill_pricing_snapshots(&pricing).await.unwrap();
+        assert_eq!(updated, 1, "should update exactly 1 row");
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.input_price_per_million_snapshot, Some(2.0));
+        assert_eq!(fetched.output_price_per_million_snapshot, Some(8.0));
+        assert_eq!(fetched.cache_read_price_per_million_snapshot, Some(0.5));
+        assert_eq!(fetched.cache_write_price_per_million_snapshot, Some(2.5));
+
+        // Expected cost: (500k*2 + 1M*8 + 250k*0.5 + 100k*2.5) / 1M
+        //              = 1.0 + 8.0 + 0.125 + 0.25 = 9.375
+        assert!(
+            (fetched.cost_usd.unwrap() - 9.375).abs() < 0.0001,
+            "expected cost_usd ~9.375, got {:?}",
+            fetched.cost_usd
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backfill_pricing_snapshots_preserves_existing_snapshots() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let original_pricing = Pricing {
+            input_per_million: 1.0,
+            output_per_million: 2.0,
+            cache_read_per_million: 0.1,
+            cache_write_per_million: 0.2,
+        };
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&original_pricing),
+            })
+            .await
+            .unwrap();
+        assert!(created.input_price_per_million_snapshot.is_some());
+
+        // Try to backfill with different pricing.
+        let new_pricing = vec![(
+            "openai/gpt-5".to_string(),
+            Pricing {
+                input_per_million: 99.0,
+                output_per_million: 99.0,
+                cache_read_per_million: 99.0,
+                cache_write_per_million: 99.0,
+            },
+        )];
+        let updated = repo.backfill_pricing_snapshots(&new_pricing).await.unwrap();
+        assert_eq!(updated, 0, "existing snapshots must not be overwritten");
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        // Original pricing preserved.
+        assert_eq!(fetched.input_price_per_million_snapshot, Some(1.0));
+        assert_eq!(fetched.output_price_per_million_snapshot, Some(2.0));
+        assert_eq!(fetched.cache_read_price_per_million_snapshot, Some(0.1));
+        assert_eq!(fetched.cache_write_price_per_million_snapshot, Some(0.2));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backfill_pricing_snapshots_skips_uncatalogued_models() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        // Session for a model not in the backfill pricing data.
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "unknown/missing-model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .unwrap();
+
+        // Simulate token counts.
+        sqlx::query(
+            "UPDATE sessions SET tokens_in = 100000, tokens_out = 200000
+             WHERE id = $1",
+        )
+        .bind(&created.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let pricing = vec![(
+            "openai/gpt-5".to_string(),
+            Pricing {
+                input_per_million: 2.0,
+                output_per_million: 8.0,
+                cache_read_per_million: 0.5,
+                cache_write_per_million: 2.5,
+            },
+        )];
+        let updated = repo.backfill_pricing_snapshots(&pricing).await.unwrap();
+        assert_eq!(updated, 0, "uncatalogued model must not be touched");
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert!(fetched.input_price_per_million_snapshot.is_none());
+        assert!(fetched.output_price_per_million_snapshot.is_none());
+        assert!(fetched.cache_read_price_per_million_snapshot.is_none());
+        assert!(fetched.cache_write_price_per_million_snapshot.is_none());
+        assert!(
+            fetched.cost_usd.is_none(),
+            "uncatalogued session cost_usd must stay NULL"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backfill_pricing_snapshots_is_idempotent() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .unwrap();
+
+        let pricing = vec![(
+            "openai/gpt-5".to_string(),
+            Pricing {
+                input_per_million: 3.0,
+                output_per_million: 15.0,
+                cache_read_per_million: 1.0,
+                cache_write_per_million: 3.0,
+            },
+        )];
+
+        // First run.
+        let n1 = repo.backfill_pricing_snapshots(&pricing).await.unwrap();
+        assert_eq!(n1, 1);
+
+        // Second run — must be a no-op.
+        let n2 = repo.backfill_pricing_snapshots(&pricing).await.unwrap();
+        assert_eq!(n2, 0, "second backfill must not re-update rows");
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.input_price_per_million_snapshot, Some(3.0));
+        assert_eq!(fetched.output_price_per_million_snapshot, Some(15.0));
+        assert_eq!(fetched.cache_read_price_per_million_snapshot, Some(1.0));
+        assert_eq!(fetched.cache_write_price_per_million_snapshot, Some(3.0));
     }
 }

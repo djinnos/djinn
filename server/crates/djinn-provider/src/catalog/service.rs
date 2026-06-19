@@ -185,6 +185,30 @@ impl CatalogService {
         })
     }
 
+    /// Collect per-million-token pricing for every model in the catalog,
+    /// keyed by the full `"providerID/modelID"` identifier that sessions store
+    /// in `model_id`.
+    ///
+    /// Used by the startup pricing-snapshot backfill to obtain a single
+    /// pass-through map from `djinn-provider` → `djinn-db` without coupling
+    /// the DB crate to the provider crate.
+    pub fn pricing_for_all_models(&self) -> HashMap<String, Pricing> {
+        let mut map = HashMap::new();
+        for provider in self.list_providers() {
+            for model in self.list_models(&provider.id) {
+                // Normalise to "providerID/modelID" so it matches the
+                // `sessions.model_id` value produced at dispatch time.
+                let full_id = if model.id.contains('/') {
+                    model.id.clone()
+                } else {
+                    format!("{}/{}", provider.id, model.id)
+                };
+                map.insert(full_id, model.pricing);
+            }
+        }
+        map
+    }
+
     // ── Write accessors ───────────────────────────────────────────────────────
 
     /// Inject synthetic catalog entries for built-in providers that have no
