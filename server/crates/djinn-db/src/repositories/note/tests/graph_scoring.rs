@@ -3,7 +3,7 @@
 // by `sqlx::query!`. All raw `sqlx::query` calls in this file are intentionally
 // runtime-typed; compile-time check not possible.
 use super::*;
-use crate::repositories::note::NoteSearchParams;
+use crate::repositories::note::{NoteAssociationKind, NoteSearchParams};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_affinity_scores_task_epic_blocker_and_max() {
@@ -379,6 +379,95 @@ async fn graph_proximity_association_applies_weighted_decay() {
         .unwrap();
     let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
     assert!((m.get(&b.id).copied().unwrap() - 0.35).abs() < 1e-9);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_proximity_edge_kind_filter_limits_traversal() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    let old = repo
+        .create(&project.id, "Old", "", "research", "[]")
+        .await
+        .unwrap();
+    let co_access = repo
+        .create(&project.id, "Co Access", "", "research", "[]")
+        .await
+        .unwrap();
+    let builds_on = repo
+        .create(&project.id, "Builds On", "", "research", "[]")
+        .await
+        .unwrap();
+    let canonical = repo
+        .create(&project.id, "Canonical", "", "research", "[]")
+        .await
+        .unwrap();
+
+    sqlx::query(
+        r#"INSERT INTO note_associations (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind)
+         VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'co_access')"#,
+    )
+    .bind(&old.id)
+    .bind(&co_access.id)
+    .bind(1.0_f64)
+    .execute(repo.db.pool())
+    .await
+    .unwrap();
+    repo.upsert_typed_association(&old.id, &builds_on.id, NoteAssociationKind::BuildsOn, 1.0)
+        .await
+        .unwrap();
+    repo.upsert_typed_association(&old.id, &canonical.id, NoteAssociationKind::Supersedes, 1.0)
+        .await
+        .unwrap();
+
+    let only_supersedes = vec!["supersedes".to_string()];
+    let (scores, warnings) = repo
+        .graph_proximity_scores_with_edge_kinds(&[canonical.id.clone()], 1, Some(&only_supersedes))
+        .await
+        .unwrap();
+
+    assert!(warnings.is_empty());
+    let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
+    assert_eq!(m.len(), 1, "only supersedes edges should be traversed");
+    assert!((m.get(&old.id).copied().unwrap() - 0.2).abs() < 1e-9);
+    assert!(!m.contains_key(&co_access.id));
+    assert!(!m.contains_key(&builds_on.id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_proximity_contradicts_returns_warning_without_score() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    let a = repo
+        .create(&project.id, "A", "", "research", "[]")
+        .await
+        .unwrap();
+    let b = repo
+        .create(&project.id, "B", "", "research", "[]")
+        .await
+        .unwrap();
+    repo.upsert_typed_association(&a.id, &b.id, NoteAssociationKind::Contradicts, 0.9)
+        .await
+        .unwrap();
+
+    let (scores, warnings) = repo
+        .graph_proximity_scores_with_edge_kinds(&[a.id.clone()], 1, None)
+        .await
+        .unwrap();
+
+    assert!(scores.is_empty(), "contradicts must not contribute score");
+    assert_eq!(warnings.len(), 1);
+    let warning = &warnings[0];
+    assert_eq!(warning.kind, "contradicts");
+    assert_eq!(warning.source_id, a.id);
+    assert_eq!(warning.target_id, b.id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

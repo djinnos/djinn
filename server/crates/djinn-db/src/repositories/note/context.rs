@@ -696,6 +696,7 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::DEFAULT_MIN_CONFIDENCE;
+    use crate::repositories::note::NoteAssociationKind;
     use crate::repositories::note::scoring::STALE_CITATION;
     use crate::{Database, NoteRepository, ProjectRepository};
     use djinn_core::events::EventBus;
@@ -1061,4 +1062,85 @@ mod tests {
              when the superseded source is the seed"
         );
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_context_surfaces_supersedes_and_contradicts_annotations() {
+        let (_tmp, repo, project_id) = setup_repo().await;
+
+        let contradictor = repo
+            .create(
+                &project_id,
+                "Contradictor",
+                "contradicting architecture patterns context note.",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let source_seed = repo
+            .create(
+                &project_id,
+                "Source Seed",
+                "architecture patterns source seed links to [[Contradictor]].",
+                "adr",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let canonical = repo
+            .create(
+                &project_id,
+                "Canonical Replacement",
+                "architecture patterns canonical replacement.",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        repo.upsert_typed_association(
+            &source_seed.id,
+            &canonical.id,
+            NoteAssociationKind::Supersedes,
+            1.0,
+        )
+        .await
+        .unwrap();
+        repo.upsert_typed_association(
+            &source_seed.id,
+            &contradictor.id,
+            NoteAssociationKind::Contradicts,
+            0.9,
+        )
+        .await
+        .unwrap();
+
+        let result = repo
+            .build_context(
+                &project_id,
+                &source_seed.permalink,
+                Some(8192),
+                None,
+                20,
+                Some(0.0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            result.supersedes.iter().any(|annotation| {
+                annotation.superseded_by == canonical.id && annotation.edge_kind == "supersedes"
+            }),
+            "expected source seed to be annotated as superseded by canonical note: {:?}",
+            result.supersedes
+        );
+        assert!(
+            result.contradicts.iter().any(|annotation| {
+                annotation.note_id == contradictor.id && annotation.edge_kind == "contradicts"
+            }),
+            "expected contradictor annotation in build_context response: {:?}",
+            result.contradicts
+        );
+    }
+
 }
