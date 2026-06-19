@@ -519,7 +519,6 @@ struct ModelEffectivenessDto {
     completed_task_count: i64,
     success_rate: Option<f64>,
     avg_reopens: Option<f64>,
-    verification_pass_rate: Option<f64>,
     /// Cost per completed task. NULL when no completed tasks or unpriced.
     cost_per_completed_task: Option<f64>,
     /// Average total tokens per completed task.
@@ -537,7 +536,6 @@ impl From<ModelEffectivenessRow> for ModelEffectivenessDto {
             completed_task_count: r.shared_credit_completed_task_count,
             success_rate: r.success_rate,
             avg_reopens: r.avg_reopens,
-            verification_pass_rate: r.verification_pass_rate,
             cost_per_completed_task: r.cost_per_completed_task,
             tokens_per_task: r.tokens_per_task,
         }
@@ -855,7 +853,6 @@ mod tests {
             shared_credit_completed_task_count: 3,
             success_rate: Some(0.67),
             avg_reopens: Some(0.5),
-            verification_pass_rate: Some(0.80),
             cost_per_completed_task: Some(0.83),
             tokens_per_task: Some(500.0),
         };
@@ -878,16 +875,6 @@ mod tests {
         );
         assert!((json.get("success_rate").unwrap().as_f64().unwrap() - 0.67).abs() < 0.01);
         assert!((json.get("avg_reopens").unwrap().as_f64().unwrap() - 0.5).abs() < 0.01);
-        assert!(
-            (json
-                .get("verification_pass_rate")
-                .unwrap()
-                .as_f64()
-                .unwrap()
-                - 0.80)
-                .abs()
-                < 0.01
-        );
         assert!(
             (json
                 .get("cost_per_completed_task")
@@ -914,7 +901,6 @@ mod tests {
             shared_credit_completed_task_count: 2,
             success_rate: Some(1.0),
             avg_reopens: Some(0.0),
-            verification_pass_rate: Some(1.0),
             cost_per_completed_task: None,
             tokens_per_task: Some(150.0),
         };

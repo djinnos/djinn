@@ -12,9 +12,6 @@ use std::sync::Arc;
 
 use super::*;
 
-/// After this many consecutive verification failures, escalate to lead.
-const VERIFICATION_ESCALATION_THRESHOLD: i64 = 3;
-
 /// Minimum pipeline timeout floor — chosen to accommodate workspace-wide
 /// `cargo test` + `cargo clippy` runs on medium-sized Rust projects.
 ///
@@ -949,73 +946,23 @@ async fn handle_verification_failure(
         );
     }
 
-    // Check if this failure will hit the escalation threshold BEFORE
-    // transitioning, so we can go directly to lead without an intermediate
-    // `open` state that would trigger a spurious worker dispatch.
-    // Verification failure counting is removed (verification gate no longer exists).
-    // Always use the normal path: transition to open for re-dispatch to worker.
-    let current_count = task_repo
-        .get(task_id)
+    // Verification failure counting removed — transition to open for re-dispatch.
+    if let Err(e) = task_repo
+        .transition(
+            task_id,
+            TransitionAction::Release,
+            "agent-supervisor",
+            "system",
+            Some(feedback),
+            None,
+        )
         .await
-        .ok()
-        .flatten()
-        .map(|_| 0)
-        .unwrap_or(0);
-
-    // VerificationFail increments the count, so the post-transition count
-    // will be current_count + 1.
-    if current_count + 1 >= VERIFICATION_ESCALATION_THRESHOLD {
-        tracing::warn!(
+    {
+        tracing::error!(
             task_id = %task_id,
-            verification_failure_count = current_count + 1,
-            "Verification: escalating directly to lead after {} consecutive failures",
-            current_count + 1,
+            error = %e,
+            "Failed to transition task after verification failure"
         );
-        let reason = format!(
-            "verification failed {} consecutive times; last failure:\n{}",
-            current_count + 1,
-            feedback
-        );
-        // Single transition: verifying → needs_pm_intervention.
-        // `transition` already retries internally on 40001/40P01; a persistent
-        // failure here would leave the task in `verifying` — surface it.
-        if let Err(e) = task_repo
-            .transition(
-                task_id,
-                TransitionAction::Escalate,
-                "agent-supervisor",
-                "system",
-                Some(&reason),
-                None,
-            )
-            .await
-        {
-            tracing::error!(
-                task_id = %task_id,
-                error = %e,
-                "Failed to escalate task to `needs_lead_intervention` after consecutive verification failures; task may stay in `verifying`"
-            );
-        }
-    } else {
-        // Normal path: transition to open for re-dispatch to worker.
-        // See note above: `transition` already retries internally.
-        if let Err(e) = task_repo
-            .transition(
-                task_id,
-                TransitionAction::Release,
-                "agent-supervisor",
-                "system",
-                Some(feedback),
-                None,
-            )
-            .await
-        {
-            tracing::error!(
-                task_id = %task_id,
-                error = %e,
-                "Failed to transition task to `open` after verification failure; task may stay in `verifying` and the worker will not be re-dispatched"
-            );
-        }
     }
 }
 

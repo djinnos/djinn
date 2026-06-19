@@ -21,7 +21,9 @@ use uuid::Uuid;
 use djinn_supervisor::cargo_target_run_dir;
 
 use crate::config::KubernetesConfig;
-use crate::sidecar::{BackingServiceSpec, sidecar_container, sidecar_dshm_volume, sidecar_conn_env};
+use crate::sidecar::{
+    BackingServiceSpec, sidecar_conn_env, sidecar_container, sidecar_dshm_volume,
+};
 
 /// Label key for the task-run id (Djinn's primary correlator).
 pub const LABEL_TASK_RUN_ID: &str = "djinn.app/task-run-id";
@@ -751,7 +753,14 @@ mod tests {
         let secret_name = "djinn-taskrun-test";
         let project_image = "registry.example:5000/djinn-project-p:abc123def456";
 
-        let job = build_task_run_job(&cfg, &task_run_id, "proj-xyz", secret_name, project_image, &[]);
+        let job = build_task_run_job(
+            &cfg,
+            &task_run_id,
+            "proj-xyz",
+            secret_name,
+            project_image,
+            &[],
+        );
 
         // Metadata.
         let meta = &job.metadata;

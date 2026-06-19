@@ -42,8 +42,6 @@ pub struct ModelEffectivenessRow {
     pub success_rate: Option<f64>,
     /// Average total_reopen_count across closed tasks attributed to this model.
     pub avg_reopens: Option<f64>,
-    /// Fraction of closed tasks with zero verification failures (0.0–1.0).
-    pub verification_pass_rate: Option<f64>,
     /// Cost per completed task. `None` when no completed tasks or all sessions
     /// were unpriced (NULL cost_usd).
     pub cost_per_completed_task: Option<f64>,
@@ -511,10 +509,6 @@ impl UsageAnalyticsRepository {
                 COALESCE(AVG(CASE WHEN t.status = 'closed' \
                     THEN CAST(t.total_reopen_count AS DOUBLE PRECISION) \
                     ELSE NULL END), 0.0)                 AS \"avg_reopens!: f64\", \
-                CAST(SUM(CASE WHEN t.status = 'closed' AND t.total_verification_failure_count = 0 THEN 1 ELSE 0 END) AS DOUBLE PRECISION) \
-                    / CAST(GREATEST(1, COUNT(DISTINCT \
-                        CASE WHEN t.status = 'closed' THEN t.id END \
-                    )) AS DOUBLE PRECISION)              AS \"verification_pass_rate: f64\" \
              {from_clause} {where_clause} \
              GROUP BY s.model_id \
              ORDER BY s.model_id"
@@ -557,7 +551,6 @@ impl UsageAnalyticsRepository {
                     shared_credit_completed_task_count: completed,
                     success_rate: r.get("success_rate"),
                     avg_reopens: r.get("avg_reopens"),
-                    verification_pass_rate: r.get("verification_pass_rate"),
                     cost_per_completed_task,
                     tokens_per_task,
                 }
@@ -736,7 +729,6 @@ mod tests {
         assert_eq!(row.shared_credit_completed_task_count, 0);
         assert!(row.success_rate.is_none());
         assert!(row.avg_reopens.is_none());
-        assert!(row.verification_pass_rate.is_none());
         assert!(row.cost_per_completed_task.is_none());
         assert!(row.tokens_per_task.is_none());
     }
@@ -763,7 +755,6 @@ mod tests {
             shared_credit_completed_task_count: 3,
             success_rate: Some(0.67),
             avg_reopens: Some(0.5),
-            verification_pass_rate: Some(0.8),
             cost_per_completed_task: Some(0.41),
             tokens_per_task: Some(50.0),
         };
