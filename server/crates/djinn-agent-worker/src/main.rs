@@ -64,6 +64,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod cargo_cache_policy;
 pub mod cargo_metrics;
 mod cargo_target_seed;
 mod lifecycle;
@@ -914,67 +915,114 @@ async fn run_cargo_warm_step(
     args: &[&str],
     label: &str,
 ) -> bool {
+    let cargo_instrumented = std::env::var("DJINN_CARGO_INSTRUMENT").is_ok();
     let cargo_command = format!("cargo {}", args.join(" "));
-    let step_label = label;
     let workspace_dir_display = workspace_dir.display().to_string();
 
-    match tokio::process::Command::new("cargo")
-        .args(args)
-        .current_dir(workspace_dir)
-        .status()
-        .await
-    {
-        Ok(status) if status.success() => {
-            info!(
-                project_id,
-                workspace_dir = %workspace_dir_display,
-                cargo_command = %cargo_command,
-                step_label,
-                seed_outcome = "ok",
-                "cargo warm: step succeeded"
-            );
-            cargo_metrics::record_warm_step(
-                project_id,
-                step_label,
-                djinn_telemetry::cargo_warm_step::OUTCOME_OK,
-            );
-            true
-        }
-        Ok(status) => {
-            warn!(
-                project_id,
-                workspace_dir = %workspace_dir_display,
-                cargo_command = %cargo_command,
-                step_label,
-                seed_outcome = "failed",
-                code = ?status.code(),
-                "cargo warm: step failed (non-fatal; continuing warm)"
-            );
-            cargo_metrics::record_warm_step(
-                project_id,
-                step_label,
-                djinn_telemetry::cargo_warm_step::OUTCOME_FAILED,
-            );
-            false
+    let mut cmd = tokio::process::Command::new("cargo");
+    cmd.args(args).current_dir(workspace_dir);
+
+    if cargo_instrumented {
+        cmd.arg("-v");
+    }
+
+    match cmd.output().await {
+        Ok(output) => {
+            if cargo_instrumented {
+                let (stdout_fresh_count, stdout_compiling_count) =
+                    cargo_fresh_compiling_counts(&output.stdout);
+                let (stderr_fresh_count, stderr_compiling_count) =
+                    cargo_fresh_compiling_counts(&output.stderr);
+                let fresh_count = stdout_fresh_count + stderr_fresh_count;
+                let compiling_count = stdout_compiling_count + stderr_compiling_count;
+
+                info!(
+                    project_id,
+                    step = label,
+                    step_label = label,
+                    workspace_dir = %workspace_dir_display,
+                    fresh_count,
+                    compiling_count,
+                    "cargo warm: instrumented Fresh/Compiling counts"
+                );
+                djinn_telemetry::cargo_cache::record_warm_step_fresh_count(
+                    project_id,
+                    label,
+                    fresh_count,
+                );
+                djinn_telemetry::cargo_cache::record_warm_step_compiling_count(
+                    project_id,
+                    label,
+                    compiling_count,
+                );
+            }
+
+            if output.status.success() {
+                info!(
+                    project_id,
+                    workspace_dir = %workspace_dir_display,
+                    cargo_command = %cargo_command,
+                    step_label = label,
+                    seed_outcome = "ok",
+                    "cargo warm: step succeeded"
+                );
+                cargo_metrics::record_warm_step(
+                    project_id,
+                    label,
+                    djinn_telemetry::cargo_warm_step::OUTCOME_OK,
+                );
+                true
+            } else {
+                warn!(
+                    project_id,
+                    workspace_dir = %workspace_dir_display,
+                    cargo_command = %cargo_command,
+                    step_label = label,
+                    seed_outcome = "failed",
+                    code = ?output.status.code(),
+                    "cargo warm: step failed (non-fatal; continuing warm)"
+                );
+                cargo_metrics::record_warm_step(
+                    project_id,
+                    label,
+                    djinn_telemetry::cargo_warm_step::OUTCOME_FAILED,
+                );
+                false
+            }
         }
         Err(err) => {
             warn!(
                 project_id,
                 workspace_dir = %workspace_dir_display,
                 cargo_command = %cargo_command,
-                step_label,
+                step_label = label,
                 seed_outcome = "spawn_error",
                 error = %err,
                 "cargo warm: failed to spawn `cargo` (non-fatal; continuing warm)"
             );
             cargo_metrics::record_warm_step(
                 project_id,
-                step_label,
+                label,
                 djinn_telemetry::cargo_warm_step::OUTCOME_SPAWN_ERROR,
             );
             false
         }
     }
+}
+
+fn cargo_fresh_compiling_counts(output: &[u8]) -> (usize, usize) {
+    let mut fresh_count = 0;
+    let mut compiling_count = 0;
+
+    for line in String::from_utf8_lossy(output).lines() {
+        match line.split_whitespace().next() {
+            Some("Fresh") => fresh_count += 1,
+            Some("Compiling") => compiling_count += 1,
+            _ => {}
+        }
+    }
+
+    (fresh_count, compiling_count)
 }
 
 struct CargoTargetRunDirGuard {
