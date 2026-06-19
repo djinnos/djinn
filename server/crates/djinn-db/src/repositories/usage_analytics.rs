@@ -317,11 +317,11 @@ impl UsageAnalyticsRepository {
         let row = query.fetch_one(self.db.pool()).await?;
 
         Ok(UsageTotals {
-            session_count: row.get("session_count"),
-            tokens_in: row.get("tokens_in"),
-            tokens_out: row.get("tokens_out"),
-            cache_read_tokens: row.get("cache_read_tokens"),
-            cache_write_tokens: row.get("cache_write_tokens"),
+            session_count: row.get("session_count!"),
+            tokens_in: row.get("tokens_in!"),
+            tokens_out: row.get("tokens_out!"),
+            cache_read_tokens: row.get("cache_read_tokens!"),
+            cache_write_tokens: row.get("cache_write_tokens!"),
             total_cost_usd: row.get("total_cost_usd"),
         })
     }
@@ -358,12 +358,12 @@ impl UsageAnalyticsRepository {
         Ok(rows
             .into_iter()
             .map(|r| DailySeriesRow {
-                day: r.get("day"),
-                session_count: r.get("session_count"),
-                tokens_in: r.get("tokens_in"),
-                tokens_out: r.get("tokens_out"),
-                cache_read_tokens: r.get("cache_read_tokens"),
-                cache_write_tokens: r.get("cache_write_tokens"),
+                day: r.get("day!"),
+                session_count: r.get("session_count!"),
+                tokens_in: r.get("tokens_in!"),
+                tokens_out: r.get("tokens_out!"),
+                cache_read_tokens: r.get("cache_read_tokens!"),
+                cache_write_tokens: r.get("cache_write_tokens!"),
                 total_cost_usd: r.get("total_cost_usd"),
             })
             .collect())
@@ -400,13 +400,13 @@ impl UsageAnalyticsRepository {
         Ok(rows
             .into_iter()
             .map(|r| BreakdownRow {
-                group_key: r.get("group_key"),
-                day: r.get("day"),
-                session_count: r.get("session_count"),
-                tokens_in: r.get("tokens_in"),
-                tokens_out: r.get("tokens_out"),
-                cache_read_tokens: r.get("cache_read_tokens"),
-                cache_write_tokens: r.get("cache_write_tokens"),
+                group_key: r.get("group_key!"),
+                day: r.get("day!"),
+                session_count: r.get("session_count!"),
+                tokens_in: r.get("tokens_in!"),
+                tokens_out: r.get("tokens_out!"),
+                cache_read_tokens: r.get("cache_read_tokens!"),
+                cache_write_tokens: r.get("cache_write_tokens!"),
                 total_cost_usd: r.get("total_cost_usd"),
             })
             .collect())
@@ -529,11 +529,11 @@ impl UsageAnalyticsRepository {
         Ok(rows
             .into_iter()
             .map(|r| {
-                let sessions: i64 = r.get("sessions");
+                let sessions: i64 = r.get("sessions!");
                 let spend_usd: Option<f64> = r.get("spend_usd");
-                let tokens_in: i64 = r.get("tokens_in");
-                let tokens_out: i64 = r.get("tokens_out");
-                let completed: i64 = r.get("shared_credit_completed_task_count");
+                let tokens_in: i64 = r.get("tokens_in!");
+                let tokens_out: i64 = r.get("tokens_out!");
+                let completed: i64 = r.get("shared_credit_completed_task_count!");
 
                 // cost_per_completed_task: NULL when no completed tasks or
                 // all sessions were unpriced (NULL cost_usd).
@@ -549,14 +549,14 @@ impl UsageAnalyticsRepository {
                 };
 
                 ModelEffectivenessRow {
-                    model_id: r.get("model_id"),
+                    model_id: r.get("model_id!"),
                     sessions,
                     spend_usd,
                     tokens_in,
                     tokens_out,
                     shared_credit_completed_task_count: completed,
                     success_rate: r.get("success_rate"),
-                    avg_reopens: r.get("avg_reopens"),
+                    avg_reopens: r.get("avg_reopens!"),
                     verification_pass_rate: r.get("verification_pass_rate"),
                     cost_per_completed_task,
                     tokens_per_task,
@@ -599,12 +599,12 @@ impl UsageAnalyticsRepository {
         Ok(rows
             .into_iter()
             .map(|r| ProjectModelMatrixRow {
-                project_id: r.get("project_id"),
-                model_id: r.get("model_id"),
-                sessions: r.get("sessions"),
+                project_id: r.get("project_id!"),
+                model_id: r.get("model_id!"),
+                sessions: r.get("sessions!"),
                 spend_usd: r.get("spend_usd"),
-                tokens_in: r.get("tokens_in"),
-                tokens_out: r.get("tokens_out"),
+                tokens_in: r.get("tokens_in!"),
+                tokens_out: r.get("tokens_out!"),
             })
             .collect())
     }
@@ -798,8 +798,9 @@ mod usage_analytics_regression_tests {
 
     async fn seed_user(db: &Database, login: &str) -> String {
         let id = uuid::Uuid::now_v7().to_string();
-        let github_id = i64::from_be_bytes(uuid::Uuid::now_v7().as_bytes()[8..16].try_into().unwrap())
-            .unsigned_abs() as i64;
+        let github_id =
+            i64::from_be_bytes(uuid::Uuid::now_v7().as_bytes()[8..16].try_into().unwrap())
+                .unsigned_abs() as i64;
         sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
             .bind(&id)
             .bind(github_id)
@@ -900,22 +901,62 @@ mod usage_analytics_regression_tests {
         let session_creator = seed_user(&db, "session-creator").await;
         let task_id = seed_task(&db, &project_id, None, "open", None, Some(&task_creator)).await;
 
-        seed_session(&db, SessionSeed {
-            project_id: Some(&project_id), task_id: Some(&task_id), model_id: "model-a", agent_type: "worker",
-            started_at: "2025-04-01T00:00:00.000Z", tokens_in: 10, tokens_out: 5, cost_usd: Some(0.0), created_by_user_id: None,
-        }).await;
-        seed_session(&db, SessionSeed {
-            project_id: Some(&project_id), task_id: Some(&task_id), model_id: "model-a", agent_type: "worker",
-            started_at: "2025-04-02T00:00:00.000Z", tokens_in: 20, tokens_out: 5, cost_usd: Some(1.0), created_by_user_id: Some(&session_creator),
-        }).await;
+        seed_session(
+            &db,
+            SessionSeed {
+                project_id: Some(&project_id),
+                task_id: Some(&task_id),
+                model_id: "model-a",
+                agent_type: "worker",
+                started_at: "2025-04-01T00:00:00.000Z",
+                tokens_in: 10,
+                tokens_out: 5,
+                cost_usd: Some(0.0),
+                created_by_user_id: None,
+            },
+        )
+        .await;
+        seed_session(
+            &db,
+            SessionSeed {
+                project_id: Some(&project_id),
+                task_id: Some(&task_id),
+                model_id: "model-a",
+                agent_type: "worker",
+                started_at: "2025-04-02T00:00:00.000Z",
+                tokens_in: 20,
+                tokens_out: 5,
+                cost_usd: Some(1.0),
+                created_by_user_id: Some(&session_creator),
+            },
+        )
+        .await;
 
         let result = UsageAnalyticsRepository::new(db)
-            .query(&UsageAnalyticsQuery { from: "2025-04-01".into(), to: "2025-04-03".into(), group_by: GroupDimension::User, project_id: Some(project_id), model_id: None, agent_type: None })
-            .await.unwrap();
+            .query(&UsageAnalyticsQuery {
+                from: "2025-04-01".into(),
+                to: "2025-04-03".into(),
+                group_by: GroupDimension::User,
+                project_id: Some(project_id),
+                model_id: None,
+                agent_type: None,
+            })
+            .await
+            .unwrap();
 
         assert_eq!(result.breakdown.len(), 2);
-        assert!(result.breakdown.iter().any(|r| r.group_key == task_creator && r.tokens_in == 10));
-        assert!(result.breakdown.iter().any(|r| r.group_key == session_creator && r.tokens_in == 20));
+        assert!(
+            result
+                .breakdown
+                .iter()
+                .any(|r| r.group_key == task_creator && r.tokens_in == 10)
+        );
+        assert!(
+            result
+                .breakdown
+                .iter()
+                .any(|r| r.group_key == session_creator && r.tokens_in == 20)
+        );
     }
 
     #[tokio::test]
@@ -927,16 +968,42 @@ mod usage_analytics_regression_tests {
         let proposal_id = uuid::Uuid::now_v7().to_string();
         sqlx::query("INSERT INTO proposals (id, short_id, title, body) VALUES ($1, $2, 'Analytics proposal', 'body')")
             .bind(&proposal_id).bind(&proposal_id[..4]).execute(db.pool()).await.unwrap();
-        sqlx::query("INSERT INTO proposal_epics (proposal_id, epic_id, project_id) VALUES ($1, $2, $3)")
-            .bind(&proposal_id).bind(&epic_id).bind(&project_id).execute(db.pool()).await.unwrap();
-        seed_session(&db, SessionSeed {
-            project_id: Some(&project_id), task_id: Some(&task_id), model_id: "proposal-model", agent_type: "worker",
-            started_at: "2025-05-01T00:00:00.000Z", tokens_in: 11, tokens_out: 7, cost_usd: Some(2.5), created_by_user_id: None,
-        }).await;
+        sqlx::query(
+            "INSERT INTO proposal_epics (proposal_id, epic_id, project_id) VALUES ($1, $2, $3)",
+        )
+        .bind(&proposal_id)
+        .bind(&epic_id)
+        .bind(&project_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        seed_session(
+            &db,
+            SessionSeed {
+                project_id: Some(&project_id),
+                task_id: Some(&task_id),
+                model_id: "proposal-model",
+                agent_type: "worker",
+                started_at: "2025-05-01T00:00:00.000Z",
+                tokens_in: 11,
+                tokens_out: 7,
+                cost_usd: Some(2.5),
+                created_by_user_id: None,
+            },
+        )
+        .await;
 
         let result = UsageAnalyticsRepository::new(db)
-            .query(&UsageAnalyticsQuery { from: "2025-05-01".into(), to: "2025-05-02".into(), group_by: GroupDimension::Proposal, project_id: Some(project_id), model_id: None, agent_type: None })
-            .await.unwrap();
+            .query(&UsageAnalyticsQuery {
+                from: "2025-05-01".into(),
+                to: "2025-05-02".into(),
+                group_by: GroupDimension::Proposal,
+                project_id: Some(project_id),
+                model_id: None,
+                agent_type: None,
+            })
+            .await
+            .unwrap();
 
         assert_eq!(result.breakdown.len(), 1);
         assert_eq!(result.breakdown[0].group_key, proposal_id);
@@ -956,23 +1023,51 @@ mod usage_analytics_regression_tests {
             ("reviewer-model", "reviewer"),
             ("chat-model", "chat"),
         ] {
-            seed_session(&db, SessionSeed {
-                project_id: if agent_type == "chat" { None } else { Some(&project_id) },
-                task_id: if agent_type == "chat" { None } else { Some(&task_id) },
-                model_id, agent_type, started_at: "2025-06-01T00:00:00.000Z", tokens_in: 10, tokens_out: 5, cost_usd: Some(0.25), created_by_user_id: None,
-            }).await;
+            seed_session(
+                &db,
+                SessionSeed {
+                    project_id: if agent_type == "chat" {
+                        None
+                    } else {
+                        Some(&project_id)
+                    },
+                    task_id: if agent_type == "chat" {
+                        None
+                    } else {
+                        Some(&task_id)
+                    },
+                    model_id,
+                    agent_type,
+                    started_at: "2025-06-01T00:00:00.000Z",
+                    tokens_in: 10,
+                    tokens_out: 5,
+                    cost_usd: Some(0.25),
+                    created_by_user_id: None,
+                },
+            )
+            .await;
         }
 
         let (effectiveness, _) = UsageAnalyticsRepository::new(db)
-            .query_effectiveness(&UsageAnalyticsQuery { from: "2025-06-01".into(), to: "2025-06-02".into(), group_by: GroupDimension::Model, project_id: None, model_id: None, agent_type: None })
-            .await.unwrap();
+            .query_effectiveness(&UsageAnalyticsQuery {
+                from: "2025-06-01".into(),
+                to: "2025-06-02".into(),
+                group_by: GroupDimension::Model,
+                project_id: None,
+                model_id: None,
+                agent_type: None,
+            })
+            .await
+            .unwrap();
 
         let models: Vec<_> = effectiveness.iter().map(|r| r.model_id.as_str()).collect();
         assert_eq!(models, vec!["worker-model-a", "worker-model-b"]);
         assert!(effectiveness.iter().all(|r| r.sessions == 1));
-        assert!(effectiveness
-            .iter()
-            .all(|r| r.shared_credit_completed_task_count == 1));
+        assert!(
+            effectiveness
+                .iter()
+                .all(|r| r.shared_credit_completed_task_count == 1)
+        );
         assert!(effectiveness.iter().all(|r| r.success_rate == Some(1.0)));
     }
 
@@ -982,21 +1077,73 @@ mod usage_analytics_regression_tests {
         let project_id = seed_project(&db, "usage-null-cost").await;
         let zero_task = seed_task(&db, &project_id, None, "closed", Some("completed"), None).await;
         let null_task = seed_task(&db, &project_id, None, "closed", Some("completed"), None).await;
-        seed_session(&db, SessionSeed { project_id: Some(&project_id), task_id: Some(&zero_task), model_id: "priced-zero", agent_type: "worker", started_at: "2025-07-01T00:00:00.000Z", tokens_in: 10, tokens_out: 10, cost_usd: Some(0.0), created_by_user_id: None }).await;
-        seed_session(&db, SessionSeed { project_id: Some(&project_id), task_id: Some(&null_task), model_id: "unpriced", agent_type: "worker", started_at: "2025-07-01T01:00:00.000Z", tokens_in: 20, tokens_out: 20, cost_usd: None, created_by_user_id: None }).await;
+        seed_session(
+            &db,
+            SessionSeed {
+                project_id: Some(&project_id),
+                task_id: Some(&zero_task),
+                model_id: "priced-zero",
+                agent_type: "worker",
+                started_at: "2025-07-01T00:00:00.000Z",
+                tokens_in: 10,
+                tokens_out: 10,
+                cost_usd: Some(0.0),
+                created_by_user_id: None,
+            },
+        )
+        .await;
+        seed_session(
+            &db,
+            SessionSeed {
+                project_id: Some(&project_id),
+                task_id: Some(&null_task),
+                model_id: "unpriced",
+                agent_type: "worker",
+                started_at: "2025-07-01T01:00:00.000Z",
+                tokens_in: 20,
+                tokens_out: 20,
+                cost_usd: None,
+                created_by_user_id: None,
+            },
+        )
+        .await;
 
         let repo = UsageAnalyticsRepository::new(db);
-        let query = UsageAnalyticsQuery { from: "2025-07-01".into(), to: "2025-07-02".into(), group_by: GroupDimension::Model, project_id: Some(project_id), model_id: None, agent_type: None };
+        let query = UsageAnalyticsQuery {
+            from: "2025-07-01".into(),
+            to: "2025-07-02".into(),
+            group_by: GroupDimension::Model,
+            project_id: Some(project_id),
+            model_id: None,
+            agent_type: None,
+        };
         let result = repo.query(&query).await.unwrap();
         let (effectiveness, matrix) = repo.query_effectiveness(&query).await.unwrap();
 
-        assert!(result.totals.total_cost_usd.is_none(), "mixed priced/unpriced totals stay null");
-        let zero_breakdown = result.breakdown.iter().find(|r| r.group_key == "priced-zero").unwrap();
-        let unpriced_breakdown = result.breakdown.iter().find(|r| r.group_key == "unpriced").unwrap();
+        assert!(
+            result.totals.total_cost_usd.is_none(),
+            "mixed priced/unpriced totals stay null"
+        );
+        let zero_breakdown = result
+            .breakdown
+            .iter()
+            .find(|r| r.group_key == "priced-zero")
+            .unwrap();
+        let unpriced_breakdown = result
+            .breakdown
+            .iter()
+            .find(|r| r.group_key == "unpriced")
+            .unwrap();
         assert_eq!(zero_breakdown.total_cost_usd, Some(0.0));
         assert!(unpriced_breakdown.total_cost_usd.is_none());
-        let zero_eff = effectiveness.iter().find(|r| r.model_id == "priced-zero").unwrap();
-        let null_eff = effectiveness.iter().find(|r| r.model_id == "unpriced").unwrap();
+        let zero_eff = effectiveness
+            .iter()
+            .find(|r| r.model_id == "priced-zero")
+            .unwrap();
+        let null_eff = effectiveness
+            .iter()
+            .find(|r| r.model_id == "unpriced")
+            .unwrap();
         assert_eq!(zero_eff.spend_usd, Some(0.0));
         assert_eq!(zero_eff.cost_per_completed_task, Some(0.0));
         assert!(null_eff.spend_usd.is_none());
