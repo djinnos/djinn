@@ -107,7 +107,7 @@ exec {bin} verify-test "{test_id}"
     // state; task-run/verification Pods use private run target dirs seeded from
     // it but keep the same shared CARGO_HOME/SCCACHE settings. Single-sourced in
     // job.rs; needs the cache volume below.
-    env.extend(crate::job::warm_cache_env_vars(project_id));
+    env.extend(crate::job::warm_cache_env_vars(project_id, None));
 
     let container = Container {
         name: "verify-test".to_string(),

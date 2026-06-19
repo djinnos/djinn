@@ -161,7 +161,7 @@ exec {bin} warm-graph "{project_id}"
     // settings. Single-sourced in job.rs to avoid the
     // task-run-updated-but-warm-missed drift that bit DJINN_*_URL.
     // Needs the cache volume mounted below.
-    env.extend(crate::job::warm_cache_env_vars(project_id));
+    env.extend(crate::job::warm_cache_env_vars(project_id, None));
 
     let container = Container {
         name: "warmer".to_string(),
