@@ -598,6 +598,7 @@ mod tests {
                 project: project.slug(),
                 folder: Some("design".to_string()),
                 note_type: Some("design".to_string()),
+                status: None,
                 depth: Some(1),
             },
         )

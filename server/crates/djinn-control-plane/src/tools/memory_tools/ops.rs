@@ -260,6 +260,7 @@ pub async fn memory_list(server: &DjinnMcpServer, p: ListParams) -> MemoryListRe
             folder.as_deref(),
             p.note_type.as_deref(),
             depth,
+            p.status.as_deref(),
         )
         .await
         .unwrap_or_default();

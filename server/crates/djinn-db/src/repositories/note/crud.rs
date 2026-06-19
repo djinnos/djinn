@@ -449,11 +449,32 @@ impl NoteRepository {
                 // string. Both columns are vestiges of the file-on-disk
                 // era, kept on the schema to avoid a migration in the same
                 // PR that does the cut-over. Drop them in a follow-up.
+                //
+                // `status` is bound explicitly when the caller supplied one;
+                // otherwise the column-level default (`'active'`) takes
+                // effect so callers that ignore lifecycle get the legacy
+                // behavior of "active by default".
+                let normalized_status: Option<String> = match status {
+                    Some(s) => {
+                        let normalized = djinn_memory::note_status::normalize(Some(s));
+                        if normalized.is_empty() {
+                            None
+                        } else {
+                            if !djinn_memory::note_status::is_valid(&normalized) {
+                                return Err(Error::InvalidData(format!(
+                                    "invalid note lifecycle status: {normalized}"
+                                )));
+                            }
+                            Some(normalized)
+                        }
+                    }
+                    None => None,
+                };
                 sqlx::query(
                     "INSERT INTO notes
                         (id, project_id, permalink, title, file_path,
-                         storage, note_type, folder, tags, content, retrieval_anchor, content_hash, scope_paths)
-                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, $7, $8, $9, $10, $11)"
+                         storage, note_type, folder, status, tags, content, retrieval_anchor, content_hash, scope_paths)
+                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, COALESCE($7, 'active'), $8, $9, $10, $11, $12)"
                 )
                 .bind(&id)
                 .bind(&project_id)
@@ -461,6 +482,7 @@ impl NoteRepository {
                 .bind(&title)
                 .bind(&note_type)
                 .bind(&folder)
+                .bind(&normalized_status)
                 .bind(&tags_json)
                 .bind(&content)
                 .bind(&retrieval_anchor)
@@ -489,7 +511,7 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                      storage, note_type, folder, tags::text AS tags, content,
+                      storage, note_type, folder, status, tags::text AS tags, content,
                       retrieval_anchor, created_at, updated_at, last_accessed,
                       access_count, confidence, abstract as abstract_, overview,
                       scope_paths::text AS scope_paths
@@ -508,7 +530,7 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                      storage, note_type, folder, tags::text AS tags, content,
+                      storage, note_type, folder, status, tags::text AS tags, content,
                       retrieval_anchor, created_at, updated_at, last_accessed,
                       access_count, confidence, abstract as abstract_, overview,
                       scope_paths::text AS scope_paths
@@ -528,7 +550,7 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                      storage, note_type, folder, tags::text AS tags, content,
+                      storage, note_type, folder, status, tags::text AS tags, content,
                       retrieval_anchor, created_at, updated_at, last_accessed,
                       access_count, confidence, abstract as abstract_, overview,
                       scope_paths::text AS scope_paths
@@ -547,7 +569,7 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Note>(
             r#"SELECT id, project_id, permalink, title, file_path,
-                      storage, note_type, folder, tags::text AS tags, content,
+                      storage, note_type, folder, status, tags::text AS tags, content,
                       retrieval_anchor, created_at, updated_at, last_accessed,
                       access_count, confidence, abstract as abstract_, overview,
                       scope_paths::text AS scope_paths
@@ -598,35 +620,78 @@ impl NoteRepository {
     }
 
     pub async fn list(&self, project_id: &str, folder: Option<&str>) -> Result<Vec<Note>> {
+        self.list_with_status(project_id, folder, None).await
+    }
+
+    pub async fn list_with_status(
+        &self,
+        project_id: &str,
+        folder: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<Vec<Note>> {
         self.db.ensure_initialized().await?;
+        let status = djinn_memory::note_status::normalize(status);
+        if !djinn_memory::note_status::is_valid(&status) {
+            return Err(Error::InvalidData(format!(
+                "invalid note lifecycle status: {status}"
+            )));
+        }
         if let Some(folder) = folder {
             Ok(sqlx::query_as::<_, Note>(
                 r#"SELECT id, project_id, permalink, title, file_path,
-                          storage, note_type, folder, tags::text AS tags, content,
+                          storage, note_type, folder, status, tags::text AS tags, content,
                           retrieval_anchor, created_at, updated_at, last_accessed,
                           access_count, confidence, abstract as abstract_, overview,
                           scope_paths::text AS scope_paths
-                   FROM notes WHERE project_id = $1 AND folder = $2
+                   FROM notes WHERE project_id = $1 AND folder = $2 AND status = $3
                    ORDER BY folder, title"#,
             )
             .bind(project_id)
             .bind(folder)
+            .bind(&status)
             .fetch_all(self.db.pool())
             .await?)
         } else {
             Ok(sqlx::query_as::<_, Note>(
                 r#"SELECT id, project_id, permalink, title, file_path,
-                          storage, note_type, folder, tags::text AS tags, content,
+                          storage, note_type, folder, status, tags::text AS tags, content,
                           retrieval_anchor, created_at, updated_at, last_accessed,
                           access_count, confidence, abstract as abstract_, overview,
                           scope_paths::text AS scope_paths
-                   FROM notes WHERE project_id = $1
+                   FROM notes WHERE project_id = $1 AND status = $2
                    ORDER BY folder, title"#,
             )
             .bind(project_id)
+            .bind(&status)
             .fetch_all(self.db.pool())
             .await?)
         }
+    }
+
+    pub async fn update_status(&self, id: &str, status: &str) -> Result<Note> {
+        self.db.ensure_initialized().await?;
+
+        let status = djinn_memory::note_status::normalize(Some(status));
+        if !djinn_memory::note_status::is_valid(&status) {
+            return Err(Error::InvalidData(format!(
+                "invalid note lifecycle status: {status}"
+            )));
+        }
+
+        sqlx::query(
+            r#"UPDATE notes SET
+                status = $1,
+                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $2"#,
+        )
+        .bind(&status)
+        .bind(id)
+        .execute(self.db.pool())
+        .await?;
+
+        let note = note_select_where_id!(id).fetch_one(self.db.pool()).await?;
+        self.events.send(djinn_memory::events::note_updated(&note));
+        Ok(note)
     }
 
     pub async fn update(&self, id: &str, title: &str, content: &str, tags: &str) -> Result<Note> {
