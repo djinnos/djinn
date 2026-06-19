@@ -1,19 +1,31 @@
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
 import type { BlockProps } from "./types";
 
-/**
- * Stub component for the `file-tree` block type.
- *
- * The full rendering (tree structure, root path display) will be implemented by
- * the sibling task that owns the P2 block React components. This minimal stub
- * satisfies the registry/barrel contract so downstream tasks can compile.
- */
-export function FileTreeBlock({ id, children }: BlockProps) {
+export function FileTreeBlock({ id, attributes, children }: BlockProps) {
+  const root = attributes.root;
+
   return (
     <div id={id} className="rounded-lg border bg-card p-4 shadow-sm">
-      <span className="mb-2 block text-xs font-medium text-muted-foreground">
-        file-tree
-      </span>
-      {children}
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-800 dark:bg-slate-900 dark:text-slate-200">
+          File Tree
+        </span>
+        <span className="font-mono text-xs text-muted-foreground">{id}</span>
+      </div>
+      {root ? (
+        <div className="mb-3 font-mono text-xs text-muted-foreground">
+          {root}
+        </div>
+      ) : null}
+      <div className="prose prose-sm max-w-none dark:prose-invert">
+        {typeof children === "string" ? (
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
+        ) : (
+          children
+        )}
+      </div>
     </div>
   );
 }
