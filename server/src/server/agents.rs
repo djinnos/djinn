@@ -443,7 +443,7 @@ async fn available_mcp_servers(
         })?;
 
     let project_root = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
-    let registry = djinn_agent::verification::settings::load_mcp_server_registry(&project_root);
+    let registry = djinn_agent::mcp_settings::load_mcp_server_registry(&project_root);
     let servers = registry
         .into_iter()
         .map(|(name, config)| {

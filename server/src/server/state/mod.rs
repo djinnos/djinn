@@ -152,10 +152,6 @@ struct Inner {
     pub coordinator: Arc<tokio::sync::Mutex<Option<CoordinatorHandle>>>,
     /// Long-running slot pool actor handle.
     pub pool: Mutex<Option<SlotPoolHandle>>,
-    /// Task IDs with an in-flight verification pipeline (background tokio task).
-    /// Used by the coordinator to distinguish genuinely stuck `verifying` tasks
-    /// (orphaned after server restart) from ones with a live pipeline.
-    pub verifying_tasks: djinn_agent::actors::coordinator::VerificationTracker,
     /// Per-session file read timestamps used to enforce read-before-edit/write.
     pub file_time: Arc<FileTime>,
     pub lsp: LspManager,
@@ -265,7 +261,6 @@ impl AppState {
                 role_registry: Arc::new(RoleRegistry::new()),
                 coordinator: Arc::new(tokio::sync::Mutex::new(None)),
                 pool: Mutex::new(None),
-                verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 file_time: Arc::new(FileTime::new()),
                 lsp: LspManager::new(),
                 active_tasks: djinn_agent::context::ActivityTracker::default(),
@@ -912,33 +907,6 @@ impl AppState {
         store.ensure_collection(dim).await
     }
 
-    /// Register a task as having an in-flight verification pipeline.
-    pub fn register_verification(&self, task_id: &str) {
-        self.inner
-            .verifying_tasks
-            .lock()
-            .expect("poisoned")
-            .insert(task_id.to_string());
-    }
-
-    /// Deregister a task's verification pipeline (completed or crashed).
-    pub fn deregister_verification(&self, task_id: &str) {
-        self.inner
-            .verifying_tasks
-            .lock()
-            .expect("poisoned")
-            .remove(task_id);
-    }
-
-    /// Check whether a task has a live verification pipeline.
-    pub fn has_verification(&self, task_id: &str) -> bool {
-        self.inner
-            .verifying_tasks
-            .lock()
-            .expect("poisoned")
-            .contains(task_id)
-    }
-
     pub fn file_time(&self) -> &FileTime {
         &self.inner.file_time
     }
@@ -964,7 +932,6 @@ impl AppState {
             db: self.inner.db.clone(),
             event_bus: self.event_bus(),
             git_actors: self.inner.git_actors.clone(),
-            verifying_tasks: self.inner.verifying_tasks.clone(),
             role_registry: self.inner.role_registry.clone(),
             health_tracker: self.inner.health_tracker.clone(),
             file_time: self.inner.file_time.clone(),
@@ -1028,7 +995,6 @@ impl AppState {
                 self.catalog().clone(),
                 self.health_tracker().clone(),
                 self.inner.role_registry.clone(),
-                self.inner.verifying_tasks.clone(),
                 self.inner.lsp.clone(),
             ));
 
@@ -1089,7 +1055,6 @@ impl AppState {
                 self.catalog().clone(),
                 self.health_tracker().clone(),
                 self.inner.role_registry.clone(),
-                self.inner.verifying_tasks.clone(),
                 self.inner.lsp.clone(),
             )
             .with_graph_warmer(self.graph_warmer().await)
@@ -1253,9 +1218,6 @@ impl AppState {
         // Coordinator + slot pool (the dispatch engine) + runtime settings.
         self.initialize_agents().await;
 
-        // Prune stale verification cache entries (>7 days old).
-        self.prune_verification_cache_on_startup().await;
-
         // One-shot backfill of pre-existing blobless mirrors to full mirrors.
         // Idempotent + serialized per-project by the mirror lock.
         let backfill_self = self.clone();
@@ -1271,12 +1233,6 @@ impl AppState {
         });
 
         // Post-session knowledge-extraction listener (reacts to task outcomes).
-        djinn_agent::verification::task_confidence::spawn_task_outcome_listener(
-            self.db().clone(),
-            self.event_bus(),
-            self.events(),
-        );
-
         // Phase 3C: periodic GitHub-org-membership reconciliation. Flips
         // `users.is_member_of_org` and revokes sessions when someone leaves
         // the locked org.
@@ -1497,15 +1453,6 @@ impl AppState {
                     "pricing backfill failed — sessions with NULL snapshots remain"
                 );
             }
-        }
-    }
-
-    async fn prune_verification_cache_on_startup(&self) {
-        use djinn_db::VerificationCacheRepository;
-        let repo = VerificationCacheRepository::new(self.db().clone());
-        match repo.prune_older_than(7).await {
-            Ok(()) => tracing::debug!("pruned stale verification cache entries"),
-            Err(e) => tracing::warn!(error = %e, "failed to prune verification cache"),
         }
     }
 

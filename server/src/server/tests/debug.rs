@@ -33,7 +33,6 @@ async fn app_state_with_agents(db: Database) -> AppState {
         state.catalog().clone(),
         state.health_tracker().clone(),
         std::sync::Arc::new(djinn_agent::roles::RoleRegistry::new()),
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         state.lsp().clone(),
     ));
     state.set_agent_handles_for_tests(pool, coordinator).await;

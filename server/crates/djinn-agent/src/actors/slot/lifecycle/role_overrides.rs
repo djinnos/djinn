@@ -325,6 +325,7 @@ mod tests {
                     model_preference: Some("claude-opus-4-6"),
                     mcp_servers: Some(r#"["github"]"#),
                     skills: Some(r#"["tdd","rust"]"#),
+                    verification_command: None,
                     is_default: true,
                 },
             )
@@ -361,6 +362,7 @@ mod tests {
                     model_preference: None,
                     mcp_servers: Some(r#"[]"#),
                     skills: Some(r#"["planning"]"#),
+                    verification_command: None,
                     is_default: false,
                 },
             )
@@ -395,6 +397,7 @@ mod tests {
                     model_preference: None,
                     mcp_servers: Some("[]"),
                     skills: Some("[]"),
+                    verification_command: None,
                     is_default: false,
                 },
             )

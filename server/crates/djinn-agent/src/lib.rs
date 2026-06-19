@@ -22,7 +22,7 @@ pub mod direct_services;
 // Project `environment_config` column accessors used by MCP/skills/hooks
 // resolution. (Was previously inside `src/verification/`, but had nothing
 // verification-specific about it.)
-pub(crate) mod environment;
+pub mod environment;
 pub(crate) mod extension;
 pub mod file_time;
 pub(crate) mod github_error_render;
@@ -34,7 +34,7 @@ pub mod mcp_client;
 // `verification::settings`). The "verification" name was a misnomer — these
 // modules have nothing verification-specific about them.
 pub(crate) mod mcp_json;
-pub(crate) mod mcp_settings;
+pub mod mcp_settings;
 pub(crate) mod oauth;
 pub(crate) mod output_parser;
 pub mod output_stash;
