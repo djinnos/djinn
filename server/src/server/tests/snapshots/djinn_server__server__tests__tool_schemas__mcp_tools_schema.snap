@@ -6571,6 +6571,51 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "LifecycleHealth": {
+          "description": "Lifecycle-status counts for a project's notes.",
+          "properties": {
+            "active_notes": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "archived_notes": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "active_notes",
+            "archived_notes"
+          ],
+          "type": "object"
+        },
+        "RecentSweepMetrics": {
+          "description": "Most recent housekeeping/operator lifecycle sweep counters surfaced through\n`memory_health`.",
+          "properties": {
+            "last_archived_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "last_decayed_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "last_superseded_source_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "last_sweep_at": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "last_decayed_count",
+            "last_archived_count",
+            "last_superseded_source_count"
+          ],
+          "type": "object"
+        },
         "StaleFolder": {
           "description": "Stale-note count for one folder.",
           "properties": {
@@ -6600,6 +6645,17 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "lifecycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LifecycleHealth"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
         "low_confidence_note_count": {
           "format": "int64",
           "nullable": true,
@@ -6609,6 +6665,17 @@ expression: signatures
           "format": "int64",
           "nullable": true,
           "type": "integer"
+        },
+        "recent_sweep": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecentSweepMetrics"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
         },
         "stale_note_count": {
           "format": "int64",

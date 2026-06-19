@@ -6,7 +6,9 @@ use tokio::time::{Interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
 use crate::Database;
-use crate::repositories::note::NoteRepository;
+use crate::repositories::note::{
+    CreateConsolidationRunMetric, NoteConsolidationRepository, NoteRepository,
+};
 use crate::repositories::project::ProjectRepository;
 
 const DEFAULT_HOUSEKEEPING_INTERVAL_SECS: u64 = 60 * 60;
@@ -32,6 +34,83 @@ const BACKFILL_DRY_RUN_ENV: &str = "DJINN_HOUSEKEEPING_BACKFILL_ANCHORS_DRY_RUN"
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HousekeepingConfig {
     pub interval: Duration,
+}
+
+/// Explicit, re-runnable lifecycle sweep entry point for operators/tests. The
+/// default option set is dry-run, which only projects decay/archive impact. Set
+/// `dry_run = false` to apply the same reversible decay and archive actions used
+/// by periodic housekeeping. This path never calls `memory_delete`.
+pub async fn run_lifecycle_sweep_for_all_projects(
+    db: &Database,
+    event_bus: &EventBus,
+    options: LifecycleSweepOptions,
+) -> anyhow::Result<LifecycleSweepReport> {
+    let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
+    let projects = project_repo.list().await?;
+    let note_repo = NoteRepository::new(db.clone(), event_bus.clone());
+
+    let mut project_reports = Vec::with_capacity(projects.len());
+    for project in projects {
+        let projection = note_repo
+            .lifecycle_sweep_projection(
+                &project.id,
+                options.decay_window_days,
+                options.archive_window_days,
+            )
+            .await?;
+
+        let (decayed_candidates, archive_candidates, already_archived) = if options.dry_run {
+            (
+                projection.decayed_candidates,
+                projection.archive_candidates,
+                projection.already_archived,
+            )
+        } else {
+            let decayed = note_repo
+                .decay_stale_extracted_notes(&project.id, options.decay_window_days)
+                .await?;
+            let archived = note_repo
+                .archive_audit_candidates(&project.id, options.archive_window_days)
+                .await?;
+            let post_projection = note_repo
+                .lifecycle_sweep_projection(
+                    &project.id,
+                    options.decay_window_days,
+                    options.archive_window_days,
+                )
+                .await?;
+            (decayed, archived, post_projection.already_archived)
+        };
+
+        tracing::info!(
+            project_id = %project.id,
+            project_name = %project.name,
+            decayed_candidates,
+            archive_candidates,
+            already_archived,
+            dry_run = options.dry_run,
+            "lifecycle sweep project report"
+        );
+
+        project_reports.push(ProjectLifecycleSweepReport {
+            project_id: project.id,
+            project_name: project.name,
+            decayed_candidates,
+            archive_candidates,
+            already_archived,
+        });
+    }
+
+    let report = LifecycleSweepReport::new(project_reports, options.dry_run);
+    tracing::info!(
+        project_count = report.projects.len(),
+        total_decayed_candidates = report.total_decayed_candidates,
+        total_archive_candidates = report.total_archive_candidates,
+        total_already_archived = report.total_already_archived,
+        dry_run = report.dry_run,
+        "lifecycle sweep summary"
+    );
+    Ok(report)
 }
 
 impl HousekeepingConfig {
@@ -62,6 +141,11 @@ pub(crate) struct ProjectHousekeepingReport {
     /// already-archived or otherwise non-active candidates are no-ops and do
     /// not increment this counter.
     pub archived_notes: u64,
+    /// Source notes superseded by lifecycle/consolidation work attributed to
+    /// this housekeeping sweep. The periodic lifecycle sweep itself does not
+    /// create canonical notes, so this remains zero unless a future substrate
+    /// adds a per-tick supersession pass.
+    pub superseded_source_notes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +157,7 @@ pub(crate) struct HousekeepingTickReport {
     pub total_repaired_broken_wikilinks: u64,
     pub total_decayed_notes: u64,
     pub total_archived_notes: u64,
+    pub total_superseded_source_notes: u64,
 }
 
 impl HousekeepingTickReport {
@@ -101,6 +186,10 @@ impl HousekeepingTickReport {
             .iter()
             .map(|report| report.archived_notes)
             .sum();
+        let total_superseded_source_notes = project_reports
+            .iter()
+            .map(|report| report.superseded_source_notes)
+            .sum();
 
         Self {
             project_reports,
@@ -110,6 +199,57 @@ impl HousekeepingTickReport {
             total_repaired_broken_wikilinks,
             total_decayed_notes,
             total_archived_notes,
+            total_superseded_source_notes,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LifecycleSweepOptions {
+    pub dry_run: bool,
+    pub decay_window_days: u32,
+    pub archive_window_days: u32,
+}
+
+impl Default for LifecycleSweepOptions {
+    fn default() -> Self {
+        Self {
+            dry_run: true,
+            decay_window_days: crate::repositories::note::lifecycle::DEFAULT_DECAY_WINDOW_DAYS,
+            archive_window_days: DEFAULT_ARCHIVE_WINDOW_DAYS,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectLifecycleSweepReport {
+    pub project_id: String,
+    pub project_name: String,
+    pub decayed_candidates: u64,
+    pub archive_candidates: u64,
+    pub already_archived: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LifecycleSweepReport {
+    pub projects: Vec<ProjectLifecycleSweepReport>,
+    pub total_decayed_candidates: u64,
+    pub total_archive_candidates: u64,
+    pub total_already_archived: u64,
+    pub dry_run: bool,
+}
+
+impl LifecycleSweepReport {
+    fn new(projects: Vec<ProjectLifecycleSweepReport>, dry_run: bool) -> Self {
+        let total_decayed_candidates = projects.iter().map(|p| p.decayed_candidates).sum();
+        let total_archive_candidates = projects.iter().map(|p| p.archive_candidates).sum();
+        let total_already_archived = projects.iter().map(|p| p.already_archived).sum();
+        Self {
+            projects,
+            total_decayed_candidates,
+            total_archive_candidates,
+            total_already_archived,
+            dry_run,
         }
     }
 }
@@ -294,6 +434,7 @@ async fn run_tick(db: &Database, event_bus: &EventBus) -> anyhow::Result<Houseke
         total_repaired_broken_wikilinks = report.total_repaired_broken_wikilinks,
         total_decayed_notes = report.total_decayed_notes,
         total_archived_notes = report.total_archived_notes,
+        total_superseded_source_notes = report.total_superseded_source_notes,
         "knowledge base housekeeping tick summary"
     );
 
@@ -361,6 +502,36 @@ async fn run_project_housekeeping(
             parse_archive_window_days(DEFAULT_ARCHIVE_WINDOW_DAYS),
         )
         .await?;
+    let superseded_source_notes = 0_u64;
+
+    let total_notes_seen_in_sweep: i64 =
+        sqlx::query_scalar(r#"SELECT COUNT(*) FROM notes WHERE project_id = $1"#)
+            .bind(&project.id)
+            .fetch_one(db.pool())
+            .await?;
+    let completed_at: String = sqlx::query_scalar(
+        r#"SELECT to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
+    )
+    .fetch_one(db.pool())
+    .await?;
+    NoteConsolidationRepository::new(db.clone())
+        .create_run_metric(CreateConsolidationRunMetric {
+            project_id: &project.id,
+            note_type: "lifecycle_sweep",
+            status: "completed",
+            scanned_note_count: total_notes_seen_in_sweep,
+            candidate_cluster_count: 0,
+            consolidated_cluster_count: 0,
+            consolidated_note_count: 0,
+            source_note_count: 0,
+            decayed_note_count: decayed_notes as i64,
+            archived_note_count: archived_notes as i64,
+            superseded_source_note_count: superseded_source_notes as i64,
+            started_at: &completed_at,
+            completed_at: Some(&completed_at),
+            error_message: None,
+        })
+        .await?;
 
     Ok(ProjectHousekeepingReport {
         project_id: project.id.clone(),
@@ -371,6 +542,7 @@ async fn run_project_housekeeping(
         repaired_broken_wikilinks,
         decayed_notes,
         archived_notes,
+        superseded_source_notes,
     })
 }
 
@@ -444,6 +616,7 @@ mod tests {
                 repaired_broken_wikilinks: 4,
                 decayed_notes: 5,
                 archived_notes: 6,
+                superseded_source_notes: 7,
             },
             ProjectHousekeepingReport {
                 project_id: "project-b".to_string(),
@@ -454,6 +627,7 @@ mod tests {
                 repaired_broken_wikilinks: 40,
                 decayed_notes: 50,
                 archived_notes: 60,
+                superseded_source_notes: 70,
             },
         ]);
 
@@ -464,6 +638,7 @@ mod tests {
         assert_eq!(report.total_repaired_broken_wikilinks, 44);
         assert_eq!(report.total_decayed_notes, 55);
         assert_eq!(report.total_archived_notes, 66);
+        assert_eq!(report.total_superseded_source_notes, 77);
     }
 
     #[test]
@@ -718,6 +893,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "archived");
+
+        let metric = NoteConsolidationRepository::new(db.clone())
+            .list_run_metrics(&project.id, Some("lifecycle_sweep"), 1)
+            .await
+            .unwrap()
+            .pop()
+            .expect("housekeeping should persist lifecycle sweep metric");
+        assert_eq!(metric.note_type, "lifecycle_sweep");
+        assert_eq!(metric.status, "completed");
+        assert_eq!(metric.scanned_note_count, 1);
+        assert_eq!(metric.decayed_note_count, report.decayed_notes as i64);
+        assert_eq!(metric.archived_note_count, 1);
+        assert_eq!(metric.superseded_source_note_count, 0);
+
+        let health = note_repo.health(&project.id).await.unwrap();
+        assert_eq!(health.lifecycle.active_notes, 0);
+        assert_eq!(health.lifecycle.archived_notes, 1);
+        assert_eq!(health.recent_sweep.last_sweep_at, metric.completed_at);
+        assert_eq!(health.recent_sweep.last_archived_count, 1);
+        assert_eq!(
+            health.recent_sweep.last_decayed_count,
+            report.decayed_notes as i64
+        );
+        assert_eq!(health.recent_sweep.last_superseded_source_count, 0);
     }
 
     /// Multi-project aggregation: create two projects with non-zero
@@ -793,5 +992,112 @@ mod tests {
         // Tick-level aggregation: 2 + 1 = 3 archived notes across both
         // projects.
         assert_eq!(report.total_archived_notes, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lifecycle_sweep_entry_point_dry_run_apply_and_idempotency() {
+        let db = Database::open_in_memory().unwrap();
+        let event_bus = EventBus::noop();
+        let (tx, _rx) = broadcast::channel(256);
+        let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let tmp = crate::database::test_tempdir().unwrap();
+        let root = tmp.keep();
+        let path_one = root.join("lifecycle-project-one");
+        let path_two = root.join("lifecycle-project-two");
+        std::fs::create_dir_all(&path_one).unwrap();
+        std::fs::create_dir_all(&path_two).unwrap();
+
+        let project_one = make_project(&db, &path_one).await;
+        let project_two = make_project(&db, &path_two).await;
+
+        const ARCHIVE_SHAPED_BODY: &str = "One short extracted paragraph.\n\n*Extracted from session 019ed7e1-980f-7ea2-935e-6f5e9fc82c14.*";
+
+        let p1_a = note_repo
+            .create(
+                &project_one.id,
+                "Lifecycle Project One Archive A",
+                ARCHIVE_SHAPED_BODY,
+                "case",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let p1_b = note_repo
+            .create(
+                &project_one.id,
+                "Lifecycle Project One Archive B",
+                ARCHIVE_SHAPED_BODY,
+                "pitfall",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let p2_a = note_repo
+            .create(
+                &project_two.id,
+                "Lifecycle Project Two Archive A",
+                ARCHIVE_SHAPED_BODY,
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let dry_run =
+            run_lifecycle_sweep_for_all_projects(&db, &event_bus, LifecycleSweepOptions::default())
+                .await
+                .unwrap();
+        assert!(dry_run.dry_run);
+        assert_eq!(dry_run.total_archive_candidates, 3);
+        assert_eq!(dry_run.total_already_archived, 0);
+
+        let active_before_apply: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notes WHERE id IN ($1, $2, $3) AND status = 'active'",
+        )
+        .bind(&p1_a.id)
+        .bind(&p1_b.id)
+        .bind(&p2_a.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(active_before_apply, 3);
+
+        let applied = run_lifecycle_sweep_for_all_projects(
+            &db,
+            &event_bus,
+            LifecycleSweepOptions {
+                dry_run: false,
+                ..LifecycleSweepOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!applied.dry_run);
+        assert_eq!(applied.total_archive_candidates, 3);
+
+        let archived_after_apply: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notes WHERE id IN ($1, $2, $3) AND status = 'archived'",
+        )
+        .bind(&p1_a.id)
+        .bind(&p1_b.id)
+        .bind(&p2_a.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(archived_after_apply, 3);
+
+        let second_apply = run_lifecycle_sweep_for_all_projects(
+            &db,
+            &event_bus,
+            LifecycleSweepOptions {
+                dry_run: false,
+                ..LifecycleSweepOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(second_apply.total_archive_candidates, 0);
+        assert_eq!(second_apply.total_already_archived, 3);
     }
 }
