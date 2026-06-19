@@ -1401,6 +1401,8 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_db::{ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository};
 
+    static OUT_OF_CORE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     async fn make_project(tmp: &std::path::Path) -> std::path::PathBuf {
         let project_root = tmp.join("repo");
         tokio::fs::create_dir_all(&project_root).await.unwrap();
@@ -1425,6 +1427,168 @@ mod tests {
         run(&["add", "a.txt"]).await;
         run(&["commit", "-q", "-m", "init"]).await;
         project_root
+    }
+
+    fn graph_artifact_blob_from_graph(
+        mut graph: crate::repo_graph::RepoDependencyGraph,
+    ) -> Vec<u8> {
+        graph.set_layout_positions(crate::layout::derive_layout_positions(&graph));
+        bincode::serialize(&graph.to_artifact()).expect("serialize graph artifact")
+    }
+
+    fn in_memory_graph_artifact_blob(index: &crate::scip_parser::ParsedScipIndex) -> Vec<u8> {
+        let graph = crate::repo_graph::RepoDependencyGraph::try_build_with_source(
+            std::slice::from_ref(index),
+            None,
+        )
+        .expect("in-memory graph build must succeed");
+        graph_artifact_blob_from_graph(graph)
+    }
+
+    fn out_of_core_graph_artifact_blob(
+        index: &crate::scip_parser::ParsedScipIndex,
+        storage_path: &std::path::Path,
+    ) -> Vec<u8> {
+        let config = crate::out_of_core::resolve_out_of_core_config(index.files.len())
+            .expect("out-of-core config must engage for fixture file count");
+        assert_eq!(
+            config.storage_path, storage_path,
+            "test must exercise the configured out-of-core storage path"
+        );
+
+        let mut store = crate::out_of_core::OutOfCoreStore::open(&config.storage_path)
+            .expect("open out-of-core store");
+        let shard_count = store
+            .put_parsed_index(index)
+            .expect("shard parsed SCIP index into out-of-core store");
+        assert_eq!(
+            shard_count,
+            index.files.len(),
+            "one out-of-core shard must be written per parsed SCIP file"
+        );
+
+        let graph = crate::repo_graph::RepoDependencyGraph::try_build_with_scip_file_iter(
+            store.scip_file_iter(),
+            &index.workspace_slug,
+            &index.external_symbols,
+            None,
+        )
+        .expect("out-of-core bounded graph build must succeed");
+        graph_artifact_blob_from_graph(graph)
+    }
+
+    fn add_extra_occurrence_to_first_file(index: &mut crate::scip_parser::ParsedScipIndex) {
+        use crate::scip_parser::{
+            ScipOccurrence, ScipRange, ScipSymbol, ScipSymbolKind, ScipSymbolRole, ScipVisibility,
+        };
+
+        let symbol = "scip-rust pkg src/helper.rs `extra_helper`().".to_string();
+        let occurrence = ScipOccurrence {
+            symbol: symbol.clone(),
+            range: ScipRange {
+                start_line: 2,
+                start_character: 0,
+                end_line: 2,
+                end_character: 12,
+            },
+            enclosing_range: None,
+            roles: std::collections::BTreeSet::from([ScipSymbolRole::Definition]),
+            syntax_kind: None,
+            override_documentation: vec![],
+        };
+        let file = index
+            .files
+            .first_mut()
+            .expect("test fixture must contain at least one file");
+        file.definitions.push(occurrence.clone());
+        file.occurrences.push(occurrence);
+        file.symbols.push(ScipSymbol {
+            symbol,
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("extra_helper".to_string()),
+            signature: Some("fn extra_helper()".to_string()),
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(ScipVisibility::Public),
+            signature_parts: None,
+        });
+    }
+
+    #[test]
+    fn test_out_of_core_graph_parity_with_in_memory() {
+        let _guard = OUT_OF_CORE_ENV_LOCK.lock().unwrap();
+        let tmp = workspace_tempdir("ooc-graph-parity-");
+        let store_path = tmp.path().join("store");
+
+        unsafe {
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_PATH");
+        }
+        let index = build_test_parsed_index_fixture();
+        let in_memory_blob = in_memory_graph_artifact_blob(&index);
+
+        unsafe {
+            std::env::set_var("DJINN_GRAPH_OUT_OF_CORE", "1");
+            std::env::set_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES", "1");
+            std::env::set_var("DJINN_GRAPH_OUT_OF_CORE_PATH", &store_path);
+        }
+        let out_of_core_blob = out_of_core_graph_artifact_blob(&index, &store_path);
+
+        crate::graph_parity::assert_graph_artifact_blob_parity(&in_memory_blob, &out_of_core_blob)
+            .expect(
+                "out-of-core graph artifact must be structurally identical to in-memory artifact",
+            );
+
+        unsafe {
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_PATH");
+        }
+    }
+
+    #[test]
+    fn test_out_of_core_graph_diverges_on_file_change() {
+        let _guard = OUT_OF_CORE_ENV_LOCK.lock().unwrap();
+        let tmp = workspace_tempdir("ooc-graph-diverge-");
+        let store_path = tmp.path().join("store");
+
+        unsafe {
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_PATH");
+        }
+        let base_index = build_test_parsed_index_fixture();
+        let in_memory_blob = in_memory_graph_artifact_blob(&base_index);
+
+        let mut changed_index = base_index.clone();
+        add_extra_occurrence_to_first_file(&mut changed_index);
+
+        unsafe {
+            std::env::set_var("DJINN_GRAPH_OUT_OF_CORE", "1");
+            std::env::set_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES", "1");
+            std::env::set_var("DJINN_GRAPH_OUT_OF_CORE_PATH", &store_path);
+        }
+        let changed_out_of_core_blob = out_of_core_graph_artifact_blob(&changed_index, &store_path);
+
+        let err = crate::graph_parity::assert_graph_artifact_blob_parity(
+            &in_memory_blob,
+            &changed_out_of_core_blob,
+        )
+        .expect_err("changed file occurrence must trip the out-of-core parity gate");
+        assert!(
+            matches!(
+                err,
+                crate::graph_parity::GraphArtifactBlobParityError::Diff(_)
+            ),
+            "expected structured graph diff for changed file occurrence, got {err:?}"
+        );
+
+        unsafe {
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES");
+            std::env::remove_var("DJINN_GRAPH_OUT_OF_CORE_PATH");
+        }
     }
 
     #[test]

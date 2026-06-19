@@ -197,33 +197,35 @@ impl NoteRepository {
             return Ok(Vec::new());
         }
 
-        let link_edges: Vec<(String, String)> = sqlx::query!(
+        let link_edges: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
             r#"SELECT source_id, target_id AS "target_id!: String" FROM note_links WHERE target_id IS NOT NULL AND source_id IN (
-                SELECT id FROM notes WHERE project_id = $1
+                SELECT id FROM notes WHERE project_id = $1 AND status = 'active'
+            ) AND target_id IN (
+                SELECT id FROM notes WHERE project_id = $2 AND status = 'active'
             )"#,
-            project_id
         )
+        .bind(&project_id)
+        .bind(&project_id)
         .fetch_all(self.db.pool())
         .await?
         .into_iter()
-        .map(|r| (r.source_id, r.target_id))
         .collect();
 
-        let association_edges: Vec<(String, String, f64)> = sqlx::query!(
-            "SELECT note_a_id, note_b_id, weight
+        let association_edges: Vec<(String, String, f64)> =
+            sqlx::query_as::<_, (String, String, f64)>(
+                "SELECT note_a_id, note_b_id, weight
              FROM note_associations
              WHERE weight >= $1
-               AND note_a_id IN (SELECT id FROM notes WHERE project_id = $2)
-               AND note_b_id IN (SELECT id FROM notes WHERE project_id = $3)",
-            MIN_ASSOCIATION_WEIGHT,
-            project_id,
-            project_id
-        )
-        .fetch_all(self.db.pool())
-        .await?
-        .into_iter()
-        .map(|r| (r.note_a_id, r.note_b_id, r.weight))
-        .collect();
+               AND note_a_id IN (SELECT id FROM notes WHERE project_id = $2 AND status = 'active')
+               AND note_b_id IN (SELECT id FROM notes WHERE project_id = $3 AND status = 'active')",
+            )
+            .bind(MIN_ASSOCIATION_WEIGHT)
+            .bind(&project_id)
+            .bind(&project_id)
+            .fetch_all(self.db.pool())
+            .await?
+            .into_iter()
+            .collect();
 
         let mut adjacency: HashMap<String, Vec<ProximityEdge>> = HashMap::new();
         for (source, target) in link_edges {
@@ -282,9 +284,17 @@ impl NoteRepository {
             }
         }
 
+        let active_ids: HashSet<String> =
+            sqlx::query_scalar("SELECT id FROM notes WHERE project_id = $1 AND status = 'active'")
+                .bind(project_id)
+                .fetch_all(self.db.pool())
+                .await?
+                .into_iter()
+                .collect();
+
         let mut results: Vec<(String, f64)> = best_scores
             .into_iter()
-            .filter(|(id, _)| !seed_set.contains(id))
+            .filter(|(id, _)| !seed_set.contains(id) && active_ids.contains(id))
             .collect();
 
         results.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
