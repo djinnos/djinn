@@ -4159,6 +4159,106 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$defs": {
+        "CargoCachePolicy": {
+          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup/verification command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
+          "oneOf": [
+            {
+              "description": "Resolve the policy from the project itself at warm/worker runtime.",
+              "properties": {
+                "mode": {
+                  "const": "auto-detected",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Use this explicit, project-authored override instead of detection.",
+              "properties": {
+                "mode": {
+                  "const": "explicit",
+                  "type": "string"
+                },
+                "policy": {
+                  "$ref": "#/$defs/CargoCachePolicyOverride"
+                }
+              },
+              "required": [
+                "mode",
+                "policy"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "CargoCachePolicyOverride": {
+          "additionalProperties": false,
+          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.",
+          "properties": {
+            "all_features": {
+              "default": false,
+              "description": "Whether warm and worker cargo commands should pass `--all-features`.",
+              "type": "boolean"
+            },
+            "features": {
+              "default": [],
+              "description": "Feature names to pass consistently to warm and worker cargo commands.\nEmpty means default features only. Use `all_features` for\n`--all-features`; do not include `all-features` in this list.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "incremental": {
+              "default": true,
+              "description": "Whether to enable Cargo incremental compilation.",
+              "type": "boolean"
+            },
+            "sccache": {
+              "default": false,
+              "description": "Whether the project should use sccache for rustc invocations.",
+              "type": "boolean"
+            },
+            "warm_commands": {
+              "default": [],
+              "description": "Warm-base cargo commands derived from or overridden for this project.",
+              "items": {
+                "$ref": "#/$defs/CargoWarmCommand"
+              },
+              "type": "array"
+            },
+            "workspace": {
+              "default": false,
+              "description": "Whether the Cargo root is a workspace rather than a single package.",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "CargoWarmCommand": {
+          "additionalProperties": false,
+          "description": "One Cargo command used to warm a project's target cache.",
+          "properties": {
+            "args": {
+              "description": "Cargo subcommand and arguments, excluding the leading `cargo` binary.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "label": {
+              "description": "Human-readable label for logs and metrics.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "args"
+          ],
+          "type": "object"
+        },
         "ClangLanguage": {
           "properties": {
             "default_version": {
@@ -4202,6 +4302,21 @@ expression: signatures
               "default": {},
               "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
+            },
+            "cargo_cache_policy": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CargoCachePolicy"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": {
+                "mode": "auto-detected"
+              },
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup/verification command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -4647,6 +4762,106 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "CargoCachePolicy": {
+          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup/verification command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
+          "oneOf": [
+            {
+              "description": "Resolve the policy from the project itself at warm/worker runtime.",
+              "properties": {
+                "mode": {
+                  "const": "auto-detected",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Use this explicit, project-authored override instead of detection.",
+              "properties": {
+                "mode": {
+                  "const": "explicit",
+                  "type": "string"
+                },
+                "policy": {
+                  "$ref": "#/$defs/CargoCachePolicyOverride"
+                }
+              },
+              "required": [
+                "mode",
+                "policy"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "CargoCachePolicyOverride": {
+          "additionalProperties": false,
+          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.",
+          "properties": {
+            "all_features": {
+              "default": false,
+              "description": "Whether warm and worker cargo commands should pass `--all-features`.",
+              "type": "boolean"
+            },
+            "features": {
+              "default": [],
+              "description": "Feature names to pass consistently to warm and worker cargo commands.\nEmpty means default features only. Use `all_features` for\n`--all-features`; do not include `all-features` in this list.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "incremental": {
+              "default": true,
+              "description": "Whether to enable Cargo incremental compilation.",
+              "type": "boolean"
+            },
+            "sccache": {
+              "default": false,
+              "description": "Whether the project should use sccache for rustc invocations.",
+              "type": "boolean"
+            },
+            "warm_commands": {
+              "default": [],
+              "description": "Warm-base cargo commands derived from or overridden for this project.",
+              "items": {
+                "$ref": "#/$defs/CargoWarmCommand"
+              },
+              "type": "array"
+            },
+            "workspace": {
+              "default": false,
+              "description": "Whether the Cargo root is a workspace rather than a single package.",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "CargoWarmCommand": {
+          "additionalProperties": false,
+          "description": "One Cargo command used to warm a project's target cache.",
+          "properties": {
+            "args": {
+              "description": "Cargo subcommand and arguments, excluding the leading `cargo` binary.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "label": {
+              "description": "Human-readable label for logs and metrics.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "args"
+          ],
+          "type": "object"
+        },
         "ClangLanguage": {
           "properties": {
             "default_version": {
@@ -4690,6 +4905,21 @@ expression: signatures
               "default": {},
               "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
+            },
+            "cargo_cache_policy": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CargoCachePolicy"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": {
+                "mode": "auto-detected"
+              },
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup/verification command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -5155,6 +5385,106 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$defs": {
+        "CargoCachePolicy": {
+          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup/verification command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
+          "oneOf": [
+            {
+              "description": "Resolve the policy from the project itself at warm/worker runtime.",
+              "properties": {
+                "mode": {
+                  "const": "auto-detected",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Use this explicit, project-authored override instead of detection.",
+              "properties": {
+                "mode": {
+                  "const": "explicit",
+                  "type": "string"
+                },
+                "policy": {
+                  "$ref": "#/$defs/CargoCachePolicyOverride"
+                }
+              },
+              "required": [
+                "mode",
+                "policy"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "CargoCachePolicyOverride": {
+          "additionalProperties": false,
+          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.",
+          "properties": {
+            "all_features": {
+              "default": false,
+              "description": "Whether warm and worker cargo commands should pass `--all-features`.",
+              "type": "boolean"
+            },
+            "features": {
+              "default": [],
+              "description": "Feature names to pass consistently to warm and worker cargo commands.\nEmpty means default features only. Use `all_features` for\n`--all-features`; do not include `all-features` in this list.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "incremental": {
+              "default": true,
+              "description": "Whether to enable Cargo incremental compilation.",
+              "type": "boolean"
+            },
+            "sccache": {
+              "default": false,
+              "description": "Whether the project should use sccache for rustc invocations.",
+              "type": "boolean"
+            },
+            "warm_commands": {
+              "default": [],
+              "description": "Warm-base cargo commands derived from or overridden for this project.",
+              "items": {
+                "$ref": "#/$defs/CargoWarmCommand"
+              },
+              "type": "array"
+            },
+            "workspace": {
+              "default": false,
+              "description": "Whether the Cargo root is a workspace rather than a single package.",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "CargoWarmCommand": {
+          "additionalProperties": false,
+          "description": "One Cargo command used to warm a project's target cache.",
+          "properties": {
+            "args": {
+              "description": "Cargo subcommand and arguments, excluding the leading `cargo` binary.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "label": {
+              "description": "Human-readable label for logs and metrics.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "args"
+          ],
+          "type": "object"
+        },
         "ClangLanguage": {
           "properties": {
             "default_version": {
@@ -5198,6 +5528,21 @@ expression: signatures
               "default": {},
               "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
+            },
+            "cargo_cache_policy": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CargoCachePolicy"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": {
+                "mode": "auto-detected"
+              },
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup/verification command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -8240,6 +8585,106 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "CargoCachePolicy": {
+          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup/verification command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
+          "oneOf": [
+            {
+              "description": "Resolve the policy from the project itself at warm/worker runtime.",
+              "properties": {
+                "mode": {
+                  "const": "auto-detected",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Use this explicit, project-authored override instead of detection.",
+              "properties": {
+                "mode": {
+                  "const": "explicit",
+                  "type": "string"
+                },
+                "policy": {
+                  "$ref": "#/$defs/CargoCachePolicyOverride"
+                }
+              },
+              "required": [
+                "mode",
+                "policy"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "CargoCachePolicyOverride": {
+          "additionalProperties": false,
+          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.",
+          "properties": {
+            "all_features": {
+              "default": false,
+              "description": "Whether warm and worker cargo commands should pass `--all-features`.",
+              "type": "boolean"
+            },
+            "features": {
+              "default": [],
+              "description": "Feature names to pass consistently to warm and worker cargo commands.\nEmpty means default features only. Use `all_features` for\n`--all-features`; do not include `all-features` in this list.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "incremental": {
+              "default": true,
+              "description": "Whether to enable Cargo incremental compilation.",
+              "type": "boolean"
+            },
+            "sccache": {
+              "default": false,
+              "description": "Whether the project should use sccache for rustc invocations.",
+              "type": "boolean"
+            },
+            "warm_commands": {
+              "default": [],
+              "description": "Warm-base cargo commands derived from or overridden for this project.",
+              "items": {
+                "$ref": "#/$defs/CargoWarmCommand"
+              },
+              "type": "array"
+            },
+            "workspace": {
+              "default": false,
+              "description": "Whether the Cargo root is a workspace rather than a single package.",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "CargoWarmCommand": {
+          "additionalProperties": false,
+          "description": "One Cargo command used to warm a project's target cache.",
+          "properties": {
+            "args": {
+              "description": "Cargo subcommand and arguments, excluding the leading `cargo` binary.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "label": {
+              "description": "Human-readable label for logs and metrics.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "args"
+          ],
+          "type": "object"
+        },
         "ClangLanguage": {
           "properties": {
             "default_version": {
@@ -8283,6 +8728,21 @@ expression: signatures
               "default": {},
               "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
+            },
+            "cargo_cache_policy": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CargoCachePolicy"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": {
+                "mode": "auto-detected"
+              },
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup/verification command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -8688,6 +9148,106 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "CargoCachePolicy": {
+          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup/verification command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
+          "oneOf": [
+            {
+              "description": "Resolve the policy from the project itself at warm/worker runtime.",
+              "properties": {
+                "mode": {
+                  "const": "auto-detected",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Use this explicit, project-authored override instead of detection.",
+              "properties": {
+                "mode": {
+                  "const": "explicit",
+                  "type": "string"
+                },
+                "policy": {
+                  "$ref": "#/$defs/CargoCachePolicyOverride"
+                }
+              },
+              "required": [
+                "mode",
+                "policy"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "CargoCachePolicyOverride": {
+          "additionalProperties": false,
+          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.",
+          "properties": {
+            "all_features": {
+              "default": false,
+              "description": "Whether warm and worker cargo commands should pass `--all-features`.",
+              "type": "boolean"
+            },
+            "features": {
+              "default": [],
+              "description": "Feature names to pass consistently to warm and worker cargo commands.\nEmpty means default features only. Use `all_features` for\n`--all-features`; do not include `all-features` in this list.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "incremental": {
+              "default": true,
+              "description": "Whether to enable Cargo incremental compilation.",
+              "type": "boolean"
+            },
+            "sccache": {
+              "default": false,
+              "description": "Whether the project should use sccache for rustc invocations.",
+              "type": "boolean"
+            },
+            "warm_commands": {
+              "default": [],
+              "description": "Warm-base cargo commands derived from or overridden for this project.",
+              "items": {
+                "$ref": "#/$defs/CargoWarmCommand"
+              },
+              "type": "array"
+            },
+            "workspace": {
+              "default": false,
+              "description": "Whether the Cargo root is a workspace rather than a single package.",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "CargoWarmCommand": {
+          "additionalProperties": false,
+          "description": "One Cargo command used to warm a project's target cache.",
+          "properties": {
+            "args": {
+              "description": "Cargo subcommand and arguments, excluding the leading `cargo` binary.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "label": {
+              "description": "Human-readable label for logs and metrics.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "args"
+          ],
+          "type": "object"
+        },
         "ClangLanguage": {
           "properties": {
             "default_version": {
@@ -8731,6 +9291,21 @@ expression: signatures
               "default": {},
               "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
+            },
+            "cargo_cache_policy": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CargoCachePolicy"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": {
+                "mode": "auto-detected"
+              },
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup/verification command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -9113,6 +9688,106 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$defs": {
+        "CargoCachePolicy": {
+          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup/verification command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
+          "oneOf": [
+            {
+              "description": "Resolve the policy from the project itself at warm/worker runtime.",
+              "properties": {
+                "mode": {
+                  "const": "auto-detected",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Use this explicit, project-authored override instead of detection.",
+              "properties": {
+                "mode": {
+                  "const": "explicit",
+                  "type": "string"
+                },
+                "policy": {
+                  "$ref": "#/$defs/CargoCachePolicyOverride"
+                }
+              },
+              "required": [
+                "mode",
+                "policy"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "CargoCachePolicyOverride": {
+          "additionalProperties": false,
+          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.",
+          "properties": {
+            "all_features": {
+              "default": false,
+              "description": "Whether warm and worker cargo commands should pass `--all-features`.",
+              "type": "boolean"
+            },
+            "features": {
+              "default": [],
+              "description": "Feature names to pass consistently to warm and worker cargo commands.\nEmpty means default features only. Use `all_features` for\n`--all-features`; do not include `all-features` in this list.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "incremental": {
+              "default": true,
+              "description": "Whether to enable Cargo incremental compilation.",
+              "type": "boolean"
+            },
+            "sccache": {
+              "default": false,
+              "description": "Whether the project should use sccache for rustc invocations.",
+              "type": "boolean"
+            },
+            "warm_commands": {
+              "default": [],
+              "description": "Warm-base cargo commands derived from or overridden for this project.",
+              "items": {
+                "$ref": "#/$defs/CargoWarmCommand"
+              },
+              "type": "array"
+            },
+            "workspace": {
+              "default": false,
+              "description": "Whether the Cargo root is a workspace rather than a single package.",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "CargoWarmCommand": {
+          "additionalProperties": false,
+          "description": "One Cargo command used to warm a project's target cache.",
+          "properties": {
+            "args": {
+              "description": "Cargo subcommand and arguments, excluding the leading `cargo` binary.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "label": {
+              "description": "Human-readable label for logs and metrics.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "args"
+          ],
+          "type": "object"
+        },
         "ClangLanguage": {
           "properties": {
             "default_version": {
@@ -9156,6 +9831,21 @@ expression: signatures
               "default": {},
               "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
+            },
+            "cargo_cache_policy": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CargoCachePolicy"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": {
+                "mode": "auto-detected"
+              },
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup/verification command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
