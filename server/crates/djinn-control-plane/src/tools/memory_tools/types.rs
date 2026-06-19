@@ -76,6 +76,10 @@ pub struct SearchParams {
     #[schemars(rename = "type")]
     pub note_type: Option<String>,
     pub limit: Option<i64>,
+    /// Optional list of edge kinds to include in graph traversal scoring.
+    /// When provided, only edges whose `kind` matches one of these values
+    /// participate in spreading activation. Omit to use all edge kinds.
+    pub edge_kinds: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -171,6 +175,10 @@ pub struct BuildContextParams {
     /// below this threshold are excluded from the context response. Set to 0.0
     /// to include all notes regardless of confidence.
     pub min_confidence: Option<f64>,
+    /// Optional list of edge kinds to include in graph traversal scoring.
+    /// When provided, only edges whose `kind` matches one of these values
+    /// participate in spreading activation. Omit to use all edge kinds.
+    pub edge_kinds: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -397,6 +405,12 @@ pub struct MemoryBuildContextResponse {
     pub primary: Vec<MemoryNoteView>,
     pub related_l1: Vec<djinn_memory::NoteOverview>,
     pub related_l0: Vec<djinn_memory::NoteAbstract>,
+    /// Notes in the context set that are superseded by another note in the set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supersedes: Vec<djinn_memory::SupersedesAnnotation>,
+    /// Notes in the context set that have a contradicting relationship.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contradicts: Vec<djinn_memory::ContradictsAnnotation>,
     pub error: Option<String>,
 }
 
@@ -418,6 +432,10 @@ pub struct MemoryTaskRefItem {
 pub struct MemoryGraphResponse {
     pub nodes: Vec<djinn_memory::GraphNode>,
     pub edges: Vec<djinn_memory::GraphEdge>,
+    /// Typed semantic edges (builds_on, contradicts, supersedes, exemplifies,
+    /// derived_from) from `note_associations` where `kind <> 'co_access'`.
+    #[serde(default)]
+    pub typed_edges: Vec<djinn_memory::TypedEdge>,
     pub error: Option<String>,
 }
 

@@ -225,6 +225,7 @@ async fn unrelated_search_query_does_not_return_repo_map_notes() {
             note_type: None,
             limit: 10,
             semantic_scores: None,
+            edge_kinds: None,
         })
         .await
         .unwrap();

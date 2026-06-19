@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::SystemTime;
 
+use djinn_memory::ContradictionWarning;
+
 use crate::error::DbResult as Result;
 
 use super::NoteRepository;
 
-const HOP_DECAY: f64 = 0.7;
+pub(crate) const HOP_DECAY: f64 = 0.7;
 const HOTNESS_ALPHA: f64 = 0.2;
 const HALF_LIFE_DAYS: f64 = 7.0;
 const MIN_ASSOCIATION_WEIGHT: f64 = 0.05;
@@ -56,6 +58,32 @@ pub fn decay_signal_for_elapsed_days(days: f64) -> f64 {
 pub fn bayesian_update(prior: f64, signal: f64) -> f64 {
     let posterior = (prior * signal) / (prior * signal + (1.0 - prior) * (1.0 - signal));
     posterior.clamp(CONFIDENCE_FLOOR, CONFIDENCE_CEILING)
+}
+
+/// Per-kind multiplier for a single hop in spreading activation.
+///
+/// Returns the raw multiplier to be applied by the caller. For symmetric kinds
+/// (`co_access`, `derived_from`, `builds_on`, `exemplifies`), this is the same
+/// in both directions. For `contradicts`, returns 0.0 (no score contribution).
+/// For `supersedes`, returns the source→target demotion (-0.5); the reverse
+/// direction (target→source +0.2) is handled by [`supersedes_reverse_multiplier`].
+pub(crate) fn multiplier_for_kind(kind: &str, weight: f64) -> f64 {
+    match kind {
+        "co_access" => HOP_DECAY * weight,
+        "derived_from" => HOP_DECAY * 1.0 * weight,
+        "builds_on" => HOP_DECAY * 0.8 * weight,
+        "exemplifies" => HOP_DECAY * 0.7 * weight,
+        "contradicts" => 0.0,
+        "supersedes" => -0.5,    // source→target; asymmetry is at the caller
+        _ => HOP_DECAY * weight, // unknown kinds default to co_access behavior
+    }
+}
+
+/// The reverse-direction multiplier for a `supersedes` edge (target→source).
+/// A single hop from the target through a `supersedes` edge gives the source
+/// a `+0.2` boost (the canonical note is preferred).
+pub(crate) fn supersedes_reverse_multiplier() -> f64 {
+    0.2
 }
 
 #[derive(Clone)]
@@ -177,13 +205,34 @@ impl NoteRepository {
         Ok(scores)
     }
 
+    /// Backward-compatible wrapper: calls `graph_proximity_scores_with_edge_kinds`
+    /// with `edge_kinds=None` and drops warnings.
     pub async fn graph_proximity_scores(
         &self,
         seed_ids: &[String],
         max_hops: usize,
     ) -> Result<Vec<(String, f64)>> {
+        let (scores, _warnings) = self
+            .graph_proximity_scores_with_edge_kinds(seed_ids, max_hops, None)
+            .await?;
+        Ok(scores)
+    }
+
+    /// Kind-aware graph proximity scoring with optional edge-kind filtering.
+    ///
+    /// When `edge_kinds` is `Some`, only edges whose `kind` appears in the list
+    /// participate in spreading activation. `None` means all kinds.
+    ///
+    /// Returns `(scores, warnings)` where `warnings` contains `ContradictionWarning`
+    /// entries for any `contradicts` edges encountered during traversal.
+    pub async fn graph_proximity_scores_with_edge_kinds(
+        &self,
+        seed_ids: &[String],
+        max_hops: usize,
+        edge_kinds: Option<&[String]>,
+    ) -> Result<(Vec<(String, f64)>, Vec<ContradictionWarning>)> {
         if seed_ids.is_empty() || max_hops == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
 
         let seed0 = &seed_ids[0];
@@ -194,7 +243,7 @@ impl NoteRepository {
                 .unwrap_or_default();
 
         if project_id.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
 
         let link_edges: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
@@ -211,9 +260,10 @@ impl NoteRepository {
         .into_iter()
         .collect();
 
-        let association_edges: Vec<(String, String, f64)> =
-            sqlx::query_as::<_, (String, String, f64)>(
-                "SELECT note_a_id, note_b_id, weight
+        // Fetch association edges with kind projected.
+        let association_edges: Vec<(String, String, f64, String)> =
+            sqlx::query_as::<_, (String, String, f64, String)>(
+                "SELECT note_a_id, note_b_id, weight, kind
              FROM note_associations
              WHERE weight >= $1
                AND note_a_id IN (SELECT id FROM notes WHERE project_id = $2 AND status = 'active')
@@ -227,7 +277,15 @@ impl NoteRepository {
             .into_iter()
             .collect();
 
+        // Build edge-kind filter set.
+        let kind_filter: Option<HashSet<&str>> =
+            edge_kinds.map(|kinds| kinds.iter().map(|s| s.as_str()).collect());
+
+        let mut warnings: Vec<ContradictionWarning> = Vec::new();
+
         let mut adjacency: HashMap<String, Vec<ProximityEdge>> = HashMap::new();
+
+        // Wikilink edges: always participate, symmetric with HOP_DECAY.
         for (source, target) in link_edges {
             adjacency
                 .entry(source.clone())
@@ -242,19 +300,61 @@ impl NoteRepository {
             });
         }
 
-        for (note_a_id, note_b_id, weight) in association_edges {
-            let multiplier = HOP_DECAY * weight;
-            adjacency
-                .entry(note_a_id.clone())
-                .or_default()
-                .push(ProximityEdge {
-                    target: note_b_id.clone(),
+        // Association edges: apply per-kind multipliers and filtering.
+        for (note_a_id, note_b_id, weight, kind) in association_edges {
+            // If a kind filter is active and this kind is not in the set, skip it
+            // (except `contradicts` which always generates a warning).
+            let dominated_by_filter = kind_filter
+                .as_ref()
+                .is_some_and(|filter| !filter.contains(kind.as_str()));
+
+            if kind == "contradicts" {
+                // Always record contradiction warnings regardless of filter.
+                warnings.push(ContradictionWarning {
+                    source_id: note_a_id.clone(),
+                    target_id: note_b_id.clone(),
+                    kind: kind.clone(),
+                });
+                // contradicts does NOT participate in scoring.
+                continue;
+            }
+
+            if dominated_by_filter {
+                continue;
+            }
+
+            if kind == "supersedes" {
+                // Asymmetric: note_a (source) → note_b (target) gets -0.5
+                //              note_b (target) → note_a (source) gets +0.2
+                adjacency
+                    .entry(note_a_id.clone())
+                    .or_default()
+                    .push(ProximityEdge {
+                        target: note_b_id.clone(),
+                        multiplier: multiplier_for_kind("supersedes", weight),
+                    });
+                adjacency
+                    .entry(note_b_id.clone())
+                    .or_default()
+                    .push(ProximityEdge {
+                        target: note_a_id.clone(),
+                        multiplier: supersedes_reverse_multiplier(),
+                    });
+            } else {
+                // Symmetric kinds.
+                let multiplier = multiplier_for_kind(&kind, weight);
+                adjacency
+                    .entry(note_a_id.clone())
+                    .or_default()
+                    .push(ProximityEdge {
+                        target: note_b_id.clone(),
+                        multiplier,
+                    });
+                adjacency.entry(note_b_id).or_default().push(ProximityEdge {
+                    target: note_a_id,
                     multiplier,
                 });
-            adjacency.entry(note_b_id).or_default().push(ProximityEdge {
-                target: note_a_id,
-                multiplier,
-            });
+            }
         }
 
         let seed_set: HashSet<String> = seed_ids.iter().cloned().collect();
@@ -298,7 +398,7 @@ impl NoteRepository {
             .collect();
 
         results.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        Ok(results)
+        Ok((results, warnings))
     }
 }
 
@@ -390,5 +490,91 @@ mod tests {
         }
         assert!(confidence <= CONFIDENCE_CEILING);
         assert!((confidence - CONFIDENCE_CEILING).abs() < 1e-9);
+    }
+
+    // ── Per-kind multiplier tests ────────────────────────────────────────────
+
+    #[test]
+    fn multiplier_co_access_uses_hop_decay_times_weight() {
+        let weight = 0.8;
+        let result = multiplier_for_kind("co_access", weight);
+        let expected = HOP_DECAY * weight;
+        assert!(
+            (result - expected).abs() < 1e-12,
+            "co_access: expected {expected}, got {result}"
+        );
+    }
+
+    #[test]
+    fn multiplier_derived_from_preserves_existing_behavior() {
+        let weight = 1.0;
+        let result = multiplier_for_kind("derived_from", weight);
+        let expected = HOP_DECAY * 1.0 * weight;
+        assert!(
+            (result - expected).abs() < 1e-12,
+            "derived_from: expected {expected}, got {result}"
+        );
+    }
+
+    #[test]
+    fn multiplier_builds_on_uses_0_8_factor() {
+        let weight = 1.0;
+        let result = multiplier_for_kind("builds_on", weight);
+        let expected = HOP_DECAY * 0.8 * weight;
+        assert!(
+            (result - expected).abs() < 1e-12,
+            "builds_on: expected {expected}, got {result}"
+        );
+    }
+
+    #[test]
+    fn multiplier_exemplifies_uses_0_7_factor() {
+        let weight = 1.0;
+        let result = multiplier_for_kind("exemplifies", weight);
+        let expected = HOP_DECAY * 0.7 * weight;
+        assert!(
+            (result - expected).abs() < 1e-12,
+            "exemplifies: expected {expected}, got {result}"
+        );
+    }
+
+    #[test]
+    fn multiplier_contradicts_returns_zero() {
+        let result = multiplier_for_kind("contradicts", 0.9);
+        assert!(
+            result.abs() < 1e-12,
+            "contradicts should return 0.0, got {result}"
+        );
+    }
+
+    #[test]
+    fn multiplier_supersedes_source_to_target_is_negative_half() {
+        let result = multiplier_for_kind("supersedes", 1.0);
+        let expected = -0.5;
+        assert!(
+            (result - expected).abs() < 1e-12,
+            "supersedes source→target: expected {expected}, got {result}"
+        );
+    }
+
+    #[test]
+    fn multiplier_supersedes_reverse_is_positive_0_2() {
+        let result = supersedes_reverse_multiplier();
+        let expected = 0.2;
+        assert!(
+            (result - expected).abs() < 1e-12,
+            "supersedes target→source: expected {expected}, got {result}"
+        );
+    }
+
+    #[test]
+    fn multiplier_unknown_kind_defaults_to_co_access() {
+        let weight = 0.6;
+        let result = multiplier_for_kind("some_future_kind", weight);
+        let expected = HOP_DECAY * weight;
+        assert!(
+            (result - expected).abs() < 1e-12,
+            "unknown kind: expected {expected}, got {result}"
+        );
     }
 }

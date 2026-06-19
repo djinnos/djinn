@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use djinn_memory::{BuildContextResponse, Note, NoteAbstract, NoteOverview};
+use djinn_memory::{
+    BuildContextResponse, ContradictsAnnotation, Note, NoteAbstract, NoteOverview,
+    SupersedesAnnotation,
+};
 
 use crate::error::DbResult as Result;
 use crate::repositories::note::rrf::rrf_fuse;
@@ -41,6 +44,7 @@ impl NoteRepository {
         task_id: Option<&str>,
         max_related: usize,
         min_confidence: Option<f64>,
+        edge_kinds: Option<&[String]>,
     ) -> Result<BuildContextResponse> {
         self.db.ensure_initialized().await?;
 
@@ -54,6 +58,8 @@ impl NoteRepository {
                 primary: vec![],
                 related_l1: vec![],
                 related_l0: vec![],
+                supersedes: vec![],
+                contradicts: vec![],
             });
         };
         if seed.status != djinn_memory::note_status::ACTIVE {
@@ -61,6 +67,8 @@ impl NoteRepository {
                 primary: vec![],
                 related_l1: vec![],
                 related_l0: vec![],
+                supersedes: vec![],
+                contradicts: vec![],
             });
         }
 
@@ -72,7 +80,7 @@ impl NoteRepository {
 
         // Run RRF retrieval pipeline to get discovered notes (includes FTS, temporal, graph, task-affinity)
         let discovered_ids = self
-            .run_rrf_discovery(project_id, &seed, task_id, max_related * 2)
+            .run_rrf_discovery(project_id, &seed, task_id, max_related * 2, edge_kinds)
             .await?;
 
         // Partition discovered notes: L1 (direct) vs L0 (non-direct)
@@ -154,11 +162,127 @@ impl NoteRepository {
             }
         }
 
+        // Build supersedes/contradicts annotations for the final context set.
+        let mut final_context_ids: HashSet<String> = HashSet::new();
+        final_context_ids.insert(seed.id.clone());
+        for note in pruned_l1.iter() {
+            final_context_ids.insert(note.id.clone());
+        }
+        for note in pruned_l0.iter() {
+            final_context_ids.insert(note.id.clone());
+        }
+
+        let supersedes_annotations = self
+            .supersedes_annotations(&seed.id, &final_context_ids)
+            .await?;
+        let contradicts_annotations = self.contradicts_annotations(&final_context_ids).await?;
+
         Ok(BuildContextResponse {
             primary: vec![seed],
             related_l1: pruned_l1,
             related_l0: pruned_l0,
+            supersedes: supersedes_annotations,
+            contradicts: contradicts_annotations,
         })
+    }
+
+    /// Build `SupersedesAnnotation` entries for notes in the context set.
+    /// For each note that has a `supersedes` edge to another note also in the
+    /// context set, we annotate the superseded note with the ID of the note
+    /// that supersedes it.
+    async fn supersedes_annotations(
+        &self,
+        _seed_id: &str,
+        context_ids: &HashSet<String>,
+    ) -> Result<Vec<SupersedesAnnotation>> {
+        if context_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let id_list: Vec<String> = context_ids.iter().cloned().collect();
+        let sql = format!(
+            "SELECT note_a_id, note_b_id, kind FROM note_associations
+             WHERE kind = 'supersedes'
+               AND (note_a_id IN ({}) OR note_b_id IN ({}))",
+            crate::repositories::pg_placeholders(id_list.len(), 1),
+            crate::repositories::pg_placeholders(id_list.len(), 1 + id_list.len())
+        );
+
+        let mut q = sqlx::query_as::<_, (String, String, String)>(&sql);
+        for id in &id_list {
+            q = q.bind(id);
+        }
+        for id in &id_list {
+            q = q.bind(id);
+        }
+
+        let rows: Vec<(String, String, String)> = q.fetch_all(self.db.pool()).await?;
+
+        let mut annotations: Vec<SupersedesAnnotation> = Vec::new();
+        for (note_a_id, note_b_id, kind) in rows {
+            // Undirected substrate: note_a_id < note_b_id (canonical pair ordering).
+            // note_a is the source (older), note_b is the canonical (newer).
+            // If the superseded note (note_a) is in the context set, annotate it
+            // with note_b as the superseding note.
+            if context_ids.contains(&note_a_id) {
+                annotations.push(SupersedesAnnotation {
+                    superseded_by: note_b_id.clone(),
+                    edge_kind: kind.clone(),
+                });
+            }
+            // Also handle if seed is note_b and note_a is in context.
+            // In this case, seed is the superseding note; note_a is superseded.
+            // This is already handled above if note_a is in context_ids.
+        }
+
+        Ok(annotations)
+    }
+
+    /// Build `ContradictsAnnotation` entries for notes in the context set.
+    async fn contradicts_annotations(
+        &self,
+        context_ids: &HashSet<String>,
+    ) -> Result<Vec<ContradictsAnnotation>> {
+        if context_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let id_list: Vec<String> = context_ids.iter().cloned().collect();
+        let sql = format!(
+            "SELECT note_a_id, note_b_id, kind FROM note_associations
+             WHERE kind = 'contradicts'
+               AND (note_a_id IN ({}) OR note_b_id IN ({}))",
+            crate::repositories::pg_placeholders(id_list.len(), 1),
+            crate::repositories::pg_placeholders(id_list.len(), 1 + id_list.len())
+        );
+
+        let mut q = sqlx::query_as::<_, (String, String, String)>(&sql);
+        for id in &id_list {
+            q = q.bind(id);
+        }
+        for id in &id_list {
+            q = q.bind(id);
+        }
+
+        let rows: Vec<(String, String, String)> = q.fetch_all(self.db.pool()).await?;
+
+        let mut annotations: Vec<ContradictsAnnotation> = Vec::new();
+        for (note_a_id, note_b_id, kind) in rows {
+            // If both endpoints are in the context set, annotate each with the
+            // other's ID.
+            if context_ids.contains(&note_a_id) && context_ids.contains(&note_b_id) {
+                annotations.push(ContradictsAnnotation {
+                    note_id: note_b_id.clone(),
+                    edge_kind: kind.clone(),
+                });
+                annotations.push(ContradictsAnnotation {
+                    note_id: note_a_id.clone(),
+                    edge_kind: kind.clone(),
+                });
+            }
+        }
+
+        Ok(annotations)
     }
 
     /// Get direct wikilink neighbors (one hop from seed).
@@ -184,6 +308,7 @@ impl NoteRepository {
         seed: &Note,
         task_id: Option<&str>,
         limit: usize,
+        edge_kinds: Option<&[String]>,
     ) -> Result<Vec<(String, f64)>> {
         // Build query from seed content (first 200 chars for efficiency)
         let query = seed.content.chars().take(200).collect::<String>();
@@ -195,8 +320,8 @@ impl NoteRepository {
         let temporal_scores = self.temporal_scores_all(project_id).await?;
 
         // Get graph proximity scores from seed
-        let graph_scores = self
-            .graph_proximity_scores(std::slice::from_ref(&seed.id), 2)
+        let (graph_scores, _graph_warnings) = self
+            .graph_proximity_scores_with_edge_kinds(std::slice::from_ref(&seed.id), 2, edge_kinds)
             .await?;
 
         // Get task-affinity scores
@@ -638,7 +763,15 @@ mod tests {
             .unwrap();
 
         let result = repo
-            .build_context(&project_id, &seed.permalink, Some(8192), None, 20, None)
+            .build_context(
+                &project_id,
+                &seed.permalink,
+                Some(8192),
+                None,
+                20,
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -691,6 +824,7 @@ mod tests {
                 None,
                 20,
                 Some(0.0),
+                None,
             )
             .await
             .unwrap();
@@ -757,6 +891,7 @@ mod tests {
                 None,
                 20,
                 Some(0.0),
+                None,
             )
             .await
             .unwrap();
@@ -838,6 +973,7 @@ mod tests {
                 None,
                 20,
                 Some(0.0),
+                None,
             )
             .await
             .unwrap();
@@ -902,6 +1038,7 @@ mod tests {
                 None,
                 20,
                 Some(0.0),
+                None,
             )
             .await
             .unwrap();

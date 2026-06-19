@@ -4,9 +4,9 @@ use super::*;
 #[tool_router(router = memory_search_router, vis = "pub(super)")]
 impl DjinnMcpServer {
     /// Search notes using FTS5 full-text search with BM25 ranking. Returns compact
-    /// results with snippets.
+    /// results with snippets. Optionally filter graph traversal by edge kinds.
     #[tool(
-        description = "Search notes using FTS5 full-text search with BM25 ranking. Returns compact results with snippets."
+        description = "Search notes using FTS5 full-text search with BM25 ranking. Returns compact results with snippets. The optional edge_kinds parameter filters which association edge kinds participate in graph proximity scoring during retrieval."
     )]
     pub async fn memory_search(
         &self,
@@ -16,9 +16,11 @@ impl DjinnMcpServer {
     }
 
     /// Returns the full knowledge graph for visualization — all notes with
-    /// connection counts and all resolved wikilink edges in a single query.
+    /// connection counts, all resolved wikilink edges, and typed semantic edges
+    /// (builds_on, contradicts, supersedes, exemplifies, derived_from) in a
+    /// single query.
     #[tool(
-        description = "Returns the full knowledge graph for visualization — all notes with connection counts and all resolved wikilink edges in a single query."
+        description = "Returns the full knowledge graph for visualization — all notes with connection counts, all resolved wikilink edges, and typed semantic edges (builds_on, contradicts, supersedes, exemplifies, derived_from) in a single query."
     )]
     pub async fn memory_graph(
         &self,
@@ -28,6 +30,7 @@ impl DjinnMcpServer {
             return Json(MemoryGraphResponse {
                 nodes: vec![],
                 edges: vec![],
+                typed_edges: vec![],
                 error: Some(format!("project not found: {}", params.project)),
             });
         };
@@ -38,6 +41,7 @@ impl DjinnMcpServer {
         Json(MemoryGraphResponse {
             nodes: graph.nodes,
             edges: graph.edges,
+            typed_edges: graph.typed_edges,
             error: None,
         })
     }
@@ -68,9 +72,10 @@ impl DjinnMcpServer {
 
     /// Build context from a seed note with progressive disclosure and token budget
     /// awareness. Returns full content for primary notes, overview for direct (L1)
-    /// linked notes, and abstract for discovered (L0) related notes.
+    /// linked notes, abstract for discovered (L0) related notes, plus supersedes
+    /// and contradicts annotations. Optionally filter graph traversal by edge kinds.
     #[tool(
-        description = "Build context from a seed note with progressive disclosure. Returns full content for primary notes, overview for direct linked notes, and abstract for discovered related notes. Seed notes are never dropped by budget constraints."
+        description = "Build context from a seed note with progressive disclosure. Returns full content for primary notes, overview for direct linked notes, abstract for discovered related notes, plus supersedes/contradicts annotations. Seed notes are never dropped by budget constraints. The optional edge_kinds parameter filters which association edge kinds participate in graph proximity scoring."
     )]
     pub async fn memory_build_context(
         &self,

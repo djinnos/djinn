@@ -139,6 +139,7 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
                 note_type: None,
                 limit: 1,
                 semantic_scores: None,
+                edge_kinds: None,
             })
             .await
         {
@@ -208,6 +209,7 @@ pub async fn memory_search(
             note_type: p.note_type.as_deref(),
             limit,
             semantic_scores,
+            edge_kinds: p.edge_kinds.as_deref(),
         })
         .await
     {
@@ -280,6 +282,8 @@ pub async fn memory_build_context(
                 primary: vec![],
                 related_l1: vec![],
                 related_l0: vec![],
+                supersedes: vec![],
+                contradicts: vec![],
                 error: Some(error),
             };
         }
@@ -306,6 +310,8 @@ pub async fn memory_build_context(
             primary: all.into_iter().map(|n| note_to_view(&n)).collect(),
             related_l1: vec![],
             related_l0: vec![],
+            supersedes: vec![],
+            contradicts: vec![],
             error: None,
         };
     }
@@ -318,6 +324,7 @@ pub async fn memory_build_context(
             task_id,
             max_related,
             p.min_confidence,
+            p.edge_kinds.as_deref(),
         )
         .await
     {
@@ -325,12 +332,16 @@ pub async fn memory_build_context(
             primary: response.primary.iter().map(note_to_view).collect(),
             related_l1: response.related_l1,
             related_l0: response.related_l0,
+            supersedes: response.supersedes,
+            contradicts: response.contradicts,
             error: None,
         },
         Err(e) => MemoryBuildContextResponse {
             primary: vec![],
             related_l1: vec![],
             related_l0: vec![],
+            supersedes: vec![],
+            contradicts: vec![],
             error: Some(format!("build_context failed: {e}")),
         },
     }
