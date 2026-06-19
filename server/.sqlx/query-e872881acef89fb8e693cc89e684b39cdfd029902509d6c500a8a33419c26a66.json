@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,\n                    status AS \"status!\", priority, owner, labels::text AS \"labels!\", acceptance_criteria::text AS \"acceptance_criteria!\",\n                    reopen_count, continuation_count, verification_failure_count,\n                    total_reopen_count, total_verification_failure_count,\n                    intervention_count, last_intervention_at,\n                    created_at, updated_at, closed_at,\n                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS \"memory_refs!\",\n                    agent_type, created_by_user_id,\n                    CAST(0 AS BIGINT) AS \"unresolved_blocker_count!: i64\"\n             FROM tasks WHERE short_id = $1",
+  "query": "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,\n                    status AS \"status!\", priority, owner, labels::text AS \"labels!\", acceptance_criteria::text AS \"acceptance_criteria!\",\n                    reopen_count, continuation_count,\n                    total_reopen_count,\n                    intervention_count, last_intervention_at,\n                    created_at, updated_at, closed_at,\n                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS \"memory_refs!\",\n                    agent_type, created_by_user_id,\n                    CAST(0 AS BIGINT) AS \"unresolved_blocker_count!: i64\"\n             FROM tasks WHERE short_id = $1",
   "describe": {
     "columns": [
       {
@@ -80,81 +80,71 @@
       },
       {
         "ordinal": 15,
-        "name": "verification_failure_count",
-        "type_info": "Int8"
-      },
-      {
-        "ordinal": 16,
         "name": "total_reopen_count",
         "type_info": "Int8"
       },
       {
-        "ordinal": 17,
-        "name": "total_verification_failure_count",
-        "type_info": "Int8"
-      },
-      {
-        "ordinal": 18,
+        "ordinal": 16,
         "name": "intervention_count",
         "type_info": "Int8"
       },
       {
-        "ordinal": 19,
+        "ordinal": 17,
         "name": "last_intervention_at",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 20,
+        "ordinal": 18,
         "name": "created_at",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 21,
+        "ordinal": 19,
         "name": "updated_at",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 22,
+        "ordinal": 20,
         "name": "closed_at",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 23,
+        "ordinal": 21,
         "name": "close_reason",
         "type_info": "Text"
       },
       {
-        "ordinal": 24,
+        "ordinal": 22,
         "name": "merge_commit_sha",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 25,
+        "ordinal": 23,
         "name": "pr_url",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 26,
+        "ordinal": 24,
         "name": "merge_conflict_metadata",
         "type_info": "Text"
       },
       {
-        "ordinal": 27,
+        "ordinal": 25,
         "name": "memory_refs!",
         "type_info": "Text"
       },
       {
-        "ordinal": 28,
+        "ordinal": 26,
         "name": "agent_type",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 29,
+        "ordinal": 27,
         "name": "created_by_user_id",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 30,
+        "ordinal": 28,
         "name": "unresolved_blocker_count!: i64",
         "type_info": "Int8"
       }
@@ -182,8 +172,6 @@
       false,
       false,
       false,
-      false,
-      false,
       true,
       false,
       false,
@@ -198,5 +186,5 @@
       null
     ]
   },
-  "hash": "96c00cdebd70afb63c7f7f176f072095021a552139477db560b678bee1569484"
+  "hash": "e872881acef89fb8e693cc89e684b39cdfd029902509d6c500a8a33419c26a66"
 }

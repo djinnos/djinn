@@ -42,8 +42,6 @@ pub struct ModelEffectivenessRow {
     pub success_rate: Option<f64>,
     /// Average total_reopen_count across closed tasks attributed to this model.
     pub avg_reopens: Option<f64>,
-    /// Fraction of closed tasks with zero verification failures (0.0–1.0).
-    pub verification_pass_rate: Option<f64>,
     /// Cost per completed task. `None` when no completed tasks or all sessions
     /// were unpriced (NULL cost_usd).
     pub cost_per_completed_task: Option<f64>,
@@ -610,9 +608,8 @@ impl UsageAnalyticsRepository {
                     tokens_in,
                     tokens_out,
                     shared_credit_completed_task_count: completed,
-                    success_rate: Some(r.get("success_rate!")),
-                    avg_reopens: r.get("avg_reopens!"),
-                    verification_pass_rate: Some(r.get("verification_pass_rate!")),
+                    success_rate: r.get("success_rate"),
+                    avg_reopens: r.get("avg_reopens"),
                     cost_per_completed_task,
                     tokens_per_task,
                 }
@@ -791,7 +788,6 @@ mod tests {
         assert_eq!(row.shared_credit_completed_task_count, 0);
         assert!(row.success_rate.is_none());
         assert!(row.avg_reopens.is_none());
-        assert!(row.verification_pass_rate.is_none());
         assert!(row.cost_per_completed_task.is_none());
         assert!(row.tokens_per_task.is_none());
     }
@@ -818,7 +814,6 @@ mod tests {
             shared_credit_completed_task_count: 3,
             success_rate: Some(0.67),
             avg_reopens: Some(0.5),
-            verification_pass_rate: Some(0.8),
             cost_per_completed_task: Some(0.41),
             tokens_per_task: Some(50.0),
         };

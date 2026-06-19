@@ -362,10 +362,6 @@ expression: signatures
             "success_rate": {
               "format": "double",
               "type": "number"
-            },
-            "verification_pass_rate": {
-              "format": "double",
-              "type": "number"
             }
           },
           "required": [
@@ -377,7 +373,6 @@ expression: signatures
             "avg_tokens_in",
             "avg_tokens_out",
             "avg_time_seconds",
-            "verification_pass_rate",
             "avg_reopens",
             "completed_task_count",
             "extraction_quality"
@@ -3286,10 +3281,6 @@ expression: signatures
             },
             "updated_at": {
               "type": "string"
-            },
-            "verification_failure_count": {
-              "format": "int64",
-              "type": "integer"
             }
           },
           "required": [
@@ -3307,7 +3298,6 @@ expression: signatures
             "acceptance_criteria",
             "reopen_count",
             "continuation_count",
-            "verification_failure_count",
             "created_at",
             "updated_at"
           ],
@@ -15420,20 +15410,12 @@ expression: signatures
               "format": "int64",
               "type": "integer"
             },
-            "total_verification_failure_count": {
-              "format": "int64",
-              "type": "integer"
-            },
             "unresolved_blocker_count": {
               "format": "int64",
               "type": "integer"
             },
             "updated_at": {
               "type": "string"
-            },
-            "verification_failure_count": {
-              "format": "int64",
-              "type": "integer"
             }
           },
           "required": [
@@ -15451,9 +15433,7 @@ expression: signatures
             "acceptance_criteria",
             "reopen_count",
             "continuation_count",
-            "verification_failure_count",
             "total_reopen_count",
-            "total_verification_failure_count",
             "intervention_count",
             "created_at",
             "updated_at",
