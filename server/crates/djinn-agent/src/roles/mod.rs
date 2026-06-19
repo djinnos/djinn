@@ -463,7 +463,6 @@ mod tests {
             acceptance_criteria: "[]".into(),
             reopen_count: 0,
             continuation_count: 0,
-            verification_failure_count: 0,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
             closed_at: None,
@@ -476,7 +475,6 @@ mod tests {
             created_by_user_id: None,
             unresolved_blocker_count: 0,
             total_reopen_count: 0,
-            total_verification_failure_count: 0,
             intervention_count: 0,
             last_intervention_at: None,
         }

@@ -1,3 +1,4 @@
+// djinn:allow-oversize — agent repository over size-guard threshold; already oversized on main, split when touched substantively.
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Agent;
 
@@ -47,8 +48,6 @@ pub struct AgentMetrics {
     pub success_rate: f64,
     /// Average reopen_count across closed tasks for this role.
     pub avg_reopens: f64,
-    /// Fraction of closed tasks with zero verification failures (0.0–1.0).
-    pub verification_pass_rate: f64,
     /// Number of closed tasks included in calculations.
     pub completed_task_count: i64,
     /// Average total tokens (in + out) per completed session in the window.
@@ -577,8 +576,6 @@ impl AgentRepository {
                 CAST(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END) AS DOUBLE PRECISION)
                     / CAST(GREATEST(1, COUNT(DISTINCT t.id)) AS DOUBLE PRECISION) AS "success_rate: f64",
                 COALESCE(AVG(CAST(t.total_reopen_count AS DOUBLE PRECISION)), 0.0) AS "avg_reopens!: f64",
-                CAST(SUM(CASE WHEN t.total_verification_failure_count = 0 THEN 1 ELSE 0 END) AS DOUBLE PRECISION)
-                    / CAST(GREATEST(1, COUNT(DISTINCT t.id)) AS DOUBLE PRECISION) AS "verification_pass_rate: f64",
                 COUNT(DISTINCT t.id) AS "completed_task_count!: i64"
              FROM tasks t
              WHERE t.project_id = $1
@@ -632,10 +629,6 @@ impl AgentRepository {
                 .and_then(|r| r.success_rate)
                 .unwrap_or(0.0),
             avg_reopens: task_row.as_ref().map(|r| r.avg_reopens).unwrap_or(0.0),
-            verification_pass_rate: task_row
-                .as_ref()
-                .and_then(|r| r.verification_pass_rate)
-                .unwrap_or(0.0),
             completed_task_count: task_row
                 .as_ref()
                 .map(|r| r.completed_task_count)

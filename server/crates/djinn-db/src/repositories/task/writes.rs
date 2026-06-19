@@ -657,36 +657,6 @@ impl TaskRepository {
         Ok(())
     }
 
-    /// Force-set `verification_failure_count` on a task.
-    ///
-    /// Used by tests that drive the verification-failure accounting pipeline;
-    /// production code increments this through the transition path.
-    pub async fn set_verification_failure_count(&self, id: &str, count: i64) -> Result<()> {
-        self.db.ensure_initialized().await?;
-        let id_owned = id.to_owned();
-
-        crate::retry::retry_on_serialization_failure(
-            crate::retry::DEFAULT_MAX_TX_RETRIES,
-            || {
-                let id = id_owned.clone();
-                async move {
-                    sqlx::query!(
-                        r#"UPDATE tasks SET verification_failure_count = $1,
-                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-                         WHERE id = $2"#,
-                        count,
-                        id
-                    )
-                    .execute(self.db.pool())
-                    .await?;
-                    Ok::<_, crate::Error>(())
-                }
-            },
-        )
-        .await?;
-        Ok(())
-    }
-
     /// Reset the reopen/continuation counters and bump intervention counters
     /// atomically. Used by the `task_reset_counters` admin tool when a human
     /// intervenes on a stuck task.

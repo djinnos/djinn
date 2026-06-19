@@ -889,7 +889,7 @@ impl CoordinatorActor {
             match repo
                 .transition(
                     &task.id,
-                    TransitionAction::ReleaseVerification,
+                    TransitionAction::Release,
                     "coordinator",
                     "system",
                     Some("Recovered by coordinator: no active verification pipeline"),

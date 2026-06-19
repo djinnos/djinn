@@ -111,7 +111,7 @@ async fn invalid_transition_returns_error() {
     let err = repo
         .transition(
             &task.id,
-            TransitionAction::SubmitVerification,
+            TransitionAction::SubmitTaskReview,
             "",
             "system",
             None,
