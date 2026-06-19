@@ -50,19 +50,15 @@ pub struct KubernetesConfig {
     /// terminates it (`activeDeadlineSeconds`). Keeps a wedged indexer
     /// subprocess from pinning a Pod indefinitely.
     ///
-    /// Default 3600s (60 minutes). The warm Pod runs the feature-aligned
-    /// cargo base, which compiles the workspace twice — once with
-    /// `--all-features` (clippy + test) and once with default features
-    /// (check + clippy). From Phase 0 data (see the warm-cargo-base-reuse
-    /// case note): a re-warm with `--all-features` alone took ~13 minutes
-    /// (clippy 4m12s + test 8m51s), the first cold warm took ~30+ minutes.
-    /// Adding a default-features pass adds an estimated ~3-10 minutes
-    /// (fewer crates compiled). So the dual-pass worst case is a cold first
-    /// warm at ~40 minutes; 3600s leaves ~20 minutes of margin. Warm Jobs
+    /// Default 3600s (60 minutes). The warm Pod runs a single default-features
+    /// cargo pass (clippy + build + test-compile) matching the worker's feature
+    /// set. From Phase 0 data: a default-features re-warm took ~10 minutes,
+    /// and a cold first warm for a ~12-crate workspace took ~20-25 minutes.
+    /// 3600s leaves ample margin for the single-pass worst case. Warm Jobs
     /// run in the background and don't affect worker latency, so a generous
     /// deadline is safe. Tunable per deployment via
-    /// `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS`; raise it (e.g. to 5400) if a
-    /// larger workspace consistently hits the deadline.
+    /// `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS`; raise it if a larger workspace
+    /// consistently hits the deadline.
     pub warm_job_timeout_seconds: i64,
     /// MySQL DSN forwarded to the warm Pod so `djinn-agent-worker
     /// warm-graph` can reuse the server's backing MySQL instance.
@@ -138,11 +134,7 @@ impl KubernetesConfig {
             cache_pvc: "djinn-cache".into(),
             server_addr: "djinn.djinn.svc.cluster.local:8443".into(),
             warm_job_ttl_seconds: 300,
-            // Bumped from 3600 to 5400s: the warm pass now also COMPILES the
-            // test binaries (`nextest run --no-run` / `cargo test --no-run`) so
-            // worker/verify test runs reuse them. That adds a test-codegen pass
-            // on top of the clippy+build passes, lengthening the cold first warm.
-            warm_job_timeout_seconds: 5400,
+            warm_job_timeout_seconds: 3600,
             database_url: None,
             task_run_active_deadline_seconds: 10800,
             task_run_termination_grace_period_seconds: 60,
@@ -180,7 +172,7 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_CACHE_PVC` | `cache_pvc` | `djinn-cache` |
     /// | `DJINN_K8S_SERVER_ADDR` | `server_addr` | `djinn.djinn.svc.cluster.local:8443` |
     /// | `DJINN_K8S_WARM_JOB_TTL_SECONDS` | `warm_job_ttl_seconds` | `300` (parsed as `i32`) |
-    /// | `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS` | `warm_job_timeout_seconds` | `5400` (parsed as `i64`) |
+    /// | `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS` | `warm_job_timeout_seconds` | `3600` (parsed as `i64`) |
     /// | `DJINN_DATABASE_URL` | `database_url` | _(unset → warm Pod has no fallback; helm chart projects this via the `djinn-server` ConfigMap)_ |
     /// | `DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS` | `task_run_active_deadline_seconds` | `10800` (parsed as `u64`) |
     /// | `DJINN_K8S_TASK_RUN_TERMINATION_GRACE_PERIOD_SECONDS` | `task_run_termination_grace_period_seconds` | `60` (parsed as `i64`) |
@@ -445,22 +437,19 @@ mod tests {
         }
     }
 
-    /// The default `warm_job_timeout_seconds` must accommodate the dual-pass
-    /// feature-aligned warm PLUS the test-compile pass: an `--all-features`
-    /// clippy pass, a default-features clippy pass, the build fallback, AND a
-    /// `nextest run --no-run` / `cargo test --no-run` test-codegen pass so
-    /// worker/verify test runs reuse the warm test binaries. The added test
-    /// pass pushes the worst cold case well past 40 min, so the default is
-    /// raised to 5400s (90 min). Dropping it below 3600 would silently
-    /// deadline-kill the first cold warm of a new project, producing an empty
-    /// warm base. This regression guard fails loudly if that happens.
+    /// The default `warm_job_timeout_seconds` must accommodate a single
+    /// default-features warm pass: clippy + build fallback + test-compile
+    /// (`nextest run --no-run` / `cargo test --no-run`). The worst cold case
+    /// for a ~12-crate workspace is ~25 minutes; 3600s (60 min) leaves ample
+    /// margin. This regression guard fails loudly if the default is reduced
+    /// below 3600.
     #[test]
-    fn warm_job_timeout_default_accommodates_dual_pass_warm() {
+    fn warm_job_timeout_default_accommodates_single_pass_warm() {
         let cfg = KubernetesConfig::for_testing();
         assert!(
             cfg.warm_job_timeout_seconds >= 3600,
             "default warm_job_timeout_seconds is {} but must be >= 3600 \
-             (60 min) to cover a cold dual-pass + test-compile warm with margin",
+             (60 min) to cover a cold single-pass + test-compile warm with margin",
             cfg.warm_job_timeout_seconds,
         );
     }
