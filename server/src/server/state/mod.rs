@@ -1253,9 +1253,6 @@ impl AppState {
         // Coordinator + slot pool (the dispatch engine) + runtime settings.
         self.initialize_agents().await;
 
-        // Prune stale verification cache entries (>7 days old).
-        self.prune_verification_cache_on_startup().await;
-
         // One-shot backfill of pre-existing blobless mirrors to full mirrors.
         // Idempotent + serialized per-project by the mirror lock.
         let backfill_self = self.clone();
@@ -1497,15 +1494,6 @@ impl AppState {
                     "pricing backfill failed — sessions with NULL snapshots remain"
                 );
             }
-        }
-    }
-
-    async fn prune_verification_cache_on_startup(&self) {
-        use djinn_db::VerificationCacheRepository;
-        let repo = VerificationCacheRepository::new(self.db().clone());
-        match repo.prune_older_than(7).await {
-            Ok(()) => tracing::debug!("pruned stale verification cache entries"),
-            Err(e) => tracing::warn!(error = %e, "failed to prune verification cache"),
         }
     }
 

@@ -92,27 +92,26 @@ pub fn resolve_cargo_cache_policy(
     project_root: &Path,
     env_config: Option<&EnvironmentConfig>,
 ) -> Option<CargoCachePolicy> {
-    if let Some(cfg) = env_config {
-        if let Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_policy)) =
+    if let Some(cfg) = env_config
+        && let Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_policy)) =
             &cfg.cargo_cache_policy
-        {
-            return Some(CargoCachePolicy {
-                workspace: override_policy.workspace,
-                features: override_policy.features.clone(),
-                all_features: override_policy.all_features,
-                sccache: override_policy.sccache,
-                incremental: override_policy.incremental,
-                warm_commands: override_policy
-                    .warm_commands
-                    .iter()
-                    .map(|command| CargoWarmCommand {
-                        label: "override",
-                        args: command.args.clone(),
-                        feature_args: Vec::new(),
-                    })
-                    .collect(),
-            });
-        }
+    {
+        return Some(CargoCachePolicy {
+            workspace: override_policy.workspace,
+            features: override_policy.features.clone(),
+            all_features: override_policy.all_features,
+            sccache: override_policy.sccache,
+            incremental: override_policy.incremental,
+            warm_commands: override_policy
+                .warm_commands
+                .iter()
+                .map(|command| CargoWarmCommand {
+                    label: "override",
+                    args: command.args.clone(),
+                    feature_args: Vec::new(),
+                })
+                .collect(),
+        });
     }
 
     let workspace_dir = resolve_cargo_workspace_dir(project_root, env_config)?;
