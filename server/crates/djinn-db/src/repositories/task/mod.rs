@@ -258,7 +258,7 @@ mod tests {
         let err = repo
             .transition(
                 &task.id,
-                TransitionAction::TaskReviewApprove,
+                TransitionAction::TaskReviewStart,
                 "reviewer-1",
                 "reviewer",
                 None,

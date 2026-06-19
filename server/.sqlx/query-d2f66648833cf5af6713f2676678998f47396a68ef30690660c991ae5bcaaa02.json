@@ -1,136 +1,136 @@
 {
-   "describe" : {
-      "parameters" : {
-         "Left" : [
-            "Text"
-         ]
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.status AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.cache_read_tokens, s.cache_write_tokens,\n                    s.task_run_id, s.title,\n                    s.parked_reason AS \"parked_reason?\",\n                    s.cost_usd, s.input_price_per_million_snapshot,\n                    s.output_price_per_million_snapshot,\n                    s.cache_read_price_per_million_snapshot,\n                    s.cache_write_price_per_million_snapshot\n             FROM sessions s\n             INNER JOIN tasks t ON t.id = s.task_id\n             WHERE s.status = 'running' AND s.agent_type = 'planner' AND t.epic_id = $1\n             ORDER BY s.started_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
       },
-      "columns" : [
-         {
-            "ordinal" : 0,
-            "name" : "id",
-            "type_info" : "Varchar"
-         },
-         {
-            "type_info" : "Varchar",
-            "name" : "project_id",
-            "ordinal" : 1
-         },
-         {
-            "ordinal" : 2,
-            "name" : "task_id",
-            "type_info" : "Varchar"
-         },
-         {
-            "name" : "model_id",
-            "type_info" : "Varchar",
-            "ordinal" : 3
-         },
-         {
-            "type_info" : "Varchar",
-            "name" : "agent_type",
-            "ordinal" : 4
-         },
-         {
-            "ordinal" : 5,
-            "name" : "started_at",
-            "type_info" : "Varchar"
-         },
-         {
-            "type_info" : "Varchar",
-            "name" : "ended_at",
-            "ordinal" : 6
-         },
-         {
-            "name" : "status!",
-            "type_info" : "Varchar",
-            "ordinal" : 7
-         },
-         {
-            "type_info" : "Int8",
-            "name" : "tokens_in",
-            "ordinal" : 8
-         },
-         {
-            "type_info" : "Int8",
-            "name" : "tokens_out",
-            "ordinal" : 9
-         },
-         {
-            "name" : "cache_read_tokens",
-            "type_info" : "Int8",
-            "ordinal" : 10
-         },
-         {
-            "type_info" : "Int8",
-            "name" : "cache_write_tokens",
-            "ordinal" : 11
-         },
-         {
-            "ordinal" : 12,
-            "type_info" : "Varchar",
-            "name" : "task_run_id"
-         },
-         {
-            "type_info" : "Varchar",
-            "name" : "title",
-            "ordinal" : 13
-         },
-         {
-            "ordinal" : 14,
-            "name" : "parked_reason?",
-            "type_info" : "Text"
-         },
-         {
-            "ordinal" : 15,
-            "type_info" : "Float8",
-            "name" : "cost_usd"
-         },
-         {
-            "ordinal" : 16,
-            "type_info" : "Float8",
-            "name" : "input_price_per_million_snapshot"
-         },
-         {
-            "ordinal" : 17,
-            "type_info" : "Float8",
-            "name" : "output_price_per_million_snapshot"
-         },
-         {
-            "name" : "cache_read_price_per_million_snapshot",
-            "type_info" : "Float8",
-            "ordinal" : 18
-         },
-         {
-            "ordinal" : 19,
-            "name" : "cache_write_price_per_million_snapshot",
-            "type_info" : "Float8"
-         }
-      ],
-      "nullable" : [
-         false,
-         true,
-         true,
-         false,
-         false,
-         false,
-         true,
-         false,
-         false,
-         false,
-         false,
-         false,
-         true,
-         true,
-         true,
-         true,
-         true,
-         true,
-         true,
-         true
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "task_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "model_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "agent_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "started_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "ended_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "status!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "tokens_in",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "tokens_out",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "cache_read_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "cache_write_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
+        "name": "task_run_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 14,
+        "name": "parked_reason?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "cost_usd",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 16,
+        "name": "input_price_per_million_snapshot",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 17,
+        "name": "output_price_per_million_snapshot",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 18,
+        "name": "cache_read_price_per_million_snapshot",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 19,
+        "name": "cache_write_price_per_million_snapshot",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
       ]
-   },
-   "db_name" : "PostgreSQL",
-   "hash" : "d2f66648833cf5af6713f2676678998f47396a68ef30690660c991ae5bcaaa02",
-   "query" : "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.status AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.cache_read_tokens, s.cache_write_tokens,\n                    s.task_run_id, s.title,\n                    s.parked_reason AS \"parked_reason?\",\n                    s.cost_usd, s.input_price_per_million_snapshot,\n                    s.output_price_per_million_snapshot,\n                    s.cache_read_price_per_million_snapshot,\n                    s.cache_write_price_per_million_snapshot\n             FROM sessions s\n             INNER JOIN tasks t ON t.id = s.task_id\n             WHERE s.status = 'running' AND s.agent_type = 'planner' AND t.epic_id = $1\n             ORDER BY s.started_at DESC"
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "d2f66648833cf5af6713f2676678998f47396a68ef30690660c991ae5bcaaa02"
 }
