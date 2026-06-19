@@ -299,10 +299,10 @@ impl UsageAnalyticsRepository {
         let sql = format!(
             "SELECT \
                 COUNT(*)                          AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in), 0)     AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)    AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens), 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens), 0) AS \"cache_write_tokens!\", \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)     AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)    AS \"tokens_out!\", \
+                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS \"cache_read_tokens!\", \
+                COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS \"cache_write_tokens!\", \
                 CASE \
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
@@ -336,17 +336,17 @@ impl UsageAnalyticsRepository {
             "SELECT \
                 substring(s.started_at, 1, 10)    AS \"day!\", \
                 COUNT(*)                          AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in), 0)     AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)    AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens), 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens), 0) AS \"cache_write_tokens!\", \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)     AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)    AS \"tokens_out!\", \
+                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS \"cache_read_tokens!\", \
+                COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS \"cache_write_tokens!\", \
                 CASE \
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
                 END AS \"total_cost_usd\" \
              {from_clause} {where_clause} \
              GROUP BY substring(s.started_at, 1, 10) \
-             ORDER BY day"
+             ORDER BY 1"
         );
 
         let query = sqlx::query(&sql);
@@ -378,17 +378,17 @@ impl UsageAnalyticsRepository {
                 {group_expr}                     AS \"group_key!\", \
                 substring(s.started_at, 1, 10)   AS \"day!\", \
                 COUNT(*)                         AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in), 0)    AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)   AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens), 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens), 0) AS \"cache_write_tokens!\", \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)    AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)   AS \"tokens_out!\", \
+                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS \"cache_read_tokens!\", \
+                COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS \"cache_write_tokens!\", \
                 CASE \
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
                 END AS \"total_cost_usd\" \
              {from_clause} {where_clause} \
              GROUP BY {group_expr}, substring(s.started_at, 1, 10) \
-             ORDER BY day, group_key"
+             ORDER BY 2, 1"
         );
 
         let query = sqlx::query(&sql);
@@ -501,30 +501,76 @@ impl UsageAnalyticsRepository {
         //     (model_id, task_id) pairs, using task properties from the
         //     tasks table (which are functionally dependent on task_id).
         let sql = format!(
-            "SELECT \
-                s.model_id                               AS \"model_id!\", \
-                COUNT(*)                                 AS \"sessions!\", \
-                CASE \
-                    WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
-                    ELSE SUM(s.cost_usd) \
-                END                                      AS \"spend_usd\", \
-                COALESCE(SUM(s.tokens_in), 0)            AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)           AS \"tokens_out!\", \
-                COUNT(DISTINCT \
-                    CASE WHEN t.status = 'closed' \
-                              AND t.close_reason = 'completed' \
-                         THEN t.id END \
-                )                                        AS \"shared_credit_completed_task_count!\", \
-                CAST(SUM(CASE WHEN t.status = 'closed' AND t.close_reason = 'completed' THEN 1 ELSE 0 END) AS DOUBLE PRECISION) \
-                    / CAST(GREATEST(1, COUNT(DISTINCT \
-                        CASE WHEN t.status = 'closed' THEN t.id END \
-                    )) AS DOUBLE PRECISION)              AS \"success_rate: f64\", \
-                COALESCE(AVG(CASE WHEN t.status = 'closed' \
-                    THEN CAST(t.total_reopen_count AS DOUBLE PRECISION) \
-                    ELSE NULL END), 0.0)                 AS \"avg_reopens!: f64\", \
-             {from_clause} {where_clause} \
-             GROUP BY s.model_id \
-             ORDER BY s.model_id"
+            "WITH filtered_sessions AS ( \
+                SELECT \
+                    s.model_id, \
+                    s.task_id, \
+                    s.cost_usd, \
+                    s.tokens_in, \
+                    s.tokens_out, \
+                    t.status, \
+                    t.close_reason, \
+                    t.total_reopen_count, \
+                    t.total_verification_failure_count \
+                {from_clause} {where_clause} \
+             ), \
+             session_agg AS ( \
+                SELECT \
+                    model_id, \
+                    COUNT(*) AS sessions, \
+                    CASE WHEN bool_or(cost_usd IS NULL) \
+                         THEN NULL ELSE SUM(cost_usd) END AS spend_usd, \
+                    COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
+                    COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out \
+                FROM filtered_sessions \
+                GROUP BY model_id \
+             ), \
+             task_agg AS ( \
+                SELECT \
+                    model_id, \
+                    COUNT(DISTINCT \
+                        CASE WHEN status = 'closed' \
+                                  AND close_reason = 'completed' \
+                             THEN task_id END) AS completed_count, \
+                    COUNT(DISTINCT \
+                        CASE WHEN status = 'closed' \
+                             THEN task_id END) AS closed_count, \
+                    AVG(CASE WHEN status = 'closed' \
+                             THEN total_reopen_count::DOUBLE PRECISION \
+                             ELSE NULL END) AS avg_reopens, \
+                    COUNT(DISTINCT \
+                        CASE WHEN status = 'closed' \
+                                  AND total_verification_failure_count = 0 \
+                             THEN task_id END) AS verified_count \
+                FROM ( \
+                    SELECT DISTINCT \
+                        model_id, task_id, status, close_reason, \
+                        total_reopen_count, total_verification_failure_count \
+                    FROM filtered_sessions \
+                ) distinct_tasks \
+                GROUP BY model_id \
+             ) \
+             SELECT \
+                 sa.model_id                                AS \"model_id!\", \
+                 sa.sessions                                AS \"sessions!\", \
+                 sa.spend_usd                               AS \"spend_usd\", \
+                 sa.tokens_in                               AS \"tokens_in!\", \
+                 sa.tokens_out                              AS \"tokens_out!\", \
+                 COALESCE(ta.completed_count, 0)            AS \"shared_credit_completed_task_count!\", \
+                 COALESCE( \
+                     ta.completed_count::DOUBLE PRECISION \
+                     / GREATEST(1, ta.closed_count)::DOUBLE PRECISION, \
+                     0.0 \
+                 )                                          AS \"success_rate!: f64\", \
+                 COALESCE(ta.avg_reopens, 0.0)              AS \"avg_reopens!: f64\", \
+                 COALESCE( \
+                     ta.verified_count::DOUBLE PRECISION \
+                     / GREATEST(1, ta.closed_count)::DOUBLE PRECISION, \
+                     0.0 \
+                 )                                          AS \"verification_pass_rate!: f64\" \
+             FROM session_agg sa \
+             LEFT JOIN task_agg ta ON ta.model_id = sa.model_id \
+             ORDER BY sa.model_id"
         );
 
         let mut query = sqlx::query(&sql);
@@ -591,11 +637,11 @@ impl UsageAnalyticsRepository {
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
                 END                                      AS \"spend_usd\", \
-                COALESCE(SUM(s.tokens_in), 0)            AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)           AS \"tokens_out!\" \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)            AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)           AS \"tokens_out!\" \
              {from_clause} {where_clause} \
              GROUP BY COALESCE(s.project_id, ''), s.model_id \
-             ORDER BY project_id, model_id"
+             ORDER BY 1, 2"
         );
 
         let query = sqlx::query(&sql);
