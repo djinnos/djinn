@@ -219,6 +219,7 @@ pub struct HealthReport {
 pub struct LifecycleHealth {
     pub active_notes: i64,
     pub archived_notes: i64,
+    pub deprecated_notes: i64,
 }
 
 /// Most recent housekeeping/operator lifecycle sweep counters surfaced through

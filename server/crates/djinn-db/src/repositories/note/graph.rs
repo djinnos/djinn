@@ -231,6 +231,13 @@ impl NoteRepository {
         .fetch_one(self.db.pool())
         .await?;
 
+        let deprecated_notes: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM notes WHERE project_id = $1 AND status = 'deprecated'"#,
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+
         let recent_sweep_row = sqlx::query(
             r#"SELECT completed_at,
                       CAST(decayed_note_count AS BIGINT) AS decayed_note_count,
@@ -282,6 +289,7 @@ impl NoteRepository {
             lifecycle: LifecycleHealth {
                 active_notes,
                 archived_notes,
+                deprecated_notes,
             },
             recent_sweep,
         })
