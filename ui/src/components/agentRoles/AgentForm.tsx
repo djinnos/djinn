@@ -4,9 +4,11 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import {
   type AvailableMcpServer,
   type AvailableSkill,
+  type Agent,
   type BaseRole,
   type CreateAgentRequest,
 } from "@/api/agents";
+import { LearnedPromptSection } from "@/components/agentRoles/LearnedPromptSection";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -31,6 +33,9 @@ export interface AgentFormProps {
   isBusy: boolean;
   availableMcpServers: AvailableMcpServer[];
   availableSkills: AvailableSkill[];
+  learnedPromptRole?: Agent;
+  canClearLearnedPrompt?: boolean;
+  onLearnedPromptCleared?: () => void;
   onSubmit: (data: Omit<CreateAgentRequest, "project_id">) => void;
   onCancel: () => void;
 }
@@ -62,6 +67,9 @@ export function AgentForm({
   isBusy,
   availableMcpServers,
   availableSkills,
+  learnedPromptRole,
+  canClearLearnedPrompt = false,
+  onLearnedPromptCleared,
   onSubmit,
   onCancel,
 }: AgentFormProps) {
@@ -75,7 +83,6 @@ export function AgentForm({
   );
   const [mcpServers, setMcpServers] = useState<string[]>(initial?.mcp_servers ?? []);
   const [skills, setSkills] = useState<string[]>(initial?.skills ?? []);
-  const [verificationCommand, setVerificationCommand] = useState(initial?.verification_command ?? "");
 
   let formTitle = "New specialist";
   if (isDefaultEdit) {
@@ -96,7 +103,6 @@ export function AgentForm({
         .filter(Boolean),
       mcp_servers: mcpServers,
       skills,
-      verification_command: verificationCommand.trim() || null,
     });
   };
 
@@ -217,6 +223,14 @@ export function AgentForm({
             className="font-mono text-sm min-h-[200px] resize-none"
           />
         </div>
+
+        {learnedPromptRole && learnedPromptRole.learned_prompt !== null && (
+          <LearnedPromptSection
+            role={learnedPromptRole}
+            canClear={canClearLearnedPrompt}
+            onCleared={onLearnedPromptCleared}
+          />
+        )}
 
         {/* MCP Servers */}
         <div className="space-y-2">
@@ -343,19 +357,6 @@ export function AgentForm({
               })}
             </div>
           )}
-        </div>
-
-        {/* Verification command */}
-        <div className="space-y-2">
-          <Label htmlFor="role-verification-command" className="text-xs text-muted-foreground block">
-            Verification command
-          </Label>
-          <Input
-            id="role-verification-command"
-            placeholder="e.g. pnpm test"
-            value={verificationCommand}
-            onChange={(e) => setVerificationCommand(e.target.value)}
-          />
         </div>
       </div>
     </form>

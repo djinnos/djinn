@@ -15,7 +15,6 @@ export interface Agent {
   mcp_servers: string[];
   skills: string[];
   model_preference: string | null;
-  verification_command: string | null;
   is_default: boolean;
   learned_prompt: string | null;
 }
@@ -43,7 +42,6 @@ export interface CreateAgentRequest {
   mcp_servers?: string[];
   skills?: string[];
   model_preference?: string | null;
-  verification_command?: string | null;
 }
 
 export interface UpdateAgentRequest {
@@ -53,7 +51,6 @@ export interface UpdateAgentRequest {
   mcp_servers?: string[];
   skills?: string[];
   model_preference?: string | null;
-  verification_command?: string | null;
 }
 
 // ── Available MCP Servers & Skills ──────────────────────────────────────────
@@ -163,7 +160,6 @@ export interface AgentMetrics {
   avg_tokens_in: number | null;
   avg_tokens_out: number | null;
   avg_time_to_complete_seconds: number | null;
-  verification_pass_rate: number | null;
   reopen_rate: number | null;
   /** trend: positive = improving, negative = declining, null = not enough data */
   success_rate_trend: number | null;
