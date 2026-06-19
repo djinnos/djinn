@@ -1,0 +1,191 @@
+{
+   "db_name" : "PostgreSQL",
+   "describe" : {
+      "columns" : [
+         {
+            "name" : "id",
+            "ordinal" : 0,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "project_id",
+            "ordinal" : 1,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "short_id",
+            "ordinal" : 2,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "epic_id",
+            "ordinal" : 3,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "title",
+            "ordinal" : 4,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "description",
+            "ordinal" : 5,
+            "type_info" : "Text"
+         },
+         {
+            "name" : "design",
+            "ordinal" : 6,
+            "type_info" : "Text"
+         },
+         {
+            "name" : "issue_type",
+            "ordinal" : 7,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "status!",
+            "ordinal" : 8,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "priority",
+            "ordinal" : 9,
+            "type_info" : "Int8"
+         },
+         {
+            "name" : "owner",
+            "ordinal" : 10,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "labels!",
+            "ordinal" : 11,
+            "type_info" : "Text"
+         },
+         {
+            "name" : "acceptance_criteria!",
+            "ordinal" : 12,
+            "type_info" : "Text"
+         },
+         {
+            "name" : "reopen_count",
+            "ordinal" : 13,
+            "type_info" : "Int8"
+         },
+         {
+            "name" : "continuation_count",
+            "ordinal" : 14,
+            "type_info" : "Int8"
+         },
+         {
+            "name" : "total_reopen_count",
+            "ordinal" : 16,
+            "type_info" : "Int8"
+         },
+         {
+            "name" : "intervention_count",
+            "ordinal" : 18,
+            "type_info" : "Int8"
+         },
+         {
+            "name" : "last_intervention_at",
+            "ordinal" : 19,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "created_at",
+            "ordinal" : 20,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "updated_at",
+            "ordinal" : 21,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "closed_at",
+            "ordinal" : 22,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "close_reason",
+            "ordinal" : 23,
+            "type_info" : "Text"
+         },
+         {
+            "name" : "merge_commit_sha",
+            "ordinal" : 24,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "pr_url",
+            "ordinal" : 25,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "merge_conflict_metadata",
+            "ordinal" : 26,
+            "type_info" : "Text"
+         },
+         {
+            "name" : "memory_refs!",
+            "ordinal" : 27,
+            "type_info" : "Text"
+         },
+         {
+            "name" : "agent_type",
+            "ordinal" : 28,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "created_by_user_id",
+            "ordinal" : 29,
+            "type_info" : "Varchar"
+         },
+         {
+            "name" : "unresolved_blocker_count!: i64",
+            "ordinal" : 30,
+            "type_info" : "Int8"
+         }
+      ],
+      "nullable" : [
+         false,
+         false,
+         false,
+         true,
+         false,
+         false,
+         false,
+         false,
+         false,
+         false,
+         false,
+         null,
+         null,
+         false,
+         false,
+         false,
+         false,
+         true,
+         false,
+         false,
+         true,
+         true,
+         true,
+         true,
+         true,
+         null,
+         true,
+         true,
+         null
+      ],
+      "parameters" : {
+         "Left" : [
+            "Text",
+            "Text"
+         ]
+      }
+   },
+   "hash" : "9f46742a5725770b52daebffa6390f7fd4f0c109fc0ed52a8807f6e085164cdb",
+   "query" : "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,\n                    status AS \"status!\", priority, owner, labels::text AS \"labels!\", acceptance_criteria::text AS \"acceptance_criteria!\",\n                    reopen_count, continuation_count, total_reopen_count, total_intervention_count, last_intervention_at,\n                    created_at, updated_at, closed_at,\n                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS \"memory_refs!\",\n                    agent_type, created_by_user_id,\n                    CAST(0 AS BIGINT) AS \"unresolved_blocker_count!: i64\"\n             FROM tasks WHERE id = $1 OR short_id = $2"
+}

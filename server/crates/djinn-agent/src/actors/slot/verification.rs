@@ -86,7 +86,7 @@ where
                 if let Err(transition_err) = repo
                     .transition(
                         &task_id,
-                        TransitionAction::ReleaseVerification,
+                        TransitionAction::Release,
                         "agent-supervisor",
                         "system",
                         Some(&format!("verification pipeline error: {e}")),
@@ -112,7 +112,7 @@ where
                 if let Err(transition_err) = repo
                     .transition(
                         &task_id,
-                        TransitionAction::ReleaseVerification,
+                        TransitionAction::Release,
                         "agent-supervisor",
                         "system",
                         Some(&format!(
@@ -334,7 +334,7 @@ async fn run_verification_pipeline(
     if let Err(e) = task_repo
         .transition(
             task_id,
-            TransitionAction::VerificationPass,
+            TransitionAction::SubmitTaskReview,
             "agent-supervisor",
             "system",
             None,
@@ -955,11 +955,11 @@ async fn handle_verification_failure(
         .await
         .ok()
         .flatten()
-        .map(|t| t.verification_failure_count)
+        .map(|t| t.reopen_count)
         .unwrap_or(0);
 
-    // VerificationFail increments the count, so the post-transition count
-    // will be current_count + 1.
+    // VerificationFail previously incremented the count. Since verification is
+    // removed, we use reopen_count as a proxy for failure threshold.
     if current_count + 1 >= VERIFICATION_ESCALATION_THRESHOLD {
         tracing::warn!(
             task_id = %task_id,
@@ -972,9 +972,9 @@ async fn handle_verification_failure(
             current_count + 1,
             feedback
         );
-        // Single transition: verifying → needs_pm_intervention.
+        // Single transition: needs_lead_intervention.
         // `transition` already retries internally on 40001/40P01; a persistent
-        // failure here would leave the task in `verifying` — surface it.
+        // failure here would leave the task stuck — surface it.
         if let Err(e) = task_repo
             .transition(
                 task_id,
@@ -989,7 +989,7 @@ async fn handle_verification_failure(
             tracing::error!(
                 task_id = %task_id,
                 error = %e,
-                "Failed to escalate task to `needs_lead_intervention` after consecutive verification failures; task may stay in `verifying`"
+                "Failed to escalate task to `needs_lead_intervention` after consecutive verification failures; task may stay stuck"
             );
         }
     } else {
@@ -998,7 +998,7 @@ async fn handle_verification_failure(
         if let Err(e) = task_repo
             .transition(
                 task_id,
-                TransitionAction::VerificationFail,
+                TransitionAction::Reopen,
                 "agent-supervisor",
                 "system",
                 Some(feedback),

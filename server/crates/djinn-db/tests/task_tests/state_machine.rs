@@ -107,11 +107,11 @@ async fn invalid_transition_returns_error() {
         "expected InvalidTransition, got {err:?}"
     );
 
-    // Can't submit_verification from open (must be in_progress).
+    // Can't submit_task_review from open (must be in_progress).
     let err = repo
         .transition(
             &task.id,
-            TransitionAction::SubmitVerification,
+            TransitionAction::SubmitTaskReview,
             "",
             "system",
             None,

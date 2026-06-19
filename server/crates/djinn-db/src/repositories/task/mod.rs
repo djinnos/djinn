@@ -145,25 +145,12 @@ mod tests {
             .unwrap();
         assert_eq!(in_progress.status, TaskStatus::InProgress.as_str());
 
-        let verifying = repo
-            .transition(
-                &task.id,
-                TransitionAction::SubmitVerification,
-                "worker-1",
-                "worker",
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(verifying.status, TaskStatus::Verifying.as_str());
-
         let needs_review = repo
             .transition(
                 &task.id,
-                TransitionAction::VerificationPass,
-                "verification-1",
-                "verification",
+                TransitionAction::SubmitTaskReview,
+                "worker-1",
+                "worker",
                 None,
                 None,
             )
@@ -271,9 +258,9 @@ mod tests {
         let err = repo
             .transition(
                 &task.id,
-                TransitionAction::VerificationPass,
-                "verification-1",
-                "verification",
+                TransitionAction::TaskReviewStart,
+                "reviewer-1",
+                "reviewer",
                 None,
                 None,
             )
@@ -797,8 +784,8 @@ macro_rules! task_select_where_id {
             ::djinn_core::models::Task,
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                 status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
-                reopen_count, continuation_count, verification_failure_count,
-                total_reopen_count, total_verification_failure_count,
+                reopen_count, continuation_count,
+                total_reopen_count,
                 intervention_count, last_intervention_at,
                 created_at, updated_at, closed_at,
                 close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",

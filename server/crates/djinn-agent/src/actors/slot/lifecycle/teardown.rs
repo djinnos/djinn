@@ -152,7 +152,7 @@ pub(crate) async fn apply_transition_and_dispatch(
             "Lifecycle: applying session transition"
         );
         let is_conflict_rejection = action == TransitionAction::TaskReviewRejectConflict;
-        let is_submit_verification = action == TransitionAction::SubmitVerification;
+        let is_submit_verification = false;
         let is_orphaned_tool_call = reason
             .as_deref()
             .map(super::super::reply_loop::error_handling::is_orphaned_tool_call_error_str)

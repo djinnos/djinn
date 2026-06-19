@@ -156,21 +156,14 @@ fn setup_verifying_task_with_count_blocking(count: i64) -> (TaskRepository, Stri
                 task_repo
                     .transition(
                         &task.id,
-                        TransitionAction::SubmitVerification,
+                        TransitionAction::SubmitTaskReview,
                         "test",
                         "system",
                         None,
                         None,
                     )
                     .await
-                    .expect("transition to verifying");
-
-                if count > 0 {
-                    task_repo
-                        .set_verification_failure_count(&task.id, count)
-                        .await
-                        .expect("set verification_failure_count");
-                }
+                    .expect("transition to needs_task_review");
 
                 (task_repo, task.id, app_state)
             })
@@ -202,21 +195,14 @@ async fn setup_verifying_task_with_count(count: i64) -> (TaskRepository, String,
     task_repo
         .transition(
             &task.id,
-            TransitionAction::SubmitVerification,
+            TransitionAction::SubmitTaskReview,
             "test",
             "system",
             None,
             None,
         )
         .await
-        .expect("transition to verifying");
-
-    if count > 0 {
-        task_repo
-            .set_verification_failure_count(&task.id, count)
-            .await
-            .expect("set verification_failure_count");
-    }
+        .expect("transition to needs_task_review");
 
     (task_repo, task.id, app_state)
 }

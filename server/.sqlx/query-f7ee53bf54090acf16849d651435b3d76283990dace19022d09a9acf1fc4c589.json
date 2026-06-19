@@ -1,0 +1,29 @@
+{
+   "db_name" : "PostgreSQL",
+   "describe" : {
+      "columns" : [],
+      "nullable" : [],
+      "parameters" : {
+         "Left" : [
+            "Varchar",
+            "Int8",
+            "Int8",
+            "Bool",
+            "Bool",
+            "Bool",
+            "Bool",
+            "Bool",
+            "Bool",
+            "Text",
+            "Text",
+            "Bool",
+            "Bool",
+            "Bool",
+            "Text",
+            "Text"
+         ]
+      }
+   },
+   "hash" : "f7ee53bf54090acf16849d651435b3d76283990dace19022d09a9acf1fc4c589",
+   "query" : "UPDATE tasks SET\n                            status = $1,\n                            reopen_count = reopen_count + $2,\n                            total_reopen_count = total_reopen_count + $3,\n                            continuation_count = CASE WHEN $4 THEN 0 WHEN $5 THEN continuation_count + 1 ELSE continuation_count END,\n                            intervention_count = CASE WHEN $6 THEN intervention_count + 1 ELSE intervention_count END,\n                            last_intervention_at = CASE WHEN $7 THEN to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') ELSE last_intervention_at END,\n                            closed_at = CASE\n                                WHEN $8 THEN to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')\n                                WHEN $9 THEN NULL\n                                ELSE closed_at\n                            END,\n                            close_reason = CASE\n                                WHEN $10::text IS NOT NULL THEN $11\n                                WHEN $12 THEN NULL\n                                ELSE close_reason\n                            END,\n                            merge_conflict_metadata = CASE\n                                WHEN $13 THEN NULL\n                                WHEN $14 THEN $15\n                                ELSE merge_conflict_metadata\n                            END,\n                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')\n                         WHERE id = $16"
+}
