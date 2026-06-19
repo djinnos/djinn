@@ -614,27 +614,6 @@ pub(crate) fn warm_cache_env_vars(
     env
 }
 
-/// Cache env vars for verification Pods. Verification reuses the warm
-/// per-project base as a read-only SEED: the worker (`run_verify_task`) seeds
-/// a private run target dir from the warm base and overrides `CARGO_TARGET_DIR`
-/// to point there before running `verify_commit`, so it never writes the shared
-/// base or contends on Cargo's build-dir lock. `CARGO_INCREMENTAL` is derived
-/// from the policy (same logic as `warm_cache_env_vars`).
-pub(crate) fn verify_cache_env_vars(
-    project_id: &str,
-    policy: Option<&djinn_stack::environment::CargoCachePolicy>,
-) -> Vec<EnvVar> {
-    let mut env = cache_env_vars(project_id);
-    let incremental = match policy {
-        Some(djinn_stack::environment::CargoCachePolicy::Explicit(override_)) => {
-            if override_.sccache { "0" } else { "1" }
-        }
-        _ => "0",
-    };
-    env.push(env_var("CARGO_INCREMENTAL", incremental));
-    env
-}
-
 /// Cache env vars for task-run Pods. The target dir is private to the canonical
 /// task run id, not the generated Kubernetes resource name, so task Pods avoid
 /// the shared Cargo build-dir lock while preserving the warm per-project base as
@@ -1377,12 +1356,6 @@ mod tests {
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        let verify_vars = verify_cache_env_vars(project_id, Some(&policy));
-        let verify_env: BTreeMap<&str, &str> = verify_vars
-            .iter()
-            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
-            .collect();
-
         let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
@@ -1394,11 +1367,6 @@ mod tests {
             warm_env.get("CARGO_INCREMENTAL").copied(),
             Some("1"),
             "warm must enable incremental when policy.sccache=false"
-        );
-        assert_eq!(
-            verify_env.get("CARGO_INCREMENTAL").copied(),
-            Some("1"),
-            "verify must enable incremental when policy.sccache=false"
         );
 
         // Task-run unchanged
@@ -1439,12 +1407,6 @@ mod tests {
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        let verify_vars = verify_cache_env_vars(project_id, Some(&policy));
-        let verify_env: BTreeMap<&str, &str> = verify_vars
-            .iter()
-            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
-            .collect();
-
         let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
@@ -1456,11 +1418,6 @@ mod tests {
             warm_env.get("CARGO_INCREMENTAL").copied(),
             Some("0"),
             "warm must disable incremental when policy.sccache=true"
-        );
-        assert_eq!(
-            verify_env.get("CARGO_INCREMENTAL").copied(),
-            Some("0"),
-            "verify must disable incremental when policy.sccache=true"
         );
 
         // Task-run with sccache=true → incremental disabled, wrapper kept
@@ -1487,13 +1444,6 @@ mod tests {
         assert_eq!(
             warm_vars_none, warm_vars_auto,
             "AutoDetected must match None for warm"
-        );
-
-        let verify_vars_none = verify_cache_env_vars(project_id, None);
-        let verify_vars_auto = verify_cache_env_vars(project_id, Some(&policy));
-        assert_eq!(
-            verify_vars_none, verify_vars_auto,
-            "AutoDetected must match None for verify"
         );
 
         let worker_vars_none = task_run_cache_env_vars(project_id, &task_run_id, None);
