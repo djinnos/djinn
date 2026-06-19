@@ -144,9 +144,9 @@ export const MultiAgentSession = {
   },
 };
 
-const verificationTimeline: TimelineEntry[] = [
+const commandOutputTimeline: TimelineEntry[] = [
   msg("assistant", "worker", [
-    { type: "text", text: "Implementation complete. Running verification commands." },
+    { type: "text", text: "Implementation complete. Running build and test commands." },
   ], { timestamp: minutesAgo(8) }),
   command("pnpm install", true, "Lockfile is up to date, resolution step is skipped\nDependencies are already up to date\nDone in 1.2s", minutesAgo(7)),
   command("pnpm tsc --noEmit", true, "Done in 4.8s", minutesAgo(6)),
@@ -166,9 +166,9 @@ const verificationTimeline: TimelineEntry[] = [
   ], { timestamp: minutesAgo(4) }),
 ];
 
-export const WithVerificationCommands = {
+export const WithCommandOutput = {
   args: {
-    timeline: verificationTimeline,
+    timeline: commandOutputTimeline,
     streamingText: new Map(),
     loading: false,
     error: null,

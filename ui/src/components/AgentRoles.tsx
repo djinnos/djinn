@@ -107,7 +107,6 @@ export function AgentRoles() {
         system_prompt_extensions: data.system_prompt_extensions,
         mcp_servers: data.mcp_servers,
         skills: data.skills,
-        verification_command: data.verification_command,
       };
       const updated = await updateAgent(
         role.id,
@@ -138,6 +137,12 @@ export function AgentRoles() {
     } finally {
       setDeletingId(null);
     }
+  };
+
+  const handleLearnedPromptCleared = (id: string) => {
+    setRoles((prev) =>
+      prev.map((role) => (role.id === id ? { ...role, learned_prompt: null } : role)),
+    );
   };
 
   // Full-page form takeover for create/edit
@@ -171,7 +176,6 @@ export function AgentRoles() {
             system_prompt_extensions: editingRole.system_prompt_extensions,
             mcp_servers: editingRole.mcp_servers,
             skills: editingRole.skills,
-            verification_command: editingRole.verification_command,
           }}
           fixedBaseRole={editingRole.base_role}
           isDefaultEdit={editingRole.is_default}
@@ -179,6 +183,9 @@ export function AgentRoles() {
           isBusy={editBusy}
           availableMcpServers={availableMcpServers}
           availableSkills={availableSkills}
+          learnedPromptRole={editingRole}
+          canClearLearnedPrompt={isAdmin}
+          onLearnedPromptCleared={() => handleLearnedPromptCleared(editingRole.id)}
           onSubmit={(data) => void handleUpdate(editingRole, data)}
           onCancel={() => setEditingId(null)}
         />
@@ -235,6 +242,7 @@ export function AgentRoles() {
                 isDeleting={deletingId === role.id}
                 canEdit={isAdmin}
                 editLabel="Edit instructions"
+                onLearnedPromptCleared={() => handleLearnedPromptCleared(role.id)}
               />
             ))}
           </div>
@@ -276,6 +284,7 @@ export function AgentRoles() {
                 onDelete={() => void handleDelete(role.id)}
                 isDeleting={deletingId === role.id}
                 canEdit={isAdmin}
+                onLearnedPromptCleared={() => handleLearnedPromptCleared(role.id)}
               />
             ))}
           </div>
