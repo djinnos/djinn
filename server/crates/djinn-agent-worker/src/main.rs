@@ -73,7 +73,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use cargo_target_seed::{run_target_dir, seed_cargo_target_dir, teardown_run_dir, warm_base_dir};
+use cargo_target_seed::{
+    CargoTargetSeedFallback, CargoTargetSeedResult, run_target_dir, seed_cargo_target_dir,
+    teardown_run_dir, warm_base_dir,
+};
 use clap::{Parser, Subcommand};
 use djinn_agent::context::AgentContext;
 use djinn_agent::file_time::FileTime;
@@ -401,6 +404,57 @@ fn set_cargo_target_dir_for_children(destination: &Path) {
     unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, destination) };
 }
 
+fn record_cargo_target_seed_result(seed_context: &'static str, result: &CargoTargetSeedResult) {
+    let seed_outcome = if result.cold_started() {
+        "fallback"
+    } else {
+        "hit"
+    };
+    let fallback_reason = if result.cold_started() {
+        cargo_target_seed_fallback_reason(result.fallback_reason.as_ref())
+    } else {
+        ""
+    };
+
+    if result.cold_started() {
+        djinn_telemetry::cargo_target_seed::increment_seed_fallback(fallback_reason);
+    } else {
+        djinn_telemetry::cargo_target_seed::increment_seed_hit();
+    }
+
+    info!(
+        seed_context,
+        seed_outcome,
+        fallback_reason,
+        linked_file_count = result.linked_file_count,
+        copied_file_count = result.copied_file_count,
+        skipped_file_count = result.skipped_file_count,
+        elapsed_ms = result.elapsed.as_millis(),
+        "cargo target seed result"
+    );
+}
+
+fn cargo_target_seed_fallback_reason(reason: Option<&CargoTargetSeedFallback>) -> &'static str {
+    match reason {
+        Some(CargoTargetSeedFallback::BaseMissing) => {
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_MISSING
+        }
+        Some(CargoTargetSeedFallback::BaseNotDirectory) => {
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_NOT_DIRECTORY
+        }
+        Some(CargoTargetSeedFallback::BaseUnusable(_)) => {
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_UNUSABLE
+        }
+        Some(CargoTargetSeedFallback::ScanFailed(_)) => {
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_SCAN_FAILED
+        }
+        Some(CargoTargetSeedFallback::CloneFailed(_)) => {
+            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_CLONE_FAILED
+        }
+        None => djinn_telemetry::cargo_target_seed::FALLBACK_REASON_UNKNOWN,
+    }
+}
+
 async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
     let source_base = warm_base_dir(&spec.project_id);
     let fallback_run_dir = run_target_dir(&spec.task_run_id);
@@ -444,13 +498,13 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
     .await
     {
         Ok(Ok(result)) => {
+            record_cargo_target_seed_result("task_run", &result);
             let fallback_reason = result
                 .fallback_reason
                 .as_ref()
                 .map(std::string::ToString::to_string);
             if result.cold_started() {
                 let fallback_reason = fallback_reason.as_deref().unwrap_or("unknown");
-                cargo_metrics::record_seed_cold(&spec.project_id, fallback_reason);
                 warn!(
                     task_run_id = %spec.task_run_id,
                     project_id = %spec.project_id,
@@ -467,7 +521,6 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
                     "cargo target seed: falling back to cold private target dir"
                 );
             } else {
-                cargo_metrics::record_seed_hit(&spec.project_id);
                 info!(
                     task_run_id = %spec.task_run_id,
                     project_id = %spec.project_id,
@@ -485,6 +538,9 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
             }
         }
         Ok(Err(err)) => {
+            djinn_telemetry::cargo_target_seed::increment_seed_fallback(
+                djinn_telemetry::cargo_target_seed::FALLBACK_REASON_UNKNOWN,
+            );
             warn!(
                 task_run_id = %spec.task_run_id,
                 project_id = %spec.project_id,
@@ -500,6 +556,9 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
             );
         }
         Err(err) => {
+            djinn_telemetry::cargo_target_seed::increment_seed_fallback(
+                djinn_telemetry::cargo_target_seed::FALLBACK_REASON_UNKNOWN,
+            );
             warn!(
                 task_run_id = %spec.task_run_id,
                 project_id = %spec.project_id,
@@ -512,10 +571,6 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
                 skipped_file_count = 0_u64,
                 fallback_reason = %format!("seed task join failed: {err}"),
                 "cargo target seed: proceeding with cold private target dir after setup task failure"
-            );
-            cargo_metrics::record_seed_cold(
-                &spec.project_id,
-                &format!("seed task join failed: {err}"),
             );
         }
     }
@@ -555,6 +610,7 @@ async fn prepare_verify_target_dir(project_id: &str, run_id: &str) -> PathBuf {
     .await
     {
         Ok(Ok(result)) => {
+            record_cargo_target_seed_result("verify", &result);
             if result.cold_started() {
                 warn!(
                     run_id,
@@ -575,22 +631,33 @@ async fn prepare_verify_target_dir(project_id: &str, run_id: &str) -> PathBuf {
                     seed_duration_ms = result.elapsed.as_millis(),
                     linked_file_count = result.linked_file_count,
                     copied_file_count = result.copied_file_count,
+                    skipped_file_count = result.skipped_file_count,
                     "verify cargo target seed: seeded private run target dir"
                 );
             }
         }
-        Ok(Err(err)) => warn!(
-            run_id,
-            project_id,
-            error = %err,
-            "verify cargo target seed: proceeding with cold private target dir after setup error"
-        ),
-        Err(err) => warn!(
-            run_id,
-            project_id,
-            error = %err,
-            "verify cargo target seed: proceeding with cold private target dir after task failure"
-        ),
+        Ok(Err(err)) => {
+            djinn_telemetry::cargo_target_seed::increment_seed_fallback(
+                djinn_telemetry::cargo_target_seed::FALLBACK_REASON_UNKNOWN,
+            );
+            warn!(
+                run_id,
+                project_id,
+                error = %err,
+                "verify cargo target seed: proceeding with cold private target dir after setup error"
+            );
+        }
+        Err(err) => {
+            djinn_telemetry::cargo_target_seed::increment_seed_fallback(
+                djinn_telemetry::cargo_target_seed::FALLBACK_REASON_UNKNOWN,
+            );
+            warn!(
+                run_id,
+                project_id,
+                error = %err,
+                "verify cargo target seed: proceeding with cold private target dir after task failure"
+            );
+        }
     }
 
     run_dir
