@@ -301,10 +301,10 @@ impl UsageAnalyticsRepository {
         let sql = format!(
             "SELECT \
                 COUNT(*)                          AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in), 0)     AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)    AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens), 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens), 0) AS \"cache_write_tokens!\", \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)     AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)    AS \"tokens_out!\", \
+                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS \"cache_read_tokens!\", \
+                COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS \"cache_write_tokens!\", \
                 CASE \
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
@@ -338,17 +338,17 @@ impl UsageAnalyticsRepository {
             "SELECT \
                 substring(s.started_at, 1, 10)    AS \"day!\", \
                 COUNT(*)                          AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in), 0)     AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)    AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens), 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens), 0) AS \"cache_write_tokens!\", \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)     AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)    AS \"tokens_out!\", \
+                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS \"cache_read_tokens!\", \
+                COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS \"cache_write_tokens!\", \
                 CASE \
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
                 END AS \"total_cost_usd\" \
              {from_clause} {where_clause} \
              GROUP BY substring(s.started_at, 1, 10) \
-             ORDER BY day"
+             ORDER BY 1"
         );
 
         let query = sqlx::query(&sql);
@@ -380,17 +380,17 @@ impl UsageAnalyticsRepository {
                 {group_expr}                     AS \"group_key!\", \
                 substring(s.started_at, 1, 10)   AS \"day!\", \
                 COUNT(*)                         AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in), 0)    AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)   AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens), 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens), 0) AS \"cache_write_tokens!\", \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)    AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)   AS \"tokens_out!\", \
+                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS \"cache_read_tokens!\", \
+                COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS \"cache_write_tokens!\", \
                 CASE \
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
                 END AS \"total_cost_usd\" \
              {from_clause} {where_clause} \
              GROUP BY {group_expr}, substring(s.started_at, 1, 10) \
-             ORDER BY day, group_key"
+             ORDER BY 2, 1"
         );
 
         let query = sqlx::query(&sql);
@@ -522,8 +522,8 @@ impl UsageAnalyticsRepository {
                     COUNT(*) AS sessions, \
                     CASE WHEN bool_or(cost_usd IS NULL) \
                          THEN NULL ELSE SUM(cost_usd) END AS spend_usd, \
-                    COALESCE(SUM(tokens_in), 0)  AS tokens_in, \
-                    COALESCE(SUM(tokens_out), 0) AS tokens_out \
+                    COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
+                    COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out \
                 FROM filtered_sessions \
                 GROUP BY model_id \
              ), \
@@ -640,11 +640,11 @@ impl UsageAnalyticsRepository {
                     WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
                     ELSE SUM(s.cost_usd) \
                 END                                      AS \"spend_usd\", \
-                COALESCE(SUM(s.tokens_in), 0)            AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out), 0)           AS \"tokens_out!\" \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)            AS \"tokens_in!\", \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)           AS \"tokens_out!\" \
              {from_clause} {where_clause} \
              GROUP BY COALESCE(s.project_id, ''), s.model_id \
-             ORDER BY project_id, model_id"
+             ORDER BY 1, 2"
         );
 
         let query = sqlx::query(&sql);
