@@ -746,6 +746,8 @@ impl SlotPool {
                     idle_seconds,
                     activity_tracked: tracked_idle.is_some(),
                     project_id,
+                    token_count: 0,
+                    turn_count: 0,
                 })
             })
             .collect();
@@ -782,6 +784,8 @@ impl SlotPool {
             idle_seconds,
             activity_tracked: tracked_idle.is_some(),
             project_id,
+            token_count: 0,
+            turn_count: 0,
         })
     }
 

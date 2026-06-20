@@ -716,6 +716,41 @@ pub struct CrateGraphOpResponse {
     pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
+/// Advisory impact preflight response: mechanical analysis of which
+/// crates, files, and symbols would break if proposed removals/renames
+/// land, along with a recommendation for how to slice the work.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ImpactCheckResponse {
+    /// Crate names whose code depends on the proposed targets.
+    pub affected_crates: Vec<String>,
+    /// Repository-relative file paths that consume proposed targets.
+    pub affected_files: Vec<String>,
+    /// Symbol keys that consume proposed targets.
+    pub affected_symbols: Vec<String>,
+    /// `true` when every affected consumer crate is inside the
+    /// caller-supplied `scope_crates` (or when no consumers were
+    /// found). A `true` value means the proposed slice can ship
+    /// without breaking external consumers.
+    pub safe_independent_slice: bool,
+    /// Advisory recommendation:
+    /// - `ok_independent` — safe to ship as independent tasks.
+    /// - `chain_tasks` — consumers are within the slice but need
+    ///   explicit ordering (task B blocked_by task A).
+    /// - `atomic_cutover` — consumers outside the proposed slice
+    ///   require a single atomic PR.
+    /// - `needs_spike` — graph is stale/missing; results are
+    ///   unreliable; run a tech spike first.
+    pub recommendation: String,
+    /// `true` when the graph cache is missing or stale relative to
+    /// the caller's HEAD, making results unreliable.
+    #[serde(default)]
+    pub low_confidence: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CodeGraphResponse {
@@ -769,4 +804,8 @@ pub enum CodeGraphResponse {
     /// Crate-level dependency graph: workspace crates as nodes,
     /// aggregated cross-crate references as edges.
     CrateGraph(CrateGraphOpResponse),
+    /// Advisory impact preflight: which crates/files/symbols would
+    /// break if proposed removals/renames land, and whether the
+    /// proposed slice is safe to ship independently.
+    ImpactCheck(ImpactCheckResponse),
 }

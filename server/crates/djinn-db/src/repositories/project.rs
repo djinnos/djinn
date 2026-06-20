@@ -139,9 +139,8 @@ impl ProjectRepository {
 
     /// Insert a project row with a caller-chosen id.
     ///
-    /// Tests that need a stable, well-known id (e.g. to satisfy a
-    /// foreign-key reference from `verification_cache` seeded under the
-    /// same id) use this instead of [`Self::create`]'s generated UUID.
+    /// Tests that need a stable, well-known id use this instead of
+    /// [`Self::create`]'s generated UUID.
     /// Production code should always use [`Self::create_from_github`];
     /// mismatched ids break downstream consumers that expect UUIDv7.
     pub async fn create_with_id(
@@ -1316,8 +1315,8 @@ mod tests {
 
     // `project.create` seeds five default agent rows (one per base role); the
     // subsequent `DELETE FROM projects` fans out across ~8 cascade targets
-    // (epics, tasks, notes, sessions, agents, consolidation_metrics,
-    // verification_cache, ...). Dolt currently drops the connection mid-
+    // (epics, tasks, notes, sessions, agents, consolidation_metrics, ...).
+    // Dolt currently drops the connection mid-
     // cascade and the driver surfaces it as `Sqlx(Io UnexpectedEof)` —
     // reproducible on 100% of runs against the current image. The same
     // The Dolt multi-cascade DELETE bug that forced this `#[ignore]` was
