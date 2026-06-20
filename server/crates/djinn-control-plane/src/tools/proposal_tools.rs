@@ -21,6 +21,7 @@ use crate::tools::epic_ops::AcceptanceCriterionItem;
 use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
 };
+use crate::tools::proposal_blocks::validate_question_form_placement;
 use crate::tools::proposal_ops::{
     ProposalDeleteResponse, ProposalEpicModel, ProposalFeedbackResponse, ProposalModel,
     ProposalReconcileObsoleteEpicResponse, ProposalShowResponse, ProposalSignoffModel,
@@ -292,6 +293,10 @@ impl DjinnMcpServer {
         if let Err(e) = validate_mdx_body(body, p.body_format.as_deref()) {
             return Json(err_single(e));
         }
+        let body_format = p.body_format.as_deref().unwrap_or("markdown");
+        if body_format == "mdx" && let Err(e) = validate_question_form_placement(body) {
+            return Json(err_single(e));
+        }
         let ac = p.acceptance_criteria.unwrap_or_default();
         if let Err(e) = validate_ac_count(ac.len()) {
             return Json(err_single(e));
@@ -498,6 +503,12 @@ impl DjinnMcpServer {
             .as_deref()
             .unwrap_or(existing.body_format.as_str());
         if let Err(e) = validate_mdx_body(body, Some(body_format)) {
+            return Json(err_single(e));
+        }
+        if p.body.is_some()
+            && body_format == "mdx"
+            && let Err(e) = validate_question_form_placement(body)
+        {
             return Json(err_single(e));
         }
 
