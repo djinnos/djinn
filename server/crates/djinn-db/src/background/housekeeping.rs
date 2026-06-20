@@ -766,6 +766,7 @@ mod tests {
                         note_type: None,
                         limit: 3,
                         semantic_scores: None,
+                        edge_kinds: None,
                     })
                     .await
                     .unwrap();

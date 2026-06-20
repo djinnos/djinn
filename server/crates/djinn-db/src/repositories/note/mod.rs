@@ -90,6 +90,10 @@ pub struct NoteSearchParams<'a> {
     pub note_type: Option<&'a str>,
     pub limit: usize,
     pub semantic_scores: Option<Vec<(String, f64)>>,
+    /// Optional list of edge kinds to include in graph proximity scoring.
+    /// When `Some`, only edges whose `kind` matches participate in spreading
+    /// activation. `None` means all kinds.
+    pub edge_kinds: Option<&'a [String]>,
 }
 
 // ── SQL constant ─────────────────────────────────────────────────────────────
