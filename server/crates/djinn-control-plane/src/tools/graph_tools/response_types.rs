@@ -31,24 +31,73 @@ impl GraphStaleness {
     /// Compute staleness metadata from a caller-supplied commit and the
     /// optional cached graph commit. The caller commit is trimmed; a
     /// missing/blank cached commit yields `is_stale=false` (non-stale-safe).
+    ///
+    /// Delegates the comparison primitive to
+    /// [`check_impact_staleness`] so the strict `impact_check` flow
+    /// (epic z3en) and the lenient `code_graph` flow share a single
+    /// trim+equality implementation. The lenient `is_stale=false` default
+    /// for missing cached commits is applied AFTER the strict check so
+    /// a missing graph never blocks an unrelated query.
     pub(crate) fn compute(caller_commit: &str, cached_commit: Option<&str>) -> Self {
-        let trimmed_caller = caller_commit.trim();
-        match cached_commit.map(str::trim).filter(|c| !c.is_empty()) {
-            Some(cached) => {
-                let is_stale = cached != trimmed_caller;
-                GraphStaleness {
-                    cached_commit: Some(cached.to_string()),
-                    caller_commit: trimmed_caller.to_string(),
-                    is_stale,
-                }
-            }
-            None => GraphStaleness {
-                cached_commit: None,
-                caller_commit: trimmed_caller.to_string(),
-                is_stale: false,
-            },
+        let (strict_is_stale, caller_commit, cached_commit) =
+            check_impact_staleness(caller_commit, cached_commit);
+        // Lenient override: when the graph has no pinned commit at all,
+        // the strict helper returns `is_stale=true`, but `code_graph`
+        // responses should not block callers on an un-warmed graph — the
+        // caller is going to get an empty result anyway, and we want the
+        // staleness signal to be additive, not load-bearing.
+        let is_stale = if cached_commit.is_none() {
+            false
+        } else {
+            strict_is_stale
+        };
+        GraphStaleness {
+            cached_commit,
+            caller_commit,
+            is_stale,
         }
     }
+}
+
+/// Strict staleness primitive shared by the `impact_check` MCP tool and
+/// the `code_graph` staleness flow (epic z3en, kfgh).
+///
+/// Returns `(is_stale, caller_commit, cached_commit)` where:
+///
+/// - `is_stale` is `true` when:
+///   - `cached_commit` is missing/blank (un-warmed or un-pinned graph), OR
+///   - the trimmed `cached_commit` and `caller_commit` differ.
+/// - `caller_commit` is the trimmed caller commit (always present).
+/// - `cached_commit` is the trimmed cached commit, or `None` when the
+///   graph has no pinned commit.
+///
+/// This is the strict counterpart of `GraphStaleness::compute`'s lenient
+/// default (which returns `is_stale=false` for missing cached commits to
+/// keep unrelated `code_graph` queries flowing). For impact preflight we
+/// MUST surface missing as stale — silently answering from unanchored
+/// data would defeat the entire point of the freshness signal.
+///
+/// Mirrors [`djinn_graph::canonical_graph::git_head_is_strictly_stale`]
+/// semantically: same trim + missing-blank→stale + equality rules. The
+/// duplication is intentional: the control-plane does not depend on
+/// `djinn-graph` directly, and the canonical bridge boundary already
+/// returns `pinned_commit` as a `String`. Keep both implementations in
+/// sync; the unit tests in `canonical_graph::tests` pin the semantics.
+pub(crate) fn check_impact_staleness(
+    caller_commit: &str,
+    cached_commit: Option<&str>,
+) -> (bool, String, Option<String>) {
+    let trimmed_caller = caller_commit.trim();
+    let trimmed_cached = cached_commit.map(str::trim).filter(|c| !c.is_empty());
+    let is_stale = match &trimmed_cached {
+        Some(cached) => *cached != trimmed_caller,
+        None => true,
+    };
+    (
+        is_stale,
+        trimmed_caller.to_string(),
+        trimmed_cached.map(str::to_string),
+    )
 }
 
 // NOTE: previously `result: NeighborsResult` was `#[serde(flatten)]`, but

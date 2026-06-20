@@ -42,6 +42,7 @@ mod validation;
 mod df6s_pagination;
 
 pub(crate) use self::next_step_hints::*;
+pub(crate) use self::response_types::check_impact_staleness;
 pub(crate) use self::risk_classification::*;
 pub(crate) use self::validation::*;
 

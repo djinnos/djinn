@@ -1104,6 +1104,166 @@
         assert_eq!(staleness.caller_commit, "abc123");
     }
 
+    // ── kfgh / epic z3en: `check_impact_staleness` (strict primitive) ─────
+
+    /// kfgh: matching caller/cached → not stale.
+    #[test]
+    fn check_impact_staleness_matching_returns_false() {
+        let (is_stale, caller, cached) = check_impact_staleness("abc123", Some("abc123"));
+        assert!(!is_stale, "matching commits must not be flagged stale");
+        assert_eq!(caller, "abc123");
+        assert_eq!(cached.as_deref(), Some("abc123"));
+    }
+
+    /// kfgh: differing caller/cached → stale (strict).
+    #[test]
+    fn check_impact_staleness_differing_returns_true() {
+        let (is_stale, caller, cached) = check_impact_staleness("def456", Some("abc123"));
+        assert!(is_stale, "differing commits must be flagged stale");
+        assert_eq!(caller, "def456");
+        assert_eq!(cached.as_deref(), Some("abc123"));
+    }
+
+    /// kfgh: missing cached → stale (strict; diverges from
+    /// `GraphStaleness::compute`'s lenient `is_stale=false` default).
+    #[test]
+    fn check_impact_staleness_missing_cached_returns_true() {
+        let (is_stale, caller, cached) = check_impact_staleness("abc123", None);
+        assert!(
+            is_stale,
+            "missing cached commit MUST be flagged stale for impact preflight"
+        );
+        assert_eq!(caller, "abc123");
+        assert!(cached.is_none(), "cached_commit must round-trip as None");
+    }
+
+    /// kfgh: blank cached (whitespace) → stale.
+    #[test]
+    fn check_impact_staleness_blank_cached_returns_true() {
+        let (is_stale, _, cached) = check_impact_staleness("abc123", Some("   \t\n"));
+        assert!(
+            is_stale,
+            "blank/whitespace cached commit MUST be flagged stale"
+        );
+        assert!(
+            cached.is_none(),
+            "blank cached_commit must normalize to None"
+        );
+    }
+
+    /// kfgh: caller whitespace is trimmed before equality check.
+    #[test]
+    fn check_impact_staleness_trims_caller_whitespace() {
+        let (is_stale, caller, _) = check_impact_staleness("  abc123  ", Some("abc123"));
+        assert!(
+            !is_stale,
+            "caller head whitespace must be trimmed before equality check"
+        );
+        assert_eq!(
+            caller, "abc123",
+            "caller_commit echo must be trimmed"
+        );
+    }
+
+    /// kfgh: `GraphStaleness::compute` must keep its lenient missing-cache
+    /// contract (non-stale-safe default) even after delegating to the
+    /// shared strict primitive. This pins the asymmetry between the two
+    /// flows — `code_graph` ops must not start blocking on un-warmed
+    /// graphs just because the impact_check flow wants strict semantics.
+    #[test]
+    fn graph_staleness_compute_keeps_lenient_missing_default() {
+        let s = GraphStaleness::compute("abc123", None);
+        assert!(
+            !s.is_stale,
+            "GraphStaleness must remain lenient when cached_commit is None"
+        );
+        assert!(s.cached_commit.is_none());
+        assert_eq!(s.caller_commit, "abc123");
+
+        let s = GraphStaleness::compute("abc123", Some("   "));
+        assert!(
+            !s.is_stale,
+            "GraphStaleness must remain lenient when cached_commit is blank"
+        );
+
+        // Same input through the strict helper should diverge.
+        let (strict_is_stale, _, _) = check_impact_staleness("abc123", None);
+        assert!(
+            strict_is_stale,
+            "check_impact_staleness must surface missing as stale"
+        );
+    }
+
+    // ── kfgh / epic z3en: `check_impact_check_staleness` (bridge flow) ────
+
+    /// kfgh: the helper reads `pinned_commit` via the bridge's `status`
+    /// peek and returns the strict staleness snapshot for the caller.
+    /// When the bridge reports a matching commit, the snapshot is fresh.
+    #[tokio::test]
+    async fn check_impact_check_staleness_fresh_when_commits_match() {
+        let ops = WorkspaceFixtureOps::new(None).with_pinned_commit("abc123");
+        let ctx = fixture_ctx(None);
+        let snap = check_impact_check_staleness(&ops, &ctx, "abc123").await;
+        assert!(
+            !snap.is_stale,
+            "matching pinned_commit must not be flagged stale"
+        );
+        assert_eq!(snap.caller_commit, "abc123");
+        assert_eq!(snap.cached_commit.as_deref(), Some("abc123"));
+        assert!(
+            !snap.is_completely_unanchored(),
+            "anchored commits must not be unanchored"
+        );
+    }
+
+    /// kfgh: when the bridge reports a different commit, the snapshot is
+    /// stale — `impact_check` must short-circuit with `needs_spike`.
+    #[tokio::test]
+    async fn check_impact_check_staleness_stale_when_commits_differ() {
+        let ops = WorkspaceFixtureOps::new(None).with_pinned_commit("abc123");
+        let ctx = fixture_ctx(None);
+        let snap = check_impact_check_staleness(&ops, &ctx, "def456").await;
+        assert!(
+            snap.is_stale,
+            "differing pinned_commit must be flagged stale"
+        );
+        assert_eq!(snap.caller_commit, "def456");
+        assert_eq!(snap.cached_commit.as_deref(), Some("abc123"));
+    }
+
+    /// kfgh: an un-warmed graph (no pinned commit) yields a strict-stale
+    /// snapshot — `impact_check` MUST spike rather than trust the empty
+    /// answer that an unanchored graph would produce.
+    #[tokio::test]
+    async fn check_impact_check_staleness_stale_when_graph_unwarmed() {
+        let ops = WorkspaceFixtureOps::new(None); // pinned_commit: None
+        let ctx = fixture_ctx(None);
+        let snap = check_impact_check_staleness(&ops, &ctx, "abc123").await;
+        assert!(
+            snap.is_stale,
+            "un-warmed graph MUST be flagged stale (strict semantic)"
+        );
+        assert!(snap.cached_commit.is_none());
+    }
+
+    /// kfgh: both sides missing (no caller commit, no pinned commit) is
+    /// `is_completely_unanchored` — the impact_check caller must surface
+    /// this distinctly because the user can recover by supplying a HEAD.
+    #[tokio::test]
+    async fn check_impact_check_staleness_marks_fully_unanchored() {
+        let ops = WorkspaceFixtureOps::new(None); // pinned_commit: None
+        let ctx = fixture_ctx(None);
+        let snap = check_impact_check_staleness(&ops, &ctx, "").await;
+        assert!(
+            snap.is_stale,
+            "no anchor on either side must be flagged stale"
+        );
+        assert!(
+            snap.is_completely_unanchored(),
+            "empty caller + empty cache must be flagged fully unanchored"
+        );
+    }
+
     /// AC#1: `current_head` accepts aliases `caller_commit` and
     /// `currentHead`.
     #[test]
