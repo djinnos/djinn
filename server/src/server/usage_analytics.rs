@@ -1,11 +1,15 @@
 // HTTP handler for the `/api/admin/usage` REST endpoint consumed by the
 // admin analytics UI.
 //
-// Returns the proposal response shape for usage/cost reporting:
-// `totals`, `previous_totals`, `series`, `breakdown`, `model_effectiveness`,
-// and `project_model_matrix`. The repository deliberately returns daily rows;
-// this handler maps those ISO day buckets into requested day/week/month periods
-// using deterministic Rust date arithmetic.
+// Emits exactly the shape the dashboard consumes:
+//   `kpis`, `time_series`, `breakdowns` (by_user/by_project/by_proposal/by_task),
+//   `model_effectiveness`, `project_model_matrix`, and `generated_at`.
+//
+// The repository returns daily multi-dimensional series rows; this handler
+// maps those ISO day buckets into requested day/week/month periods using
+// deterministic Rust date arithmetic, derives the KPI cards from the current
+// and previous window totals, and renames repository fields to the frontend
+// contract.
 
 use axum::{
     Json, Router,
@@ -20,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use crate::server::AppState;
 use crate::server::auth::require_admin;
 use djinn_db::{
-    BreakdownRow, DailySeriesRow, GroupDimension, ModelEffectivenessRow, ProjectModelMatrixRow,
-    UsageAnalyticsQuery, UsageAnalyticsRepository, UsageAnalyticsResult, UsageTotals,
+    EntityBreakdownRow, GroupDimension, ModelEffectivenessRow, ProjectModelMatrixRow,
+    SeriesDetailRow, UsageAnalyticsQuery, UsageAnalyticsRepository, UsageTotals,
 };
 
 pub(super) fn router() -> Router<AppState> {
@@ -33,16 +37,21 @@ pub(super) fn router() -> Router<AppState> {
 
 // ── Query parsing ────────────────────────────────────────────────────────────
 
-/// Raw query params deserialised from the request URL.  All are optional;
-/// defaults and validation are applied in [`UsageQuery::into_typed`].
+/// Raw query params deserialised from the request URL.  Mirrors the frontend
+/// `UsageAnalyticsFilters` exactly.  All are optional; defaults and validation
+/// are applied in [`UsageQuery::into_typed`].
 #[derive(Debug, Deserialize)]
 struct UsageQuery {
-    from: Option<String>,
-    to: Option<String>,
+    /// Shorthand date range; mutually exclusive with start/end.
+    preset: Option<String>,
+    /// ISO start date (inclusive); used only when `preset` is absent.
+    start: Option<String>,
+    /// ISO end date (exclusive); used only when `preset` is absent.
+    end: Option<String>,
     granularity: Option<String>,
-    group_by: Option<String>,
     project_id: Option<String>,
-    model_id: Option<String>,
+    /// Model identifier filter.
+    model: Option<String>,
     agent_type: Option<String>,
 }
 
@@ -70,32 +79,11 @@ impl Granularity {
     }
 }
 
-/// Parse a `group_by` query value into the repository's `GroupDimension`.
-/// Accepts the same identifiers used in the SQL column expressions.
-fn parse_group_by(raw: Option<&str>) -> Result<GroupDimension, (StatusCode, String)> {
-    match raw.map(str::to_ascii_lowercase).as_deref() {
-        None | Some("model") => Ok(GroupDimension::Model),
-        Some("project") => Ok(GroupDimension::Project),
-        Some("user") => Ok(GroupDimension::User),
-        Some("proposal") => Ok(GroupDimension::Proposal),
-        Some("task") => Ok(GroupDimension::Task),
-        Some("agent") => Ok(GroupDimension::Agent),
-        Some(other) => Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "invalid group_by '{other}' (expected model, project, user, proposal, task, or agent)"
-            ),
-        )),
-    }
-}
-
-/// Default `from`/`to` window (last 30 days, ISO-8601) when the client omits
-/// either bound.  Kept here rather than the repository so the endpoint owns
-/// its own HTTP-facing defaults.
-fn default_window() -> (String, String) {
+/// A `from`/`to` window ending now and spanning `days` days, in RFC3339.
+fn window_days(days: i64) -> (String, String) {
     use time::format_description::well_known::Rfc3339;
     let now = time::OffsetDateTime::now_utc();
-    let start = now - time::Duration::days(30);
+    let start = now - time::Duration::days(days);
     let to = now.format(&Rfc3339).unwrap_or_default();
     let from = start.format(&Rfc3339).unwrap_or_default();
     (from, to)
@@ -106,11 +94,15 @@ fn default_window() -> (String, String) {
 /// either a date (`YYYY-MM-DD`) or a timestamp whose first 10 characters are an
 /// ISO date prefix.
 fn parse_iso_date_prefix(name: &str, value: &str) -> Result<time::Date, (StatusCode, String)> {
-    let Some(date) = value.get(..10) else {
-        return Err((
+    let invalid = || {
+        (
             StatusCode::BAD_REQUEST,
             format!("invalid {name}: expected YYYY-MM-DD or ISO-8601 timestamp"),
-        ));
+        )
+    };
+
+    let Some(date) = value.get(..10) else {
+        return Err(invalid());
     };
 
     let bytes = date.as_bytes();
@@ -122,53 +114,17 @@ fn parse_iso_date_prefix(name: &str, value: &str) -> Result<time::Date, (StatusC
             .enumerate()
             .all(|(idx, b)| idx == 4 || idx == 7 || b.is_ascii_digit());
     if !valid_shape {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("invalid {name}: expected YYYY-MM-DD or ISO-8601 timestamp"),
-        ));
+        return Err(invalid());
     }
 
-    let year = date[0..4].parse::<i32>().map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid {name}: expected YYYY-MM-DD or ISO-8601 timestamp"),
-        )
-    })?;
-    let month = date[5..7].parse::<u8>().map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid {name}: expected YYYY-MM-DD or ISO-8601 timestamp"),
-        )
-    })?;
-    let day = date[8..10].parse::<u8>().map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid {name}: expected YYYY-MM-DD or ISO-8601 timestamp"),
-        )
-    })?;
-    let month = time::Month::try_from(month).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid {name}: expected YYYY-MM-DD or ISO-8601 timestamp"),
-        )
-    })?;
-    time::Date::from_calendar_date(year, month, day).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid {name}: expected YYYY-MM-DD or ISO-8601 timestamp"),
-        )
-    })
-}
-
-fn validate_date_bound(name: &str, value: String) -> Result<String, (StatusCode, String)> {
-    parse_iso_date_prefix(name, &value)?;
-
-    Ok(value)
+    let year = date[0..4].parse::<i32>().map_err(|_| invalid())?;
+    let month = date[5..7].parse::<u8>().map_err(|_| invalid())?;
+    let day = date[8..10].parse::<u8>().map_err(|_| invalid())?;
+    let month = time::Month::try_from(month).map_err(|_| invalid())?;
+    time::Date::from_calendar_date(year, month, day).map_err(|_| invalid())
 }
 
 fn validate_date_range(from: String, to: String) -> Result<(String, String), (StatusCode, String)> {
-    let from = validate_date_bound("from", from)?;
-    let to = validate_date_bound("to", to)?;
     let from_date = parse_iso_date_prefix("from", &from)?;
     let to_date = parse_iso_date_prefix("to", &to)?;
     if from_date >= to_date {
@@ -221,24 +177,52 @@ fn previous_window_query(
 }
 
 impl UsageQuery {
+    /// Resolve the effective `from`/`to` window from `preset` or `start`/`end`,
+    /// applying a default 30-day window when nothing is supplied.
+    fn resolve_window(&self) -> Result<(String, String), (StatusCode, String)> {
+        if let Some(preset) = self.preset.as_deref().filter(|s| !s.is_empty()) {
+            let days = match preset.to_ascii_lowercase().as_str() {
+                "7d" => 7,
+                "30d" => 30,
+                other => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!("invalid preset '{other}' (expected 7d or 30d)"),
+                    ));
+                }
+            };
+            return Ok(window_days(days));
+        }
+
+        let (default_from, default_to) = window_days(30);
+        let from = self
+            .start
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_from);
+        let to = self
+            .end
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_to);
+        validate_date_range(from, to)
+    }
+
     /// Validate the raw params and produce the typed repository query plus the
     /// parsed granularity.  Returns an HTTP-style error tuple on bad input.
     fn into_typed(self) -> Result<(UsageAnalyticsQuery, Granularity), (StatusCode, String)> {
         let granularity = Granularity::parse(self.granularity.as_deref())?;
-        let group_by = parse_group_by(self.group_by.as_deref())?;
-
-        let (default_from, default_to) = default_window();
-        let from = self.from.unwrap_or(default_from);
-        let to = self.to.unwrap_or(default_to);
-        let (from, to) = validate_date_range(from, to)?;
+        let (from, to) = self.resolve_window()?;
 
         Ok((
             UsageAnalyticsQuery {
                 from,
                 to,
-                group_by,
+                // The dashboard computes all four entity breakdowns; group_by is
+                // retained only for repository API compatibility.
+                group_by: GroupDimension::Model,
                 project_id: self.project_id.filter(|s| !s.is_empty()),
-                model_id: self.model_id.filter(|s| !s.is_empty()),
+                model_id: self.model.filter(|s| !s.is_empty()),
                 agent_type: self.agent_type.filter(|s| !s.is_empty()),
             },
             granularity,
@@ -247,157 +231,203 @@ impl UsageQuery {
 }
 
 // ── Response DTOs ────────────────────────────────────────────────────────────
-//
-// Cost fields are `Option<f64>` to preserve the repository's NULL/unpriced
-// semantics: an aggregate group with any unpriced model surfaces `null` in
-// JSON so the UI can render an em-dash instead of `$0`.
 
+/// A single KPI card derived from the current vs previous window totals.
 #[derive(Serialize)]
-struct TotalsDto {
-    session_count: i64,
-    tokens_in: i64,
-    tokens_out: i64,
-    cache_read_tokens: i64,
-    cache_write_tokens: i64,
-    total_cost_usd: Option<f64>,
+struct UsageKpiDto {
+    label: String,
+    /// Numeric value; `null` when unavailable (e.g. unpriced spend).
+    value: Option<f64>,
+    /// Period-over-period change as a fraction (0.12 == +12%); `null` when the
+    /// previous window was empty.
+    delta_pct: Option<f64>,
+    /// Pre-formatted display value (currency); empty string lets the UI fall
+    /// back to compact-number formatting of `value`.
+    formatted: String,
 }
 
-impl From<UsageTotals> for TotalsDto {
-    fn from(t: UsageTotals) -> Self {
-        Self {
-            session_count: t.session_count,
-            tokens_in: t.tokens_in,
-            tokens_out: t.tokens_out,
-            cache_read_tokens: t.cache_read_tokens,
-            cache_write_tokens: t.cache_write_tokens,
-            total_cost_usd: t.total_cost_usd,
-        }
-    }
-}
-
+/// A point in the multi-dimensional time series.  Carries the model / project /
+/// agent dimensions so the Overview tab can group spend client-side.
 #[derive(Serialize)]
 struct SeriesPointDto {
-    day: String,
-    session_count: i64,
+    date: String,
+    /// Spend in USD; `null` when any session in the bucket was unpriced.
+    cost: Option<f64>,
     tokens_in: i64,
     tokens_out: i64,
-    cache_read_tokens: i64,
-    cache_write_tokens: i64,
-    total_cost_usd: Option<f64>,
+    task_count: i64,
+    model: String,
+    project_id: String,
+    project_name: String,
+    agent_type: String,
 }
 
-impl From<DailySeriesRow> for SeriesPointDto {
-    fn from(r: DailySeriesRow) -> Self {
+/// A breakdown row for one entity (user / project / proposal / task).
+#[derive(Serialize)]
+struct BreakdownRowDto {
+    id: String,
+    name: String,
+    cost: Option<f64>,
+    tokens_in: i64,
+    tokens_out: i64,
+    task_count: i64,
+    success_rate: Option<f64>,
+    avg_reopens: Option<f64>,
+    cost_per_task: Option<f64>,
+    /// Present only for the by_task breakdown; lets the UI build a task link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
+    /// Present only for the by_proposal breakdown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proposal_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BreakdownsDto {
+    by_user: Vec<BreakdownRowDto>,
+    by_project: Vec<BreakdownRowDto>,
+    by_proposal: Vec<BreakdownRowDto>,
+    by_task: Vec<BreakdownRowDto>,
+}
+
+/// Per-model effectiveness, renamed to the frontend contract.
+#[derive(Serialize)]
+struct ModelEffectivenessDto {
+    model: String,
+    task_count: i64,
+    success_rate: Option<f64>,
+    avg_reopens: Option<f64>,
+    cost_per_task: Option<f64>,
+    total_cost: Option<f64>,
+    total_tokens: i64,
+    tokens_in: i64,
+    tokens_out: i64,
+    session_count: i64,
+    /// Shared-credit completed-task count (== task_count); surfaced separately
+    /// so the UI can label the attribution semantics.
+    completed_task_count: i64,
+}
+
+impl From<ModelEffectivenessRow> for ModelEffectivenessDto {
+    fn from(r: ModelEffectivenessRow) -> Self {
         Self {
-            day: r.day,
-            session_count: r.session_count,
+            model: r.model_id,
+            task_count: r.shared_credit_completed_task_count,
+            success_rate: r.success_rate,
+            avg_reopens: r.avg_reopens,
+            cost_per_task: r.cost_per_completed_task,
+            total_cost: r.spend_usd,
+            total_tokens: r.tokens_in + r.tokens_out,
             tokens_in: r.tokens_in,
             tokens_out: r.tokens_out,
-            cache_read_tokens: r.cache_read_tokens,
-            cache_write_tokens: r.cache_write_tokens,
-            total_cost_usd: r.total_cost_usd,
+            session_count: r.sessions,
+            completed_task_count: r.shared_credit_completed_task_count,
+        }
+    }
+}
+
+/// Project × model matrix cell, renamed to the frontend contract.
+#[derive(Serialize)]
+struct ProjectModelCellDto {
+    project_id: String,
+    project_name: String,
+    model: String,
+    cost_per_task: Option<f64>,
+    success_rate: Option<f64>,
+    avg_reopens: Option<f64>,
+    total_cost: Option<f64>,
+    total_tokens: i64,
+}
+
+impl From<ProjectModelMatrixRow> for ProjectModelCellDto {
+    fn from(r: ProjectModelMatrixRow) -> Self {
+        let cost_per_task = match (r.spend_usd, r.task_count) {
+            (Some(cost), n) if n > 0 => Some(cost / n as f64),
+            _ => None,
+        };
+        Self {
+            project_id: r.project_id,
+            project_name: r.project_name,
+            model: r.model_id,
+            cost_per_task,
+            success_rate: r.success_rate,
+            avg_reopens: r.avg_reopens,
+            total_cost: r.spend_usd,
+            total_tokens: r.tokens_in + r.tokens_out,
         }
     }
 }
 
 #[derive(Serialize)]
-struct BreakdownPointDto {
-    group_key: String,
-    day: String,
-    session_count: i64,
-    tokens_in: i64,
-    tokens_out: i64,
-    cache_read_tokens: i64,
-    cache_write_tokens: i64,
-    total_cost_usd: Option<f64>,
+struct UsageResponse {
+    kpis: Vec<UsageKpiDto>,
+    time_series: Vec<SeriesPointDto>,
+    breakdowns: BreakdownsDto,
+    model_effectiveness: Vec<ModelEffectivenessDto>,
+    project_model_matrix: Vec<ProjectModelCellDto>,
+    /// RFC3339 timestamp when the response was generated.
+    generated_at: String,
 }
 
-impl From<BreakdownRow> for BreakdownPointDto {
-    fn from(r: BreakdownRow) -> Self {
-        Self {
-            group_key: r.group_key,
-            day: r.day,
-            session_count: r.session_count,
-            tokens_in: r.tokens_in,
-            tokens_out: r.tokens_out,
-            cache_read_tokens: r.cache_read_tokens,
-            cache_write_tokens: r.cache_write_tokens,
-            total_cost_usd: r.total_cost_usd,
-        }
+// ── Derivations ──────────────────────────────────────────────────────────────
+
+/// Currency formatting that mirrors the frontend `formatCurrency` precision.
+fn format_currency(value: f64) -> String {
+    if value >= 100.0 {
+        format!("${value:.0}")
+    } else {
+        format!("${value:.2}")
     }
 }
 
-#[derive(Debug, Default)]
-struct UsageAccumulator {
-    session_count: i64,
-    tokens_in: i64,
-    tokens_out: i64,
-    cache_read_tokens: i64,
-    cache_write_tokens: i64,
-    total_cost_usd: f64,
-    cost_known: bool,
-}
-
-impl UsageAccumulator {
-    fn add_values(
-        &mut self,
-        session_count: i64,
-        tokens_in: i64,
-        tokens_out: i64,
-        cache_read_tokens: i64,
-        cache_write_tokens: i64,
-        total_cost_usd: Option<f64>,
-    ) {
-        self.session_count += session_count;
-        self.tokens_in += tokens_in;
-        self.tokens_out += tokens_out;
-        self.cache_read_tokens += cache_read_tokens;
-        self.cache_write_tokens += cache_write_tokens;
-
-        let has_usage = session_count != 0
-            || tokens_in != 0
-            || tokens_out != 0
-            || cache_read_tokens != 0
-            || cache_write_tokens != 0;
-        match total_cost_usd {
-            Some(cost) if self.cost_known => self.total_cost_usd += cost,
-            Some(_) => {}
-            None if has_usage => self.cost_known = false,
-            None => {}
-        }
-    }
-
-    fn into_series_point(self, day: String) -> SeriesPointDto {
-        SeriesPointDto {
-            day,
-            session_count: self.session_count,
-            tokens_in: self.tokens_in,
-            tokens_out: self.tokens_out,
-            cache_read_tokens: self.cache_read_tokens,
-            cache_write_tokens: self.cache_write_tokens,
-            total_cost_usd: self.cost_known.then_some(self.total_cost_usd),
-        }
-    }
-
-    fn into_breakdown_point(self, group_key: String, day: String) -> BreakdownPointDto {
-        BreakdownPointDto {
-            group_key,
-            day,
-            session_count: self.session_count,
-            tokens_in: self.tokens_in,
-            tokens_out: self.tokens_out,
-            cache_read_tokens: self.cache_read_tokens,
-            cache_write_tokens: self.cache_write_tokens,
-            total_cost_usd: self.cost_known.then_some(self.total_cost_usd),
-        }
+/// Period-over-period change as a fraction; `None` when the prior value is ~0.
+fn pct_delta(current: f64, previous: f64) -> Option<f64> {
+    if previous.abs() < f64::EPSILON {
+        None
+    } else {
+        Some((current - previous) / previous)
     }
 }
 
-fn empty_accumulator() -> UsageAccumulator {
-    UsageAccumulator {
-        cost_known: true,
-        ..UsageAccumulator::default()
-    }
+/// Build the KPI cards from current and previous window totals.
+fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> {
+    let spend_delta = match (totals.total_cost_usd, previous.total_cost_usd) {
+        (Some(cur), Some(prev)) => pct_delta(cur, prev),
+        _ => None,
+    };
+
+    let tokens = (totals.tokens_in + totals.tokens_out) as f64;
+    let prev_tokens = (previous.tokens_in + previous.tokens_out) as f64;
+
+    vec![
+        UsageKpiDto {
+            label: "Spend".to_string(),
+            value: totals.total_cost_usd,
+            delta_pct: spend_delta,
+            formatted: totals.total_cost_usd.map(format_currency).unwrap_or_default(),
+        },
+        UsageKpiDto {
+            label: "Tokens".to_string(),
+            value: Some(tokens),
+            delta_pct: pct_delta(tokens, prev_tokens),
+            formatted: String::new(),
+        },
+        UsageKpiDto {
+            label: "Sessions".to_string(),
+            value: Some(totals.session_count as f64),
+            delta_pct: pct_delta(totals.session_count as f64, previous.session_count as f64),
+            formatted: String::new(),
+        },
+        UsageKpiDto {
+            label: "Cache reads".to_string(),
+            value: Some(totals.cache_read_tokens as f64),
+            delta_pct: pct_delta(
+                totals.cache_read_tokens as f64,
+                previous.cache_read_tokens as f64,
+            ),
+            formatted: String::new(),
+        },
+    ]
 }
 
 fn week_start(date: time::Date) -> Result<time::Date, (StatusCode, String)> {
@@ -434,179 +464,132 @@ fn period_start(day: &str, granularity: Granularity) -> Result<String, (StatusCo
     Ok(format_date(start))
 }
 
+/// Accumulates spend (preserving NULL-unpriced semantics) and token/task
+/// counters for a rolled-up series bucket.
+struct SeriesAccumulator {
+    tokens_in: i64,
+    tokens_out: i64,
+    task_count: i64,
+    cost_sum: f64,
+    cost_known: bool,
+    any_usage: bool,
+}
+
+impl Default for SeriesAccumulator {
+    fn default() -> Self {
+        // `cost_known` starts true and flips to false the first time an
+        // unpriced (NULL cost) row with usage is folded in.
+        Self {
+            tokens_in: 0,
+            tokens_out: 0,
+            task_count: 0,
+            cost_sum: 0.0,
+            cost_known: true,
+            any_usage: false,
+        }
+    }
+}
+
+impl SeriesAccumulator {
+    fn add(&mut self, row: &SeriesDetailRow) {
+        self.tokens_in += row.tokens_in;
+        self.tokens_out += row.tokens_out;
+        self.task_count += row.task_count;
+        self.any_usage = true;
+        match row.cost {
+            Some(cost) if self.cost_known => self.cost_sum += cost,
+            Some(_) => {}
+            None => self.cost_known = false,
+        }
+    }
+
+    fn cost(&self) -> Option<f64> {
+        if self.cost_known && self.any_usage {
+            Some(self.cost_sum)
+        } else {
+            None
+        }
+    }
+}
+
+/// Roll up the daily multi-dimensional series into the requested granularity,
+/// grouping by (period, model, project, agent).
 fn rollup_series(
-    rows: Vec<DailySeriesRow>,
+    rows: Vec<SeriesDetailRow>,
     granularity: Granularity,
 ) -> Result<Vec<SeriesPointDto>, (StatusCode, String)> {
-    if granularity == Granularity::Day {
-        return Ok(rows.into_iter().map(Into::into).collect());
-    }
+    // Key: (period, model, project_id, project_name, agent_type). project_name
+    // is part of the key purely to carry it through; it is functionally
+    // dependent on project_id.
+    type Key = (String, String, String, String, String);
+    let mut buckets: BTreeMap<Key, SeriesAccumulator> = BTreeMap::new();
 
-    let mut by_period: BTreeMap<String, UsageAccumulator> = BTreeMap::new();
     for row in rows {
         let period = period_start(&row.day, granularity)?;
-        by_period
-            .entry(period)
-            .or_insert_with(empty_accumulator)
-            .add_values(
-                row.session_count,
-                row.tokens_in,
-                row.tokens_out,
-                row.cache_read_tokens,
-                row.cache_write_tokens,
-                row.total_cost_usd,
-            );
+        let key = (
+            period,
+            row.model.clone(),
+            row.project_id.clone(),
+            row.project_name.clone(),
+            row.agent_type.clone(),
+        );
+        buckets.entry(key).or_default().add(&row);
     }
 
-    Ok(by_period
+    Ok(buckets
         .into_iter()
-        .map(|(day, acc)| acc.into_series_point(day))
-        .collect())
-}
-
-fn rollup_breakdown(
-    rows: Vec<BreakdownRow>,
-    granularity: Granularity,
-) -> Result<Vec<BreakdownPointDto>, (StatusCode, String)> {
-    if granularity == Granularity::Day {
-        let mut rows: Vec<_> = rows.into_iter().map(Into::into).collect();
-        rows.sort_by(|a: &BreakdownPointDto, b| {
-            a.group_key
-                .cmp(&b.group_key)
-                .then_with(|| a.day.cmp(&b.day))
-        });
-        return Ok(rows);
-    }
-
-    let mut by_group_period: BTreeMap<(String, String), UsageAccumulator> = BTreeMap::new();
-    for row in rows {
-        let period = period_start(&row.day, granularity)?;
-        by_group_period
-            .entry((row.group_key, period))
-            .or_insert_with(empty_accumulator)
-            .add_values(
-                row.session_count,
-                row.tokens_in,
-                row.tokens_out,
-                row.cache_read_tokens,
-                row.cache_write_tokens,
-                row.total_cost_usd,
-            );
-    }
-
-    Ok(by_group_period
-        .into_iter()
-        .map(|((group_key, day), acc)| acc.into_breakdown_point(group_key, day))
-        .collect())
-}
-
-/// Per-model effectiveness row.  Computed over worker sessions only.
-///
-/// Completed-task attribution uses shared-credit: every model that ran at
-/// least one worker session on a completed task receives credit for that task.
-/// The `completed_task_count` field reflects this shared-credit semantics;
-/// UI code should label it accordingly (e.g. "Tasks (shared credit)").
-#[derive(Serialize)]
-struct ModelEffectivenessDto {
-    model_id: String,
-    sessions: i64,
-    /// Aggregate spend in USD. NULL when all worker sessions for this model
-    /// used unpriced models.
-    spend_usd: Option<f64>,
-    tokens_in: i64,
-    tokens_out: i64,
-    /// Shared-credit completed-task count.
-    completed_task_count: i64,
-    success_rate: Option<f64>,
-    avg_reopens: Option<f64>,
-    /// Cost per completed task. NULL when no completed tasks or unpriced.
-    cost_per_completed_task: Option<f64>,
-    /// Average total tokens per completed task.
-    tokens_per_task: Option<f64>,
-}
-
-impl From<ModelEffectivenessRow> for ModelEffectivenessDto {
-    fn from(r: ModelEffectivenessRow) -> Self {
-        Self {
-            model_id: r.model_id,
-            sessions: r.sessions,
-            spend_usd: r.spend_usd,
-            tokens_in: r.tokens_in,
-            tokens_out: r.tokens_out,
-            completed_task_count: r.shared_credit_completed_task_count,
-            success_rate: r.success_rate,
-            avg_reopens: r.avg_reopens,
-            cost_per_completed_task: r.cost_per_completed_task,
-            tokens_per_task: r.tokens_per_task,
-        }
-    }
-}
-
-/// Project × model matrix entry for frontend consumption.
-#[derive(Serialize)]
-struct ProjectModelMatrixDto {
-    project_id: String,
-    model_id: String,
-    sessions: i64,
-    spend_usd: Option<f64>,
-    tokens_in: i64,
-    tokens_out: i64,
-}
-
-impl From<ProjectModelMatrixRow> for ProjectModelMatrixDto {
-    fn from(r: ProjectModelMatrixRow) -> Self {
-        Self {
-            project_id: r.project_id,
-            model_id: r.model_id,
-            sessions: r.sessions,
-            spend_usd: r.spend_usd,
-            tokens_in: r.tokens_in,
-            tokens_out: r.tokens_out,
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct UsageResponse {
-    /// Echoes the requested granularity so the UI can label axes.
-    granularity: Granularity,
-    /// Overall totals across the queried window.
-    totals: TotalsDto,
-    /// Totals for the preceding window of equal length.
-    previous_totals: TotalsDto,
-    /// Time series for the window at the requested period granularity.
-    series: Vec<SeriesPointDto>,
-    /// Breakdown rows grouped by the requested dimension and period.
-    breakdown: Vec<BreakdownPointDto>,
-    /// Per-model effectiveness metrics (worker-scoped, shared-credit attribution).
-    model_effectiveness: Vec<ModelEffectivenessDto>,
-    /// Project × model spend/token matrix.
-    project_model_matrix: Vec<ProjectModelMatrixDto>,
-}
-
-impl UsageResponse {
-    fn from_results(
-        result: UsageAnalyticsResult,
-        previous_totals: UsageTotals,
-        granularity: Granularity,
-        effectiveness_rows: Vec<ModelEffectivenessRow>,
-        matrix_rows: Vec<ProjectModelMatrixRow>,
-    ) -> Result<Self, (StatusCode, String)> {
-        let UsageAnalyticsResult {
-            totals,
-            series,
-            breakdown,
-        } = result;
-        Ok(Self {
-            granularity,
-            totals: totals.into(),
-            previous_totals: previous_totals.into(),
-            series: rollup_series(series, granularity)?,
-            breakdown: rollup_breakdown(breakdown, granularity)?,
-            model_effectiveness: effectiveness_rows.into_iter().map(Into::into).collect(),
-            project_model_matrix: matrix_rows.into_iter().map(Into::into).collect(),
+        .map(|((date, model, project_id, project_name, agent_type), acc)| SeriesPointDto {
+            date,
+            cost: acc.cost(),
+            tokens_in: acc.tokens_in,
+            tokens_out: acc.tokens_out,
+            task_count: acc.task_count,
+            model,
+            project_id,
+            project_name,
+            agent_type,
         })
+        .collect())
+}
+
+/// Map a repository breakdown row to the response DTO, deriving cost-per-task
+/// and attaching the entity-specific link id.
+fn breakdown_row(row: EntityBreakdownRow, dimension: GroupDimension) -> BreakdownRowDto {
+    let cost_per_task = match (row.cost, row.task_count) {
+        (Some(cost), n) if n > 0 => Some(cost / n as f64),
+        _ => None,
+    };
+    let (task_id, proposal_id) = match dimension {
+        GroupDimension::Task => (Some(row.id.clone()), None),
+        GroupDimension::Proposal => (None, Some(row.id.clone())),
+        _ => (None, None),
+    };
+    BreakdownRowDto {
+        id: row.id,
+        name: row.name,
+        cost: row.cost,
+        tokens_in: row.tokens_in,
+        tokens_out: row.tokens_out,
+        task_count: row.task_count,
+        success_rate: row.success_rate,
+        avg_reopens: row.avg_reopens,
+        cost_per_task,
+        task_id,
+        proposal_id,
     }
+}
+
+fn breakdown_rows(rows: Vec<EntityBreakdownRow>, dimension: GroupDimension) -> Vec<BreakdownRowDto> {
+    rows.into_iter()
+        .map(|row| breakdown_row(row, dimension))
+        .collect()
+}
+
+fn now_rfc3339() -> String {
+    use time::format_description::well_known::Rfc3339;
+    time::OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_default()
 }
 
 // ── Handler ──────────────────────────────────────────────────────────────────
@@ -622,31 +605,50 @@ async fn usage_handler(
 ) -> Result<Json<UsageResponse>, (StatusCode, String)> {
     require_admin(&state, &headers).await?;
     let (query, granularity) = q.into_typed()?;
-
     let previous_query = previous_window_query(&query)?;
+
     let repo = UsageAnalyticsRepository::new(state.db().clone());
-    let result = repo
-        .query(&query)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let previous = repo
-        .query(&previous_query)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let internal = |e: djinn_db::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
 
-    // Model effectiveness (worker-scoped) and project × model matrix.
-    let (effectiveness_rows, matrix_rows) = repo
-        .query_effectiveness(&query)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let totals = repo.totals(&query).await.map_err(internal)?;
+    let previous = repo.totals(&previous_query).await.map_err(internal)?;
+    let series = repo.series_detailed(&query).await.map_err(internal)?;
 
-    Ok(Json(UsageResponse::from_results(
-        result,
-        previous.totals,
-        granularity,
-        effectiveness_rows,
-        matrix_rows,
-    )?))
+    let by_user = repo
+        .entity_breakdown(&query, GroupDimension::User)
+        .await
+        .map_err(internal)?;
+    let by_project = repo
+        .entity_breakdown(&query, GroupDimension::Project)
+        .await
+        .map_err(internal)?;
+    let by_proposal = repo
+        .entity_breakdown(&query, GroupDimension::Proposal)
+        .await
+        .map_err(internal)?;
+    let by_task = repo
+        .entity_breakdown(&query, GroupDimension::Task)
+        .await
+        .map_err(internal)?;
+
+    let (effectiveness_rows, matrix_rows) =
+        repo.query_effectiveness(&query).await.map_err(internal)?;
+
+    let response = UsageResponse {
+        kpis: build_kpis(&totals, &previous),
+        time_series: rollup_series(series, granularity)?,
+        breakdowns: BreakdownsDto {
+            by_user: breakdown_rows(by_user, GroupDimension::User),
+            by_project: breakdown_rows(by_project, GroupDimension::Project),
+            by_proposal: breakdown_rows(by_proposal, GroupDimension::Proposal),
+            by_task: breakdown_rows(by_task, GroupDimension::Task),
+        },
+        model_effectiveness: effectiveness_rows.into_iter().map(Into::into).collect(),
+        project_model_matrix: matrix_rows.into_iter().map(Into::into).collect(),
+        generated_at: now_rfc3339(),
+    };
+
+    Ok(Json(response))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -655,16 +657,24 @@ async fn usage_handler(
 mod tests {
     use super::*;
 
+    fn empty_query() -> UsageQuery {
+        UsageQuery {
+            preset: None,
+            start: None,
+            end: None,
+            granularity: None,
+            project_id: None,
+            model: None,
+            agent_type: None,
+        }
+    }
+
     #[test]
     fn granularity_parses_known_values() {
         assert_eq!(Granularity::parse(None).unwrap(), Granularity::Day);
-        assert_eq!(Granularity::parse(Some("day")).unwrap(), Granularity::Day);
         assert_eq!(Granularity::parse(Some("DAY")).unwrap(), Granularity::Day);
         assert_eq!(Granularity::parse(Some("week")).unwrap(), Granularity::Week);
-        assert_eq!(
-            Granularity::parse(Some("month")).unwrap(),
-            Granularity::Month
-        );
+        assert_eq!(Granularity::parse(Some("month")).unwrap(), Granularity::Month);
     }
 
     #[test]
@@ -675,262 +685,78 @@ mod tests {
     }
 
     #[test]
-    fn group_by_parses_all_dimensions() {
-        assert_eq!(parse_group_by(None).unwrap(), GroupDimension::Model);
-        assert_eq!(
-            parse_group_by(Some("model")).unwrap(),
-            GroupDimension::Model
-        );
-        assert_eq!(
-            parse_group_by(Some("project")).unwrap(),
-            GroupDimension::Project
-        );
-        assert_eq!(parse_group_by(Some("user")).unwrap(), GroupDimension::User);
-        assert_eq!(
-            parse_group_by(Some("proposal")).unwrap(),
-            GroupDimension::Proposal
-        );
-        assert_eq!(parse_group_by(Some("task")).unwrap(), GroupDimension::Task);
-        assert_eq!(
-            parse_group_by(Some("agent")).unwrap(),
-            GroupDimension::Agent
-        );
-    }
-
-    #[test]
-    fn group_by_rejects_unknown() {
-        let err = parse_group_by(Some("foo")).unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("foo"));
-    }
-
-    #[test]
-    fn into_typed_applies_defaults_and_filters_blanks() {
+    fn into_typed_maps_model_filter_and_drops_blanks() {
         let q = UsageQuery {
-            from: Some("2025-01-01".into()),
-            to: Some("2025-02-01".into()),
+            start: Some("2025-01-01".into()),
+            end: Some("2025-02-01".into()),
             granularity: Some("day".into()),
-            group_by: Some("model".into()),
             project_id: Some("proj-1".into()),
-            model_id: Some("".into()),
-            agent_type: None,
+            model: Some("".into()),
+            ..empty_query()
         };
         let (typed, gran) = q.into_typed().unwrap();
         assert_eq!(typed.from, "2025-01-01");
         assert_eq!(typed.to, "2025-02-01");
-        assert_eq!(typed.group_by, GroupDimension::Model);
         assert_eq!(typed.project_id.as_deref(), Some("proj-1"));
-        assert!(typed.model_id.is_none(), "blank strings must be dropped");
-        assert!(typed.agent_type.is_none());
+        assert!(typed.model_id.is_none(), "blank model must be dropped");
         assert_eq!(gran, Granularity::Day);
     }
 
     #[test]
     fn into_typed_supplies_default_window_when_omitted() {
-        let q = UsageQuery {
-            from: None,
-            to: None,
-            granularity: None,
-            group_by: None,
-            project_id: None,
-            model_id: None,
-            agent_type: None,
-        };
-        let (typed, gran) = q.into_typed().unwrap();
+        let (typed, gran) = empty_query().into_typed().unwrap();
         assert!(!typed.from.is_empty());
         assert!(!typed.to.is_empty());
         assert_eq!(gran, Granularity::Day);
-        assert_eq!(typed.group_by, GroupDimension::Model);
     }
 
     #[test]
-    fn into_typed_rejects_invalid_date_bounds() {
-        let q = UsageQuery {
-            from: Some("2025-02-30".into()),
-            to: Some("2025-03-01".into()),
-            granularity: None,
-            group_by: None,
-            project_id: None,
-            model_id: None,
-            agent_type: None,
+    fn preset_30d_window_is_wider_than_7d() {
+        let span = |preset: &str| {
+            let q = UsageQuery {
+                preset: Some(preset.into()),
+                ..empty_query()
+            };
+            let (typed, _) = q.into_typed().unwrap();
+            let from = parse_iso_date_prefix("from", &typed.from).unwrap();
+            let to = parse_iso_date_prefix("to", &typed.to).unwrap();
+            to.to_julian_day() - from.to_julian_day()
         };
+        assert!(span("30d") > span("7d"));
+    }
 
+    #[test]
+    fn invalid_preset_returns_400() {
+        let q = UsageQuery {
+            preset: Some("90d".into()),
+            ..empty_query()
+        };
         let err = q.into_typed().unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("from"));
+        assert!(err.1.contains("90d"));
     }
 
     #[test]
-    fn into_typed_rejects_reversed_date_range() {
+    fn into_typed_rejects_reversed_custom_range() {
         let q = UsageQuery {
-            from: Some("2025-03-01".into()),
-            to: Some("2025-03-01".into()),
-            granularity: None,
-            group_by: None,
-            project_id: None,
-            model_id: None,
-            agent_type: None,
+            start: Some("2025-03-01".into()),
+            end: Some("2025-03-01".into()),
+            ..empty_query()
         };
-
         let err = q.into_typed().unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("from must be before to"));
     }
 
     #[test]
-    fn totals_dto_preserves_null_cost() {
-        let dto: TotalsDto = UsageTotals {
-            session_count: 3,
-            tokens_in: 100,
-            tokens_out: 50,
-            cache_read_tokens: 10,
-            cache_write_tokens: 5,
-            total_cost_usd: None,
-        }
-        .into();
-        assert_eq!(dto.session_count, 3);
-        assert!(dto.total_cost_usd.is_none());
-
-        let json = serde_json::to_value(&dto).unwrap();
-        assert!(json.get("total_cost_usd").unwrap().is_null());
-    }
-
-    #[test]
-    fn series_dto_preserves_cost() {
-        let dto: SeriesPointDto = DailySeriesRow {
-            day: "2025-03-14".into(),
-            session_count: 1,
-            tokens_in: 2,
-            tokens_out: 3,
-            cache_read_tokens: 4,
-            cache_write_tokens: 5,
-            total_cost_usd: Some(1.23),
-        }
-        .into();
-        assert_eq!(dto.day, "2025-03-14");
-        assert_eq!(dto.total_cost_usd, Some(1.23));
-    }
-
-    #[test]
-    fn response_shape_has_all_fields() {
-        let result = UsageAnalyticsResult::default();
-        let resp = UsageResponse::from_results(
-            result,
-            UsageTotals::default(),
-            Granularity::Day,
-            Vec::new(),
-            Vec::new(),
-        )
-        .unwrap();
-        let json = serde_json::to_value(&resp).unwrap();
-        for field in [
-            "totals",
-            "previous_totals",
-            "series",
-            "breakdown",
-            "model_effectiveness",
-            "project_model_matrix",
-            "granularity",
-        ] {
-            assert!(json.get(field).is_some(), "missing response field: {field}");
-        }
-        assert!(json.get("series").unwrap().is_array());
-        assert!(json.get("model_effectiveness").unwrap().is_array());
-        assert!(json.get("project_model_matrix").unwrap().is_array());
-    }
-
-    #[test]
-    fn model_effectiveness_dto_has_all_metric_fields() {
-        // Verify that a ModelEffectivenessDto serialises with all required
-        // metric fields, including shared-credit completed_task_count,
-        // avg_reopens, and tokens_per_task.
-        let row = ModelEffectivenessRow {
-            model_id: "test-model".into(),
-            sessions: 10,
-            spend_usd: Some(2.50),
-            tokens_in: 1000,
-            tokens_out: 500,
-            shared_credit_completed_task_count: 3,
-            success_rate: Some(0.67),
-            avg_reopens: Some(0.5),
-            cost_per_completed_task: Some(0.83),
-            tokens_per_task: Some(500.0),
+    fn into_typed_rejects_invalid_date() {
+        let q = UsageQuery {
+            start: Some("2025-02-30".into()),
+            end: Some("2025-03-01".into()),
+            ..empty_query()
         };
-        let dto: ModelEffectivenessDto = row.into();
-        let json = serde_json::to_value(&dto).unwrap();
-
-        assert_eq!(
-            json.get("model_id").unwrap().as_str().unwrap(),
-            "test-model"
-        );
-        assert_eq!(json.get("sessions").unwrap().as_i64().unwrap(), 10);
-        assert!((json.get("spend_usd").unwrap().as_f64().unwrap() - 2.50).abs() < 0.01);
-        assert_eq!(json.get("tokens_in").unwrap().as_i64().unwrap(), 1000);
-        assert_eq!(json.get("tokens_out").unwrap().as_i64().unwrap(), 500);
-        // Shared-credit completed task count — field name documents the
-        // attribution semantics so the UI can label it accurately.
-        assert_eq!(
-            json.get("completed_task_count").unwrap().as_i64().unwrap(),
-            3
-        );
-        assert!((json.get("success_rate").unwrap().as_f64().unwrap() - 0.67).abs() < 0.01);
-        assert!((json.get("avg_reopens").unwrap().as_f64().unwrap() - 0.5).abs() < 0.01);
-        assert!(
-            (json
-                .get("cost_per_completed_task")
-                .unwrap()
-                .as_f64()
-                .unwrap()
-                - 0.83)
-                .abs()
-                < 0.01
-        );
-        assert!((json.get("tokens_per_task").unwrap().as_f64().unwrap() - 500.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn model_effectiveness_dto_preserves_null_spend() {
-        // When all worker sessions use unpriced models, spend and
-        // cost_per_completed_task must be NULL (not zero).
-        let row = ModelEffectivenessRow {
-            model_id: "unpriced-model".into(),
-            sessions: 5,
-            spend_usd: None,
-            tokens_in: 200,
-            tokens_out: 100,
-            shared_credit_completed_task_count: 2,
-            success_rate: Some(1.0),
-            avg_reopens: Some(0.0),
-            cost_per_completed_task: None,
-            tokens_per_task: Some(150.0),
-        };
-        let dto: ModelEffectivenessDto = row.into();
-        let json = serde_json::to_value(&dto).unwrap();
-
-        assert!(json.get("spend_usd").unwrap().is_null());
-        assert!(json.get("cost_per_completed_task").unwrap().is_null());
-        assert!(!json.get("tokens_per_task").unwrap().is_null());
-    }
-
-    #[test]
-    fn project_model_matrix_dto_serialises_correctly() {
-        let row = ProjectModelMatrixRow {
-            project_id: "proj-1".into(),
-            model_id: "model-a".into(),
-            sessions: 7,
-            spend_usd: Some(1.23),
-            tokens_in: 300,
-            tokens_out: 150,
-        };
-        let dto: ProjectModelMatrixDto = row.into();
-        let json = serde_json::to_value(&dto).unwrap();
-
-        assert_eq!(json.get("project_id").unwrap().as_str().unwrap(), "proj-1");
-        assert_eq!(json.get("model_id").unwrap().as_str().unwrap(), "model-a");
-        assert_eq!(json.get("sessions").unwrap().as_i64().unwrap(), 7);
-        assert!((json.get("spend_usd").unwrap().as_f64().unwrap() - 1.23).abs() < 0.01);
-        assert_eq!(json.get("tokens_in").unwrap().as_i64().unwrap(), 300);
-        assert_eq!(json.get("tokens_out").unwrap().as_i64().unwrap(), 150);
+        let err = q.into_typed().unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -938,129 +764,229 @@ mod tests {
         let query = UsageAnalyticsQuery {
             from: "2025-03-10".into(),
             to: "2025-03-17".into(),
-            group_by: GroupDimension::Project,
+            group_by: GroupDimension::Model,
             project_id: Some("proj-1".into()),
             model_id: Some("model-1".into()),
             agent_type: Some("worker".into()),
         };
-
         let previous = previous_window_query(&query).unwrap();
         assert_eq!(previous.from, "2025-03-03");
         assert_eq!(previous.to, "2025-03-10");
-        assert_eq!(previous.group_by, GroupDimension::Project);
         assert_eq!(previous.project_id.as_deref(), Some("proj-1"));
-        assert_eq!(previous.model_id.as_deref(), Some("model-1"));
-        assert_eq!(previous.agent_type.as_deref(), Some("worker"));
     }
 
     #[test]
-    fn weekly_rollup_sums_daily_rows_and_preserves_unknown_cost() {
-        let rows = vec![
-            DailySeriesRow {
-                day: "2025-03-03".into(),
-                session_count: 1,
-                tokens_in: 10,
-                tokens_out: 20,
-                cache_read_tokens: 3,
-                cache_write_tokens: 4,
-                total_cost_usd: Some(0.5),
-            },
-            DailySeriesRow {
-                day: "2025-03-05".into(),
-                session_count: 2,
-                tokens_in: 30,
-                tokens_out: 40,
-                cache_read_tokens: 5,
-                cache_write_tokens: 6,
-                total_cost_usd: None,
-            },
-            DailySeriesRow {
-                day: "2025-03-10".into(),
-                session_count: 3,
-                tokens_in: 50,
-                tokens_out: 60,
-                cache_read_tokens: 7,
-                cache_write_tokens: 8,
-                total_cost_usd: Some(1.5),
-            },
-        ];
-
-        let rolled = rollup_series(rows, Granularity::Week).unwrap();
-        assert_eq!(rolled.len(), 2);
-        assert_eq!(rolled[0].day, "2025-03-03");
-        assert_eq!(rolled[0].session_count, 3);
-        assert_eq!(rolled[0].tokens_in, 40);
-        assert!(rolled[0].total_cost_usd.is_none());
-        assert_eq!(rolled[1].day, "2025-03-10");
-        assert_eq!(rolled[1].total_cost_usd, Some(1.5));
-    }
-
-    #[test]
-    fn monthly_breakdown_rollup_keeps_groups_separate_and_sorted() {
-        let rows = vec![
-            BreakdownRow {
-                group_key: "b".into(),
-                day: "2025-02-01".into(),
-                session_count: 1,
-                tokens_in: 2,
-                tokens_out: 3,
-                cache_read_tokens: 4,
-                cache_write_tokens: 5,
-                total_cost_usd: Some(0.1),
-            },
-            BreakdownRow {
-                group_key: "a".into(),
-                day: "2025-01-31".into(),
-                session_count: 2,
-                tokens_in: 3,
-                tokens_out: 4,
-                cache_read_tokens: 5,
-                cache_write_tokens: 6,
-                total_cost_usd: Some(0.2),
-            },
-            BreakdownRow {
-                group_key: "a".into(),
-                day: "2025-01-15".into(),
-                session_count: 3,
-                tokens_in: 4,
-                tokens_out: 5,
-                cache_read_tokens: 6,
-                cache_write_tokens: 7,
-                total_cost_usd: Some(0.3),
-            },
-        ];
-
-        let rolled = rollup_breakdown(rows, Granularity::Month).unwrap();
-        assert_eq!(rolled.len(), 2);
-        assert_eq!(rolled[0].group_key, "a");
-        assert_eq!(rolled[0].day, "2025-01-01");
-        assert_eq!(rolled[0].session_count, 5);
-        assert_eq!(rolled[0].tokens_in, 7);
-        assert_eq!(rolled[0].total_cost_usd, Some(0.5));
-        assert_eq!(rolled[1].group_key, "b");
-        assert_eq!(rolled[1].day, "2025-02-01");
-    }
-
-    #[test]
-    fn previous_totals_uses_supplied_repository_totals() {
-        let previous_totals = UsageTotals {
-            session_count: 2,
-            tokens_in: 11,
-            tokens_out: 12,
-            cache_read_tokens: 13,
-            cache_write_tokens: 14,
-            total_cost_usd: Some(0.42),
+    fn build_kpis_emits_four_cards_with_deltas() {
+        let totals = UsageTotals {
+            session_count: 10,
+            tokens_in: 100,
+            tokens_out: 100,
+            cache_read_tokens: 50,
+            cache_write_tokens: 5,
+            total_cost_usd: Some(20.0),
         };
-        let resp = UsageResponse::from_results(
-            UsageAnalyticsResult::default(),
-            previous_totals,
-            Granularity::Day,
-            Vec::new(),
-            Vec::new(),
-        )
-        .unwrap();
-        assert_eq!(resp.previous_totals.session_count, 2);
-        assert_eq!(resp.previous_totals.tokens_in, 11);
-        assert_eq!(resp.previous_totals.total_cost_usd, Some(0.42));
+        let previous = UsageTotals {
+            session_count: 5,
+            tokens_in: 50,
+            tokens_out: 50,
+            cache_read_tokens: 25,
+            cache_write_tokens: 0,
+            total_cost_usd: Some(10.0),
+        };
+        let kpis = build_kpis(&totals, &previous);
+        assert_eq!(kpis.len(), 4);
+
+        let spend = &kpis[0];
+        assert_eq!(spend.label, "Spend");
+        assert_eq!(spend.value, Some(20.0));
+        assert!((spend.delta_pct.unwrap() - 1.0).abs() < 1e-9, "doubled spend = +100%");
+        assert!(spend.formatted.starts_with('$'));
+
+        let tokens = &kpis[1];
+        assert_eq!(tokens.value, Some(200.0));
+        assert!(tokens.formatted.is_empty());
+    }
+
+    #[test]
+    fn build_kpis_null_spend_yields_null_value_and_delta() {
+        let totals = UsageTotals {
+            total_cost_usd: None,
+            ..UsageTotals::default()
+        };
+        let kpis = build_kpis(&totals, &UsageTotals::default());
+        assert_eq!(kpis[0].label, "Spend");
+        assert!(kpis[0].value.is_none());
+        assert!(kpis[0].delta_pct.is_none());
+        assert!(kpis[0].formatted.is_empty());
+        // Previous window empty → token delta is null, not a divide-by-zero.
+        assert!(kpis[1].delta_pct.is_none());
+    }
+
+    fn series_row(day: &str, model: &str, cost: Option<f64>) -> SeriesDetailRow {
+        SeriesDetailRow {
+            day: day.into(),
+            model: model.into(),
+            project_id: "p1".into(),
+            project_name: "Proj One".into(),
+            agent_type: "worker".into(),
+            session_count: 1,
+            tokens_in: 10,
+            tokens_out: 5,
+            task_count: 1,
+            cost,
+        }
+    }
+
+    #[test]
+    fn rollup_series_day_is_identity_per_dimension() {
+        let rows = vec![
+            series_row("2025-03-10", "a", Some(1.0)),
+            series_row("2025-03-10", "b", Some(2.0)),
+        ];
+        let points = rollup_series(rows, Granularity::Day).unwrap();
+        assert_eq!(points.len(), 2);
+        assert!(points.iter().all(|p| p.date == "2025-03-10"));
+    }
+
+    #[test]
+    fn rollup_series_week_groups_same_dimension_and_preserves_null_cost() {
+        let rows = vec![
+            series_row("2025-03-03", "a", Some(1.0)),
+            series_row("2025-03-05", "a", None),
+            series_row("2025-03-04", "b", Some(3.0)),
+        ];
+        let points = rollup_series(rows, Granularity::Week).unwrap();
+        // model a (two rows, one unpriced) collapses to one bucket with null
+        // cost; model b stays separate.
+        let a = points.iter().find(|p| p.model == "a").unwrap();
+        assert_eq!(a.date, "2025-03-03");
+        assert_eq!(a.tokens_in, 20);
+        assert!(a.cost.is_none(), "any unpriced row makes the bucket null");
+        let b = points.iter().find(|p| p.model == "b").unwrap();
+        assert_eq!(b.cost, Some(3.0));
+    }
+
+    #[test]
+    fn breakdown_row_sets_links_and_cost_per_task() {
+        let row = EntityBreakdownRow {
+            id: "task-1".into(),
+            name: "A task".into(),
+            cost: Some(4.0),
+            tokens_in: 10,
+            tokens_out: 10,
+            task_count: 2,
+            success_rate: Some(0.5),
+            avg_reopens: Some(1.0),
+        };
+        let task = breakdown_row(row.clone(), GroupDimension::Task);
+        assert_eq!(task.task_id.as_deref(), Some("task-1"));
+        assert!(task.proposal_id.is_none());
+        assert_eq!(task.cost_per_task, Some(2.0));
+
+        let proposal = breakdown_row(row.clone(), GroupDimension::Proposal);
+        assert_eq!(proposal.proposal_id.as_deref(), Some("task-1"));
+        assert!(proposal.task_id.is_none());
+
+        let user = breakdown_row(row, GroupDimension::User);
+        assert!(user.task_id.is_none() && user.proposal_id.is_none());
+    }
+
+    #[test]
+    fn breakdown_row_zero_tasks_has_null_cost_per_task() {
+        let row = EntityBreakdownRow {
+            id: "u1".into(),
+            name: "user".into(),
+            cost: Some(3.0),
+            tokens_in: 1,
+            tokens_out: 1,
+            task_count: 0,
+            success_rate: None,
+            avg_reopens: None,
+        };
+        let dto = breakdown_row(row, GroupDimension::User);
+        assert!(dto.cost_per_task.is_none());
+    }
+
+    #[test]
+    fn model_effectiveness_dto_renames_to_frontend_contract() {
+        let row = ModelEffectivenessRow {
+            model_id: "gpt".into(),
+            sessions: 4,
+            spend_usd: Some(2.0),
+            tokens_in: 100,
+            tokens_out: 50,
+            shared_credit_completed_task_count: 3,
+            success_rate: Some(0.75),
+            avg_reopens: Some(0.2),
+            cost_per_completed_task: Some(0.66),
+            tokens_per_task: Some(50.0),
+        };
+        let dto: ModelEffectivenessDto = row.into();
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json.get("model").unwrap().as_str().unwrap(), "gpt");
+        assert_eq!(json.get("task_count").unwrap().as_i64().unwrap(), 3);
+        assert_eq!(json.get("completed_task_count").unwrap().as_i64().unwrap(), 3);
+        assert_eq!(json.get("session_count").unwrap().as_i64().unwrap(), 4);
+        assert_eq!(json.get("total_tokens").unwrap().as_i64().unwrap(), 150);
+        assert!((json.get("total_cost").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9);
+        assert!((json.get("cost_per_task").unwrap().as_f64().unwrap() - 0.66).abs() < 1e-9);
+        // Repository-only names must not leak.
+        assert!(json.get("model_id").is_none());
+        assert!(json.get("spend_usd").is_none());
+    }
+
+    #[test]
+    fn project_model_cell_dto_derives_cost_per_task_and_renames() {
+        let row = ProjectModelMatrixRow {
+            project_id: "p1".into(),
+            project_name: "Proj".into(),
+            model_id: "m1".into(),
+            sessions: 2,
+            spend_usd: Some(6.0),
+            tokens_in: 30,
+            tokens_out: 20,
+            task_count: 3,
+            success_rate: Some(1.0),
+            avg_reopens: Some(0.0),
+        };
+        let dto: ProjectModelCellDto = row.into();
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json.get("model").unwrap().as_str().unwrap(), "m1");
+        assert_eq!(json.get("project_name").unwrap().as_str().unwrap(), "Proj");
+        assert_eq!(json.get("total_tokens").unwrap().as_i64().unwrap(), 50);
+        assert!((json.get("cost_per_task").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9);
+        assert!((json.get("total_cost").unwrap().as_f64().unwrap() - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn response_serialises_with_frontend_contract_fields() {
+        let response = UsageResponse {
+            kpis: build_kpis(&UsageTotals::default(), &UsageTotals::default()),
+            time_series: Vec::new(),
+            breakdowns: BreakdownsDto {
+                by_user: Vec::new(),
+                by_project: Vec::new(),
+                by_proposal: Vec::new(),
+                by_task: Vec::new(),
+            },
+            model_effectiveness: Vec::new(),
+            project_model_matrix: Vec::new(),
+            generated_at: "2025-06-20T00:00:00Z".into(),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        for field in [
+            "kpis",
+            "time_series",
+            "breakdowns",
+            "model_effectiveness",
+            "project_model_matrix",
+            "generated_at",
+        ] {
+            assert!(json.get(field).is_some(), "missing field {field}");
+        }
+        let breakdowns = json.get("breakdowns").unwrap();
+        for field in ["by_user", "by_project", "by_proposal", "by_task"] {
+            assert!(breakdowns.get(field).unwrap().is_array(), "missing {field}");
+        }
     }
 }

@@ -1,5 +1,6 @@
-//! Integration test: verify `UsageAnalyticsRepository::query()` returns correct
-//! `UsageTotals` against a live Postgres database.
+//! Integration test: verify `UsageAnalyticsRepository::totals()` /
+//! `series_detailed()` / `entity_breakdown()` return correct aggregates
+//! against a live Postgres database.
 //!
 //! Guards against the NUMERIC→i64 decode panic that occurred because
 //! `SUM(bigint)` returns `NUMERIC` in Postgres.  The fix casts each integer
@@ -223,23 +224,27 @@ async fn usage_totals_decodes_i64_from_sum() {
         agent_type: None,
     };
 
-    let result = repo.query(&params).await.expect("query should succeed");
+    let totals = repo.totals(&params).await.expect("totals should succeed");
 
-    assert_eq!(result.totals.session_count, 1);
-    assert_eq!(result.totals.tokens_in, 1234);
-    assert_eq!(result.totals.tokens_out, 5678);
-    assert_eq!(result.totals.cache_read_tokens, 100);
-    assert_eq!(result.totals.cache_write_tokens, 200);
+    assert_eq!(totals.session_count, 1);
+    assert_eq!(totals.tokens_in, 1234);
+    assert_eq!(totals.tokens_out, 5678);
+    assert_eq!(totals.cache_read_tokens, 100);
+    assert_eq!(totals.cache_write_tokens, 200);
     // total_cost_usd should be Some(0.042) — no NULL sessions, so no NULL
     // cost semantic applies.
-    let cost = result.totals.total_cost_usd.expect("cost should be Some");
+    let cost = totals.total_cost_usd.expect("cost should be Some");
     assert!((cost - 0.042_f64).abs() < 1e-9, "cost mismatch: {cost}");
 
-    // Series should have exactly one day bucket.
-    assert_eq!(result.series.len(), 1);
-    assert_eq!(result.series[0].day, "2025-06-15");
-    assert_eq!(result.series[0].tokens_in, 1234);
-    assert_eq!(result.series[0].tokens_out, 5678);
+    // Detailed series should have exactly one (day, model, project, agent) row.
+    let series = repo
+        .series_detailed(&params)
+        .await
+        .expect("series should succeed");
+    assert_eq!(series.len(), 1);
+    assert_eq!(series[0].day, "2025-06-15");
+    assert_eq!(series[0].tokens_in, 1234);
+    assert_eq!(series[0].tokens_out, 5678);
 }
 
 /// Verify NULL-cost semantics: when ANY matching session has NULL cost_usd,
@@ -260,23 +265,24 @@ async fn usage_totals_null_cost_semantics_preserved() {
         agent_type: None,
     };
 
-    let result = repo.query(&params).await.expect("query should succeed");
+    let totals = repo.totals(&params).await.expect("totals should succeed");
 
-    assert_eq!(result.totals.session_count, 2);
+    assert_eq!(totals.session_count, 2);
     // Token counts should be summed correctly across both sessions.
-    assert_eq!(result.totals.tokens_in, 1234 + 999);
-    assert_eq!(result.totals.tokens_out, 5678 + 888);
-    assert_eq!(result.totals.cache_read_tokens, 100 + 50);
-    assert_eq!(result.totals.cache_write_tokens, 200 + 75);
+    assert_eq!(totals.tokens_in, 1234 + 999);
+    assert_eq!(totals.tokens_out, 5678 + 888);
+    assert_eq!(totals.cache_read_tokens, 100 + 50);
+    assert_eq!(totals.cache_write_tokens, 200 + 75);
     // Because one session has NULL cost_usd, total_cost_usd must be NULL.
     assert!(
-        result.totals.total_cost_usd.is_none(),
+        totals.total_cost_usd.is_none(),
         "expected NULL total_cost_usd when any session is unpriced, got {:?}",
-        result.totals.total_cost_usd,
+        totals.total_cost_usd,
     );
 }
 
-/// Verify the breakdown query also decodes correctly (same SUM→NUMERIC hazard).
+/// Verify the entity breakdown query also decodes correctly (same SUM→NUMERIC
+/// hazard) and aggregates tokens per entity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn breakdown_decodes_i64_from_sum() {
     let db = create_test_db();
@@ -292,13 +298,14 @@ async fn breakdown_decodes_i64_from_sum() {
         agent_type: None,
     };
 
-    let result = repo.query(&params).await.expect("query should succeed");
+    let rows = repo
+        .entity_breakdown(&params, GroupDimension::Project)
+        .await
+        .expect("entity_breakdown should succeed");
 
-    assert_eq!(result.breakdown.len(), 1);
-    assert_eq!(result.breakdown[0].tokens_in, 1234);
-    assert_eq!(result.breakdown[0].tokens_out, 5678);
-    assert_eq!(result.breakdown[0].cache_read_tokens, 100);
-    assert_eq!(result.breakdown[0].cache_write_tokens, 200);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tokens_in, 1234);
+    assert_eq!(rows[0].tokens_out, 5678);
 }
 
 // ── Model effectiveness regression tests ───────────────────────────────────
