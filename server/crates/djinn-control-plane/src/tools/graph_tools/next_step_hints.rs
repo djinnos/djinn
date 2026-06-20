@@ -164,6 +164,7 @@ pub(crate) fn next_step_slot(response: &mut CodeGraphResponse) -> &mut Option<St
         CodeGraphResponse::ApiImpact(r) => &mut r.next_step,
         CodeGraphResponse::Flow(r) => &mut r.next_step,
         CodeGraphResponse::CrateGraph(r) => &mut r.next_step,
+        CodeGraphResponse::ImpactCheck(r) => &mut r.next_step,
     }
 }
 
@@ -238,6 +239,7 @@ pub(crate) fn graph_staleness_slot(
         CodeGraphResponse::ApiImpact(r) => &mut r.graph_staleness,
         CodeGraphResponse::Flow(r) => &mut r.graph_staleness,
         CodeGraphResponse::CrateGraph(r) => &mut r.graph_staleness,
+        CodeGraphResponse::ImpactCheck(r) => &mut r.graph_staleness,
     }
 }
 
