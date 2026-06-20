@@ -556,6 +556,7 @@ mod tests {
                 folder: None,
                 note_type: None,
                 limit: Some(10),
+                edge_kinds: None,
             },
             Some("task-123"),
         )
@@ -620,6 +621,7 @@ mod tests {
                 folder: None,
                 note_type: None,
                 limit: Some(10),
+                edge_kinds: None,
             },
             None,
         )
@@ -736,6 +738,7 @@ mod tests {
                 folder: None,
                 note_type: None,
                 limit: Some(10),
+                edge_kinds: None,
             },
             None,
         )
@@ -796,6 +799,7 @@ mod tests {
                 folder: None,
                 note_type: None,
                 limit: Some(10),
+                edge_kinds: None,
             },
             None,
         )
@@ -828,6 +832,7 @@ mod tests {
                 budget: Some(4096),
                 task_id: None,
                 min_confidence: None,
+                edge_kinds: None,
             },
             None,
         )
@@ -849,6 +854,7 @@ mod tests {
                 budget: Some(4096),
                 task_id: None,
                 min_confidence: None,
+                edge_kinds: None,
             },
             None,
         )
@@ -873,6 +879,7 @@ mod tests {
                 folder: None,
                 note_type: None,
                 limit: Some(10),
+                edge_kinds: None,
             }))
             .await
             .0;

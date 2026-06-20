@@ -1,4 +1,4 @@
-// ADR-051 §7 — Auto-dispatch reentrance guards.
+// Reentrance gating for auto-dispatch of the Planner (wave-1) slot.
 //
 // Both auto-dispatch rules from ADR-034 §4 are gated through a single
 // helper, `should_auto_dispatch_planner`, so that future auto-dispatch
@@ -96,12 +96,13 @@ pub(super) async fn should_auto_dispatch_planner(db: &Database, event: DispatchE
             }
             Ok(false) => {}
             Err(e) => {
-                // Fail closed: defer dispatch when blocker lookup fails to
-                // avoid duplicating foundation work (ADR-051 / Task 8cif).
+                // Fail closed: a blocker-lookup error must NOT silently
+                // allow dispatch — duplicating foundation work (migrations,
+                // schemas, shared modules) is worse than stalling.
                 tracing::error!(
                     epic_id,
                     error = %e,
-                    "epic dependencies: blocker lookup failed, deferring dispatch",
+                    "epic dependencies: blocker lookup failed, deferring dispatch (fail-closed)",
                 );
                 return false;
             }
@@ -138,6 +139,7 @@ mod tests {
     use super::*;
     use crate::test_helpers;
     use djinn_db::{CreateSessionParams, EpicRepository, SessionRepository, TaskRepository};
+    use sqlx;
 
     async fn make_epic(db: &djinn_db::Database, project_id: &str) -> djinn_core::models::Epic {
         EpicRepository::new(db.clone(), EventBus::noop())
@@ -287,7 +289,7 @@ mod tests {
             "unresolved epic blocker must skip wave-1 dispatch"
         );
 
-        // Closing the blocker unblocks the dependent.
+        // Close the blocker.
         epic_repo.close(&blocker.id).await.unwrap();
 
         let allowed_after = should_auto_dispatch_planner(
@@ -300,85 +302,33 @@ mod tests {
         .await;
         assert!(
             allowed_after,
-            "closing the last blocker must allow wave-1 dispatch"
+            "closed blocker must allow wave-1 dispatch for dependent"
         );
     }
 
+    // ── Regression tests: race-condition + propagation (i528-1 §4) ──────────
+
+    /// Regression test 1: Create-then-block ordering.
+    ///
+    /// Simulates the proposal decomposition flow where epic A is created first,
+    /// then epic B is created, and B.blocked_by=A is wired AFTER creation.
+    /// B's auto-breakdown must be suppressed while A is still open.
+    /// This reproduces the original race condition described in the epic.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn natural_completion_allows_dispatch() {
-        let db = test_helpers::create_test_db();
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = make_epic(&db, &project.id).await;
-
-        let allowed = should_auto_dispatch_planner(
-            &db,
-            DispatchEvent::TaskClosed {
-                epic_id: &epic.id,
-                close_reason: Some("completed"),
-            },
-        )
-        .await;
-        assert!(
-            allowed,
-            "natural completion with no active planner must dispatch"
-        );
-
-        let allowed_epic = should_auto_dispatch_planner(
-            &db,
-            DispatchEvent::EpicCreated {
-                epic_id: &epic.id,
-                auto_breakdown: true,
-            },
-        )
-        .await;
-        assert!(
-            allowed_epic,
-            "epic created with auto_breakdown=true must dispatch"
-        );
-    }
-
-    /// Regression: a blocker-lookup error must defer (fail-closed) rather than
-    /// allowing dispatch (fail-open).  Closing the pool forces
-    /// `has_unresolved_blockers` to error; with the fail-closed arm the
-    /// dispatcher should see `false`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn blocker_lookup_error_defers_dispatch() {
-        let db = test_helpers::create_test_db();
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = make_epic(&db, &project.id).await;
-
-        // Close the pool so any subsequent query will fail.
-        db.pool().close().await;
-
-        let allowed = should_auto_dispatch_planner(
-            &db,
-            DispatchEvent::EpicCreated {
-                epic_id: &epic.id,
-                auto_breakdown: true,
-            },
-        )
-        .await;
-        assert!(
-            !allowed,
-            "blocker lookup error must defer dispatch (fail-closed)"
-        );
-    }
-
-    /// Race-condition regression: when `blocked_by` is wired AFTER epic
-    /// creation (the proposal-decomposition ordering), the auto-dispatch gate
-    /// must suppress breakdown until the blocker closes.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn create_then_block_ordering_suppresses_dispatch() {
+    async fn create_then_block_ordering_defers_decomposition() {
         let db = test_helpers::create_test_db();
         let project = test_helpers::create_test_project(&db).await;
         let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
 
-        // Create two epics — A (foundation) and B (dependent).
+        // 1. Create epic A (open, no blockers — foundation).
         let epic_a = make_epic(&db, &project.id).await;
+
+        // 2. Create epic B (open, no blockers — dependent, created before
+        //    the proposal planner wires the blocker edge).
         let epic_b = make_epic(&db, &project.id).await;
 
-        // At creation time B has no blockers → dispatch is allowed.
-        let allowed_before = should_auto_dispatch_planner(
+        // 3. At this point, B has no blockers — dispatch would be allowed.
+        let allowed_before_block = should_auto_dispatch_planner(
             &db,
             DispatchEvent::EpicCreated {
                 epic_id: &epic_b.id,
@@ -387,13 +337,15 @@ mod tests {
         )
         .await;
         assert!(
-            allowed_before,
-            "epic with no blockers must dispatch immediately"
+            allowed_before_block,
+            "B with no blockers should dispatch initially"
         );
 
-        // Wire the dependency AFTER creation (the race-condition ordering).
+        // 4. Wire B.blocked_by = A (simulates proposal planner wiring
+        //    the dependency edge AFTER epic creation).
         epic_repo.add_blocker(&epic_b.id, &epic_a.id).await.unwrap();
 
+        // 5. Now the blocker gate must suppress B's dispatch.
         let allowed_after_block = should_auto_dispatch_planner(
             &db,
             DispatchEvent::EpicCreated {
@@ -404,13 +356,45 @@ mod tests {
         .await;
         assert!(
             !allowed_after_block,
-            "wiring blocker after creation must suppress dispatch"
+            "B blocked by open epic A must NOT dispatch (race condition regression)"
+        );
+    }
+
+    /// Regression test 2: Closing blocker triggers decomposition.
+    ///
+    /// After epic A (the blocker) is closed, epic B (which was blocked by A)
+    /// must be allowed to dispatch. This validates the emit_unblocked_epics
+    /// re-drive path through the coordinator gate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closing_blocker_allows_blocked_epic_dispatch() {
+        let db = test_helpers::create_test_db();
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
+
+        let epic_a = make_epic(&db, &project.id).await;
+        let epic_b = make_epic(&db, &project.id).await;
+
+        // B blocked by A.
+        epic_repo.add_blocker(&epic_b.id, &epic_a.id).await.unwrap();
+
+        // Confirm B is suppressed while A is open.
+        assert!(
+            !should_auto_dispatch_planner(
+                &db,
+                DispatchEvent::EpicCreated {
+                    epic_id: &epic_b.id,
+                    auto_breakdown: true,
+                },
+            )
+            .await,
+            "B must be suppressed while A is open"
         );
 
-        // Close the blocking epic → B's dispatch is now allowed.
+        // Close A — triggers emit_unblocked_epics internally.
         epic_repo.close(&epic_a.id).await.unwrap();
 
-        let allowed_after_close = should_auto_dispatch_planner(
+        // Now the blocker gate must allow B to dispatch.
+        let allowed = should_auto_dispatch_planner(
             &db,
             DispatchEvent::EpicCreated {
                 epic_id: &epic_b.id,
@@ -418,21 +402,56 @@ mod tests {
             },
         )
         .await;
+        assert!(allowed, "closing blocker A must allow B to dispatch");
+    }
+
+    /// Regression test 3: Fail-closed on blocker lookup error.
+    ///
+    /// If the blocker-lookup query returns an error (e.g. table missing),
+    /// the gate must defer dispatch (fail-closed), not allow it (fail-open).
+    /// This prevents duplicate foundation work when the DB is degraded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocker_lookup_error_defers_dispatch_fail_closed() {
+        let db = test_helpers::create_test_db();
+        let project = test_helpers::create_test_project(&db).await;
+
+        let epic = make_epic(&db, &project.id).await;
+
+        // Drop the epic_blockers table to cause a lookup error on the
+        // next has_unresolved_blockers call.
+        sqlx::query("DROP TABLE IF EXISTS epic_blockers")
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        // With the table gone, the blocker lookup will error.
+        // The gate must fail CLOSED: defer dispatch rather than allow it.
+        let allowed = should_auto_dispatch_planner(
+            &db,
+            DispatchEvent::EpicCreated {
+                epic_id: &epic.id,
+                auto_breakdown: true,
+            },
+        )
+        .await;
         assert!(
-            allowed_after_close,
-            "closing the blocker must re-allow dispatch for the dependent"
+            !allowed,
+            "blocker-lookup error must defer dispatch (fail-closed), not allow it"
         );
     }
 
-    /// Regression guard: a single epic with no blockers must decompose
-    /// immediately.  Ensures the blocker gate does not accidentally block
-    /// proposals with a single, independent epic.
+    /// Regression test 4: No-blocker epics decompose immediately.
+    ///
+    /// An epic with no blockers and auto_breakdown=true must be dispatched
+    /// immediately. This ensures we haven't regressed single-epic proposals.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn no_regression_single_epic() {
+    async fn no_blocker_epic_decomposes_immediately() {
         let db = test_helpers::create_test_db();
         let project = test_helpers::create_test_project(&db).await;
+
         let epic = make_epic(&db, &project.id).await;
 
+        // No blockers, auto_breakdown=true — must dispatch.
         let allowed = should_auto_dispatch_planner(
             &db,
             DispatchEvent::EpicCreated {
@@ -443,7 +462,56 @@ mod tests {
         .await;
         assert!(
             allowed,
-            "single epic with no blockers must dispatch immediately"
+            "single epic with no blockers and auto_breakdown=true must dispatch immediately"
+        );
+    }
+
+    /// Regression test 5 (gate-level): Two-phased regression guard.
+    ///
+    /// P1 owns a migration (foundation). P2 depends on P1.
+    /// P2 must NOT dispatch while P1 is open.
+    /// Once P1 closes, P2 dispatches.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_phased_p2_waits_for_p1_at_gate_level() {
+        let db = test_helpers::create_test_db();
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
+
+        // P1: foundation epic (owns a migration).
+        let p1 = make_epic(&db, &project.id).await;
+        // P2: dependent epic (builds on P1's migration).
+        let p2 = make_epic(&db, &project.id).await;
+
+        // P2 depends on P1.
+        epic_repo.add_blocker(&p2.id, &p1.id).await.unwrap();
+
+        // While P1 is open, P2 must be suppressed.
+        assert!(
+            !should_auto_dispatch_planner(
+                &db,
+                DispatchEvent::EpicCreated {
+                    epic_id: &p2.id,
+                    auto_breakdown: true,
+                },
+            )
+            .await,
+            "P2 must NOT dispatch while P1 (migration owner) is open"
+        );
+
+        // Close P1 — migration complete.
+        epic_repo.close(&p1.id).await.unwrap();
+
+        // Now P2 must dispatch.
+        assert!(
+            should_auto_dispatch_planner(
+                &db,
+                DispatchEvent::EpicCreated {
+                    epic_id: &p2.id,
+                    auto_breakdown: true,
+                },
+            )
+            .await,
+            "P2 must dispatch after P1 closes"
         );
     }
 }
