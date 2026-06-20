@@ -689,7 +689,6 @@ impl SessionRuntime for KubernetesRuntime {
             task_run_id: handle.task_run_id.clone(),
             outcome: TaskRunOutcome::Interrupted,
             stages_completed: Vec::<RoleKind>::new(),
-            verification_run_id: None,
         }))
     }
 
@@ -1897,7 +1896,6 @@ mod tests {
                 reason: "bridge-test".into(),
             },
             stages_completed: vec![RoleKind::Planner],
-            verification_run_id: None,
         };
         let event_frame = SupFrame {
             correlation_id: 0,

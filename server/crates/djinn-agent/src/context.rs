@@ -20,7 +20,7 @@ use djinn_runtime::GraphWarmerService;
 use djinn_workspace::MirrorManager;
 use tokio::sync::Mutex;
 
-use crate::actors::coordinator::{CoordinatorHandle, VerificationTracker};
+use crate::actors::coordinator::{BackgroundWorkTracker, CoordinatorHandle};
 use crate::file_time::FileTime;
 use crate::lsp::LspManager;
 use crate::roles::RoleRegistry;
@@ -43,7 +43,12 @@ pub struct AgentContext {
     pub db: Database,
     pub event_bus: EventBus,
     pub git_actors: Arc<Mutex<HashMap<PathBuf, GitActorHandle>>>,
-    pub verifying_tasks: VerificationTracker,
+    /// Tasks with in-flight post-session background work (merge/transition for
+    /// non-worker roles, knowledge extraction). The coordinator's stuck-task
+    /// recovery skips releasing a task while it is registered here, so a slot
+    /// that freed its session but is still finishing background work isn't
+    /// spuriously recovered.
+    pub background_work_tasks: BackgroundWorkTracker,
     pub role_registry: Arc<RoleRegistry>,
     pub health_tracker: HealthTracker,
     pub file_time: Arc<FileTime>,
@@ -260,32 +265,6 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
     async fn apply_user_model_change(&self) {
         // Slot-pool/coordinator reconfiguration is owned by the server-side
         // AppState impl. No-op for the agent-internal runtime.
-    }
-    async fn dispatch_verification_test(
-        &self,
-        _test_id: &str,
-        _project_id: &str,
-    ) -> Result<(), djinn_control_plane::bridge::RuntimeDispatchError> {
-        // Verification-test dispatch is owned by the server-side AppState impl
-        // (it routes to the K8s graph warmer). The agent-internal runtime has
-        // no kube client.
-        Err(djinn_control_plane::bridge::RuntimeDispatchError::Backend(
-            "dispatch_verification_test not supported on the agent-internal runtime".to_string(),
-        ))
-    }
-    async fn dispatch_verification(
-        &self,
-        _run_id: &str,
-        _project_id: &str,
-        _task_branch: &str,
-        _target_branch: &str,
-    ) -> Result<(), djinn_control_plane::bridge::RuntimeDispatchError> {
-        // Verification dispatch is owned by the server-side AppState impl (it
-        // routes to the K8s graph warmer). The agent-internal runtime has no
-        // kube client; the verification pipeline falls back to host execution.
-        Err(djinn_control_plane::bridge::RuntimeDispatchError::Backend(
-            "dispatch_verification not supported on the agent-internal runtime".to_string(),
-        ))
     }
     async fn teardown_taskrun_job(&self, _task_run_id: &str) -> Result<(), String> {
         // Task-run Job deletion is owned by the server-side AppState impl via
@@ -703,28 +682,20 @@ impl AgentContext {
         djinn_git::get_or_spawn(&mut map, path)
     }
 
-    /// Register a task as having an in-flight verification pipeline.
-    pub fn register_verification(&self, task_id: &str) {
-        self.verifying_tasks
+    /// Register a task as having in-flight post-session background work.
+    pub fn register_background_work(&self, task_id: &str) {
+        self.background_work_tasks
             .lock()
             .expect("poisoned")
             .insert(task_id.to_string());
     }
 
-    /// Deregister a task's verification pipeline (completed or crashed).
-    pub fn deregister_verification(&self, task_id: &str) {
-        self.verifying_tasks
+    /// Deregister a task's post-session background work (completed or crashed).
+    pub fn deregister_background_work(&self, task_id: &str) {
+        self.background_work_tasks
             .lock()
             .expect("poisoned")
             .remove(task_id);
-    }
-
-    /// Check whether a task has a live verification pipeline.
-    pub fn has_verification(&self, task_id: &str) -> bool {
-        self.verifying_tasks
-            .lock()
-            .expect("poisoned")
-            .contains(task_id)
     }
 
     /// Register a task as active and return the shared timestamp atomic.

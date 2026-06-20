@@ -272,28 +272,6 @@ impl McpState {
         self.runtime.trigger_graph_warm(project_id).await;
     }
 
-    pub async fn dispatch_verification_test(
-        &self,
-        test_id: &str,
-        project_id: &str,
-    ) -> Result<(), crate::bridge::RuntimeDispatchError> {
-        self.runtime
-            .dispatch_verification_test(test_id, project_id)
-            .await
-    }
-
-    pub async fn dispatch_verification(
-        &self,
-        run_id: &str,
-        project_id: &str,
-        task_branch: &str,
-        target_branch: &str,
-    ) -> Result<(), crate::bridge::RuntimeDispatchError> {
-        self.runtime
-            .dispatch_verification(run_id, project_id, task_branch, target_branch)
-            .await
-    }
-
     /// Best-effort/idempotent foreground deletion of the canonical task-run Job
     /// (`djinn-taskrun-{task_run_id}`), routed through the runtime bridge so
     /// control-plane/agent callers never depend on djinn-k8s directly.
@@ -394,22 +372,6 @@ pub mod stubs {
         }
         async fn trigger_graph_warm(&self, _: &str) {}
         async fn apply_user_model_change(&self) {}
-        async fn dispatch_verification_test(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> Result<(), crate::bridge::RuntimeDispatchError> {
-            Ok(())
-        }
-        async fn dispatch_verification(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-        ) -> Result<(), crate::bridge::RuntimeDispatchError> {
-            Ok(())
-        }
         async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {
             Ok(())
         }

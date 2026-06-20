@@ -430,15 +430,6 @@ impl SessionRepository {
     /// conversation's lifetime, and must not share a budget with autonomous
     /// task-runs — otherwise an open (or leaked) chat tab silently starves the
     /// user's task dispatch (fatal at `max_sessions = 1`).
-    ///
-    /// Sessions whose owning task is in the `verifying` stage are ALSO excluded:
-    /// once the worker stage hands off to verification the model is no longer in
-    /// use (in-pod verification runs `cargo test`/`clippy` and consumes ZERO
-    /// model tokens), even though the worker pod / slot is still held while it
-    /// compiles. The cap protects the *model*, not the pod/CPU budget, so a
-    /// verify-stage run must free a model slot for the next session to dispatch
-    /// on a different pod. Without this a single verify (minutes long) keeps
-    /// counting against the per-model cap and wedges an otherwise-idle model.
     pub async fn count_active_by_user_and_model(
         &self,
     ) -> Result<Vec<(Option<String>, String, i64)>> {
@@ -451,7 +442,6 @@ impl SessionRepository {
                  LEFT JOIN tasks t ON t.id = s.task_id
                 WHERE s.status = 'running'
                   AND s.agent_type <> 'chat'
-                  AND (t.status IS NULL OR t.status <> 'verifying')
                 GROUP BY COALESCE(s.created_by_user_id, t.created_by_user_id), s.model_id"#
         )
         .fetch_all(self.db.pool())
@@ -1252,99 +1242,6 @@ mod tests {
         assert_eq!(
             map.get(&(user_b.clone(), "openai/gpt".to_string())),
             Some(&1)
-        );
-    }
-
-    /// A running worker session whose owning task has handed off to the
-    /// `verifying` stage must NOT count against the per-model concurrency cap:
-    /// in-pod verification consumes the pod/CPU but ZERO model tokens, so the
-    /// model slot is free for the next session. Without this exclusion a
-    /// minutes-long verify keeps the model "busy" and wedges dispatch.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn count_active_by_user_and_model_excludes_verifying_stage_sessions() {
-        let db = test_db();
-        let (bus, _captured) = capturing_bus();
-        db.ensure_initialized().await.unwrap();
-
-        let user = uuid::Uuid::now_v7().to_string();
-        sqlx::query!(
-            "INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)",
-            user,
-            7101i64,
-            "verify-cap"
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
-
-        let epic = EpicRepository::new(db.clone(), bus.clone())
-            .create("E", "", "", "", "", None)
-            .await
-            .unwrap();
-        let project_id = epic.project_id.clone();
-
-        async fn mk_task(
-            db: &Database,
-            project_id: &str,
-            epic_id: &str,
-            creator: &str,
-            status: &str,
-        ) -> String {
-            let id = uuid::Uuid::now_v7().to_string();
-            let short_id = format!("t{}{}", &id[..6], &id[id.len() - 6..]);
-            // Runtime `sqlx::query` (no `query!` macro) — the test sets a
-            // per-row `status` (`in_progress` / `verifying`) so the query
-            // string varies per call and would otherwise need a fresh
-            // `.sqlx/` cache entry for each variant.
-            sqlx::query(
-                "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                    issue_type, priority, owner, status, continuation_count,
-                                    labels, acceptance_criteria, memory_refs, created_by_user_id)
-                 VALUES ($1,$2,$3,$4,'T','','','task',0,'',$6,0,'[]'::jsonb,'[]'::jsonb,'[]'::jsonb,$5)",
-            )
-            .bind(&id)
-            .bind(project_id)
-            .bind(&short_id)
-            .bind(epic_id)
-            .bind(creator)
-            .bind(status)
-            .execute(db.pool())
-            .await
-            .unwrap();
-            id
-        }
-
-        let repo = SessionRepository::new(db.clone(), bus.clone());
-        // One in_progress (generating) task and one verifying task, both with a
-        // running worker session on the same model under the same creator.
-        let t_gen = mk_task(&db, &project_id, &epic.id, &user, "in_progress").await;
-        let t_verify = mk_task(&db, &project_id, &epic.id, &user, "verifying").await;
-        for t in [&t_gen, &t_verify] {
-            repo.create(CreateSessionParams {
-                project_id: &project_id,
-                task_id: Some(t),
-                model: "openai/gpt-5.5",
-                agent_type: "worker",
-                metadata_json: None,
-                task_run_id: None,
-                pricing: None,
-            })
-            .await
-            .unwrap();
-        }
-
-        let map: std::collections::HashMap<(String, String), i64> = repo
-            .count_active_by_user_and_model()
-            .await
-            .unwrap()
-            .into_iter()
-            .filter_map(|(c, m, n)| c.map(|c| ((c, m), n)))
-            .collect();
-        // Only the in_progress task counts; the verifying one is excluded.
-        assert_eq!(
-            map.get(&(user.clone(), "openai/gpt-5.5".to_string())),
-            Some(&1),
-            "verifying-stage worker session must not count against the per-model cap"
         );
     }
 

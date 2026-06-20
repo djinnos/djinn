@@ -1,39 +1,35 @@
-//! Fetch a project's `environment_config.verification` block from Dolt.
+//! Fetch a project's `environment_config` block from Postgres.
 //!
-//! This is the post-P8 replacement for the `.djinn/settings.json` reader in
-//! `verification/settings.rs`. All verification setup commands and glob rules
-//! now live in `projects.environment_config` (JSON column), written by the P5
-//! boot reseed hook and edited via the `project_environment_config_set` MCP
-//! tool.
+//! All workspace/setup config now lives in `projects.environment_config` (JSON
+//! column), written by the boot reseed hook and edited via the
+//! `project_environment_config_set` MCP tool.
 //!
 //! ## Lookup modes
 //!
 //! The fetch helpers accept either a project id (preferred — the in-process
-//! caller already has it) or a workspace path (used by the verification
-//! pipeline, which runs against an ephemeral mirror clone and doesn't know the
-//! project id up-front). The path form reverse-parses the canonical
-//! `{projects_root}/{owner}/{repo}` clone-path shape and looks the project up
-//! by GitHub coords via [`djinn_db::ProjectRepository::get_by_github`].
+//! caller already has it) or a workspace path (used by callers that run against
+//! an ephemeral mirror clone and don't know the project id up-front). The path
+//! form reverse-parses the canonical `{projects_root}/{owner}/{repo}`
+//! clone-path shape and looks the project up by GitHub coords via
+//! [`djinn_db::ProjectRepository::get_by_github`].
 //!
 //! ## Soft-failure policy
 //!
 //! Every edge case — missing row, `'{}'` (pre-reseed) column, malformed JSON,
 //! forward-incompatible `schema_version` — degrades to an empty
-//! [`djinn_stack::environment::Verification`]. The verification pipeline then
-//! treats the project as having no rules/setup, which is the correct
-//! "no-op / vacuous pass" behaviour. We log a `warn` so misconfiguration is
-//! visible in the logs without blocking the task.
+//! [`djinn_stack::environment::EnvironmentConfig`]. We log a `warn` so
+//! misconfiguration is visible in the logs without blocking the task.
 
 use std::path::Path;
 
-use djinn_db::{Database, ProjectRepository, VerificationRepository};
-use djinn_stack::environment::{EnvironmentConfig, Verification, VerificationRule};
+use djinn_db::{Database, ProjectRepository};
+use djinn_stack::environment::EnvironmentConfig;
 
 /// Resolve a project id from a workspace path (exact or fuzzy prefix match).
 ///
 /// Returns `None` when no project row has a path that is a prefix of
-/// `worktree_path`. Errors from the Dolt lookup are also surfaced as `None`
-/// (with a warn log) so a broken DB connection can't block verification.
+/// `worktree_path`. Errors from the lookup are also surfaced as `None`
+/// (with a warn log) so a broken DB connection can't block the caller.
 async fn resolve_project_id_for_path(db: &Database, worktree_path: &Path) -> Option<String> {
     let repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
     let path_str = worktree_path.to_string_lossy();
@@ -50,7 +46,7 @@ async fn resolve_project_id_for_path(db: &Database, worktree_path: &Path) -> Opt
     if components.len() < 2 {
         tracing::debug!(
             path = %path_str,
-            "verification::environment: path too short to parse owner/repo; using empty verification config"
+            "environment: path too short to parse owner/repo; using empty environment config"
         );
         return None;
     }
@@ -64,7 +60,7 @@ async fn resolve_project_id_for_path(db: &Database, worktree_path: &Path) -> Opt
                 tracing::warn!(
                     error = %e,
                     path = %path_str,
-                    "verification::environment: failed to resolve project id from path; using empty verification config"
+                    "environment: failed to resolve project id from path; using empty environment config"
                 );
                 return None;
             }
@@ -72,7 +68,7 @@ async fn resolve_project_id_for_path(db: &Database, worktree_path: &Path) -> Opt
     }
     tracing::debug!(
         path = %path_str,
-        "verification::environment: no project row matched any ancestor owner/repo; using empty verification config"
+        "environment: no project row matched any ancestor owner/repo; using empty environment config"
     );
     None
 }
@@ -81,8 +77,8 @@ async fn resolve_project_id_for_path(db: &Database, worktree_path: &Path) -> Opt
 ///
 /// Returns [`EnvironmentConfig::empty`] for every failure / missing path
 /// described in the module-level docs. This is the single entry point used by
-/// verification, MCP default resolution, and skills; callers extract whichever
-/// sub-field they need from the returned config.
+/// MCP default resolution and skills; callers extract whichever sub-field they
+/// need from the returned config.
 pub async fn environment_config_for_project_id(
     db: &Database,
     project_id: &str,
@@ -95,7 +91,7 @@ pub async fn environment_config_for_project_id(
         Ok(None) => {
             tracing::warn!(
                 project_id = %project_id,
-                "verification::environment: no projects row; using empty environment config"
+                "environment: no projects row; using empty environment config"
             );
             return EnvironmentConfig::empty();
         }
@@ -103,7 +99,7 @@ pub async fn environment_config_for_project_id(
             tracing::warn!(
                 project_id = %project_id,
                 error = %e,
-                "verification::environment: failed to fetch environment_config; using empty environment config"
+                "environment: failed to fetch environment_config; using empty environment config"
             );
             return EnvironmentConfig::empty();
         }
@@ -111,11 +107,11 @@ pub async fn environment_config_for_project_id(
 
     match serde_json::from_str::<EnvironmentConfig>(&raw) {
         Ok(cfg) if cfg.schema_version == 0 => {
-            // Column still holds the migration-10 `'{}'` default; P5 reseed
+            // Column still holds the migration-10 `'{}'` default; reseed
             // hook hasn't run yet (or the row pre-dates the hook).
             tracing::debug!(
                 project_id = %project_id,
-                "verification::environment: environment_config schema_version=0 (pre-reseed); using empty environment config"
+                "environment: environment_config schema_version=0 (pre-reseed); using empty environment config"
             );
             EnvironmentConfig::empty()
         }
@@ -124,7 +120,7 @@ pub async fn environment_config_for_project_id(
             tracing::warn!(
                 project_id = %project_id,
                 error = %e,
-                "verification::environment: failed to deserialize environment_config; using empty environment config"
+                "environment: failed to deserialize environment_config; using empty environment config"
             );
             EnvironmentConfig::empty()
         }
@@ -176,7 +172,7 @@ pub async fn project_has_indexable_code(db: &Database, project_id: &str) -> bool
                     project_id = %project_id,
                     image_id = %image.id,
                     error = %e,
-                    "verification::environment: catalog image config unparseable; assuming project has code"
+                    "environment: catalog image config unparseable; assuming project has code"
                 );
                 true
             }
@@ -186,55 +182,10 @@ pub async fn project_has_indexable_code(db: &Database, project_id: &str) -> bool
             tracing::warn!(
                 project_id = %project_id,
                 error = %e,
-                "verification::environment: failed to resolve catalog image; assuming project has code"
+                "environment: failed to resolve catalog image; assuming project has code"
             );
             true
         }
-    }
-}
-
-/// Fetch the verification rules for a project from the `project_verifications`
-/// table (migration 44 — verification moved out of `environment_config`).
-///
-/// Every edge case — missing row, malformed rules JSON, DB error — degrades to
-/// an empty [`Verification`] (the "no rules / vacuous pass" behaviour), logged
-/// at `warn` so misconfiguration is visible without blocking the task.
-pub async fn verification_for_project_id(db: &Database, project_id: &str) -> Verification {
-    let raw = match VerificationRepository::new(db.clone())
-        .get_rules(project_id)
-        .await
-    {
-        Ok(Some(raw)) => raw,
-        Ok(None) => return Verification::default(),
-        Err(e) => {
-            tracing::warn!(
-                project_id = %project_id,
-                error = %e,
-                "verification::environment: failed to fetch verification rules; using empty verification config"
-            );
-            return Verification::default();
-        }
-    };
-    match serde_json::from_str::<Vec<VerificationRule>>(&raw) {
-        Ok(rules) => Verification { rules },
-        Err(e) => {
-            tracing::warn!(
-                project_id = %project_id,
-                error = %e,
-                "verification::environment: failed to deserialize verification rules; using empty verification config"
-            );
-            Verification::default()
-        }
-    }
-}
-
-/// Fetch the verification rules for a workspace path. Convenience wrapper over
-/// [`verification_for_project_id`] for the verification pipeline which only has
-/// a path to the ephemeral mirror clone, not a project id.
-pub async fn verification_for_path(db: &Database, worktree_path: &Path) -> Verification {
-    match resolve_project_id_for_path(db, worktree_path).await {
-        Some(id) => verification_for_project_id(db, &id).await,
-        None => Verification::default(),
     }
 }
 
@@ -244,7 +195,7 @@ pub async fn verification_for_path(db: &Database, worktree_path: &Path) -> Verif
 /// unchanged.
 ///
 /// Only the `Shell(String)` variant maps cleanly today — that's the shape the
-/// P5 reseed hook emits, and the only shape the old `.djinn/settings.json`
+/// reseed hook emits, and the only shape the old `.djinn/settings.json`
 /// setup list expressed. `Exec(argv)` is joined into a single `sh -c` string
 /// best-effort; `Parallel` is flattened in declaration order (no actual
 /// parallelism), matching the sequential behaviour of the old setup loop.
@@ -268,7 +219,7 @@ pub fn hook_commands_to_specs(
             djinn_stack::environment::HookCommand::Exec(argv) => {
                 tracing::warn!(
                     index = idx,
-                    "verification::environment: Exec-form setup hooks are flattened to `sh -c`; prefer Shell form in environment_config.lifecycle.pre_verification"
+                    "environment: Exec-form setup hooks are flattened to `sh -c`; prefer Shell form in environment_config.lifecycle.pre_verification"
                 );
                 let joined = shell_join_argv(argv);
                 specs.push(djinn_core::commands::CommandSpec {
@@ -281,7 +232,7 @@ pub fn hook_commands_to_specs(
                 tracing::warn!(
                     index = idx,
                     group_size = map.len(),
-                    "verification::environment: Parallel-form setup hooks run sequentially on the agent side"
+                    "environment: Parallel-form setup hooks run sequentially on the agent side"
                 );
                 for (child_name, child) in map {
                     let child_specs = hook_commands_to_specs(std::slice::from_ref(child));
@@ -318,7 +269,7 @@ fn shell_join_argv(argv: &[String]) -> String {
 mod tests {
     use super::*;
     use djinn_core::events::EventBus;
-    use djinn_stack::environment::{HookCommand, VerificationRule};
+    use djinn_stack::environment::HookCommand;
 
     fn test_db() -> Database {
         Database::open_in_memory().expect("in-memory db")
@@ -328,13 +279,6 @@ mod tests {
         db.ensure_initialized().await.unwrap();
         ProjectRepository::new(db.clone(), EventBus::noop())
             .create_with_id(id, &format!("p-{id}"), "test", slug)
-            .await
-            .unwrap();
-    }
-
-    async fn set_rules(db: &Database, id: &str, rules: Vec<VerificationRule>) {
-        djinn_db::VerificationRepository::new(db.clone())
-            .set_rules(id, &serde_json::to_string(&rules).unwrap(), "user_edited")
             .await
             .unwrap();
     }
@@ -433,42 +377,6 @@ mod tests {
         assert!(!project_has_indexable_code(&db, "p1").await);
     }
 
-    #[tokio::test]
-    async fn missing_project_returns_empty_verification() {
-        let db = test_db();
-        db.ensure_initialized().await.unwrap();
-        let v = verification_for_project_id(&db, "does-not-exist").await;
-        assert!(v.rules.is_empty());
-    }
-
-    #[tokio::test]
-    async fn project_without_rules_returns_empty_verification() {
-        let db = test_db();
-        seed_project(&db, "p1", "p1").await;
-        let v = verification_for_project_id(&db, "p1").await;
-        assert!(v.rules.is_empty());
-    }
-
-    #[tokio::test]
-    async fn returns_parsed_verification_rules() {
-        let db = test_db();
-        seed_project(&db, "p1", "p1").await;
-        set_rules(
-            &db,
-            "p1",
-            vec![VerificationRule {
-                match_pattern: "crates/**".into(),
-                commands: vec!["cargo test".into()],
-            }],
-        )
-        .await;
-        let v = verification_for_project_id(&db, "p1").await;
-        assert!(
-            v.rules.is_empty(),
-            "verification rules table is dropped; stale seeded rules are ignored"
-        );
-    }
-
     #[test]
     fn hook_commands_to_specs_handles_shell_form() {
         let hooks = vec![
@@ -504,28 +412,5 @@ mod tests {
         assert_eq!(specs[0].command, "echo a");
         assert_eq!(specs[1].name, "setup-1-b");
         assert_eq!(specs[1].command, "echo b");
-    }
-
-    #[tokio::test]
-    async fn verification_for_path_resolves_by_fuzzy_prefix() {
-        let db = test_db();
-        seed_project(&db, "p1", "fuzzy-proj").await;
-        set_rules(
-            &db,
-            "p1",
-            vec![VerificationRule {
-                match_pattern: "**".into(),
-                commands: vec!["cargo test".into()],
-            }],
-        )
-        .await;
-
-        // A subdirectory under the project path should resolve by walking
-        // ancestors until `{owner}/{repo}` matches a registered project.
-        let v = verification_for_path(&db, Path::new("/tmp/test/fuzzy-proj/crates/foo")).await;
-        assert!(
-            v.rules.is_empty(),
-            "verification rules table is dropped; path resolution yields no rules"
-        );
     }
 }
