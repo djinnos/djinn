@@ -188,10 +188,11 @@ pub fn build_task_run_job(
     let labels = job_labels(&task_run_id_str);
     let job_name = format!("djinn-taskrun-{task_run_id}");
 
-    // Worker env carries the base task-run knobs plus one connection env var
-    // per injected backing service (e.g. TEST_POSTGRES_URL → 127.0.0.1:5432).
+    // Worker env carries the base task-run knobs plus the connection env var(s)
+    // per injected backing service (e.g. DATABASE_URL + TEST_POSTGRES_URL →
+    // 127.0.0.1:5432). A preset may declare more than one name.
     let mut worker_env = build_task_run_env(config, &task_run_id_str, project_id, policy);
-    worker_env.extend(services.iter().map(sidecar_conn_env));
+    worker_env.extend(services.iter().flat_map(sidecar_conn_env));
 
     let container = Container {
         name: "worker".to_string(),

@@ -24,7 +24,13 @@ pub struct ServicePresetDto {
     pub name: String,
     pub service_type: String,
     pub image: String,
+    /// Comma-separated list of env-var names the connection string is exported
+    /// under (e.g. `DATABASE_URL,TEST_POSTGRES_URL`).
     pub conn_env_var: String,
+    /// System (apt) package providing this service's CLI client, auto-installed
+    /// into images that attach the preset. `null` = none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_package: Option<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -59,6 +65,7 @@ impl DjinnMcpServer {
                         service_type: p.service_type,
                         image: p.image,
                         conn_env_var: p.conn_env_var,
+                        client_package: p.client_package,
                     })
                     .collect(),
             }),

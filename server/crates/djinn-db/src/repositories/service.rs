@@ -22,7 +22,14 @@ pub struct ServicePreset {
     pub env: String,       // JSON object (text)
     pub resources: String, // JSON object (text)
     pub conn_template: String,
+    /// One OR MORE env-var names (comma-separated) the worker exports for this
+    /// connection. The same rendered connection string is emitted under each
+    /// name — e.g. `DATABASE_URL,TEST_POSTGRES_URL` exports both.
     pub conn_env_var: String,
+    /// Optional system (apt) package providing this service's command-line
+    /// client (e.g. `postgresql-client` for `psql`). Auto-installed into any
+    /// catalog image that attaches the preset. `None` = no client to install.
+    pub client_package: Option<String>,
 }
 
 fn map_preset(r: &sqlx::postgres::PgRow) -> ServicePreset {
@@ -36,11 +43,14 @@ fn map_preset(r: &sqlx::postgres::PgRow) -> ServicePreset {
         resources: r.get("resources"),
         conn_template: r.get("conn_template"),
         conn_env_var: r.get("conn_env_var"),
+        // NULL maps to None; tolerate the column being absent on older schemas.
+        client_package: r.try_get("client_package").ok().flatten(),
     }
 }
 
 const PRESET_COLS: &str = r#"id, name, service_type, image, port,
-    env::text AS env, resources::text AS resources, conn_template, conn_env_var"#;
+    env::text AS env, resources::text AS resources, conn_template, conn_env_var,
+    client_package"#;
 
 pub struct ServicePresetRepository {
     db: Database,
@@ -86,6 +96,9 @@ mod tests {
             .unwrap()
             .expect("pg preset");
         assert_eq!(pg.service_type, "postgres");
-        assert_eq!(pg.conn_env_var, "TEST_POSTGRES_URL");
+        // Migration 73 overloads conn_env_var as a comma-separated list so the
+        // sidecar exports the connection under the conventional DATABASE_URL too.
+        assert_eq!(pg.conn_env_var, "DATABASE_URL,TEST_POSTGRES_URL");
+        assert_eq!(pg.client_package.as_deref(), Some("postgresql-client"));
     }
 }
