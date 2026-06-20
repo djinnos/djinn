@@ -67,6 +67,15 @@ pub struct RunningTaskInfo {
     /// queries can filter running tasks without depending on a DB session row
     /// (which does not exist during pre-session lifecycle stages).
     pub project_id: Option<String>,
+    /// Live token spend for this session, sourced from the worker's
+    /// `touch_activity` RPC (not the DB row, which is only flushed at session
+    /// end).  Used by the coordinator's per-session token ceiling to catch
+    /// runaway loops before they consume unbounded resources.
+    pub token_count: u64,
+    /// Live turn count for this session, sourced from the worker's
+    /// `touch_activity` RPC.  Used by the coordinator's per-session turn
+    /// ceiling to detect structurally-stuck sessions.
+    pub turn_count: u64,
 }
 
 #[derive(Debug, Clone)]

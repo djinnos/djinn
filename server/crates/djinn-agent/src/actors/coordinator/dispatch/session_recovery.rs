@@ -109,24 +109,30 @@ impl CoordinatorActor {
             // Query the activity tracker for idle time.  If the task has no
             // activity entry (e.g. session predates this feature, or reply loop
             // never started) fall back to wall-clock elapsed from started_at.
-            let (idle, activity_tracked) = match self.pool.session_for_task(task_id).await {
-                Ok(Some(info)) => (info.idle_seconds, info.activity_tracked),
-                _ => {
-                    // Fallback: parse ISO-8601 started_at from the DB and compute
-                    // elapsed seconds.  The column stores datetime strings like
-                    // "2026-03-27 13:52:47" or "2026-03-27T13:52:47.231Z".
-                    let Some(elapsed) = parse_iso_elapsed(&session.started_at) else {
-                        tracing::warn!(
-                            task_id = %task_id,
-                            started_at = %session.started_at,
-                            "CoordinatorActor: cannot parse started_at for stall check, skipping"
-                        );
-                        continue;
-                    };
-                    // No host activity entry → still on the first LLM call.
-                    (elapsed, false)
-                }
-            };
+            let (idle, activity_tracked, token_count, turn_count) =
+                match self.pool.session_for_task(task_id).await {
+                    Ok(Some(info)) => (
+                        info.idle_seconds,
+                        info.activity_tracked,
+                        info.token_count,
+                        info.turn_count,
+                    ),
+                    _ => {
+                        // Fallback: parse ISO-8601 started_at from the DB and compute
+                        // elapsed seconds.  The column stores datetime strings like
+                        // "2026-03-27 13:52:47" or "2026-03-27T13:52:47.231Z".
+                        let Some(elapsed) = parse_iso_elapsed(&session.started_at) else {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                started_at = %session.started_at,
+                                "CoordinatorActor: cannot parse started_at for stall check, skipping"
+                            );
+                            continue;
+                        };
+                        // No host activity entry → still on the first LLM call.
+                        (elapsed, false, 0, 0)
+                    }
+                };
 
             // Pick the threshold that fires first. A session that has never
             // shown a sign of life (no host ActivityTracker entry) is
@@ -147,6 +153,98 @@ impl CoordinatorActor {
             } else {
                 stall_threshold
             };
+
+            // ── Per-session token / turn ceiling check (runaway guard) ──
+            // These are session-ownership guards, NOT provider-health evidence.
+            // When tripped we kill the session and route the task through the
+            // loop-guard planner intervention path — without feeding the model
+            // circuit breaker.
+            let ceiling_reason = if token_count > SESSION_TOKEN_CEILING {
+                Some(format!(
+                    "token ceiling exceeded ({} > {})",
+                    token_count, SESSION_TOKEN_CEILING
+                ))
+            } else if turn_count > SESSION_TURN_CEILING {
+                Some(format!(
+                    "turn ceiling exceeded ({} > {})",
+                    turn_count, SESSION_TURN_CEILING
+                ))
+            } else {
+                None
+            };
+
+            if let Some(reason) = ceiling_reason {
+                let kill_task_id = task_id.to_owned();
+                let kill_session_id = session.id.clone();
+                let kill_span = tracing::info_span!(
+                    "djinn.session_recovery.kill_session",
+                    kind = "ceiling",
+                    task_id = %kill_task_id,
+                    session_id = %kill_session_id
+                );
+                let kill_result = async {
+                    let result = self.pool.kill_session(&kill_task_id).await;
+                    let outcome = match &result {
+                        Ok(()) => "ok",
+                        Err(PoolError::TaskNotFound { .. }) => "not_found",
+                        Err(_) => "error",
+                    };
+                    tracing::info!(
+                        kind = "ceiling",
+                        task_id = %kill_task_id,
+                        session_id = %kill_session_id,
+                        outcome,
+                        "CoordinatorActor: session recovery kill_session attempt (ceiling)"
+                    );
+                    result
+                }
+                .instrument(kill_span)
+                .await;
+                if let Err(e) = kill_result {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        session_id = %session.id,
+                        error = %e,
+                        "CoordinatorActor: failed to kill ceiling-tripped session"
+                    );
+                    continue;
+                }
+
+                // Mark this session as killed so we don't re-kill on subsequent ticks.
+                self.stall_killed.insert(session.id.clone());
+
+                // Log an actionable coordinator comment.
+                let payload = serde_json::json!({
+                    "message": format!(
+                        "Coordinator session ceiling: {} session {} — {}. Session was cancelled and task routed to Planner intervention.",
+                        session.agent_type, session.id, reason
+                    )
+                })
+                .to_string();
+                let task_repo = self.task_repo();
+                let _ = task_repo
+                    .log_activity(Some(task_id), "coordinator", "system", "comment", &payload)
+                    .await;
+
+                // Route through loop-guard planner intervention (NOT a stall kill).
+                let intervention_reason = format!(
+                    "Session exceeded {} ceiling ({}). Routing to Planner intervention to decide how to unstick the task.",
+                    if token_count > SESSION_TOKEN_CEILING { "token" } else { "turn" },
+                    reason
+                );
+                self.route_loop_guard_planner_intervention(task_id, "coordinator", &intervention_reason)
+                    .await;
+
+                tracing::warn!(
+                    task_id = %task_id,
+                    session_id = %session.id,
+                    agent_type = %session.agent_type,
+                    token_count,
+                    turn_count,
+                    "CoordinatorActor: killed ceiling-tripped session"
+                );
+                continue;
+            }
 
             if idle <= applied_threshold {
                 continue;

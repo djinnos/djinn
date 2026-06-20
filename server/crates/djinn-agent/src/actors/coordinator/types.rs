@@ -292,6 +292,26 @@ pub(super) const REOPEN_INTERVENTION_THRESHOLD: i64 = 3;
 /// scoped task against the existing branch) can finish it.
 pub(super) const MAX_PLANNER_INTERVENTIONS: i64 = 1;
 
+/// Per-session total-token ceiling.  A session that has consumed more than
+/// this many tokens across all turns has likely entered a runaway loop
+/// (repeated identical tool calls, circular reasoning, or broken self-correction).
+/// This is a **session-ownership / runaway guard**, not a provider-health
+/// signal — the model may be perfectly healthy; the task itself is stuck.
+/// When tripped, the coordinator kills the session and routes the task to a
+/// Planner intervention (loop-guard path) rather than redispatching the same
+/// worker.  The value is deliberately generous (2_000_000) so only genuine
+/// runaways fire; normal multi-turn work stays well under it.
+pub(super) const SESSION_TOKEN_CEILING: u64 = 2_000_000;
+
+/// Per-session turn ceiling.  A session that has taken more than this many
+/// turns without completing is structurally stuck — either the acceptance
+/// criteria are underspecified, the worker is looping, or the task scope
+/// is too large.  Like `SESSION_TOKEN_CEILING`, this is a **runaway guard**
+/// (not provider-health evidence).  Tripped sessions are killed and routed
+/// to Planner intervention.  The value (500) is generous enough that only
+/// genuine loops trigger it.
+pub(super) const SESSION_TURN_CEILING: u64 = 500;
+
 #[derive(Debug, Clone)]
 pub(super) struct DispatchMarker {
     pub(super) instant: StdInstant,
