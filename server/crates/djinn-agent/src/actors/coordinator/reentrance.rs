@@ -96,12 +96,16 @@ pub(super) async fn should_auto_dispatch_planner(db: &Database, event: DispatchE
             }
             Ok(false) => {}
             Err(e) => {
-                // Fail open: don't stall the board on a blocker-lookup error.
-                tracing::warn!(
+                // Fail closed: a blocker-lookup error means we cannot
+                // confirm the epic is unblocked.  Defer dispatch rather
+                // than risking premature breakdown that duplicates
+                // foundation work.
+                tracing::error!(
                     epic_id,
                     error = %e,
-                    "epic dependencies: blocker lookup failed, allowing dispatch",
+                    "epic dependencies: blocker lookup failed, deferring dispatch",
                 );
+                return false;
             }
         }
     }
@@ -151,6 +155,7 @@ mod tests {
                     status: Some("open"),
                     auto_breakdown: None,
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await

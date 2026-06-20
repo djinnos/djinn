@@ -294,7 +294,9 @@ impl DjinnMcpServer {
             return Json(err_single(e));
         }
         let body_format = p.body_format.as_deref().unwrap_or("markdown");
-        if body_format == "mdx" && let Err(e) = validate_question_form_placement(body) {
+        if body_format == "mdx"
+            && let Err(e) = validate_question_form_placement(body)
+        {
             return Json(err_single(e));
         }
         let ac = p.acceptance_criteria.unwrap_or_default();
@@ -1593,6 +1595,7 @@ mod stop_build_tests {
                     status: None,
                     auto_breakdown: Some(false),
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await
@@ -1774,6 +1777,7 @@ mod stop_build_tests {
                     status: None,
                     auto_breakdown: Some(false),
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await

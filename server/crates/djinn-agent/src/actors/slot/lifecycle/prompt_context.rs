@@ -627,6 +627,7 @@ mod tests {
                     status,
                     auto_breakdown: None,
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await

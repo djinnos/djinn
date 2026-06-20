@@ -1061,6 +1061,7 @@ async fn stall_kill_settles_session_row_and_clears_from_per_user_cap() {
                 status: None,
                 auto_breakdown: None,
                 originating_adr_id: None,
+                blocked_by: None,
             },
         )
         .await

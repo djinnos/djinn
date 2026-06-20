@@ -212,6 +212,7 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
                 status: None,
                 auto_breakdown: None,
                 originating_adr_id: None,
+                blocked_by: None,
             },
         )
         .await
@@ -444,6 +445,7 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
                 status: None,
                 auto_breakdown: None,
                 originating_adr_id: None,
+                blocked_by: None,
             },
         )
         .await
@@ -675,6 +677,7 @@ async fn proactive_sync_merges_advanced_base_into_behind_task_branch() {
                 status: None,
                 auto_breakdown: None,
                 originating_adr_id: None,
+                blocked_by: None,
             },
         )
         .await

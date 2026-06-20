@@ -84,6 +84,10 @@ pub struct EpicCreateInput<'a> {
     pub auto_breakdown: Option<bool>,
     /// ADR-051 Epic C — slug of the accepted ADR that spawned this epic.
     pub originating_adr_id: Option<&'a str>,
+    /// Epic-level blocked_by references (UUIDs or short_ids) to wire at
+    /// creation time, so the `epic_created` event is only emitted AFTER
+    /// blocker edges exist in the DB.  Resolved inside `create_for_project`.
+    pub blocked_by: Option<&'a [&'a str]>,
 }
 
 pub type EpicUpdateInput<'a> = EpicCreateInput<'a>;
@@ -164,6 +168,7 @@ impl EpicRepository {
                 status: None,
                 auto_breakdown: None,
                 originating_adr_id: None,
+                blocked_by: None,
             },
         )
         .await
@@ -215,6 +220,22 @@ impl EpicRepository {
         )
         .fetch_one(self.db.pool())
         .await?;
+
+        // Wire epic-level blocked_by edges before emitting the event, so
+        // the coordinator's has_unresolved_blockers gate sees them at check
+        // time.  Reuses update_blockers_atomic which has cycle detection and
+        // ON CONFLICT DO NOTHING.
+        if let Some(blocker_refs) = input.blocked_by {
+            let mut blocker_ids = Vec::new();
+            for blocker_ref in blocker_refs {
+                if let Some(blocker) = self.resolve(blocker_ref).await? {
+                    blocker_ids.push(blocker.id);
+                }
+            }
+            if !blocker_ids.is_empty() {
+                self.update_blockers_atomic(&id, &blocker_ids, &[]).await?;
+            }
+        }
 
         self.events.send(DjinnEventEnvelope::epic_created(&epic));
         Ok(epic)
@@ -1114,6 +1135,7 @@ mod tests {
                     status: None,
                     auto_breakdown: None,
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await
@@ -1331,6 +1353,7 @@ mod tests {
                     status: Some("open"),
                     auto_breakdown: None,
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await

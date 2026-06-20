@@ -298,6 +298,7 @@ mod tests {
                     status: Some("open"),
                     auto_breakdown: None,
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await
@@ -330,6 +331,7 @@ mod tests {
                     status: Some("open"),
                     auto_breakdown: None,
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await
@@ -376,6 +378,7 @@ mod tests {
                     status: Some("open"),
                     auto_breakdown: Some(false),
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await
@@ -416,6 +419,7 @@ mod tests {
                     status: Some("closed"),
                     auto_breakdown: None,
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await
@@ -452,6 +456,7 @@ mod tests {
                     status: Some("closed"),
                     auto_breakdown: None,
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await
@@ -507,6 +512,7 @@ mod tests {
                     status: Some("open"),
                     auto_breakdown: None,
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await
@@ -585,6 +591,7 @@ mod tests {
                     status: Some("open"),
                     auto_breakdown: None,
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await
