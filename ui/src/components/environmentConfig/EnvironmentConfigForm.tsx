@@ -34,7 +34,9 @@ import {
   type Languages,
   type Workspace,
   LANGUAGE_KEYS,
+  cargoFeaturesCsv,
   pruneOrphanLanguages,
+  setCargoFeaturesCsv,
 } from "@/api/environmentConfig";
 import { HookCommandList } from "@/components/environmentConfig/HookCommandList";
 
@@ -47,6 +49,7 @@ export function EnvironmentConfigForm({ config, onChange }: Props) {
   return (
     <div className="flex flex-col gap-8">
       <WorkspacesSection config={config} onChange={onChange} />
+      <CargoFeaturesSection config={config} onChange={onChange} />
       <SystemPackagesSection config={config} onChange={onChange} />
       <EnvVarsSection config={config} onChange={onChange} />
       <LifecycleSection config={config} onChange={onChange} />
@@ -295,6 +298,33 @@ function WorkspaceCard({
         )}
       </div>
     </div>
+  );
+}
+
+// ── Cargo features ──────────────────────────────────────────────────────
+
+// Project-level Cargo feature set used by the warm/verify/worker build pods.
+// This is the one real per-project cargo knob left after the dead
+// sccache/incremental fields were dropped (the platform forces
+// CARGO_INCREMENTAL=1 + RUSTC_WRAPPER=""). Only shown when a Rust workspace
+// exists, since it's a no-op otherwise. Empty = auto-detect (default features
+// + anything inferred from .cargo/config.toml / lifecycle hooks).
+function CargoFeaturesSection({ config, onChange }: Props) {
+  const hasRust = config.workspaces.some((w) => w.language === "rust");
+  if (!hasRust) return null;
+
+  return (
+    <Section
+      title="Cargo features"
+      description="Feature set passed to cargo for build, cache-warming, and verification. Comma-separated. Leave empty to auto-detect (default features). Do not list `all-features` here."
+    >
+      <Input
+        value={cargoFeaturesCsv(config)}
+        onChange={(e) => onChange(setCargoFeaturesCsv(config, e.target.value))}
+        placeholder="e.g. postgres, ci"
+        className="font-mono text-xs"
+      />
+    </Section>
   );
 }
 
