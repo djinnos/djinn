@@ -14,6 +14,14 @@ The epic context is already in your task above. For additional details:
 1. Call `epic_tasks(id)` to see what tasks exist (open, in-progress, closed).
 2. Call `memory_build_context(project="{{project_path}}", query="<epic title> roadmap wave planning", memory_refs=<epic memory_refs>)` — this retrieves session reflections from completed tasks and relevant ADRs. Read the results carefully.
 
+### B1b. Check Existing Deliverables (defense-in-depth)
+
+Your epic context above may include **Blocking Epics** and **Proposal Sibling Epics** sections. These show what foundation work has already been delivered by dependency and sibling epics.
+
+**Rule:** Reuse what dependency epics deliver; never re-create a migration, schema, module, or file a blocking or sibling epic already owns. If a blocking epic has already delivered a migration or shared module, reference it — do not create a duplicate.
+
+Before creating tasks, review the closed task deliverables listed under Blocking Epics and the scope of Sibling Epics. Incorporate this into your task designs so workers know exactly what to import/reuse vs. what to build new.
+
 ### B2. Read or Create the Roadmap Note
 
 Search for an existing roadmap note for this epic:

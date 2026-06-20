@@ -9,4 +9,4 @@ export { Diagram } from "./Diagram";
 export { AnnotatedCode } from "./AnnotatedCode";
 export { BlockRenderer } from "./BlockRenderer";
 export type { BlockRendererProps } from "./BlockRenderer";
-export { parseMdxBody } from "./parseMdxBody";
+export { parseMdxBody, isPascalCaseTag, extractBlockTags } from "./parseMdxBody";
