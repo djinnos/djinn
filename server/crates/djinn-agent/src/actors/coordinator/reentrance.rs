@@ -1,4 +1,4 @@
-// Reentrance gating for auto-dispatch of the Planner (wave-1) slot.
+// ADR-051 §7 — Auto-dispatch reentrance guards.
 //
 // Both auto-dispatch rules from ADR-034 §4 are gated through a single
 // helper, `should_auto_dispatch_planner`, so that future auto-dispatch
@@ -290,7 +290,7 @@ mod tests {
             "unresolved epic blocker must skip wave-1 dispatch"
         );
 
-        // Close the blocker.
+        // Closing the blocker unblocks the dependent.
         epic_repo.close(&blocker.id).await.unwrap();
 
         let allowed_after = should_auto_dispatch_planner(
@@ -303,7 +303,7 @@ mod tests {
         .await;
         assert!(
             allowed_after,
-            "closed blocker must allow wave-1 dispatch for dependent"
+            "closing the last blocker must allow wave-1 dispatch"
         );
     }
 
