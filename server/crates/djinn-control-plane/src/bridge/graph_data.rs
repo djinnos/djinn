@@ -306,7 +306,7 @@ pub struct WorkspacesResult {
 /// Request for the `crate_graph` bridge operation. Currently empty — the
 /// crate graph is always the full workspace view; project context is supplied
 /// via `ProjectCtx`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct CrateGraphRequest;
 
 /// A single workspace crate node in the crate-level dependency graph.
