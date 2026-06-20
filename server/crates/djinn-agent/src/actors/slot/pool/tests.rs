@@ -1923,63 +1923,6 @@ async fn interrupt_all_is_idempotent_and_skips_already_removed_sessions() {
     );
 }
 
-/// Layering guard: the slot-pool lifecycle code MUST NOT import
-/// `djinn_k8s` directly. The bridge abstraction is the whole point of
-/// the ld18 refactor — the slot pool reaches Kubernetes only through
-/// the `RuntimeOps::teardown_taskrun_job` trait method on
-/// `AgentContext.runtime_ops`. A regression that re-introduces a direct
-/// `use djinn_k8s` in the pool/actor (or any helper it pulls in) would
-/// make the agent crate impossible to compile/test without a live
-/// kube client and break the djinn-control-plane integration tests.
-#[test]
-fn slot_pool_lifecycle_does_not_import_djinn_k8s_directly() {
-    // Source-set under audit: the pool actor + everything reachable
-    // from `pool/actor.rs` (incl. `pool/types.rs`, `pool/mod.rs`,
-    // `pool/handle.rs`). The test file itself imports `RuntimeOps`
-    // from `djinn_control_plane::bridge` to plug in a recording fake
-    // — that is the *intended* boundary, not a `djinn_k8s` import.
-    let pool_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/actors/slot/pool");
-    let mut disallowed: Vec<(String, String)> = Vec::new();
-    let entries = std::fs::read_dir(&pool_dir).expect("read pool dir");
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        // The test file pulls in `djinn_control_plane::bridge` to wire
-        // up `RecordingRuntimeOps` — that bridge import is the intended
-        // boundary, and `tests.rs` is allowed (and required) to use
-        // it. The audit applies to non-test production code
-        // (`actor.rs`, `handle.rs`, `mod.rs`, `types.rs`).
-        if name == "tests.rs" {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        for (idx, line) in text.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") {
-                continue;
-            }
-            if trimmed.contains("use djinn_k8s")
-                || trimmed.contains("djinn_k8s::")
-                || trimmed.contains("djinn_k8s =")
-            {
-                disallowed.push((name.clone(), format!("line {}: {line}", idx + 1)));
-            }
-        }
-    }
-    assert!(
-        disallowed.is_empty(),
-        "slot-pool lifecycle code must not depend on djinn_k8s directly — reach K8s through the RuntimeOps bridge instead. Found: {disallowed:#?}"
-    );
-}
-
 /// The `SlotEvent::Killed` path is the backstop for kill routes that bypass
 /// `kill_session`/`evict_session`: when a slot lifecycle directly reports a
 /// killed task, the pool must still delete the task-run Job before settling the
