@@ -254,7 +254,7 @@ async fn delete_mcp_server(
 //
 // Reads/writes the `agent_mcp_defaults` and `global_skills` fields in the
 // project's `environment_config` Dolt column. All other `environment_config`
-// fields (base, languages, workspaces, lifecycle, verification, …) are
+// fields (base, languages, workspaces, lifecycle, …) are
 // preserved across writes.
 
 use djinn_stack::environment::EnvironmentConfig;

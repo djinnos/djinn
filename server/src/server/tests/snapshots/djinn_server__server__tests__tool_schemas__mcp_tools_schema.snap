@@ -4201,8 +4201,7 @@ expression: signatures
           ]
         },
         "CargoCachePolicyOverride": {
-          "additionalProperties": false,
-          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.",
+          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.\n\nNOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were\nremoved once the platform began forcing `CARGO_INCREMENTAL=1` +\n`RUSTC_WRAPPER=\"\"` on every warm/verify/worker pod (PR #874). Stored rows\nmay still carry those keys; serde ignores them on read.",
           "properties": {
             "all_features": {
               "default": false,
@@ -4216,16 +4215,6 @@ expression: signatures
                 "type": "string"
               },
               "type": "array"
-            },
-            "incremental": {
-              "default": true,
-              "description": "Whether to enable Cargo incremental compilation.",
-              "type": "boolean"
-            },
-            "sccache": {
-              "default": false,
-              "description": "Whether the project should use sccache for rustc invocations.",
-              "type": "boolean"
             },
             "warm_commands": {
               "default": [],
@@ -4322,7 +4311,7 @@ expression: signatures
               "default": {
                 "mode": "auto-detected"
               },
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -4804,8 +4793,7 @@ expression: signatures
           ]
         },
         "CargoCachePolicyOverride": {
-          "additionalProperties": false,
-          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.",
+          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.\n\nNOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were\nremoved once the platform began forcing `CARGO_INCREMENTAL=1` +\n`RUSTC_WRAPPER=\"\"` on every warm/verify/worker pod (PR #874). Stored rows\nmay still carry those keys; serde ignores them on read.",
           "properties": {
             "all_features": {
               "default": false,
@@ -4819,16 +4807,6 @@ expression: signatures
                 "type": "string"
               },
               "type": "array"
-            },
-            "incremental": {
-              "default": true,
-              "description": "Whether to enable Cargo incremental compilation.",
-              "type": "boolean"
-            },
-            "sccache": {
-              "default": false,
-              "description": "Whether the project should use sccache for rustc invocations.",
-              "type": "boolean"
             },
             "warm_commands": {
               "default": [],
@@ -4925,7 +4903,7 @@ expression: signatures
               "default": {
                 "mode": "auto-detected"
               },
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -5427,8 +5405,7 @@ expression: signatures
           ]
         },
         "CargoCachePolicyOverride": {
-          "additionalProperties": false,
-          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.",
+          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.\n\nNOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were\nremoved once the platform began forcing `CARGO_INCREMENTAL=1` +\n`RUSTC_WRAPPER=\"\"` on every warm/verify/worker pod (PR #874). Stored rows\nmay still carry those keys; serde ignores them on read.",
           "properties": {
             "all_features": {
               "default": false,
@@ -5442,16 +5419,6 @@ expression: signatures
                 "type": "string"
               },
               "type": "array"
-            },
-            "incremental": {
-              "default": true,
-              "description": "Whether to enable Cargo incremental compilation.",
-              "type": "boolean"
-            },
-            "sccache": {
-              "default": false,
-              "description": "Whether the project should use sccache for rustc invocations.",
-              "type": "boolean"
             },
             "warm_commands": {
               "default": [],
@@ -5548,7 +5515,7 @@ expression: signatures
               "default": {
                 "mode": "auto-detected"
               },
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -8932,8 +8899,7 @@ expression: signatures
           ]
         },
         "CargoCachePolicyOverride": {
-          "additionalProperties": false,
-          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.",
+          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.\n\nNOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were\nremoved once the platform began forcing `CARGO_INCREMENTAL=1` +\n`RUSTC_WRAPPER=\"\"` on every warm/verify/worker pod (PR #874). Stored rows\nmay still carry those keys; serde ignores them on read.",
           "properties": {
             "all_features": {
               "default": false,
@@ -8947,16 +8913,6 @@ expression: signatures
                 "type": "string"
               },
               "type": "array"
-            },
-            "incremental": {
-              "default": true,
-              "description": "Whether to enable Cargo incremental compilation.",
-              "type": "boolean"
-            },
-            "sccache": {
-              "default": false,
-              "description": "Whether the project should use sccache for rustc invocations.",
-              "type": "boolean"
             },
             "warm_commands": {
               "default": [],
@@ -9053,7 +9009,7 @@ expression: signatures
               "default": {
                 "mode": "auto-detected"
               },
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -9495,8 +9451,7 @@ expression: signatures
           ]
         },
         "CargoCachePolicyOverride": {
-          "additionalProperties": false,
-          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.",
+          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.\n\nNOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were\nremoved once the platform began forcing `CARGO_INCREMENTAL=1` +\n`RUSTC_WRAPPER=\"\"` on every warm/verify/worker pod (PR #874). Stored rows\nmay still carry those keys; serde ignores them on read.",
           "properties": {
             "all_features": {
               "default": false,
@@ -9510,16 +9465,6 @@ expression: signatures
                 "type": "string"
               },
               "type": "array"
-            },
-            "incremental": {
-              "default": true,
-              "description": "Whether to enable Cargo incremental compilation.",
-              "type": "boolean"
-            },
-            "sccache": {
-              "default": false,
-              "description": "Whether the project should use sccache for rustc invocations.",
-              "type": "boolean"
             },
             "warm_commands": {
               "default": [],
@@ -9616,7 +9561,7 @@ expression: signatures
               "default": {
                 "mode": "auto-detected"
               },
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -10035,8 +9980,7 @@ expression: signatures
           ]
         },
         "CargoCachePolicyOverride": {
-          "additionalProperties": false,
-          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.",
+          "description": "Explicit Cargo target-cache policy used when auto-detection is overridden.\n\nNOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were\nremoved once the platform began forcing `CARGO_INCREMENTAL=1` +\n`RUSTC_WRAPPER=\"\"` on every warm/verify/worker pod (PR #874). Stored rows\nmay still carry those keys; serde ignores them on read.",
           "properties": {
             "all_features": {
               "default": false,
@@ -10050,16 +9994,6 @@ expression: signatures
                 "type": "string"
               },
               "type": "array"
-            },
-            "incremental": {
-              "default": true,
-              "description": "Whether to enable Cargo incremental compilation.",
-              "type": "boolean"
-            },
-            "sccache": {
-              "default": false,
-              "description": "Whether the project should use sccache for rustc invocations.",
-              "type": "boolean"
             },
             "warm_commands": {
               "default": [],
@@ -10156,7 +10090,7 @@ expression: signatures
               "default": {
                 "mode": "auto-detected"
               },
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -16103,7 +16037,7 @@ expression: signatures
           "type": "string"
         },
         "target_status": {
-          "description": "Required when action = \"user_override\". Allowed values: open, in_progress,\nverifying, needs_task_review, in_task_review, approved, pr_draft, pr_review, closed.",
+          "description": "Required when action = \"user_override\". Allowed values: open, in_progress,\nneeds_task_review, in_task_review, approved, pr_draft, pr_review, closed.",
           "nullable": true,
           "type": "string"
         }

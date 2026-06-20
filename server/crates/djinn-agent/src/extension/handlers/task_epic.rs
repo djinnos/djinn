@@ -74,7 +74,7 @@ pub(super) async fn call_task_show(
                     .map(|entry| {
                         let mut payload = serde_json::from_str::<serde_json::Value>(&entry.payload)
                             .unwrap_or(serde_json::json!({}));
-                        // Truncate large payload string values (e.g. verification output).
+                        // Truncate large payload string values.
                         if let Some(obj) = payload.as_object_mut() {
                             for value in obj.values_mut() {
                                 if let Some(s) = value.as_str()

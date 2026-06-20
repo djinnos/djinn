@@ -82,6 +82,31 @@ export interface LifecycleHooks {
   pre_task: HookCommand[];
 }
 
+/**
+ * Explicit Cargo target-cache policy override. Mirrors
+ * `djinn_stack::environment::CargoCachePolicyOverride`. The dead
+ * `sccache`/`incremental` knobs were removed once the platform began forcing
+ * `CARGO_INCREMENTAL=1` + `RUSTC_WRAPPER=""` on every build pod (PR #874); any
+ * such keys still stored on old rows pass through here untouched (the type is
+ * intentionally open-ended) and are ignored by the server on read.
+ */
+export interface CargoCachePolicyOverride {
+  workspace?: boolean;
+  features?: string[];
+  all_features?: boolean;
+  warm_commands?: unknown[];
+  [key: string]: unknown;
+}
+
+/**
+ * Per-project Cargo cache policy. Mirrors the tagged
+ * `djinn_stack::environment::CargoCachePolicy` enum: `{ mode: "auto-detected" }`
+ * (detection-driven, the default) or `{ mode: "explicit", policy: {...} }`.
+ */
+export type CargoCachePolicy =
+  | { mode: "auto-detected" }
+  | { mode: "explicit"; policy: CargoCachePolicyOverride };
+
 export interface EnvironmentConfig {
   schema_version: number;
   source: ConfigSource;
@@ -90,6 +115,16 @@ export interface EnvironmentConfig {
   system_packages: string[];
   env: Record<string, string>;
   lifecycle: LifecycleHooks;
+  /**
+   * Project-level Cargo cache policy. The structured form only edits the
+   * `features` list; the rest of an explicit policy (and any unknown keys)
+   * round-trips untouched so the form never silently drops it.
+   */
+  cargo_cache_policy?: CargoCachePolicy | null;
+  /** Preserved verbatim so the structured form never drops them on save. */
+  agent_mcp_defaults?: Record<string, string[]>;
+  /** Preserved verbatim so the structured form never drops them on save. */
+  global_skills?: string[];
 }
 
 /**
@@ -115,7 +150,7 @@ export function normalizeConfig(
     : Array.isArray(lifecycle.pre_warm)
       ? (lifecycle.pre_warm as HookCommand[])
       : [];
-  return {
+  const normalized: EnvironmentConfig = {
     schema_version:
       typeof obj.schema_version === "number" ? obj.schema_version : SCHEMA_VERSION,
     source: (obj.source === "user-edited" ? "user-edited" : "auto-detected") as ConfigSource,
@@ -132,6 +167,73 @@ export function normalizeConfig(
         ? (lifecycle.pre_task as HookCommand[])
         : [],
     },
+  };
+
+  // Preserve fields the structured form doesn't fully edit but must NOT drop
+  // on save (the form sends the whole config back). `cargo_cache_policy` is
+  // partly edited (the features list); `agent_mcp_defaults` / `global_skills`
+  // round-trip verbatim.
+  if (obj.cargo_cache_policy != null && typeof obj.cargo_cache_policy === "object") {
+    normalized.cargo_cache_policy = obj.cargo_cache_policy as CargoCachePolicy;
+  }
+  if (obj.agent_mcp_defaults != null && typeof obj.agent_mcp_defaults === "object") {
+    normalized.agent_mcp_defaults = obj.agent_mcp_defaults as Record<string, string[]>;
+  }
+  if (Array.isArray(obj.global_skills)) {
+    normalized.global_skills = obj.global_skills as string[];
+  }
+
+  return normalized;
+}
+
+/**
+ * Read the Cargo feature override out of a config as a CSV string for the
+ * editor. Empty string means "no explicit feature override" (auto-detect).
+ */
+export function cargoFeaturesCsv(config: EnvironmentConfig): string {
+  const policy = config.cargo_cache_policy;
+  if (policy && policy.mode === "explicit" && Array.isArray(policy.policy.features)) {
+    return policy.policy.features.join(", ");
+  }
+  return "";
+}
+
+/**
+ * Write a CSV Cargo feature override back into a config.
+ *
+ * Empty (after trimming) clears the override: if the rest of an explicit
+ * policy is also empty we drop `cargo_cache_policy` entirely (back to
+ * auto-detect); otherwise we keep the explicit policy with an empty feature
+ * list. Any other explicit-policy fields (and unknown keys) are preserved.
+ */
+export function setCargoFeaturesCsv(
+  config: EnvironmentConfig,
+  csv: string,
+): EnvironmentConfig {
+  const features = csv
+    .split(",")
+    .map((f) => f.trim())
+    .filter(Boolean);
+
+  const existing =
+    config.cargo_cache_policy && config.cargo_cache_policy.mode === "explicit"
+      ? config.cargo_cache_policy.policy
+      : {};
+
+  if (features.length === 0) {
+    const { features: _dropped, ...rest } = existing;
+    const hasOtherOverrides = Object.keys(rest).length > 0;
+    if (!hasOtherOverrides) {
+      const next = { ...config };
+      delete next.cargo_cache_policy;
+      return next;
+    }
+    return { ...config, cargo_cache_policy: { mode: "explicit", policy: rest } };
+  }
+
+  return {
+    ...config,
+    cargo_cache_policy: { mode: "explicit", policy: { ...existing, features } },
   };
 }
 
