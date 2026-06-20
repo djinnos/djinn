@@ -343,7 +343,7 @@ async fn advertise_read_sources(
 
 /// Execute one role stage against the shared workspace.
 ///
-/// Resolves the role → model credential → project setup/verification config →
+/// Resolves the role → model credential → project setup config →
 /// MCP + skills → creates a fresh session record linked to `task_run_id` →
 /// builds a degenerate prompt → invokes the reply loop → finalizes the
 /// session record → maps the result to [`StageOutcome`].

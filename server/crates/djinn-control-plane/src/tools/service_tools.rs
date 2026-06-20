@@ -1,8 +1,8 @@
 //! Backing-service catalog MCP tool.
 //!
 //! Backing services (Postgres/Redis/RabbitMQ) are injected declaratively: a
-//! project's selected catalog image declares which presets every task-run /
-//! verification Pod provides (see `image_set_services`), and djinn-k8s injects
+//! project's selected catalog image declares which presets every task-run
+//! Pod provides (see `image_set_services`), and djinn-k8s injects
 //! each as a native sidecar with the connection string pre-set in an env var
 //! (e.g. `TEST_POSTGRES_URL`). There is no on-demand "request a service" step
 //! any more — the worker just reads the env var. This module only exposes the
@@ -38,7 +38,7 @@ pub struct ServicePresetListResponse {
 #[tool_router(router = service_tool_router, vis = "pub")]
 impl DjinnMcpServer {
     #[tool(
-        description = "List the available backing-service presets (Postgres/Redis/RabbitMQ) that an image can declare via image_set_services. Declared services are injected as native sidecars into every task-run / verification Pod, reachable on 127.0.0.1 with the connection string in the preset's env var."
+        description = "List the available backing-service presets (Postgres/Redis/RabbitMQ) that an image can declare via image_set_services. Declared services are injected as native sidecars into every task-run Pod, reachable on 127.0.0.1 with the connection string in the preset's env var."
     )]
     pub async fn service_preset_list(
         &self,

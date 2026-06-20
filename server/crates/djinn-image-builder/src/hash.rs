@@ -60,7 +60,7 @@ pub fn compute_environment_hash(config: &EnvironmentConfig, agent_worker_ref: &s
     // the workspace.
     //
     // v3→v4: bake `clippy` + `rustfmt` into the Rust toolchain components
-    // (RUST_COMPONENTS in dockerfile.rs) so the verification gate
+    // (RUST_COMPONENTS in dockerfile.rs) so the task-run gate
     // (`cargo clippy -- -D warnings`, `cargo fmt --check`) doesn't trigger a
     // session-time `rustup component add` against the read-only RUSTUP_HOME
     // ("cannot write to /usr/local/rustup/tmp"). RUST_COMPONENTS is a hardcoded
@@ -83,13 +83,11 @@ pub fn compute_environment_hash(config: &EnvironmentConfig, agent_worker_ref: &s
     // hardcoded const here too, so bump the salt to document + guarantee the
     // rebuild.
     //
-    // v6→v7: `verification` left `EnvironmentConfig` (it now lives in the
-    // `project_verifications` table — verification edits no longer rebuild the
-    // image). Removing the field already changes `config_json` for every
-    // existing row, but bump the salt to document the decoupling and guarantee
-    // the one-time rebuild. The hash is now build-only: it covers languages,
-    // workspaces, system_packages, env, lifecycle, and the script/worker refs —
-    // not the runtime-only verification rules.
+    // v6→v7: verification left `EnvironmentConfig`. Removing the field already
+    // changes `config_json` for every existing row, but bump the salt to
+    // document the decoupling and guarantee the one-time rebuild. The hash is
+    // now build-only: it covers languages, workspaces, system_packages, env,
+    // lifecycle, and the script/worker refs.
     //
     // v7→v8: install-rust.sh's /etc/profile.d/10-rust.sh fragment now uses
     // `${CARGO_HOME:-/usr/local/cargo}` instead of an unconditional export.

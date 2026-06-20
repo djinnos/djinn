@@ -122,11 +122,11 @@ elif [ -f package-lock.json ]; then
 fi
 # The cargo target base is warmed by `warm-graph` itself (in the worker), NOT
 # here: the worker normalizes tracked-file mtimes to commit times — the SAME
-# normalization verification applies before it compiles — then compiles the
+# normalization task-run applies before it compiles — then compiles the
 # cargo workspace into the warm base. Doing it in this shell wrapper (with
 # clone-time mtimes, and gated on a root `Cargo.toml` that djinn's `server/`
 # workspace doesn't have) produced a base whose cargo fingerprints never matched
-# verification's tree, so verification recompiled cold every run. See
+# task-run's tree, so task-run recompiled cold every run. See
 # `warm_cargo_target_base` in djinn-agent-worker.
 exec {bin} warm-graph "{project_id}"
 "#,
@@ -467,7 +467,7 @@ mod tests {
         );
         assert!(cmd[2].contains("pnpm install"));
         // The cargo target base is warmed inside `warm-graph` (the worker), where
-        // mtimes are normalized to match verification — NOT in this shell wrapper.
+        // mtimes are normalized to match task-run — NOT in this shell wrapper.
         // The old in-shell `cargo` step gated on a root `Cargo.toml` djinn's
         // `server/` workspace lacks, so it never ran; guard against its return.
         assert!(

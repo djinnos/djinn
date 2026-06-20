@@ -198,7 +198,7 @@ pub struct TaskActivityListParams {
     pub id: Option<String>,
     /// Filter by event_type (e.g. "status_changed", "comment").
     pub event_type: Option<String>,
-    /// Filter by actor_role (e.g. "lead", "reviewer", "worker", "verification", "system").
+    /// Filter by actor_role (e.g. "lead", "reviewer", "worker", "system").
     pub actor_role: Option<String>,
     /// ISO-8601 lower bound on created_at.
     pub from_time: Option<String>,
@@ -238,8 +238,7 @@ pub struct TaskTransitionParams {
     pub project: String,
     /// Task UUID or short_id.
     pub id: String,
-    /// Transition action: start, submit_verification,
-    /// verification_pass, verification_fail, release_verification,
+    /// Transition action: start,
     /// submit_task_review, task_review_start,
     /// task_review_reject, task_review_reject_conflict, task_review_approve,
     /// pr_created, pr_undraft, pr_ci_failed, pr_conflict,
@@ -247,7 +246,7 @@ pub struct TaskTransitionParams {
     /// reopen, close, release, release_task_review, force_close,
     /// user_override.
     pub action: String,
-    /// Required for: verification_fail, release_verification,
+    /// Required for:
     /// task_review_reject, task_review_reject_conflict,
     /// pr_changes_requested,
     /// reopen, release, release_task_review, force_close.
