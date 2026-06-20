@@ -240,6 +240,9 @@ impl From<&ProposalFeedback> for ProposalFeedbackModel {
 pub struct ProposalSingleResponse {
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<ProposalModel>,
+    /// Portable `proposal.mdx` export string returned by `proposal_export`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mdx: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

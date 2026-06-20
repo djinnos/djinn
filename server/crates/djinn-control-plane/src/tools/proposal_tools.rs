@@ -21,7 +21,7 @@ use crate::tools::epic_ops::AcceptanceCriterionItem;
 use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
 };
-use crate::tools::proposal_blocks::validate_question_form_placement;
+use crate::tools::proposal_blocks::{parse_mdx_blocks, validate_question_form_placement};
 use crate::tools::proposal_ops::{
     ProposalDeleteResponse, ProposalEpicModel, ProposalFeedbackResponse, ProposalModel,
     ProposalReconcileObsoleteEpicResponse, ProposalShowResponse, ProposalSignoffModel,
@@ -129,6 +129,12 @@ pub struct ProposalCreateParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ProposalShowParams {
+    /// Proposal UUID or short_id.
+    pub id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalExportParams {
     /// Proposal UUID or short_id.
     pub id: String,
 }
@@ -345,8 +351,32 @@ impl DjinnMcpServer {
 
         Json(ProposalSingleResponse {
             proposal: Some(ProposalModel::from(&proposal)),
+            mdx: None,
             error: None,
         })
+    }
+
+    /// Export a proposal as a portable `proposal.mdx` document.
+    #[tool(
+        description = "Export a proposal (by UUID or short_id) as a portable proposal.mdx string. The result has YAML frontmatter with title, body_format, and acceptance_criteria, followed by the stored body exactly. Returns the document in `mdx`."
+    )]
+    pub async fn proposal_export(
+        &self,
+        Parameters(p): Parameters<ProposalExportParams>,
+    ) -> Json<ProposalSingleResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(err_single(proposal_not_found_error(&p.id)));
+        };
+
+        match export_proposal_mdx(&proposal) {
+            Ok(mdx) => Json(ProposalSingleResponse {
+                proposal: Some(ProposalModel::from(&proposal)),
+                mdx: Some(mdx),
+                error: None,
+            }),
+            Err(e) => Json(err_single(e)),
+        }
     }
 
     /// Show a proposal with targets, feedback, revisions, and sign-offs.
@@ -554,6 +584,7 @@ impl DjinnMcpServer {
         {
             Ok(updated) => Json(ProposalSingleResponse {
                 proposal: Some(ProposalModel::from(&updated)),
+                mdx: None,
                 error: None,
             }),
             Err(e) => Json(err_single(e.to_string())),
@@ -780,6 +811,7 @@ impl DjinnMcpServer {
         match repo.add_signoff(&proposal.id, &p.kind, &user_id).await {
             Ok(updated) => Json(ProposalSingleResponse {
                 proposal: Some(ProposalModel::from(&updated)),
+                mdx: None,
                 error: None,
             }),
             Err(e) => Json(err_single(e.to_string())),
@@ -806,6 +838,7 @@ impl DjinnMcpServer {
         match repo.clear_signoff(&proposal.id, &p.kind, &user_id).await {
             Ok(updated) => Json(ProposalSingleResponse {
                 proposal: Some(ProposalModel::from(&updated)),
+                mdx: None,
                 error: None,
             }),
             Err(e) => Json(err_single(e.to_string())),
@@ -944,6 +977,7 @@ impl DjinnMcpServer {
         match repo.set_building(&proposal.id, &owner).await {
             Ok(updated) => Json(ProposalSingleResponse {
                 proposal: Some(ProposalModel::from(&updated)),
+                mdx: None,
                 error: None,
             }),
             Err(e) => Json(err_single(e.to_string())),
@@ -1509,8 +1543,96 @@ async fn graduated_epic_models(
 fn err_single(error: impl Into<String>) -> ProposalSingleResponse {
     ProposalSingleResponse {
         proposal: None,
+        mdx: None,
         error: Some(error.into()),
     }
+}
+
+#[derive(Serialize)]
+struct ProposalExportFrontmatter {
+    title: String,
+    body_format: String,
+    acceptance_criteria: Vec<ProposalExportAcceptanceCriterion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ProposalExportAcceptanceCriterion {
+    criterion: String,
+    met: bool,
+}
+
+fn export_proposal_mdx(proposal: &djinn_core::models::Proposal) -> Result<String, String> {
+    let frontmatter = ProposalExportFrontmatter {
+        title: proposal.title.clone(),
+        body_format: proposal.body_format.clone(),
+        acceptance_criteria: export_acceptance_criteria(&proposal.acceptance_criteria)?,
+    };
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str(&proposal_frontmatter_yaml(&frontmatter));
+    out.push_str("---\n");
+    out.push_str(&proposal.body);
+
+    let exported_body = exported_body(&out).unwrap_or_default();
+    let source_blocks = parse_mdx_blocks(&proposal.body).map_err(|e| e.to_string())?;
+    let exported_blocks = parse_mdx_blocks(exported_body).map_err(|e| e.to_string())?;
+    if exported_blocks != source_blocks {
+        return Err("exported proposal.mdx failed block round-trip equality".to_string());
+    }
+
+    Ok(out)
+}
+
+fn proposal_frontmatter_yaml(frontmatter: &ProposalExportFrontmatter) -> String {
+    let mut yaml = String::new();
+    yaml.push_str("title: ");
+    yaml.push_str(&yaml_string(&frontmatter.title));
+    yaml.push('\n');
+    yaml.push_str("body_format: ");
+    yaml.push_str(&yaml_string(&frontmatter.body_format));
+    yaml.push('\n');
+    if frontmatter.acceptance_criteria.is_empty() {
+        yaml.push_str("acceptance_criteria: []\n");
+        return yaml;
+    }
+    yaml.push_str("acceptance_criteria:\n");
+    for criterion in &frontmatter.acceptance_criteria {
+        yaml.push_str("  - criterion: ");
+        yaml.push_str(&yaml_string(&criterion.criterion));
+        yaml.push('\n');
+        yaml.push_str("    met: ");
+        yaml.push_str(if criterion.met { "true" } else { "false" });
+        yaml.push('\n');
+    }
+    yaml
+}
+
+fn yaml_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn export_acceptance_criteria(raw: &str) -> Result<Vec<ProposalExportAcceptanceCriterion>, String> {
+    let parsed = serde_json::from_str::<Vec<AcceptanceCriterionItem>>(raw)
+        .map_err(|e| format!("invalid stored acceptance_criteria JSON: {e}"))?;
+    Ok(parsed
+        .into_iter()
+        .map(|item| match item {
+            AcceptanceCriterionItem::Text(criterion) => ProposalExportAcceptanceCriterion {
+                criterion,
+                met: false,
+            },
+            AcceptanceCriterionItem::Structured(status) => ProposalExportAcceptanceCriterion {
+                criterion: status.criterion,
+                met: status.met,
+            },
+        })
+        .collect())
+}
+
+fn exported_body(document: &str) -> Option<&str> {
+    let rest = document.strip_prefix("---\n")?;
+    let body_start = rest.find("\n---\n")? + "\n---\n".len();
+    Some(&rest[body_start..])
 }
 
 fn err_targets(error: impl Into<String>) -> ProposalTargetsResponse {
@@ -1538,6 +1660,93 @@ async fn finish_targets(
             error: None,
         }),
         Err(e) => Json(err_targets(e)),
+    }
+}
+
+#[cfg(test)]
+mod proposal_export_tests {
+    use super::*;
+    use djinn_core::models::Proposal;
+
+    fn proposal(title: &str, body: &str, body_format: &str, acceptance_criteria: &str) -> Proposal {
+        Proposal {
+            id: "proposal-id".to_string(),
+            short_id: "p123".to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            body_format: body_format.to_string(),
+            acceptance_criteria: acceptance_criteria.to_string(),
+            status: "draft".to_string(),
+            author_user_id: None,
+            superseded_by: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            closed_at: None,
+            latest_revision_seq: 1,
+            last_reconciled_revision_seq: None,
+            pending_reconcile: false,
+            build_owner_user_id: None,
+            build_frozen: false,
+            build_breakdown_task_id: None,
+        }
+    }
+
+    fn split_export(document: &str) -> (&str, &str) {
+        let rest = document.strip_prefix("---\n").expect("frontmatter opens");
+        let close = rest.find("\n---\n").expect("frontmatter closes");
+        let frontmatter = &rest[..close];
+        let body = &rest[close + "\n---\n".len()..];
+        (frontmatter, body)
+    }
+
+    #[test]
+    fn export_markdown_proposal_serializes_frontmatter_and_exact_body() {
+        let body = "## Problem\nGateways are the wrong boundary.\n";
+        let proposal = proposal(
+            "Export markdown proposal",
+            body,
+            "markdown",
+            r#"["Enforce centrally",{"criterion":"Fail safely","met":true}]"#,
+        );
+
+        let exported = export_proposal_mdx(&proposal).expect("export proposal");
+        let (frontmatter, exported_body) = split_export(&exported);
+
+        assert!(frontmatter.contains("title: \"Export markdown proposal\""));
+        assert!(frontmatter.contains("body_format: \"markdown\""));
+        assert!(frontmatter.contains("  - criterion: \"Enforce centrally\"\n    met: false"));
+        assert!(frontmatter.contains("  - criterion: \"Fail safely\"\n    met: true"));
+        assert_eq!(exported_body, body);
+        assert_eq!(parse_mdx_blocks(exported_body).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn export_mdx_proposal_round_trips_blocks_structurally() {
+        let body = r#"# Proposal
+
+<RichText id="intro" content="Hello" />
+
+<Diagram id="flow" type="mermaid">
+graph TD;
+</Diagram>
+
+<QuestionForm id="questions" title="Open questions" />"#;
+        let proposal = proposal(
+            "Export MDX proposal",
+            body,
+            "mdx",
+            r#"[{"criterion":"Blocks preserved","met":false}]"#,
+        );
+
+        let exported = export_proposal_mdx(&proposal).expect("export proposal");
+        let (frontmatter, exported_body) = split_export(&exported);
+
+        assert!(frontmatter.contains("body_format: \"mdx\""));
+        assert_eq!(exported_body, body);
+        assert_eq!(
+            parse_mdx_blocks(exported_body).unwrap(),
+            parse_mdx_blocks(body).unwrap()
+        );
     }
 }
 
