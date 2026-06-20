@@ -5,7 +5,7 @@
 //! existing Dockerfile generator + content hash apply unchanged. Identity is
 //! the content hash + the immutable registry digest.
 //!
-//! Non-macro `sqlx::query` form (like the verification repos) so a fresh table
+//! Non-macro `sqlx::query` form (like other dynamic repositories) so a fresh table
 //! doesn't require regenerating the offline `.sqlx` cache.
 
 use sqlx::Row;

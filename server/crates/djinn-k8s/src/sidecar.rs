@@ -1,7 +1,7 @@
 //! Native-sidecar injection for backing services (Postgres / Redis / RabbitMQ).
 //!
 //! A project's selected catalog image declares which service presets every
-//! task-run / verification Pod should provide (the `image_service_presets`
+//! task-run Pod should provide (the `image_service_presets`
 //! junction, migration 66). Each declared service is injected as a *native
 //! sidecar*: an init container with `restartPolicy: Always`. A native sidecar
 //!   * shares the Pod network namespace, so the worker reaches it on
@@ -19,7 +19,7 @@
 //!
 //! [`sidecar_container`] / [`sidecar_conn_env`] are pure manifest builders;
 //! [`resolve_image_services`] is the impure resolver that reads the catalog for
-//! a project's image (used by the task-run + verification dispatch paths).
+//! a project's image (used by task-run dispatch paths).
 
 use std::collections::BTreeMap;
 
