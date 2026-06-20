@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
-assertion_line: 797
 expression: tool_schemas_planner()
 ---
 [
@@ -146,6 +145,13 @@ expression: tool_schemas_planner()
         },
         "limit": {
           "type": "integer"
+        },
+        "edge_kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional list of edge kinds to include in graph traversal scoring. When provided, only edges whose kind matches one of these values participate in spreading activation. Omit to use all edge kinds."
         }
       }
     },
@@ -1196,6 +1202,13 @@ expression: tool_schemas_planner()
         "min_confidence": {
           "type": "number",
           "description": "Minimum confidence threshold for related notes (default 0.1). Notes below this are excluded."
+        },
+        "edge_kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional list of edge kinds to include in graph traversal scoring. When provided, only edges whose kind matches one of these values participate in spreading activation. Omit to use all edge kinds."
         }
       }
     },
