@@ -305,7 +305,7 @@ pub(crate) async fn default_target_branch(project_id: &str, app_state: &AgentCon
 /// entry that represents a review-to-open rejection (from_status =
 /// "in_task_review", to_status = "open"). Searches backwards through ALL
 /// status_changed events, not just the very last one, so that intervening
-/// transitions (e.g. verification failures cycling through verifying→open)
+/// transitions (e.g. review failures cycling back to open)
 /// don't obscure the original rejection reason.
 async fn last_review_rejection_reason(task_id: &str, app_state: &AgentContext) -> Option<String> {
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
