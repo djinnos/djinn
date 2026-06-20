@@ -390,7 +390,6 @@ pub struct TaskRunReport {
     pub task_run_id: String,
     pub outcome: TaskRunOutcome,
     pub stages_completed: Vec<RoleKind>,
-    // (field removed — verification pre-PR gate deleted)
 }
 
 #[cfg(test)]
@@ -461,11 +460,6 @@ mod tests {
         let back: TaskRunReport = bincode::deserialize(&bytes).expect("deserialize");
         assert!(matches!(back.outcome, TaskRunOutcome::WorkerSubmitted));
         assert_eq!(back.stages_completed, vec![RoleKind::Worker]);
-    }
-
-    #[test]
-    fn worker_submitted_in_pod_run_id_removed() {
-        // Test removed — verification pre-PR gate deleted.
     }
 
     #[test]
