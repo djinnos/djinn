@@ -740,7 +740,11 @@ mod tests {
 
     #[test]
     fn proposal_dimension_inner_joins_proposal_epics() {
-        assert!(GroupDimension::Proposal.joins().contains("INNER JOIN proposal_epics"));
+        assert!(
+            GroupDimension::Proposal
+                .joins()
+                .contains("INNER JOIN proposal_epics")
+        );
         assert!(GroupDimension::Proposal.name_expr().contains("pr.title"));
     }
 

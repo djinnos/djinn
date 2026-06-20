@@ -11,9 +11,11 @@ use djinn_stack::environment::EnvironmentConfig;
 /// Resolved per-project cargo cache strategy.
 ///
 /// All fields are derived from detection, not hardcoded.  The warm and worker
-/// paths use the same `CargoCachePolicy` so their feature sets, sccache vs
-/// incremental, and command shapes stay consistent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// paths use the same `CargoCachePolicy` so their feature sets and command
+/// shapes stay consistent. (sccache/incremental are no longer policy knobs —
+/// the platform forces `CARGO_INCREMENTAL=1` + `RUSTC_WRAPPER=""` on every
+/// warm/verify/worker pod, see PR #874.)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CargoCachePolicy {
     /// Whether the project uses a cargo workspace (multiple crates) or a
     /// single crate.
@@ -23,13 +25,6 @@ pub struct CargoCachePolicy {
     pub features: Vec<String>,
     /// Whether to pass `--all-features` to cargo commands.
     pub all_features: bool,
-    /// Whether the project pins `rustc-wrapper = "sccache"` in
-    /// `.cargo/config.toml`.
-    pub sccache: bool,
-    /// Whether to enable incremental compilation (`CARGO_INCREMENTAL=1`).
-    /// Set to `false` when sccache is detected because sccache disables
-    /// incremental anyway.
-    pub incremental: bool,
     /// The warm-base commands derived from the project's detected shape.
     pub warm_commands: Vec<CargoWarmCommand>,
 }
@@ -52,19 +47,6 @@ impl CargoCachePolicy {
     }
 }
 
-impl Default for CargoCachePolicy {
-    fn default() -> Self {
-        Self {
-            workspace: false,
-            features: Vec::new(),
-            all_features: false,
-            sccache: false,
-            incremental: true,
-            warm_commands: Vec::new(),
-        }
-    }
-}
-
 /// One warm-base compile step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CargoWarmCommand {
@@ -83,7 +65,7 @@ pub struct CargoWarmCommand {
 ///
 /// Reads (but never writes):
 /// * `Cargo.toml` — workspace section detection.
-/// * `.cargo/config.toml` — `rustc-wrapper` and `build.features`.
+/// * `.cargo/config.toml` — `build.features`.
 /// * `env_config` — Rust workspace root for workspace directory resolution.
 ///
 /// Returns `None` when no cargo workspace exists (non-Rust repo).
@@ -99,8 +81,6 @@ pub fn resolve_cargo_cache_policy(
             workspace: override_policy.workspace,
             features: override_policy.features.clone(),
             all_features: override_policy.all_features,
-            sccache: override_policy.sccache,
-            incremental: override_policy.incremental,
             warm_commands: override_policy
                 .warm_commands
                 .iter()
@@ -117,10 +97,6 @@ pub fn resolve_cargo_cache_policy(
 
     let is_workspace = detect_workspace_layout(&workspace_dir);
     let cargo_config = read_cargo_config_toml(&workspace_dir);
-    let sccache = cargo_config
-        .as_ref()
-        .map(|c| c.rustc_wrapper.as_deref() == Some("sccache"))
-        .unwrap_or(false);
     let config_features = cargo_config
         .as_ref()
         .map(|c| c.features.clone())
@@ -143,8 +119,6 @@ pub fn resolve_cargo_cache_policy(
         workspace: is_workspace,
         features,
         all_features,
-        sccache,
-        incremental: !sccache,
         warm_commands,
     })
 }
@@ -156,7 +130,6 @@ pub fn resolve_cargo_cache_policy(
 /// Parsed subset of `.cargo/config.toml` relevant to cache policy.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct CargoConfigToml {
-    rustc_wrapper: Option<String>,
     features: Vec<String>,
 }
 
@@ -168,9 +141,6 @@ fn read_cargo_config_toml(workspace_dir: &Path) -> Option<CargoConfigToml> {
     let mut out = CargoConfigToml::default();
 
     if let Some(build) = raw.get("build").and_then(|v| v.as_table()) {
-        if let Some(wrapper) = build.get("rustc-wrapper").and_then(|v| v.as_str()) {
-            out.rustc_wrapper = Some(wrapper.to_string());
-        }
         if let Some(features) = build.get("features").and_then(|v| v.as_str()) {
             out.features = features.split_whitespace().map(|s| s.to_string()).collect();
         }
@@ -384,8 +354,6 @@ version = "0.1.0"
         let policy = resolve_cargo_cache_policy(root, None).expect("policy");
         assert!(!policy.workspace);
         assert!(!policy.all_features);
-        assert!(!policy.sccache);
-        assert!(policy.incremental);
         assert_eq!(policy.features, Vec::<String>::new());
 
         // Single crate, default features: clippy + build fallback + test compile,
@@ -442,8 +410,6 @@ version = "0.1.0"
         // Lifecycle hook scanning removed — all_features only comes from
         // .cargo/config.toml features override now.
         assert!(!policy.all_features);
-        assert!(!policy.sccache);
-        assert!(policy.incremental);
         assert_eq!(policy.features, Vec::<String>::new());
 
         // Single default-features pass: clippy + build + test --no-run.
@@ -471,9 +437,11 @@ version = "0.1.0"
         assert!(policy.warm_commands[2].feature_args.is_empty());
     }
 
-    // (c) workspace with pinned `rustc-wrapper = "sccache"`
+    // (c) workspace with a pinned `rustc-wrapper = "sccache"` in
+    // `.cargo/config.toml` — the wrapper is no longer a policy knob (the
+    // platform forces RUSTC_WRAPPER=""), so it must not affect resolution.
     #[test]
-    fn workspace_with_sccache_wrapper() {
+    fn workspace_with_sccache_wrapper_in_config_is_ignored() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         fs::write(
@@ -504,13 +472,11 @@ version = "0.1.0"
         let policy = resolve_cargo_cache_policy(root, None).expect("policy");
         assert!(policy.workspace);
         assert!(!policy.all_features);
-        assert!(policy.sccache);
-        assert!(!policy.incremental);
         assert_eq!(policy.features, Vec::<String>::new());
 
-        // Workspace, default features, sccache: clippy + build + test, no feature
-        // flags. (Policy detects sccache, but the platform forces it off — the
-        // warm command shape itself is unaffected.)
+        // Workspace, default features: clippy + build + test, no feature flags.
+        // (The repo's `rustc-wrapper = "sccache"` is ignored — the platform
+        // forces RUSTC_WRAPPER="" — so the warm command shape is unaffected.)
         assert_eq!(policy.warm_commands.len(), 3);
         assert_eq!(policy.warm_commands[0].label, "clippy");
         assert_eq!(
@@ -682,8 +648,6 @@ version = "0.1.0"
                 workspace: false,
                 features: vec!["override-a".into(), "override-b".into()],
                 all_features: false,
-                sccache: false,
-                incremental: true,
                 warm_commands: vec![djinn_stack::environment::CargoWarmCommand {
                     label: "explicit warm".into(),
                     args: vec![
@@ -699,8 +663,6 @@ version = "0.1.0"
         assert!(!policy.workspace);
         assert_eq!(policy.features, vec!["override-a", "override-b"]);
         assert!(!policy.all_features);
-        assert!(!policy.sccache);
-        assert!(policy.incremental);
         assert_eq!(
             policy.features(),
             vec![
@@ -903,12 +865,12 @@ version = "0.1.0"
         assert_eq!(cmds[2].feature_args, vec!["--features", "foo,bar"]);
     }
 
-    // (d7) Integration: workspace + sccache + --all-features lifecycle hook
-    //      → lifecycle hook no longer triggers all_features,
-    //        policy.all_features=false, policy.sccache=true,
-    //        single default-features pass.
+    // (d7) Integration: workspace + (ignored) sccache config + --all-features
+    //      lifecycle hook → lifecycle hook no longer triggers all_features,
+    //      policy.all_features=false, single default-features pass. The repo's
+    //      `rustc-wrapper = "sccache"` is ignored.
     #[test]
-    fn integration_workspace_sccache_lifecycle_hook_no_all_features() {
+    fn integration_workspace_lifecycle_hook_no_all_features() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         fs::write(
@@ -948,11 +910,6 @@ version = "0.1.0"
             !policy.all_features,
             "lifecycle hook should no longer trigger all-features"
         );
-        assert!(
-            policy.sccache,
-            "should detect sccache from .cargo/config.toml"
-        );
-        assert!(!policy.incremental, "sccache disables incremental");
 
         // Single default-features pass: clippy + build + test-compile = 3 warm commands
         assert_eq!(policy.warm_commands.len(), 3);
@@ -1006,11 +963,9 @@ version = "0.1.0"
         )
         .expect("write crate-a/Cargo.toml");
 
-        // No env_config → no lifecycle hooks, no sccache
+        // No env_config → no lifecycle hooks, no all-features
         let policy = resolve_cargo_cache_policy(root, None).expect("policy");
         assert!(!policy.all_features);
-        assert!(!policy.sccache);
-        assert!(policy.incremental);
 
         // clippy + build + test = 3 commands, all with empty feature_args
         assert_eq!(policy.warm_commands.len(), 3);

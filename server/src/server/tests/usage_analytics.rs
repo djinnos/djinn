@@ -307,7 +307,10 @@ async fn kpis_have_label_value_and_delta_fields() {
         .iter()
         .filter_map(|k| k.get("label").and_then(Value::as_str))
         .collect();
-    assert!(labels.contains(&"Spend"), "expected a Spend KPI: {labels:?}");
+    assert!(
+        labels.contains(&"Spend"),
+        "expected a Spend KPI: {labels:?}"
+    );
 
     for kpi in kpis {
         assert!(kpi.get("label").unwrap().is_string());
@@ -333,7 +336,11 @@ async fn granularity_week_and_month_are_accepted() {
             Some(&admin_cookie),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "granularity={gran} should be accepted");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "granularity={gran} should be accepted"
+        );
         assert!(body.get("time_series").unwrap().is_array());
     }
 }
@@ -508,8 +515,7 @@ async fn invalid_date_format_returns_400() {
     let admin_cookie = seed_admin_session(&db).await;
     let app = test_helpers::create_test_app_with_db(db);
 
-    let (status, _) =
-        get_usage(&app, "start=not-a-date&end=2025-02-01", Some(&admin_cookie)).await;
+    let (status, _) = get_usage(&app, "start=not-a-date&end=2025-02-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }

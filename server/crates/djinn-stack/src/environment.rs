@@ -125,8 +125,8 @@ pub struct EnvironmentConfig {
     /// never creates, edits, or rewrites the project's `.cargo/config.toml`.
     ///
     /// Set an explicit policy only when project authors need to override the
-    /// detected feature/sccache/incremental choices at the environment-config
-    /// level. `None` is accepted for legacy rows and is treated the same as the
+    /// detected cargo feature set at the environment-config level. `None` is
+    /// accepted for legacy rows and is treated the same as the
     /// default auto-detected policy by consumers.
     #[serde(default = "default_cargo_cache_policy")]
     pub cargo_cache_policy: Option<CargoCachePolicy>,
@@ -357,8 +357,12 @@ impl CargoCachePolicy {
 }
 
 /// Explicit Cargo target-cache policy used when auto-detection is overridden.
+///
+/// NOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were
+/// removed once the platform began forcing `CARGO_INCREMENTAL=1` +
+/// `RUSTC_WRAPPER=""` on every warm/verify/worker pod (PR #874). Stored rows
+/// may still carry those keys; serde ignores them on read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct CargoCachePolicyOverride {
     /// Whether the Cargo root is a workspace rather than a single package.
     #[serde(default)]
@@ -371,12 +375,6 @@ pub struct CargoCachePolicyOverride {
     /// Whether warm and worker cargo commands should pass `--all-features`.
     #[serde(default)]
     pub all_features: bool,
-    /// Whether the project should use sccache for rustc invocations.
-    #[serde(default)]
-    pub sccache: bool,
-    /// Whether to enable Cargo incremental compilation.
-    #[serde(default = "default_cargo_incremental")]
-    pub incremental: bool,
     /// Warm-base cargo commands derived from or overridden for this project.
     #[serde(default)]
     pub warm_commands: Vec<CargoWarmCommand>,
@@ -391,12 +389,6 @@ impl CargoCachePolicyOverride {
                 value: "features cannot be combined with all_features".into(),
             });
         }
-        if self.sccache && self.incremental {
-            return Err(EnvironmentConfigError::UnsafeIdentifier {
-                field: "cargo_cache_policy.policy.incremental".into(),
-                value: "incremental must be false when sccache is true".into(),
-            });
-        }
         if self.warm_commands.len() > MAX_HOOKS_PER_PHASE {
             return Err(EnvironmentConfigError::ListTooLong {
                 field: "cargo_cache_policy.policy.warm_commands".into(),
@@ -409,10 +401,6 @@ impl CargoCachePolicyOverride {
         }
         Ok(())
     }
-}
-
-fn default_cargo_incremental() -> bool {
-    true
 }
 
 /// One Cargo command used to warm a project's target cache.
@@ -1377,8 +1365,6 @@ mod tests {
             workspace: true,
             features: vec!["ci".to_owned(), "postgres".to_owned()],
             all_features: false,
-            sccache: true,
-            incremental: false,
             warm_commands: vec![CargoWarmCommand {
                 label: "clippy".to_owned(),
                 args: vec![
@@ -1414,16 +1400,38 @@ mod tests {
             cfg.validate().unwrap_err(),
             EnvironmentConfigError::UnsafeIdentifier { .. }
         ));
+    }
 
-        cfg.cargo_cache_policy = Some(CargoCachePolicy::Explicit(CargoCachePolicyOverride {
-            sccache: true,
-            incremental: true,
-            ..Default::default()
-        }));
-        assert!(matches!(
-            cfg.validate().unwrap_err(),
-            EnvironmentConfigError::UnsafeIdentifier { .. }
-        ));
+    #[test]
+    fn cargo_cache_policy_override_ignores_legacy_sccache_and_incremental_keys() {
+        // Backward-compat: stored env-configs written before the dead
+        // `sccache`/`incremental` knobs were removed still carry those keys.
+        // `CargoCachePolicyOverride` is NOT `deny_unknown_fields`, so the old
+        // JSON must still deserialize cleanly (the extra keys are dropped).
+        let raw = r#"{
+            "schema_version": 1,
+            "cargo_cache_policy": {
+                "mode": "explicit",
+                "policy": {
+                    "workspace": true,
+                    "features": ["ci"],
+                    "all_features": false,
+                    "sccache": true,
+                    "incremental": false,
+                    "warm_commands": []
+                }
+            }
+        }"#;
+        let cfg: EnvironmentConfig = serde_json::from_str(raw).expect("legacy keys must parse");
+        match cfg.cargo_cache_policy {
+            Some(CargoCachePolicy::Explicit(ref policy)) => {
+                assert!(policy.workspace);
+                assert_eq!(policy.features, vec!["ci".to_owned()]);
+                assert!(!policy.all_features);
+            }
+            other => panic!("expected explicit policy, got {other:?}"),
+        }
+        cfg.validate().unwrap();
     }
 
     #[test]

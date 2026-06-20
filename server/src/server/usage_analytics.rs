@@ -404,7 +404,10 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
             label: "Spend".to_string(),
             value: totals.total_cost_usd,
             delta_pct: spend_delta,
-            formatted: totals.total_cost_usd.map(format_currency).unwrap_or_default(),
+            formatted: totals
+                .total_cost_usd
+                .map(format_currency)
+                .unwrap_or_default(),
         },
         UsageKpiDto {
             label: "Tokens".to_string(),
@@ -538,17 +541,19 @@ fn rollup_series(
 
     Ok(buckets
         .into_iter()
-        .map(|((date, model, project_id, project_name, agent_type), acc)| SeriesPointDto {
-            date,
-            cost: acc.cost(),
-            tokens_in: acc.tokens_in,
-            tokens_out: acc.tokens_out,
-            task_count: acc.task_count,
-            model,
-            project_id,
-            project_name,
-            agent_type,
-        })
+        .map(
+            |((date, model, project_id, project_name, agent_type), acc)| SeriesPointDto {
+                date,
+                cost: acc.cost(),
+                tokens_in: acc.tokens_in,
+                tokens_out: acc.tokens_out,
+                task_count: acc.task_count,
+                model,
+                project_id,
+                project_name,
+                agent_type,
+            },
+        )
         .collect())
 }
 
@@ -579,7 +584,10 @@ fn breakdown_row(row: EntityBreakdownRow, dimension: GroupDimension) -> Breakdow
     }
 }
 
-fn breakdown_rows(rows: Vec<EntityBreakdownRow>, dimension: GroupDimension) -> Vec<BreakdownRowDto> {
+fn breakdown_rows(
+    rows: Vec<EntityBreakdownRow>,
+    dimension: GroupDimension,
+) -> Vec<BreakdownRowDto> {
     rows.into_iter()
         .map(|row| breakdown_row(row, dimension))
         .collect()
@@ -674,7 +682,10 @@ mod tests {
         assert_eq!(Granularity::parse(None).unwrap(), Granularity::Day);
         assert_eq!(Granularity::parse(Some("DAY")).unwrap(), Granularity::Day);
         assert_eq!(Granularity::parse(Some("week")).unwrap(), Granularity::Week);
-        assert_eq!(Granularity::parse(Some("month")).unwrap(), Granularity::Month);
+        assert_eq!(
+            Granularity::parse(Some("month")).unwrap(),
+            Granularity::Month
+        );
     }
 
     #[test]
@@ -799,7 +810,10 @@ mod tests {
         let spend = &kpis[0];
         assert_eq!(spend.label, "Spend");
         assert_eq!(spend.value, Some(20.0));
-        assert!((spend.delta_pct.unwrap() - 1.0).abs() < 1e-9, "doubled spend = +100%");
+        assert!(
+            (spend.delta_pct.unwrap() - 1.0).abs() < 1e-9,
+            "doubled spend = +100%"
+        );
         assert!(spend.formatted.starts_with('$'));
 
         let tokens = &kpis[1];
@@ -925,7 +939,10 @@ mod tests {
         let json = serde_json::to_value(&dto).unwrap();
         assert_eq!(json.get("model").unwrap().as_str().unwrap(), "gpt");
         assert_eq!(json.get("task_count").unwrap().as_i64().unwrap(), 3);
-        assert_eq!(json.get("completed_task_count").unwrap().as_i64().unwrap(), 3);
+        assert_eq!(
+            json.get("completed_task_count").unwrap().as_i64().unwrap(),
+            3
+        );
         assert_eq!(json.get("session_count").unwrap().as_i64().unwrap(), 4);
         assert_eq!(json.get("total_tokens").unwrap().as_i64().unwrap(), 150);
         assert!((json.get("total_cost").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9);
