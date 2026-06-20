@@ -696,6 +696,100 @@ describe("buildGraphFromSnapshot", () => {
     ).toBe("User · domain");
   });
 
+  it("does not append workspace suffix to selected nodes when filtering for a single workspace", () => {
+    const wsSnapshot: SnapshotPayload = {
+      ...fixtureSnapshot,
+      total_nodes: 6,
+      total_edges: 5,
+      nodes: [
+        {
+          id: "api:file",
+          kind: "file",
+          label: "api.ts",
+          pagerank: 0.5,
+          workspace: "api",
+        },
+        {
+          id: "api:fn",
+          kind: "symbol",
+          label: "apiFn",
+          symbol_kind: "function",
+          pagerank: 0.4,
+          workspace: "api",
+        },
+        {
+          id: "web:file",
+          kind: "file",
+          label: "web.ts",
+          pagerank: 0.3,
+          workspace: "web",
+        },
+        {
+          id: "web:fn",
+          kind: "symbol",
+          label: "webFn",
+          symbol_kind: "function",
+          pagerank: 0.2,
+          workspace: "web",
+        },
+        {
+          id: "worker:file",
+          kind: "file",
+          label: "worker.ts",
+          pagerank: 0.1,
+          workspace: "worker",
+        },
+        {
+          id: "worker:fn",
+          kind: "symbol",
+          label: "workerFn",
+          symbol_kind: "function",
+          pagerank: 0.1,
+          workspace: "worker",
+        },
+      ],
+      edges: [
+        {
+          from: "api:file",
+          to: "api:fn",
+          kind: "ContainsDefinition",
+          confidence: 1,
+        },
+        {
+          from: "api:fn",
+          to: "web:fn",
+          kind: "SymbolReference",
+          confidence: 0.8,
+        },
+        {
+          from: "web:file",
+          to: "web:fn",
+          kind: "ContainsDefinition",
+          confidence: 1,
+        },
+        {
+          from: "worker:file",
+          to: "worker:fn",
+          kind: "ContainsDefinition",
+          confidence: 1,
+        },
+        {
+          from: "web:fn",
+          to: "worker:fn",
+          kind: "SymbolReference",
+          confidence: 0.7,
+        },
+      ],
+    };
+    const filtered = filterSnapshotForWorkspace(wsSnapshot, "api");
+    const graph = buildGraphFromSnapshot(filtered);
+    // Selected workspace nodes should NOT have the "· {workspace}" suffix.
+    expect(graph.getNodeAttribute("api:file", "label")).toBe("api.ts");
+    expect(graph.getNodeAttribute("api:fn", "label")).toBe("apiFn");
+    // Remote context nodes SHOULD still have the suffix.
+    expect(graph.getNodeAttribute("web:fn", "label")).toBe("webFn · web");
+  });
+
   it("attaches keyword subtitles to community node labels", () => {
     const communitySnapshot: SnapshotPayload = {
       ...fixtureSnapshot,
