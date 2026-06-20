@@ -69,7 +69,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "task_activity_list",
-    "description": "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.",
+    "description": "Query a task's activity log with optional filters. Returns comments, status transitions, and other events. Use to inspect Lead guidance, reviewer feedback, or history.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -86,7 +86,7 @@ expression: tool_schemas_planner()
         },
         "actor_role": {
           "type": "string",
-          "description": "Filter by actor: lead, reviewer, worker, verification, system"
+          "description": "Filter by actor: lead, reviewer, worker, system"
         },
         "limit": {
           "type": "integer",

@@ -692,7 +692,7 @@ async fn board_health_flags_repeated_reopen_role_tool_mismatch_candidates() {
     );
     assert_eq!(
         mismatches[0]["reason"],
-        "Repeated reopen churn (3 reopens) suggests this task needs the planner toolset (task_create, epic_update, memory_ref_update, reprioritization) rather than the currently routed worker toolset (code_changes, tests, verification_fix)."
+        "Repeated reopen churn (3 reopens) suggests this task needs the planner toolset (task_create, epic_update, memory_ref_update, reprioritization) rather than the currently routed worker toolset (code_changes, tests, review_fix)."
     );
 }
 

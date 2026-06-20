@@ -15871,7 +15871,7 @@ expression: signatures
           "type": "string"
         },
         "target_status": {
-          "description": "Required when action = \"user_override\". Allowed values: open, in_progress,\nverifying, needs_task_review, in_task_review, approved, pr_draft, pr_review, closed.",
+          "description": "Required when action = \"user_override\". Allowed values: open, in_progress,\nneeds_task_review, in_task_review, approved, pr_draft, pr_review, closed.",
           "nullable": true,
           "type": "string"
         }
