@@ -113,6 +113,48 @@ struct SessionSeed<'a> {
     cache_read_tokens: i64,
     cache_write_tokens: i64,
     cost_usd: Option<f64>,
+    task_id: Option<&'a str>,
+}
+
+struct TaskSeed<'a> {
+    project_id: &'a str,
+    status: &'a str,
+    close_reason: Option<&'a str>,
+    total_reopen_count: i32,
+    total_verification_failure_count: i32,
+}
+
+/// Seed a task row directly into the database for integration-level
+/// contract tests. Returns the generated task id.
+async fn seed_task_row(db: &djinn_db::Database, seed: TaskSeed<'_>) -> String {
+    let id = uuid::Uuid::now_v7().to_string();
+    let short_id = format!("task-{}", &id[..8]);
+    sqlx::query(
+        "INSERT INTO tasks \
+         (id, project_id, short_id, epic_id, title, description, design, \
+          issue_type, status, priority, owner, labels, acceptance_criteria, \
+          reopen_count, continuation_count, verification_failure_count, \
+          total_reopen_count, total_verification_failure_count, \
+          intervention_count, created_at, updated_at, closed_at, close_reason, \
+          merge_commit_sha, memory_refs, merge_conflict_metadata, agent_type, pr_url) \
+         VALUES ($1, $2, $3, NULL, 'test title', 'test desc', 'test design', \
+                 'task', $4, 0, '', '[]', '[]', \
+                 0, 0, 0, \
+                 $5, $6, \
+                 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', NULL, $7, \
+                 NULL, '[]', NULL, NULL, NULL)",
+    )
+    .bind(&id)
+    .bind(seed.project_id)
+    .bind(&short_id)
+    .bind(seed.status)
+    .bind(seed.total_reopen_count)
+    .bind(seed.total_verification_failure_count)
+    .bind(seed.close_reason)
+    .execute(db.pool())
+    .await
+    .expect("failed to seed task row");
+    id
 }
 
 /// Seed raw session rows directly into the database for integration-level
@@ -127,10 +169,11 @@ async fn seed_session_row(db: &djinn_db::Database, seed: SessionSeed<'_>) {
         "INSERT INTO sessions \
          (id, project_id, task_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd) \
-         VALUES ($1, $2, NULL, $3, $4, 'completed', $5, $6, $7, $8, $9, $10)",
+         VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8, $9, $10, $11)",
     )
     .bind(&id)
     .bind(seed.project_id)
+    .bind(seed.task_id)
     .bind(seed.model_id)
     .bind(seed.agent_type)
     .bind(seed.started_at)
@@ -326,6 +369,7 @@ async fn weekly_rollup_and_previous_window_with_seeded_data() {
             cache_read_tokens: 10,
             cache_write_tokens: 5,
             cost_usd: Some(0.50),
+            task_id: None,
         },
     )
     .await;
@@ -341,6 +385,7 @@ async fn weekly_rollup_and_previous_window_with_seeded_data() {
             cache_read_tokens: 20,
             cache_write_tokens: 10,
             cost_usd: Some(1.00),
+            task_id: None,
         },
     )
     .await;
@@ -356,6 +401,7 @@ async fn weekly_rollup_and_previous_window_with_seeded_data() {
             cache_read_tokens: 30,
             cache_write_tokens: 15,
             cost_usd: Some(1.50),
+            task_id: None,
         },
     )
     .await;
@@ -419,6 +465,7 @@ async fn monthly_rollup_with_seeded_data() {
             cache_read_tokens: 10,
             cache_write_tokens: 5,
             cost_usd: Some(0.50),
+            task_id: None,
         },
     )
     .await;
@@ -434,6 +481,7 @@ async fn monthly_rollup_with_seeded_data() {
             cache_read_tokens: 20,
             cache_write_tokens: 10,
             cost_usd: Some(1.00),
+            task_id: None,
         },
     )
     .await;
@@ -449,6 +497,7 @@ async fn monthly_rollup_with_seeded_data() {
             cache_read_tokens: 30,
             cache_write_tokens: 15,
             cost_usd: Some(1.50),
+            task_id: None,
         },
     )
     .await;
@@ -500,6 +549,7 @@ async fn null_cost_fields_serialize_as_json_null() {
             cache_read_tokens: 10,
             cache_write_tokens: 5,
             cost_usd: None, // unpriced
+            task_id: None,
         },
     )
     .await;
@@ -632,6 +682,190 @@ async fn omitted_query_params_apply_defaults() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.get("granularity").unwrap().as_str().unwrap(), "day");
     assert!(body.get("totals").unwrap().is_object());
+}
+
+// ── Model effectiveness field coverage ─────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_request_with_worker_session_returns_model_effectiveness_fields() {
+    let db = test_helpers::create_test_db();
+    let admin_cookie = seed_admin_session(&db).await;
+
+    seed_project(&db, "proj-eff", "effectiveness-project").await;
+    let task_id = seed_task_row(
+        &db,
+        TaskSeed {
+            project_id: "proj-eff",
+            status: "closed",
+            close_reason: Some("completed"),
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+        },
+    )
+    .await;
+    seed_session_row(
+        &db,
+        SessionSeed {
+            project_id: "proj-eff",
+            model_id: "test-model",
+            agent_type: "worker",
+            started_at: "2025-03-11T10:00:00Z",
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_read_tokens: 10,
+            cache_write_tokens: 5,
+            cost_usd: Some(1.00),
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
+    let app = test_helpers::create_test_app_with_db(db);
+
+    let (status, body) =
+        get_usage(&app, "from=2025-03-01&to=2025-04-01", Some(&admin_cookie)).await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    let me = body.get("model_effectiveness").unwrap().as_array().unwrap();
+    assert!(
+        !me.is_empty(),
+        "model_effectiveness should have at least one element"
+    );
+
+    let first = &me[0];
+    for field in [
+        "model_id",
+        "sessions",
+        "tokens_in",
+        "tokens_out",
+        "completed_task_count",
+        "success_rate",
+        "avg_reopens",
+        "verification_pass_rate",
+        "cost_per_completed_task",
+        "tokens_per_task",
+    ] {
+        assert!(
+            first.get(field).is_some(),
+            "missing model_effectiveness field '{field}' in response: {first}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_effectiveness_response_contains_all_metric_fields() {
+    let db = test_helpers::create_test_db();
+    let admin_cookie = seed_admin_session(&db).await;
+
+    seed_project(&db, "proj-metrics", "metrics-project").await;
+    let task_id = seed_task_row(
+        &db,
+        TaskSeed {
+            project_id: "proj-metrics",
+            status: "closed",
+            close_reason: Some("completed"),
+            total_reopen_count: 2,
+            total_verification_failure_count: 1,
+        },
+    )
+    .await;
+    seed_session_row(
+        &db,
+        SessionSeed {
+            project_id: "proj-metrics",
+            model_id: "metric-model",
+            agent_type: "worker",
+            started_at: "2025-03-11T10:00:00Z",
+            tokens_in: 1000,
+            tokens_out: 500,
+            cache_read_tokens: 100,
+            cache_write_tokens: 50,
+            cost_usd: Some(2.50),
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
+    let app = test_helpers::create_test_app_with_db(db);
+
+    let (status, body) =
+        get_usage(&app, "from=2025-03-01&to=2025-04-01", Some(&admin_cookie)).await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    let me = body.get("model_effectiveness").unwrap().as_array().unwrap();
+    assert!(
+        !me.is_empty(),
+        "model_effectiveness should have at least one element"
+    );
+
+    let first = &me[0];
+    assert!(first.get("model_id").unwrap().is_string());
+    assert!(first.get("sessions").unwrap().is_number());
+    assert!(first.get("tokens_in").unwrap().is_number());
+    assert!(first.get("tokens_out").unwrap().is_number());
+    assert!(first.get("completed_task_count").unwrap().is_number());
+    assert!(first.get("success_rate").unwrap().is_number());
+    assert!(first.get("avg_reopens").unwrap().is_number());
+    assert!(first.get("verification_pass_rate").unwrap().is_number());
+    assert!(first.get("cost_per_completed_task").unwrap().is_number());
+    assert!(first.get("tokens_per_task").unwrap().is_number());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_effectiveness_null_cost_serializes_correctly() {
+    let db = test_helpers::create_test_db();
+    let admin_cookie = seed_admin_session(&db).await;
+
+    seed_project(&db, "proj-null-eff", "null-eff-project").await;
+    let task_id = seed_task_row(
+        &db,
+        TaskSeed {
+            project_id: "proj-null-eff",
+            status: "closed",
+            close_reason: Some("completed"),
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+        },
+    )
+    .await;
+    seed_session_row(
+        &db,
+        SessionSeed {
+            project_id: "proj-null-eff",
+            model_id: "unpriced-model",
+            agent_type: "worker",
+            started_at: "2025-03-11T10:00:00Z",
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_read_tokens: 10,
+            cache_write_tokens: 5,
+            cost_usd: None, // NULL cost
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
+    let app = test_helpers::create_test_app_with_db(db);
+
+    let (status, body) =
+        get_usage(&app, "from=2025-03-01&to=2025-04-01", Some(&admin_cookie)).await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    let me = body.get("model_effectiveness").unwrap().as_array().unwrap();
+    assert!(
+        !me.is_empty(),
+        "model_effectiveness should have at least one element"
+    );
+
+    let first = &me[0];
+    assert!(
+        first.get("spend_usd").unwrap().is_null(),
+        "expected spend_usd to be JSON null for unpriced model, got: {}",
+        first.get("spend_usd").unwrap()
+    );
 }
 
 // ── Breakdown group_by dimension ─────────────────────────────────────────────
