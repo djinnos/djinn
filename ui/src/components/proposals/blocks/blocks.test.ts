@@ -10,6 +10,7 @@ import {
   isPascalCaseTag,
   parseMdxBody,
 } from "./parseMdxBody";
+import { extractProposalBlockIds } from "./blockRegistry";
 
 // ------------------------------------------------------------------------------
 // Canonical v1 tag set — single source of truth for parity assertions.
@@ -330,5 +331,26 @@ describe("extractBlockTags", () => {
 
   it("returns empty array for empty string", () => {
     expect(extractBlockTags("")).toEqual([]);
+  });
+});
+
+describe("extractProposalBlockIds", () => {
+  it("extracts registered block ids for pre-validation", () => {
+    const ids = extractProposalBlockIds(
+      '<RichText id="intro">Intro</RichText>\n<Diagram id="flow" type="mermaid" />',
+    );
+
+    expect(ids).toEqual([
+      { id: "intro", tag: "RichText", type: "rich-text" },
+      { id: "flow", tag: "Diagram", type: "diagram" },
+    ]);
+  });
+
+  it("ignores unknown PascalCase tags while extracting ids", () => {
+    const ids = extractProposalBlockIds(
+      '<UnknownBlock id="ignored" />\n<RichText id="kept">Kept</RichText>',
+    );
+
+    expect(ids).toEqual([{ id: "kept", tag: "RichText", type: "rich-text" }]);
   });
 });
