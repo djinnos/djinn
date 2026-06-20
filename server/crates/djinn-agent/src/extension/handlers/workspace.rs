@@ -3,8 +3,7 @@ use super::*;
 /// Default interactive-shell timeout (ms) when the caller passes no `timeout_ms`.
 /// Overridable via `DJINN_SHELL_TIMEOUT_MS`. Raised well above the old 120s:
 /// cold native builds routinely exceed two minutes, and a too-short ceiling
-/// SIGKILLed compiles mid-flight, leaving the model to retry from cold — the
-/// same guillotine the verification runner already fixed (verification/service.rs).
+/// SIGKILLed compiles mid-flight, leaving the model to retry from cold.
 fn default_shell_timeout_ms() -> u64 {
     std::env::var("DJINN_SHELL_TIMEOUT_MS")
         .ok()

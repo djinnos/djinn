@@ -479,7 +479,7 @@ impl UsageAnalyticsRepository {
     ///
     /// Uses shared-credit attribution: each completed task counts for every
     /// model that ran at least one worker session on it.  Success rate,
-    /// average reopens, and verification pass rate are computed over distinct
+    /// average reopens are computed over distinct
     /// shared-credit tasks per model (not raw worker-session rows) so that
     /// multiple sessions on the same task cannot inflate rates above 1.0.
     async fn fetch_model_effectiveness(

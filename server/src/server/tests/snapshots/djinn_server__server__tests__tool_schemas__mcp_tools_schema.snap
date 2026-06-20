@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 510
 expression: signatures
 ---
 [
@@ -4401,7 +4400,7 @@ expression: signatures
               "type": "object"
             }
           ],
-          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+          "description": "A lifecycle / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
         },
         "JavaLanguage": {
           "properties": {
@@ -4544,7 +4543,7 @@ expression: signatures
             },
             "pre_verification": {
               "default": [],
-              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "description": "Runs once in the task-run Pod, before any setup commands fire.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace.",
               "items": {
                 "$ref": "#/$defs/HookCommand"
               },
@@ -5004,7 +5003,7 @@ expression: signatures
               "type": "object"
             }
           ],
-          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+          "description": "A lifecycle / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
         },
         "ImageDto": {
           "properties": {
@@ -5184,7 +5183,7 @@ expression: signatures
             },
             "pre_verification": {
               "default": [],
-              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "description": "Runs once in the task-run Pod, before any setup commands fire.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace.",
               "items": {
                 "$ref": "#/$defs/HookCommand"
               },
@@ -5627,7 +5626,7 @@ expression: signatures
               "type": "object"
             }
           ],
-          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+          "description": "A lifecycle / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
         },
         "JavaLanguage": {
           "properties": {
@@ -5770,7 +5769,7 @@ expression: signatures
             },
             "pre_verification": {
               "default": [],
-              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "description": "Runs once in the task-run Pod, before any setup commands fire.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace.",
               "items": {
                 "$ref": "#/$defs/HookCommand"
               },
@@ -9132,7 +9131,7 @@ expression: signatures
               "type": "object"
             }
           ],
-          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+          "description": "A lifecycle / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
         },
         "JavaLanguage": {
           "properties": {
@@ -9275,7 +9274,7 @@ expression: signatures
             },
             "pre_verification": {
               "default": [],
-              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "description": "Runs once in the task-run Pod, before any setup commands fire.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace.",
               "items": {
                 "$ref": "#/$defs/HookCommand"
               },
@@ -9695,7 +9694,7 @@ expression: signatures
               "type": "object"
             }
           ],
-          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+          "description": "A lifecycle / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
         },
         "JavaLanguage": {
           "properties": {
@@ -9838,7 +9837,7 @@ expression: signatures
             },
             "pre_verification": {
               "default": [],
-              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "description": "Runs once in the task-run Pod, before any setup commands fire.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace.",
               "items": {
                 "$ref": "#/$defs/HookCommand"
               },
@@ -10235,7 +10234,7 @@ expression: signatures
               "type": "object"
             }
           ],
-          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+          "description": "A lifecycle / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
         },
         "JavaLanguage": {
           "properties": {
@@ -10378,7 +10377,7 @@ expression: signatures
             },
             "pre_verification": {
               "default": [],
-              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "description": "Runs once in the task-run Pod, before any setup commands fire.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace.",
               "items": {
                 "$ref": "#/$defs/HookCommand"
               },

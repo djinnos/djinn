@@ -397,14 +397,14 @@ pub(crate) fn tool_task_blocked_list() -> RmcpTool {
 pub(crate) fn tool_task_activity_list() -> RmcpTool {
     RmcpTool::new(
         "task_activity_list".to_string(),
-        "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.".to_string(),
+        "Query a task's activity log with optional filters. Returns comments, status transitions, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
             "properties": {
                 "id": {"type": "string", "description": "Task UUID or short ID"},
                 "event_type": {"type": "string", "description": "Filter by event type: comment, status_changed, commands_run, merge_conflict, task_review_start"},
-                "actor_role": {"type": "string", "description": "Filter by actor: lead, reviewer, worker, verification, system"},
+                "actor_role": {"type": "string", "description": "Filter by actor: lead, reviewer, worker, system"},
                 "limit": {"type": "integer", "description": "Max entries to return (default 30, max 50)"}
             }
         }),

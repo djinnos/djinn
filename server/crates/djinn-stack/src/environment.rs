@@ -823,7 +823,7 @@ fn is_valid_env_key(key: &str) -> bool {
 
 // ---- lifecycle ----------------------------------------------------------
 
-/// A lifecycle / verification / setup command.
+/// A lifecycle / setup command.
 ///
 /// Shape matches the `LifecycleCommand` enum in
 /// `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
@@ -912,10 +912,9 @@ pub struct LifecycleHooks {
     /// Runs in the task-run Pod before the supervisor starts.
     #[serde(default)]
     pub pre_task: Vec<HookCommand>,
-    /// Runs once in the task-run Pod, before any verification rule fires.
+    /// Runs once in the task-run Pod, before any setup commands fire.
     /// Typically `pnpm install` / `cargo build` / similar — commands that
-    /// prepare the workspace so the `verification.rules` commands succeed.
-    /// Previously lived as `verification.setup`.
+    /// prepare the workspace.
     #[serde(default)]
     pub pre_verification: Vec<HookCommand>,
 }
