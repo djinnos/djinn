@@ -579,7 +579,10 @@ mod tests {
 
         let result = resolve_scoped_commands(&db, None, &project_root, &base, None).await;
 
-        assert_eq!(result, vec!["cargo test -p djinn-control-plane"]);
+        assert!(
+            result.is_empty(),
+            "verification rules table is dropped; DB-backed resolution no longer emits commands"
+        );
     }
 
     /// Regression: the slot-free verification pipeline runs against an ephemeral
@@ -607,13 +610,16 @@ mod tests {
             "// mcp",
         );
 
-        // Path form would skip (no owner/repo); id form must resolve.
+        // Verification rules are no longer resolved from the dropped DB table.
         let by_path = resolve_scoped_commands(&db, None, &project_root, &base, None).await;
         assert!(
             by_path.is_empty(),
             "non-owner/repo path should not resolve via path form"
         );
         let by_id = resolve_scoped_commands(&db, Some("p1"), &project_root, &base, None).await;
-        assert_eq!(by_id, vec!["cargo test -p djinn-control-plane"]);
+        assert!(
+            by_id.is_empty(),
+            "project id form also yields no commands after verification rule storage is dropped"
+        );
     }
 }

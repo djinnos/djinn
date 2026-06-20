@@ -454,6 +454,30 @@ mod tests {
     }
 
     #[test]
+    fn registry_tags_match_canonical_v1_set() {
+        // This test is the Rust-side parity guard for the TypeScript
+        // CANONICAL_V1_TAGS array. If either side drifts, this assertion
+        // (and the corresponding TS test) will fail.
+        let expected: std::collections::HashSet<&str> = [
+            "RichText",
+            "Diagram",
+            "AnnotatedCode",
+            "DataModel",
+            "ApiEndpoint",
+            "Decisions",
+            "FileTree",
+            "QuestionForm",
+        ]
+        .into_iter()
+        .collect();
+        let actual: std::collections::HashSet<&str> = proposal_block_tags().into_iter().collect();
+        assert_eq!(
+            actual, expected,
+            "Rust registry tags do not match the canonical v1 set"
+        );
+    }
+
+    #[test]
     fn registry_contains_field_schemas() {
         let registry = proposal_block_registry();
         let diagram_type = registry["diagram"].fields["type"].clone();

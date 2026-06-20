@@ -1,0 +1,49 @@
+# Canonical Proposal
+
+This is a canonical proposal.mdx sample that exercises all eight v1 proposal block types. It is used by the UI and backend test suites to prove the registry/parser round-trip contract.
+
+<RichText id="intro">
+Welcome to the proposal. This is **rich text** content.
+</RichText>
+
+## Architecture
+
+<Diagram id="arch-overview" type="mermaid">
+graph TD
+  A[Client] --> B[API]
+  B --> C[Database]
+</Diagram>
+
+<AnnotatedCode id="handler" language="rust">
+fn handle_request(req: Request) -> Response {
+  let data = parse(req);
+  process(data)
+}
+</AnnotatedCode>
+
+<DataModel id="user-schema" name="User">
+  id: uuid
+  email: string
+  name: string
+</DataModel>
+
+<ApiEndpoint id="get-users" method="GET" path="/api/users">
+Returns a list of all users.
+</ApiEndpoint>
+
+<Decisions id="auth-choice">
+We chose JWT over session cookies for stateless auth.
+</Decisions>
+
+<FileTree id="project-layout" root="src">
+  src/
+    main.rs
+    lib.rs
+  tests/
+</FileTree>
+
+<QuestionForm id="open-questions" title="Open Questions">
+Should we use Redis or Memcached for caching?
+</QuestionForm>
+
+Some trailing markdown.

@@ -1,5 +1,20 @@
+//! Per-commit verification output cache (`verification_cache` table).
+//!
+//! Verification is being removed (epic sehj). The `verification_cache` table
+//! is dropped by migration 72 but this repository module remains temporarily
+//! pending the full removal of all verification references. It uses the
+//! non-macro `sqlx::query` form (like the other verification repos) so it
+//! does not require the table to exist for offline `.sqlx` cache compilation.
+//!
+//! All methods gracefully degrade when the table no longer exists (post
+//! migration 72): reads return empty/`None`, writes are silent no-ops. This
+//! lets remaining consumers be removed incrementally without runtime panics.
+
+use sqlx::Row;
+
 use crate::Result;
 use crate::database::Database;
+use crate::repositories::verification_common::ok_if_table_dropped;
 
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct CachedVerification {
@@ -23,14 +38,29 @@ impl VerificationCacheRepository {
         commit_sha: &str,
     ) -> Result<Option<CachedVerification>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            CachedVerification,
-            r#"SELECT output, duration_ms AS "duration_ms!: i64", created_at FROM verification_cache WHERE project_id = $1 AND commit_sha = $2"#,
-            project_id,
-            commit_sha,
+        let row = sqlx::query(
+            r#"SELECT output, duration_ms AS "duration_ms!: i64", created_at
+                 FROM verification_cache
+                WHERE project_id = $1 AND commit_sha = $2"#,
         )
+        .bind(project_id)
+        .bind(commit_sha)
         .fetch_optional(self.db.pool())
-        .await?)
+        .await;
+        match row {
+            Ok(row) => Ok(row.map(|r| CachedVerification {
+                output: r.get("output"),
+                duration_ms: r.get("duration_ms"),
+                created_at: r.get("created_at"),
+            })),
+            Err(e) => {
+                if ok_if_table_dropped(&e) {
+                    Ok(None)
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
     }
 
     pub async fn insert(
@@ -41,130 +71,55 @@ impl VerificationCacheRepository {
         duration_ms: i64,
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "INSERT INTO verification_cache (project_id, commit_sha, output, duration_ms) VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (project_id, commit_sha) DO UPDATE SET output=EXCLUDED.output, duration_ms=EXCLUDED.duration_ms",
-            project_id,
-            commit_sha,
-            output_json,
-            duration_ms,
+        let res: std::result::Result<sqlx::postgres::PgQueryResult, sqlx::Error> = sqlx::query(
+            r#"INSERT INTO verification_cache (project_id, commit_sha, output, duration_ms)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (project_id, commit_sha) DO UPDATE
+                   SET output=EXCLUDED.output, duration_ms=EXCLUDED.duration_ms"#,
         )
+        .bind(project_id)
+        .bind(commit_sha)
+        .bind(output_json)
+        .bind(duration_ms)
         .execute(self.db.pool())
-        .await?;
-        Ok(())
+        .await;
+        ok_if_table_dropped_or_propagate(res)
     }
 
     pub async fn invalidate_project(&self, project_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "DELETE FROM verification_cache WHERE project_id = $1",
-            project_id
-        )
-        .execute(self.db.pool())
-        .await?;
-        Ok(())
+        let res = sqlx::query("DELETE FROM verification_cache WHERE project_id = $1")
+            .bind(project_id)
+            .execute(self.db.pool())
+            .await;
+        ok_if_table_dropped_or_propagate(res)
     }
 
     pub async fn prune_older_than(&self, days: i64) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            r#"DELETE FROM verification_cache WHERE created_at < to_char((now() at time zone 'utc') - (interval '1 day' * $1), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
-            days as f64,
+        let res = sqlx::query(
+            r#"DELETE FROM verification_cache
+                WHERE created_at < to_char((now() at time zone 'utc') - (interval '1 day' * $1),
+                                           'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
         )
+        .bind(days as f64)
         .execute(self.db.pool())
-        .await?;
-        Ok(())
+        .await;
+        ok_if_table_dropped_or_propagate(res)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::database::Database;
-
-    async fn test_repo() -> VerificationCacheRepository {
-        let db = Database::open_in_memory().expect("in-memory db");
-        VerificationCacheRepository::new(db)
-    }
-
-    /// Create the project rows referenced by `verification_cache.project_id`.
-    /// The cache table carries a FK to `projects` on MySQL/Dolt, so inserting
-    /// a cache row for "p1"/"p2" without the parent row is a constraint
-    /// violation (SQLite quietly allowed it in the previous backend).
-    async fn seed_projects(db: &Database, ids: &[&str]) {
-        db.ensure_initialized().await.unwrap();
-        for id in ids {
-            let owner = "test";
-            let repo_slug = format!("verif-cache-{id}");
-            sqlx::query!(
-                "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
-                id,
-                id,
-                owner,
-                repo_slug,
-            )
-            .execute(db.pool())
-            .await
-            .unwrap();
+fn ok_if_table_dropped_or_propagate(
+    res: std::result::Result<sqlx::postgres::PgQueryResult, sqlx::Error>,
+) -> Result<()> {
+    match res {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            if ok_if_table_dropped(&e) {
+                Ok(())
+            } else {
+                Err(e.into())
+            }
         }
-    }
-
-    #[tokio::test]
-    async fn insert_and_get_round_trip() {
-        let repo = test_repo().await;
-        seed_projects(&repo.db, &["p1"]).await;
-        repo.insert("p1", "abc123", "[{\"ok\":true}]", 42)
-            .await
-            .expect("insert");
-
-        let cached = repo.get("p1", "abc123").await.expect("get").expect("hit");
-        assert_eq!(cached.output, "[{\"ok\":true}]");
-        assert_eq!(cached.duration_ms, 42);
-        assert!(!cached.created_at.is_empty());
-    }
-
-    #[tokio::test]
-    async fn cache_miss_returns_none() {
-        let repo = test_repo().await;
-        let cached = repo.get("missing", "sha").await.expect("get");
-        assert!(cached.is_none());
-    }
-
-    #[tokio::test]
-    async fn invalidate_project_deletes_only_project_rows() {
-        let repo = test_repo().await;
-        seed_projects(&repo.db, &["p1", "p2"]).await;
-        repo.insert("p1", "a1", "[]", 10).await.expect("insert p1");
-        repo.insert("p1", "a2", "[]", 20).await.expect("insert p1");
-        repo.insert("p2", "b1", "[]", 30).await.expect("insert p2");
-
-        repo.invalidate_project("p1").await.expect("invalidate");
-
-        assert!(repo.get("p1", "a1").await.expect("get").is_none());
-        assert!(repo.get("p1", "a2").await.expect("get").is_none());
-        assert!(repo.get("p2", "b1").await.expect("get").is_some());
-    }
-
-    #[tokio::test]
-    async fn prune_older_than_deletes_old_rows() {
-        let repo = test_repo().await;
-        seed_projects(&repo.db, &["p1"]).await;
-
-        repo.insert("p1", "old", "[]", 1).await.expect("insert old");
-        sqlx::query!(
-            r#"UPDATE verification_cache SET created_at = to_char((now() at time zone 'utc') - interval '10 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE project_id = $1 AND commit_sha = $2"#,
-            "p1",
-            "old",
-        )
-        .execute(repo.db.pool())
-        .await
-        .expect("age old row");
-
-        repo.insert("p1", "new", "[]", 2).await.expect("insert new");
-
-        repo.prune_older_than(5).await.expect("prune");
-
-        assert!(repo.get("p1", "old").await.expect("get old").is_none());
-        assert!(repo.get("p1", "new").await.expect("get new").is_some());
     }
 }
