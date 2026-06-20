@@ -121,7 +121,6 @@ struct TaskSeed<'a> {
     status: &'a str,
     close_reason: Option<&'a str>,
     total_reopen_count: i32,
-    total_verification_failure_count: i32,
 }
 
 /// Seed a task row directly into the database for integration-level
@@ -134,14 +133,14 @@ async fn seed_task_row(db: &djinn_db::Database, seed: TaskSeed<'_>) -> String {
          (id, project_id, short_id, epic_id, title, description, design, \
           issue_type, status, priority, owner, labels, acceptance_criteria, \
           reopen_count, continuation_count, verification_failure_count, \
-          total_reopen_count, total_verification_failure_count, \
+          total_reopen_count, \
           intervention_count, created_at, updated_at, closed_at, close_reason, \
           merge_commit_sha, memory_refs, merge_conflict_metadata, agent_type, pr_url) \
          VALUES ($1, $2, $3, NULL, 'test title', 'test desc', 'test design', \
                  'task', $4, 0, '', '[]', '[]', \
                  0, 0, 0, \
-                 $5, $6, \
-                 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', NULL, $7, \
+                 $5, \
+                 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', NULL, $6, \
                  NULL, '[]', NULL, NULL, NULL)",
     )
     .bind(&id)
@@ -149,7 +148,6 @@ async fn seed_task_row(db: &djinn_db::Database, seed: TaskSeed<'_>) -> String {
     .bind(&short_id)
     .bind(seed.status)
     .bind(seed.total_reopen_count)
-    .bind(seed.total_verification_failure_count)
     .bind(seed.close_reason)
     .execute(db.pool())
     .await
@@ -705,7 +703,6 @@ async fn admin_request_with_worker_session_returns_model_effectiveness_fields() 
             status: "closed",
             close_reason: Some("completed"),
             total_reopen_count: 0,
-            total_verification_failure_count: 0,
         },
     )
     .await;
@@ -748,7 +745,6 @@ async fn admin_request_with_worker_session_returns_model_effectiveness_fields() 
         "completed_task_count",
         "success_rate",
         "avg_reopens",
-        "verification_pass_rate",
         "cost_per_completed_task",
         "tokens_per_task",
     ] {
@@ -765,7 +761,6 @@ async fn admin_request_with_worker_session_returns_model_effectiveness_fields() 
     assert!(first.get("completed_task_count").unwrap().is_number());
     assert!(first.get("success_rate").unwrap().is_number());
     assert!(first.get("avg_reopens").unwrap().is_number());
-    assert!(first.get("verification_pass_rate").unwrap().is_number());
     assert!(first.get("cost_per_completed_task").unwrap().is_number());
     assert!(first.get("tokens_per_task").unwrap().is_number());
 }
@@ -783,7 +778,6 @@ async fn model_effectiveness_response_contains_all_metric_fields() {
             status: "closed",
             close_reason: Some("completed"),
             total_reopen_count: 2,
-            total_verification_failure_count: 1,
         },
     )
     .await;
@@ -825,7 +819,6 @@ async fn model_effectiveness_response_contains_all_metric_fields() {
     assert!(first.get("completed_task_count").unwrap().is_number());
     assert!(first.get("success_rate").unwrap().is_number());
     assert!(first.get("avg_reopens").unwrap().is_number());
-    assert!(first.get("verification_pass_rate").unwrap().is_number());
     assert!(first.get("cost_per_completed_task").unwrap().is_number());
     assert!(first.get("tokens_per_task").unwrap().is_number());
 }
@@ -843,7 +836,6 @@ async fn model_effectiveness_null_cost_serializes_correctly() {
             status: "closed",
             close_reason: Some("completed"),
             total_reopen_count: 0,
-            total_verification_failure_count: 0,
         },
     )
     .await;

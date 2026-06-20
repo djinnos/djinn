@@ -461,6 +461,7 @@ impl RepoGraphOps for StubRepoGraphOps {
         &self,
         _: &ProjectCtx,
         _: &[BoundaryRule],
+        _: &str,
     ) -> Result<Vec<BoundaryViolation>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }

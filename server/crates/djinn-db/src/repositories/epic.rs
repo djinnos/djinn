@@ -1413,6 +1413,115 @@ mod tests {
         assert_eq!(remaining, 0);
     }
 
+    // ── Regression tests: race-condition + propagation (i528-1 §4) ──────────
+
+    /// Regression test: `emit_unblocked_epics` correctly emits `epic.updated`
+    /// for dependents that become fully unblocked when their last blocker closes.
+    /// Also verifies that dependents with remaining open blockers are NOT emitted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn emit_unblocked_epics_fires_for_fully_unblocked_dependents() {
+        let (bus, captured) = capturing_bus();
+        let repo = EpicRepository::new(test_db(), bus);
+
+        // A: foundation epic.
+        let a = repo
+            .create("Foundation A", "", "", "", "", None)
+            .await
+            .unwrap();
+        // B: another blocker.
+        let b = repo
+            .create("Blocker B", "", "", "", "", None)
+            .await
+            .unwrap();
+        // C: depends on both A and B.
+        let c = repo
+            .create("Dependent C", "", "", "", "", None)
+            .await
+            .unwrap();
+
+        // Wire C.blocked_by = A and C.blocked_by = B.
+        repo.add_blocker(&c.id, &a.id).await.unwrap();
+        repo.add_blocker(&c.id, &b.id).await.unwrap();
+        captured.lock().unwrap().clear();
+
+        // Close A — B is still open, so C is NOT fully unblocked.
+        repo.close(&a.id).await.unwrap();
+
+        // emit_unblocked_epics is called internally by close().
+        // Since B is still open, C should NOT have been emitted.
+        let events_after_a = captured.lock().unwrap().clone();
+        let c_emitted: Vec<_> = events_after_a
+            .iter()
+            .filter(|ev| ev.action == "updated" && ev.entity_type == "epic")
+            .filter_map(|ev| {
+                let e: Epic = serde_json::from_value(ev.payload.clone()).ok()?;
+                if e.id == c.id { Some(e) } else { None }
+            })
+            .collect();
+        assert!(
+            c_emitted.is_empty(),
+            "C must NOT be emitted while B is still open"
+        );
+
+        // Now close B — C should be fully unblocked.
+        captured.lock().unwrap().clear();
+        repo.close(&b.id).await.unwrap();
+
+        let events_after_b = captured.lock().unwrap().clone();
+        let c_unblocked: Vec<_> = events_after_b
+            .iter()
+            .filter(|ev| ev.action == "updated" && ev.entity_type == "epic")
+            .filter_map(|ev| {
+                let e: Epic = serde_json::from_value(ev.payload.clone()).ok()?;
+                if e.id == c.id { Some(e) } else { None }
+            })
+            .collect();
+        assert_eq!(
+            c_unblocked.len(),
+            1,
+            "C must be emitted once when its last blocker (B) closes"
+        );
+        assert_eq!(c_unblocked[0].id, c.id);
+    }
+
+    /// Regression test: `emit_unblocked_epics` only fires for OPEN dependents.
+    /// A closed dependent must NOT be re-emitted even if its blocker closes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn emit_unblocked_epics_skips_closed_dependents() {
+        let (bus, captured) = capturing_bus();
+        let repo = EpicRepository::new(test_db(), bus);
+
+        let blocker = repo.create("Blocker", "", "", "", "", None).await.unwrap();
+        let dependent = repo
+            .create("Dependent", "", "", "", "", None)
+            .await
+            .unwrap();
+
+        repo.add_blocker(&dependent.id, &blocker.id).await.unwrap();
+
+        // Close the dependent first (it was closed before its blocker).
+        repo.close(&dependent.id).await.unwrap();
+        captured.lock().unwrap().clear();
+
+        // Now close the blocker.
+        repo.close(&blocker.id).await.unwrap();
+
+        // The closed dependent should NOT have been emitted.
+        let events = captured.lock().unwrap().clone();
+        let dependent_emitted: Vec<_> = events
+            .iter()
+            .filter(|ev| ev.action == "updated" && ev.entity_type == "epic")
+            .filter_map(|ev| {
+                let e: Epic = serde_json::from_value(ev.payload.clone()).ok()?;
+                if e.id == dependent.id { Some(e) } else { None }
+            })
+            .collect();
+        assert!(
+            dependent_emitted.is_empty(),
+            "closed dependent must NOT be re-emitted when its blocker closes"
+        );
+    }
+
     #[test]
     fn encode_base36_roundtrip() {
         assert_eq!(encode_base36(0), "0000");
