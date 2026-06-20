@@ -9,6 +9,7 @@ import { callMcpTool } from "@/api/mcpClient";
 import { usersQueryOptions } from "@/api/queryOptions";
 import { userDisplayName, type OrgUser } from "@/api/users";
 import { AcceptanceChecklist } from "@/components/AcceptanceChecklist";
+import { BlockRenderer } from "@/components/proposals/blocks/BlockRenderer";
 import { AcceptanceProgressBadge } from "@/components/AcceptanceProgressBadge";
 import { UserAvatar } from "@/components/UserAvatar";
 import { CopyButton } from "@/components/CopyButton";
@@ -524,11 +525,15 @@ function ProposalDetailView({
         {/* Spec body — read-only; editing happens via djinn in chat. */}
         <div className="space-y-2">
           <Label className="text-xs uppercase text-muted-foreground">Spec</Label>
-          <div className="prose prose-sm max-w-none dark:prose-invert">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {proposal.body || "_No spec body yet._"}
-            </ReactMarkdown>
-          </div>
+          {proposal.body_format === "mdx" ? (
+            <BlockRenderer body={proposal.body || ""} feedback={[]} />
+          ) : (
+            <div className="prose prose-sm max-w-none dark:prose-invert">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {proposal.body || "_No spec body yet._"}
+              </ReactMarkdown>
+            </div>
+          )}
         </div>
 
         <ProposalHistory detail={detail} />

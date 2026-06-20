@@ -1,138 +1,315 @@
-// Block registry for MDX-aware proposals.
-//
-// Defines the P2 block types with their MDX tag names, expected attributes,
-// and a simple regex-based parser that extracts blocks with stable IDs from
-// MDX body text. When `body_format == 'mdx'`, the parser is used for
-// validation in proposal_create / proposal_update.
+//! Proposal MDX block registry and introspection tool.
+//!
+//! This module is the Rust source for the v1 proposal block contract: each
+//! stable block type maps to the MDX tag clients should emit plus the field
+//! schema workers can use when validating or generating proposal bodies.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::LazyLock;
 
+use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-// ── Block type definitions ──────────────────────────────────────────────────
+use crate::server::DjinnMcpServer;
 
-/// Every P2 block type carries an MDX tag name, a human display name, and a
-/// list of required attribute names (beyond the always-required `id`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BlockType {
-    DataModel,
-    ApiEndpoint,
-    Decisions,
-    FileTree,
-    QuestionForm,
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ProposalBlockFieldSchema {
+    /// Primitive schema kind: `string`, `boolean`, `object`, or `array`.
+    #[serde(rename = "type")]
+    pub field_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enum_values: Option<Vec<&'static str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<BTreeMap<&'static str, ProposalBlockFieldSchema>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<Box<ProposalBlockFieldSchema>>,
 }
 
-impl BlockType {
-    /// The MDX tag name used in proposal bodies (e.g. `<data-model>`).
-    pub fn mdx_tag(&self) -> &'static str {
-        match self {
-            Self::DataModel => "data-model",
-            Self::ApiEndpoint => "api-endpoint",
-            Self::Decisions => "decisions",
-            Self::FileTree => "file-tree",
-            Self::QuestionForm => "question-form",
-        }
-    }
-
-    /// Human-readable display name for UI/reporting.
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::DataModel => "Data Model",
-            Self::ApiEndpoint => "API Endpoint",
-            Self::Decisions => "Decisions",
-            Self::FileTree => "File Tree",
-            Self::QuestionForm => "Question Form",
-        }
-    }
-
-    /// Attribute names required on this block type beyond the universal `id`.
-    pub fn required_fields(&self) -> &'static [&'static str] {
-        match self {
-            Self::DataModel => &["title"],
-            Self::ApiEndpoint => &["method", "path"],
-            Self::Decisions => &[],
-            Self::FileTree => &["root"],
-            Self::QuestionForm => &[],
-        }
-    }
-
-    /// All known block types.
-    pub fn all() -> &'static [BlockType] {
-        &[
-            Self::DataModel,
-            Self::ApiEndpoint,
-            Self::Decisions,
-            Self::FileTree,
-            Self::QuestionForm,
-        ]
-    }
-
-    /// Try to match a tag name to a known block type.
-    pub fn from_tag(tag: &str) -> Option<BlockType> {
-        Self::all().iter().find(|bt| bt.mdx_tag() == tag).copied()
-    }
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ProposalBlockDefinition {
+    /// Stable proposal block type identifier, e.g. `annotated-code`.
+    #[serde(rename = "type")]
+    pub block_type: &'static str,
+    /// MDX component tag, e.g. `AnnotatedCode`.
+    pub tag: &'static str,
+    /// Field schema keyed by field name.
+    pub fields: BTreeMap<&'static str, ProposalBlockFieldSchema>,
 }
 
-// ── Parsed block ────────────────────────────────────────────────────────────
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalBlocksParams {}
 
-/// A single block extracted from MDX body text.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParsedBlock {
-    pub block_type: BlockType,
-    /// Stable identifier for this block (from the `id` attribute).
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ProposalBlocksResponse {
+    pub blocks: BTreeMap<&'static str, ProposalBlockDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParsedProposalBlock {
+    /// Stable proposal block type identifier, e.g. `annotated-code`.
+    pub block_type: String,
+    /// MDX component tag found in the body, e.g. `AnnotatedCode`.
+    pub tag: String,
+    /// Stable identifier for this block from the optional `id` attribute.
     pub id: String,
-    /// All attributes from the opening tag (including `id`).
+    /// All attributes from the opening tag, including `id` when present.
     pub attributes: HashMap<String, String>,
-    /// Raw content between the opening and closing tags.
+    /// Raw content between opening and closing tags.
     pub raw_content: String,
 }
 
-// ── MDX block parser ────────────────────────────────────────────────────────
+impl ParsedProposalBlock {
+    pub fn block_id(&self) -> &str {
+        &self.id
+    }
+}
 
-/// Extract all known blocks from an MDX body string.
+fn string_field() -> ProposalBlockFieldSchema {
+    ProposalBlockFieldSchema {
+        field_type: "string",
+        enum_values: None,
+        fields: None,
+        items: None,
+    }
+}
+
+fn boolean_field() -> ProposalBlockFieldSchema {
+    ProposalBlockFieldSchema {
+        field_type: "boolean",
+        enum_values: None,
+        fields: None,
+        items: None,
+    }
+}
+
+fn enum_string_field(values: Vec<&'static str>) -> ProposalBlockFieldSchema {
+    ProposalBlockFieldSchema {
+        field_type: "string",
+        enum_values: Some(values),
+        fields: None,
+        items: None,
+    }
+}
+
+fn object_field(
+    fields: BTreeMap<&'static str, ProposalBlockFieldSchema>,
+) -> ProposalBlockFieldSchema {
+    ProposalBlockFieldSchema {
+        field_type: "object",
+        enum_values: None,
+        fields: Some(fields),
+        items: None,
+    }
+}
+
+fn array_field(items: ProposalBlockFieldSchema) -> ProposalBlockFieldSchema {
+    ProposalBlockFieldSchema {
+        field_type: "array",
+        enum_values: None,
+        fields: None,
+        items: Some(Box::new(items)),
+    }
+}
+
+fn fields(
+    entries: Vec<(&'static str, ProposalBlockFieldSchema)>,
+) -> BTreeMap<&'static str, ProposalBlockFieldSchema> {
+    entries.into_iter().collect()
+}
+
+fn block(
+    block_type: &'static str,
+    tag: &'static str,
+    fields: BTreeMap<&'static str, ProposalBlockFieldSchema>,
+) -> ProposalBlockDefinition {
+    ProposalBlockDefinition {
+        block_type,
+        tag,
+        fields,
+    }
+}
+
+pub static PROPOSAL_BLOCK_REGISTRY: LazyLock<BTreeMap<&'static str, ProposalBlockDefinition>> =
+    LazyLock::new(|| {
+        BTreeMap::from([
+            (
+                "rich-text",
+                block(
+                    "rich-text",
+                    "RichText",
+                    fields(vec![("content", string_field())]),
+                ),
+            ),
+            (
+                "diagram",
+                block(
+                    "diagram",
+                    "Diagram",
+                    fields(vec![
+                        (
+                            "type",
+                            enum_string_field(vec!["mermaid", "plantuml", "svg"]),
+                        ),
+                        ("source", string_field()),
+                    ]),
+                ),
+            ),
+            (
+                "annotated-code",
+                block(
+                    "annotated-code",
+                    "AnnotatedCode",
+                    fields(vec![
+                        ("language", string_field()),
+                        ("code", string_field()),
+                        (
+                            "annotations",
+                            array_field(object_field(fields(vec![
+                                ("line", string_field()),
+                                ("note", string_field()),
+                            ]))),
+                        ),
+                    ]),
+                ),
+            ),
+            (
+                "data-model",
+                block(
+                    "data-model",
+                    "DataModel",
+                    fields(vec![
+                        ("name", string_field()),
+                        (
+                            "fields",
+                            array_field(object_field(fields(vec![
+                                ("name", string_field()),
+                                ("type", string_field()),
+                                ("optional", boolean_field()),
+                                ("description", string_field()),
+                            ]))),
+                        ),
+                    ]),
+                ),
+            ),
+            (
+                "api-endpoint",
+                block(
+                    "api-endpoint",
+                    "ApiEndpoint",
+                    fields(vec![
+                        ("method", string_field()),
+                        ("path", string_field()),
+                        ("description", string_field()),
+                        ("request_schema", string_field()),
+                        ("response_schema", string_field()),
+                    ]),
+                ),
+            ),
+            (
+                "decisions",
+                block(
+                    "decisions",
+                    "Decisions",
+                    fields(vec![(
+                        "items",
+                        array_field(object_field(fields(vec![
+                            ("decision", string_field()),
+                            ("rationale", string_field()),
+                            ("status", string_field()),
+                        ]))),
+                    )]),
+                ),
+            ),
+            (
+                "file-tree",
+                block(
+                    "file-tree",
+                    "FileTree",
+                    fields(vec![
+                        ("root", string_field()),
+                        (
+                            "entries",
+                            array_field(object_field(fields(vec![
+                                ("path", string_field()),
+                                ("kind", enum_string_field(vec!["file", "dir"])),
+                            ]))),
+                        ),
+                    ]),
+                ),
+            ),
+            (
+                "question-form",
+                block(
+                    "question-form",
+                    "QuestionForm",
+                    fields(vec![
+                        ("title", string_field()),
+                        (
+                            "questions",
+                            array_field(object_field(fields(vec![
+                                ("question", string_field()),
+                                ("kind", enum_string_field(vec!["text", "single", "multi"])),
+                                ("options", array_field(string_field())),
+                            ]))),
+                        ),
+                    ]),
+                ),
+            ),
+        ])
+    });
+
+pub fn proposal_block_registry() -> BTreeMap<&'static str, ProposalBlockDefinition> {
+    PROPOSAL_BLOCK_REGISTRY.clone()
+}
+
+pub fn proposal_block_definition_for_tag(tag: &str) -> Option<&'static ProposalBlockDefinition> {
+    PROPOSAL_BLOCK_REGISTRY
+        .values()
+        .find(|definition| definition.tag == tag)
+}
+
+pub fn proposal_block_tags() -> HashSet<&'static str> {
+    PROPOSAL_BLOCK_REGISTRY
+        .values()
+        .map(|definition| definition.tag)
+        .collect()
+}
+
+/// Extract registered proposal MDX blocks from a body string.
 ///
-/// Uses a regex to find opening tags `<tagname ...>`, then searches for the
-/// matching closing tag `</tagname>` to extract block content. Returns an
-/// error for malformed blocks.
-pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedBlock>, String> {
-    // Regex to find opening tags: `<tagname ...>` where tagname is lowercase with hyphens.
-    let re = regex::Regex::new(r"<([a-z][a-z0-9-]*)([^>]*)>")
+/// This lightweight parser is intended for validation/introspection workflows,
+/// not for rendering arbitrary MDX. It recognizes the PascalCase component tags
+/// published in [`PROPOSAL_BLOCK_REGISTRY`] and skips unrelated HTML/MDX tags.
+pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedProposalBlock>, String> {
+    let re = regex::Regex::new(r"<([A-Z][A-Za-z0-9]*)([^>]*)>")
         .map_err(|e| format!("block parser regex error: {e}"))?;
-
     let mut blocks = Vec::new();
 
     for cap in re.captures_iter(body) {
-        let tag_name = &cap[1];
-        let attrs_str = &cap[2];
-        let open_end = cap.get(0).unwrap().end();
-
-        let block_type = match BlockType::from_tag(tag_name) {
-            Some(bt) => bt,
-            None => {
-                // Skip unknown tags — they may be HTML or other MDX components.
-                continue;
-            }
+        let tag = &cap[1];
+        let Some(definition) = proposal_block_definition_for_tag(tag) else {
+            continue;
         };
-
-        // Find the matching closing tag.
-        let closing_tag = format!("</{}>", tag_name);
-        let close_start = body[open_end..]
-            .find(&closing_tag)
-            .map(|pos| open_end + pos)
-            .ok_or_else(|| {
-                format!(
-                    "unclosed <{}> block (no closing {} found)",
-                    tag_name, closing_tag
-                )
-            })?;
-
-        let raw_content = body[open_end..close_start].to_string();
-
+        let attrs_str = &cap[2];
+        let open_end = cap.get(0).expect("full match exists").end();
         let attributes = parse_attributes(attrs_str);
         let id = attributes.get("id").cloned().unwrap_or_default();
+        let raw_content = if attrs_str.trim_end().ends_with('/') {
+            String::new()
+        } else {
+            let closing_tag = format!("</{tag}>");
+            let close_start = body[open_end..]
+                .find(&closing_tag)
+                .map(|pos| open_end + pos)
+                .ok_or_else(|| {
+                    format!("unclosed <{tag}> block (no closing {closing_tag} found)")
+                })?;
+            body[open_end..close_start].to_string()
+        };
 
-        blocks.push(ParsedBlock {
-            block_type,
+        blocks.push(ParsedProposalBlock {
+            block_type: definition.block_type.to_string(),
+            tag: tag.to_string(),
             id,
             attributes,
             raw_content,
@@ -142,19 +319,16 @@ pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedBlock>, String> {
     Ok(blocks)
 }
 
-/// Parse attributes from an opening tag's attribute string.
-///
-/// Handles `key="value"` and `key='value'` pairs. Returns a map of
-/// attribute name → value.
+/// Parse `key="value"` and `key='value'` attributes from an MDX opening tag.
 fn parse_attributes(attrs_str: &str) -> HashMap<String, String> {
-    let re = regex::Regex::new(r#"([a-z][a-z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#)
+    let re = regex::Regex::new(r#"([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#)
         .expect("attr regex should compile");
     let mut map = HashMap::new();
     for cap in re.captures_iter(attrs_str) {
         let key = cap[1].to_string();
         let value = cap
             .get(2)
-            .or(cap.get(3))
+            .or_else(|| cap.get(3))
             .map(|m| m.as_str().to_string())
             .unwrap_or_default();
         map.insert(key, value);
@@ -162,102 +336,128 @@ fn parse_attributes(attrs_str: &str) -> HashMap<String, String> {
     map
 }
 
-// ── Block ID validation ─────────────────────────────────────────────────────
-
-/// Ensure all blocks have non-empty `id` attributes and that IDs are unique
-/// within the proposal.
-pub fn validate_block_ids(blocks: &[ParsedBlock]) -> Result<(), String> {
-    let mut seen = std::collections::HashSet::new();
+/// Ensure all parsed blocks have non-empty, unique `id` attributes.
+pub fn validate_block_ids(blocks: &[ParsedProposalBlock]) -> Result<(), String> {
+    let mut seen = HashSet::new();
     for block in blocks {
         if block.id.is_empty() {
             return Err(format!(
                 "{} block is missing a required `id` attribute",
-                block.block_type.mdx_tag()
+                block.tag
             ));
         }
-        if !seen.insert(&block.id) {
+        if !seen.insert(block.id.as_str()) {
             return Err(format!("duplicate block id: `{}`", block.block_id()));
         }
     }
     Ok(())
 }
 
-impl ParsedBlock {
-    /// Convenience accessor for the block id.
-    pub fn block_id(&self) -> &str {
-        &self.id
+#[tool_router(router = proposal_blocks_tool_router, vis = "pub")]
+impl DjinnMcpServer {
+    #[tool(
+        description = "Return the v1 proposal MDX block registry, including stable block types, MDX tags, and field schemas.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn proposal_blocks(
+        &self,
+        Parameters(_): Parameters<ProposalBlocksParams>,
+    ) -> Json<ProposalBlocksResponse> {
+        Json(ProposalBlocksResponse {
+            blocks: proposal_block_registry(),
+        })
     }
 }
-
-// ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parse_single_block() {
-        let body = r#"# Proposal
-
-Some intro text.
-
-<data-model id="user-schema" title="User Schema">
-field: name (string)
-field: email (string)
-</data-model>
-
-More text."#;
-
-        let blocks = parse_mdx_blocks(body).unwrap();
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].block_type, BlockType::DataModel);
-        assert_eq!(blocks[0].id, "user-schema");
-        assert_eq!(
-            blocks[0].attributes.get("title").map(|s| s.as_str()),
-            Some("User Schema")
-        );
-        assert!(blocks[0].raw_content.contains("field: name"));
+    fn registry_contains_v1_blocks() {
+        let registry = proposal_block_registry();
+        assert_eq!(registry.len(), 8);
+        assert_eq!(registry["rich-text"].tag, "RichText");
+        assert_eq!(registry["diagram"].tag, "Diagram");
+        assert_eq!(registry["annotated-code"].tag, "AnnotatedCode");
+        assert_eq!(registry["data-model"].tag, "DataModel");
+        assert_eq!(registry["api-endpoint"].tag, "ApiEndpoint");
+        assert_eq!(registry["decisions"].tag, "Decisions");
+        assert_eq!(registry["file-tree"].tag, "FileTree");
+        assert_eq!(registry["question-form"].tag, "QuestionForm");
     }
 
     #[test]
-    fn parse_multiple_blocks() {
-        let body = r#"
-<api-endpoint id="create-user" method="POST" path="/api/users">
-Create a new user.
-</api-endpoint>
+    fn registry_contains_field_schemas() {
+        let registry = proposal_block_registry();
+        let diagram_type = registry["diagram"].fields["type"].clone();
+        assert_eq!(diagram_type.field_type, "string");
+        assert_eq!(
+            diagram_type.enum_values.as_deref(),
+            Some(["mermaid", "plantuml", "svg"].as_slice())
+        );
 
-<decisions id="auth-choice">
-Use JWT for authentication.
-</decisions>
+        let question_kind = registry["question-form"].fields["questions"]
+            .items
+            .as_ref()
+            .and_then(|items| items.fields.as_ref())
+            .and_then(|fields| fields.get("kind"))
+            .expect("question kind schema exists");
+        assert_eq!(
+            question_kind.enum_values.as_deref(),
+            Some(["text", "single", "multi"].as_slice())
+        );
+    }
 
-<file-tree id="project-layout" root=".">
-src/
-  main.rs
-Cargo.toml
-</file-tree>
-"#;
+    #[test]
+    fn parse_registered_mdx_blocks() {
+        let body = r#"# Proposal
+
+<RichText id="intro" content="Hello" />
+
+<Diagram id='flow' type='mermaid'>
+graph TD;
+</Diagram>
+
+<AnnotatedCode id="example" language="rust">
+fn main() {}
+</AnnotatedCode>"#;
 
         let blocks = parse_mdx_blocks(body).unwrap();
         assert_eq!(blocks.len(), 3);
-        assert_eq!(blocks[0].block_type, BlockType::ApiEndpoint);
-        assert_eq!(blocks[0].id, "create-user");
-        assert_eq!(blocks[1].block_type, BlockType::Decisions);
-        assert_eq!(blocks[1].id, "auth-choice");
-        assert_eq!(blocks[2].block_type, BlockType::FileTree);
-        assert_eq!(blocks[2].id, "project-layout");
+        assert_eq!(blocks[0].block_type, "rich-text");
+        assert_eq!(blocks[0].tag, "RichText");
+        assert_eq!(blocks[0].id, "intro");
+        assert!(blocks[0].raw_content.is_empty());
+        assert_eq!(blocks[1].block_type, "diagram");
+        assert_eq!(blocks[1].tag, "Diagram");
+        assert_eq!(blocks[1].id, "flow");
+        assert_eq!(
+            blocks[1].attributes.get("type").map(String::as_str),
+            Some("mermaid")
+        );
+        assert!(blocks[1].raw_content.contains("graph TD"));
+        assert_eq!(blocks[2].block_type, "annotated-code");
     }
 
     #[test]
     fn validate_ids_passes_with_unique_ids() {
         let blocks = vec![
-            ParsedBlock {
-                block_type: BlockType::DataModel,
+            ParsedProposalBlock {
+                block_type: "data-model".to_string(),
+                tag: "DataModel".to_string(),
                 id: "schema-a".to_string(),
                 attributes: HashMap::new(),
                 raw_content: String::new(),
             },
-            ParsedBlock {
-                block_type: BlockType::Decisions,
+            ParsedProposalBlock {
+                block_type: "decisions".to_string(),
+                tag: "Decisions".to_string(),
                 id: "decisions-1".to_string(),
                 attributes: HashMap::new(),
                 raw_content: String::new(),
@@ -268,8 +468,9 @@ Cargo.toml
 
     #[test]
     fn validate_ids_fails_on_empty() {
-        let blocks = vec![ParsedBlock {
-            block_type: BlockType::DataModel,
+        let blocks = vec![ParsedProposalBlock {
+            block_type: "data-model".to_string(),
+            tag: "DataModel".to_string(),
             id: String::new(),
             attributes: HashMap::new(),
             raw_content: String::new(),
@@ -281,14 +482,16 @@ Cargo.toml
     #[test]
     fn validate_ids_fails_on_duplicate() {
         let blocks = vec![
-            ParsedBlock {
-                block_type: BlockType::DataModel,
+            ParsedProposalBlock {
+                block_type: "data-model".to_string(),
+                tag: "DataModel".to_string(),
                 id: "same-id".to_string(),
                 attributes: HashMap::new(),
                 raw_content: String::new(),
             },
-            ParsedBlock {
-                block_type: BlockType::Decisions,
+            ParsedProposalBlock {
+                block_type: "decisions".to_string(),
+                tag: "Decisions".to_string(),
                 id: "same-id".to_string(),
                 attributes: HashMap::new(),
                 raw_content: String::new(),
@@ -296,38 +499,5 @@ Cargo.toml
         ];
         let err = validate_block_ids(&blocks).unwrap_err();
         assert!(err.contains("duplicate block id"));
-    }
-
-    #[test]
-    fn parse_unknown_tags_skipped() {
-        let body = r#"<div class="custom">content</div>
-<question-form id="open-questions">
-What needs clarification?
-</question-form>"#;
-
-        let blocks = parse_mdx_blocks(body).unwrap();
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].block_type, BlockType::QuestionForm);
-        assert_eq!(blocks[0].id, "open-questions");
-    }
-
-    #[test]
-    fn parse_attributes_handles_single_quotes() {
-        let body = r#"<data-model id='test-id' title='Test'>content</data-model>"#;
-        let blocks = parse_mdx_blocks(body).unwrap();
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].id, "test-id");
-        assert_eq!(
-            blocks[0].attributes.get("title").map(|s| s.as_str()),
-            Some("Test")
-        );
-    }
-
-    #[test]
-    fn block_type_from_tag_roundtrip() {
-        for bt in BlockType::all() {
-            assert_eq!(BlockType::from_tag(bt.mdx_tag()), Some(*bt));
-        }
-        assert_eq!(BlockType::from_tag("unknown-tag"), None);
     }
 }
