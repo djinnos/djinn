@@ -26,9 +26,10 @@ Evidence checked while creating this inventory:
   (`CREATE DATABASE djinn_test_<uuid> TEMPLATE djinn_test_template`), and
   `djinn_agent::test_helpers::create_test_db()` delegates to it.
 - Slot-pool/control-plane tests route task-run teardown through recording
-  `RuntimeOps` fakes; the slot-pool/k8s layering guard now lives in
-  `server/boundary_rules.toml` as `slot-pool-no-k8s-direct-import`, which
-  is enforced by the boundary-rule gate instead of an ad-hoc unit test.
+  `RuntimeOps` fakes; the production slot-pool/k8s layering guard now
+  lives in `server/boundary_rules.toml` as
+  `slot-pool-no-k8s-direct-import`, which is enforced by the file-level
+  boundary-rule gate instead of an ad-hoc unit test.
 
 ## Inventory and profile classification
 
@@ -42,7 +43,7 @@ Evidence checked while creating this inventory:
 | Slot-pool late event / reclaimed mapping race | `server/crates/djinn-agent/src/actors/slot/pool/tests.rs::actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping` | `-E 'test(actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping)'` | Uses `test_app_state()`, `RecordingRuntimeOps`, and `SlotPoolHandle::spawn_with_factory`; no live runtime/k8s. | Existing merge-queue `profile ci`. Deterministic late-event race coverage. |
 | Slot-pool killed-event teardown backstop | `server/crates/djinn-agent/src/actors/slot/pool/tests.rs::slot_event_killed_tears_down_taskrun_job` | `-E 'test(slot_event_killed_tears_down_taskrun_job)'` | Uses `RecordingRuntimeOps` and direct `SlotEvent::Killed` handling; DB is template Postgres. | Existing merge-queue `profile ci`. Single event-path regression. |
 | Slot-pool synchronous terminate settlement | `server/crates/djinn-agent/src/actors/slot/pool/tests.rs::terminate_session_synchronously_reclaims_mapping_activity_and_session_row` | `-E 'test(terminate_session_synchronously_reclaims_mapping_activity_and_session_row)'` | Uses fake runtime teardown and template Postgres session rows. | Existing merge-queue `profile ci`. Deterministic settlement check; belongs with normal CI coverage. |
-| Slot-pool/k8s boundary guard | `server/boundary_rules.toml` rule `slot-pool-no-k8s-direct-import` | Boundary-rule CI gate | Forbids slot-pool lifecycle code under `src/actors/slot/pool` from importing `djinn-k8s` directly. | General boundary-rule gate. This replaces the former ad-hoc `slot_pool_lifecycle_does_not_import_djinn_k8s_directly` unit test. |
+| Slot-pool/k8s boundary guard | `server/boundary_rules.toml` rule `slot-pool-no-k8s-direct-import` | Boundary-rule CI gate | Forbids production slot-pool lifecycle files under `src/actors/slot/pool` from importing `djinn-k8s` directly. | File-level boundary-rule gate. This replaces the former ad-hoc `slot_pool_lifecycle_does_not_import_djinn_k8s_directly` unit test. |
 | `execution_kill_task` settlement | `server/crates/djinn-control-plane/tests/execution_tools.rs::execution_kill_task_settles_live_run_through_control_plane_tool_route` | `-E 'test(execution_kill_task_settles_live_run_through_control_plane_tool_route)'` | `RealPoolKillHarness` uses `Database::open_in_memory()`, a real `SlotPoolHandle`, `McpTestHarness`, and `RecordingRuntimeOps`; teardown is recorded, not sent to Kubernetes. | Existing merge-queue `profile ci`. End-to-end tool route with fake runtime side effects; bounded waits. |
 | `execution_kill_task` kill-vs-completion race | `server/crates/djinn-control-plane/tests/execution_tools.rs::execution_kill_task_racing_natural_completion_settles_once_and_releases_capacity` | `-E 'test(execution_kill_task_racing_natural_completion_settles_once_and_releases_capacity)'` | Uses a controlled completion gate (`CompletionRaceControl`) so natural settlement and kill interleave deterministically inside the real pool/tool harness. | Existing merge-queue `profile ci`. Deterministic race interleaving; no soak/stress profile needed. |
 | `execution_kill_task` double-kill | `server/crates/djinn-control-plane/tests/execution_tools.rs::execution_kill_task_double_kill_is_harmless_and_leaves_capacity_available` | `-E 'test(execution_kill_task_double_kill_is_harmless_and_leaves_capacity_available)'` | Same real-pool/control-plane harness with template Postgres and recording runtime. | Existing merge-queue `profile ci`. Bounded idempotency regression. |
@@ -131,8 +132,8 @@ cargo nextest run --workspace --all-targets --all-features --profile ci --no-run
 - **Locally runnable now (no infrastructure):** the former ad-hoc
   `slot_pool_lifecycle_does_not_import_djinn_k8s_directly` source-file
   guard has moved to `server/boundary_rules.toml` as
-  `slot-pool-no-k8s-direct-import` and is covered by the boundary-rule
-  gate rather than nextest discovery.
+  `slot-pool-no-k8s-direct-import` and is covered by the file-level
+  boundary-rule gate rather than nextest discovery.
 - **DB-backed tests (13 / 13):** need Postgres at
   `127.0.0.1:5433` + a migrated `djinn_test_template`.  The merge-queue
   `server-test` job supplies both.  In the worker pod used for
@@ -202,7 +203,7 @@ cd server && cargo nextest run --workspace --all-targets --all-features --profil
    Djinn worker pods (this validator) intentionally do not carry
    Postgres, so this gap is expected and does not block ir2i closing.
 6. **The slot-pool/k8s static guard moved to the general boundary-rule
-   gate** as `slot-pool-no-k8s-direct-import` in
+   gate** as the file-level `slot-pool-no-k8s-direct-import` rule in
    `server/boundary_rules.toml`, so the lifecycle inventory no longer
    carries an ad-hoc source-scanning unit test for that constraint.
 
