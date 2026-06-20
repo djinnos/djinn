@@ -18,7 +18,7 @@ fn settled_noop_task() -> Task {
         description: "Do the requested work".into(),
         design: String::new(),
         issue_type: "task".into(),
-        status: "verifying".into(),
+        status: "in_progress".into(),
         priority: 1,
         owner: String::new(),
         labels: "[]".into(),
