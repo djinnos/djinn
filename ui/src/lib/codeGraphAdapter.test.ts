@@ -234,6 +234,33 @@ describe("parseSnapshotResponse", () => {
     expect(node?.workspace_kind).toBe("mixed");
   });
 
+  it("parses non-empty community keywords and drops blank legacy values", () => {
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [
+          {
+            id: "community:abc123",
+            kind: "community",
+            label: "auth-module",
+            pagerank: 0.9,
+            keywords: ["auth", "  tokens  ", "", "   ", 42],
+          },
+          {
+            id: "community:legacy",
+            kind: "community",
+            label: "legacy-module",
+            pagerank: 0.1,
+            keywords: [],
+          },
+        ],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    expect(parsed?.nodes[0]?.keywords).toEqual(["auth", "tokens"]);
+    expect(parsed?.nodes[1]?.keywords).toBeUndefined();
+  });
+
   it("treats non-numeric / negative member_count as undefined", () => {
     const wire = {
       snapshot: {
@@ -638,7 +665,7 @@ describe("buildGraphFromSnapshot", () => {
       "A",
     );
     expect(graph.getNodeAttribute("file:src/main.rs", "label")).toBe(
-      "main.rs · app",
+      "main.rs",
     );
     expect(graph.getNodeAttribute("file:src/main.rs", "baseLabel")).toBe(
       "main.rs",
@@ -653,7 +680,7 @@ describe("buildGraphFromSnapshot", () => {
       ...fixtureSnapshot,
       nodes: fixtureSnapshot.nodes.map((n) =>
         n.id === "symbol:scip-rust . . . User#"
-          ? { ...n, workspace_context: true }
+          ? { ...n, workspace: "domain", workspace_context: true }
           : n,
       ),
     };
@@ -664,6 +691,56 @@ describe("buildGraphFromSnapshot", () => {
     expect(
       graph.getNodeAttribute("file:src/main.rs", "isWorkspaceContext"),
     ).toBe(false);
+    expect(
+      graph.getNodeAttribute("symbol:scip-rust . . . User#", "label"),
+    ).toBe("User · domain");
+  });
+
+  it("attaches keyword subtitles to community node labels", () => {
+    const communitySnapshot: SnapshotPayload = {
+      ...fixtureSnapshot,
+      total_nodes: 3,
+      total_edges: 0,
+      nodes: [
+        {
+          id: "community:auth",
+          kind: "community",
+          label: "auth",
+          pagerank: 0.8,
+          community_id: "auth",
+          keywords: ["tokens", "sessions"],
+        },
+        {
+          id: "community:legacy",
+          kind: "community",
+          label: "legacy",
+          pagerank: 0.2,
+        },
+        {
+          id: "file:src/main.rs",
+          kind: "file",
+          label: "main.rs",
+          pagerank: 0.1,
+          keywords: ["ignored"],
+        },
+      ],
+      edges: [],
+    };
+    const graph = buildGraphFromSnapshot(communitySnapshot);
+    expect(graph.getNodeAttribute("community:auth", "label")).toBe(
+      "auth\ntokens, sessions",
+    );
+    expect(graph.getNodeAttribute("community:auth", "subtitle")).toBe(
+      "tokens, sessions",
+    );
+    expect(graph.getNodeAttribute("community:auth", "keywords")).toEqual([
+      "tokens",
+      "sessions",
+    ]);
+    expect(graph.getNodeAttribute("community:legacy", "label")).toBe("legacy");
+    expect(graph.getNodeAttribute("community:legacy", "subtitle")).toBeUndefined();
+    expect(graph.getNodeAttribute("file:src/main.rs", "label")).toBe("main.rs");
+    expect(graph.getNodeAttribute("file:src/main.rs", "subtitle")).toBeUndefined();
   });
 
   it("attaches endpoint workspace metadata to edges", () => {
