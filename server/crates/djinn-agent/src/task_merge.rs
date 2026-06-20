@@ -340,7 +340,7 @@ pub(crate) enum AutoMergeOutcome {
 ///   task branch to GitHub (reusing the same machinery as
 ///   [`push_task_branch_to_github`]), so the open PR's head advances and GitHub
 ///   re-evaluates it as mergeable. Returns [`AutoMergeOutcome::AutoMerged`].
-///   No worker, no reviewer, no verification — zero agent involvement.
+///   No worker, no reviewer — zero agent involvement.
 /// - **Conflict**: returns [`AutoMergeOutcome::Conflicts`] with the file list so
 ///   the caller flags `merge_conflict_metadata` + reopens into ConflictRetry.
 /// - **Anything indeterminate** (no App / missing coords / git error): returns

@@ -32,7 +32,7 @@ const CHILD_OOM_SCORE_ADJ: &str = "800\n";
 pub fn isolate_process_group(cmd: &mut Command) {
     // SAFETY: pre_exec runs in the child process right before exec.
     // setpgid(0, 0) places that child in a new process group.
-    // We also lower CPU and I/O priority so spawned verification / session
+    // We also lower CPU and I/O priority so spawned session
     // commands do not starve interactive user applications (browser, editor).
     unsafe {
         cmd.pre_exec(|| {

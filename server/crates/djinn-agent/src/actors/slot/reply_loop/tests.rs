@@ -2277,8 +2277,7 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         "remaining concerns should carry the budget-park prefix: {remaining_concerns}"
     );
 
-    let (worker_summary, worker_concerns) =
-        extract_worker_context(&Some(entries));
+    let (worker_summary, worker_concerns) = extract_worker_context(&Some(entries));
     assert_eq!(
         worker_summary.as_deref(),
         Some("Budget handoff: implemented A; B remains."),

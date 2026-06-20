@@ -298,8 +298,7 @@ pub(crate) async fn default_target_branch(project_id: &str, app_state: &AgentCon
 /// entry that represents a review-to-open rejection (from_status =
 /// "in_task_review", to_status = "open"). Searches backwards through ALL
 /// status_changed events, not just the very last one, so that intervening
-/// transitions (e.g. verification failures cycling through verifying→open)
-/// don't obscure the original rejection reason.
+/// transitions don't obscure the original rejection reason.
 async fn last_review_rejection_reason(task_id: &str, app_state: &AgentContext) -> Option<String> {
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let activity = repo.list_activity(task_id).await.ok()?;
@@ -421,17 +420,17 @@ pub(crate) fn budget_combined_sections(reviewer: &str, ci: &str) -> (String, Str
     )
 }
 
-/// Find the most recent CI-failure / verification feedback that belongs to the
+/// Find the most recent CI-failure feedback that belongs to the
 /// CURRENT rework cycle — i.e. logged at or after the latest PR-review-feedback
 /// entry (the two are written in the same poller tick when a PR has both
 /// reviewer changes-requested and failing CI). This guards against surfacing a
 /// stale CI comment from an earlier head SHA.
 ///
-/// Find the RAW (untruncated) CI/verification body for the CURRENT rework cycle.
+/// Find the RAW (untruncated) CI failure body for the CURRENT rework cycle.
 /// The combined-brief path applies its own fair per-section budget downstream
 /// (`budget_combined_sections`), so no pre-clipping happens here.
 ///
-/// Returns the comment body, or `None` when there's no in-cycle CI/verification
+/// Returns the comment body, or `None` when there's no in-cycle CI failure
 /// comment.
 pub(crate) fn raw_ci_feedback_in_cycle(
     activity: &[djinn_core::models::ActivityEntry],

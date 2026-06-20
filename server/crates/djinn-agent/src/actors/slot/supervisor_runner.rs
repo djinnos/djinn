@@ -686,8 +686,6 @@ pub(crate) async fn run_supervisor_dispatch(
                 "supervisor dispatch: failed to finalize session row after infra death"
             ),
         }
-
-        // (verification re-attach removed — verification gate deleted)
     }
 
     match (report_result, teardown) {
@@ -1080,9 +1078,8 @@ fn report_to_terminal_status(report: &TaskRunReport) -> TaskRunStatus {
     match &report.outcome {
         TaskRunOutcome::PrOpened { .. }
         | TaskRunOutcome::Closed { .. }
-        // The worker stage succeeded and handed off to verification — the
-        // task-run completed cleanly (the verification pipeline runs as a
-        // separate slot-free job on the host).
+        // The worker stage succeeded and submitted for review — the
+        // task-run completed cleanly.
         | TaskRunOutcome::WorkerSubmitted
         | TaskRunOutcome::Parked { .. }
         | TaskRunOutcome::Escalated { .. } => TaskRunStatus::Completed,

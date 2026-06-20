@@ -67,15 +67,6 @@ async fn trigger_dispatch_increments_counter_for_review_tasks() {
 
 // ── Stuck detection ───────────────────────────────────────────────────────
 
-/// VerificationTracker was removed — this test exercised the tracker-based
-/// background-work protection for stuck detection. With the tracker gone, the
-/// test is obsolete and replaced with a no-op placeholder.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stuck_detection_skips_task_with_background_post_session_work_obsolete() {
-    // No-op: VerificationTracker removed. Kept as a placeholder to document
-    // that the tracker-based background-work protection is intentionally gone.
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stuck_detection_releases_orphaned_in_progress_task() {
     let db = test_helpers::create_test_db();
@@ -107,23 +98,6 @@ async fn stuck_detection_releases_orphaned_in_progress_task() {
         updated.status, "open",
         "released task should be back to open"
     );
-}
-
-/// Verifying status was removed from the task state machine.
-/// These tests exercised the recovery/protection paths for stuck `verifying`
-/// tasks; with verifying gone they are obsolete and removed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stuck_verifying_recovery_tests_obsolete() {
-    // No-op: verifying status removed. Kept as a placeholder to document
-    // that the verifying-specific recovery logic is intentionally gone.
-}
-
-/// Verifying status was removed from the task state machine.
-/// This test exercised re-arming a verifying task against a terminal in-pod
-/// verification row; with verifying gone it is obsolete and removed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stuck_verifying_with_terminal_inpod_run_rearm_obsolete() {
-    // No-op: verifying status removed.
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

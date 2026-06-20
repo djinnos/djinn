@@ -451,7 +451,7 @@ impl SupervisorServices for DirectServices {
 ///
 /// The set of distinct pairs the worker can emit is bounded (see
 /// `event_bus.send(..)` call sites in `actors::slot::reply_loop` /
-/// `streaming` / `verification` / `lifecycle/setup` /
+/// `streaming` / `lifecycle/setup` /
 /// `lifecycle/model_resolution`). Unknown pairs return `Err((entity_type,
 /// action))` so the caller can log + drop rather than leaking strings into
 /// the static lifetime.

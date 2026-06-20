@@ -85,9 +85,7 @@ use crate::actors::slot::lifecycle::prompt_context::{
 use crate::actors::slot::lifecycle::role_overrides::{
     ResolvedRoleOverrides, resolve_role_overrides,
 };
-use crate::actors::slot::lifecycle::setup::{
-    SetupContext, SetupError, resolve_setup_context,
-};
+use crate::actors::slot::lifecycle::setup::{SetupContext, SetupError, resolve_setup_context};
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
 use crate::actors::slot::reply_loop::error_handling::BudgetWindDownIgnored;
 use crate::actors::slot::reply_loop::loop_guard::{
@@ -345,7 +343,7 @@ async fn advertise_read_sources(
 
 /// Execute one role stage against the shared workspace.
 ///
-/// Resolves the role → model credential → project setup/verification config →
+/// Resolves the role → model credential → project setup config →
 /// MCP + skills → creates a fresh session record linked to `task_run_id` →
 /// builds a degenerate prompt → invokes the reply loop → finalizes the
 /// session record → maps the result to [`StageOutcome`].
@@ -462,7 +460,7 @@ pub(crate) async fn execute_stage(
     .await;
 
     // ── Setup commands ──────────────────────────────────────────────────────
-    // Pre-verification hooks come from `lifecycle.pre_verification` (via the
+    // Setup hooks come from `lifecycle.pre_verification` (via the
     // SupervisorServices RPC).
     let env_config = services
         .get_environment_config(task.project_id.clone())

@@ -100,17 +100,14 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
 
         // K8s flow: the djinn-supervisor stage loop is the SOLE transition
         // authority. The legacy role.on_complete() returned post-session
-        // transition actions that raced with the supervisor
-        // body's Start / submit_task_review / task_review_approve calls,
-        // moving the task into `verifying` before the supervisor's
-        // submit_task_review could fire (then bouncing it back to `open`
-        // because the worker pod has no MirrorManager). Pass None so
-        // apply_transition_and_dispatch only does its trigger-next-dispatch
-        // bookkeeping and the no-op log.
+        // transition actions that raced with the supervisor body's
+        // Start / submit_task_review / task_review_approve calls.
+        // Pass None so apply_transition_and_dispatch only does its
+        // trigger-next-dispatch bookkeeping and the no-op log.
         //
         // `final_error` and `final_result_ok` are intentionally unused here
         // for the same reason — the supervisor body decides ReviewerRejected
-        // / VerifierFailed / Failed and fires the matching transition itself.
+        // / Failed and fires the matching transition itself.
         let _ = final_result_ok;
         let _ = &final_error;
 
@@ -201,7 +198,6 @@ pub(crate) async fn apply_transition_and_dispatch(
         if is_conflict_rejection || is_orphaned_tool_call {
             interrupt_paused_worker_session(task_id, app_state).await;
         }
-        // Verification handoff removed; no extra post-session transition runs here.
     } else {
         tracing::info!(
             task_id = %task_id,
