@@ -28,7 +28,7 @@ use crate::tools::task_tools::types::{
     ActivityEntryResponse, ErrorOr, ErrorResponse, TaskResponse,
 };
 use djinn_core::models::{ActivityEntry, Task, TaskStatus, TransitionAction};
-use djinn_db::TaskRepository;
+use djinn_db::{EpicRepository, TaskRepository};
 
 pub(crate) fn task_to_response(task: &Task) -> TaskResponse {
     TaskResponse {
@@ -199,6 +199,30 @@ pub async fn create_task(
             Err(e) => return Json(ErrorOr::Error(e)),
         };
         resolved_blocker_ids.push(blocking_id);
+    }
+
+    // Safety net: if this task is being created under an epic that is blocked
+    // by other open epics, atomically chain the new task to the blocking epics'
+    // open tasks. This prevents a stray child task under a blocked epic from
+    // dispatching before its foundation work is done.
+    if let Some(ref eid) = epic_id {
+        let epic_repo = EpicRepository::new(server.state.db().clone(), server.state.event_bus());
+        if let Ok(blocking_epics) = epic_repo.list_blockers(eid).await {
+            for blocking_epic in blocking_epics {
+                if blocking_epic.status == "closed" || blocking_epic.epic_id == *eid {
+                    continue;
+                }
+                if let Ok(blocking_tasks) = repo.list_by_epic(&blocking_epic.epic_id).await {
+                    for blocking_task in blocking_tasks {
+                        if blocking_task.status != "closed"
+                            && !resolved_blocker_ids.contains(&blocking_task.id)
+                        {
+                            resolved_blocker_ids.push(blocking_task.id);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let ac_json = request
@@ -528,4 +552,166 @@ pub struct CommentTaskRequest {
     pub body: String,
     pub actor_id: String,
     pub actor_role: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{
+        Database, EpicCreateInput, EpicRepository, ProjectRepository, ReadyQuery, TaskRepository,
+    };
+
+    fn epic_input<'a>(title: &'a str) -> EpicCreateInput<'a> {
+        EpicCreateInput {
+            title,
+            description: "test epic",
+            emoji: "🧪",
+            color: "blue",
+            owner: "worker",
+            memory_refs: None,
+            status: None,
+            auto_breakdown: None,
+            originating_adr_id: None,
+        }
+    }
+
+    fn planning_task_request(title: &str, epic_ref: &str) -> CreateTaskRequest {
+        CreateTaskRequest {
+            title: title.to_owned(),
+            description: "test task".to_owned(),
+            design: "test design".to_owned(),
+            issue_type: "planning".to_owned(),
+            priority: 0,
+            owner: "worker".to_owned(),
+            status: None,
+            acceptance_criteria: None,
+            labels: Vec::new(),
+            memory_refs: Vec::new(),
+            blocked_by_refs: Vec::new(),
+            agent_type: None,
+            epic_ref: Some(epic_ref.to_owned()),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_under_blocked_epic_inherits_open_tasks_from_blocking_epic() {
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let server = DjinnMcpServer::new(state);
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create(
+                "epic-blocker-propagation",
+                "test",
+                "epic-blocker-propagation",
+            )
+            .await
+            .unwrap();
+        let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
+        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+
+        let foundation_epic = epic_repo
+            .create_for_project(&project.id, epic_input("Foundation"))
+            .await
+            .unwrap();
+        let blocked_epic = epic_repo
+            .create_for_project(&project.id, epic_input("Dependent"))
+            .await
+            .unwrap();
+
+        let open_foundation_task = task_repo
+            .create_in_project(
+                &project.id,
+                Some(&foundation_epic.id),
+                "open foundation task",
+                "foundation",
+                "foundation design",
+                "planning",
+                0,
+                "worker",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let closed_foundation_task = task_repo
+            .create_in_project(
+                &project.id,
+                Some(&foundation_epic.id),
+                "closed foundation task",
+                "foundation",
+                "foundation design",
+                "planning",
+                0,
+                "worker",
+                Some("closed"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        epic_repo
+            .add_blocker(&blocked_epic.id, &foundation_epic.id)
+            .await
+            .unwrap();
+
+        let Json(created) = create_task(
+            &server,
+            &project.id,
+            planning_task_request("dependent task", &blocked_epic.short_id),
+        )
+        .await;
+        let dependent_task = match created {
+            ErrorOr::Ok(task) => task,
+            ErrorOr::Error(err) => panic!("task_create failed: {}", err.error),
+        };
+
+        let blockers = task_repo.list_blockers(&dependent_task.id).await.unwrap();
+        assert_eq!(
+            blockers
+                .iter()
+                .map(|b| b.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![open_foundation_task.id.as_str()],
+            "only open tasks from blocking epics should be propagated"
+        );
+        assert!(
+            !blockers
+                .iter()
+                .any(|b| b.task_id == closed_foundation_task.id),
+            "closed tasks in the blocking epic must not be propagated"
+        );
+
+        let ready = task_repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            !ready.iter().any(|task| task.id == dependent_task.id),
+            "dependent task must not be dispatchable while inherited blocker is open"
+        );
+
+        task_repo
+            .set_status(&open_foundation_task.id, "closed")
+            .await
+            .unwrap();
+        let ready = task_repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            ready.iter().any(|task| task.id == dependent_task.id),
+            "dependent task should become dispatchable once inherited blocker closes"
+        );
+    }
 }
