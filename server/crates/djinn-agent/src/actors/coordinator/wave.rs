@@ -647,4 +647,235 @@ mod tests {
         let next_wave = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
         assert_eq!(next_wave.len(), 1);
     }
+
+    // ── Regression tests: race-condition + propagation (i528-1 §4) ──────────
+
+    /// Regression test: blocked epic does NOT get a planning task while its
+    /// blocker is still open.
+    ///
+    /// Simulates the proposal decomposition flow: epic A (foundation) and
+    /// epic B (dependent) are created, then B.blocked_by=A is wired.
+    /// B must NOT receive a planning task until A closes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_epic_does_not_get_planning_task_while_blocker_open() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let _handle = spawn_coordinator_with_planner(&db, &tx);
+        tokio::task::yield_now().await;
+
+        // Create epic A (foundation, no blockers).
+        let epic_a = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Foundation Epic A",
+                    description: "owns migration",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: Some("open"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                    blocked_by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Epic A gets its planning task immediately (no blockers).
+        let a_tasks = wait_for_decomp_tasks(&db, &tx, &epic_a.id, 1).await;
+        assert_eq!(
+            a_tasks.len(),
+            1,
+            "foundation epic A should get a planning task"
+        );
+
+        // Create epic B (dependent).
+        let epic_b = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Dependent Epic B",
+                    description: "depends on A",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: Some("open"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                    blocked_by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // B initially has no blockers — its planning task may or may not
+        // have fired by now. Wire the blocker immediately (simulates the
+        // proposal planner wiring edges after creation).
+        epic_repo.add_blocker(&epic_b.id, &epic_a.id).await.unwrap();
+
+        // Wait a bit for any pending dispatches to settle.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // B must NOT have an open planning task while A is still open.
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let b_tasks = task_repo.list_by_epic(&epic_b.id).await.unwrap();
+        let b_open_planning: Vec<_> = b_tasks
+            .iter()
+            .filter(|t| {
+                matches!(t.issue_type.as_str(), "planning" | "decomposition")
+                    && matches!(t.status.as_str(), "open" | "in_progress")
+            })
+            .collect();
+        assert!(
+            b_open_planning.is_empty(),
+            "epic B must NOT have an open planning task while blocker A is open, \
+             but found {} open planning tasks",
+            b_open_planning.len()
+        );
+    }
+
+    /// Regression test (two-phased): closing blocker triggers decomposition
+    /// of the dependent via emit_unblocked_epics.
+    ///
+    /// P1 owns a migration. P2 depends on P1.
+    /// P2 does NOT decompose while P1 is open.
+    /// Once P1 closes, P2 decomposes automatically.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_phased_p2_decomposes_after_p1_closes() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let _handle = spawn_coordinator_with_planner(&db, &tx);
+        tokio::task::yield_now().await;
+
+        // P1: foundation epic (owns a migration).
+        let p1 = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "P1 Migration Foundation",
+                    description: "adds migration that P2 depends on",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: Some("open"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                    blocked_by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // P1 gets its planning task.
+        let p1_tasks = wait_for_decomp_tasks(&db, &tx, &p1.id, 1).await;
+        assert_eq!(p1_tasks.len(), 1, "P1 should get a planning task");
+
+        // P2: dependent epic.
+        let p2 = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "P2 Dependent Feature",
+                    description: "builds on P1 migration",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: Some("open"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                    blocked_by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Wire P2.blocked_by = P1 (simulates proposal planner wiring).
+        epic_repo.add_blocker(&p2.id, &p1.id).await.unwrap();
+
+        // Wait for dispatches to settle.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // P2 must NOT have an open planning task while P1 is open.
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let p2_tasks = task_repo.list_by_epic(&p2.id).await.unwrap();
+        let p2_open_planning: Vec<_> = p2_tasks
+            .iter()
+            .filter(|t| {
+                matches!(t.issue_type.as_str(), "planning" | "decomposition")
+                    && matches!(t.status.as_str(), "open" | "in_progress")
+            })
+            .collect();
+        assert!(
+            p2_open_planning.is_empty(),
+            "P2 must NOT decompose while P1 is open"
+        );
+
+        // Close P1 — triggers emit_unblocked_epics, which emits epic.updated
+        // for P2, which re-drives the coordinator's wave-1 path.
+        epic_repo.close(&p1.id).await.unwrap();
+
+        // Now P2 should get its planning task via the re-drive path.
+        let p2_decomp = wait_for_decomp_tasks(&db, &tx, &p2.id, 1).await;
+        assert_eq!(
+            p2_decomp.len(),
+            1,
+            "P2 must decompose automatically after P1 closes"
+        );
+    }
+
+    /// Regression test: no-blocker epics decompose immediately at
+    /// coordinator level.
+    ///
+    /// An epic with no blockers and auto_breakdown=true (the default) must
+    /// get a planning task as soon as it's created. This is the normal
+    /// single-epic proposal path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_blocker_epic_gets_planning_task_immediately() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let _handle = spawn_coordinator_with_planner(&db, &tx);
+        tokio::task::yield_now().await;
+
+        // Create a single epic with no blockers and default auto_breakdown.
+        let epic = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Simple Epic",
+                    description: "no blockers, should decompose immediately",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: Some("open"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                    blocked_by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // It should get a planning task immediately.
+        let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
+        assert_eq!(
+            decomp_tasks.len(),
+            1,
+            "single epic with no blockers must decompose immediately"
+        );
+    }
 }
