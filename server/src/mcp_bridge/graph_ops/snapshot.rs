@@ -485,7 +485,12 @@ impl RepoGraphBridge {
         &self,
         ctx: &ProjectCtx,
         rules: &[BoundaryRule],
+        level: &str,
     ) -> Result<Vec<BoundaryViolation>, String> {
+        if level == "crate" {
+            return self.boundary_check_crate(ctx, rules).await;
+        }
+
         use globset::Glob;
 
         let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
@@ -567,6 +572,40 @@ impl RepoGraphBridge {
             }
         }
         Ok(violations)
+    }
+
+    /// Crate-level boundary check: loads the warmed canonical graph +
+    /// crate map, builds the `CrateGraph`, and matches each
+    /// `CrateEdge` against the supplied rules.
+    ///
+    /// For crate-level matching, the glob patterns are matched against
+    /// the bare crate name (e.g. `djinn-agent`). A glob like
+    /// `**/djinn-agent/**` is normalised by stripping path-prefix/suffix
+    /// wildcards so that the literal `djinn-agent` component is what the
+    /// matcher tests against.
+    async fn boundary_check_crate(
+        &self,
+        ctx: &ProjectCtx,
+        rules: &[BoundaryRule],
+    ) -> Result<Vec<BoundaryViolation>, String> {
+        let (_project_root, index_tree_path) =
+            djinn_graph::canonical_graph::normalize_graph_query_paths(&ctx.clone_path);
+
+        let (graph, crate_map) = {
+            let cache = djinn_graph::canonical_graph::GRAPH_CACHE.read().await;
+            let cached = cache
+                .as_ref()
+                .filter(|c| c.project_path == index_tree_path)
+                .ok_or("Graph not warmed for crate-level boundary check")?;
+            (cached.graph.clone(), cached.crate_map.clone())
+        };
+
+        if crate_map.is_empty() {
+            return Err("No crate mapping available".into());
+        }
+
+        let crate_graph = djinn_graph::repo_graph::build_crate_graph(&graph, crate_map.as_ref());
+        Ok(crate_boundary_violations(&crate_graph.edges, rules))
     }
 
     pub(super) async fn hotspots(
@@ -1079,5 +1118,172 @@ impl RepoGraphBridge {
             public_api_count,
             doc_coverage_pct,
         })
+    }
+}
+
+/// Normalise a glob intended to match a crate name.
+///
+/// Crate-level boundary rules are typically written as path-style globs
+/// (e.g. `**/djinn-agent/**`) because they share the same format as
+/// file-level rules. When matching against bare crate names
+/// (e.g. `djinn-agent`), we strip leading/trailing `**/`, `*/`, and `/**`
+/// wildcards so the literal component is what remains.
+///
+/// Examples:
+/// - `**/djinn-agent/**` → `djinn-agent`
+/// - `**/djinn-*/**`     → `djinn-*`
+/// - `djinn-agent`        → `djinn-agent`
+/// - `*`                  → `*`
+fn normalise_crate_glob(glob: &str) -> String {
+    let mut s = glob.trim().to_string();
+    // Strip leading wildcard segments: `**/`, `*/`, or just `**`.
+    while s.starts_with("**/") || s.starts_with("*/") {
+        s = s[s.find('/').unwrap() + 1..].to_string();
+    }
+    if s == "**" || s == "*" {
+        return s;
+    }
+    // Strip trailing wildcard segments: `/**` or `/*`.
+    if s.ends_with("/**") {
+        s = s[..s.len() - 3].to_string();
+    } else if s.ends_with("/*") {
+        s = s[..s.len() - 2].to_string();
+    }
+    s
+}
+
+/// Match compiled boundary rules against crate-level edges.
+///
+/// Each rule's `from_glob`/`to_glob` are normalised via
+/// [`normalise_crate_glob`] so that path-style globs like
+/// `**/djinn-agent/**` match against the bare crate name
+/// `djinn-agent`. Every rule is treated as a forbidden edge; matching
+/// edges are reported as [`BoundaryViolation`] entries with
+/// `edge_kind = "crate_depends_on"`.
+fn crate_boundary_violations(
+    edges: &[djinn_graph::repo_graph::CrateEdge],
+    rules: &[BoundaryRule],
+) -> Vec<BoundaryViolation> {
+    use globset::Glob;
+
+    let compiled: Vec<(usize, globset::GlobMatcher, globset::GlobMatcher)> = rules
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| {
+            let from = Glob::new(&normalise_crate_glob(&r.from_glob))
+                .map_err(|e| format!("rule[{i}].from_glob '{}': {e}", r.from_glob))
+                .ok()?
+                .compile_matcher();
+            let to = Glob::new(&normalise_crate_glob(&r.to_glob))
+                .map_err(|e| format!("rule[{i}].to_glob '{}': {e}", r.to_glob))
+                .ok()?
+                .compile_matcher();
+            Some((i, from, to))
+        })
+        .collect();
+
+    let mut violations = Vec::new();
+    for edge in edges {
+        for (rule_index, from_m, to_m) in &compiled {
+            if from_m.is_match(&edge.source) && to_m.is_match(&edge.target) {
+                violations.push(BoundaryViolation {
+                    rule_index: *rule_index,
+                    from_key: edge.source.clone(),
+                    to_key: edge.target.clone(),
+                    edge_kind: "crate_depends_on".to_string(),
+                    from_file: None,
+                    to_file: None,
+                    witness_path: Some(vec![edge.source.clone(), edge.target.clone()]),
+                });
+            }
+        }
+    }
+    violations
+}
+
+#[cfg(test)]
+mod boundary_check_crate_tests {
+    use super::*;
+    use djinn_graph::repo_graph::CrateEdge;
+
+    #[test]
+    fn test_normalise_crate_glob() {
+        assert_eq!(normalise_crate_glob("**/djinn-agent/**"), "djinn-agent");
+        assert_eq!(normalise_crate_glob("**/djinn-agent"), "djinn-agent");
+        assert_eq!(normalise_crate_glob("djinn-agent/**"), "djinn-agent");
+        assert_eq!(normalise_crate_glob("djinn-agent"), "djinn-agent");
+        assert_eq!(normalise_crate_glob("**/djinn-*/**"), "djinn-*");
+        assert_eq!(normalise_crate_glob("*"), "*");
+        assert_eq!(normalise_crate_glob("**"), "**");
+        assert_eq!(normalise_crate_glob("*/djinn-agent"), "djinn-agent");
+    }
+
+    /// boundary_check with level=crate returns violations when rules
+    /// match crate-level edges.
+    #[test]
+    fn crate_boundary_violations_returns_matches() {
+        let edges = vec![
+            CrateEdge {
+                source: "crate-b".to_string(),
+                target: "crate-a".to_string(),
+                weight: 1.0,
+                edge_count: 3,
+            },
+            CrateEdge {
+                source: "djinn-agent".to_string(),
+                target: "djinn-control-plane".to_string(),
+                weight: 5.0,
+                edge_count: 10,
+            },
+        ];
+
+        // Rule: djinn-agent must not depend on djinn-control-plane.
+        let rules = vec![BoundaryRule {
+            from_glob: "**/djinn-agent/**".to_string(),
+            to_glob: "**/djinn-control-plane/**".to_string(),
+            description: Some("agent must not depend on control-plane".to_string()),
+        }];
+
+        let violations = crate_boundary_violations(&edges, &rules);
+        assert_eq!(
+            violations.len(),
+            1,
+            "should flag exactly the agent → control-plane edge"
+        );
+        assert_eq!(violations[0].rule_index, 0);
+        assert_eq!(violations[0].from_key, "djinn-agent");
+        assert_eq!(violations[0].to_key, "djinn-control-plane");
+        assert_eq!(violations[0].edge_kind, "crate_depends_on");
+        assert!(violations[0].from_file.is_none());
+        assert!(violations[0].to_file.is_none());
+        assert_eq!(
+            violations[0].witness_path.as_deref(),
+            Some(&["djinn-agent".to_string(), "djinn-control-plane".to_string()][..])
+        );
+    }
+
+    /// boundary_check with level=crate returns empty when no
+    /// violations (rules don't match any edge).
+    #[test]
+    fn crate_boundary_violations_returns_empty_when_no_match() {
+        let edges = vec![CrateEdge {
+            source: "crate-a".to_string(),
+            target: "crate-b".to_string(),
+            weight: 1.0,
+            edge_count: 2,
+        }];
+
+        // Rule: crate-c must not depend on crate-d — doesn't match.
+        let rules = vec![BoundaryRule {
+            from_glob: "**/crate-c/**".to_string(),
+            to_glob: "**/crate-d/**".to_string(),
+            description: None,
+        }];
+
+        let violations = crate_boundary_violations(&edges, &rules);
+        assert!(
+            violations.is_empty(),
+            "no edges should match the rule; got {violations:?}"
+        );
     }
 }
