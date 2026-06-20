@@ -148,23 +148,6 @@ async fn stuck_detection_releases_orphaned_in_progress_task() {
     );
 }
 
-/// Verifying status was removed from the task state machine.
-/// These tests exercised the recovery/protection paths for stuck `verifying`
-/// tasks; with verifying gone they are obsolete and removed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stuck_verifying_recovery_tests_obsolete() {
-    // No-op: verifying status removed. Kept as a placeholder to document
-    // that the verifying-specific recovery logic is intentionally gone.
-}
-
-/// Verifying status was removed from the task state machine.
-/// This test exercised re-arming a verifying task against a terminal in-pod
-/// verification row; with verifying gone it is obsolete and removed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stuck_verifying_with_terminal_inpod_run_rearm_obsolete() {
-    // No-op: verifying status removed.
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_closed_task_applies_failure_confidence_once() {
     let db = test_helpers::create_test_db();
