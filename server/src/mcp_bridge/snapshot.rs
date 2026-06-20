@@ -289,6 +289,7 @@ pub(crate) fn build_snapshot_payload(
                 // nodes that never had a position computed.
                 x: graph.layout_position(idx).map(|p| p.x).unwrap_or_default(),
                 y: graph.layout_position(idx).map(|p| p.y).unwrap_or_default(),
+                keywords: Vec::new(),
             }
         })
         .collect();
@@ -371,6 +372,7 @@ fn build_community_snapshot_payload(
         missing_workspace: bool,
         pagerank_sum: f64,
         internal_edges: usize,
+        keywords: Vec<String>,
     }
 
     let workspace_prefix = shared::active_workspace_prefix(graph, workspace);
@@ -416,6 +418,9 @@ fn build_community_snapshot_payload(
                 missing_workspace: false,
                 pagerank_sum: 0.0,
                 internal_edges: 0,
+                keywords: meta
+                    .map(|community| community.keywords.clone())
+                    .unwrap_or_default(),
             });
         agg.members.insert(idx);
         if let Some(workspace) = node.workspace.as_deref() {
@@ -496,6 +501,7 @@ fn build_community_snapshot_payload(
                 is_test: false,
                 x,
                 y,
+                keywords: agg.keywords,
             }
         })
         .collect();
