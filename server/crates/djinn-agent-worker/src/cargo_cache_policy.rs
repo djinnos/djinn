@@ -1,8 +1,8 @@
 //! Cargo cache policy resolver — project-agnostic detection of per-project
 //! cargo build strategy.
 //!
-//! Detects from workspace layout, `.cargo/config.toml`, and verification
-//! command patterns.  Pure/unit-testable; never mutates any project file.
+//! Detects from workspace layout and `.cargo/config.toml`.  Pure/unit-
+//! testable; never mutates any project file.
 
 use std::path::{Path, PathBuf};
 
@@ -84,8 +84,7 @@ pub struct CargoWarmCommand {
 /// Reads (but never writes):
 /// * `Cargo.toml` — workspace section detection.
 /// * `.cargo/config.toml` — `rustc-wrapper` and `build.features`.
-/// * `env_config` — Rust workspace root and verification rules for command
-///   pattern detection.
+/// * `env_config` — Rust workspace root for workspace directory resolution.
 ///
 /// Returns `None` when no cargo workspace exists (non-Rust repo).
 pub fn resolve_cargo_cache_policy(
@@ -126,8 +125,10 @@ pub fn resolve_cargo_cache_policy(
         .as_ref()
         .map(|c| c.features.clone())
         .unwrap_or_default();
-    let all_features = detect_all_features_from_env_config(env_config)
-        || config_features.contains(&"all-features".to_string());
+    // Only the explicit `.cargo/config.toml` `build.features = "all-features"`
+    // override can opt into an all-features warm.  Former verification-rule
+    // scanning was removed when the verification gate was deleted.
+    let all_features = config_features.contains(&"all-features".to_string());
 
     let features = if all_features {
         Vec::new()
@@ -198,40 +199,9 @@ fn detect_workspace_layout(workspace_dir: &Path) -> bool {
     raw.contains_key("workspace")
 }
 
-fn detect_all_features_from_env_config(env_config: Option<&EnvironmentConfig>) -> bool {
-    let Some(cfg) = env_config else {
-        return false;
-    };
-    // Scan verification rules for `--all-features` in any command string.
-    // Verification rules are no longer in EnvironmentConfig, but we keep
-    // the hook scanning path for CI command patterns in lifecycle hooks.
-    for hook in &cfg.lifecycle.pre_verification {
-        if hook_contains(hook, "--all-features") {
-            return true;
-        }
-    }
-    for hook in &cfg.lifecycle.pre_task {
-        if hook_contains(hook, "--all-features") {
-            return true;
-        }
-    }
-    for hook in &cfg.lifecycle.post_build {
-        if hook_contains(hook, "--all-features") {
-            return true;
-        }
-    }
-    false
-}
-
-fn hook_contains(hook: &djinn_stack::environment::HookCommand, needle: &str) -> bool {
-    use djinn_stack::environment::HookCommand;
-    match hook {
-        HookCommand::Shell(s) => s.contains(needle),
-        HookCommand::Exec(argv) => argv.iter().any(|a| a.contains(needle)),
-        HookCommand::Parallel(map) => map.values().any(|h| hook_contains(h, needle)),
-    }
-}
-
+// `detect_all_features_from_env_config` and `hook_contains` were removed
+// when the verification gate was deleted.  All-features warm is now opt-in
+// only via `.cargo/config.toml` `build.features = "all-features"`.
 /// Detect whether the project uses `cargo-nextest` (a `.config/nextest.toml` or
 /// `nextest.toml` at the cargo workspace root). Drives whether the test-compile
 /// warm step uses `cargo nextest run --no-run` vs `cargo test --no-run`.
@@ -276,13 +246,14 @@ fn build_warm_commands(
     features: &[String],
     nextest: bool,
 ) -> Vec<CargoWarmCommand> {
-    let all_features_args: Vec<String> = if all_features {
+    // Single-pass warm: always one clippy + one build fallback, matching
+    // the worker's feature set exactly.  The former dual-pass
+    // (all-features + default-features for workspace) was removed when the
+    // verification gate was deleted — there is no longer an in-cluster
+    // consumer for the all-features warm pass on workspace projects.
+    let detected_features: Vec<String> = if all_features {
         vec!["--all-features".to_string()]
-    } else {
-        Vec::new()
-    };
-
-    let named_features_args: Vec<String> = if !all_features && !features.is_empty() {
+    } else if !features.is_empty() {
         let joined = features.join(",");
         vec!["--features".to_string(), joined]
     } else {
@@ -298,70 +269,30 @@ fn build_warm_commands(
 
     let mut commands = Vec::new();
 
-    if all_features && is_workspace {
-        // Dual-pass warm: all-features first (for CI/verification deps),
-        // then default-features (for worker default-feature reuse).
-        let mut clippy_all = vec!["clippy".to_string()];
-        clippy_all.extend(base_args.clone());
-        commands.push(CargoWarmCommand {
-            label: "clippy (all-features)",
-            args: clippy_all,
-            feature_args: all_features_args.clone(),
-        });
+    let mut clippy_args = vec!["clippy".to_string()];
+    clippy_args.extend(base_args.clone());
+    commands.push(CargoWarmCommand {
+        label: "clippy",
+        args: clippy_args,
+        feature_args: detected_features.clone(),
+    });
 
-        let mut clippy_default = vec!["clippy".to_string()];
-        clippy_default.extend(base_args.clone());
-        commands.push(CargoWarmCommand {
-            label: "clippy (default-features)",
-            args: clippy_default,
-            feature_args: Vec::new(),
-        });
+    let mut build_args = vec!["build".to_string()];
+    build_args.extend(base_args.clone());
+    commands.push(CargoWarmCommand {
+        label: "build (clippy fallback)",
+        args: build_args,
+        feature_args: detected_features.clone(),
+    });
 
-        let mut build_all = vec!["build".to_string()];
-        build_all.extend(base_args.clone());
-        commands.push(CargoWarmCommand {
-            label: "build (clippy fallback)",
-            args: build_all,
-            feature_args: all_features_args.clone(),
-        });
-    } else {
-        // Single-pass warm: clippy with detected features, build fallback.
-        let detected_features = if all_features {
-            all_features_args.clone()
-        } else {
-            named_features_args.clone()
-        };
-
-        let mut clippy_args = vec!["clippy".to_string()];
-        clippy_args.extend(base_args.clone());
-        commands.push(CargoWarmCommand {
-            label: "clippy",
-            args: clippy_args,
-            feature_args: detected_features.clone(),
-        });
-
-        let mut build_args = vec!["build".to_string()];
-        build_args.extend(base_args.clone());
-        commands.push(CargoWarmCommand {
-            label: "build (clippy fallback)",
-            args: build_args,
-            feature_args: detected_features.clone(),
-        });
-    }
-
-    // Test-compile warm step (compile, not run) so worker/verify `cargo
-    // test`/nextest reuse the warm test binaries. Uses the PRIMARY feature set
-    // the verify/worker test command runs with (all-features or named features,
-    // else default) — matching the consistency invariant. Always appended last
-    // so it never displaces the clippy/build fallback ordering above.
-    let test_feature_args: Vec<String> = if all_features {
-        all_features_args
-    } else {
-        named_features_args
-    };
+    // Test-compile warm step (compile, not run) so worker `cargo
+    // test`/nextest reuse the warm test binaries. Uses the same feature
+    // set as the worker test command — matching the consistency invariant.
+    // Always appended last so it never displaces the clippy/build fallback
+    // ordering above.
     commands.push(build_test_warm_command(
         &base_args,
-        &test_feature_args,
+        &detected_features,
         nextest,
     ));
 
@@ -480,9 +411,10 @@ version = "0.1.0"
         assert!(policy.warm_commands[2].feature_args.is_empty());
     }
 
-    // (b) workspace with `--all-features` CI → dual-pass warm
+    // (b) workspace with `--all-features` lifecycle hook → single default-
+    // features pass (lifecycle hook scanning was removed with verification)
     #[test]
-    fn workspace_with_all_features_ci() {
+    fn workspace_with_lifecycle_hook_no_longer_triggers_all_features() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         fs::write(
@@ -509,47 +441,36 @@ version = "0.1.0"
 
         let policy = resolve_cargo_cache_policy(root, Some(&cfg)).expect("policy");
         assert!(policy.workspace);
-        assert!(policy.all_features);
+        // Lifecycle hook scanning removed — all_features only comes from
+        // .cargo/config.toml features override now.
+        assert!(!policy.all_features);
         assert!(!policy.sccache);
         assert!(policy.incremental);
         assert_eq!(policy.features, Vec::<String>::new());
 
-        // Dual-pass: clippy (all-features), clippy (default-features),
-        // build (clippy fallback), test --no-run (all-features).
-        assert_eq!(policy.warm_commands.len(), 4);
+        // Single default-features pass: clippy + build + test --no-run.
+        assert_eq!(policy.warm_commands.len(), 3);
 
-        // Pass 1: all-features clippy
-        assert_eq!(policy.warm_commands[0].label, "clippy (all-features)");
+        assert_eq!(policy.warm_commands[0].label, "clippy");
         assert_eq!(
             policy.warm_commands[0].args,
             vec!["clippy", "--workspace", "--all-targets"]
         );
-        assert_eq!(policy.warm_commands[0].feature_args, vec!["--all-features"]);
+        assert!(policy.warm_commands[0].feature_args.is_empty());
 
-        // Pass 2: default-features clippy (no feature flags)
-        assert_eq!(policy.warm_commands[1].label, "clippy (default-features)");
+        assert_eq!(policy.warm_commands[1].label, "build (clippy fallback)");
         assert_eq!(
             policy.warm_commands[1].args,
-            vec!["clippy", "--workspace", "--all-targets"]
+            vec!["build", "--workspace", "--all-targets"]
         );
         assert!(policy.warm_commands[1].feature_args.is_empty());
 
-        // Pass 3: build fallback (all-features)
-        assert_eq!(policy.warm_commands[2].label, "build (clippy fallback)");
+        assert_eq!(policy.warm_commands[2].label, "test (--no-run)");
         assert_eq!(
             policy.warm_commands[2].args,
-            vec!["build", "--workspace", "--all-targets"]
-        );
-        assert_eq!(policy.warm_commands[2].feature_args, vec!["--all-features"]);
-
-        // Pass 4: test-compile (all-features), same primary feature set as
-        // verify/worker `cargo test`.
-        assert_eq!(policy.warm_commands[3].label, "test (--no-run)");
-        assert_eq!(
-            policy.warm_commands[3].args,
             vec!["test", "--workspace", "--all-targets", "--no-run"]
         );
-        assert_eq!(policy.warm_commands[3].feature_args, vec!["--all-features"]);
+        assert!(policy.warm_commands[2].feature_args.is_empty());
     }
 
     // (c) workspace with pinned `rustc-wrapper = "sccache"`
@@ -809,36 +730,29 @@ version = "0.1.0"
         sets
     }
 
-    // (d1) build_warm_commands: workspace + all_features → dual-pass + test
+    // (d1) build_warm_commands: workspace + all_features → single-pass with
+    //      --all-features (dual-pass was removed with verification gate)
     #[test]
-    fn build_warm_commands_workspace_all_features_dual_pass() {
+    fn build_warm_commands_workspace_all_features_single_pass() {
         let cmds = build_warm_commands(true, true, &[], false);
 
-        // clippy (all-features), clippy (default-features), build, test
-        assert_eq!(cmds.len(), 4);
+        // clippy, build, test — all with --all-features in feature_args
+        assert_eq!(cmds.len(), 3);
 
-        assert_eq!(cmds[0].label, "clippy (all-features)");
+        assert_eq!(cmds[0].label, "clippy");
         assert_eq!(cmds[0].args, vec!["clippy", "--workspace", "--all-targets"]);
         assert_eq!(cmds[0].feature_args, vec!["--all-features"]);
 
-        assert_eq!(cmds[1].label, "clippy (default-features)");
-        assert_eq!(cmds[1].args, vec!["clippy", "--workspace", "--all-targets"]);
-        assert!(
-            cmds[1].feature_args.is_empty(),
-            "default-features pass must have empty feature_args"
-        );
+        assert_eq!(cmds[1].label, "build (clippy fallback)");
+        assert_eq!(cmds[1].args, vec!["build", "--workspace", "--all-targets"]);
+        assert_eq!(cmds[1].feature_args, vec!["--all-features"]);
 
-        assert_eq!(cmds[2].label, "build (clippy fallback)");
-        assert_eq!(cmds[2].args, vec!["build", "--workspace", "--all-targets"]);
-        assert_eq!(cmds[2].feature_args, vec!["--all-features"]);
-
-        // Test-compile uses the primary (all-features) feature set.
-        assert_eq!(cmds[3].label, "test (--no-run)");
+        assert_eq!(cmds[2].label, "test (--no-run)");
         assert_eq!(
-            cmds[3].args,
+            cmds[2].args,
             vec!["test", "--workspace", "--all-targets", "--no-run"]
         );
-        assert_eq!(cmds[3].feature_args, vec!["--all-features"]);
+        assert_eq!(cmds[2].feature_args, vec!["--all-features"]);
     }
 
     // (d1b) build_warm_commands: nextest detected → nextest --no-run test step
@@ -930,12 +844,11 @@ version = "0.1.0"
         assert_eq!(cmds[2].feature_args, vec!["--all-features"]);
     }
 
-    // (d5) Superset invariant: for any all-features workspace project,
-    //      the warm set's feature_args union covers the default-features
-    //      worker (empty feature_args).
+    // (d5) Feature-set invariant: each warm set's feature_args match the
+    //      expected feature set for that configuration.
     #[test]
-    fn warm_set_superset_covers_default_features_worker() {
-        // All-features workspace → must have both --all-features AND empty
+    fn warm_set_feature_args_match_expected_configuration() {
+        // All-features workspace → must have --all-features (single pass)
         let cmds_af = build_warm_commands(true, true, &[], false);
         let sets_af = feature_sets(&cmds_af);
         assert!(
@@ -943,9 +856,10 @@ version = "0.1.0"
             "all-features warm set must include --all-features pass, got {:?}",
             sets_af
         );
-        assert!(
-            sets_af.contains(&Vec::<String>::new()),
-            "all-features warm set must include a default-features pass (empty feature_args), got {:?}",
+        assert_eq!(
+            sets_af.len(),
+            1,
+            "all-features warm set must have exactly one feature set, got {:?}",
             sets_af
         );
 
@@ -992,34 +906,35 @@ version = "0.1.0"
     }
 
     // (d7) Integration: workspace + sccache + --all-features lifecycle hook
-    //      → policy.all_features=true, policy.sccache=true,
-    //        warm_commands include both feature-set passes.
+    //      → lifecycle hook no longer triggers all_features,
+    //        policy.all_features=false, policy.sccache=true,
+    //        single default-features pass.
     #[test]
-    fn integration_workspace_sccache_all_features_produces_dual_pass() {
+    fn integration_workspace_sccache_lifecycle_hook_no_all_features() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         fs::write(
             root.join("Cargo.toml"),
             r#"[workspace]
-members = ["crate-a"]
-"#,
+    members = ["crate-a"]
+    "#,
         )
         .expect("write Cargo.toml");
         fs::create_dir_all(root.join(".cargo")).expect("mkdir .cargo");
         fs::write(
             root.join(".cargo/config.toml"),
             r#"[build]
-rustc-wrapper = "sccache"
-"#,
+    	rustc-wrapper = "sccache"
+    "#,
         )
         .expect("write config.toml");
         fs::create_dir_all(root.join("crate-a/src")).expect("mkdir crate-a/src");
         fs::write(
             root.join("crate-a/Cargo.toml"),
             r#"[package]
-name = "crate-a"
-version = "0.1.0"
-"#,
+    name = "crate-a"
+    version = "0.1.0"
+    "#,
         )
         .expect("write crate-a/Cargo.toml");
 
@@ -1029,9 +944,11 @@ version = "0.1.0"
         )];
 
         let policy = resolve_cargo_cache_policy(root, Some(&cfg)).expect("policy");
+        // Lifecycle hook scanning removed — all_features only comes from
+        // .cargo/config.toml features override now.
         assert!(
-            policy.all_features,
-            "should detect all-features from lifecycle hook"
+            !policy.all_features,
+            "lifecycle hook should no longer trigger all-features"
         );
         assert!(
             policy.sccache,
@@ -1039,19 +956,20 @@ version = "0.1.0"
         );
         assert!(!policy.incremental, "sccache disables incremental");
 
-        // Dual-pass clippy + build + test-compile = 4 warm commands
-        assert_eq!(policy.warm_commands.len(), 4);
+        // Single default-features pass: clippy + build + test-compile = 3 warm commands
+        assert_eq!(policy.warm_commands.len(), 3);
 
-        // Verify both feature-set passes are present
+        // Verify all commands have empty feature_args (default features)
         let sets = feature_sets(&policy.warm_commands);
-        assert!(
-            sets.contains(&vec!["--all-features".to_string()]),
-            "warm set must include --all-features pass, got {:?}",
+        assert_eq!(
+            sets.len(),
+            1,
+            "only one distinct feature set expected, got {:?}",
             sets
         );
         assert!(
             sets.contains(&Vec::<String>::new()),
-            "warm set must include default-features pass, got {:?}",
+            "warm set must have empty feature_args (default features), got {:?}",
             sets
         );
 

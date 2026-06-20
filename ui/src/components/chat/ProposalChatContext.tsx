@@ -33,6 +33,11 @@ export function ProposalChatContext({ scope }: { scope: ProposalChatScope }) {
           className="shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5"
         />
       </button>
+      {scope.targetSection && (
+        <div className="mt-2 text-xs text-muted-foreground">
+          Block target: <span className="font-mono text-foreground">{scope.targetSection}</span>
+        </div>
+      )}
       {scope.feedbackBody && (
         <div className="mt-2 rounded-md border bg-background/60 p-2">
           <div className="mb-1 flex items-center gap-1.5 text-xs text-muted-foreground">
