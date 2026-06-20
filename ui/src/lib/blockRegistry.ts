@@ -1,10 +1,13 @@
 import type { BlockProps } from "@/components/proposals/blocks/types";
 import {
+  AnnotatedCode,
   ApiEndpointBlock,
   DataModelBlock,
   DecisionsBlock,
+  Diagram,
   FileTreeBlock,
   QuestionFormBlock,
+  RichText,
 } from "@/components/proposals/blocks";
 
 export interface BlockTypeDefinition {
@@ -15,14 +18,34 @@ export interface BlockTypeDefinition {
 }
 
 /**
- * Registry of all known P2 block types. Each entry maps an MDX tag name to its
- * display metadata, required fields, and the React component responsible for
- * rendering it.
+ * Registry of all known block types (P1 + P2). Each entry maps an MDX tag name
+ * to its display metadata, required fields, and the React component responsible
+ * for rendering it.
  *
  * All blocks require an `id` attribute so that feedback comments and the debate
  * trail can anchor to a specific block across proposal revisions.
  */
 export const BLOCK_TYPES: BlockTypeDefinition[] = [
+  // P1 blocks
+  {
+    tag: "rich-text",
+    displayName: "Rich Text",
+    requiredFields: ["id"],
+    component: RichText,
+  },
+  {
+    tag: "diagram",
+    displayName: "Diagram",
+    requiredFields: ["id"],
+    component: Diagram,
+  },
+  {
+    tag: "annotated-code",
+    displayName: "Annotated Code",
+    requiredFields: ["id"],
+    component: AnnotatedCode,
+  },
+  // P2 blocks
   {
     tag: "data-model",
     displayName: "Data Model",
