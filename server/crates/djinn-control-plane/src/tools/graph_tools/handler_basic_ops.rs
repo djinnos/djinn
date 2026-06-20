@@ -771,3 +771,104 @@ impl DjinnMcpServer {
         }))
     }
 }
+
+// ── `impact_check` staleness entry point ────────────────────────────────────
+//
+// kfgh / epic z3en: the planner-facing `impact_check` MCP tool (built in
+// sibling task xkqs) MUST short-circuit with `needs_spike` whenever the
+// canonical graph is stale — a stale consumer set would defeat the entire
+// purpose of preflight. This helper is the single entry point that
+// `impact_check` calls before doing any consumer computation.
+//
+// `code_graph` ops share the same staleness primitive via
+// [`check_impact_staleness`]: that path attaches a [`GraphStaleness`]
+// struct (lenient on missing) to every response, while `impact_check`
+// short-circuits on the same boolean (strict on missing). Both paths
+// read `pinned_commit` via the same bridge call (`RepoGraphOps::status`)
+// so the staleness signal stays anchored to a single source.
+
+/// Snapshot of the canonical graph staleness signal at the moment an
+/// `impact_check` call begins. The boolean is the strict form
+/// (`true` when the graph is missing, un-pinned, or out-of-sync with
+/// the caller's HEAD). The strings are the trimmed echoes so the
+/// `impact_check` response can surface them in `next_step` hints.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // consumed by the `impact_check` handler built in sibling task xkqs
+pub(super) struct ImpactCheckStaleness {
+    /// `true` when `cached_commit` is missing/blank or differs from
+    /// `caller_commit`. Drives the `needs_spike` short-circuit in
+    /// `impact_check`.
+    pub is_stale: bool,
+    /// Trimmed caller-supplied commit, or `""` if the caller omitted
+    /// `current_head` (in which case `is_stale` is `true` because we
+    /// have no anchor for comparison).
+    pub caller_commit: String,
+    /// Trimmed cached graph commit, or `None` when the graph has no
+    /// pinned commit (un-warmed).
+    pub cached_commit: Option<String>,
+}
+
+impl ImpactCheckStaleness {
+    /// `true` when the caller did not supply a `current_head` AND the
+    /// graph has no pinned commit. This is the "completely unanchored"
+    /// case — both sides are missing, so we cannot answer and must
+    /// spike. Distinct from `is_stale` which is the canonical
+    /// missing/blank/mismatch signal.
+    #[allow(dead_code)] // consumed by the `impact_check` handler built in sibling task xkqs
+    pub fn is_completely_unanchored(&self) -> bool {
+        self.caller_commit.is_empty() && self.cached_commit.is_none()
+    }
+}
+
+/// Run the staleness check for an `impact_check` call.
+///
+/// Performs the same `RepoGraphOps::status` peek that `attach_graph_staleness`
+/// uses for `code_graph` ops, then funnels both inputs through the shared
+/// [`check_impact_staleness`] primitive so `impact_check` and `code_graph`
+/// never drift on the staleness semantics.
+///
+/// Contract for callers (the `impact_check` handler built by sibling
+/// task xkqs):
+///
+/// 1. Call this helper BEFORE computing any consumers.
+/// 2. If [`ImpactCheckStaleness::is_stale`] is `true`, return
+///    `recommendation = "needs_spike"` and a low-confidence flag without
+///    computing consumers.
+/// 3. Otherwise proceed with the standard `impact_check` flow using
+///    [`ImpactCheckStaleness::caller_commit`] / `cached_commit` to
+///    surface freshness metadata in the response.
+///
+/// `caller_head` is the (raw, pre-trim) caller commit. An empty string
+/// is allowed and yields `is_stale = true` (no anchor on the caller's
+/// side).
+#[allow(dead_code)] // consumed by the `impact_check` handler built in sibling task xkqs
+pub(super) async fn check_impact_check_staleness(
+    graph: &dyn crate::bridge::RepoGraphOps,
+    ctx: &crate::bridge::ProjectCtx,
+    caller_head: &str,
+) -> ImpactCheckStaleness {
+    let cached = match graph.status(ctx).await {
+        Ok(status) => status.pinned_commit,
+        Err(e) => {
+            // A failed status lookup is the same as an un-pinned graph
+            // for impact preflight: we have no anchor, so we MUST
+            // surface `is_stale=true` and let the caller decide
+            // whether to spike. We do NOT silently fall through to
+            // the un-stale default — that would defeat the freshness
+            // signal. Logged at debug so we can correlate with
+            // upstream warmer failures without spamming warn logs.
+            tracing::debug!(
+                error = %e,
+                "impact_check staleness: status lookup failed; treating as un-pinned"
+            );
+            None
+        }
+    };
+    let (is_stale, caller_commit, cached_commit) =
+        check_impact_staleness(caller_head, cached.as_deref());
+    ImpactCheckStaleness {
+        is_stale,
+        caller_commit,
+        cached_commit,
+    }
+}

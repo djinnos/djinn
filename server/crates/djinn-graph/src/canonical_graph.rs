@@ -119,6 +119,42 @@ impl CachedGraph {
     ) -> Option<crate::layout::GraphLayoutPosition> {
         self.layout_positions.get(stable_uid).copied()
     }
+
+    /// Return `true` when this cached graph's pinned `git_head` differs
+    /// from the caller-supplied commit, or when `git_head` is missing/blank.
+    ///
+    /// Used by `impact_check` (epic z3en) to short-circuit consumer
+    /// computation when the canonical graph is stale: a stale graph would
+    /// produce unreliable consumer sets, so the safe default is to surface
+    /// a `needs_spike` recommendation rather than asserting on bad data.
+    ///
+    /// Both `caller_head` and `self.git_head` are trimmed before
+    /// comparison; a blank `git_head` (un-warmed or un-pinned graph) is
+    /// always treated as stale so callers never trust an unpinned graph
+    /// for an impact-critical decision.
+    pub fn is_stale(&self, caller_head: &str) -> bool {
+        git_head_is_strictly_stale(caller_head, &self.git_head)
+    }
+}
+
+/// Strict staleness primitive shared between `CachedGraph::is_stale` and
+/// downstream control-plane flows (epic z3en). Returns `true` when:
+/// - `git_head` is missing/blank (un-warmed or un-pinned graph), OR
+/// - the trimmed `git_head` and `caller_head` differ.
+///
+/// This is the strict counterpart of the lenient default in
+/// `GraphStaleness::compute` (which returns `is_stale=false` for missing
+/// cached commits to avoid blocking unrelated queries). For impact
+/// preflight we want the strict form — when the graph has no anchor,
+/// we must surface a `needs_spike` rather than silently answering
+/// from unanchored data.
+pub fn git_head_is_strictly_stale(caller_head: &str, git_head: &str) -> bool {
+    let cached = git_head.trim();
+    if cached.is_empty() {
+        return true;
+    }
+    let caller = caller_head.trim();
+    cached != caller
 }
 
 pub static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
@@ -1733,6 +1769,103 @@ edition = "2024"
         .unwrap();
 
         assert!(derive_crate_map(&root).is_empty());
+    }
+
+    /// Build a `CachedGraph` fixture with the given `git_head` and all
+    /// other fields defaulted. The graph/caches/positions are zeroed-out
+    /// because `is_stale` only inspects `git_head`; the other fields are
+    /// never read by the test path.
+    fn cached_graph_fixture(git_head: &str) -> CachedGraph {
+        let graph = crate::repo_graph::RepoDependencyGraph::build(&[]);
+        let pagerank = std::sync::Arc::new(graph.rank());
+        let sccs = std::sync::Arc::new(CachedSccs {
+            full: Vec::new(),
+            file: Vec::new(),
+            symbol: Vec::new(),
+        });
+        let layout_positions = std::sync::Arc::new(std::collections::BTreeMap::new());
+        let crate_map = std::sync::Arc::new(std::collections::BTreeMap::new());
+        CachedGraph {
+            graph,
+            project_path: std::path::PathBuf::from("/tmp/fake-project"),
+            git_head: git_head.to_string(),
+            pagerank,
+            sccs,
+            layout_positions,
+            crate_map,
+        }
+    }
+
+    /// kfgh/AC#4: matching HEAD → not stale.
+    #[test]
+    fn cached_graph_is_stale_returns_false_for_matching_head() {
+        let cached = cached_graph_fixture("abc123");
+        assert!(
+            !cached.is_stale("abc123"),
+            "matching caller head must not be flagged stale"
+        );
+    }
+
+    /// kfgh/AC#4: differing HEAD → stale.
+    #[test]
+    fn cached_graph_is_stale_returns_true_for_differing_head() {
+        let cached = cached_graph_fixture("abc123");
+        assert!(
+            cached.is_stale("def456"),
+            "differing caller head must be flagged stale"
+        );
+    }
+
+    /// kfgh/AC#4: missing HEAD (empty `git_head`) → stale. An un-warmed or
+    /// un-pinned graph must never be trusted for impact preflight.
+    #[test]
+    fn cached_graph_is_stale_returns_true_for_missing_head() {
+        let cached = cached_graph_fixture("");
+        assert!(
+            cached.is_stale("abc123"),
+            "missing git_head must always be flagged stale"
+        );
+    }
+
+    /// kfgh/AC#4: blank HEAD (whitespace-only `git_head`) → stale. The
+    /// trim-then-check semantic must surface whitespace as missing.
+    #[test]
+    fn cached_graph_is_stale_returns_true_for_blank_head() {
+        let cached = cached_graph_fixture("   \t  \n");
+        assert!(
+            cached.is_stale("abc123"),
+            "blank/whitespace git_head must be flagged stale"
+        );
+    }
+
+    /// kfgh: caller-head whitespace is trimmed before comparison. A
+    /// caller that passes `"  abc123  "` matches a cached `"abc123"`.
+    #[test]
+    fn cached_graph_is_stale_trims_caller_head_whitespace() {
+        let cached = cached_graph_fixture("abc123");
+        assert!(
+            !cached.is_stale("  abc123  "),
+            "caller head whitespace must be trimmed before equality check"
+        );
+    }
+
+    /// kfgh: `git_head_is_strictly_stale` is the shared primitive that
+    /// `CachedGraph::is_stale` and downstream flows both consume. Cover
+    /// the same 4 cases at the free-function level so refactors that
+    /// move the instance method body to the free helper don't silently
+    /// break the semantics.
+    #[test]
+    fn git_head_is_strictly_stale_primitive_covers_all_cases() {
+        // Matching → not stale.
+        assert!(!git_head_is_strictly_stale("abc123", "abc123"));
+        // Differing → stale.
+        assert!(git_head_is_strictly_stale("def456", "abc123"));
+        // Missing git_head → stale.
+        assert!(git_head_is_strictly_stale("abc123", ""));
+        // Blank git_head → stale.
+        assert!(git_head_is_strictly_stale("abc123", "  \t"));
+        // Caller whitespace is trimmed.
+        assert!(!git_head_is_strictly_stale("  abc123  ", "abc123"));
     }
 
     fn in_memory_graph_artifact_blob(index: &crate::scip_parser::ParsedScipIndex) -> Vec<u8> {
