@@ -910,6 +910,7 @@ mod tests {
                     status: Some("open"),
                     auto_breakdown: None,
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await

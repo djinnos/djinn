@@ -309,6 +309,7 @@ async fn create_task_with_note(
                 status: None,
                 auto_breakdown: None,
                 originating_adr_id: None,
+                blocked_by: None,
             },
         )
         .await
@@ -1109,6 +1110,7 @@ async fn create_simple_task(
                 status: None,
                 auto_breakdown: None,
                 originating_adr_id: None,
+                blocked_by: None,
             },
         )
         .await
@@ -1241,6 +1243,7 @@ async fn make_task_with_reopen_count(
                 status: None,
                 auto_breakdown: None,
                 originating_adr_id: None,
+                blocked_by: None,
             },
         )
         .await
