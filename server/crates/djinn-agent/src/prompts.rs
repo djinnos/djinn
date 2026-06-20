@@ -15,7 +15,15 @@ use djinn_core::models::Task;
 /// Hard cap on rendered system prompt size (chars). Individual sections have
 /// their own soft limits, but this catches cases where multiple sections
 /// combine to blow past a reasonable size.
-const MAX_SYSTEM_PROMPT_CHARS: usize = 31_000;
+///
+/// Sized to fit the largest legitimate prompt — the Planner decomposition mode
+/// (`base.md` + `planner.md` + `planner/decomposition.md` + tool schemas + task
+/// fields), which is ~35K after the planner prompt-contract guidance landed. The
+/// old 31K cap silently truncated the tail of `decomposition.md` (the
+/// "prune unverifiable AC instead of escalating" contract), so the planner never
+/// saw guidance it was explicitly given. All in-use models have >=128K context,
+/// so a ~48K system prompt is comfortably within budget.
+const MAX_SYSTEM_PROMPT_CHARS: usize = 48_000;
 
 // ─── Embedded templates ────────────────────────────────────────────────────────
 
