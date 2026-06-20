@@ -44,6 +44,7 @@ import {
   MAX_NODE_SIZE,
   MEMORY_COMMUNITY_ID_ATTRIBUTE,
   MEMORY_COMMUNITY_LABEL_ATTRIBUTE,
+  TYPED_EDGE_STYLES,
 } from "@/lib/memoryGraphAdapter";
 import { applyPerCommunityAttraction } from "@/lib/perCommunityAttraction";
 
@@ -740,3 +741,145 @@ describe("empty payload handling", () => {
     expect(graph.size).toBe(0);
   });
 });
+
+// ── Typed edges (vrn9 epic) ─────────────────────────────────────────────────
+
+describe("parseMemoryGraphResponse — typed_edges", () => {
+  it("extracts typed_edges with correct fields", () => {
+    const parsed = parseMemoryGraphResponse({
+      nodes: [{ id: "a" }],
+      edges: [],
+      typed_edges: [
+        { source_id: "a", target_id: "b", kind: "supersedes", weight: 1.2 },
+        { source_id: "a", target_id: "c", kind: "contradicts", weight: 0.9 },
+      ],
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed!.typed_edges).toHaveLength(2);
+    expect(parsed!.typed_edges![0]).toEqual({
+      source_id: "a",
+      target_id: "b",
+      kind: "supersedes",
+      weight: 1.2,
+    });
+    expect(parsed!.typed_edges![1]).toEqual({
+      source_id: "a",
+      target_id: "c",
+      kind: "contradicts",
+      weight: 0.9,
+    });
+  });
+
+  it("filters typed_edges with missing source_id, target_id, or kind", () => {
+    const parsed = parseMemoryGraphResponse({
+      nodes: [{ id: "a" }],
+      typed_edges: [
+        { source_id: "", target_id: "b", kind: "supersedes", weight: 1.0 },
+        { source_id: "a", target_id: "", kind: "supersedes", weight: 1.0 },
+        { source_id: "a", target_id: "b", kind: "", weight: 1.0 },
+        { source_id: "a", target_id: "b", kind: "supersedes", weight: 1.0 },
+      ],
+    });
+    expect(parsed!.typed_edges).toHaveLength(1);
+    expect(parsed!.typed_edges![0].source_id).toBe("a");
+  });
+
+  it("defaults weight to 0 when missing or non-finite", () => {
+    const parsed = parseMemoryGraphResponse({
+      nodes: [{ id: "a" }],
+      typed_edges: [
+        { source_id: "a", target_id: "b", kind: "builds_on" },
+        { source_id: "a", target_id: "b", kind: "builds_on", weight: NaN },
+        { source_id: "a", target_id: "b", kind: "builds_on", weight: Infinity },
+      ],
+    });
+    expect(parsed!.typed_edges!.every((e) => e.weight === 0)).toBe(true);
+  });
+
+  it("treats missing typed_edges as an empty array", () => {
+    const parsed = parseMemoryGraphResponse({ nodes: [{ id: "a" }] });
+    expect(parsed!.typed_edges).toEqual([]);
+  });
+});
+
+describe("buildMemoryGraph — typed edges", () => {
+  it("adds typed edges to the graph with correct kind, color, and size", () => {
+    const payload = makePayload({
+      nodes: [
+        makeNode({ id: "a" }),
+        makeNode({ id: "b" }),
+        makeNode({ id: "c" }),
+      ],
+      typed_edges: [
+        { source_id: "a", target_id: "b", kind: "supersedes", weight: 1.2 },
+        { source_id: "a", target_id: "c", kind: "contradicts", weight: 0.9 },
+        { source_id: "b", target_id: "c", kind: "builds_on", weight: 0.8 },
+      ],
+    });
+    const graph = buildMemoryGraph(payload);
+
+    const typed = graph.filterEdges((_, attrs) =>
+      ["supersedes", "contradicts", "builds_on", "exemplifies", "derived_from"].includes(attrs.kind),
+    );
+    expect(typed).toHaveLength(3);
+
+    const supersedes = typed.find((e) => graph.getEdgeAttributes(e).kind === "supersedes")!;
+    const contradicts = typed.find((e) => graph.getEdgeAttributes(e).kind === "contradicts")!;
+    const buildsOn = typed.find((e) => graph.getEdgeAttributes(e).kind === "builds_on")!;
+
+    expect(graph.getEdgeAttributes(supersedes).color).toBe(TYPED_EDGE_STYLES.supersedes.color);
+    expect(graph.getEdgeAttributes(supersedes).size).toBe(TYPED_EDGE_STYLES.supersedes.size);
+    expect(graph.getEdgeAttributes(supersedes).dashed).toBe(TYPED_EDGE_STYLES.supersedes.dashed);
+    expect(graph.getEdgeAttributes(supersedes).weight).toBe(1.2);
+
+    expect(graph.getEdgeAttributes(contradicts).color).toBe(TYPED_EDGE_STYLES.contradicts.color);
+    expect(graph.getEdgeAttributes(contradicts).size).toBe(TYPED_EDGE_STYLES.contradicts.size);
+    expect(graph.getEdgeAttributes(contradicts).dashed).toBe(TYPED_EDGE_STYLES.contradicts.dashed);
+    expect(graph.getEdgeAttributes(contradicts).weight).toBe(0.9);
+
+    expect(graph.getEdgeAttributes(buildsOn).color).toBe(TYPED_EDGE_STYLES.builds_on.color);
+    expect(graph.getEdgeAttributes(buildsOn).size).toBe(TYPED_EDGE_STYLES.builds_on.size);
+    expect(graph.getEdgeAttributes(buildsOn).dashed).toBe(TYPED_EDGE_STYLES.builds_on.dashed);
+    expect(graph.getEdgeAttributes(buildsOn).weight).toBe(0.8);
+  });
+
+  it("drops typed edges with unknown endpoints", () => {
+    const payload = makePayload({
+      nodes: [makeNode({ id: "a" })],
+      typed_edges: [
+        { source_id: "a", target_id: "ghost", kind: "supersedes", weight: 1.0 },
+        { source_id: "ghost", target_id: "a", kind: "supersedes", weight: 1.0 },
+      ],
+    });
+    const graph = buildMemoryGraph(payload);
+    const typed = graph.filterEdges((_, attrs) => attrs.kind === "supersedes");
+    expect(typed).toHaveLength(0);
+  });
+
+  it("skips self-loop typed edges", () => {
+    const payload = makePayload({
+      nodes: [makeNode({ id: "a" })],
+      typed_edges: [
+        { source_id: "a", target_id: "a", kind: "supersedes", weight: 1.0 },
+      ],
+    });
+    const graph = buildMemoryGraph(payload);
+    const typed = graph.filterEdges((_, attrs) => attrs.kind === "supersedes");
+    expect(typed).toHaveLength(0);
+  });
+
+  it("falls back to default style for unknown typed edge kinds", () => {
+    const payload = makePayload({
+      nodes: [makeNode({ id: "a" }), makeNode({ id: "b" })],
+      typed_edges: [
+        { source_id: "a", target_id: "b", kind: "unknown_kind", weight: 1.0 },
+      ],
+    });
+    const graph = buildMemoryGraph(payload);
+    const edge = graph.filterEdges((_, attrs) => attrs.kind === "unknown_kind")[0];
+    expect(graph.getEdgeAttributes(edge).color).toBe("#94a3b8");
+    expect(graph.getEdgeAttributes(edge).size).toBe(1.0);
+    expect(graph.getEdgeAttributes(edge).dashed).toBe(false);
+  });
+});
+
