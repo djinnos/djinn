@@ -45,9 +45,9 @@ use crate::tools::project_tools::{
 use crate::tools::proposal_blocks::ProposalBlocksParams;
 use crate::tools::proposal_tools::{
     ProposalCreateParams, ProposalDeleteParams, ProposalFeedbackAddParams,
-    ProposalFeedbackResolveParams, ProposalGraduateParams, ProposalListParams,
-    ProposalReconcileObsoleteEpicParams, ProposalShowParams, ProposalSignoffParams,
-    ProposalStopBuildParams, ProposalTargetParams, ProposalUpdateParams,
+    ProposalFeedbackResolveParams, ProposalGraduateParams, ProposalImportParams,
+    ProposalListParams, ProposalReconcileObsoleteEpicParams, ProposalShowParams,
+    ProposalSignoffParams, ProposalStopBuildParams, ProposalTargetParams, ProposalUpdateParams,
 };
 use crate::tools::provider_tools::{
     ModelHealthInput, ProviderCatalogInput, ProviderConnectedInput, ProviderModelLookupInput,
@@ -420,6 +420,11 @@ impl DjinnMcpServer {
             "proposal_create" => map_json(
                 name,
                 self.proposal_create(Parameters(decode_args::<ProposalCreateParams>(name, args)?))
+                    .await,
+            ),
+            "proposal_import" => map_json(
+                name,
+                self.proposal_import(Parameters(decode_args::<ProposalImportParams>(name, args)?))
                     .await,
             ),
             "proposal_blocks" => map_json(

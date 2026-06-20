@@ -14,6 +14,7 @@ use std::borrow::Cow;
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::acting_user::acting_caps;
@@ -21,7 +22,9 @@ use crate::tools::epic_ops::AcceptanceCriterionItem;
 use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
 };
-use crate::tools::proposal_blocks::validate_question_form_placement;
+use crate::tools::proposal_blocks::{
+    parse_mdx_blocks, validate_mdx_blocks, validate_question_form_placement,
+};
 use crate::tools::proposal_ops::{
     ProposalDeleteResponse, ProposalEpicModel, ProposalFeedbackResponse, ProposalModel,
     ProposalReconcileObsoleteEpicResponse, ProposalShowResponse, ProposalSignoffModel,
@@ -125,6 +128,105 @@ pub struct ProposalCreateParams {
     pub status: Option<String>,
     /// Body encoding: `markdown` (default) or `mdx` (block-aware).
     pub body_format: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalImportParams {
+    /// Full portable proposal.mdx content, including optional YAML frontmatter.
+    pub mdx: String,
+}
+
+#[derive(Debug)]
+struct ImportedProposalMdx<'a> {
+    id: Option<String>,
+    title: String,
+    body_format: String,
+    body: &'a str,
+    acceptance_criteria_json: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProposalMdxFrontmatter {
+    id: Option<String>,
+    title: Option<String>,
+    body_format: Option<String>,
+    acceptance_criteria: Option<JsonValue>,
+}
+
+fn split_proposal_mdx_frontmatter(mdx: &str) -> Result<(Option<&str>, &str), String> {
+    let Some((rest, close, close_len)) = mdx
+        .strip_prefix("---\n")
+        .map(|rest| (rest, "\n---\n", 5usize))
+        .or_else(|| {
+            mdx.strip_prefix("---\r\n")
+                .map(|rest| (rest, "\r\n---\r\n", 7usize))
+        })
+    else {
+        return Ok((None, mdx));
+    };
+
+    if let Some(end) = rest.find(close) {
+        return Ok((Some(&rest[..end]), &rest[end + close_len..]));
+    }
+
+    let terminal = close.trim_end_matches(['\n', '\r']);
+    if let Some(frontmatter) = rest.strip_suffix(terminal) {
+        return Ok((Some(frontmatter.trim_end_matches(['\n', '\r'])), ""));
+    }
+
+    Err("invalid proposal.mdx frontmatter: missing closing --- delimiter".to_string())
+}
+
+fn parse_proposal_mdx(mdx: &str) -> Result<ImportedProposalMdx<'_>, String> {
+    let (frontmatter_raw, body) = split_proposal_mdx_frontmatter(mdx)?;
+    let frontmatter = match frontmatter_raw {
+        Some(raw) => serde_yaml::from_str::<ProposalMdxFrontmatter>(raw)
+            .map_err(|e| format!("invalid proposal.mdx YAML frontmatter: {e}"))?,
+        None => ProposalMdxFrontmatter {
+            id: None,
+            title: None,
+            body_format: None,
+            acceptance_criteria: None,
+        },
+    };
+
+    let title = frontmatter
+        .title
+        .unwrap_or_else(|| "Imported proposal".to_string());
+    if title.is_empty() {
+        return Err("title must not be empty".to_string());
+    }
+    if title.len() > 200 {
+        return Err(format!("title exceeds 200 chars (got {})", title.len()));
+    }
+
+    let body_format = frontmatter
+        .body_format
+        .unwrap_or_else(|| "markdown".to_string());
+    if body_format != "markdown" && body_format != "mdx" {
+        return Err(format!(
+            "invalid body_format: {body_format:?} (allowed: markdown, mdx)"
+        ));
+    }
+
+    let acceptance_criteria = frontmatter
+        .acceptance_criteria
+        .unwrap_or_else(|| JsonValue::Array(Vec::new()));
+    let ac_len = acceptance_criteria
+        .as_array()
+        .ok_or_else(|| "acceptance_criteria must be an array".to_string())?
+        .len();
+    validate_ac_count(ac_len)?;
+    let acceptance_criteria_json = serde_json::to_string(&acceptance_criteria)
+        .map_err(|e| format!("invalid acceptance_criteria: {e}"))?;
+
+    Ok(ImportedProposalMdx {
+        id: frontmatter.id,
+        title,
+        body_format,
+        body,
+        acceptance_criteria_json,
+    })
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -342,6 +444,83 @@ impl DjinnMcpServer {
                 }
             }
         }
+
+        Json(ProposalSingleResponse {
+            proposal: Some(ProposalModel::from(&proposal)),
+            error: None,
+        })
+    }
+
+    /// Import a portable proposal.mdx document, creating or updating a proposal.
+    #[tool(
+        description = "Import a portable proposal.mdx document. Parses YAML frontmatter (optional id, title, body_format, acceptance_criteria), validates MDX custom block tags against the proposal block registry, then creates a new proposal or updates the existing proposal named by id."
+    )]
+    pub async fn proposal_import(
+        &self,
+        Parameters(p): Parameters<ProposalImportParams>,
+    ) -> Json<ProposalSingleResponse> {
+        let imported = match parse_proposal_mdx(&p.mdx) {
+            Ok(imported) => imported,
+            Err(e) => return Json(err_single(e)),
+        };
+
+        if let Err(e) = validate_design(imported.body) {
+            return Json(err_single(e));
+        }
+        if imported.body_format == "mdx"
+            && let Err(e) = validate_mdx_blocks(imported.body)
+        {
+            return Json(err_single(e.to_string()));
+        }
+        if imported.body_format == "mdx"
+            && let Err(e) = parse_mdx_blocks(imported.body)
+        {
+            return Json(err_single(e.to_string()));
+        }
+
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let proposal = if let Some(id) = imported.id.as_deref() {
+            let Some(existing) = repo.resolve(id).await.ok().flatten() else {
+                return Json(err_single(proposal_not_found_error(id)));
+            };
+            if let Err(e) = self
+                .gate_proposal_edit(existing.author_user_id.as_deref())
+                .await
+            {
+                return Json(err_single(e));
+            }
+            match repo
+                .update(
+                    &existing.id,
+                    djinn_db::ProposalUpdateInput {
+                        title: &imported.title,
+                        body: imported.body,
+                        acceptance_criteria: &imported.acceptance_criteria_json,
+                        status: &existing.status,
+                        superseded_by: existing.superseded_by.as_deref(),
+                        body_format: Some(&imported.body_format),
+                    },
+                )
+                .await
+            {
+                Ok(proposal) => proposal,
+                Err(e) => return Json(err_single(e.to_string())),
+            }
+        } else {
+            match repo
+                .create(djinn_db::ProposalCreateInput {
+                    title: &imported.title,
+                    body: imported.body,
+                    acceptance_criteria: Some(&imported.acceptance_criteria_json),
+                    status: None,
+                    body_format: Some(&imported.body_format),
+                })
+                .await
+            {
+                Ok(proposal) => proposal,
+                Err(e) => return Json(err_single(e.to_string())),
+            }
+        };
 
         Json(ProposalSingleResponse {
             proposal: Some(ProposalModel::from(&proposal)),
@@ -1538,6 +1717,125 @@ async fn finish_targets(
             error: None,
         }),
         Err(e) => Json(err_targets(e)),
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{Database, ProposalCreateInput};
+
+    async fn test_server() -> (DjinnMcpServer, Database) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_import_creates_valid_mdx_and_preserves_fields() {
+        let (server, db) = test_server().await;
+        let body = "Intro\n\n<Diagram id=\"arch\" title=\"Architecture\">\nA -> B\n</Diagram>\n";
+        let mdx = format!(
+            "---\ntitle: Portable title\nbody_format: mdx\nacceptance_criteria:\n  - Keep the exact string\n  - criterion: Structured AC\n    met: true\n---\n{body}"
+        );
+
+        let response = server
+            .dispatch_tool("proposal_import", serde_json::json!({ "mdx": mdx }))
+            .await
+            .expect("proposal_import should be registered");
+
+        let id = response.get("id").and_then(|v| v.as_str()).unwrap();
+        let repo = ProposalRepository::new(db, EventBus::noop());
+        let stored = repo.get(id).await.unwrap().unwrap();
+        assert_eq!(stored.title, "Portable title");
+        assert_eq!(stored.body_format, "mdx");
+        assert_eq!(stored.body, body);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&stored.acceptance_criteria).unwrap(),
+            serde_json::json!([
+                "Keep the exact string",
+                { "criterion": "Structured AC", "met": true }
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_import_rejects_unknown_block_with_tag_name() {
+        let (server, _db) = test_server().await;
+        let mdx = "---\ntitle: Bad block\nbody_format: mdx\n---\n<FancyUnknown id=\"x\" />";
+
+        let response = server
+            .dispatch_tool("proposal_import", serde_json::json!({ "mdx": mdx }))
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(error.contains("FancyUnknown"), "error was {error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_import_updates_when_id_is_present() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let existing = repo
+            .create(ProposalCreateInput {
+                title: "Before",
+                body: "old body",
+                acceptance_criteria: Some("[\"old\"]"),
+                status: None,
+                body_format: Some("markdown"),
+            })
+            .await
+            .unwrap();
+        let mdx = format!(
+            "---\nid: {}\ntitle: After\nbody_format: markdown\nacceptance_criteria:\n  - new one\n---\nupdated body",
+            existing.short_id
+        );
+
+        let response = server
+            .dispatch_tool("proposal_import", serde_json::json!({ "mdx": mdx }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.get("id").and_then(|v| v.as_str()),
+            Some(existing.id.as_str())
+        );
+        let stored = repo.get(&existing.id).await.unwrap().unwrap();
+        assert_eq!(stored.title, "After");
+        assert_eq!(stored.body, "updated body");
+        assert_eq!(stored.body_format, "markdown");
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&stored.acceptance_criteria).unwrap(),
+            serde_json::json!(["new one"])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_import_without_frontmatter_defaults_to_plain_markdown() {
+        let (server, db) = test_server().await;
+        let body = "# Offline notes\n\nPlain markdown only.";
+
+        let response = server
+            .proposal_import(Parameters(ProposalImportParams {
+                mdx: body.to_string(),
+            }))
+            .await
+            .0;
+
+        let imported = response.proposal.unwrap();
+        let repo = ProposalRepository::new(db, EventBus::noop());
+        let stored = repo.get(&imported.id).await.unwrap().unwrap();
+        assert_eq!(stored.title, "Imported proposal");
+        assert_eq!(stored.body_format, "markdown");
+        assert_eq!(stored.body, body);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&stored.acceptance_criteria).unwrap(),
+            serde_json::json!([])
+        );
     }
 }
 
