@@ -254,7 +254,7 @@ pub struct TaskTransitionParams {
     pub actor_id: Option<String>,
     pub actor_role: Option<String>,
     /// Required when action = "user_override". Allowed values: open, in_progress,
-    /// verifying, needs_task_review, in_task_review, approved, pr_draft, pr_review, closed.
+    /// needs_task_review, in_task_review, approved, pr_draft, pr_review, closed.
     pub target_status: Option<String>,
 }
 

@@ -70,9 +70,8 @@ export async function listToolchainVersions(): Promise<ToolchainVersions> {
  *  - `null`/`undefined` `languages.*` entries (a disabled language); the
  *    image-builder emits an install block for ANY present key, so an
  *    explicit null would still try to install.
- *  - any `verification` key — verification lives in the dedicated
- *    `project_verifications` table now, not in `EnvironmentConfig`, and the
- *    server 400s on the unknown field.
+ *  - any `verification` key — the field was removed from `EnvironmentConfig`,
+ *    and the server 400s on the unknown field.
  *
  * Returns a shallow copy; never mutates the caller's config.
  */
