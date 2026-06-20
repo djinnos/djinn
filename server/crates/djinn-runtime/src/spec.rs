@@ -156,9 +156,6 @@ pub fn role_sequence(flow: SupervisorFlow) -> &'static [RoleKind] {
         // upfront Planner stage here.
         SupervisorFlow::NewTask => &[Worker],
         // ReviewResponse (reviewer rejected / human asked for more) and
-        // ConflictRetry (merge-conflict fixup) both re-enter at the worker and
-        // must verify before the next review, exactly like NewTask — so they
-        // ReviewResponse (reviewer rejected / human asked for more) and
         // ConflictRetry (merge-conflict fixup) both re-enter at the worker,
         // exactly like NewTask — so they are also worker-only.
         SupervisorFlow::ReviewResponse | SupervisorFlow::ConflictRetry => &[Worker],
@@ -414,8 +411,8 @@ mod tests {
 
     #[test]
     fn review_response_and_conflict_retry_are_worker_only() {
-        // Both re-enter at the worker and must verify before the next review,
-        // so neither carries a reviewer stage anymore.
+        // Both re-enter at the worker, so neither carries a reviewer stage
+        // anymore.
         assert_eq!(
             SupervisorFlow::ReviewResponse.role_sequence(),
             &[RoleKind::Worker]
