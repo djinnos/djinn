@@ -2495,14 +2495,6 @@ expression: signatures
           "nullable": true,
           "type": "boolean"
         },
-        "blocked_by": {
-          "description": "Epic-level dependencies: UUIDs or short_ids of epics that must close\nbefore this epic's auto-breakdown can run.  Wired atomically at\ncreation time so the `epic_created` event is only emitted after\nblocker edges exist in the DB.",
-          "items": {
-            "type": "string"
-          },
-          "nullable": true,
-          "type": "array"
-        },
         "color": {
           "nullable": true,
           "type": "string"
