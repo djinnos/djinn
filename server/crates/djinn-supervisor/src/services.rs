@@ -131,10 +131,10 @@ pub trait SupervisorServices: Send + Sync + 'static {
     ) -> Result<(), String>;
 
     /// Fetch the project's `environment_config` blob (lifecycle hooks,
-    /// verification rules, language toolchains).
+    /// language toolchains).
     ///
     /// Phase 6d extraction — replaces direct
-    /// `verification::environment::environment_config_for_project_id(&agent_context.db, ..)`
+    /// `environment::environment_config_for_project_id(&agent_context.db, ..)`
     /// in `supervisor_impl::stage`. Returns `EnvironmentConfig::empty()`
     /// (wrapped in `Ok`) for missing-project / parse-failure paths to match
     /// the existing helper's degrade-to-empty semantics.
@@ -297,36 +297,4 @@ pub trait SupervisorServices: Send + Sync + 'static {
         action: String,
         reason: Option<String>,
     ) -> Result<(), String>;
-
-    /// Run the pre-PR verification pipeline IN-PROCESS, right after the worker
-    /// stage committed to the task branch and BEFORE [`crate::TaskRunSupervisor::run`]
-    /// tears down the private Cargo target dir — so verification reuses the
-    /// worker's already-compiled artifacts (`CARGO_TARGET_DIR` is still seeded)
-    /// instead of the host dispatching a separate verify Job that re-seeds the
-    /// warm base and recompiles the changed crates from scratch (the
-    /// double-compile this avoids).
-    ///
-    /// The impl is responsible for putting the workspace in the exact committed
-    /// state (`git reset --hard <HEAD>` + `git clean -fd`) before running, so it
-    /// gates the committed tree, NOT a dirty workspace; it must NOT delete the
-    /// Cargo target dir (it lives on the shared cache, outside the workspace);
-    /// and it must write the outcome to a `verification_runs` row (the same row
-    /// shape the separate-pod path writes), returning that row id.
-    ///
-    /// Returns:
-    /// - `Ok(Some(run_id))` — a terminal `verification_runs` row the host's
-    ///   verification pipeline consumes directly (skipping the separate Job).
-    /// - `Ok(None)` — in-pod verify did not run / is not applicable; the host
-    ///   dispatches the separate verify Job (the unchanged FALLBACK). This is the
-    ///   DEFAULT, so the host (`DirectServices`) and every test double inherit
-    ///   the legacy behavior untouched; only the worker pod overrides it.
-    /// - `Err(_)` — a hard error the supervisor logs and treats as `None`
-    ///   (fall back to the Job).
-    async fn verify_committed_tree(
-        &self,
-        _spec: &TaskRunSpec,
-        _task: &Task,
-    ) -> Result<Option<String>, String> {
-        Ok(None)
-    }
 }

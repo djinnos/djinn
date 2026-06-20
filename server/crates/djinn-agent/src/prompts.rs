@@ -65,13 +65,6 @@ pub struct TaskContext {
     // ── Project command fields ────────────────────────────────────────────
     /// Newline-separated list of setup command names, or None if none configured.
     pub setup_commands: Option<String>,
-    /// Newline-separated list of verification command names, or None if none configured.
-    pub verification_commands: Option<String>,
-
-    // ── Verification rules ────────────────────────────────────────────────
-    /// Formatted verification rules section for scoped build/test guidance.
-    /// None or empty means no rules are configured; section is omitted from prompt.
-    pub verification_rules: Option<String>,
 
     // ── Activity log ─────────────────────────────────────────────────────
     /// Pre-formatted activity log (comments, transitions) for the task.
@@ -82,8 +75,6 @@ pub struct TaskContext {
     pub worker_summary: Option<String>,
     /// Remaining concerns from the last `work_submitted` activity entry.
     pub worker_concerns: Option<String>,
-    /// Body of the last verification failure comment.
-    pub verification_failure: Option<String>,
 
     // ── Epic context ─────────────────────────────────────────────────────
     /// Epic context section for lead agents (title, description, memory_refs, sibling tasks).
@@ -197,14 +188,7 @@ pub(crate) fn render_prompt_for_role(
         ),
         _ => String::new(),
     };
-    let verification_section = match &ctx.verification_commands {
-        Some(cmds) if !cmds.trim().is_empty() => format!(
-            "## Automated Verification\n\nBuild/test verification commands passed before review. Focus on acceptance criteria and code quality.\n\n{cmds}\n"
-        ),
-        _ => String::new(),
-    };
     out = out.replace("{{setup_commands_section}}", &setup_section);
-    out = out.replace("{{verification_section}}", &verification_section);
 
     let epic_context_section = match &ctx.epic_context {
         Some(text) if !text.trim().is_empty() => format!("## Epic Context\n\n{text}\n"),
@@ -267,20 +251,6 @@ pub(crate) fn render_prompt_for_role(
         {
             parts.push(format!("### Worker's remaining concerns\n\n{concerns}"));
         }
-        if let Some(failure) = &ctx.verification_failure
-            && !failure.trim().is_empty()
-        {
-            parts.push(format!(
-                "### Previous verification failure\n\n{failure}\n\n\
-                 **Important:** Fix this verification failure ONLY by changing files \
-                 within this task's scope (as defined by the task description and design). \
-                 If the failure is caused by code outside your task's scope (e.g. a \
-                 pre-existing compile error in an unrelated module), do NOT modify those \
-                 files. Instead, call `request_lead` to escalate — the lead can either \
-                 expand your task's scope or create a separate blocking task to fix the \
-                 out-of-scope issue first."
-            ));
-        }
         if parts.is_empty() {
             String::new()
         } else {
@@ -288,23 +258,6 @@ pub(crate) fn render_prompt_for_role(
         }
     };
     out = out.replace("{{worker_context_section}}", &worker_context_section);
-
-    let verification_rules_section = match &ctx.verification_rules {
-        Some(rules) if !rules.trim().is_empty() => format!(
-            "## Verification Rules\n\n\
-             These commands run AUTOMATICALLY after your session, against your submitted \
-             tree — do NOT run them yourself. They are listed so you know what will be \
-             checked. Between edits, verify with the narrowest scoped command that covers \
-             your change (e.g. `cargo check -p <crate>`, a single test), never a \
-             workspace-wide build/clippy/test.\n\n\
-             {rules}\n"
-        ),
-        _ => String::new(),
-    };
-    out = out.replace(
-        "{{verification_rules_section}}",
-        &verification_rules_section,
-    );
 
     // Hard cap: truncate the rendered system prompt to prevent context window
     // blowout when individual sections escape their soft limits.

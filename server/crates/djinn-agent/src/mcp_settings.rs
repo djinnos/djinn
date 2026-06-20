@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+
+pub mod mcp_json;
 
 /// Configuration for a single named MCP server, as discovered from
 /// `mcp.json`-style files at the project root.
@@ -88,7 +89,7 @@ pub fn effective_skill_names(global_skills: &[String], role_skills: &[String]) -
 pub fn load_mcp_server_registry(
     worktree_path: &std::path::Path,
 ) -> HashMap<String, McpServerConfig> {
-    crate::verification::mcp_json::load_mcp_server_registry(worktree_path)
+    mcp_json::load_mcp_server_registry(worktree_path)
 }
 
 /// Resolve a list of role-level MCP server names against the project's registry.
@@ -134,20 +135,6 @@ pub fn resolve_mcp_servers<'a>(
         }
     }
     resolved
-}
-
-/// Compute the verification cache key from a commit SHA and the resolved scoped command set.
-///
-/// The key encodes both the commit identity and the exact commands run so that different
-/// scoped command sets for the same commit produce different cache entries.
-pub fn verification_cache_key(commit_sha: &str, scoped_commands: &[String]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(commit_sha.as_bytes());
-    for cmd in scoped_commands {
-        hasher.update(b"\x00");
-        hasher.update(cmd.as_bytes());
-    }
-    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]

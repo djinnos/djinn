@@ -38,9 +38,7 @@ use crate::tools::project_tools::{
     ProjectAddFromGithubParams, ProjectBranchesParams, ProjectConfigGetParams,
     ProjectConfigSetParams, ProjectEnvironmentConfigGetParams, ProjectEnvironmentConfigResetParams,
     ProjectEnvironmentConfigSetParams, ProjectGraphExclusionsGetParams,
-    ProjectGraphExclusionsSetParams, ProjectRemoveParams, ProjectVerificationGetParams,
-    ProjectVerificationSetParams, ProjectVerificationTestParams,
-    ProjectVerificationTestStatusParams, RetriggerImageBuildParams,
+    ProjectGraphExclusionsSetParams, ProjectRemoveParams, RetriggerImageBuildParams,
 };
 use crate::tools::proposal_blocks::ProposalBlocksParams;
 use crate::tools::proposal_tools::{
@@ -338,34 +336,6 @@ impl DjinnMcpServer {
                 name,
                 self.project_environment_config_reset(Parameters(decode_args::<
                     ProjectEnvironmentConfigResetParams,
-                >(name, args)?))
-                    .await,
-            ),
-            "project_verification_get" => map_json(
-                name,
-                self.project_verification_get(Parameters(decode_args::<
-                    ProjectVerificationGetParams,
-                >(name, args)?))
-                    .await,
-            ),
-            "project_verification_set" => map_json(
-                name,
-                self.project_verification_set(Parameters(decode_args::<
-                    ProjectVerificationSetParams,
-                >(name, args)?))
-                    .await,
-            ),
-            "project_verification_test" => map_json(
-                name,
-                self.project_verification_test(Parameters(decode_args::<
-                    ProjectVerificationTestParams,
-                >(name, args)?))
-                    .await,
-            ),
-            "project_verification_test_status" => map_json(
-                name,
-                self.project_verification_test_status(Parameters(decode_args::<
-                    ProjectVerificationTestStatusParams,
                 >(name, args)?))
                     .await,
             ),

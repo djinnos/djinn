@@ -200,7 +200,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::actors::coordinator::{
-        CoordinatorDeps, CoordinatorHandle, DEFAULT_MODEL_ID, VerificationTracker,
+        BackgroundWorkTracker, CoordinatorDeps, CoordinatorHandle, DEFAULT_MODEL_ID,
     };
     use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
     use crate::roles::RoleRegistry;
@@ -233,7 +233,7 @@ mod tests {
         );
         let catalog = CatalogService::new();
         let health = HealthTracker::new();
-        let verification_tracker = VerificationTracker::default();
+        let background_work_tracker = BackgroundWorkTracker::default();
         let role_registry = Arc::new(RoleRegistry::new());
         CoordinatorHandle::spawn(CoordinatorDeps::new(
             tx.clone(),
@@ -243,7 +243,7 @@ mod tests {
             catalog,
             health,
             role_registry,
-            verification_tracker,
+            background_work_tracker,
             crate::lsp::LspManager::new(),
         ))
     }

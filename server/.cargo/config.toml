@@ -1,6 +1,6 @@
 [build]
 # NOTE: `rustc-wrapper = "sccache"` is intentionally NOT set here. The djinn
-# platform (warm/verify/worker pods) reuses a warm, main-based per-project
+# platform (warm/worker pods) reuses a warm, main-based per-project
 # cargo target base with INCREMENTAL compilation (CI-style, like
 # Swatinem/rust-cache); sccache forbids incremental, so forcing it here would
 # disable the whole warm-cache fast path. CI keeps sccache by setting
@@ -49,7 +49,7 @@ DJINN_TEST_DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:5433/postgres"
 DJINN_VAULT_KEY_PATH = "/var/tmp/djinn-test-vault/vault.key"
 # NOTE: incremental compilation is left at cargo's profile defaults
 # (dev/test = ON). We deliberately do NOT clamp `CARGO_INCREMENTAL` here:
-# the djinn warm/verify/worker pods rely on consistent incremental-on so the
+# the djinn warm/worker pods rely on consistent incremental-on so the
 # warm-base seed is reusable, and a `force = true` clamp would override the
 # env they set. CI still pins `CARGO_INCREMENTAL: 0` + sccache in
 # `.github/workflows/quality-gate.yml`, so the GitHub Actions cache stays

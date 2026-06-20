@@ -1724,7 +1724,6 @@ mod tests {
                 reason: "planner-only flow finished".into(),
             },
             stages_completed: vec![RoleKind::Planner],
-            verification_run_id: None,
         };
         let event_frame = Frame {
             correlation_id: 0,
@@ -1846,7 +1845,6 @@ mod tests {
                 reason: "into_parts held the slot".into(),
             },
             stages_completed: vec![RoleKind::Planner],
-            verification_run_id: None,
         };
         let event_frame = Frame {
             correlation_id: 0,
