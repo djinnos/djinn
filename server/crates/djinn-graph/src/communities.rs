@@ -987,7 +987,10 @@ mod tests {
         }
         let mut best = 0.0_f64;
         for comm in communities {
-            let in_comm = crate_nodes.iter().filter(|&&v| comm.member_ids.contains(&v)).count();
+            let in_comm = crate_nodes
+                .iter()
+                .filter(|&&v| comm.member_ids.contains(&v))
+                .count();
             let frac = in_comm as f64 / crate_nodes.len() as f64;
             if frac > best {
                 best = frac;
@@ -1007,6 +1010,7 @@ mod tests {
             },
         );
 
+        // Assert per-crate: ≥80% of each crate's nodes land in one community.
         for crate_name in ["alpha", "beta", "gamma"] {
             let purity = best_crate_purity(crate_name, &graph, &communities, &crate_map);
             assert!(
@@ -1015,6 +1019,21 @@ mod tests {
                 crate_name,
                 purity
             );
+        }
+
+        // Assert per-community: every community with ≥2 members has ≥80%
+        // purity (i.e. the dominant crate accounts for ≥80% of members).
+        for comm in &communities {
+            if comm.symbol_count >= 2 {
+                let purity = crate_purity(comm, &graph, &crate_map);
+                assert!(
+                    purity >= 0.80,
+                    "community '{}' ({} members) should have ≥80% purity, got {:.2}",
+                    comm.label,
+                    comm.symbol_count,
+                    purity
+                );
+            }
         }
     }
 
