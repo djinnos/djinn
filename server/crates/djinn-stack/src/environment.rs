@@ -39,7 +39,6 @@ const MAX_WORKSPACES: usize = 64;
 const MAX_ENV_ENTRIES: usize = 256;
 const MAX_SYSTEM_PACKAGES: usize = 256;
 const MAX_HOOKS_PER_PHASE: usize = 64;
-const MAX_VERIFICATION_RULES: usize = 128;
 const MAX_LANGUAGE_LIST: usize = 64;
 const MAX_STRING_LEN: usize = 512;
 const MAX_WORKSPACE_TAGS: usize = 32;
@@ -71,8 +70,6 @@ pub enum EnvironmentConfigError {
     InvalidEnvKey { key: String },
     #[error("env var {key:?}: value contains disallowed newline/NUL")]
     InvalidEnvValue { key: String },
-    #[error("{field}: verification rule has empty commands list")]
-    EmptyVerificationCommands { field: String },
 }
 
 pub type EnvResult<T> = std::result::Result<T, EnvironmentConfigError>;
@@ -122,7 +119,7 @@ pub struct EnvironmentConfig {
     /// The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
     /// cache strategy from the repository it is about to run, including the
     /// Cargo workspace layout, `.cargo/config.toml` settings such as
-    /// `rustc-wrapper`, and configured setup/verification command shapes. That
+    /// `rustc-wrapper`, and configured setup command shapes. That
     /// detection is deliberately read-only. djinn may read `.cargo/config.toml`
     /// to keep warm-job and worker behavior consistent with the project, but it
     /// never creates, edits, or rewrites the project's `.cargo/config.toml`.
@@ -176,10 +173,6 @@ impl EnvironmentConfig {
     /// * `workspaces` — one entry per `StackWorkspace`, with
     ///   toolchain/version routed to the right field per language.
     /// * `env`, `system_packages`, `lifecycle` — empty.
-    ///
-    /// Verification rules are no longer part of this config — they live in the
-    /// `project_verifications` table now. Seed them via
-    /// [`default_verification_rules`].
     pub fn from_stack(stack: &crate::schema::Stack) -> Self {
         let mut cfg = Self::empty();
         cfg.source = ConfigSource::AutoDetected;
@@ -339,7 +332,7 @@ fn default_cargo_cache_policy() -> Option<CargoCachePolicy> {
 ///
 /// The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
 /// consumers resolve the policy by reading the project shape (Cargo workspace
-/// layout, `.cargo/config.toml`, and configured setup/verification command
+/// layout, `.cargo/config.toml`, and configured setup command
 /// patterns) instead of hardcoding one universal compile set. That resolver is
 /// intentionally non-mutating. It may observe a project's `.cargo/config.toml`,
 /// including `rustc-wrapper = "sccache"` and feature-related settings, but it
@@ -823,7 +816,7 @@ fn is_valid_env_key(key: &str) -> bool {
 
 // ---- lifecycle ----------------------------------------------------------
 
-/// A lifecycle / verification / setup command.
+/// A lifecycle / setup command.
 ///
 /// Shape matches the `LifecycleCommand` enum in
 /// `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
@@ -912,10 +905,9 @@ pub struct LifecycleHooks {
     /// Runs in the task-run Pod before the supervisor starts.
     #[serde(default)]
     pub pre_task: Vec<HookCommand>,
-    /// Runs once in the task-run Pod, before any verification rule fires.
-    /// Typically `pnpm install` / `cargo build` / similar — commands that
-    /// prepare the workspace so the `verification.rules` commands succeed.
-    /// Previously lived as `verification.setup`.
+    /// Workspace setup hook that runs once in the task-run Pod before the
+    /// supervisor starts. Typically `pnpm install` / `cargo build` / similar
+    /// — commands that prepare the workspace for the agent session.
     #[serde(default)]
     pub pre_verification: Vec<HookCommand>,
 }
@@ -943,140 +935,6 @@ fn validate_hook_list(field: &str, hooks: &[HookCommand]) -> EnvResult<()> {
     }
     Ok(())
 }
-
-// ---- verification -------------------------------------------------------
-
-/// One verification rule.
-///
-/// Field names and semantics match the pre-cut-over
-/// `djinn_db::repositories::project::VerificationRule`, so the P5 boot hook
-/// can copy `projects.verification_rules` straight into
-/// `environment_config.verification.rules` without a translation step.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct VerificationRule {
-    pub match_pattern: String,
-    pub commands: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Verification {
-    /// Rules moved verbatim from `projects.verification_rules` by the P5
-    /// boot reseed hook. The former `setup` field lives at
-    /// `lifecycle.pre_verification` now.
-    #[serde(default)]
-    pub rules: Vec<VerificationRule>,
-}
-
-impl Verification {
-    pub fn validate(&self) -> EnvResult<()> {
-        if self.rules.len() > MAX_VERIFICATION_RULES {
-            return Err(EnvironmentConfigError::ListTooLong {
-                field: "verification.rules".into(),
-                len: self.rules.len(),
-                max: MAX_VERIFICATION_RULES,
-            });
-        }
-        for (i, rule) in self.rules.iter().enumerate() {
-            if rule.match_pattern.len() > MAX_STRING_LEN {
-                return Err(EnvironmentConfigError::TooLong {
-                    field: format!("verification.rules[{i}].match_pattern"),
-                    len: rule.match_pattern.len(),
-                    max: MAX_STRING_LEN,
-                });
-            }
-            if rule.commands.is_empty() {
-                return Err(EnvironmentConfigError::EmptyVerificationCommands {
-                    field: format!("verification.rules[{i}].commands"),
-                });
-            }
-            if rule.commands.len() > MAX_HOOKS_PER_PHASE {
-                return Err(EnvironmentConfigError::ListTooLong {
-                    field: format!("verification.rules[{i}].commands"),
-                    len: rule.commands.len(),
-                    max: MAX_HOOKS_PER_PHASE,
-                });
-            }
-            for (j, cmd) in rule.commands.iter().enumerate() {
-                if cmd.len() > MAX_HOOK_SHELL_LEN {
-                    return Err(EnvironmentConfigError::TooLong {
-                        field: format!("verification.rules[{i}].commands[{j}]"),
-                        len: cmd.len(),
-                        max: MAX_HOOK_SHELL_LEN,
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Auto-detected verification rule for a workspace, if its language has
-/// a safe language-primitive command set. Returns `None` for languages
-/// whose verification surface depends on project-specific configuration
-/// (Node/Python/Java/Ruby/Dotnet/Clang) — those rules are author-only.
-///
-/// `root` is the repo-relative workspace root (empty string for a
-/// root-level workspace). Commands run from the repo root so we embed
-/// the manifest path; the glob likewise anchors under `root`.
-fn default_verification_rule(language: &str, root: &str) -> Option<VerificationRule> {
-    // Build the glob prefix: empty root → match repo root; otherwise
-    // `root/**` style match. Normalize trailing `/` so we don't end up
-    // with `server//**`.
-    let root_trim = root.trim_end_matches('/');
-    let glob_prefix = if root_trim.is_empty() {
-        String::new()
-    } else {
-        format!("{root_trim}/")
-    };
-    match language {
-        "rust" => {
-            let manifest = if root_trim.is_empty() {
-                "Cargo.toml".to_string()
-            } else {
-                format!("{root_trim}/Cargo.toml")
-            };
-            // `cargo clippy -- -D warnings` is a strict superset of
-            // `cargo check` (it runs the type checker AND clippy lints),
-            // so we skip the redundant `cargo check` invocation.
-            Some(VerificationRule {
-                match_pattern: format!("{glob_prefix}**/*.rs"),
-                commands: vec![
-                    format!("cargo clippy --manifest-path {manifest} -- -D warnings"),
-                    format!("cargo test --manifest-path {manifest}"),
-                ],
-            })
-        }
-        "go" => {
-            let scope = if root_trim.is_empty() {
-                "./...".to_string()
-            } else {
-                format!("./{root_trim}/...")
-            };
-            Some(VerificationRule {
-                match_pattern: format!("{glob_prefix}**/*.go"),
-                commands: vec![format!("go vet {scope}"), format!("go test {scope}")],
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Safe default verification rules for a freshly-detected stack — one rule per
-/// workspace whose language has a language-primitive command set (Rust, Go).
-/// Extracted from `from_stack` when verification moved out of
-/// `EnvironmentConfig` into its own `project_verifications` store; the boot
-/// reseed hook and the on-demand reset path seed the verification table with
-/// the output.
-pub fn default_verification_rules(stack: &crate::schema::Stack) -> Vec<VerificationRule> {
-    stack
-        .workspaces
-        .iter()
-        .filter_map(|ws| default_verification_rule(&ws.language, &ws.root))
-        .collect()
-}
-
 // ---- string validators --------------------------------------------------
 
 /// Accept `[A-Za-z0-9._-]+` — the character set that's safe in a `RUN`
@@ -1744,74 +1602,6 @@ mod tests {
             err,
             EnvironmentConfigError::UnsafeIdentifier { .. }
         ));
-    }
-
-    #[test]
-    fn verification_rules_round_trip_existing_shape() {
-        // Matches the JSON shape the pre-cut-over djinn-db VerificationRule
-        // emits via serde — P5's reseed hook copies that blob verbatim.
-        let raw = r#"[
-            {"match_pattern": "src/**/*.rs", "commands": ["cargo test"]},
-            {"match_pattern": "**", "commands": ["cargo check", "cargo fmt --check"]}
-        ]"#;
-        let rules: Vec<VerificationRule> = serde_json::from_str(raw).unwrap();
-        assert_eq!(rules.len(), 2);
-        assert_eq!(rules[0].match_pattern, "src/**/*.rs");
-        assert_eq!(rules[1].commands.len(), 2);
-    }
-
-    #[test]
-    fn verification_rule_with_empty_commands_rejected() {
-        // Verification now validates standalone (it left EnvironmentConfig).
-        let v = Verification {
-            rules: vec![VerificationRule {
-                match_pattern: "**".to_owned(),
-                commands: vec![],
-            }],
-        };
-        let err = v.validate().unwrap_err();
-        assert!(matches!(
-            err,
-            EnvironmentConfigError::EmptyVerificationCommands { .. }
-        ));
-    }
-
-    #[test]
-    fn config_no_longer_serializes_a_verification_key() {
-        let json = serde_json::to_string(&EnvironmentConfig::empty()).unwrap();
-        // Match the top-level key specifically — `lifecycle.pre_verification`
-        // legitimately contains the substring "verification".
-        assert!(
-            !json.contains("\"verification\""),
-            "verification moved out of EnvironmentConfig; got: {json}"
-        );
-    }
-
-    #[test]
-    fn default_verification_rules_seeds_rust_and_go_only() {
-        let mut stack = crate::schema::Stack::empty();
-        stack.workspaces = vec![
-            crate::schema::StackWorkspace {
-                root: "".into(),
-                language: "rust".into(),
-                toolchain: None,
-                package_manager: None,
-            },
-            crate::schema::StackWorkspace {
-                root: "svc".into(),
-                language: "go".into(),
-                toolchain: None,
-                package_manager: None,
-            },
-            crate::schema::StackWorkspace {
-                root: "web".into(),
-                language: "node".into(),
-                toolchain: None,
-                package_manager: Some("pnpm".into()),
-            },
-        ];
-        // Rust + Go get a safe default; Node does not.
-        assert_eq!(default_verification_rules(&stack).len(), 2);
     }
 
     #[test]
