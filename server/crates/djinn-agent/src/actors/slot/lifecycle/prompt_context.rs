@@ -590,3 +590,223 @@ fn git_merge_base(worktree_path: &Path, a: &str, b: &str) -> std::io::Result<Str
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use djinn_core::events::EventBus;
+    use djinn_core::models::Epic;
+    use djinn_db::{
+        Database, EpicCreateInput, EpicRepository, ProposalCreateInput, ProposalRepository,
+        TaskRepository,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    use crate::roles::LeadRole;
+    use crate::test_helpers::{agent_context_from_db, create_test_project, test_tempdir};
+
+    async fn create_epic(
+        db: &Database,
+        events: &EventBus,
+        project_id: &str,
+        title: &str,
+        description: &str,
+        status: Option<&str>,
+    ) -> Epic {
+        EpicRepository::new(db.clone(), events.clone())
+            .create_for_project(
+                project_id,
+                EpicCreateInput {
+                    title,
+                    description,
+                    emoji: "🧪",
+                    color: "blue",
+                    owner: "test-owner",
+                    memory_refs: None,
+                    status,
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                },
+            )
+            .await
+            .expect("create test epic")
+    }
+
+    async fn prompt_context_for_task(db: Database, task: &djinn_core::models::Task) -> String {
+        let app_state = agent_context_from_db(db, CancellationToken::new());
+        let worktree = test_tempdir("prompt-context-worktree-");
+        let role = LeadRole;
+        build_prompt_context(PromptContextInputs {
+            task,
+            runtime_role: &role,
+            role_for_epic_check: &role,
+            project_path: "/workspace/test-project",
+            worktree_path: worktree.path(),
+            conflict_ctx: None,
+            merge_validation_ctx: None,
+            prompt_setup_commands: None,
+            prompt_verification_commands: None,
+            prompt_verification_rules: None,
+            system_prompt_extensions: "",
+            learned_prompt: None,
+            resolved_skills: &[],
+            app_state: &app_state,
+            read_sources: &[],
+        })
+        .await
+        .epic_context
+        .expect("lead prompt context includes epic context")
+    }
+
+    #[tokio::test]
+    async fn epic_context_includes_blocking_and_sibling_sections() {
+        let db = Database::ephemeral().await.expect("create ephemeral db");
+        let events = EventBus::noop();
+        let project = create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), events.clone());
+        let task_repo = TaskRepository::new(db.clone(), events.clone());
+        let proposal_repo = ProposalRepository::new(db.clone(), events.clone());
+
+        let subject_epic = create_epic(
+            &db,
+            &events,
+            &project.id,
+            "Subject decomposition epic",
+            "Build on dependency foundations without duplicating them.",
+            None,
+        )
+        .await;
+        let blocking_epic = create_epic(
+            &db,
+            &events,
+            &project.id,
+            "Foundation blocking epic",
+            "Owns the schema and migration foundation.",
+            Some("closed"),
+        )
+        .await;
+
+        task_repo
+            .create(
+                &blocking_epic.id,
+                "Ship shared migration",
+                "migration delivered",
+                "migration design",
+                "task",
+                1,
+                "test-owner",
+                Some("closed"),
+            )
+            .await
+            .expect("create first closed blocker task");
+        task_repo
+            .create(
+                &blocking_epic.id,
+                "Ship shared schema module",
+                "schema module delivered",
+                "schema module design",
+                "task",
+                1,
+                "test-owner",
+                Some("closed"),
+            )
+            .await
+            .expect("create second closed blocker task");
+
+        epic_repo
+            .update_blockers_atomic(
+                &subject_epic.id,
+                std::slice::from_ref(&blocking_epic.id),
+                &[],
+            )
+            .await
+            .expect("wire epic blocker relationship");
+
+        let sibling_epic = create_epic(
+            &db,
+            &events,
+            &project.id,
+            "Sibling proposal epic",
+            "Owns a later proposal phase.",
+            None,
+        )
+        .await;
+        let proposal = proposal_repo
+            .create(ProposalCreateInput {
+                title: "Dependency-aware decomposition proposal",
+                body: "Proposal body",
+                acceptance_criteria: None,
+                status: Some("building"),
+                body_format: None,
+            })
+            .await
+            .expect("create proposal");
+        proposal_repo
+            .link_epic(&proposal.id, &subject_epic.id, &project.id)
+            .await
+            .expect("link subject epic to proposal");
+        proposal_repo
+            .link_epic(&proposal.id, &sibling_epic.id, &project.id)
+            .await
+            .expect("link sibling epic to proposal");
+
+        let task = task_repo
+            .create(
+                &subject_epic.id,
+                "Decompose subject epic",
+                "task description",
+                "task design",
+                "task",
+                1,
+                "test-owner",
+                None,
+            )
+            .await
+            .expect("create subject task");
+
+        let epic_context = prompt_context_for_task(db, &task).await;
+
+        assert!(epic_context.contains("### Blocking Epics"));
+        assert!(epic_context.contains("Foundation blocking epic"));
+        assert!(epic_context.contains("Ship shared migration"));
+        assert!(epic_context.contains("Ship shared schema module"));
+        assert!(epic_context.contains("### Proposal Sibling Epics"));
+        assert!(epic_context.contains("Sibling proposal epic"));
+    }
+
+    #[tokio::test]
+    async fn epic_context_omits_sections_when_no_blockers_or_proposal() {
+        let db = Database::ephemeral().await.expect("create ephemeral db");
+        let events = EventBus::noop();
+        let project = create_test_project(&db).await;
+        let task_repo = TaskRepository::new(db.clone(), events.clone());
+        let standalone_epic = create_epic(
+            &db,
+            &events,
+            &project.id,
+            "Standalone epic",
+            "No blockers and no proposal link.",
+            None,
+        )
+        .await;
+        let task = task_repo
+            .create(
+                &standalone_epic.id,
+                "Standalone task",
+                "task description",
+                "task design",
+                "task",
+                1,
+                "test-owner",
+                None,
+            )
+            .await
+            .expect("create standalone task");
+
+        let epic_context = prompt_context_for_task(db, &task).await;
+
+        assert!(!epic_context.contains("### Blocking Epics"));
+        assert!(!epic_context.contains("### Proposal Sibling Epics"));
+    }
+}

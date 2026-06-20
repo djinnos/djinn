@@ -214,7 +214,7 @@ impl Database {
     /// Open an isolated test database.
     ///
     /// Uses the Postgres template-clone approach: take the base URL from
-    /// `DJINN_TEST_DATABASE_URL` (default
+    /// `DJINN_TEST_DATABASE_URL` (falling back to `TEST_POSTGRES_URL`, then
     /// `postgres://postgres:postgres@127.0.0.1:5433/postgres`), strip any
     /// trailing `/<db>` segment, then construct an admin connection against
     /// `<base>/postgres`, `CREATE DATABASE djinn_test_<uuid> TEMPLATE
@@ -228,6 +228,7 @@ impl Database {
     /// `cargo nextest` parallelism.
     pub fn open_in_memory() -> DbResult<Self> {
         let base = std::env::var("DJINN_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("TEST_POSTGRES_URL"))
             .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:5433/postgres".to_owned());
         let server_prefix = strip_server_prefix(&base);
         let test_db = format!("djinn_test_{}", uuid::Uuid::now_v7().simple());
@@ -241,6 +242,16 @@ impl Database {
                 test_db,
             })),
         )
+    }
+
+    /// Open an isolated ephemeral Postgres database for async integration tests.
+    ///
+    /// This is an async-facing alias for the template-cloned test database
+    /// harness used by [`Self::open_in_memory`]. It keeps tests that seed
+    /// realistic repository data explicit about using the ephemeral database
+    /// harness without changing the underlying setup semantics.
+    pub async fn ephemeral() -> DbResult<Self> {
+        std::future::ready(Self::open_in_memory()).await
     }
 
     pub fn pool(&self) -> &PgPool {
