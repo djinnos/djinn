@@ -1,21 +1,18 @@
 //! Per-project verification rules (`project_verifications` table, migration 44).
 //!
-//! Verification rules left `projects.environment_config` so that editing a
-//! verify command no longer rebuilds the image (the rule was part of the
-//! hashed config, and `set_environment_config` nulls `image_hash` on every
-//! write). Rules now live here, edited independently of the image.
+//! Verification is being removed (epic sehj). The `project_verifications`
+//! table is dropped by migration 72 but this repository module remains
+//! temporarily pending the full removal of all verification references. It
+//! uses the non-macro `sqlx::query` form (like the other verification repos).
 //!
-//! Like [`ProjectRepository::get_environment_config`], this repository is
-//! JSON-string based — it stores/returns the raw `rules` array as text and
-//! leaves typing + validation to the callers that depend on `djinn-stack`
-//! (the MCP layer and the agent verification pipeline). It uses the
-//! **non-macro** `sqlx::query` form so a fresh `project_verifications` table
-//! doesn't require regenerating the offline `.sqlx` cache to compile.
+//! All methods gracefully degrade when the table no longer exists (post
+//! migration 72): reads return `None`, writes are silent no-ops.
 
 use sqlx::Row;
 
 use crate::Result;
 use crate::database::Database;
+use crate::repositories::verification_common::ok_if_table_dropped;
 
 pub struct VerificationRepository {
     db: Database,
@@ -36,8 +33,17 @@ impl VerificationRepository {
         )
         .bind(project_id)
         .fetch_optional(self.db.pool())
-        .await?;
-        Ok(row.map(|r| r.get::<String, _>("rules")))
+        .await;
+        match row {
+            Ok(row) => Ok(row.map(|r| r.get::<String, _>("rules"))),
+            Err(e) => {
+                if ok_if_table_dropped(&e) {
+                    Ok(None)
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
     }
 
     /// Upsert the `rules` array for a project. `rules_json` must be a JSON
@@ -49,7 +55,7 @@ impl VerificationRepository {
         // The `$2::jsonb` cast types the bind as `serde_json::Value`.
         let rules: serde_json::Value = serde_json::from_str(rules_json)
             .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
-        sqlx::query(
+        let res = sqlx::query(
             r#"INSERT INTO project_verifications (project_id, rules, source, updated_at)
                VALUES ($1, $2::jsonb, $3,
                        to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
@@ -62,8 +68,12 @@ impl VerificationRepository {
         .bind(rules)
         .bind(source)
         .execute(self.db.pool())
-        .await?;
-        Ok(())
+        .await;
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) if ok_if_table_dropped(&e) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Insert default rules for a project only if it has no row yet. Used by
@@ -73,7 +83,7 @@ impl VerificationRepository {
         self.db.ensure_initialized().await?;
         let rules: serde_json::Value = serde_json::from_str(rules_json)
             .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
-        sqlx::query(
+        let res = sqlx::query(
             r#"INSERT INTO project_verifications (project_id, rules, source)
                VALUES ($1, $2::jsonb, 'auto_detected')
                ON CONFLICT (project_id) DO NOTHING"#,
@@ -81,85 +91,11 @@ impl VerificationRepository {
         .bind(project_id)
         .bind(rules)
         .execute(self.db.pool())
-        .await?;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use djinn_core::events::EventBus;
-
-    use crate::repositories::project::ProjectRepository;
-
-    async fn seed_project(db: &Database, id: &str) {
-        db.ensure_initialized().await.unwrap();
-        ProjectRepository::new(db.clone(), EventBus::noop())
-            .create_with_id(id, &format!("p-{id}"), "test", id)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn get_returns_none_when_absent() {
-        let db = Database::open_in_memory().unwrap();
-        seed_project(&db, "p1").await;
-        let repo = VerificationRepository::new(db.clone());
-        assert!(repo.get_rules("p1").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn set_then_get_round_trips() {
-        let db = Database::open_in_memory().unwrap();
-        seed_project(&db, "p1").await;
-        let repo = VerificationRepository::new(db.clone());
-        let rules = r#"[{"match_pattern":"**/*.rs","commands":["cargo test"]}]"#;
-        repo.set_rules("p1", rules, "user_edited").await.unwrap();
-        let got = repo.get_rules("p1").await.unwrap().expect("row");
-        let parsed: serde_json::Value = serde_json::from_str(&got).unwrap();
-        assert_eq!(parsed[0]["match_pattern"], "**/*.rs");
-    }
-
-    #[tokio::test]
-    async fn seed_if_absent_does_not_clobber() {
-        let db = Database::open_in_memory().unwrap();
-        seed_project(&db, "p1").await;
-        let repo = VerificationRepository::new(db.clone());
-        repo.set_rules(
-            "p1",
-            r#"[{"match_pattern":"x","commands":["a"]}]"#,
-            "user_edited",
-        )
-        .await
-        .unwrap();
-        repo.seed_if_absent("p1", r#"[{"match_pattern":"y","commands":["b"]}]"#)
-            .await
-            .unwrap();
-        let got = repo.get_rules("p1").await.unwrap().unwrap();
-        assert!(
-            got.contains('x') && !got.contains('y'),
-            "seed must not clobber: {got}"
-        );
-    }
-
-    #[tokio::test]
-    async fn cascade_deletes_with_project() {
-        let db = Database::open_in_memory().unwrap();
-        seed_project(&db, "p1").await;
-        let repo = VerificationRepository::new(db.clone());
-        repo.set_rules(
-            "p1",
-            r#"[{"match_pattern":"x","commands":["a"]}]"#,
-            "user_edited",
-        )
-        .await
-        .unwrap();
-        sqlx::query("DELETE FROM projects WHERE id = $1")
-            .bind("p1")
-            .execute(db.pool())
-            .await
-            .unwrap();
-        assert!(repo.get_rules("p1").await.unwrap().is_none());
+        .await;
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) if ok_if_table_dropped(&e) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 }

@@ -33,6 +33,7 @@ export interface ProposalChatScope {
   proposalId: string;
   proposalShortId: string;
   proposalTitle: string;
+  targetSection?: string;
   feedbackId?: string;
   feedbackAuthor?: string;
   feedbackBody?: string;
