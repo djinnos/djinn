@@ -84,7 +84,7 @@ In this pruning/repair arm:
 
 Call `impact_check` if the proposed wave touches ANY of:
 
-- A public symbol (function, struct, enum, trait, type alias, const) — removal, rename, signature change, visibility change (`pub` → `pub(crate)`), or `#[deprecated]` → `#[removed]`.
+- A public symbol (function, struct, enum, trait, type alias, const) — removal, rename, signature change, visibility change (pub → pub(crate)), or #[deprecated] → #[removed].
 - A public file path that other crates import (`use crate::...`, `mod foo;` across crate boundaries).
 - A whole crate rename or removal from the workspace (`Cargo.toml` member changes).
 - A SQL migration that drops or renames a table, column, type, function, or view referenced by any repository.
