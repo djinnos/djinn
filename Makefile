@@ -9,7 +9,7 @@ SERVER_DIR := $(CURDIR)/server
 # Postgres (docker-compose.yml → `postgres-test` service at :5433) plus the
 # test harness targets that depend on it.
 
-.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check skills-manifest-generate skills-manifest-check test test-all validate-taskrun-backstop
+.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check skills-manifest-generate skills-manifest-check test test-all validate-taskrun-backstop check-boundaries
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -102,3 +102,9 @@ test-all: ## Run the merge-queue/full-suite nextest command with template Postgr
 
 validate-taskrun-backstop: ## Run epic 8451 full Postgres-backed validation
 	./scripts/validate-taskrun-backstop.sh
+
+check-boundaries: ## Run crate-level architectural boundary checks against the server workspace
+	cd $(SERVER_DIR) && cargo run --bin check-boundaries -- \
+		--rules boundary_rules.toml \
+		--project-id $$DJINN_PROJECT_ID \
+		--project-path $$DJINN_PROJECT_PATH

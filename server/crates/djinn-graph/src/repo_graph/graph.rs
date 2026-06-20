@@ -156,6 +156,7 @@ pub struct SymbolRange {
 pub struct RepoGraphBuildOptions {
     pub process_detection_enabled: bool,
     pub process_parity_enabled: bool,
+    pub community_crate_seeding_enabled: bool,
 }
 
 impl RepoGraphBuildOptions {
@@ -163,6 +164,7 @@ impl RepoGraphBuildOptions {
         Self {
             process_detection_enabled: crate::processes::process_detection_enabled(),
             process_parity_enabled: crate::processes::process_parity_enabled(),
+            community_crate_seeding_enabled: crate::communities::crate_seeding_enabled(),
         }
     }
 
@@ -175,12 +177,52 @@ impl RepoGraphBuildOptions {
         self.process_parity_enabled = enabled;
         self
     }
+
+    pub fn with_community_crate_seeding(mut self, enabled: bool) -> Self {
+        self.community_crate_seeding_enabled = enabled;
+        self
+    }
 }
 
 impl Default for RepoGraphBuildOptions {
     fn default() -> Self {
         Self::from_env()
     }
+}
+
+fn resolve_community_seed_by_crate(
+    project_root: Option<&Path>,
+    enabled: bool,
+    crate_map: Option<&BTreeMap<PathBuf, String>>,
+) -> Option<BTreeMap<PathBuf, String>> {
+    if !enabled {
+        return None;
+    }
+    let map = crate_map
+        .cloned()
+        .or_else(|| project_root.map(crate::canonical_graph::derive_crate_map))
+        .filter(|map| !map.is_empty())?;
+    Some(expand_crate_map_for_graph_paths(project_root, map))
+}
+
+fn expand_crate_map_for_graph_paths(
+    project_root: Option<&Path>,
+    mut crate_map: BTreeMap<PathBuf, String>,
+) -> BTreeMap<PathBuf, String> {
+    let Some(root) = project_root else {
+        return crate_map;
+    };
+    let relative_entries: Vec<(PathBuf, String)> = crate_map
+        .iter()
+        .filter_map(|(path, name)| {
+            path.strip_prefix(root)
+                .ok()
+                .filter(|relative| !relative.as_os_str().is_empty())
+                .map(|relative| (relative.to_path_buf(), name.clone()))
+        })
+        .collect();
+    crate_map.extend(relative_entries);
+    crate_map
 }
 
 /// Computed audit metadata for route-consumer edges. Kept out of persisted edge
@@ -313,8 +355,26 @@ impl RepoDependencyGraph {
         project_root: Option<&Path>,
         options: RepoGraphBuildOptions,
     ) -> Result<Self, String> {
+        Self::try_build_with_source_options_and_crate_map(indices, project_root, options, None)
+    }
+
+    /// Fallible build with explicit temporary rollout toggles and an optional
+    /// precomputed crate map for crate-aware community seeding. The map is used
+    /// only when crate seeding is explicitly enabled in `options`.
+    pub fn try_build_with_source_options_and_crate_map(
+        indices: &[ParsedScipIndex],
+        project_root: Option<&Path>,
+        options: RepoGraphBuildOptions,
+        crate_map: Option<&BTreeMap<PathBuf, String>>,
+    ) -> Result<Self, String> {
+        let community_seed_by_crate = resolve_community_seed_by_crate(
+            project_root,
+            options.community_crate_seeding_enabled,
+            crate_map,
+        );
         let mut builder = super::RepoDependencyGraphBuilder {
             project_root: project_root.map(|p| p.to_path_buf()),
+            community_seed_by_crate,
             ..Default::default()
         };
         for index in indices {
@@ -362,8 +422,37 @@ impl RepoDependencyGraph {
     where
         I: Iterator<Item = &'a ScipFile>,
     {
+        Self::try_build_with_scip_files_options_and_crate_map(
+            files,
+            workspace_slug,
+            external_symbols,
+            project_root,
+            options,
+            None,
+        )
+    }
+
+    /// Like [`Self::try_build_with_scip_files_options`] with an optional
+    /// precomputed crate map for crate-aware community seeding.
+    pub fn try_build_with_scip_files_options_and_crate_map<'a, I>(
+        files: I,
+        workspace_slug: &str,
+        external_symbols: &[ScipSymbol],
+        project_root: Option<&Path>,
+        options: RepoGraphBuildOptions,
+        crate_map: Option<&BTreeMap<PathBuf, String>>,
+    ) -> Result<Self, String>
+    where
+        I: Iterator<Item = &'a ScipFile>,
+    {
+        let community_seed_by_crate = resolve_community_seed_by_crate(
+            project_root,
+            options.community_crate_seeding_enabled,
+            crate_map,
+        );
         let mut builder = super::RepoDependencyGraphBuilder {
             project_root: project_root.map(|p| p.to_path_buf()),
+            community_seed_by_crate,
             ..Default::default()
         };
         builder.add_scip_files(workspace_slug, external_symbols, files);
@@ -392,12 +481,43 @@ impl RepoDependencyGraph {
         F: std::borrow::Borrow<ScipFile>,
         E: std::fmt::Display,
     {
+        Self::try_build_with_scip_file_iter_options_and_crate_map(
+            files,
+            workspace_slug,
+            external_symbols,
+            project_root,
+            RepoGraphBuildOptions::from_env(),
+            None,
+        )
+    }
+
+    /// Like [`Self::try_build_with_scip_file_iter`] with explicit build options
+    /// and an optional precomputed crate map for crate-aware community seeding.
+    pub fn try_build_with_scip_file_iter_options_and_crate_map<I, F, E>(
+        files: I,
+        workspace_slug: &str,
+        external_symbols: &[ScipSymbol],
+        project_root: Option<&Path>,
+        options: RepoGraphBuildOptions,
+        crate_map: Option<&BTreeMap<PathBuf, String>>,
+    ) -> Result<Self, String>
+    where
+        I: Iterator<Item = Result<F, E>>,
+        F: std::borrow::Borrow<ScipFile>,
+        E: std::fmt::Display,
+    {
+        let community_seed_by_crate = resolve_community_seed_by_crate(
+            project_root,
+            options.community_crate_seeding_enabled,
+            crate_map,
+        );
         let mut builder = super::RepoDependencyGraphBuilder {
             project_root: project_root.map(|p| p.to_path_buf()),
+            community_seed_by_crate,
             ..Default::default()
         };
         builder.add_scip_files_fallible(workspace_slug, external_symbols, files)?;
-        Self::finish_builder(builder, project_root, RepoGraphBuildOptions::from_env())
+        Self::finish_builder(builder, project_root, options)
     }
 
     /// Common post-build pipeline: entry-point detection, process

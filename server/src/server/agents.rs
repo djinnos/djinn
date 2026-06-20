@@ -255,7 +255,6 @@ async fn update_agent(
     } else {
         existing.model_preference.as_deref()
     };
-
     let updated = repo
         .update(
             &id,
