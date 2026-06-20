@@ -1,5 +1,3 @@
-import type { ProposalFeedback } from "@/api/types";
-
 // Matches <tag-name attributes>content</tag-name> — same pattern as the
 // server-side Rust parser so block boundaries are identical in both places.
 const BLOCK_REGEX = /<([a-z-]+)([^>]*)>([\s\S]*?)<\/\1>/g;
@@ -10,11 +8,6 @@ const ATTR_REGEX = /([a-z_-]+)="([^"]*)"/g;
 // ──────────────────────────────────────────────────────────────────────────────
 // Types
 // ──────────────────────────────────────────────────────────────────────────────
-
-export interface BlockRendererProps {
-  body: string;
-  feedback?: ProposalFeedback[];
-}
 
 interface BlockSegment {
   kind: "block";
