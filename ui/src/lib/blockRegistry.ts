@@ -14,7 +14,7 @@ import {
 import {
   PROPOSAL_BLOCK_REGISTRY,
   type ProposalBlockDefinition,
-} from "@/lib/proposalBlocks";
+} from "@/components/proposals/blocks/blockRegistry";
 
 type ProposalBlockType = keyof typeof PROPOSAL_BLOCK_REGISTRY;
 

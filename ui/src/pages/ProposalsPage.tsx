@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -90,6 +90,22 @@ const TERMINAL_COLLAPSED_STATUSES = new Set<ProposalStatus>([
   "done",
   "rejected",
 ]);
+
+const BLOCK_HIGHLIGHT_CLASSES = [
+  "ring-2",
+  "ring-primary",
+  "ring-offset-2",
+  "transition-all",
+  "duration-1000",
+  "rounded-lg",
+];
+
+function cssStringEscape(value: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(value);
+  }
+  return value.replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+}
 
 function defaultCollapsed(status: ProposalStatus): boolean {
   return TERMINAL_COLLAPSED_STATUSES.has(status);
@@ -335,7 +351,10 @@ function ProposalDetailView({
   onChanged: () => void;
 }) {
   const proposal = detail.proposal as Proposal;
+  const location = useLocation();
   const diffRef = useRef<ProposalDiffHandle>(null);
+  const specContainerRef = useRef<HTMLDivElement>(null);
+  const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const me = useAuthUser();
   const caps = capsFromUser(me);
   const usersQuery = useQuery(usersQueryOptions());
@@ -350,6 +369,41 @@ function ProposalDetailView({
     [projects, detail.targets]
   );
   const driftState = proposalDriftState(proposal);
+
+  useEffect(() => {
+    const blockId = new URLSearchParams(
+      window.location.search || location.search,
+    ).get("block");
+    if (!blockId) return undefined;
+
+    const specContainer = specContainerRef.current;
+    if (!specContainer) return undefined;
+
+    const target = specContainer.querySelector<HTMLElement>(
+      `[id="${cssStringEscape(blockId)}"]`,
+    );
+    if (!target) return undefined;
+
+    if (highlightTimeoutRef.current) {
+      clearTimeout(highlightTimeoutRef.current);
+    }
+
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.classList.add(...BLOCK_HIGHLIGHT_CLASSES);
+
+    highlightTimeoutRef.current = setTimeout(() => {
+      target.classList.remove(...BLOCK_HIGHLIGHT_CLASSES);
+      highlightTimeoutRef.current = null;
+    }, 3000);
+
+    return () => {
+      if (highlightTimeoutRef.current) {
+        clearTimeout(highlightTimeoutRef.current);
+        highlightTimeoutRef.current = null;
+      }
+      target.classList.remove(...BLOCK_HIGHLIGHT_CLASSES);
+    };
+  }, [location.search, proposal.id, proposal.body, proposal.body_format]);
 
   const openRevisionDiff = () => {
     diffRef.current?.open();
@@ -524,7 +578,7 @@ function ProposalDetailView({
         )}
 
         {/* Spec body — read-only; editing happens via djinn in chat. */}
-        <div className="space-y-2">
+        <div className="space-y-2" ref={specContainerRef} data-testid="proposal-spec">
           <Label className="text-xs uppercase text-muted-foreground">Spec</Label>
           {proposal.body_format === "mdx" ? (
             <BlockRenderer
