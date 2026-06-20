@@ -69,7 +69,8 @@ export interface MemoryGraphNodeAttrs {
 }
 
 /** Edge relationship kinds the adapter can emit. */
-export type MemoryGraphEdgeKind = "wikilink" | "broken";
+export type TypedEdgeKind = "builds_on" | "contradicts" | "supersedes" | "exemplifies" | "derived_from";
+export type MemoryGraphEdgeKind = "wikilink" | "broken" | "co_access" | TypedEdgeKind;
 
 /**
  * Per-edge attributes. `kind: "wikilink"` is the default for resolved
@@ -83,6 +84,10 @@ export interface MemoryGraphEdgeAttrs {
   kind: MemoryGraphEdgeKind;
   /** Present on `broken` stub edges (the raw wikilink text) and wikilink edges. */
   raw_text?: string;
+  /** Dashed line flag (e.g. for `contradicts` typed edges). */
+  dashed?: boolean;
+  /** Weight from the server (present on typed edges). */
+  weight?: number;
 }
 
 // ── Color palette ───────────────────────────────────────────────────────────
@@ -202,6 +207,18 @@ const WIKILINK_EDGE_SIZE = 0.8;
 const BROKEN_EDGE_COLOR = "#f87171"; // red-400 — matches the orphan flag hue
 const BROKEN_EDGE_SIZE = 1.0;
 
+/**
+ * Per-kind styling for typed association edges surfaced from `note_associations`.
+ * The canvas (task 4) reads these to render distinct visual lanes.
+ */
+export const TYPED_EDGE_STYLES: Readonly<Record<string, { color: string; size: number; dashed: boolean }>> = Object.freeze({
+  supersedes:   { color: "#22c55e", size: 2.0, dashed: false }, // green-500
+  contradicts:  { color: "#ef4444", size: 2.0, dashed: true },   // red-500
+  builds_on:    { color: "#3b82f6", size: 1.5, dashed: false }, // blue-500
+  exemplifies:  { color: "#f59e0b", size: 1.5, dashed: false }, // amber-500
+  derived_from: { color: "#8b5cf6", size: 1.5, dashed: false }, // violet-500
+});
+
 // ── Response parser (pure runtime guard) ────────────────────────────────────
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -256,7 +273,19 @@ export function parseMemoryGraphResponse(raw: unknown): MemoryGraphOutput | null
     }))
     .filter((e) => e.source_id.length > 0 && e.target_id.length > 0);
 
-  return { nodes: parsedNodes, edges: parsedEdges };
+  const typedEdges = Array.isArray(raw.typed_edges)
+    ? (raw.typed_edges.filter(isRecord) as Array<Record<string, unknown>>)
+    : [];
+  const parsedTypedEdges = typedEdges
+    .map((e) => ({
+      source_id: String(e.source_id ?? ""),
+      target_id: String(e.target_id ?? ""),
+      kind: typeof e.kind === "string" ? e.kind : "",
+      weight: typeof e.weight === "number" && Number.isFinite(e.weight) ? e.weight : 0,
+    }))
+    .filter((e) => e.source_id.length > 0 && e.target_id.length > 0 && e.kind.length > 0);
+
+  return { nodes: parsedNodes, edges: parsedEdges, typed_edges: parsedTypedEdges };
 }
 
 // ── Core adapter ────────────────────────────────────────────────────────────
@@ -350,6 +379,21 @@ export function buildMemoryGraph(
         raw_text: raw,
       });
     }
+  }
+
+  // Typed association edges — only add when both endpoints are known nodes.
+  const typedEdges = Array.isArray(payload.typed_edges) ? payload.typed_edges : [];
+  for (const edge of typedEdges) {
+    if (!knownIds.has(edge.source_id) || !knownIds.has(edge.target_id)) continue;
+    if (edge.source_id === edge.target_id) continue;
+    const style = TYPED_EDGE_STYLES[edge.kind] ?? { color: "#94a3b8", size: 1.0, dashed: false };
+    graph.addEdge(edge.source_id, edge.target_id, {
+      color: style.color,
+      size: style.size,
+      kind: edge.kind as MemoryGraphEdgeKind,
+      dashed: style.dashed,
+      weight: edge.weight,
+    });
   }
 
   return graph;
