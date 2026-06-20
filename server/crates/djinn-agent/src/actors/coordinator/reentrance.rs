@@ -307,6 +307,39 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn natural_completion_allows_dispatch() {
+        let db = test_helpers::create_test_db();
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = make_epic(&db, &project.id).await;
+
+        let allowed = should_auto_dispatch_planner(
+            &db,
+            DispatchEvent::TaskClosed {
+                epic_id: &epic.id,
+                close_reason: Some("completed"),
+            },
+        )
+        .await;
+        assert!(
+            allowed,
+            "natural completion with no active planner must dispatch"
+        );
+
+        let allowed_epic = should_auto_dispatch_planner(
+            &db,
+            DispatchEvent::EpicCreated {
+                epic_id: &epic.id,
+                auto_breakdown: true,
+            },
+        )
+        .await;
+        assert!(
+            allowed_epic,
+            "epic created with auto_breakdown=true must dispatch"
+        );
+    }
+
     // ── Regression tests: race-condition + propagation (i528-1 §4) ──────────
 
     /// Regression test 1: Create-then-block ordering.
