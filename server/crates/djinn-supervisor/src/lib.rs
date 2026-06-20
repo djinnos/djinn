@@ -1775,7 +1775,6 @@ impl TaskRunSupervisor {
             task_run_id: run_id,
             outcome,
             stages_completed: completed,
-            verification_run_id: None,
         })
     }
 
@@ -1815,9 +1814,6 @@ impl TaskRunSupervisor {
             task_run_id: run_id,
             outcome: TaskRunOutcome::Interrupted,
             stages_completed,
-            // Interrupted runs never reach the worker-submit point, so no in-pod
-            // verification ran.
-            verification_run_id: None,
         })
     }
 }
