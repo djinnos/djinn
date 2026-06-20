@@ -61,10 +61,10 @@ async fn seed_task(
         "INSERT INTO tasks \
          (id, project_id, short_id, title, description, design, \
           status, close_reason, \
-          total_reopen_count, total_verification_failure_count, \
+          total_reopen_count, \
           labels, acceptance_criteria, memory_refs) \
          VALUES ($1, $2, $3, $4, '', '', \
-                 $5, $6, $7, 0, \
+                 $5, $6, $7, \
                  '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
     )
     .bind(task_id)
