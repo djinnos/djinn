@@ -319,6 +319,25 @@ pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedProposalBlock>, String> 
     Ok(blocks)
 }
 
+/// Extract all PascalCase component (JSX-like) tag names from an MDX body, in
+/// first-seen order and de-duplicated. Unlike [`parse_mdx_blocks`], this does
+/// NOT filter to registered tags — it returns every opening tag whose name
+/// starts with an uppercase letter, so callers (e.g. body validation) can
+/// detect unknown blocks. Lowercase HTML tags (`<div>`, `<span>`, …) and
+/// closing tags (`</Tag>`) are intentionally ignored.
+pub fn extract_custom_block_tags(body: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"<([A-Z][A-Za-z0-9]*)").expect("tag regex should compile");
+    let mut tags = Vec::new();
+    let mut seen = HashSet::new();
+    for cap in re.captures_iter(body) {
+        let tag = cap[1].to_string();
+        if seen.insert(tag.clone()) {
+            tags.push(tag);
+        }
+    }
+    tags
+}
+
 /// Parse `key="value"` and `key='value'` attributes from an MDX opening tag.
 fn parse_attributes(attrs_str: &str) -> HashMap<String, String> {
     let re = regex::Regex::new(r#"([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#)
@@ -499,5 +518,51 @@ fn main() {}
         ];
         let err = validate_block_ids(&blocks).unwrap_err();
         assert!(err.contains("duplicate block id"));
+    }
+
+    #[test]
+    fn extract_tags_returns_registered_and_unknown() {
+        let body = r#"
+# Proposal
+
+<RichText id="intro" />
+<UnknownBlock id="x" />
+<Diagram id="flow">
+graph TD;
+</Diagram>
+"#;
+        let tags = extract_custom_block_tags(body);
+        // PascalCase tags, first-seen order, de-duplicated.
+        assert_eq!(tags, vec!["RichText", "UnknownBlock", "Diagram"]);
+    }
+
+    #[test]
+    fn extract_tags_ignores_lowercase_and_closing_tags() {
+        let body = "<div>\n<RichText />\n</RichText>\n</div>\n<span>hi</span>";
+        let tags = extract_custom_block_tags(body);
+        // `div`/`span` (lowercase) and `</RichText>` (closing) are ignored.
+        assert_eq!(tags, vec!["RichText"]);
+    }
+
+    #[test]
+    fn extract_tags_dedupes_repeated_tags() {
+        let body = "<RichText />\n<RichText />\n<Diagram />";
+        let tags = extract_custom_block_tags(body);
+        assert_eq!(tags, vec!["RichText", "Diagram"]);
+    }
+
+    #[test]
+    fn extract_tags_nested_blocks() {
+        // A registered block nested inside another registered block — both
+        // opening tags are extracted, enabling validation of nesting.
+        let body = "<RichText>\n  <Diagram>\n    graph TD\n  </Diagram>\n</RichText>";
+        let tags = extract_custom_block_tags(body);
+        assert_eq!(tags, vec!["RichText", "Diagram"]);
+    }
+
+    #[test]
+    fn extract_tags_empty_body() {
+        assert!(extract_custom_block_tags("").is_empty());
+        assert!(extract_custom_block_tags("plain markdown only").is_empty());
     }
 }

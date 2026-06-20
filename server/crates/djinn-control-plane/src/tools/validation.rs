@@ -3,6 +3,8 @@
 // Each function returns `Result<T, String>` where `Err` is a human-readable
 // message suitable for returning as a JSON `{ "error": ... }` response.
 
+use crate::tools::proposal_blocks::{extract_custom_block_tags, proposal_block_tags};
+
 /// Decode the handful of HTML entities that LLM-authored plain text routinely
 /// over-escapes (e.g. a title arriving as `A &amp; B`). `&amp;` is decoded last
 /// so `&amp;lt;` round-trips to `&lt;` rather than `<`.
@@ -159,6 +161,29 @@ pub fn validate_body(s: &str) -> Result<(), String> {
     }
     if s.len() > 10_000 {
         return Err(format!("body exceeds 10,000 chars (got {})", s.len()));
+    }
+    Ok(())
+}
+
+/// Validate a proposal body for MDX block tags.
+///
+/// When `body_format` is `"mdx"` and `body` is non-empty, extract every
+/// PascalCase component (JSX-like) tag and check each against the shared block
+/// registry. The first unknown tag produces an error naming the offending tag,
+/// e.g. `Unknown MDX block tag: 'FooBar'`. For `"markdown"` bodies or empty
+/// bodies validation is skipped (returns `Ok(())`).
+pub fn validate_mdx_body(body: &str, body_format: Option<&str>) -> Result<(), String> {
+    if body_format != Some("mdx") {
+        return Ok(());
+    }
+    if body.trim().is_empty() {
+        return Ok(());
+    }
+    let allowed = proposal_block_tags();
+    for tag in extract_custom_block_tags(body) {
+        if !allowed.contains(tag.as_str()) {
+            return Err(format!("Unknown MDX block tag: '{tag}'"));
+        }
     }
     Ok(())
 }
@@ -402,6 +427,86 @@ mod tests {
         assert!(validate_body("hello").is_ok());
         assert!(validate_body(&"x".repeat(10_000)).is_ok());
         assert!(validate_body(&"x".repeat(10_001)).is_err());
+    }
+
+    #[test]
+    fn mdx_body_valid_known_blocks() {
+        let body = r#"
+# Proposal
+
+<RichText id="intro" content="Hello" />
+
+<Diagram id="flow" type="mermaid">
+graph TD;
+</Diagram>
+
+<AnnotatedCode id="example" language="rust">
+fn main() {}
+</AnnotatedCode>
+"#;
+        assert!(validate_mdx_body(body, Some("mdx")).is_ok());
+    }
+
+    #[test]
+    fn mdx_body_rejects_single_unknown_block() {
+        let body = r#"
+<RichText id="intro" />
+<FooBar id="bad" />
+"#;
+        let err = validate_mdx_body(body, Some("mdx")).unwrap_err();
+        assert!(
+            err.contains("Unknown MDX block tag: 'FooBar'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn mdx_body_rejects_first_unknown_of_many() {
+        let body = r#"
+<RichText id="a" />
+<BogusOne id="b" />
+<AlsoBad id="c" />
+"#;
+        let err = validate_mdx_body(body, Some("mdx")).unwrap_err();
+        assert!(
+            err.contains("Unknown MDX block tag: 'BogusOne'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn mdx_body_nested_blocks_validated() {
+        // A registered block nested inside another — both known, passes.
+        let body = "<RichText>\n  <Diagram>\n    graph TD\n  </Diagram>\n</RichText>";
+        assert!(validate_mdx_body(body, Some("mdx")).is_ok());
+
+        // Unknown block nested inside a known one — rejected.
+        let body = "<RichText>\n  <GhostBlock />\n</RichText>";
+        let err = validate_mdx_body(body, Some("mdx")).unwrap_err();
+        assert!(
+            err.contains("Unknown MDX block tag: 'GhostBlock'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn mdx_body_skips_markdown_format() {
+        // A `markdown` body containing PascalCase-ish text is not validated.
+        let body = "<NotARealBlock> still fine </NotARealBlock>";
+        assert!(validate_mdx_body(body, Some("markdown")).is_ok());
+        assert!(validate_mdx_body(body, None).is_ok());
+    }
+
+    #[test]
+    fn mdx_body_skips_empty_body() {
+        assert!(validate_mdx_body("", Some("mdx")).is_ok());
+        assert!(validate_mdx_body("   \n  ", Some("mdx")).is_ok());
+    }
+
+    #[test]
+    fn mdx_body_ignores_lowercase_html() {
+        let body = "<div>\n  <span>plain html</span>\n</div>";
+        assert!(validate_mdx_body(body, Some("mdx")).is_ok());
     }
 
     #[test]
