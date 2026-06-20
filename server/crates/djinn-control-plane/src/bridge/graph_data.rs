@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
@@ -632,6 +633,10 @@ pub struct ApiSurfaceEntry {
 pub struct BoundaryRule {
     pub from_glob: String,
     pub to_glob: String,
+    /// Optional human-readable explanation of why this rule exists,
+    /// surfaced in CI output so violations are self-documenting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// A single violation emitted by the `boundary_check` op.

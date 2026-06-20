@@ -303,8 +303,9 @@ impl RepoGraphOps for RepoGraphBridge {
         &self,
         ctx: &ProjectCtx,
         rules: &[BoundaryRule],
+        level: &str,
     ) -> Result<Vec<BoundaryViolation>, String> {
-        RepoGraphBridge::boundary_check(self, ctx, rules).await
+        RepoGraphBridge::boundary_check(self, ctx, rules, level).await
     }
 
     async fn hotspots(

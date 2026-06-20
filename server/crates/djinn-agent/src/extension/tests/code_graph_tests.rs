@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use super::*;
 
 // -----------------------------------------------------------------------
@@ -250,6 +251,7 @@ impl djinn_control_plane::bridge::RepoGraphOps for TraversalDispatchStub {
         &self,
         _: &djinn_control_plane::bridge::ProjectCtx,
         _: &[djinn_control_plane::bridge::BoundaryRule],
+        _: &str,
     ) -> Result<Vec<djinn_control_plane::bridge::BoundaryViolation>, String> {
         Err("not used".into())
     }
@@ -2106,6 +2108,7 @@ impl djinn_control_plane::bridge::RepoGraphOps for StalenessDispatchStub {
         &self,
         _: &djinn_control_plane::bridge::ProjectCtx,
         _: &[djinn_control_plane::bridge::BoundaryRule],
+        _: &str,
     ) -> Result<Vec<djinn_control_plane::bridge::BoundaryViolation>, String> {
         Err("not used".into())
     }
@@ -2539,6 +2542,7 @@ async fn code_graph_dispatch_describe_serde_direct_attaches_graph_staleness() {
             &self,
             _: &djinn_control_plane::bridge::ProjectCtx,
             _: &[djinn_control_plane::bridge::BoundaryRule],
+            _: &str,
         ) -> Result<Vec<djinn_control_plane::bridge::BoundaryViolation>, String> {
             Err("not used".into())
         }
