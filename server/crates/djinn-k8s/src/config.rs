@@ -138,14 +138,20 @@ impl KubernetesConfig {
             cache_pvc: "djinn-cache".into(),
             server_addr: "djinn.djinn.svc.cluster.local:8443".into(),
             warm_job_ttl_seconds: 300,
-            warm_job_timeout_seconds: 3600,
+            // Bumped from 3600 to 5400s: the warm pass now also COMPILES the
+            // test binaries (`nextest run --no-run` / `cargo test --no-run`) so
+            // worker/verify test runs reuse them. That adds a test-codegen pass
+            // on top of the clippy+build passes, lengthening the cold first warm.
+            warm_job_timeout_seconds: 5400,
             database_url: None,
             task_run_active_deadline_seconds: 10800,
             task_run_termination_grace_period_seconds: 60,
             warm_cpu_request: "1".into(),
             warm_cpu_limit: "2".into(),
+            // Bumped limit 4Gi → 6Gi: compiling test binaries with --all-targets
+            // links more codegen units at once than clippy alone.
             warm_memory_request: "2Gi".into(),
-            warm_memory_limit: "4Gi".into(),
+            warm_memory_limit: "6Gi".into(),
             node_selector: BTreeMap::new(),
             tolerations: Vec::new(),
         }
@@ -174,14 +180,14 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_CACHE_PVC` | `cache_pvc` | `djinn-cache` |
     /// | `DJINN_K8S_SERVER_ADDR` | `server_addr` | `djinn.djinn.svc.cluster.local:8443` |
     /// | `DJINN_K8S_WARM_JOB_TTL_SECONDS` | `warm_job_ttl_seconds` | `300` (parsed as `i32`) |
-    /// | `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS` | `warm_job_timeout_seconds` | `3600` (parsed as `i64`) |
+    /// | `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS` | `warm_job_timeout_seconds` | `5400` (parsed as `i64`) |
     /// | `DJINN_DATABASE_URL` | `database_url` | _(unset → warm Pod has no fallback; helm chart projects this via the `djinn-server` ConfigMap)_ |
     /// | `DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS` | `task_run_active_deadline_seconds` | `10800` (parsed as `u64`) |
     /// | `DJINN_K8S_TASK_RUN_TERMINATION_GRACE_PERIOD_SECONDS` | `task_run_termination_grace_period_seconds` | `60` (parsed as `i64`) |
     /// | `DJINN_K8S_WARM_CPU_REQUEST` | `warm_cpu_request` | `1` |
     /// | `DJINN_K8S_WARM_CPU_LIMIT` | `warm_cpu_limit` | `2` |
     /// | `DJINN_K8S_WARM_MEMORY_REQUEST` | `warm_memory_request` | `2Gi` |
-    /// | `DJINN_K8S_WARM_MEMORY_LIMIT` | `warm_memory_limit` | `4Gi` |
+    /// | `DJINN_K8S_WARM_MEMORY_LIMIT` | `warm_memory_limit` | `6Gi` |
     /// | `DJINN_K8S_NODE_SELECTOR` | `node_selector` | `{}` (parsed as a JSON object of string→string) |
     /// | `DJINN_K8S_TOLERATIONS` | `tolerations` | `[]` (parsed as a JSON array of k8s `Toleration` objects) |
     ///
@@ -440,20 +446,21 @@ mod tests {
     }
 
     /// The default `warm_job_timeout_seconds` must accommodate the dual-pass
-    /// feature-aligned warm: an `--all-features` clippy+test pass (~13 min
-    /// re-warm, ~30 min cold first warm) plus a default-features
-    /// check+clippy pass (~3-10 min). The worst observed cold case is ~40
-    /// minutes, so the default must be at least 3600s (60 min) to leave
-    /// margin. Bumping this below 3600 would silently deadline-kill the
-    /// first cold warm of a new project, producing an empty warm base. This
-    /// regression guard fails loudly if a future change drops the default.
+    /// feature-aligned warm PLUS the test-compile pass: an `--all-features`
+    /// clippy pass, a default-features clippy pass, the build fallback, AND a
+    /// `nextest run --no-run` / `cargo test --no-run` test-codegen pass so
+    /// worker/verify test runs reuse the warm test binaries. The added test
+    /// pass pushes the worst cold case well past 40 min, so the default is
+    /// raised to 5400s (90 min). Dropping it below 3600 would silently
+    /// deadline-kill the first cold warm of a new project, producing an empty
+    /// warm base. This regression guard fails loudly if that happens.
     #[test]
     fn warm_job_timeout_default_accommodates_dual_pass_warm() {
         let cfg = KubernetesConfig::for_testing();
         assert!(
             cfg.warm_job_timeout_seconds >= 3600,
             "default warm_job_timeout_seconds is {} but must be >= 3600 \
-             (60 min) to cover a cold dual-pass warm (~40 min) with margin",
+             (60 min) to cover a cold dual-pass + test-compile warm with margin",
             cfg.warm_job_timeout_seconds,
         );
     }

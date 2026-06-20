@@ -82,7 +82,8 @@ pub struct ProposalUpdateInput<'a> {
     pub title: &'a str,
     pub body: &'a str,
     /// Body format: `markdown` (legacy default) or `mdx` (block-aware).
-    pub body_format: &'a str,
+    /// When `None`, the existing value is preserved.
+    pub body_format: Option<&'a str>,
     /// JSON array string of acceptance-criteria.
     pub acceptance_criteria: &'a str,
     pub status: &'a str,
@@ -127,6 +128,16 @@ struct ProposalStatusEvent<'a> {
     edited_by: Option<&'a str>,
     status_from: &'a str,
     status_to: &'a str,
+}
+
+struct ProposalRevisionSnapshot<'a> {
+    proposal_id: &'a str,
+    seq: i32,
+    title: &'a str,
+    body: &'a str,
+    body_format: &'a str,
+    acceptance_criteria: &'a serde_json::Value,
+    edited_by: Option<&'a str>,
 }
 
 pub struct ProposalRepository {
@@ -214,15 +225,15 @@ impl ProposalRepository {
         .await?;
         // Seed revision 1 with the initial spec so every proposal has a head to
         // diff against.
-        self.insert_revision(
-            &id,
-            1,
-            input.title,
-            input.body,
+        self.insert_revision(ProposalRevisionSnapshot {
+            proposal_id: &id,
+            seq: 1,
+            title: input.title,
+            body: input.body,
             body_format,
-            &acceptance_criteria,
-            author_user_id.as_deref(),
-        )
+            acceptance_criteria: &acceptance_criteria,
+            edited_by: author_user_id.as_deref(),
+        })
         .await?;
         let proposal = self.get_required(&id).await?;
         self.events
@@ -242,12 +253,14 @@ impl ProposalRepository {
             .get(id)
             .await?
             .ok_or_else(|| Error::InvalidData(format!("proposal not found: {id}")))?;
+        let body_format = input.body_format.unwrap_or(&current.body_format);
         let current_ac: serde_json::Value =
             serde_json::from_str(&current.acceptance_criteria).unwrap_or(serde_json::json!([]));
         // A "material" edit changes the spec (title/body/AC), not just status.
         // Only material edits append a revision and disturb sign-offs.
         let content_changed = input.title != current.title
             || input.body != current.body
+            || body_format != current.body_format
             || acceptance_criteria != current_ac;
 
         // Stale/hard rule: editing the spec of an *approved* proposal reverts it
@@ -273,39 +286,39 @@ impl ProposalRepository {
             !content_changed && status_changed && effective_status == "done";
 
         sqlx::query!(
-            r#"UPDATE proposals SET title = $1, body = $2, body_format = $3, acceptance_criteria = $4, status = $5,
-                    superseded_by = $6, latest_revision_seq = $9,
-                    pending_reconcile = CASE WHEN $10 THEN true ELSE pending_reconcile END,
-                    closed_at = CASE WHEN $7 IN ('done', 'rejected', 'archived', 'superseded')
+            r#"UPDATE proposals SET title = $1, body = $2, body_format = $10, acceptance_criteria = $3, status = $4,
+                    superseded_by = $5, latest_revision_seq = $8,
+                    pending_reconcile = CASE WHEN $9 THEN true ELSE pending_reconcile END,
+                    closed_at = CASE WHEN $6 IN ('done', 'rejected', 'archived', 'superseded')
                         THEN COALESCE(closed_at, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
                         ELSE NULL END,
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE id = $8"#,
+             WHERE id = $7"#,
             input.title,
             input.body,
-            input.body_format,
             acceptance_criteria,
             effective_status,
             input.superseded_by,
             effective_status,
             id,
             next_seq,
-            building_amend
+            building_amend,
+            body_format,
         )
         .execute(self.db.pool())
         .await?;
 
         if content_changed {
             let editor = djinn_core::auth_context::current_user_id();
-            self.insert_revision(
-                id,
-                next_seq,
-                input.title,
-                input.body,
-                input.body_format,
-                &acceptance_criteria,
-                editor.as_deref(),
-            )
+            self.insert_revision(ProposalRevisionSnapshot {
+                proposal_id: id,
+                seq: next_seq,
+                title: input.title,
+                body: input.body,
+                body_format,
+                acceptance_criteria: &acceptance_criteria,
+                edited_by: editor.as_deref(),
+            })
             .await?;
         } else if record_done_status_event {
             let editor = djinn_core::auth_context::current_user_id();
@@ -314,7 +327,7 @@ impl ProposalRepository {
                 seq: next_seq,
                 title: input.title,
                 body: input.body,
-                body_format: input.body_format,
+                body_format,
                 acceptance_criteria: &acceptance_criteria,
                 edited_by: editor.as_deref(),
                 status_from: &current.status,
@@ -550,16 +563,7 @@ impl ProposalRepository {
     // ── Revisions + sign-offs ────────────────────────────────────────────────
 
     #[allow(clippy::too_many_arguments)]
-    async fn insert_revision(
-        &self,
-        proposal_id: &str,
-        seq: i32,
-        title: &str,
-        body: &str,
-        body_format: &str,
-        acceptance_criteria: &serde_json::Value,
-        edited_by: Option<&str>,
-    ) -> Result<()> {
+    async fn insert_revision(&self, revision: ProposalRevisionSnapshot<'_>) -> Result<()> {
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
             r#"INSERT INTO proposal_revisions
@@ -567,13 +571,13 @@ impl ProposalRepository {
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision')"#,
         )
         .bind(id)
-        .bind(proposal_id)
-        .bind(seq)
-        .bind(title)
-        .bind(body)
-        .bind(body_format)
-        .bind(acceptance_criteria)
-        .bind(edited_by)
+        .bind(revision.proposal_id)
+        .bind(revision.seq)
+        .bind(revision.title)
+        .bind(revision.body)
+        .bind(revision.body_format)
+        .bind(revision.acceptance_criteria)
+        .bind(revision.edited_by)
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -1223,15 +1227,15 @@ impl ProposalRepository {
         .execute(self.db.pool())
         .await?;
         let editor = djinn_core::auth_context::current_user_id();
-        self.insert_revision(
+        self.insert_revision(ProposalRevisionSnapshot {
             proposal_id,
-            next_revision_seq,
-            &current.title,
-            &current.body,
-            &current.body_format,
-            &acceptance_criteria,
-            editor.as_deref(),
-        )
+            seq: next_revision_seq,
+            title: &current.title,
+            body: &current.body,
+            body_format: &current.body_format,
+            acceptance_criteria: &acceptance_criteria,
+            edited_by: editor.as_deref(),
+        })
         .await?;
 
         let audit_json = serde_json::to_string(&audit_entries)
@@ -1524,7 +1528,7 @@ mod tests {
                 ProposalUpdateInput {
                     title: "Up2",
                     body: "new body",
-                    body_format: "markdown",
+                    body_format: Some("markdown"),
                     acceptance_criteria: "[\"ac1\"]",
                     status: "archived",
                     superseded_by: None,
@@ -1679,7 +1683,7 @@ mod tests {
         ProposalUpdateInput {
             title,
             body,
-            body_format: "markdown",
+            body_format: Some("markdown"),
             acceptance_criteria: ac,
             status,
             superseded_by: None,

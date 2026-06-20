@@ -111,7 +111,7 @@ async fn target_models(
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ProposalCreateParams {
     pub title: String,
-    /// Markdown spec body.
+    /// Spec body (markdown or MDX depending on `body_format`).
     pub body: Option<String>,
     /// Body format: `markdown` (legacy default) or `mdx` (block-aware).
     /// Defaults to `markdown` when omitted.
@@ -514,7 +514,7 @@ impl DjinnMcpServer {
             existing.superseded_by.clone()
         };
 
-        let body_format = p.body_format.as_deref().unwrap_or(&existing.body_format);
+        let body_format = p.body_format.as_deref();
 
         match repo
             .update(

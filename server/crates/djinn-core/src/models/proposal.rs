@@ -11,7 +11,7 @@ pub struct Proposal {
     /// Globally unique short id (NOT per-project, unlike epics).
     pub short_id: String,
     pub title: String,
-    /// Markdown spec body.
+    /// Spec body (markdown or MDX depending on `body_format`).
     pub body: String,
     /// Body format: `markdown` (legacy default) or `mdx` (block-aware).
     pub body_format: String,
