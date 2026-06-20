@@ -161,4 +161,20 @@ impl SlotPoolHandle {
         })
         .await
     }
+
+    /// Test-only: inject a live `(token_count, turn_count)` override for a
+    /// task so the coordinator's session ceiling logic can observe a runaway
+    /// session without a real worker bridging `touch_activity`.
+    #[cfg(test)]
+    pub async fn test_set_token_override(&self, task_id: &str, token_count: u64, turn_count: u64) {
+        // Fire-and-forget — no reply channel.
+        let _ = self
+            .sender
+            .send(PoolMessage::TestSetTokenOverride {
+                task_id: task_id.to_owned(),
+                token_count,
+                turn_count,
+            })
+            .await;
+    }
 }

@@ -30,6 +30,12 @@ pub(super) struct SlotPool {
     app_state: AgentContext,
     cancel: CancellationToken,
     slot_factory: SlotFactory,
+    /// Test-only per-task `(token_count, turn_count)` overrides. In production
+    /// live token spend is bridged from the worker's `touch_activity` RPC; in
+    /// tests there is no worker, so the ceiling tests inject a high count here.
+    /// Keyed by task_id. Empty in all non-test contexts.
+    #[cfg(test)]
+    test_token_overrides: HashMap<String, (u64, u64)>,
 }
 
 impl SlotPool {
@@ -71,6 +77,8 @@ impl SlotPool {
             app_state,
             cancel,
             slot_factory,
+            #[cfg(test)]
+            test_token_overrides: HashMap::new(),
         };
         pool.spawn_slots_for_config(&config);
         pool
@@ -264,6 +272,15 @@ impl SlotPool {
             } => {
                 self.interrupt_project(&project_id, &reason).await;
                 let _ = respond_to.send(Ok(()));
+            }
+            #[cfg(test)]
+            PoolMessage::TestSetTokenOverride {
+                task_id,
+                token_count,
+                turn_count,
+            } => {
+                self.test_token_overrides
+                    .insert(task_id, (token_count, turn_count));
             }
         }
     }
@@ -738,6 +755,14 @@ impl SlotPool {
                 let tracked_idle = self.app_state.idle_seconds(task_id);
                 let idle_seconds = tracked_idle.unwrap_or(duration_seconds);
                 let project_id = self.task_projects.get(task_id).cloned();
+                #[cfg(test)]
+                let (token_count, turn_count) = self
+                    .test_token_overrides
+                    .get(task_id)
+                    .copied()
+                    .unwrap_or((0, 0));
+                #[cfg(not(test))]
+                let (token_count, turn_count) = (0, 0);
                 Some(super::types::RunningTaskInfo {
                     task_id: task_id.clone(),
                     model_id,
@@ -746,8 +771,8 @@ impl SlotPool {
                     idle_seconds,
                     activity_tracked: tracked_idle.is_some(),
                     project_id,
-                    token_count: 0,
-                    turn_count: 0,
+                    token_count,
+                    turn_count,
                 })
             })
             .collect();
@@ -776,6 +801,17 @@ impl SlotPool {
         let tracked_idle = self.app_state.idle_seconds(task_id);
         let idle_seconds = tracked_idle.unwrap_or(duration_seconds);
         let project_id = self.task_projects.get(task_id).cloned();
+        // Test-only token/turn overrides: in production the live counts are
+        // bridged from the worker's `touch_activity` RPC, but in tests there
+        // is no worker so the ceiling tests inject a count here.
+        #[cfg(test)]
+        let (token_count, turn_count) = self
+            .test_token_overrides
+            .get(task_id)
+            .copied()
+            .unwrap_or((0, 0));
+        #[cfg(not(test))]
+        let (token_count, turn_count) = (0, 0);
         Some(super::types::RunningTaskInfo {
             task_id: task_id.to_string(),
             model_id,
@@ -784,8 +820,8 @@ impl SlotPool {
             idle_seconds,
             activity_tracked: tracked_idle.is_some(),
             project_id,
-            token_count: 0,
-            turn_count: 0,
+            token_count,
+            turn_count,
         })
     }
 
