@@ -51,15 +51,17 @@ export function UsageDashboardPage() {
   // ── Empty-state detection ─────────────────────────────────────────────────
   const isEmpty = useMemo(() => {
     if (!data) return false;
+    // Guard every nested array: a malformed/partial response must render the
+    // empty state rather than crash the whole admin page.
     return (
-      data.kpis.length === 0 &&
-      data.time_series.length === 0 &&
-      data.model_effectiveness.length === 0 &&
-      data.project_model_matrix.length === 0 &&
-      data.breakdowns.by_user.length === 0 &&
-      data.breakdowns.by_project.length === 0 &&
-      data.breakdowns.by_proposal.length === 0 &&
-      data.breakdowns.by_task.length === 0
+      (data.kpis?.length ?? 0) === 0 &&
+      (data.time_series?.length ?? 0) === 0 &&
+      (data.model_effectiveness?.length ?? 0) === 0 &&
+      (data.project_model_matrix?.length ?? 0) === 0 &&
+      (data.breakdowns?.by_user?.length ?? 0) === 0 &&
+      (data.breakdowns?.by_project?.length ?? 0) === 0 &&
+      (data.breakdowns?.by_proposal?.length ?? 0) === 0 &&
+      (data.breakdowns?.by_task?.length ?? 0) === 0
     );
   }, [data]);
 

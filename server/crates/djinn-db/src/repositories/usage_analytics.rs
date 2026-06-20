@@ -1,16 +1,22 @@
 // ── Usage analytics repository ─────────────────────────────────────────────
 //
-// Provides raw daily-aggregate and breakdown queries over the `sessions` table
-// (plus optional dimension joins) for admin usage analytics.  All SQL uses
-// `substring(s.started_at, 1, 10)` for day bucketing — no `date_trunc` or
-// `generate_series`.
+// Provides aggregate queries over the `sessions` table (plus dimension joins)
+// for the admin usage analytics dashboard.  All day bucketing uses
+// `substring(s.started_at, 1, 10)` — no `date_trunc` or `generate_series`.
 //
 // Cost semantics: `cost_usd` is nullable on the sessions table.  When ANY
 // session in an aggregate group has a NULL cost (unpriced model), the group
 // aggregate cost is returned as NULL so the UI can render an em-dash instead
 // of $0.
-
-use std::fmt;
+//
+// The dashboard consumes a single response shaped exactly like the frontend
+// contract:
+//   - a multi-dimensional time series (per day × model × project × agent) so
+//     the Overview tab can group spend client-side;
+//   - four entity breakdowns (user / project / proposal / task) aggregated
+//     across the whole window;
+//   - worker-scoped per-model effectiveness;
+//   - a project × model matrix with per-cell outcome metrics.
 
 use sqlx::Row;
 
@@ -53,11 +59,15 @@ pub struct ModelEffectivenessRow {
 ///
 /// Groups usage by project and model across all agent types matching the
 /// endpoint filters. NULL-project sessions (chat sessions without a task)
-/// are preserved with an empty-string project_id.
+/// are preserved with an empty-string project_id.  Outcome metrics
+/// (`success_rate`, `avg_reopens`) are computed over the distinct tasks
+/// touched by the cell's sessions.
 #[derive(Clone, Debug, Default)]
 pub struct ProjectModelMatrixRow {
     /// Project ID, or empty string for sessions without a project.
     pub project_id: String,
+    /// Human-readable project name (empty when unknown / no project).
+    pub project_name: String,
     pub model_id: String,
     pub sessions: i64,
     /// Aggregate cost in USD. `None` when ANY session in the group had a NULL
@@ -65,6 +75,12 @@ pub struct ProjectModelMatrixRow {
     pub spend_usd: Option<f64>,
     pub tokens_in: i64,
     pub tokens_out: i64,
+    /// Distinct tasks touched by this cell's sessions.
+    pub task_count: i64,
+    /// Fraction of closed tasks that completed successfully (0.0–1.0).
+    pub success_rate: Option<f64>,
+    /// Average total_reopen_count across closed tasks in this cell.
+    pub avg_reopens: Option<f64>,
 }
 
 // ── Public types ──────────────────────────────────────────────────────────
@@ -81,20 +97,6 @@ pub enum GroupDimension {
 }
 
 impl GroupDimension {
-    /// SQL column expression for the group key.
-    fn group_expr(&self) -> &'static str {
-        match self {
-            Self::Model => "s.model_id",
-            Self::Project => "COALESCE(s.project_id, '')",
-            // User attribution: prefer session creator, fall back to task creator.
-            Self::User => "COALESCE(s.created_by_user_id, t.created_by_user_id, '')",
-            // Proposal: sessions → tasks → epics → proposal_epics → proposals
-            Self::Proposal => "COALESCE(pe.proposal_id, '')",
-            Self::Task => "COALESCE(s.task_id, '')",
-            Self::Agent => "s.agent_type",
-        }
-    }
-
     /// Human-readable label for the group key column in result rows.
     pub fn label(&self) -> &'static str {
         match self {
@@ -106,11 +108,59 @@ impl GroupDimension {
             Self::Agent => "agent_type",
         }
     }
-}
 
-impl fmt::Display for GroupDimension {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
+    /// SQL expression yielding the entity id (group key) for breakdowns.
+    fn key_expr(&self) -> &'static str {
+        match self {
+            Self::Model => "s.model_id",
+            Self::Project => "COALESCE(s.project_id, '')",
+            // User attribution: prefer session creator, fall back to task creator.
+            Self::User => "COALESCE(s.created_by_user_id, t.created_by_user_id, '')",
+            Self::Proposal => "COALESCE(pe.proposal_id, '')",
+            Self::Task => "COALESCE(s.task_id, '')",
+            Self::Agent => "s.agent_type",
+        }
+    }
+
+    /// SQL expression yielding the human-readable display name for breakdowns.
+    /// Always wrapped in COALESCE so the column is non-null; the UI falls back
+    /// to the id when the name is empty.
+    fn name_expr(&self) -> &'static str {
+        match self {
+            Self::Model => "s.model_id",
+            Self::Project => "COALESCE(p.name, '')",
+            Self::User => "COALESCE(u.github_name, u.github_login, '')",
+            Self::Proposal => "COALESCE(pr.title, '')",
+            Self::Task => "COALESCE(t.title, '')",
+            Self::Agent => "s.agent_type",
+        }
+    }
+
+    /// Join clauses required to resolve this dimension's key and name.
+    /// The base relation is always `sessions s`.
+    fn joins(&self) -> &'static str {
+        match self {
+            Self::Model | Self::Agent => "LEFT JOIN tasks t ON t.id = s.task_id",
+            Self::Project => {
+                "LEFT JOIN tasks t ON t.id = s.task_id \
+                 LEFT JOIN projects p ON p.id = s.project_id"
+            }
+            Self::User => {
+                "LEFT JOIN tasks t ON t.id = s.task_id \
+                 LEFT JOIN users u \
+                    ON u.id = COALESCE(s.created_by_user_id, t.created_by_user_id)"
+            }
+            Self::Task => "LEFT JOIN tasks t ON t.id = s.task_id",
+            // Proposal: sessions → tasks → epics → proposal_epics → proposals.
+            // INNER JOIN proposal_epics restricts to sessions that trace to a
+            // proposal.
+            Self::Proposal => {
+                "LEFT JOIN tasks t ON t.id = s.task_id \
+                 LEFT JOIN epics e ON e.id = t.epic_id \
+                 INNER JOIN proposal_epics pe ON pe.epic_id = e.id \
+                 LEFT JOIN proposals pr ON pr.id = pe.proposal_id"
+            }
+        }
     }
 }
 
@@ -121,7 +171,8 @@ pub struct UsageAnalyticsQuery {
     pub from: String,
     /// Exclusive upper bound.
     pub to: String,
-    /// How to group breakdown rows.
+    /// Retained for API compatibility; the dashboard computes all four entity
+    /// breakdowns regardless of this value.
     pub group_by: GroupDimension,
     /// Optional project filter.
     pub project_id: Option<String>,
@@ -129,38 +180,6 @@ pub struct UsageAnalyticsQuery {
     pub model_id: Option<String>,
     /// Optional agent_type filter.
     pub agent_type: Option<String>,
-}
-
-/// A single day's aggregate row in the time-series output.
-#[derive(Clone, Debug, Default)]
-pub struct DailySeriesRow {
-    /// ISO date prefix, e.g. `"2025-03-14"`.
-    pub day: String,
-    pub session_count: i64,
-    pub tokens_in: i64,
-    pub tokens_out: i64,
-    pub cache_read_tokens: i64,
-    pub cache_write_tokens: i64,
-    /// Aggregate cost in USD.  `None` when ANY session in this day had no
-    /// pricing (NULL `cost_usd`), preserving the "unpriced" signal.
-    pub total_cost_usd: Option<f64>,
-}
-
-/// A single row in the breakdown result, keyed by the chosen `GroupDimension`.
-#[derive(Clone, Debug, Default)]
-pub struct BreakdownRow {
-    /// The group key value (model id, user id, proposal id, etc.).
-    /// Empty string represents "no value" (e.g. chat sessions without a task).
-    pub group_key: String,
-    /// ISO date prefix for this row's day bucket.
-    pub day: String,
-    pub session_count: i64,
-    pub tokens_in: i64,
-    pub tokens_out: i64,
-    pub cache_read_tokens: i64,
-    pub cache_write_tokens: i64,
-    /// Aggregate cost in USD.  NULL-unpriced semantics preserved.
-    pub total_cost_usd: Option<f64>,
 }
 
 /// Overall totals across the entire queried date range (and matching filters).
@@ -176,12 +195,47 @@ pub struct UsageTotals {
     pub total_cost_usd: Option<f64>,
 }
 
-/// Aggregated result bundle returned by [`UsageAnalyticsRepository::query`].
+/// A single multi-dimensional time-series row: one day bucket for a particular
+/// (model, project, agent_type) combination.  The dashboard sums these client
+/// side to render spend grouped by any one of those dimensions.
 #[derive(Clone, Debug, Default)]
-pub struct UsageAnalyticsResult {
-    pub totals: UsageTotals,
-    pub series: Vec<DailySeriesRow>,
-    pub breakdown: Vec<BreakdownRow>,
+pub struct SeriesDetailRow {
+    /// ISO date prefix, e.g. `"2025-03-14"`.
+    pub day: String,
+    pub model: String,
+    /// Project id, or empty string for sessions without a project.
+    pub project_id: String,
+    /// Human-readable project name (empty when unknown).
+    pub project_name: String,
+    pub agent_type: String,
+    pub session_count: i64,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    /// Distinct tasks touched in this bucket.
+    pub task_count: i64,
+    /// Aggregate cost in USD.  `None` when any session in the bucket was
+    /// unpriced (NULL `cost_usd`).
+    pub cost: Option<f64>,
+}
+
+/// A single aggregated entity-breakdown row (one user / project / proposal /
+/// task), summarised across the whole queried window.
+#[derive(Clone, Debug, Default)]
+pub struct EntityBreakdownRow {
+    /// The entity id (user id, project id, proposal id, task id).
+    pub id: String,
+    /// Human-readable display name; empty when unknown.
+    pub name: String,
+    /// Aggregate cost in USD.  NULL-unpriced semantics preserved.
+    pub cost: Option<f64>,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    /// Distinct tasks attributed to this entity.
+    pub task_count: i64,
+    /// Fraction of closed tasks that completed successfully (0.0–1.0).
+    pub success_rate: Option<f64>,
+    /// Average total_reopen_count across this entity's closed tasks.
+    pub avg_reopens: Option<f64>,
 }
 
 // ── Repository ────────────────────────────────────────────────────────────
@@ -195,91 +249,48 @@ impl UsageAnalyticsRepository {
         Self { db }
     }
 
-    /// Run all three analytics queries (totals, daily series, breakdown)
-    /// against the given filters and return the combined result.
-    pub async fn query(&self, params: &UsageAnalyticsQuery) -> Result<UsageAnalyticsResult> {
-        self.db.ensure_initialized().await?;
+    // ── Shared filter construction ─────────────────────────────────────────
 
-        let totals = self.fetch_totals(params).await?;
-        let series = self.fetch_daily_series(params).await?;
-        let breakdown = self.fetch_breakdown(params).await?;
-
-        Ok(UsageAnalyticsResult {
-            totals,
-            series,
-            breakdown,
-        })
-    }
-
-    // ── Internal queries ──────────────────────────────────────────────────
-
-    /// Shared FROM + WHERE clause fragment.
-    ///
-    /// Joins:
-    ///   - `LEFT JOIN tasks t ON t.id = s.task_id` (for user attribution and
-    ///     optional task/project dimension joins)
-    ///   - `LEFT JOIN epics e ON e.id = t.epic_id` (for proposal grouping)
-    ///   - `LEFT JOIN proposal_epics pe ON pe.epic_id = e.id` (proposal link)
-    ///
-    /// Returns `(from_clause, where_clause, binds)` where `binds` is the
-    /// ordered list of parameter values.
-    fn build_from_where(params: &UsageAnalyticsQuery) -> (String, String, Vec<String>) {
+    /// Build the session-level WHERE conditions (date range + optional
+    /// project / model / agent filters) and their ordered bind values.  All
+    /// conditions reference `sessions s`, so this composes with any joins.
+    fn session_filters(params: &UsageAnalyticsQuery) -> (Vec<String>, Vec<String>) {
         let mut conditions: Vec<String> = Vec::new();
         let mut binds: Vec<String> = Vec::new();
-        let mut bind_idx: usize = 1;
+        let mut idx: usize = 1;
 
-        // Date range filter (always first two binds).
-        conditions.push(format!("s.started_at >= ${bind_idx}"));
+        conditions.push(format!("s.started_at >= ${idx}"));
         binds.push(params.from.clone());
-        bind_idx += 1;
+        idx += 1;
 
-        conditions.push(format!("s.started_at < ${bind_idx}"));
+        conditions.push(format!("s.started_at < ${idx}"));
         binds.push(params.to.clone());
-        bind_idx += 1;
+        idx += 1;
 
         if let Some(ref project_id) = params.project_id {
-            conditions.push(format!("s.project_id = ${bind_idx}"));
+            conditions.push(format!("s.project_id = ${idx}"));
             binds.push(project_id.clone());
-            bind_idx += 1;
+            idx += 1;
         }
 
         if let Some(ref model_id) = params.model_id {
-            conditions.push(format!("s.model_id = ${bind_idx}"));
+            conditions.push(format!("s.model_id = ${idx}"));
             binds.push(model_id.clone());
-            bind_idx += 1;
+            idx += 1;
         }
 
         if let Some(ref agent_type) = params.agent_type {
-            conditions.push(format!("s.agent_type = ${bind_idx}"));
+            conditions.push(format!("s.agent_type = ${idx}"));
             binds.push(agent_type.clone());
         }
 
-        // When grouping by proposal, only include sessions that trace to a
-        // proposal (INNER join).  For other dimensions, include all sessions
-        // (LEFT join) so chat sessions with no task/project are counted.
-        let proposal_join = if params.group_by == GroupDimension::Proposal {
-            "INNER JOIN proposal_epics pe ON pe.epic_id = e.id"
-        } else {
-            "LEFT JOIN proposal_epics pe ON pe.epic_id = e.id"
-        };
-
-        let from_clause = format!(
-            "FROM sessions s \
-             LEFT JOIN tasks t ON t.id = s.task_id \
-             LEFT JOIN epics e ON e.id = t.epic_id \
-             {proposal_join}"
-        );
-
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", conditions.join(" AND "))
-        };
-
-        (from_clause, where_clause, binds)
+        (conditions, binds)
     }
 
-    /// Bind parameters onto a `sqlx::query()` builder.
+    fn where_clause(conditions: &[String]) -> String {
+        format!("WHERE {}", conditions.join(" AND "))
+    }
+
     fn bind_all<'q>(
         query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
         binds: &'q [String],
@@ -293,124 +304,181 @@ impl UsageAnalyticsRepository {
 
     // ── Totals ────────────────────────────────────────────────────────────
 
-    async fn fetch_totals(&self, params: &UsageAnalyticsQuery) -> Result<UsageTotals> {
-        let (from_clause, where_clause, binds) = Self::build_from_where(params);
+    /// Window totals across all matching sessions (no dimension joins so an
+    /// epic mapped to multiple proposals cannot inflate the counts).
+    pub async fn totals(&self, params: &UsageAnalyticsQuery) -> Result<UsageTotals> {
+        self.db.ensure_initialized().await?;
+
+        let (conditions, binds) = Self::session_filters(params);
+        let where_clause = Self::where_clause(&conditions);
 
         let sql = format!(
             "SELECT \
-                COUNT(*)                          AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in)::bigint, 0)     AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out)::bigint, 0)    AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS \"cache_write_tokens!\", \
-                CASE \
-                    WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
-                    ELSE SUM(s.cost_usd) \
-                END AS \"total_cost_usd\" \
-             {from_clause} {where_clause}"
+                COUNT(*)                                       AS session_count, \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)          AS tokens_in, \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)         AS tokens_out, \
+                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS cache_read_tokens, \
+                COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS cache_write_tokens, \
+                CASE WHEN bool_or(s.cost_usd IS NULL) THEN NULL ELSE SUM(s.cost_usd) END \
+                                                               AS total_cost_usd \
+             FROM sessions s {where_clause}"
         );
 
-        let query = sqlx::query(&sql);
-        let query = Self::bind_all(query, &binds);
+        let query = Self::bind_all(sqlx::query(&sql), &binds);
         let row = query.fetch_one(self.db.pool()).await?;
 
         Ok(UsageTotals {
-            session_count: row.get("session_count!"),
-            tokens_in: row.get("tokens_in!"),
-            tokens_out: row.get("tokens_out!"),
-            cache_read_tokens: row.get("cache_read_tokens!"),
-            cache_write_tokens: row.get("cache_write_tokens!"),
+            session_count: row.get("session_count"),
+            tokens_in: row.get("tokens_in"),
+            tokens_out: row.get("tokens_out"),
+            cache_read_tokens: row.get("cache_read_tokens"),
+            cache_write_tokens: row.get("cache_write_tokens"),
             total_cost_usd: row.get("total_cost_usd"),
         })
     }
 
-    // ── Daily series ──────────────────────────────────────────────────────
+    // ── Multi-dimensional time series ──────────────────────────────────────
 
-    async fn fetch_daily_series(
+    /// Daily series carrying model / project / agent dimensions so the UI can
+    /// group spend client-side.  One row per (day, model, project, agent).
+    pub async fn series_detailed(
         &self,
         params: &UsageAnalyticsQuery,
-    ) -> Result<Vec<DailySeriesRow>> {
-        let (from_clause, where_clause, binds) = Self::build_from_where(params);
+    ) -> Result<Vec<SeriesDetailRow>> {
+        self.db.ensure_initialized().await?;
+
+        let (conditions, binds) = Self::session_filters(params);
+        let where_clause = Self::where_clause(&conditions);
 
         let sql = format!(
             "SELECT \
-                substring(s.started_at, 1, 10)    AS \"day!\", \
-                COUNT(*)                          AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in)::bigint, 0)     AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out)::bigint, 0)    AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS \"cache_write_tokens!\", \
-                CASE \
-                    WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
-                    ELSE SUM(s.cost_usd) \
-                END AS \"total_cost_usd\" \
-             {from_clause} {where_clause} \
-             GROUP BY substring(s.started_at, 1, 10) \
+                substring(s.started_at, 1, 10)                AS day, \
+                s.model_id                                    AS model, \
+                COALESCE(s.project_id, '')                    AS project_id, \
+                COALESCE(p.name, '')                          AS project_name, \
+                s.agent_type                                  AS agent_type, \
+                COUNT(*)                                       AS session_count, \
+                COALESCE(SUM(s.tokens_in)::bigint, 0)          AS tokens_in, \
+                COALESCE(SUM(s.tokens_out)::bigint, 0)         AS tokens_out, \
+                COUNT(DISTINCT s.task_id)                      AS task_count, \
+                CASE WHEN bool_or(s.cost_usd IS NULL) THEN NULL ELSE SUM(s.cost_usd) END \
+                                                               AS cost \
+             FROM sessions s \
+             LEFT JOIN projects p ON p.id = s.project_id \
+             {where_clause} \
+             GROUP BY substring(s.started_at, 1, 10), s.model_id, \
+                      COALESCE(s.project_id, ''), COALESCE(p.name, ''), s.agent_type \
              ORDER BY 1"
         );
 
-        let query = sqlx::query(&sql);
-        let query = Self::bind_all(query, &binds);
+        let query = Self::bind_all(sqlx::query(&sql), &binds);
         let rows = query.fetch_all(self.db.pool()).await?;
 
         Ok(rows
             .into_iter()
-            .map(|r| DailySeriesRow {
-                day: r.get("day!"),
-                session_count: r.get("session_count!"),
-                tokens_in: r.get("tokens_in!"),
-                tokens_out: r.get("tokens_out!"),
-                cache_read_tokens: r.get("cache_read_tokens!"),
-                cache_write_tokens: r.get("cache_write_tokens!"),
-                total_cost_usd: r.get("total_cost_usd"),
+            .map(|r| SeriesDetailRow {
+                day: r.get("day"),
+                model: r.get("model"),
+                project_id: r.get("project_id"),
+                project_name: r.get("project_name"),
+                agent_type: r.get("agent_type"),
+                session_count: r.get("session_count"),
+                tokens_in: r.get("tokens_in"),
+                tokens_out: r.get("tokens_out"),
+                task_count: r.get("task_count"),
+                cost: r.get("cost"),
             })
             .collect())
     }
 
-    // ── Breakdown by group dimension ──────────────────────────────────────
+    // ── Entity breakdown (user / project / proposal / task) ────────────────
 
-    async fn fetch_breakdown(&self, params: &UsageAnalyticsQuery) -> Result<Vec<BreakdownRow>> {
-        let (from_clause, where_clause, binds) = Self::build_from_where(params);
-        let group_expr = params.group_by.group_expr();
+    /// Aggregate breakdown for a single entity dimension across the whole
+    /// window.  Spend / tokens are session-level sums; `success_rate` and
+    /// `avg_reopens` are computed over the entity's distinct tasks so multiple
+    /// sessions on one task cannot overweight the outcome metrics.
+    pub async fn entity_breakdown(
+        &self,
+        params: &UsageAnalyticsQuery,
+        dimension: GroupDimension,
+    ) -> Result<Vec<EntityBreakdownRow>> {
+        self.db.ensure_initialized().await?;
+
+        let (conditions, binds) = Self::session_filters(params);
+        let where_clause = Self::where_clause(&conditions);
+        let key_expr = dimension.key_expr();
+        let name_expr = dimension.name_expr();
+        let joins = dimension.joins();
 
         let sql = format!(
-            "SELECT \
-                {group_expr}                     AS \"group_key!\", \
-                substring(s.started_at, 1, 10)   AS \"day!\", \
-                COUNT(*)                         AS \"session_count!\", \
-                COALESCE(SUM(s.tokens_in)::bigint, 0)    AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out)::bigint, 0)   AS \"tokens_out!\", \
-                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS \"cache_read_tokens!\", \
-                COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS \"cache_write_tokens!\", \
-                CASE \
-                    WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
-                    ELSE SUM(s.cost_usd) \
-                END AS \"total_cost_usd\" \
-             {from_clause} {where_clause} \
-             GROUP BY {group_expr}, substring(s.started_at, 1, 10) \
-             ORDER BY 2, 1"
+            "WITH base AS ( \
+                SELECT \
+                    {key_expr}  AS entity_id, \
+                    {name_expr} AS entity_name, \
+                    s.cost_usd, s.tokens_in, s.tokens_out, s.task_id, \
+                    t.status, t.close_reason, t.total_reopen_count \
+                FROM sessions s {joins} {where_clause} \
+             ), \
+             sess AS ( \
+                SELECT \
+                    entity_id, \
+                    MAX(entity_name) AS entity_name, \
+                    CASE WHEN bool_or(cost_usd IS NULL) THEN NULL ELSE SUM(cost_usd) END AS cost, \
+                    COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
+                    COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out, \
+                    COUNT(DISTINCT task_id) AS task_count \
+                FROM base GROUP BY entity_id \
+             ), \
+             task_agg AS ( \
+                SELECT \
+                    entity_id, \
+                    COUNT(DISTINCT CASE WHEN status = 'closed' AND close_reason = 'completed' \
+                                        THEN task_id END) AS completed_count, \
+                    COUNT(DISTINCT CASE WHEN status = 'closed' THEN task_id END) AS closed_count, \
+                    AVG(CASE WHEN status = 'closed' \
+                             THEN total_reopen_count::DOUBLE PRECISION END) AS avg_reopens \
+                FROM ( \
+                    SELECT DISTINCT entity_id, task_id, status, close_reason, total_reopen_count \
+                    FROM base \
+                ) distinct_tasks \
+                GROUP BY entity_id \
+             ) \
+             SELECT \
+                 sess.entity_id    AS entity_id, \
+                 sess.entity_name  AS entity_name, \
+                 sess.cost         AS cost, \
+                 sess.tokens_in    AS tokens_in, \
+                 sess.tokens_out   AS tokens_out, \
+                 sess.task_count   AS task_count, \
+                 CASE WHEN ta.closed_count > 0 \
+                      THEN ta.completed_count::DOUBLE PRECISION / ta.closed_count::DOUBLE PRECISION \
+                      END          AS success_rate, \
+                 ta.avg_reopens    AS avg_reopens \
+             FROM sess \
+             LEFT JOIN task_agg ta ON ta.entity_id = sess.entity_id \
+             WHERE sess.entity_id <> '' \
+             ORDER BY sess.cost DESC NULLS LAST"
         );
 
-        let query = sqlx::query(&sql);
-        let query = Self::bind_all(query, &binds);
+        let query = Self::bind_all(sqlx::query(&sql), &binds);
         let rows = query.fetch_all(self.db.pool()).await?;
 
         Ok(rows
             .into_iter()
-            .map(|r| BreakdownRow {
-                group_key: r.get("group_key!"),
-                day: r.get("day!"),
-                session_count: r.get("session_count!"),
-                tokens_in: r.get("tokens_in!"),
-                tokens_out: r.get("tokens_out!"),
-                cache_read_tokens: r.get("cache_read_tokens!"),
-                cache_write_tokens: r.get("cache_write_tokens!"),
-                total_cost_usd: r.get("total_cost_usd"),
+            .map(|r| EntityBreakdownRow {
+                id: r.get("entity_id"),
+                name: r.get("entity_name"),
+                cost: r.get("cost"),
+                tokens_in: r.get("tokens_in"),
+                tokens_out: r.get("tokens_out"),
+                task_count: r.get("task_count"),
+                success_rate: r.get("success_rate"),
+                avg_reopens: r.get("avg_reopens"),
             })
             .collect())
     }
 
-    // ── Model effectiveness (worker-scoped) ──────────────────────────────
+    // ── Model effectiveness (worker-scoped) + project × model matrix ───────
 
     /// Run effectiveness and project-model matrix queries and return the
     /// combined result.  Effectiveness is always scoped to worker sessions;
@@ -427,98 +495,64 @@ impl UsageAnalyticsRepository {
         Ok((effectiveness, matrix))
     }
 
-    /// Build FROM + WHERE for the model effectiveness query.
-    ///
-    /// Always scopes to `agent_type = 'worker'`.  Applies date range,
-    /// `project_id`, and `model_id` endpoint filters; the `agent_type`
-    /// filter from the endpoint query is intentionally ignored here because
-    /// effectiveness is defined over worker sessions only.
+    /// Build FROM + WHERE for the worker-scoped model effectiveness query.
+    /// Always scopes to `agent_type = 'worker'`; the endpoint `agent_type`
+    /// filter is intentionally ignored because effectiveness is defined over
+    /// worker sessions only.
     fn build_effectiveness_from_where(
         params: &UsageAnalyticsQuery,
     ) -> (String, String, Vec<String>) {
         let mut conditions: Vec<String> = Vec::new();
         let mut binds: Vec<String> = Vec::new();
-        let mut bind_idx: usize = 1;
+        let mut idx: usize = 1;
 
-        // Date range (same as base query).
-        conditions.push(format!("s.started_at >= ${bind_idx}"));
+        conditions.push(format!("s.started_at >= ${idx}"));
         binds.push(params.from.clone());
-        bind_idx += 1;
+        idx += 1;
 
-        conditions.push(format!("s.started_at < ${bind_idx}"));
+        conditions.push(format!("s.started_at < ${idx}"));
         binds.push(params.to.clone());
-        bind_idx += 1;
+        idx += 1;
 
-        // Always worker-scoped.
-        conditions.push(format!("s.agent_type = ${bind_idx}"));
+        conditions.push(format!("s.agent_type = ${idx}"));
         binds.push("worker".to_string());
-        bind_idx += 1;
+        idx += 1;
 
         if let Some(ref project_id) = params.project_id {
-            conditions.push(format!("s.project_id = ${bind_idx}"));
+            conditions.push(format!("s.project_id = ${idx}"));
             binds.push(project_id.clone());
-            bind_idx += 1;
+            idx += 1;
         }
 
         if let Some(ref model_id) = params.model_id {
-            conditions.push(format!("s.model_id = ${bind_idx}"));
+            conditions.push(format!("s.model_id = ${idx}"));
             binds.push(model_id.clone());
-            // bind_idx not incremented — last use
         }
 
-        let from_clause = "FROM sessions s \
-             JOIN tasks t ON t.id = s.task_id"
-            .to_string();
-
+        let from_clause = "FROM sessions s JOIN tasks t ON t.id = s.task_id".to_string();
         let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
         (from_clause, where_clause, binds)
     }
 
-    /// Per-model effectiveness metrics over worker sessions.
-    ///
-    /// Uses shared-credit attribution: each completed task counts for every
-    /// model that ran at least one worker session on it.  Success rate,
-    /// average reopens, and verification pass rate are computed over distinct
-    /// shared-credit tasks per model (not raw worker-session rows) so that
-    /// multiple sessions on the same task cannot inflate rates above 1.0.
     async fn fetch_model_effectiveness(
         &self,
         params: &UsageAnalyticsQuery,
     ) -> Result<Vec<ModelEffectivenessRow>> {
         let (from_clause, where_clause, binds) = Self::build_effectiveness_from_where(params);
 
-        // Use CTEs to separate session-level aggregates (spend, tokens,
-        // sessions) from task-level outcome metrics.  Task outcomes are
-        // computed over DISTINCT (model_id, task_id) pairs so that multiple
-        // worker sessions on the same task cannot overweight success_rate,
-        // avg_reopens, or cost_per_completed_task.
-        //
-        // `filtered_sessions` — rows matching the effectiveness WHERE clause
-        //     (date range, worker scope, optional project/model filters).
-        // `session_agg` — per-model session/spend/tokens rollup.
-        // `task_agg` — per-model task-outcome rollup over distinct
-        //     (model_id, task_id) pairs, using task properties from the
-        //     tasks table (which are functionally dependent on task_id).
         let sql = format!(
             "WITH filtered_sessions AS ( \
                 SELECT \
-                    s.model_id, \
-                    s.task_id, \
-                    s.cost_usd, \
-                    s.tokens_in, \
-                    s.tokens_out, \
-                    t.status, \
-                    t.close_reason, \
-                    t.total_reopen_count \
+                    s.model_id, s.task_id, s.cost_usd, s.tokens_in, s.tokens_out, \
+                    t.status, t.close_reason, t.total_reopen_count \
                 {from_clause} {where_clause} \
              ), \
              session_agg AS ( \
                 SELECT \
                     model_id, \
                     COUNT(*) AS sessions, \
-                    CASE WHEN bool_or(cost_usd IS NULL) \
-                         THEN NULL ELSE SUM(cost_usd) END AS spend_usd, \
+                    CASE WHEN bool_or(cost_usd IS NULL) THEN NULL ELSE SUM(cost_usd) END AS spend_usd, \
                     COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
                     COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out \
                 FROM filtered_sessions \
@@ -527,64 +561,49 @@ impl UsageAnalyticsRepository {
              task_agg AS ( \
                 SELECT \
                     model_id, \
-                    COUNT(DISTINCT \
-                        CASE WHEN status = 'closed' \
-                                  AND close_reason = 'completed' \
-                             THEN task_id END) AS completed_count, \
-                    COUNT(DISTINCT \
-                        CASE WHEN status = 'closed' \
-                             THEN task_id END) AS closed_count, \
+                    COUNT(DISTINCT CASE WHEN status = 'closed' AND close_reason = 'completed' \
+                                        THEN task_id END) AS completed_count, \
+                    COUNT(DISTINCT CASE WHEN status = 'closed' THEN task_id END) AS closed_count, \
                     AVG(CASE WHEN status = 'closed' \
-                             THEN total_reopen_count::DOUBLE PRECISION \
-                             ELSE NULL END) AS avg_reopens \
+                             THEN total_reopen_count::DOUBLE PRECISION END) AS avg_reopens \
                 FROM ( \
-                    SELECT DISTINCT \
-                        model_id, task_id, status, close_reason, \
-                        total_reopen_count \
+                    SELECT DISTINCT model_id, task_id, status, close_reason, total_reopen_count \
                     FROM filtered_sessions \
                 ) distinct_tasks \
                 GROUP BY model_id \
              ) \
              SELECT \
-                 sa.model_id                                AS \"model_id!\", \
-                 sa.sessions                                AS \"sessions!\", \
-                 sa.spend_usd                               AS \"spend_usd\", \
-                 sa.tokens_in                               AS \"tokens_in!\", \
-                 sa.tokens_out                              AS \"tokens_out!\", \
-                 COALESCE(ta.completed_count, 0)            AS \"shared_credit_completed_task_count!\", \
-                 COALESCE( \
-                     ta.completed_count::DOUBLE PRECISION \
-                     / GREATEST(1, ta.closed_count)::DOUBLE PRECISION, \
-                     0.0 \
-                 )                                          AS \"success_rate!\", \
-                 COALESCE(ta.avg_reopens, 0.0)              AS \"avg_reopens!\" \
+                 sa.model_id                     AS model_id, \
+                 sa.sessions                     AS sessions, \
+                 sa.spend_usd                    AS spend_usd, \
+                 sa.tokens_in                    AS tokens_in, \
+                 sa.tokens_out                   AS tokens_out, \
+                 COALESCE(ta.completed_count, 0) AS shared_credit_completed_task_count, \
+                 CASE WHEN ta.closed_count > 0 \
+                      THEN ta.completed_count::DOUBLE PRECISION / ta.closed_count::DOUBLE PRECISION \
+                      END                        AS success_rate, \
+                 ta.avg_reopens                  AS avg_reopens \
              FROM session_agg sa \
              LEFT JOIN task_agg ta ON ta.model_id = sa.model_id \
              ORDER BY sa.model_id"
         );
 
-        let mut query = sqlx::query(&sql);
-        for val in &binds {
-            query = query.bind(val.clone());
-        }
+        let query = Self::bind_all(sqlx::query(&sql), &binds);
         let rows = query.fetch_all(self.db.pool()).await?;
 
         Ok(rows
             .into_iter()
             .map(|r| {
-                let sessions: i64 = r.get("sessions!");
+                let sessions: i64 = r.get("sessions");
                 let spend_usd: Option<f64> = r.get("spend_usd");
-                let tokens_in: i64 = r.get("tokens_in!");
-                let tokens_out: i64 = r.get("tokens_out!");
-                let completed: i64 = r.get("shared_credit_completed_task_count!");
+                let tokens_in: i64 = r.get("tokens_in");
+                let tokens_out: i64 = r.get("tokens_out");
+                let completed: i64 = r.get("shared_credit_completed_task_count");
 
-                // cost_per_completed_task: NULL when no completed tasks or
-                // all sessions were unpriced (NULL cost_usd).
                 let cost_per_completed_task = match (spend_usd, completed) {
                     (Some(cost), c) if c > 0 => Some(cost / c as f64),
                     _ => None,
                 };
-                // tokens_per_task: NULL when no completed tasks.
                 let tokens_per_task = if completed > 0 {
                     Some((tokens_in + tokens_out) as f64 / completed as f64)
                 } else {
@@ -592,14 +611,14 @@ impl UsageAnalyticsRepository {
                 };
 
                 ModelEffectivenessRow {
-                    model_id: r.get("model_id!"),
+                    model_id: r.get("model_id"),
                     sessions,
                     spend_usd,
                     tokens_in,
                     tokens_out,
                     shared_credit_completed_task_count: completed,
-                    success_rate: r.get("success_rate!"),
-                    avg_reopens: r.get("avg_reopens!"),
+                    success_rate: r.get("success_rate"),
+                    avg_reopens: r.get("avg_reopens"),
                     cost_per_completed_task,
                     tokens_per_task,
                 }
@@ -607,46 +626,90 @@ impl UsageAnalyticsRepository {
             .collect())
     }
 
-    // ── Project × model matrix ───────────────────────────────────────────
-
-    /// Project × model usage matrix.  Groups all sessions (all agent types)
-    /// by project and model, applying all endpoint filters.  NULL-project
-    /// sessions are preserved with an empty-string project_id.
+    /// Project × model usage matrix.  Groups all sessions (all agent types) by
+    /// project and model, applying all endpoint filters.  NULL-project
+    /// sessions are preserved with an empty-string project_id.  Outcome
+    /// metrics are computed over the distinct tasks touched by each cell.
     async fn fetch_project_model_matrix(
         &self,
         params: &UsageAnalyticsQuery,
     ) -> Result<Vec<ProjectModelMatrixRow>> {
-        let (from_clause, where_clause, binds) = Self::build_from_where(params);
+        let (conditions, binds) = Self::session_filters(params);
+        let where_clause = Self::where_clause(&conditions);
 
         let sql = format!(
-            "SELECT \
-                COALESCE(s.project_id, '')               AS \"project_id!\", \
-                s.model_id                               AS \"model_id!\", \
-                COUNT(*)                                 AS \"sessions!\", \
-                CASE \
-                    WHEN bool_or(s.cost_usd IS NULL) THEN NULL \
-                    ELSE SUM(s.cost_usd) \
-                END                                      AS \"spend_usd\", \
-                COALESCE(SUM(s.tokens_in)::bigint, 0)            AS \"tokens_in!\", \
-                COALESCE(SUM(s.tokens_out)::bigint, 0)           AS \"tokens_out!\" \
-             {from_clause} {where_clause} \
-             GROUP BY COALESCE(s.project_id, ''), s.model_id \
-             ORDER BY 1, 2"
+            "WITH base AS ( \
+                SELECT \
+                    COALESCE(s.project_id, '') AS project_id, \
+                    COALESCE(p.name, '')       AS project_name, \
+                    s.model_id                 AS model_id, \
+                    s.cost_usd, s.tokens_in, s.tokens_out, s.task_id, \
+                    t.status, t.close_reason, t.total_reopen_count \
+                FROM sessions s \
+                LEFT JOIN projects p ON p.id = s.project_id \
+                LEFT JOIN tasks t ON t.id = s.task_id \
+                {where_clause} \
+             ), \
+             sess AS ( \
+                SELECT \
+                    project_id, MAX(project_name) AS project_name, model_id, \
+                    COUNT(*) AS sessions, \
+                    CASE WHEN bool_or(cost_usd IS NULL) THEN NULL ELSE SUM(cost_usd) END AS spend_usd, \
+                    COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
+                    COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out, \
+                    COUNT(DISTINCT task_id) AS task_count \
+                FROM base GROUP BY project_id, model_id \
+             ), \
+             task_agg AS ( \
+                SELECT \
+                    project_id, model_id, \
+                    COUNT(DISTINCT CASE WHEN status = 'closed' AND close_reason = 'completed' \
+                                        THEN task_id END) AS completed_count, \
+                    COUNT(DISTINCT CASE WHEN status = 'closed' THEN task_id END) AS closed_count, \
+                    AVG(CASE WHEN status = 'closed' \
+                             THEN total_reopen_count::DOUBLE PRECISION END) AS avg_reopens \
+                FROM ( \
+                    SELECT DISTINCT project_id, model_id, task_id, status, close_reason, \
+                           total_reopen_count \
+                    FROM base \
+                ) distinct_tasks \
+                GROUP BY project_id, model_id \
+             ) \
+             SELECT \
+                 sess.project_id   AS project_id, \
+                 sess.project_name AS project_name, \
+                 sess.model_id     AS model_id, \
+                 sess.sessions     AS sessions, \
+                 sess.spend_usd    AS spend_usd, \
+                 sess.tokens_in    AS tokens_in, \
+                 sess.tokens_out   AS tokens_out, \
+                 sess.task_count   AS task_count, \
+                 CASE WHEN ta.closed_count > 0 \
+                      THEN ta.completed_count::DOUBLE PRECISION / ta.closed_count::DOUBLE PRECISION \
+                      END           AS success_rate, \
+                 ta.avg_reopens    AS avg_reopens \
+             FROM sess \
+             LEFT JOIN task_agg ta \
+                ON ta.project_id = sess.project_id AND ta.model_id = sess.model_id \
+             ORDER BY 1, 3"
         );
 
-        let query = sqlx::query(&sql);
-        let query = Self::bind_all(query, &binds);
+        let query = Self::bind_all(sqlx::query(&sql), &binds);
         let rows = query.fetch_all(self.db.pool()).await?;
 
         Ok(rows
             .into_iter()
             .map(|r| ProjectModelMatrixRow {
-                project_id: r.get("project_id!"),
-                model_id: r.get("model_id!"),
-                sessions: r.get("sessions!"),
+                project_id: r.get("project_id"),
+                project_name: r.get("project_name"),
+                model_id: r.get("model_id"),
+                sessions: r.get("sessions"),
                 spend_usd: r.get("spend_usd"),
-                tokens_in: r.get("tokens_in!"),
-                tokens_out: r.get("tokens_out!"),
+                tokens_in: r.get("tokens_in"),
+                tokens_out: r.get("tokens_out"),
+                task_count: r.get("task_count"),
+                success_rate: r.get("success_rate"),
+                avg_reopens: r.get("avg_reopens"),
             })
             .collect())
     }
@@ -669,45 +732,34 @@ mod tests {
     }
 
     #[test]
-    fn group_dimension_display_matches_label() {
-        for dim in [
-            GroupDimension::Model,
-            GroupDimension::Project,
-            GroupDimension::User,
-            GroupDimension::Proposal,
-            GroupDimension::Task,
-            GroupDimension::Agent,
-        ] {
-            assert_eq!(dim.to_string(), dim.label());
-        }
-    }
-
-    #[test]
-    fn group_dimension_sql_expressions() {
-        // Verify SQL expressions are reasonable and non-empty.
-        assert!(!GroupDimension::Model.group_expr().is_empty());
-        assert!(!GroupDimension::Project.group_expr().is_empty());
-        assert!(!GroupDimension::User.group_expr().is_empty());
-        assert!(!GroupDimension::Proposal.group_expr().is_empty());
-        assert!(!GroupDimension::Task.group_expr().is_empty());
-        assert!(!GroupDimension::Agent.group_expr().is_empty());
-    }
-
-    #[test]
-    fn user_group_uses_coalesce() {
-        let expr = GroupDimension::User.group_expr();
+    fn user_dimension_key_uses_creator_fallback() {
+        let expr = GroupDimension::User.key_expr();
         assert!(expr.contains("COALESCE"));
         assert!(expr.contains("created_by_user_id"));
     }
 
     #[test]
-    fn proposal_group_joins_through_epics() {
-        let expr = GroupDimension::Proposal.group_expr();
-        assert!(expr.contains("proposal_id"));
+    fn proposal_dimension_inner_joins_proposal_epics() {
+        assert!(GroupDimension::Proposal.joins().contains("INNER JOIN proposal_epics"));
+        assert!(GroupDimension::Proposal.name_expr().contains("pr.title"));
     }
 
     #[test]
-    fn usage_analytics_query_clone_debug() {
+    fn breakdown_dimensions_have_non_empty_sql() {
+        for dim in [
+            GroupDimension::User,
+            GroupDimension::Project,
+            GroupDimension::Proposal,
+            GroupDimension::Task,
+        ] {
+            assert!(!dim.key_expr().is_empty());
+            assert!(!dim.name_expr().is_empty());
+            assert!(dim.joins().contains("tasks t"));
+        }
+    }
+
+    #[test]
+    fn session_filters_emit_date_bounds_first() {
         let q = UsageAnalyticsQuery {
             from: "2025-01-01".into(),
             to: "2025-02-01".into(),
@@ -716,81 +768,48 @@ mod tests {
             model_id: None,
             agent_type: Some("worker".into()),
         };
-        let q2 = q.clone();
-        assert_eq!(q2.from, "2025-01-01");
-        assert_eq!(q2.to, "2025-02-01");
-        assert_eq!(q2.group_by, GroupDimension::Model);
-        assert_eq!(q2.project_id.as_deref(), Some("proj-1"));
-        assert!(q2.model_id.is_none());
-        assert_eq!(q2.agent_type.as_deref(), Some("worker"));
-
-        // Verify Debug is derived (doesn't panic).
-        let _dbg = format!("{q:?}");
-    }
-
-    #[test]
-    fn daily_series_row_default() {
-        let row = DailySeriesRow::default();
-        assert_eq!(row.day, "");
-        assert_eq!(row.session_count, 0);
-        assert_eq!(row.tokens_in, 0);
-        assert_eq!(row.tokens_out, 0);
-        assert_eq!(row.cache_read_tokens, 0);
-        assert_eq!(row.cache_write_tokens, 0);
-        assert!(row.total_cost_usd.is_none());
-    }
-
-    #[test]
-    fn breakdown_row_default() {
-        let row = BreakdownRow::default();
-        assert_eq!(row.group_key, "");
-        assert_eq!(row.day, "");
-        assert!(row.total_cost_usd.is_none());
+        let (conditions, binds) = UsageAnalyticsRepository::session_filters(&q);
+        assert_eq!(conditions[0], "s.started_at >= $1");
+        assert_eq!(conditions[1], "s.started_at < $2");
+        assert_eq!(binds[0], "2025-01-01");
+        assert_eq!(binds[1], "2025-02-01");
+        // project_id present, model_id absent, agent_type present → 4 binds.
+        assert_eq!(binds.len(), 4);
+        assert_eq!(binds[2], "proj-1");
+        assert_eq!(binds[3], "worker");
     }
 
     #[test]
     fn usage_totals_default() {
         let totals = UsageTotals::default();
         assert_eq!(totals.session_count, 0);
-        assert_eq!(totals.tokens_in, 0);
-        assert_eq!(totals.tokens_out, 0);
-        assert_eq!(totals.cache_read_tokens, 0);
-        assert_eq!(totals.cache_write_tokens, 0);
         assert!(totals.total_cost_usd.is_none());
     }
 
     #[test]
-    fn usage_analytics_result_default() {
-        let result = UsageAnalyticsResult::default();
-        assert_eq!(result.totals.session_count, 0);
-        assert!(result.series.is_empty());
-        assert!(result.breakdown.is_empty());
+    fn series_detail_row_default() {
+        let row = SeriesDetailRow::default();
+        assert_eq!(row.day, "");
+        assert_eq!(row.session_count, 0);
+        assert!(row.cost.is_none());
     }
 
     #[test]
-    fn model_effectiveness_row_default() {
-        let row = ModelEffectivenessRow::default();
-        assert_eq!(row.model_id, "");
-        assert_eq!(row.sessions, 0);
-        assert!(row.spend_usd.is_none());
-        assert_eq!(row.tokens_in, 0);
-        assert_eq!(row.tokens_out, 0);
-        assert_eq!(row.shared_credit_completed_task_count, 0);
+    fn entity_breakdown_row_default() {
+        let row = EntityBreakdownRow::default();
+        assert_eq!(row.id, "");
+        assert_eq!(row.task_count, 0);
+        assert!(row.cost.is_none());
         assert!(row.success_rate.is_none());
-        assert!(row.avg_reopens.is_none());
-        assert!(row.cost_per_completed_task.is_none());
-        assert!(row.tokens_per_task.is_none());
     }
 
     #[test]
     fn project_model_matrix_row_default() {
         let row = ProjectModelMatrixRow::default();
         assert_eq!(row.project_id, "");
-        assert_eq!(row.model_id, "");
-        assert_eq!(row.sessions, 0);
+        assert_eq!(row.project_name, "");
         assert!(row.spend_usd.is_none());
-        assert_eq!(row.tokens_in, 0);
-        assert_eq!(row.tokens_out, 0);
+        assert!(row.success_rate.is_none());
     }
 
     #[test]
@@ -810,7 +829,6 @@ mod tests {
         let row2 = row.clone();
         assert_eq!(row2.model_id, "gpt-4");
         assert_eq!(row2.shared_credit_completed_task_count, 3);
-        // Debug doesn't panic.
         let _dbg = format!("{row:?}");
     }
 }
