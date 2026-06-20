@@ -26,8 +26,9 @@ Evidence checked while creating this inventory:
   (`CREATE DATABASE djinn_test_<uuid> TEMPLATE djinn_test_template`), and
   `djinn_agent::test_helpers::create_test_db()` delegates to it.
 - Slot-pool/control-plane tests route task-run teardown through recording
-  `RuntimeOps` fakes; the slot-pool module also has an explicit layering guard
-  that production slot-pool lifecycle code does not import `djinn_k8s` directly.
+  `RuntimeOps` fakes; the slot-pool/k8s layering guard now lives in
+  `server/boundary_rules.toml` as `slot-pool-no-k8s-direct-import`, which
+  is enforced by the boundary-rule gate instead of an ad-hoc unit test.
 
 ## Inventory and profile classification
 
@@ -41,7 +42,7 @@ Evidence checked while creating this inventory:
 | Slot-pool late event / reclaimed mapping race | `server/crates/djinn-agent/src/actors/slot/pool/tests.rs::actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping` | `-E 'test(actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping)'` | Uses `test_app_state()`, `RecordingRuntimeOps`, and `SlotPoolHandle::spawn_with_factory`; no live runtime/k8s. | Existing merge-queue `profile ci`. Deterministic late-event race coverage. |
 | Slot-pool killed-event teardown backstop | `server/crates/djinn-agent/src/actors/slot/pool/tests.rs::slot_event_killed_tears_down_taskrun_job` | `-E 'test(slot_event_killed_tears_down_taskrun_job)'` | Uses `RecordingRuntimeOps` and direct `SlotEvent::Killed` handling; DB is template Postgres. | Existing merge-queue `profile ci`. Single event-path regression. |
 | Slot-pool synchronous terminate settlement | `server/crates/djinn-agent/src/actors/slot/pool/tests.rs::terminate_session_synchronously_reclaims_mapping_activity_and_session_row` | `-E 'test(terminate_session_synchronously_reclaims_mapping_activity_and_session_row)'` | Uses fake runtime teardown and template Postgres session rows. | Existing merge-queue `profile ci`. Deterministic settlement check; belongs with normal CI coverage. |
-| Slot-pool/k8s boundary guard | `server/crates/djinn-agent/src/actors/slot/pool/tests.rs::slot_pool_lifecycle_does_not_import_djinn_k8s_directly` | `-E 'test(slot_pool_lifecycle_does_not_import_djinn_k8s_directly)'` | Reads source files under `src/actors/slot/pool` and asserts no direct `djinn_k8s` imports in production slot-pool lifecycle code. | Existing merge-queue `profile ci`. Fast static guard proving the no-kind/k8s boundary. |
+| Slot-pool/k8s boundary guard | `server/boundary_rules.toml` rule `slot-pool-no-k8s-direct-import` | Boundary-rule CI gate | Forbids slot-pool lifecycle code under `src/actors/slot/pool` from importing `djinn-k8s` directly. | General boundary-rule gate. This replaces the former ad-hoc `slot_pool_lifecycle_does_not_import_djinn_k8s_directly` unit test. |
 | `execution_kill_task` settlement | `server/crates/djinn-control-plane/tests/execution_tools.rs::execution_kill_task_settles_live_run_through_control_plane_tool_route` | `-E 'test(execution_kill_task_settles_live_run_through_control_plane_tool_route)'` | `RealPoolKillHarness` uses `Database::open_in_memory()`, a real `SlotPoolHandle`, `McpTestHarness`, and `RecordingRuntimeOps`; teardown is recorded, not sent to Kubernetes. | Existing merge-queue `profile ci`. End-to-end tool route with fake runtime side effects; bounded waits. |
 | `execution_kill_task` kill-vs-completion race | `server/crates/djinn-control-plane/tests/execution_tools.rs::execution_kill_task_racing_natural_completion_settles_once_and_releases_capacity` | `-E 'test(execution_kill_task_racing_natural_completion_settles_once_and_releases_capacity)'` | Uses a controlled completion gate (`CompletionRaceControl`) so natural settlement and kill interleave deterministically inside the real pool/tool harness. | Existing merge-queue `profile ci`. Deterministic race interleaving; no soak/stress profile needed. |
 | `execution_kill_task` double-kill | `server/crates/djinn-control-plane/tests/execution_tools.rs::execution_kill_task_double_kill_is_harmless_and_leaves_capacity_available` | `-E 'test(execution_kill_task_double_kill_is_harmless_and_leaves_capacity_available)'` | Same real-pool/control-plane harness with template Postgres and recording runtime. | Existing merge-queue `profile ci`. Bounded idempotency regression. |
@@ -58,7 +59,7 @@ for targeted local/diagnostic checks.
 cd server
 
 # djinn-agent lifecycle/concurrency inventory
-AGENT_FILTER='test(wnd1_dispatch_race_harness_never_exceeds_caps_1_through_5) or test(wnd1_ready_queue_fixture_is_visible_to_dispatch_selection_and_reads_caps) or test(invariant_harness_accepts_stale_busy_slot_self_heal) or test(lifecycle_permutations_preserve_slot_pool_invariants) or test(mark_slot_free_is_idempotent_and_skips_retired) or test(actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping) or test(slot_event_killed_tears_down_taskrun_job) or test(terminate_session_synchronously_reclaims_mapping_activity_and_session_row) or test(slot_pool_lifecycle_does_not_import_djinn_k8s_directly) or test(reopen_loop_guard_second_strike_chaos_parks_without_rearming) or test(same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes)'
+AGENT_FILTER='test(wnd1_dispatch_race_harness_never_exceeds_caps_1_through_5) or test(wnd1_ready_queue_fixture_is_visible_to_dispatch_selection_and_reads_caps) or test(invariant_harness_accepts_stale_busy_slot_self_heal) or test(lifecycle_permutations_preserve_slot_pool_invariants) or test(mark_slot_free_is_idempotent_and_skips_retired) or test(actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping) or test(slot_event_killed_tears_down_taskrun_job) or test(terminate_session_synchronously_reclaims_mapping_activity_and_session_row) or test(reopen_loop_guard_second_strike_chaos_parks_without_rearming) or test(same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes)'
 cargo nextest list -p djinn-agent --all-targets --all-features --profile ci -E "$AGENT_FILTER"
 
 # djinn-control-plane execution_kill_task inventory
@@ -103,9 +104,9 @@ cargo nextest show-config version --profile ci
 # → current nextest version: 0.9.137  (exit 0)
 
 # (2) Targeted djinn-agent inventory discovery.
-AGENT_FILTER='test(wnd1_dispatch_race_harness_never_exceeds_caps_1_through_5) or test(wnd1_ready_queue_fixture_is_visible_to_dispatch_selection_and_reads_caps) or test(invariant_harness_accepts_stale_busy_slot_self_heal) or test(lifecycle_permutations_preserve_slot_pool_invariants) or test(mark_slot_free_is_idempotent_and_skips_retired) or test(actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping) or test(slot_event_killed_tears_down_taskrun_job) or test(terminate_session_synchronously_reclaims_mapping_activity_and_session_row) or test(slot_pool_lifecycle_does_not_import_djinn_k8s_directly) or test(reopen_loop_guard_second_strike_chaos_parks_without_rearming) or test(same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes)'
+AGENT_FILTER='test(wnd1_dispatch_race_harness_never_exceeds_caps_1_through_5) or test(wnd1_ready_queue_fixture_is_visible_to_dispatch_selection_and_reads_caps) or test(invariant_harness_accepts_stale_busy_slot_self_heal) or test(lifecycle_permutations_preserve_slot_pool_invariants) or test(mark_slot_free_is_idempotent_and_skips_retired) or test(actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping) or test(slot_event_killed_tears_down_taskrun_job) or test(terminate_session_synchronously_reclaims_mapping_activity_and_session_row) or test(reopen_loop_guard_second_strike_chaos_parks_without_rearming) or test(same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes)'
 cargo nextest list -p djinn-agent --all-targets --all-features --profile ci -E "$AGENT_FILTER"
-# → 11/11 inventory tests discovered under the unfiltered merge-queue profile.
+# → 10/10 djinn-agent inventory tests discovered under the unfiltered merge-queue profile.
 
 # (3) Targeted djinn-control-plane execution_kill_task inventory discovery.
 KILL_FILTER='test(execution_kill_task_settles_live_run_through_control_plane_tool_route) or test(execution_kill_task_racing_natural_completion_settles_once_and_releases_capacity) or test(execution_kill_task_double_kill_is_harmless_and_leaves_capacity_available)'
@@ -115,7 +116,7 @@ cargo nextest list -p djinn-control-plane --test execution_tools --all-features 
 # (4) Full unfiltered discovery — proves the inventory is a subset of the
 #     merge-queue command, not a side list.
 cargo nextest list --workspace --all-targets --all-features --profile ci | wc -l
-# → 3531 tests total, all 14 inventory tests appear in this list.
+# → 3530 tests total, all 13 Rust inventory tests appear in this list; the slot-pool/k8s guard is enforced by the boundary-rule gate.
 
 # (5) No-run compile of the full merge-queue command — the strongest local
 #     check that does not require Postgres/Docker.  Exits 0 means the
@@ -127,10 +128,12 @@ cargo nextest run --workspace --all-targets --all-features --profile ci --no-run
 
 ### Local execution vs CI execution split
 
-- **Locally runnable now (no infrastructure):** only
-  `slot_pool_lifecycle_does_not_import_djinn_k8s_directly` — a static
-  source-file guard.  It passed in 0.04s on a stripped-down worker pod.
-- **DB-backed tests (13 / 14):** need Postgres at
+- **Locally runnable now (no infrastructure):** the former ad-hoc
+  `slot_pool_lifecycle_does_not_import_djinn_k8s_directly` source-file
+  guard has moved to `server/boundary_rules.toml` as
+  `slot-pool-no-k8s-direct-import` and is covered by the boundary-rule
+  gate rather than nextest discovery.
+- **DB-backed tests (13 / 13):** need Postgres at
   `127.0.0.1:5433` + a migrated `djinn_test_template`.  The merge-queue
   `server-test` job supplies both.  In the worker pod used for
   validation, no `psql`/`postgres` is installed and no
@@ -155,7 +158,7 @@ For each of the four vjs6 families, the command/filter to run in CI
 | Family | Command / filter |
 | --- | --- |
 | Dispatch-cap race / per-user max sessions | `cd server && cargo nextest run -p djinn-agent --all-targets --all-features --profile ci -E 'test(wnd1_dispatch_race_harness_never_exceeds_caps_1_through_5) or test(wnd1_ready_queue_fixture_is_visible_to_dispatch_selection_and_reads_caps)'` |
-| Slot-pool lifecycle event races | `cd server && cargo nextest run -p djinn-agent --all-targets --all-features --profile ci -E 'test(invariant_harness_accepts_stale_busy_slot_self_heal) or test(lifecycle_permutations_preserve_slot_pool_invariants) or test(mark_slot_free_is_idempotent_and_skips_retired) or test(actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping) or test(slot_event_killed_tears_down_taskrun_job) or test(terminate_session_synchronously_reclaims_mapping_activity_and_session_row) or test(slot_pool_lifecycle_does_not_import_djinn_k8s_directly)'` |
+| Slot-pool lifecycle event races | `cd server && cargo nextest run -p djinn-agent --all-targets --all-features --profile ci -E 'test(invariant_harness_accepts_stale_busy_slot_self_heal) or test(lifecycle_permutations_preserve_slot_pool_invariants) or test(mark_slot_free_is_idempotent_and_skips_retired) or test(actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping) or test(slot_event_killed_tears_down_taskrun_job) or test(terminate_session_synchronously_reclaims_mapping_activity_and_session_row)'` |
 | `execution_kill_task` settlement / race / double-kill | `cd server && cargo nextest run -p djinn-control-plane --test execution_tools --all-features --profile ci -E 'test(execution_kill_task_settles_live_run_through_control_plane_tool_route) or test(execution_kill_task_racing_natural_completion_settles_once_and_releases_capacity) or test(execution_kill_task_double_kill_is_harmless_and_leaves_capacity_available)'` |
 | Reopen / intervention / same-role cycling chaos | `cd server && cargo nextest run -p djinn-agent --all-targets --all-features --profile ci -E 'test(reopen_loop_guard_second_strike_chaos_parks_without_rearming) or test(same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes)'` |
 
@@ -180,11 +183,13 @@ cd server && cargo nextest run --workspace --all-targets --all-features --profil
    describe the same PR-fast vs merge-queue-full split, point to the
    unfiltered `profile ci` path, and explicitly say kind/k8s is not
    required.
-3. **All 14 inventory tests are discoverable by the merge-queue
+3. **All 13 Rust inventory tests are discoverable by the merge-queue
    command.**  Verified by `cargo nextest list --workspace --all-targets
-   --all-features --profile ci` (3531 tests, all 14 inventory names
+   --all-features --profile ci` (3530 tests, all 13 Rust inventory names
    present) and by two targeted `cargo nextest list -E` filters that
-   return 11/11 djinn-agent and 3/3 djinn-control-plane tests.
+   return 10/10 djinn-agent and 3/3 djinn-control-plane tests. The
+   slot-pool/k8s boundary is covered separately by the boundary-rule gate
+   rule `slot-pool-no-k8s-direct-import`.
 4. **Workspace compiles + links under `profile ci` no-run** — the
    strongest local check available without Postgres.  Exit 0.
 5. **Local execution blocker is scoped to worker-pod infrastructure,
@@ -196,11 +201,10 @@ cd server && cargo nextest run --workspace --all-targets --all-features --profil
    `server-test` job supplies the missing service.  Stripped-down
    Djinn worker pods (this validator) intentionally do not carry
    Postgres, so this gap is expected and does not block ir2i closing.
-6. **The pure-in-process static guard
-   (`slot_pool_lifecycle_does_not_import_djinn_k8s_directly`) did run
-   locally and passed in 0.04s**, providing a positive execution
-   signal for at least one inventory test on every worker pod, with the
-   rest gated on the merge-queue `server-test` job as designed.
+6. **The slot-pool/k8s static guard moved to the general boundary-rule
+   gate** as `slot-pool-no-k8s-direct-import` in
+   `server/boundary_rules.toml`, so the lifecycle inventory no longer
+   carries an ad-hoc source-scanning unit test for that constraint.
 
 These six points give the closing planner enough to confirm ir2i can
 close once this task lands.

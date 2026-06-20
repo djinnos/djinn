@@ -45,6 +45,12 @@ description = "Agent must not import control-plane; control-plane is the bridge 
 # internals, which is an architectural smell that should be flagged.
 
 [[rules]]
+name = "slot-pool-no-k8s-direct-import"
+from_glob = "**/actors/slot/pool/**"
+to_glob = "**/djinn-k8s/**"
+description = "Slot pool lifecycle code must not import djinn_k8s directly; use the RuntimeOps bridge layer."
+
+[[rules]]
 name = "no-agent-imports-db"
 from_glob = "**/djinn-agent/**"
 to_glob = "**/djinn-db/**"
