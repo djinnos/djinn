@@ -1,9 +1,11 @@
 // Endpoint contract regressions for `GET /api/admin/usage`.
 //
-// These tests exercise the HTTP handler layer — admin gating, response shape,
-// query-parameter validation, and rollup/pagination behaviour that repository-
-// only tests cannot prove.  They follow the same `seed_admin_session` +
-// `test_helpers::create_test_app_with_db` pattern used by `tests/agents.rs`.
+// These tests exercise the HTTP handler layer — admin gating, the frontend
+// response contract (kpis / time_series / breakdowns / model_effectiveness /
+// project_model_matrix / generated_at), query-parameter validation, and
+// rollup behaviour that repository-only tests cannot prove.  They follow the
+// same `seed_admin_session` + `test_helpers::create_test_app_with_db` pattern
+// used by `tests/agents.rs`.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -157,10 +159,6 @@ async fn seed_task_row(db: &djinn_db::Database, seed: TaskSeed<'_>) -> String {
 
 /// Seed raw session rows directly into the database for integration-level
 /// contract tests that need actual query results.
-///
-/// Inserts sessions with the given `started_at` prefix (first 10 chars must be
-/// a valid ISO date), `model_id`, `agent_type`, `project_id`, and optional
-/// `cost_usd`.
 async fn seed_session_row(db: &djinn_db::Database, seed: SessionSeed<'_>) {
     let id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
@@ -199,10 +197,18 @@ async fn seed_project(db: &djinn_db::Database, project_id: &str, name: &str) {
     .expect("failed to seed project");
 }
 
-fn model_effectiveness_row<'a>(rows: &'a [Value], model_id: &str) -> &'a Value {
+/// Find a model_effectiveness row by its (renamed) `model` field.
+fn model_effectiveness_row<'a>(rows: &'a [Value], model: &str) -> &'a Value {
     rows.iter()
-        .find(|row| row.get("model_id").and_then(Value::as_str) == Some(model_id))
-        .unwrap_or_else(|| panic!("missing model_effectiveness row for {model_id}: {rows:?}"))
+        .find(|row| row.get("model").and_then(Value::as_str) == Some(model))
+        .unwrap_or_else(|| panic!("missing model_effectiveness row for {model}: {rows:?}"))
+}
+
+/// Convenience: extract a top-level array field as a slice of Values.
+fn array_field<'a>(body: &'a Value, field: &str) -> &'a Vec<Value> {
+    body.get(field)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("expected array field '{field}' in {body}"))
 }
 
 // ── Admin gating ─────────────────────────────────────────────────────────────
@@ -213,12 +219,7 @@ async fn nonadmin_request_is_rejected_with_403() {
     let nonadmin_cookie = seed_nonadmin_session(&db).await;
     let app = test_helpers::create_test_app_with_db(db);
 
-    let (status, body) = get_usage(
-        &app,
-        "from=2025-01-01&to=2025-02-01",
-        Some(&nonadmin_cookie),
-    )
-    .await;
+    let (status, body) = get_usage(&app, "preset=30d", Some(&nonadmin_cookie)).await;
 
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(
@@ -235,7 +236,7 @@ async fn unauthenticated_request_is_rejected_with_401() {
     let db = test_helpers::create_test_db();
     let app = test_helpers::create_test_app_with_db(db);
 
-    let (status, body) = get_usage(&app, "from=2025-01-01&to=2025-02-01", None).await;
+    let (status, body) = get_usage(&app, "preset=30d", None).await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(
@@ -250,24 +251,23 @@ async fn unauthenticated_request_is_rejected_with_401() {
 // ── Response shape ───────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn admin_request_returns_all_six_top_level_fields() {
+async fn admin_request_returns_frontend_contract_fields() {
     let db = test_helpers::create_test_db();
     let admin_cookie = seed_admin_session(&db).await;
     let app = test_helpers::create_test_app_with_db(db);
 
     let (status, body) =
-        get_usage(&app, "from=2025-01-01&to=2025-02-01", Some(&admin_cookie)).await;
+        get_usage(&app, "start=2025-01-01&end=2025-02-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::OK);
 
     for field in [
-        "totals",
-        "previous_totals",
-        "series",
-        "breakdown",
+        "kpis",
+        "time_series",
+        "breakdowns",
         "model_effectiveness",
         "project_model_matrix",
-        "granularity",
+        "generated_at",
     ] {
         assert!(
             body.get(field).is_some(),
@@ -275,272 +275,136 @@ async fn admin_request_returns_all_six_top_level_fields() {
         );
     }
 
-    // Verify types
-    assert!(body.get("totals").unwrap().is_object());
-    assert!(body.get("previous_totals").unwrap().is_object());
-    assert!(body.get("series").unwrap().is_array());
-    assert!(body.get("breakdown").unwrap().is_array());
+    assert!(body.get("kpis").unwrap().is_array());
+    assert!(body.get("time_series").unwrap().is_array());
     assert!(body.get("model_effectiveness").unwrap().is_array());
     assert!(body.get("project_model_matrix").unwrap().is_array());
-    assert_eq!(body.get("granularity").unwrap().as_str().unwrap(), "day");
+    assert!(body.get("generated_at").unwrap().is_string());
+
+    let breakdowns = body.get("breakdowns").unwrap();
+    for field in ["by_user", "by_project", "by_proposal", "by_task"] {
+        assert!(
+            breakdowns.get(field).map(Value::is_array).unwrap_or(false),
+            "missing breakdowns.{field}: {breakdowns}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn totals_and_previous_totals_contain_expected_scalar_fields() {
+async fn kpis_have_label_value_and_delta_fields() {
     let db = test_helpers::create_test_db();
     let admin_cookie = seed_admin_session(&db).await;
     let app = test_helpers::create_test_app_with_db(db);
 
     let (status, body) =
-        get_usage(&app, "from=2025-01-01&to=2025-02-01", Some(&admin_cookie)).await;
+        get_usage(&app, "start=2025-01-01&end=2025-02-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::OK);
+    let kpis = array_field(&body, "kpis");
+    assert_eq!(kpis.len(), 4, "expected four KPI cards, got {}", kpis.len());
 
-    for key in ["totals", "previous_totals"] {
-        let obj = body.get(key).unwrap();
-        for field in [
-            "session_count",
-            "tokens_in",
-            "tokens_out",
-            "cache_read_tokens",
-            "cache_write_tokens",
-            "total_cost_usd",
-        ] {
-            assert!(
-                obj.get(field).is_some(),
-                "missing '{field}' in {key}: {obj}"
-            );
-        }
+    let labels: Vec<&str> = kpis
+        .iter()
+        .filter_map(|k| k.get("label").and_then(Value::as_str))
+        .collect();
+    assert!(labels.contains(&"Spend"), "expected a Spend KPI: {labels:?}");
+
+    for kpi in kpis {
+        assert!(kpi.get("label").unwrap().is_string());
+        // value and delta_pct may be null but the keys must exist.
+        assert!(kpi.get("value").is_some());
+        assert!(kpi.get("delta_pct").is_some());
+        assert!(kpi.get("formatted").unwrap().is_string());
     }
 }
 
 // ── Granularity and rollups ──────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn granularity_week_is_accepted_and_reflected_in_response() {
+async fn granularity_week_and_month_are_accepted() {
     let db = test_helpers::create_test_db();
     let admin_cookie = seed_admin_session(&db).await;
     let app = test_helpers::create_test_app_with_db(db);
 
-    let (status, body) = get_usage(
-        &app,
-        "from=2025-01-01&to=2025-02-01&granularity=week",
-        Some(&admin_cookie),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.get("granularity").unwrap().as_str().unwrap(), "week");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn granularity_month_is_accepted_and_reflected_in_response() {
-    let db = test_helpers::create_test_db();
-    let admin_cookie = seed_admin_session(&db).await;
-    let app = test_helpers::create_test_app_with_db(db);
-
-    let (status, body) = get_usage(
-        &app,
-        "from=2025-01-01&to=2025-04-01&granularity=month",
-        Some(&admin_cookie),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.get("granularity").unwrap().as_str().unwrap(), "month");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn weekly_rollup_and_previous_window_with_seeded_data() {
-    let db = test_helpers::create_test_db();
-    let admin_cookie = seed_admin_session(&db).await;
-
-    // Seed a project so FK constraints pass.
-    seed_project(&db, "proj-rollup", "rollup-project").await;
-
-    // Seed sessions across two weeks:
-    //   Window (2025-03-10..2025-03-17): 2 sessions
-    //   Previous window (2025-03-03..2025-03-10): 1 session
-    seed_session_row(
-        &db,
-        SessionSeed {
-            project_id: "proj-rollup",
-            model_id: "model-a",
-            agent_type: "worker",
-            started_at: "2025-03-11T10:00:00Z",
-            tokens_in: 100,
-            tokens_out: 50,
-            cache_read_tokens: 10,
-            cache_write_tokens: 5,
-            cost_usd: Some(0.50),
-            task_id: None,
-        },
-    )
-    .await;
-    seed_session_row(
-        &db,
-        SessionSeed {
-            project_id: "proj-rollup",
-            model_id: "model-a",
-            agent_type: "worker",
-            started_at: "2025-03-12T10:00:00Z",
-            tokens_in: 200,
-            tokens_out: 100,
-            cache_read_tokens: 20,
-            cache_write_tokens: 10,
-            cost_usd: Some(1.00),
-            task_id: None,
-        },
-    )
-    .await;
-    seed_session_row(
-        &db,
-        SessionSeed {
-            project_id: "proj-rollup",
-            model_id: "model-a",
-            agent_type: "worker",
-            started_at: "2025-03-05T10:00:00Z",
-            tokens_in: 300,
-            tokens_out: 150,
-            cache_read_tokens: 30,
-            cache_write_tokens: 15,
-            cost_usd: Some(1.50),
-            task_id: None,
-        },
-    )
-    .await;
-
-    let app = test_helpers::create_test_app_with_db(db);
-
-    let (status, body) = get_usage(
-        &app,
-        "from=2025-03-10&to=2025-03-17&granularity=week",
-        Some(&admin_cookie),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.get("granularity").unwrap().as_str().unwrap(), "week");
-
-    // The main window totals should reflect the 2 sessions.
-    let totals = body.get("totals").unwrap();
-    assert_eq!(totals.get("session_count").unwrap().as_i64().unwrap(), 2);
-    assert_eq!(totals.get("tokens_in").unwrap().as_i64().unwrap(), 300);
-    assert_eq!(totals.get("tokens_out").unwrap().as_i64().unwrap(), 150);
-
-    // Previous totals should reflect the 1 session in the prior week.
-    let prev = body.get("previous_totals").unwrap();
-    assert_eq!(prev.get("session_count").unwrap().as_i64().unwrap(), 1);
-    assert_eq!(prev.get("tokens_in").unwrap().as_i64().unwrap(), 300);
-
-    // Weekly series should have at most one rolled-up bucket (Mon 2025-03-10).
-    let series = body.get("series").unwrap().as_array().unwrap();
-    assert!(
-        !series.is_empty(),
-        "weekly series should have at least one point"
-    );
-    // All points should be week-start dates (Monday).
-    for point in series {
-        let day = point.get("day").unwrap().as_str().unwrap();
-        assert!(
-            day.starts_with("2025-03-"),
-            "expected March 2025 week-start, got {day}"
-        );
+    for gran in ["week", "month"] {
+        let (status, body) = get_usage(
+            &app,
+            &format!("start=2025-01-01&end=2025-04-01&granularity={gran}"),
+            Some(&admin_cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "granularity={gran} should be accepted");
+        assert!(body.get("time_series").unwrap().is_array());
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn monthly_rollup_with_seeded_data() {
+async fn weekly_rollup_buckets_to_week_start_and_counts_sessions() {
     let db = test_helpers::create_test_db();
     let admin_cookie = seed_admin_session(&db).await;
 
-    seed_project(&db, "proj-monthly", "monthly-project").await;
+    seed_project(&db, "proj-rollup", "rollup-project").await;
 
-    // Seed sessions across two months.
-    seed_session_row(
-        &db,
-        SessionSeed {
-            project_id: "proj-monthly",
-            model_id: "model-a",
-            agent_type: "worker",
-            started_at: "2025-01-15T10:00:00Z",
-            tokens_in: 100,
-            tokens_out: 50,
-            cache_read_tokens: 10,
-            cache_write_tokens: 5,
-            cost_usd: Some(0.50),
-            task_id: None,
-        },
-    )
-    .await;
-    seed_session_row(
-        &db,
-        SessionSeed {
-            project_id: "proj-monthly",
-            model_id: "model-a",
-            agent_type: "worker",
-            started_at: "2025-01-20T10:00:00Z",
-            tokens_in: 200,
-            tokens_out: 100,
-            cache_read_tokens: 20,
-            cache_write_tokens: 10,
-            cost_usd: Some(1.00),
-            task_id: None,
-        },
-    )
-    .await;
-    seed_session_row(
-        &db,
-        SessionSeed {
-            project_id: "proj-monthly",
-            model_id: "model-b",
-            agent_type: "worker",
-            started_at: "2025-02-10T10:00:00Z",
-            tokens_in: 300,
-            tokens_out: 150,
-            cache_read_tokens: 30,
-            cache_write_tokens: 15,
-            cost_usd: Some(1.50),
-            task_id: None,
-        },
-    )
-    .await;
+    // Window 2025-03-10..2025-03-17: 2 sessions; previous week: 1 session.
+    for (started, tin, tout, cost) in [
+        ("2025-03-11T10:00:00Z", 100, 50, 0.50),
+        ("2025-03-12T10:00:00Z", 200, 100, 1.00),
+        ("2025-03-05T10:00:00Z", 300, 150, 1.50),
+    ] {
+        seed_session_row(
+            &db,
+            SessionSeed {
+                project_id: "proj-rollup",
+                model_id: "model-a",
+                agent_type: "worker",
+                started_at: started,
+                tokens_in: tin,
+                tokens_out: tout,
+                cache_read_tokens: 10,
+                cache_write_tokens: 5,
+                cost_usd: Some(cost),
+                task_id: None,
+            },
+        )
+        .await;
+    }
 
     let app = test_helpers::create_test_app_with_db(db);
 
     let (status, body) = get_usage(
         &app,
-        "from=2025-01-01&to=2025-03-01&granularity=month",
+        "start=2025-03-10&end=2025-03-17&granularity=week",
         Some(&admin_cookie),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.get("granularity").unwrap().as_str().unwrap(), "month");
 
-    // Totals should cover all 3 sessions.
-    let totals = body.get("totals").unwrap();
-    assert_eq!(totals.get("session_count").unwrap().as_i64().unwrap(), 3);
+    // Sessions KPI should reflect the 2 sessions in the main window.
+    let kpis = array_field(&body, "kpis");
+    let sessions_kpi = kpis
+        .iter()
+        .find(|k| k.get("label").and_then(Value::as_str) == Some("Sessions"))
+        .expect("Sessions KPI");
+    assert_eq!(sessions_kpi.get("value").unwrap().as_f64().unwrap(), 2.0);
 
-    // Monthly series should have at most 2 buckets (Jan and Feb).
-    let series = body.get("series").unwrap().as_array().unwrap();
-    assert!(
-        series.len() <= 2,
-        "expected at most 2 monthly buckets, got {}",
-        series.len()
-    );
+    // Weekly series buckets to the Monday week-start (2025-03-10).
+    let series = array_field(&body, "time_series");
+    assert!(!series.is_empty(), "weekly series should have a point");
+    for point in series {
+        let date = point.get("date").unwrap().as_str().unwrap();
+        assert_eq!(date, "2025-03-10", "expected week-start Monday, got {date}");
+    }
 }
 
 // ── Nullable cost semantics ──────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn null_cost_fields_serialize_as_json_null() {
+async fn null_cost_yields_null_spend_kpi_and_series_cost() {
     let db = test_helpers::create_test_db();
     let admin_cookie = seed_admin_session(&db).await;
 
     seed_project(&db, "proj-nullcost", "nullcost-project").await;
-
-    // Seed a session with NULL cost_usd.
     seed_session_row(
         &db,
         SessionSeed {
@@ -552,7 +416,7 @@ async fn null_cost_fields_serialize_as_json_null() {
             tokens_out: 50,
             cache_read_tokens: 10,
             cache_write_tokens: 5,
-            cost_usd: None, // unpriced
+            cost_usd: None,
             task_id: None,
         },
     )
@@ -561,24 +425,27 @@ async fn null_cost_fields_serialize_as_json_null() {
     let app = test_helpers::create_test_app_with_db(db);
 
     let (status, body) =
-        get_usage(&app, "from=2025-03-01&to=2025-04-01", Some(&admin_cookie)).await;
+        get_usage(&app, "start=2025-03-01&end=2025-04-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::OK);
 
-    // total_cost_usd must be JSON null (not 0.0) when sessions are unpriced.
-    let totals = body.get("totals").unwrap();
+    let kpis = array_field(&body, "kpis");
+    let spend = kpis
+        .iter()
+        .find(|k| k.get("label").and_then(Value::as_str) == Some("Spend"))
+        .expect("Spend KPI");
     assert!(
-        totals.get("total_cost_usd").unwrap().is_null(),
-        "expected null total_cost_usd for unpriced sessions, got: {}",
-        totals.get("total_cost_usd").unwrap()
+        spend.get("value").unwrap().is_null(),
+        "expected null Spend value for unpriced sessions, got: {}",
+        spend.get("value").unwrap()
     );
 
-    // previous_totals should also have null cost (no sessions in previous window).
-    let prev = body.get("previous_totals").unwrap();
+    let series = array_field(&body, "time_series");
+    assert!(!series.is_empty());
     assert!(
-        prev.get("total_cost_usd").unwrap().is_null(),
-        "expected null total_cost_usd in previous_totals, got: {}",
-        prev.get("total_cost_usd").unwrap()
+        series[0].get("cost").unwrap().is_null(),
+        "expected null series cost for unpriced bucket, got: {}",
+        series[0].get("cost").unwrap()
     );
 }
 
@@ -592,7 +459,7 @@ async fn invalid_granularity_returns_400() {
 
     let (status, body) = get_usage(
         &app,
-        "from=2025-01-01&to=2025-02-01&granularity=hourly",
+        "start=2025-01-01&end=2025-02-01&granularity=hourly",
         Some(&admin_cookie),
     )
     .await;
@@ -606,24 +473,16 @@ async fn invalid_granularity_returns_400() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn invalid_group_by_returns_400() {
+async fn invalid_preset_returns_400() {
     let db = test_helpers::create_test_db();
     let admin_cookie = seed_admin_session(&db).await;
     let app = test_helpers::create_test_app_with_db(db);
 
-    let (status, body) = get_usage(
-        &app,
-        "from=2025-01-01&to=2025-02-01&group_by=invalid_dimension",
-        Some(&admin_cookie),
-    )
-    .await;
+    let (status, body) = get_usage(&app, "preset=90d", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let msg = body.get("_raw").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(
-        msg.contains("group_by") || msg.contains("invalid_dimension"),
-        "expected group_by error, got: {msg}"
-    );
+    assert!(msg.contains("preset") || msg.contains("90d"), "got: {msg}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -632,9 +491,8 @@ async fn reversed_date_range_returns_400() {
     let admin_cookie = seed_admin_session(&db).await;
     let app = test_helpers::create_test_app_with_db(db);
 
-    // from >= to
     let (status, body) =
-        get_usage(&app, "from=2025-03-01&to=2025-03-01", Some(&admin_cookie)).await;
+        get_usage(&app, "start=2025-03-01&end=2025-03-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let msg = body.get("_raw").and_then(|v| v.as_str()).unwrap_or("");
@@ -650,24 +508,8 @@ async fn invalid_date_format_returns_400() {
     let admin_cookie = seed_admin_session(&db).await;
     let app = test_helpers::create_test_app_with_db(db);
 
-    let (status, body) =
-        get_usage(&app, "from=not-a-date&to=2025-02-01", Some(&admin_cookie)).await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let msg = body.get("_raw").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(
-        msg.contains("from") || msg.contains("YYYY-MM-DD"),
-        "expected date format error, got: {msg}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn invalid_month_day_returns_400() {
-    let db = test_helpers::create_test_db();
-    let admin_cookie = seed_admin_session(&db).await;
-    let app = test_helpers::create_test_app_with_db(db);
-
-    let (status, _) = get_usage(&app, "from=2025-02-30&to=2025-03-01", Some(&admin_cookie)).await;
+    let (status, _) =
+        get_usage(&app, "start=not-a-date&end=2025-02-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
@@ -680,18 +522,17 @@ async fn omitted_query_params_apply_defaults() {
     let admin_cookie = seed_admin_session(&db).await;
     let app = test_helpers::create_test_app_with_db(db);
 
-    // No query params at all — should default to day granularity and succeed.
     let (status, body) = get_usage(&app, "", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.get("granularity").unwrap().as_str().unwrap(), "day");
-    assert!(body.get("totals").unwrap().is_object());
+    assert!(body.get("kpis").unwrap().is_array());
+    assert!(body.get("generated_at").unwrap().is_string());
 }
 
 // ── Model effectiveness field coverage ─────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn admin_request_with_worker_session_returns_model_effectiveness_fields() {
+async fn model_effectiveness_uses_frontend_field_names() {
     let db = test_helpers::create_test_db();
     let admin_cookie = seed_admin_session(&db).await;
 
@@ -726,105 +567,40 @@ async fn admin_request_with_worker_session_returns_model_effectiveness_fields() 
     let app = test_helpers::create_test_app_with_db(db);
 
     let (status, body) =
-        get_usage(&app, "from=2025-03-01&to=2025-04-01", Some(&admin_cookie)).await;
+        get_usage(&app, "start=2025-03-01&end=2025-04-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::OK);
 
-    let me = body.get("model_effectiveness").unwrap().as_array().unwrap();
-    assert!(
-        !me.is_empty(),
-        "model_effectiveness should have at least one element"
-    );
+    let me = array_field(&body, "model_effectiveness");
+    assert!(!me.is_empty(), "model_effectiveness should have a row");
 
-    let first = model_effectiveness_row(me, "test-model");
+    let row = model_effectiveness_row(me, "test-model");
     for field in [
-        "model_id",
-        "sessions",
-        "tokens_in",
-        "tokens_out",
-        "completed_task_count",
+        "model",
+        "task_count",
         "success_rate",
         "avg_reopens",
-        "cost_per_completed_task",
-        "tokens_per_task",
+        "cost_per_task",
+        "total_cost",
+        "total_tokens",
+        "session_count",
+        "completed_task_count",
     ] {
         assert!(
-            first.get(field).is_some(),
-            "missing model_effectiveness field '{field}' in response: {first}"
+            row.get(field).is_some(),
+            "missing model_effectiveness field '{field}' in {row}"
         );
     }
-
-    assert!(first.get("model_id").unwrap().is_string());
-    assert!(first.get("sessions").unwrap().is_number());
-    assert!(first.get("tokens_in").unwrap().is_number());
-    assert!(first.get("tokens_out").unwrap().is_number());
-    assert!(first.get("completed_task_count").unwrap().is_number());
-    assert!(first.get("success_rate").unwrap().is_number());
-    assert!(first.get("avg_reopens").unwrap().is_number());
-    assert!(first.get("cost_per_completed_task").unwrap().is_number());
-    assert!(first.get("tokens_per_task").unwrap().is_number());
+    assert!(row.get("model").unwrap().is_string());
+    assert!(row.get("session_count").unwrap().is_number());
+    assert_eq!(row.get("total_tokens").unwrap().as_i64().unwrap(), 150);
+    // Repository-only names must not leak into the API.
+    assert!(row.get("model_id").is_none());
+    assert!(row.get("spend_usd").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn model_effectiveness_response_contains_all_metric_fields() {
-    let db = test_helpers::create_test_db();
-    let admin_cookie = seed_admin_session(&db).await;
-
-    seed_project(&db, "proj-metrics", "metrics-project").await;
-    let task_id = seed_task_row(
-        &db,
-        TaskSeed {
-            project_id: "proj-metrics",
-            status: "closed",
-            close_reason: Some("completed"),
-            total_reopen_count: 2,
-        },
-    )
-    .await;
-    seed_session_row(
-        &db,
-        SessionSeed {
-            project_id: "proj-metrics",
-            model_id: "metric-model",
-            agent_type: "worker",
-            started_at: "2025-03-11T10:00:00Z",
-            tokens_in: 1000,
-            tokens_out: 500,
-            cache_read_tokens: 100,
-            cache_write_tokens: 50,
-            cost_usd: Some(2.50),
-            task_id: Some(&task_id),
-        },
-    )
-    .await;
-
-    let app = test_helpers::create_test_app_with_db(db);
-
-    let (status, body) =
-        get_usage(&app, "from=2025-03-01&to=2025-04-01", Some(&admin_cookie)).await;
-
-    assert_eq!(status, StatusCode::OK);
-
-    let me = body.get("model_effectiveness").unwrap().as_array().unwrap();
-    assert!(
-        !me.is_empty(),
-        "model_effectiveness should have at least one element"
-    );
-
-    let first = model_effectiveness_row(me, "metric-model");
-    assert!(first.get("model_id").unwrap().is_string());
-    assert!(first.get("sessions").unwrap().is_number());
-    assert!(first.get("tokens_in").unwrap().is_number());
-    assert!(first.get("tokens_out").unwrap().is_number());
-    assert!(first.get("completed_task_count").unwrap().is_number());
-    assert!(first.get("success_rate").unwrap().is_number());
-    assert!(first.get("avg_reopens").unwrap().is_number());
-    assert!(first.get("cost_per_completed_task").unwrap().is_number());
-    assert!(first.get("tokens_per_task").unwrap().is_number());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn model_effectiveness_null_cost_serializes_correctly() {
+async fn model_effectiveness_null_cost_serializes_total_cost_null() {
     let db = test_helpers::create_test_db();
     let admin_cookie = seed_admin_session(&db).await;
 
@@ -850,7 +626,7 @@ async fn model_effectiveness_null_cost_serializes_correctly() {
             tokens_out: 50,
             cache_read_tokens: 10,
             cache_write_tokens: 5,
-            cost_usd: None, // NULL cost
+            cost_usd: None,
             task_id: Some(&task_id),
         },
     )
@@ -859,39 +635,95 @@ async fn model_effectiveness_null_cost_serializes_correctly() {
     let app = test_helpers::create_test_app_with_db(db);
 
     let (status, body) =
-        get_usage(&app, "from=2025-03-01&to=2025-04-01", Some(&admin_cookie)).await;
+        get_usage(&app, "start=2025-03-01&end=2025-04-01", Some(&admin_cookie)).await;
 
     assert_eq!(status, StatusCode::OK);
 
-    let me = body.get("model_effectiveness").unwrap().as_array().unwrap();
+    let me = array_field(&body, "model_effectiveness");
+    let row = model_effectiveness_row(me, "unpriced-model");
     assert!(
-        !me.is_empty(),
-        "model_effectiveness should have at least one element"
-    );
-
-    let first = model_effectiveness_row(me, "unpriced-model");
-    assert!(
-        first.get("spend_usd").unwrap().is_null(),
-        "expected spend_usd to be JSON null for unpriced model, got: {}",
-        first.get("spend_usd").unwrap()
+        row.get("total_cost").unwrap().is_null(),
+        "expected total_cost null for unpriced model, got: {}",
+        row.get("total_cost").unwrap()
     );
 }
 
-// ── Breakdown group_by dimension ─────────────────────────────────────────────
+// ── Entity breakdowns + matrix ───────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn all_group_by_dimensions_are_accepted() {
+async fn breakdowns_and_matrix_populate_from_seeded_session() {
     let db = test_helpers::create_test_db();
     let admin_cookie = seed_admin_session(&db).await;
+
+    seed_project(&db, "proj-bd", "breakdown-project").await;
+    let task_id = seed_task_row(
+        &db,
+        TaskSeed {
+            project_id: "proj-bd",
+            status: "closed",
+            close_reason: Some("completed"),
+            total_reopen_count: 1,
+        },
+    )
+    .await;
+    seed_session_row(
+        &db,
+        SessionSeed {
+            project_id: "proj-bd",
+            model_id: "model-bd",
+            agent_type: "worker",
+            started_at: "2025-03-11T10:00:00Z",
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_read_tokens: 10,
+            cache_write_tokens: 5,
+            cost_usd: Some(4.00),
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
     let app = test_helpers::create_test_app_with_db(db);
 
-    for dim in ["model", "project", "user", "proposal", "task", "agent"] {
-        let (status, _) = get_usage(
-            &app,
-            &format!("from=2025-01-01&to=2025-02-01&group_by={dim}"),
-            Some(&admin_cookie),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "group_by={dim} should be accepted");
-    }
+    let (status, body) =
+        get_usage(&app, "start=2025-03-01&end=2025-04-01", Some(&admin_cookie)).await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    // by_project: a row keyed by the project id with the human-readable name.
+    let by_project = array_field(body.get("breakdowns").unwrap(), "by_project");
+    let proj_row = by_project
+        .iter()
+        .find(|r| r.get("id").and_then(Value::as_str) == Some("proj-bd"))
+        .expect("by_project row for proj-bd");
+    assert_eq!(
+        proj_row.get("name").unwrap().as_str().unwrap(),
+        "breakdown-project"
+    );
+    assert!((proj_row.get("cost").unwrap().as_f64().unwrap() - 4.0).abs() < 1e-9);
+
+    // by_task: a row keyed by the task id, carrying a task_id link field and a
+    // derived cost_per_task.
+    let by_task = array_field(body.get("breakdowns").unwrap(), "by_task");
+    let task_row = by_task
+        .iter()
+        .find(|r| r.get("id").and_then(Value::as_str) == Some(task_id.as_str()))
+        .expect("by_task row for the seeded task");
+    assert_eq!(
+        task_row.get("task_id").unwrap().as_str().unwrap(),
+        task_id.as_str()
+    );
+    assert!((task_row.get("cost_per_task").unwrap().as_f64().unwrap() - 4.0).abs() < 1e-9);
+
+    // project_model_matrix: a cell for (proj-bd, model-bd) with frontend names.
+    let matrix = array_field(&body, "project_model_matrix");
+    let cell = matrix
+        .iter()
+        .find(|c| {
+            c.get("project_id").and_then(Value::as_str) == Some("proj-bd")
+                && c.get("model").and_then(Value::as_str) == Some("model-bd")
+        })
+        .expect("matrix cell for proj-bd/model-bd");
+    assert!((cell.get("total_cost").unwrap().as_f64().unwrap() - 4.0).abs() < 1e-9);
+    assert_eq!(cell.get("total_tokens").unwrap().as_i64().unwrap(), 150);
 }
