@@ -104,7 +104,6 @@ async fn proposal_ac_amend_validates_and_uses_repository_primitive() {
                 r#"[{"criterion":"Old text","met":false},{"criterion":"Drop me","met":true},{"criterion":"Waive me","met":false}]"#,
             ),
             status: Some("building"),
-            body_format: None,
         })
         .await
         .expect("create proposal");
@@ -255,7 +254,6 @@ async fn proposal_ac_set_stays_status_only_without_revision_bump() {
                 r#"[{"criterion":"Keep text","met":false},{"criterion":"Also keep","met":false}]"#,
             ),
             status: Some("building"),
-            body_format: None,
         })
         .await
         .expect("create proposal");
@@ -302,7 +300,6 @@ async fn proposal_ac_set_records_successful_reconcile_for_graduated_epics() {
             body_format: None,
             acceptance_criteria: Some(r#"[{"criterion":"Ship it","met":false}]"#),
             status: Some("approved"),
-            body_format: None,
         })
         .await
         .expect("create proposal");
@@ -320,7 +317,6 @@ async fn proposal_ac_set_records_successful_reconcile_for_graduated_epics() {
             djinn_db::ProposalUpdateInput {
                 title: "reconcile proposal v2",
                 body: "body v2",
-                body_format: "markdown",
                 acceptance_criteria: r#"[{"criterion":"Ship it better","met":false}]"#,
                 status: "building",
                 superseded_by: None,
@@ -380,7 +376,6 @@ async fn proposal_reconcile_obsolete_epic_then_ac_set_preserves_unrelated_epics(
             body_format: None,
             acceptance_criteria: Some(r#"[{"criterion":"Ship revised scope","met":false}]"#),
             status: Some("approved"),
-            body_format: None,
         })
         .await
         .expect("create proposal");
@@ -402,7 +397,6 @@ async fn proposal_reconcile_obsolete_epic_then_ac_set_preserves_unrelated_epics(
             djinn_db::ProposalUpdateInput {
                 title: "obsolete reconcile proposal v2",
                 body: "body v2",
-                body_format: "markdown",
                 acceptance_criteria: r#"[{"criterion":"Ship revised scope","met":false}]"#,
                 status: "building",
                 superseded_by: None,
