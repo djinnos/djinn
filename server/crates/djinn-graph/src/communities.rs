@@ -44,6 +44,29 @@ use sha2::{Digest, Sha256};
 
 use crate::repo_graph::{RepoDependencyGraph, RepoGraphNodeKind, RepoNodeKey};
 
+/// Controls the granularity of community detection.  Higher resolution
+/// produces more, smaller communities; lower resolution produces fewer,
+/// larger communities.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Resolution {
+    /// More communities, smaller minimum size (min_community_size = 1).
+    Fine,
+    /// Default balanced resolution (min_community_size = 2).
+    #[default]
+    Medium,
+    /// Fewer communities, larger minimum size (min_community_size = 4).
+    Coarse,
+}
+
+/// Map a [`Resolution`] to the minimum community member count.
+fn min_community_size_for(resolution: Resolution) -> usize {
+    match resolution {
+        Resolution::Fine => 1,
+        Resolution::Medium => 2,
+        Resolution::Coarse => 4,
+    }
+}
+
 /// Cap for the local-moving phase per aggregation level. The plan
 /// specified 50; we use the same value here.
 const MAX_LOCAL_MOVE_ITERATIONS: usize = 50;
@@ -56,11 +79,11 @@ const MAX_AGGREGATION_LEVELS: usize = 10;
 /// Top-K keywords per community.
 const KEYWORDS_PER_COMMUNITY: usize = 5;
 
-/// Singleton communities (one node, no intra-edges) are dropped before
-/// returning, since they carry no clustering signal and would inflate
-/// the `community_id` namespace with one entry per orphan node.
-const MIN_COMMUNITY_SIZE: usize = 2;
-
+/// Minimum community size is now controlled by [`Resolution`] via
+/// [`min_community_size_for`].  The default ([`Resolution::Medium`])
+/// uses a minimum of 2 members — singletons are dropped since they
+/// carry no clustering signal.
+///
 /// A detected community of related nodes.
 ///
 /// Persisted as a sidecar on [`RepoDependencyGraph`]; the snapshot
@@ -99,7 +122,20 @@ pub struct Community {
 /// The result is deterministic for a given graph — node visit order is
 /// fixed by `NodeIndex` and tie-breaks in the move step prefer the
 /// lowest-index neighbor community.
+///
+/// Uses [`Resolution::default`] for community granularity.  Call
+/// [`detect_communities_with_resolution`] to override.
 pub fn detect_communities(graph: &RepoDependencyGraph) -> Vec<Community> {
+    detect_communities_with_resolution(graph, Resolution::default())
+}
+
+/// Like [`detect_communities`] but accepts an explicit [`Resolution`]
+/// to control community granularity.
+pub fn detect_communities_with_resolution(
+    graph: &RepoDependencyGraph,
+    resolution: Resolution,
+) -> Vec<Community> {
+    let min_size = min_community_size_for(resolution);
     let pg = graph.graph();
     let node_count = pg.node_count();
     if node_count == 0 {
@@ -143,7 +179,7 @@ pub fn detect_communities(graph: &RepoDependencyGraph) -> Vec<Community> {
     if m <= 0.0 {
         // Edgeless graph: every node is its own community. Skip the
         // expensive loops; return empty (all singletons drop below the
-        // MIN_COMMUNITY_SIZE filter anyway).
+        // min_community_size filter anyway).
         return Vec::new();
     }
 
@@ -163,7 +199,7 @@ pub fn detect_communities(graph: &RepoDependencyGraph) -> Vec<Community> {
     }
 
     // Step 5: materialize Community structs from the final partition.
-    materialize_communities(graph, &partition, &adjacency, m)
+    materialize_communities(graph, &partition, &adjacency, m, min_size)
 }
 
 /// Run one pass of the local-moving phase. Returns `true` iff at least
@@ -321,13 +357,14 @@ fn relabel_contiguous(partition: &mut [usize]) {
 
 /// Build the final [`Community`] vec from the partition.
 ///
-/// Drops singletons and computes cohesion / label / keywords for each
-/// non-trivial community.
+/// Drops communities below `min_community_size` and computes cohesion /
+/// label / keywords for each surviving community.
 fn materialize_communities(
     graph: &RepoDependencyGraph,
     partition: &[usize],
     adjacency: &HashMap<usize, HashMap<usize, f64>>,
     _m: f64,
+    min_community_size: usize,
 ) -> Vec<Community> {
     let pg = graph.graph();
     let mut by_comm: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -337,7 +374,7 @@ fn materialize_communities(
 
     let mut out: Vec<Community> = Vec::new();
     for (_c, members) in by_comm {
-        if members.len() < MIN_COMMUNITY_SIZE {
+        if members.len() < min_community_size {
             continue;
         }
 
@@ -432,39 +469,96 @@ fn format_member_uid(key: &RepoNodeKey) -> String {
 }
 
 /// Pick a label by:
-/// 1. Counting top-level path segments across member file_paths; if a
-///    single segment dominates (≥ 50% of members with a file_path),
-///    use it.
-/// 2. Otherwise return the display_name of the member with the
-///    highest `intrinsic_weight × degree` proxy (highest-degree wins).
+/// 1. Collecting path segments for each member, skipping the
+///    workspace-root segment (the first component that matches the
+///    node's `workspace` field).
+/// 2. Finding the first path-component index where members differ
+///    ("distinguishing index") and voting on that component.
+///    If a single segment dominates (≥ 50% of members with a
+///    file_path), use it.
+/// 3. If no path segment dominates (all members share the same
+///    prefix, or no segment has ≥ 50%), fall back to the top keyword
+///    from [`derive_keywords`].
+/// 4. Last resort: return the display_name of the member with the
+///    highest degree.
 fn derive_label(graph: &RepoDependencyGraph, members: &[usize]) -> String {
     let pg = graph.graph();
 
-    // Path-segment vote.
-    let mut segment_counts: BTreeMap<String, usize> = BTreeMap::new();
-    let mut members_with_path = 0usize;
+    // Collect path segments after skipping workspace-root component.
+    let mut member_segments: Vec<Vec<String>> = Vec::new();
     for &v in members {
         let node = &pg[NodeIndex::new(v)];
         if let Some(p) = &node.file_path {
-            members_with_path += 1;
-            // First non-empty path component (e.g. "src", "server").
-            if let Some(seg) = p.components().find_map(|c| match c {
-                std::path::Component::Normal(s) => s.to_str().map(str::to_string),
-                _ => None,
-            }) {
-                *segment_counts.entry(seg).or_default() += 1;
+            let segments: Vec<String> = p
+                .components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(s) => s.to_str().map(str::to_string),
+                    _ => None,
+                })
+                .collect();
+
+            // Skip the first segment when it matches the workspace slug.
+            let skip = if let Some(ws) = &node.workspace {
+                if segments.first().map(|s| s.as_str()) == Some(ws.as_str()) {
+                    1
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+
+            let remaining: Vec<String> = segments.into_iter().skip(skip).collect();
+            if !remaining.is_empty() {
+                member_segments.push(remaining);
             }
         }
     }
-    if members_with_path > 0 {
-        // Pick the most common segment (BTreeMap iter is sorted by key,
-        // so ties resolve alphabetically — deterministic).
-        if let Some((seg, &count)) = segment_counts
-            .iter()
-            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
-            && count * 2 >= members_with_path
-        {
-            return seg.clone();
+
+    if !member_segments.is_empty() {
+        // Find the first component index where not all members agree.
+        // Length differences count as distinguishing: if one path ends
+        // while another has another segment, the extra segment can be
+        // useful. If every path has exactly the same remaining segments,
+        // there is no distinguishing path component and we should use
+        // keyword-derived tokens instead of returning a shared prefix like
+        // "crates" or "src".
+        let max_len = member_segments.iter().map(|s| s.len()).max().unwrap_or(0);
+        let mut distinguishing_idx: Option<usize> = None;
+        for i in 0..max_len {
+            let first = member_segments[0].get(i).map(String::as_str);
+            if member_segments
+                .iter()
+                .any(|s| s.get(i).map(String::as_str) != first)
+            {
+                distinguishing_idx = Some(i);
+                break;
+            }
+        }
+
+        if let Some(vote_idx) = distinguishing_idx {
+            let mut segment_counts: BTreeMap<String, usize> = BTreeMap::new();
+            let members_with_path = member_segments.len();
+            for segs in &member_segments {
+                if segs.len() > vote_idx {
+                    *segment_counts.entry(segs[vote_idx].clone()).or_default() += 1;
+                }
+            }
+
+            if let Some((seg, &count)) = segment_counts
+                .iter()
+                .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+                && count * 2 >= members_with_path
+            {
+                return seg.clone();
+            }
+        }
+
+        // No segment distinguishes this community (or no distinguishing
+        // segment dominates) — fall back to top keyword token.
+        let keywords = derive_keywords(graph, members, KEYWORDS_PER_COMMUNITY);
+        if let Some(top) = keywords.into_iter().next() {
+            return top;
         }
     }
 
@@ -482,7 +576,7 @@ fn derive_label(graph: &RepoDependencyGraph, members: &[usize]) -> String {
     if let Some(idx) = best_idx {
         return pg[idx].display_name.clone();
     }
-    // Truly empty community (shouldn't reach here given MIN_COMMUNITY_SIZE).
+    // Truly empty community (shouldn't reach here given min_community_size).
     String::from("community")
 }
 
@@ -772,12 +866,11 @@ mod tests {
             billing_comm.cohesion
         );
 
-        // Labels should pick up the directory ("src" — the shared top
-        // segment for both clusters in this fixture, since we use
-        // src/{auth,billing}/...). The path-segment vote uses the
-        // first non-empty component, so "src" wins.
-        assert_eq!(auth_comm.label, "src");
-        assert_eq!(billing_comm.label, "src");
+        // Labels should pick up the *distinguishing* path component.
+        // Both clusters share "src" as the first component, so the
+        // distinguishing index is 1: "auth" vs "billing".
+        assert_eq!(auth_comm.label, "auth");
+        assert_eq!(billing_comm.label, "billing");
     }
 
     #[test]
@@ -858,6 +951,258 @@ mod tests {
         assert!(
             q > 0.3,
             "expected positive modularity for clean cluster split, got Q={q}"
+        );
+    }
+
+    /// Build a monorepo-style fixture with workspace="server" paths.
+    /// Three clusters: djinn-graph (3 nodes), djinn-auth (3 nodes),
+    /// djinn-billing (3 nodes). Paths all start with
+    /// `server/crates/<crate>/src/...` and workspace is "server".
+    fn monorepo_cluster_graph() -> RepoDependencyGraph {
+        use crate::repo_graph::{
+            REPO_GRAPH_ARTIFACT_VERSION, RepoGraphArtifact, RepoGraphArtifactEdge,
+        };
+
+        let mk_node = |name: &str, file: &str, ws: Option<&str>| RepoGraphNode {
+            id: RepoNodeKey::Symbol(format!("symbol:{name}")),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: name.to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(PathBuf::from(file)),
+            symbol: Some(format!("symbol:{name}")),
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: vec![],
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: ws.map(str::to_string),
+            route_framework: None,
+            route_handler_symbol: None,
+        };
+
+        let nodes = vec![
+            // djinn-graph cluster
+            mk_node(
+                "detect_communities",
+                "server/crates/djinn-graph/src/communities.rs",
+                Some("server"),
+            ),
+            mk_node(
+                "derive_label",
+                "server/crates/djinn-graph/src/communities.rs",
+                Some("server"),
+            ),
+            mk_node(
+                "tokenize_identifier",
+                "server/crates/djinn-graph/src/communities.rs",
+                Some("server"),
+            ),
+            // djinn-auth cluster
+            mk_node(
+                "auth_login",
+                "server/crates/djinn-auth/src/login.rs",
+                Some("server"),
+            ),
+            mk_node(
+                "auth_session",
+                "server/crates/djinn-auth/src/session.rs",
+                Some("server"),
+            ),
+            mk_node(
+                "auth_token",
+                "server/crates/djinn-auth/src/token.rs",
+                Some("server"),
+            ),
+            // djinn-billing cluster
+            mk_node(
+                "billing_charge",
+                "server/crates/djinn-billing/src/charge.rs",
+                Some("server"),
+            ),
+            mk_node(
+                "billing_invoice",
+                "server/crates/djinn-billing/src/invoice.rs",
+                Some("server"),
+            ),
+            mk_node(
+                "billing_refund",
+                "server/crates/djinn-billing/src/refund.rs",
+                Some("server"),
+            ),
+        ];
+
+        let edge = |s, t, w| RepoGraphArtifactEdge {
+            source: s,
+            target: t,
+            kind: RepoGraphEdgeKind::SymbolReference,
+            weight: w,
+            evidence_count: 1,
+            confidence: 0.9,
+            reason: None,
+            step: None,
+        };
+        let edges = vec![
+            // graph cluster: triangle
+            edge(0, 1, 5.0),
+            edge(1, 0, 5.0),
+            edge(1, 2, 5.0),
+            edge(2, 1, 5.0),
+            edge(0, 2, 5.0),
+            edge(2, 0, 5.0),
+            // auth cluster: triangle
+            edge(3, 4, 5.0),
+            edge(4, 3, 5.0),
+            edge(4, 5, 5.0),
+            edge(5, 4, 5.0),
+            edge(3, 5, 5.0),
+            edge(5, 3, 5.0),
+            // billing cluster: triangle
+            edge(6, 7, 5.0),
+            edge(7, 6, 5.0),
+            edge(7, 8, 5.0),
+            edge(8, 7, 5.0),
+            edge(6, 8, 5.0),
+            edge(8, 6, 5.0),
+            // Thin bridges
+            edge(2, 3, 0.5),
+            edge(3, 2, 0.5),
+            edge(5, 6, 0.5),
+            edge(6, 5, 0.5),
+        ];
+
+        let artifact = RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes,
+            edges,
+            symbol_ranges: BTreeMap::new(),
+            communities: Vec::new(),
+            processes: Vec::new(),
+            route_exclusion_config: Default::default(),
+            layout_positions: BTreeMap::new(),
+        };
+        RepoDependencyGraph::from_artifact(&artifact)
+    }
+
+    #[test]
+    fn monorepo_labels_are_not_all_server() {
+        let graph = monorepo_cluster_graph();
+        let communities = detect_communities(&graph);
+        assert!(
+            communities.len() >= 2,
+            "expected at least two communities, got {}",
+            communities.len()
+        );
+        // No community should be labeled "server" — the workspace root
+        // segment should be skipped.
+        for c in &communities {
+            assert_ne!(
+                c.label, "server",
+                "community should not be labeled 'server' (workspace root): {:?}",
+                c.label
+            );
+        }
+    }
+
+    #[test]
+    fn monorepo_labels_are_pairwise_distinct() {
+        let graph = monorepo_cluster_graph();
+        let communities = detect_communities(&graph);
+        let labels: Vec<&str> = communities.iter().map(|c| c.label.as_str()).collect();
+        let mut unique: Vec<&str> = labels.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            labels.len(),
+            unique.len(),
+            "community labels should be pairwise distinct, got: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn label_falls_back_to_keywords_when_paths_are_not_distinguishing() {
+        use crate::repo_graph::{
+            REPO_GRAPH_ARTIFACT_VERSION, RepoGraphArtifact, RepoGraphArtifactEdge,
+        };
+
+        let mk_node = |name: &str| RepoGraphNode {
+            id: RepoNodeKey::Symbol(format!("symbol:{name}")),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: name.to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(PathBuf::from("server/crates/djinn-payments/src/lib.rs")),
+            symbol: Some(format!("symbol:{name}")),
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: vec![],
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: Some("server".to_string()),
+            route_framework: None,
+            route_handler_symbol: None,
+        };
+
+        let edge = |s, t| RepoGraphArtifactEdge {
+            source: s,
+            target: t,
+            kind: RepoGraphEdgeKind::SymbolReference,
+            weight: 5.0,
+            evidence_count: 1,
+            confidence: 0.9,
+            reason: None,
+            step: None,
+        };
+
+        let artifact = RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes: vec![
+                mk_node("payments_processor"),
+                mk_node("payments_gateway"),
+                mk_node("payments_refund"),
+            ],
+            edges: vec![edge(0, 1), edge(1, 0), edge(1, 2), edge(2, 1)],
+            symbol_ranges: BTreeMap::new(),
+            communities: Vec::new(),
+            processes: Vec::new(),
+            route_exclusion_config: Default::default(),
+            layout_positions: BTreeMap::new(),
+        };
+        let graph = RepoDependencyGraph::from_artifact(&artifact);
+
+        assert_eq!(derive_label(&graph, &[0, 1, 2]), "payments");
+    }
+
+    #[test]
+    fn community_count_not_collapsed() {
+        let graph = monorepo_cluster_graph();
+        let communities = detect_communities(&graph);
+        // With 9 nodes in 3 tight clusters, we should get at least 2
+        // communities (not collapsed into one giant community).
+        assert!(
+            communities.len() >= 2,
+            "community count should not collapse to 1, got {}",
+            communities.len()
+        );
+    }
+
+    #[test]
+    fn resolution_fine_produces_more_communities() {
+        let graph = two_cluster_graph();
+        let coarse = detect_communities_with_resolution(&graph, Resolution::Coarse);
+        let fine = detect_communities_with_resolution(&graph, Resolution::Fine);
+        // Fine should produce at least as many communities as coarse
+        // (min size 1 vs 4).
+        assert!(
+            fine.len() >= coarse.len(),
+            "fine resolution should produce >= coarse communities: fine={}, coarse={}",
+            fine.len(),
+            coarse.len()
         );
     }
 }
