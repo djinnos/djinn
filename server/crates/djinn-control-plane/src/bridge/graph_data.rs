@@ -303,6 +303,45 @@ pub struct WorkspacesResult {
     pub workspaces: Vec<GraphWorkspaceEntry>,
 }
 
+/// Request for the `crate_graph` bridge operation. Currently empty — the
+/// crate graph is always the full workspace view; project context is supplied
+/// via `ProjectCtx`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct CrateGraphRequest;
+
+/// A single workspace crate node in the crate-level dependency graph.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CrateNodeEntry {
+    pub name: String,
+    pub manifest_path: String,
+    pub loc: usize,
+    pub node_count: usize,
+    pub fan_in: f64,
+    pub fan_out: f64,
+    pub inbound_weight: f64,
+    pub outbound_weight: f64,
+}
+
+/// An aggregated cross-crate edge: source crate → target crate.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CrateEdgeEntry {
+    pub source: String,
+    pub target: String,
+    pub weight: f64,
+    pub edge_count: usize,
+}
+
+/// Full crate-level graph returned by the `crate_graph` bridge operation.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CrateGraphResponse {
+    pub crates: Vec<CrateNodeEntry>,
+    pub edges: Vec<CrateEdgeEntry>,
+    /// Present when the graph is empty (e.g. not a Rust workspace) to
+    /// communicate the reason without returning an error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 /// PR D2: snapshot node — one entry in the `snapshot.nodes` array. The
 /// shape is binding (see `code_graph snapshot` inter-PR contract): `id`
 /// is the canonical RepoNodeKey (`"file:..."` / `"symbol:..."`), `kind`
@@ -436,85 +475,6 @@ impl SnapshotLevel {
             )),
         }
     }
-}
-
-/// Typed bridge request for the budgeted natural-language subgraph planner.
-#[derive(Debug, Clone)]
-pub struct QuerySubgraphRequest {
-    pub query: String,
-    pub workspace: Option<String>,
-    pub context_filter: Option<String>,
-    pub file_filter: Option<String>,
-    pub kind_filter: Option<String>,
-    pub edge_filter: Vec<String>,
-    pub token_budget: Option<usize>,
-    pub max_depth: Option<usize>,
-    pub max_seeds: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct QuerySubgraphResult {
-    pub query: String,
-    pub nodes: Vec<QuerySubgraphNode>,
-    pub edges: Vec<QuerySubgraphEdge>,
-    pub seeds: Vec<QuerySubgraphSeedDebug>,
-    pub inferred_edge_kinds: Vec<String>,
-    pub budget: QuerySubgraphBudget,
-    pub traversal: QuerySubgraphTraversalDebug,
-    pub narrowing_hints: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct QuerySubgraphNode {
-    pub uid: String,
-    pub kind: String,
-    pub display_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<String>,
-    pub is_seed: bool,
-    pub is_hub: bool,
-    pub degree: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct QuerySubgraphEdge {
-    pub from_uid: String,
-    pub to_uid: String,
-    pub kind: String,
-    pub confidence: f64,
-    pub confidence_tier: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct QuerySubgraphSeedDebug {
-    pub uid: String,
-    pub display_name: String,
-    pub score: f64,
-    pub source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matched_text: Option<String>,
-    pub debug: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct QuerySubgraphBudget {
-    pub requested_tokens: usize,
-    pub estimated_tokens: usize,
-    pub truncated: bool,
-    pub omitted_nodes: usize,
-    pub omitted_edges: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct QuerySubgraphTraversalDebug {
-    pub max_depth: usize,
-    pub hub_degree_threshold: usize,
-    pub hubs_blocked: Vec<String>,
-    pub skipped_edge_kinds: Vec<String>,
 }
 
 /// Per-function complexity metrics surfaced on `describe` and
