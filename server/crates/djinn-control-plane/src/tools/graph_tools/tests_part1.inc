@@ -10,7 +10,8 @@
 
     use crate::bridge::{
         ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, ChurnEntry,
-        ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup,
+        ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry,
+        CrateEdgeEntry, CrateGraphResponse, CrateNodeEntry, CycleGroup,
         DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, DiffTouchesResult, EdgeEntry,
         GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactResult, MetricsAtResult,
         NeighborsResult, OrphanEntry, PathResult, ProjectCtx, QuerySubgraphBudget, QuerySubgraphEdge,
@@ -1662,6 +1663,10 @@
         /// mimics an un-warmed graph cache; `Some(sha)` mimics a
         /// warmed graph pinned at that commit.
         pinned_commit: Option<String>,
+        /// Optional crate_graph response override. When `Some`, the
+        /// `crate_graph` bridge method returns this data instead of
+        /// the trait default (empty graph).
+        crate_graph_response: Option<CrateGraphResponse>,
     }
 
     impl WorkspaceFixtureOps {
@@ -1672,6 +1677,7 @@
                 ranked_nodes: Vec::new(),
                 impact_result: ImpactResult::Detailed(Vec::new()),
                 pinned_commit: None,
+                crate_graph_response: None,
             }
         }
 
@@ -1686,6 +1692,7 @@
                 ranked_nodes,
                 impact_result,
                 pinned_commit: None,
+                crate_graph_response: None,
             }
         }
 
@@ -1693,6 +1700,13 @@
         /// simulating a warmed graph cache.
         fn with_pinned_commit(mut self, commit: impl Into<String>) -> Self {
             self.pinned_commit = Some(commit.into());
+            self
+        }
+
+        /// Set a custom `crate_graph` response, simulating a warmed
+        /// workspace with crate-level aggregation.
+        fn with_crate_graph(mut self, response: CrateGraphResponse) -> Self {
+            self.crate_graph_response = Some(response);
             self
         }
 
@@ -2040,6 +2054,19 @@
             // still letting the inner handler see the test's `key`
             // string.
             Ok(crate::bridge::ResolveOutcome::Found(key.to_string()))
+        }
+        async fn crate_graph(
+            &self,
+            _: &ProjectCtx,
+        ) -> Result<CrateGraphResponse, String> {
+            match &self.crate_graph_response {
+                Some(resp) => Ok(resp.clone()),
+                None => Ok(CrateGraphResponse {
+                    crates: Vec::new(),
+                    edges: Vec::new(),
+                    message: None,
+                }),
+            }
         }
     }
 

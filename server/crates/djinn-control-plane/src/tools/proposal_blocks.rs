@@ -319,6 +319,48 @@ pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedProposalBlock>, String> 
     Ok(blocks)
 }
 
+/// Enforce the MDX proposal question form placement contract.
+///
+/// MDX proposals must contain exactly one registered `question-form` block, and
+/// that block must be the final parsed proposal block in the body.
+pub fn validate_question_form_placement(body: &str) -> Result<(), String> {
+    let blocks = parse_mdx_blocks(body)?;
+    let question_form_count = blocks
+        .iter()
+        .filter(|block| block.block_type == "question-form")
+        .count();
+
+    if question_form_count != 1 {
+        return Err(format!(
+            "Exactly one question-form block is required in MDX proposals (found {question_form_count})"
+        ));
+    }
+
+    if !matches!(
+        blocks.last(),
+        Some(block) if block.block_type == "question-form"
+    ) {
+        return Err(
+            "The question-form block must be the last block in the proposal body".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Validate question-form placement for MDX bodies; markdown bodies intentionally
+/// skip this block-level constraint.
+pub fn validate_question_form_placement_for_format(
+    body: &str,
+    body_format: &str,
+) -> Result<(), String> {
+    if body_format == "mdx" {
+        validate_question_form_placement(body)
+    } else {
+        Ok(())
+    }
+}
+
 /// Extract all PascalCase component (JSX-like) tag names from an MDX body, in
 /// first-seen order and de-duplicated. Unlike [`parse_mdx_blocks`], this does
 /// NOT filter to registered tags — it returns every opening tag whose name
@@ -518,6 +560,67 @@ fn main() {}
         ];
         let err = validate_block_ids(&blocks).unwrap_err();
         assert!(err.contains("duplicate block id"));
+    }
+
+    #[test]
+    fn test_validate_question_form_missing() {
+        let body = r#"# Proposal
+
+<DataModel id="schema" name="User" />"#;
+
+        let err = validate_question_form_placement(body).unwrap_err();
+        assert_eq!(
+            err,
+            "Exactly one question-form block is required in MDX proposals (found 0)"
+        );
+    }
+
+    #[test]
+    fn test_validate_question_form_multiple() {
+        let body = r#"# Proposal
+
+<QuestionForm id="questions-a" title="Open questions" />
+
+<QuestionForm id="questions-b" title="More questions" />"#;
+
+        let err = validate_question_form_placement(body).unwrap_err();
+        assert_eq!(
+            err,
+            "Exactly one question-form block is required in MDX proposals (found 2)"
+        );
+    }
+
+    #[test]
+    fn test_validate_question_form_not_last() {
+        let body = r#"# Proposal
+
+<QuestionForm id="questions" title="Open questions" />
+
+<Decisions id="decisions" />"#;
+
+        let err = validate_question_form_placement(body).unwrap_err();
+        assert_eq!(
+            err,
+            "The question-form block must be the last block in the proposal body"
+        );
+    }
+
+    #[test]
+    fn test_validate_question_form_valid() {
+        let body = r#"# Proposal
+
+<DataModel id="schema" name="User" />
+
+<QuestionForm id="questions" title="Open questions" />"#;
+
+        assert!(validate_question_form_placement(body).is_ok());
+    }
+
+    #[test]
+    fn test_validate_question_form_markdown_skipped() {
+        let body = "# Proposal\n\nPlain markdown proposal with no MDX blocks.";
+
+        assert!(validate_question_form_placement_for_format(body, "markdown").is_ok());
     }
 
     #[test]
