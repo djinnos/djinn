@@ -542,6 +542,7 @@ impl RealPoolKillHarness {
                     status: None,
                     auto_breakdown: None,
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await

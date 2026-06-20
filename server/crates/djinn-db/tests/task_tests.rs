@@ -139,6 +139,7 @@ pub(crate) async fn create_test_epic(db: &Database, project_id: &str) -> djinn_c
             status: None,
             auto_breakdown: None,
             originating_adr_id: None,
+            blocked_by: None,
         },
     )
     .await
