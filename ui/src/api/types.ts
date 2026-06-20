@@ -28,7 +28,7 @@ export type Epic = Omit<EpicListOutputSchema.EpicModel, "owner"> & {
 // SSE handler normalizes to an array before storing.
 export type Proposal = ProposalShowOutputSchema.ProposalModel & {
   /** Body format: 'markdown' (legacy default) or 'mdx' (block-aware). */
-  body_format?: "markdown" | "mdx" | string;
+  body_format?: "markdown" | "mdx" | string | null;
 };
 export type ProposalFeedback = ProposalShowOutputSchema.ProposalFeedbackModel;
 export type ProposalTarget = ProposalShowOutputSchema.ProposalTargetModel;

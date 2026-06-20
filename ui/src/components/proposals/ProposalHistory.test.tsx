@@ -156,25 +156,25 @@ describe("ProposalHistory", () => {
             body_format: "mdx",
             body: [
               "Initial contract.",
-              '<data-model id="users">',
+              '<DataModel id="users">',
               "User { id: uuid }",
-              "</data-model>",
-              '<question-form id="open-questions">',
+              "</DataModel>",
+              '<QuestionForm id="open-questions">',
               "- Is email required?",
-              "</question-form>",
+              "</QuestionForm>",
             ].join("\n"),
           }),
           revision(2, {
             body_format: "mdx",
             body: [
               "Initial contract.",
-              '<data-model id="users">',
+              '<DataModel id="users">',
               "User { id: uuid, email: string }",
-              "</data-model>",
-              '<question-form id="open-questions">',
+              "</DataModel>",
+              '<QuestionForm id="open-questions">',
               "- Is email required?",
               "- Who owns retention?",
-              "</question-form>",
+              "</QuestionForm>",
             ].join("\n"),
             created_at: "2026-06-02T00:00:00Z",
           }),
@@ -186,20 +186,20 @@ describe("ProposalHistory", () => {
     expect(screen.getAllByText("spec_revision")).toHaveLength(2);
     expect(screen.getAllByText("MDX")).toHaveLength(2);
     expect(
-      screen.getAllByText(/MDX blocks: data-model, question-form/).length,
+      screen.getAllByText(/MDX blocks: DataModel, QuestionForm/).length,
     ).toBeGreaterThan(0);
     expect(screen.getByTitle("2026-06-02T00:00:00Z")).toBeInTheDocument();
     expect(screen.queryByText("- Who owns retention?")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /rev 2/ }));
 
-    expect(screen.getByText('<data-model id="users">')).toBeInTheDocument();
+    expect(screen.getByText('<DataModel id="users">')).toBeInTheDocument();
     expect(
       screen.getByText("User { id: uuid, email: string }"),
     ).toBeInTheDocument();
     expect(screen.getByText("- Who owns retention?")).toBeInTheDocument();
-    expect(container.querySelector("data-model")).toBeNull();
-    expect(container.querySelector("question-form")).toBeNull();
+    expect(container.querySelector("DataModel")).toBeNull();
+    expect(container.querySelector("QuestionForm")).toBeNull();
     await waitFor(() =>
       expect(screen.getAllByText("Pat Manager").length).toBeGreaterThan(0),
     );
