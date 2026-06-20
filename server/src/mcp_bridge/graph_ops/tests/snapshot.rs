@@ -868,6 +868,7 @@ fn community_snapshot_aggregates_cross_workspace_edges() {
             && node.workspace_kind.as_deref() == Some("single")
             && node.member_count == Some(2)
             && node.internal_edge_count == Some(1)
+            && node.keywords == vec!["api".to_string()]
     }));
     assert!(payload.edges.iter().any(|edge| {
         edge.from == "community-api" && edge.to == "community-web" && edge.kind == "SymbolReference"
