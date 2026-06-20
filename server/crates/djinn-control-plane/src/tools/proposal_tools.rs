@@ -550,7 +550,7 @@ impl DjinnMcpServer {
         };
 
         // Build the YAML frontmatter matching the parse_proposal_mdx format.
-        let ac_items: Vec<serde_json::Value> =
+        let ac_items: Vec<JsonValue> =
             serde_json::from_str::<serde_json::Value>(&proposal.acceptance_criteria)
                 .ok()
                 .and_then(|v| v.as_array().cloned())
