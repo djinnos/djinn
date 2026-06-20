@@ -16,10 +16,15 @@
 # every djinn-* crate.  Self-references (a crate importing itself) are
 # excluded by the checker and never reported as violations.
 #
-# Cross-reference: [[design/r7iw-roadmap]] item 2.
+# The slot-pool/k8s lifecycle rule is intentionally file-level because it
+# replaces the former source-scanning unit test and only constrains
+# production files under djinn-agent's slot-pool module, not all of
+# djinn-agent.
+#
+# Cross-reference: [[design/r7iw-roadmap]] item 2 and item 4.
 
 [boundary]
-level = "crate"
+level = "file"
 description = "Server workspace layering DAG — architectural boundary rules"
 
 # ------------------------------------------------------------------ #
@@ -43,6 +48,12 @@ description = "Agent must not import control-plane; control-plane is the bridge 
 # control-plane bridge.  Direct agent → db / agent → graph edges bypass
 # that indirection and tightly couple the agent to storage / graph
 # internals, which is an architectural smell that should be flagged.
+
+[[rules]]
+name = "slot-pool-no-k8s-direct-import"
+from_glob = "**/actors/slot/pool/{actor,handle,mod,types}.rs"
+to_glob = "**/djinn-k8s/**"
+description = "Production slot pool lifecycle code must not import djinn_k8s directly; use the RuntimeOps bridge layer."
 
 [[rules]]
 name = "no-agent-imports-db"

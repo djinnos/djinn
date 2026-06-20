@@ -42,8 +42,6 @@ pub struct ModelEffectivenessRow {
     pub success_rate: Option<f64>,
     /// Average total_reopen_count across closed tasks attributed to this model.
     pub avg_reopens: Option<f64>,
-    /// Fraction of closed attributed tasks with zero verification failures.
-    pub verification_pass_rate: Option<f64>,
     /// Cost per completed task. `None` when no completed tasks or all sessions
     /// were unpriced (NULL cost_usd).
     pub cost_per_completed_task: Option<f64>,
@@ -494,7 +492,7 @@ impl UsageAnalyticsRepository {
         // sessions) from task-level outcome metrics.  Task outcomes are
         // computed over DISTINCT (model_id, task_id) pairs so that multiple
         // worker sessions on the same task cannot overweight success_rate,
-        // avg_reopens, or verification_pass_rate.
+        // avg_reopens, or cost_per_completed_task.
         //
         // `filtered_sessions` — rows matching the effectiveness WHERE clause
         //     (date range, worker scope, optional project/model filters).
@@ -512,8 +510,7 @@ impl UsageAnalyticsRepository {
                     s.tokens_out, \
                     t.status, \
                     t.close_reason, \
-                    t.total_reopen_count, \
-                    t.total_verification_failure_count \
+                    t.total_reopen_count \
                 {from_clause} {where_clause} \
              ), \
              session_agg AS ( \
@@ -539,15 +536,11 @@ impl UsageAnalyticsRepository {
                              THEN task_id END) AS closed_count, \
                     AVG(CASE WHEN status = 'closed' \
                              THEN total_reopen_count::DOUBLE PRECISION \
-                             ELSE NULL END) AS avg_reopens, \
-                    COUNT(DISTINCT \
-                        CASE WHEN status = 'closed' \
-                                  AND total_verification_failure_count = 0 \
-                             THEN task_id END) AS verified_count \
+                             ELSE NULL END) AS avg_reopens \
                 FROM ( \
                     SELECT DISTINCT \
                         model_id, task_id, status, close_reason, \
-                        total_reopen_count, total_verification_failure_count \
+                        total_reopen_count \
                     FROM filtered_sessions \
                 ) distinct_tasks \
                 GROUP BY model_id \
@@ -564,12 +557,7 @@ impl UsageAnalyticsRepository {
                      / GREATEST(1, ta.closed_count)::DOUBLE PRECISION, \
                      0.0 \
                  )                                          AS \"success_rate!\", \
-                 COALESCE(ta.avg_reopens, 0.0)              AS \"avg_reopens!\", \
-                 COALESCE( \
-                     ta.verified_count::DOUBLE PRECISION \
-                     / GREATEST(1, ta.closed_count)::DOUBLE PRECISION, \
-                     0.0 \
-                 )                                          AS \"verification_pass_rate!\" \
+                 COALESCE(ta.avg_reopens, 0.0)              AS \"avg_reopens!\" \
              FROM session_agg sa \
              LEFT JOIN task_agg ta ON ta.model_id = sa.model_id \
              ORDER BY sa.model_id"
@@ -612,7 +600,6 @@ impl UsageAnalyticsRepository {
                     shared_credit_completed_task_count: completed,
                     success_rate: r.get("success_rate!"),
                     avg_reopens: r.get("avg_reopens!"),
-                    verification_pass_rate: r.get("verification_pass_rate!"),
                     cost_per_completed_task,
                     tokens_per_task,
                 }
@@ -791,7 +778,6 @@ mod tests {
         assert_eq!(row.shared_credit_completed_task_count, 0);
         assert!(row.success_rate.is_none());
         assert!(row.avg_reopens.is_none());
-        assert!(row.verification_pass_rate.is_none());
         assert!(row.cost_per_completed_task.is_none());
         assert!(row.tokens_per_task.is_none());
     }
@@ -818,7 +804,6 @@ mod tests {
             shared_credit_completed_task_count: 3,
             success_rate: Some(0.67),
             avg_reopens: Some(0.5),
-            verification_pass_rate: Some(0.75),
             cost_per_completed_task: Some(0.41),
             tokens_per_task: Some(50.0),
         };

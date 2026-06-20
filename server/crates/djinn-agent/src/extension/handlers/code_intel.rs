@@ -1239,11 +1239,14 @@ pub(crate) async fn call_code_graph_inner(
                     flat.push(TraitRule {
                         from_glob: rule.from_glob.clone(),
                         to_glob: forbid.clone(),
+                        description: rule.description.clone(),
                     });
                     origin.push((rule_i, forbid.clone()));
                 }
             }
-            let violations = graph_ops.boundary_check(ctx, &flat).await?;
+            let violations = graph_ops
+                .boundary_check(ctx, &flat, p.level.as_deref().unwrap_or("file"))
+                .await?;
             // Regroup violations by original user rule.
             const PER_RULE_LIMIT: usize = 100;
             let mut by_user_rule: Vec<(usize, bool, Vec<serde_json::Value>)> =

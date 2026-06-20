@@ -262,26 +262,6 @@ pub(crate) fn spawn_verification_with_in_pod_run(
     }));
 }
 
-/// Resolve the role-level `verification_command` override for the given task.
-///
-/// Returns `None` when the task has no `agent_type`, the role cannot be found,
-/// or the role's `verification_command` is `None` / empty.
-async fn role_verification_command_for_task(
-    task: &djinn_core::models::Task,
-    app_state: &AgentContext,
-) -> Option<String> {
-    let specialist_name = task.agent_type.as_deref().filter(|s| !s.is_empty())?;
-    let role_repo =
-        djinn_db::AgentRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let role = role_repo
-        .get_by_name_for_project(&task.project_id, specialist_name)
-        .await
-        .ok()
-        .flatten()?;
-    role.verification_command
-        .filter(|cmd| !cmd.trim().is_empty())
-}
-
 async fn run_verification_pipeline(
     task_id: &str,
     _project_path: &str,
@@ -408,13 +388,12 @@ async fn run_verification_on_host(
     let commit_sha = resolve_head_commit(&workspace_path)?;
 
     // Resolve scoped verification commands (AC-1 through AC-7).
-    let role_cmd_override = role_verification_command_for_task(task, app_state).await;
     let scoped_commands = resolve_scoped_commands(
         &app_state.db,
         Some(&task.project_id),
         &workspace_path,
         &target_branch,
-        role_cmd_override.as_deref(),
+        None,
     )
     .await;
 

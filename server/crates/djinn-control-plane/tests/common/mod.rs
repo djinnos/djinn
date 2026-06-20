@@ -85,6 +85,7 @@ pub async fn create_test_epic(db: &Database, project_id: &str) -> Epic {
             status: None,
             auto_breakdown: None,
             originating_adr_id: None,
+            blocked_by: None,
         },
     )
     .await

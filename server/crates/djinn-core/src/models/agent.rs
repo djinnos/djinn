@@ -12,7 +12,6 @@ pub struct Agent {
     pub description: String,
     pub system_prompt_extensions: String,
     pub model_preference: Option<String>,
-    pub verification_command: Option<String>,
     /// JSON array of MCP server references (`[]` when none).
     pub mcp_servers: String,
     /// JSON array of skill names assigned to this role, e.g. `'["rust-expert","tdd"]'`.

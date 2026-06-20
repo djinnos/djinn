@@ -268,6 +268,7 @@
             &self,
             _: &ProjectCtx,
             _: &[BoundaryRule],
+            _: &str,
         ) -> Result<Vec<BoundaryViolation>, String> {
             unreachable!("query_subgraph tests should not call boundary_check")
         }
@@ -1667,6 +1668,10 @@
         /// `crate_graph` bridge method returns this data instead of
         /// the trait default (empty graph).
         crate_graph_response: Option<CrateGraphResponse>,
+        /// Optional boundary_check response override. When `Some`, the
+        /// `boundary_check` bridge method returns this data instead of
+        /// the trait default (empty violations).
+        boundary_check_response: Option<Vec<BoundaryViolation>>,
     }
 
     impl WorkspaceFixtureOps {
@@ -1678,6 +1683,7 @@
                 impact_result: ImpactResult::Detailed(Vec::new()),
                 pinned_commit: None,
                 crate_graph_response: None,
+                boundary_check_response: None,
             }
         }
 
@@ -1693,6 +1699,7 @@
                 impact_result,
                 pinned_commit: None,
                 crate_graph_response: None,
+                boundary_check_response: None,
             }
         }
 
@@ -1707,6 +1714,13 @@
         /// workspace with crate-level aggregation.
         fn with_crate_graph(mut self, response: CrateGraphResponse) -> Self {
             self.crate_graph_response = Some(response);
+            self
+        }
+
+        /// Set a custom `boundary_check` response, simulating known
+        /// violations (or a clean pass) for crate-level tests.
+        fn with_boundary_check(mut self, violations: Vec<BoundaryViolation>) -> Self {
+            self.boundary_check_response = Some(violations);
             self
         }
 
@@ -1947,8 +1961,9 @@
             &self,
             _: &ProjectCtx,
             _: &[BoundaryRule],
+            _: &str,
         ) -> Result<Vec<BoundaryViolation>, String> {
-            Ok(Vec::new())
+            Ok(self.boundary_check_response.clone().unwrap_or_default())
         }
         async fn hotspots(
             &self,
