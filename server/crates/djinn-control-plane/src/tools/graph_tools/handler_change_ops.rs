@@ -213,7 +213,12 @@ impl DjinnMcpServer {
                 params.operation
             ));
         }
-        let violations = self.state.repo_graph().boundary_check(ctx, rules).await?;
+        let level = params.level.as_deref().unwrap_or("file");
+        let violations = self
+            .state
+            .repo_graph()
+            .boundary_check(ctx, rules, level)
+            .await?;
         Ok(CodeGraphResponse::BoundaryCheck(BoundaryCheckResponse {
             violations,
             next_step: None,

@@ -714,6 +714,10 @@ pub(super) struct BoundaryRule {
     /// any of {transport, api, http_handlers}" without splitting it
     /// into separate rules.
     pub forbid_to: Vec<String>,
+    /// Optional human-readable explanation of why this rule exists,
+    /// surfaced in CI output so violations are self-documenting.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Deserialize)]
