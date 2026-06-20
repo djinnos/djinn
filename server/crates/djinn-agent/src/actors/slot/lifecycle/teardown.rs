@@ -103,9 +103,9 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
         // authority. The legacy role.on_complete() returned post-session
         // transition actions that raced with the supervisor
         // body's Start / submit_task_review / task_review_approve calls,
-        // moving the task into `verifying` before the supervisor's
-        // submit_task_review could fire (then bouncing it back to `open`
-        // because the worker pod has no MirrorManager). Pass None so
+        // including legacy on_complete racing with submit_task_review and
+        // bouncing the task back to `open` because the worker pod has no
+        // MirrorManager. Pass None so
         // apply_transition_and_dispatch only does its trigger-next-dispatch
         // bookkeeping and the no-op log.
         //
