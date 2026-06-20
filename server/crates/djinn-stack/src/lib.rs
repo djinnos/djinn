@@ -25,7 +25,7 @@ pub use environment::{
     CargoCachePolicy, CargoCachePolicyOverride, CargoWarmCommand, ClangLanguage, ConfigSource,
     DotnetLanguage, EnvironmentConfig, EnvironmentConfigError, GoLanguage, HookCommand,
     JavaLanguage, Languages, LifecycleHooks, NodeLanguage, PythonLanguage, RubyLanguage,
-    RustLanguage, SCHEMA_VERSION, Verification, VerificationRule, Workspace,
+    RustLanguage, SCHEMA_VERSION, Workspace,
 };
 pub use schema::{LanguageStat, ManifestSignals, Runtimes, Stack};
 pub use slug::workspace_slug;
