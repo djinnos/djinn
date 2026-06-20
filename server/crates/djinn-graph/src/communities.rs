@@ -814,6 +814,19 @@ pub fn detection_enabled() -> bool {
     }
 }
 
+/// Read the `DJINN_COMMUNITY_SEED_BY_CRATE` flag. Default `false` so
+/// production community detection remains unseeded unless explicitly opted in.
+/// Recognized "on" values: `1`, `true`, `yes`, `on` (case-insensitive).
+pub fn crate_seeding_enabled() -> bool {
+    match std::env::var("DJINN_COMMUNITY_SEED_BY_CRATE") {
+        Err(_) => false,
+        Ok(v) => {
+            let lower = v.trim().to_ascii_lowercase();
+            matches!(lower.as_str(), "1" | "true" | "yes" | "on")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
