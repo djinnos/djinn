@@ -22,9 +22,11 @@ pub use consolidation::{
 };
 pub use note::{
     BrokenLink, BrokenLinkRepair, BuildContextResponse, ContradictionCandidate,
-    ExtractedNoteAuditCategory, ExtractedNoteAuditFinding, ExtractedNoteAuditReport, GitLogEntry,
-    GraphEdge, GraphNode, GraphResponse, HealthReport, LifecycleHealth, Note, NoteAbstract,
-    NoteCompact, NoteDedupCandidate, NoteOverview, NoteQualityAssessment, NoteSearchResult,
-    OrphanNote, RecentSweepMetrics, ReindexSummary, StaleFolder, TypeRisk, TypedEdge, note_status,
+    ContradictionWarning, ContradictsAnnotation, ExtractedNoteAuditCategory,
+    ExtractedNoteAuditFinding, ExtractedNoteAuditReport, GitLogEntry, GraphEdge, GraphNode,
+    GraphResponse, HealthReport, LifecycleHealth, Note, NoteAbstract, NoteCompact,
+    NoteDedupCandidate, NoteOverview, NoteQualityAssessment, NoteSearchResult, OrphanNote,
+    RecentSweepMetrics, ReindexSummary, StaleFolder, SupersedesAnnotation, TypeRisk, TypedEdge,
+    note_status,
 };
 pub use note_association::{NoteAssociation, association_kind, canonical_pair};
