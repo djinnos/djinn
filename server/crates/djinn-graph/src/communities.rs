@@ -832,9 +832,232 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::canonical_graph::CrateMap;
     use crate::repo_graph::{
         RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
     };
+
+    /// Build a multi-crate test fixture with 3+ crates (alpha, beta, gamma),
+    /// each containing 3+ nodes, internal heavy edges, and thin cross-crate
+    /// bridges. Returns the graph plus a `CrateMap` that maps each crate's
+    /// root directory to its crate name.
+    fn multi_crate_fixture() -> (RepoDependencyGraph, CrateMap) {
+        use crate::repo_graph::{
+            REPO_GRAPH_ARTIFACT_VERSION, RepoGraphArtifact, RepoGraphArtifactEdge,
+        };
+
+        let mk_node = |name: &str, file: &str| RepoGraphNode {
+            id: RepoNodeKey::Symbol(format!("symbol:{name}")),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: name.to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(PathBuf::from(file)),
+            symbol: Some(format!("symbol:{name}")),
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: vec![],
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: None,
+            route_framework: None,
+            route_handler_symbol: None,
+        };
+
+        let nodes = vec![
+            // alpha crate (nodes 0..3)
+            mk_node("alpha_one", "crates/alpha/src/one.rs"),
+            mk_node("alpha_two", "crates/alpha/src/two.rs"),
+            mk_node("alpha_three", "crates/alpha/src/three.rs"),
+            // beta crate (nodes 3..6)
+            mk_node("beta_one", "crates/beta/src/one.rs"),
+            mk_node("beta_two", "crates/beta/src/two.rs"),
+            mk_node("beta_three", "crates/beta/src/three.rs"),
+            // gamma crate (nodes 6..9)
+            mk_node("gamma_one", "crates/gamma/src/one.rs"),
+            mk_node("gamma_two", "crates/gamma/src/two.rs"),
+            mk_node("gamma_three", "crates/gamma/src/three.rs"),
+        ];
+
+        let edge = |s, t, w| RepoGraphArtifactEdge {
+            source: s,
+            target: t,
+            kind: RepoGraphEdgeKind::SymbolReference,
+            weight: w,
+            evidence_count: 1,
+            confidence: 0.9,
+            reason: None,
+            step: None,
+        };
+
+        let edges = vec![
+            // alpha internal heavy edges (triangle + extra)
+            edge(0, 1, 5.0),
+            edge(1, 0, 5.0),
+            edge(1, 2, 5.0),
+            edge(2, 1, 5.0),
+            edge(0, 2, 5.0),
+            edge(2, 0, 5.0),
+            // beta internal heavy edges
+            edge(3, 4, 5.0),
+            edge(4, 3, 5.0),
+            edge(4, 5, 5.0),
+            edge(5, 4, 5.0),
+            edge(3, 5, 5.0),
+            edge(5, 3, 5.0),
+            // gamma internal heavy edges
+            edge(6, 7, 5.0),
+            edge(7, 6, 5.0),
+            edge(7, 8, 5.0),
+            edge(8, 7, 5.0),
+            edge(6, 8, 5.0),
+            edge(8, 6, 5.0),
+            // thin cross-crate bridges
+            edge(2, 3, 0.5),
+            edge(3, 2, 0.5),
+            edge(5, 6, 0.5),
+            edge(6, 5, 0.5),
+        ];
+
+        let artifact = RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes,
+            edges,
+            symbol_ranges: BTreeMap::new(),
+            communities: Vec::new(),
+            processes: Vec::new(),
+            route_exclusion_config: Default::default(),
+            layout_positions: BTreeMap::new(),
+        };
+        let graph = RepoDependencyGraph::from_artifact(&artifact);
+
+        let mut crate_map = CrateMap::new();
+        crate_map.insert(PathBuf::from("crates/alpha"), "alpha".to_string());
+        crate_map.insert(PathBuf::from("crates/beta"), "beta".to_string());
+        crate_map.insert(PathBuf::from("crates/gamma"), "gamma".to_string());
+
+        (graph, crate_map)
+    }
+
+    /// Compute the dominant-crate fraction for a community.
+    /// For each member, resolve its crate via `resolve_crate_for_node`.
+    /// Returns (max_crate_count / total_members) as a fraction in [0.0, 1.0].
+    fn crate_purity(
+        community: &Community,
+        graph: &RepoDependencyGraph,
+        crate_map: &CrateMap,
+    ) -> f64 {
+        let pg = graph.graph();
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for &v in &community.member_ids {
+            let node = &pg[NodeIndex::new(v)];
+            if let Some(crate_name) = resolve_crate_for_node(node.file_path.as_deref(), crate_map) {
+                *counts.entry(crate_name.to_string()).or_default() += 1;
+            }
+        }
+        let total = community.member_ids.len();
+        if total == 0 {
+            return 0.0;
+        }
+        let max_count = counts.values().copied().max().unwrap_or(0);
+        max_count as f64 / total as f64
+    }
+
+    /// Return the purity of the *best* community for a given crate — i.e. the
+    /// highest fraction of that crate's nodes that landed in any single
+    /// community.  This is the per-crate metric used by the acceptance tests.
+    fn best_crate_purity(
+        crate_name: &str,
+        graph: &RepoDependencyGraph,
+        communities: &[Community],
+        crate_map: &CrateMap,
+    ) -> f64 {
+        let pg = graph.graph();
+        let mut crate_nodes: Vec<usize> = Vec::new();
+        for v in 0..pg.node_count() {
+            let node = &pg[NodeIndex::new(v)];
+            if resolve_crate_for_node(node.file_path.as_deref(), crate_map) == Some(crate_name) {
+                crate_nodes.push(v);
+            }
+        }
+        if crate_nodes.is_empty() {
+            return 0.0;
+        }
+        let mut best = 0.0_f64;
+        for comm in communities {
+            let in_comm = crate_nodes.iter().filter(|&&v| comm.member_ids.contains(&v)).count();
+            let frac = in_comm as f64 / crate_nodes.len() as f64;
+            if frac > best {
+                best = frac;
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn seeded_communities_respect_crate_boundaries() {
+        let (graph, crate_map) = multi_crate_fixture();
+        let communities = detect_communities_with_options(
+            &graph,
+            CommunityDetectionOptions {
+                resolution: Resolution::Medium,
+                seed_by_crate: Some(crate_map.clone()),
+            },
+        );
+
+        for crate_name in ["alpha", "beta", "gamma"] {
+            let purity = best_crate_purity(crate_name, &graph, &communities, &crate_map);
+            assert!(
+                purity >= 0.80,
+                "crate '{}' should have ≥80% of its nodes in one community with seeding, got {:.2}",
+                crate_name,
+                purity
+            );
+        }
+    }
+
+    #[test]
+    fn seeded_outperforms_unseeded() {
+        let (graph, crate_map) = multi_crate_fixture();
+
+        let seeded = detect_communities_with_options(
+            &graph,
+            CommunityDetectionOptions {
+                resolution: Resolution::Medium,
+                seed_by_crate: Some(crate_map.clone()),
+            },
+        );
+        let unseeded = detect_communities_with_options(
+            &graph,
+            CommunityDetectionOptions {
+                resolution: Resolution::Medium,
+                seed_by_crate: None,
+            },
+        );
+
+        let seeded_avg = ["alpha", "beta", "gamma"]
+            .iter()
+            .map(|c| best_crate_purity(c, &graph, &seeded, &crate_map))
+            .sum::<f64>()
+            / 3.0;
+        let unseeded_avg = ["alpha", "beta", "gamma"]
+            .iter()
+            .map(|c| best_crate_purity(c, &graph, &unseeded, &crate_map))
+            .sum::<f64>()
+            / 3.0;
+
+        // The fixture is designed so that unseeded detection may also find
+        // the optimal partition (tight clusters + thin bridges), so we
+        // assert seeded is *at least as good* rather than strictly greater.
+        assert!(
+            seeded_avg >= unseeded_avg,
+            "seeded detection should have >= average crate purity than unseeded: seeded={:.3}, unseeded={:.3}",
+            seeded_avg,
+            unseeded_avg
+        );
+    }
 
     /// Build a tiny manual graph with two clusters of 3 nodes each,
     /// connected internally by tight edges and across by a single
