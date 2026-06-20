@@ -1,5 +1,3 @@
-import type { ProposalFeedback } from "@/api/types";
-
 // Matches <PascalCaseTag attributes>content</PascalCaseTag> and self-closing
 // <PascalCaseTag attributes /> blocks — the same custom component convention as
 // the server-side Rust parser so block boundaries are identical in both places.
@@ -15,11 +13,6 @@ const ATTR_REGEX = /([A-Za-z_][A-Za-z0-9_-]*)="([^"]*)"/g;
 // ──────────────────────────────────────────────────────────────────────────────
 // Types
 // ──────────────────────────────────────────────────────────────────────────────
-
-export interface BlockRendererProps {
-  body: string;
-  feedback?: ProposalFeedback[];
-}
 
 interface BlockSegment {
   kind: "block";

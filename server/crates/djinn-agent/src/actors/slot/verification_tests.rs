@@ -217,9 +217,8 @@ fn compute_pipeline_timeout_returns_minimum_floor() {
     assert_eq!(timeout, Duration::from_secs(MIN_PIPELINE_TIMEOUT_SECS));
 }
 
-/// FAST PATH: a terminal in-pod `verification_runs` row that belongs to the
-/// task is consumed directly (its per-command results reconstructed),
-/// skipping the separate verify Job — the double-compile fix.
+/// Post-drop behavior: verification tables are removed, so any stale in-pod
+/// run id must be ignored rather than blocking task review routing.
 #[tokio::test]
 async fn consume_in_pod_run_returns_terminal_result() {
     let db = create_test_db();
@@ -242,22 +241,17 @@ async fn consume_in_pod_run_returns_terminal_result() {
     .await
     .unwrap();
 
-    let result = consume_in_pod_verification_run(&task, Some(run_id), &app_state)
-        .await
-        .expect("terminal in-pod row must be consumed");
-    assert!(result.passed);
-    assert!(!result.cached);
-    assert_eq!(result.verification_results.len(), 1);
-    assert_eq!(result.total_duration_ms, 42);
+    assert!(
+        consume_in_pod_verification_run(&task, Some(run_id), &app_state)
+            .await
+            .is_none(),
+        "dropped verification tables mean stale in-pod run ids are ignored"
+    );
 }
 
-/// Bug 1 recovery detection: the supervisor infra-death seam and the
-/// coordinator's stuck-`verifying` sweep both decide "re-arm vs reset to open"
-/// by looking up the worker's terminal in-pod verification row via
-/// `latest_terminal_for_task`. This pins that lookup: a `passed`/`failed` row
-/// is found (drives re-arm), while `error`/`pending`/`running` rows are not (so
-/// recovery falls through to releasing the task). Without a usable row the
-/// completed work would be discarded.
+/// Post-drop behavior: the coordinator no longer re-arms verification from a
+/// terminal in-pod row because verification tables are gone. All lookups should
+/// resolve to no row so tasks are routed back to review instead of re-verified.
 #[tokio::test]
 async fn latest_terminal_inpod_run_drives_rearm_decision() {
     let db = create_test_db();
@@ -289,7 +283,7 @@ async fn latest_terminal_inpod_run_drives_rearm_decision() {
         "a non-terminal running row must not drive re-arm"
     );
 
-    // A terminal `passed` row IS the recoverable artifact the seams re-arm on.
+    // A terminal `passed` row is ignored after the table-drop migration.
     repo.create("vr-passed", &task.id, &project.id)
         .await
         .unwrap();
@@ -307,9 +301,8 @@ async fn latest_terminal_inpod_run_drives_rearm_decision() {
             .await
             .unwrap()
             .as_deref(),
-        Some("vr-passed"),
-        "a terminal passed row must be detected so the host pipeline is re-armed \
-         instead of discarding the completed work"
+        None,
+        "terminal verification rows are obsolete after the verification gate removal"
     );
 }
 
