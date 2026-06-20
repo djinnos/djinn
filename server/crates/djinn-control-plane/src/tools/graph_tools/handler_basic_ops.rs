@@ -790,9 +790,7 @@ impl DjinnMcpServer {
                 .to_string()
         })?;
         if targets.is_empty() {
-            return Err(
-                "impact_check requires at least one entry in `impact_targets`".to_string(),
-            );
+            return Err("impact_check requires at least one entry in `impact_targets`".to_string());
         }
 
         let scope_crates: std::collections::HashSet<String> = params
@@ -804,28 +802,23 @@ impl DjinnMcpServer {
             .collect();
 
         // ── Graph freshness check ────────────────────────────────────────
-        // Compare the caller-supplied HEAD against the cached graph's
-        // pinned commit.  When the graph is missing or stale, the
-        // impact analysis would be unreliable — return `needs_spike`.
-        let graph_status = self.state.repo_graph().status(ctx).await;
-        let pinned_commit = graph_status.ok().and_then(|s| s.pinned_commit);
-        let caller_head = params
-            .current_head
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
+        // Use the shared `check_impact_check_staleness` helper so
+        // `impact_check` and `code_graph` ops share the same
+        // `check_impact_staleness` primitive (no duplication, epic z3en/kfgh).
+        let caller_head_raw = params.current_head.as_deref().unwrap_or("");
+        let staleness_info =
+            check_impact_check_staleness(self.state.repo_graph().as_ref(), ctx, caller_head_raw)
+                .await;
 
-        let low_confidence = match (caller_head, &pinned_commit) {
-            (Some(head), Some(pinned)) => head != pinned.trim(),
-            (Some(_), None) => true, // caller HEAD provided but graph not warmed
-            (None, None) => true,    // no caller HEAD and graph not warmed
-            (None, Some(_)) => false, // no caller HEAD but graph is warmed
-        };
-
-        if low_confidence {
-            let staleness = caller_head.map(|head| {
-                GraphStaleness::compute(head, pinned_commit.as_deref())
-            });
+        if staleness_info.is_stale {
+            let staleness = if !staleness_info.caller_commit.is_empty() {
+                Some(GraphStaleness::compute(
+                    &staleness_info.caller_commit,
+                    staleness_info.cached_commit.as_deref(),
+                ))
+            } else {
+                None
+            };
             return Ok(CodeGraphResponse::ImpactCheck(ImpactCheckResponse {
                 affected_crates: Vec::new(),
                 affected_files: Vec::new(),
@@ -892,7 +885,14 @@ impl DjinnMcpServer {
                 match self
                     .state
                     .repo_graph()
-                    .impact(ctx, params.workspace.as_deref(), target, depth, None, params.min_confidence)
+                    .impact(
+                        ctx,
+                        params.workspace.as_deref(),
+                        target,
+                        depth,
+                        None,
+                        params.min_confidence,
+                    )
                     .await
                 {
                     Ok(ImpactResult::Detailed(entries)) => {
@@ -961,10 +961,18 @@ impl DjinnMcpServer {
             "atomic_cutover"
         };
 
-        // Attach staleness metadata for the caller.
-        let staleness = caller_head.map(|head| {
-            GraphStaleness::compute(head, pinned_commit.as_deref())
-        });
+        // Attach staleness metadata for the caller.  Re-uses the
+        // `staleness_info` snapshot from the freshness check above so
+        // `impact_check` and `code_graph` ops share the same
+        // `check_impact_staleness` primitive (no duplication).
+        let staleness = if !staleness_info.caller_commit.is_empty() {
+            Some(GraphStaleness::compute(
+                &staleness_info.caller_commit,
+                staleness_info.cached_commit.as_deref(),
+            ))
+        } else {
+            None
+        };
 
         Ok(CodeGraphResponse::ImpactCheck(ImpactCheckResponse {
             affected_crates: affected_crates.into_iter().collect(),
@@ -1000,7 +1008,6 @@ impl DjinnMcpServer {
 /// the caller's HEAD). The strings are the trimmed echoes so the
 /// `impact_check` response can surface them in `next_step` hints.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // consumed by the `impact_check` handler built in sibling task xkqs
 pub(super) struct ImpactCheckStaleness {
     /// `true` when `cached_commit` is missing/blank or differs from
     /// `caller_commit`. Drives the `needs_spike` short-circuit in
@@ -1021,7 +1028,7 @@ impl ImpactCheckStaleness {
     /// case — both sides are missing, so we cannot answer and must
     /// spike. Distinct from `is_stale` which is the canonical
     /// missing/blank/mismatch signal.
-    #[allow(dead_code)] // consumed by the `impact_check` handler built in sibling task xkqs
+    #[allow(dead_code)] // diagnostic tested in unit tests; not consumed by the handler flow yet
     pub fn is_completely_unanchored(&self) -> bool {
         self.caller_commit.is_empty() && self.cached_commit.is_none()
     }
@@ -1048,7 +1055,6 @@ impl ImpactCheckStaleness {
 /// `caller_head` is the (raw, pre-trim) caller commit. An empty string
 /// is allowed and yields `is_stale = true` (no anchor on the caller's
 /// side).
-#[allow(dead_code)] // consumed by the `impact_check` handler built in sibling task xkqs
 pub(super) async fn check_impact_check_staleness(
     graph: &dyn crate::bridge::RepoGraphOps,
     ctx: &crate::bridge::ProjectCtx,
