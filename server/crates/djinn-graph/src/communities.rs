@@ -115,6 +115,27 @@ pub struct Community {
     pub keywords: Vec<String>,
 }
 
+/// Optional configuration for community detection: granularity plus
+/// optional crate-aware pre-seeding of the initial partition.
+///
+/// When `seed_by_crate` is `Some`, the initial partition groups all
+/// nodes whose `file_path` belongs to the same crate (longest-prefix
+/// match against the map) into a single starting community before the
+/// Louvain-style local-moving phase runs. This biases the final
+/// communities toward crate boundaries — modularity optimization can
+/// still split or merge crates where cross-crate edges are dense, but
+/// members of one crate predominantly end up together. Default
+/// (`None`) leaves the legacy singletons-as-start behaviour untouched.
+#[derive(Debug, Clone, Default)]
+pub struct CommunityDetectionOptions {
+    /// Community granularity. See [`Resolution`].
+    pub resolution: Resolution,
+    /// Optional crate map (`crate-root-prefix → crate-name`) used to
+    /// pre-seed the initial partition by crate membership. `None`
+    /// (the default) disables seeding for backward compatibility.
+    pub seed_by_crate: Option<std::collections::BTreeMap<std::path::PathBuf, String>>,
+}
+
 /// Run greedy modularity-based community detection over the canonical
 /// graph and return one [`Community`] per terminal partition (excluding
 /// singletons).
@@ -126,7 +147,7 @@ pub struct Community {
 /// Uses [`Resolution::default`] for community granularity.  Call
 /// [`detect_communities_with_resolution`] to override.
 pub fn detect_communities(graph: &RepoDependencyGraph) -> Vec<Community> {
-    detect_communities_with_resolution(graph, Resolution::default())
+    detect_communities_with_options(graph, CommunityDetectionOptions::default())
 }
 
 /// Like [`detect_communities`] but accepts an explicit [`Resolution`]
@@ -135,7 +156,32 @@ pub fn detect_communities_with_resolution(
     graph: &RepoDependencyGraph,
     resolution: Resolution,
 ) -> Vec<Community> {
-    let min_size = min_community_size_for(resolution);
+    detect_communities_with_options(
+        graph,
+        CommunityDetectionOptions {
+            resolution,
+            seed_by_crate: None,
+        },
+    )
+}
+
+/// Full-feature entry point: greedy modularity-based community detection
+/// over the canonical graph with optional crate-aware pre-seeding.
+///
+/// When `options.seed_by_crate` is `Some`, the initial partition groups
+/// nodes by crate membership (longest-prefix match) before the
+/// Louvain-style local-moving phase runs, biasing the result toward
+/// crate boundaries. When `None`, behaviour is identical to the legacy
+/// singletons-as-start path.
+///
+/// The result is deterministic for a given graph and set of options —
+/// node visit order is fixed by `NodeIndex` and tie-breaks in the move
+/// step prefer the lowest-index neighbor community.
+pub fn detect_communities_with_options(
+    graph: &RepoDependencyGraph,
+    options: CommunityDetectionOptions,
+) -> Vec<Community> {
+    let min_size = min_community_size_for(options.resolution);
     let pg = graph.graph();
     let node_count = pg.node_count();
     if node_count == 0 {
@@ -173,8 +219,13 @@ pub fn detect_communities_with_resolution(
     // symmetric matrix; that matches what we accumulated.
     let m = total_weight;
 
-    // Initial partition: each node in its own community.
-    let mut partition: Vec<usize> = (0..node_count).collect();
+    // Initial partition. With crate-aware seeding enabled, nodes that
+    // share a crate start in the same community (contiguous id per
+    // crate); otherwise each node starts as a singleton.
+    let mut partition: Vec<usize> = match options.seed_by_crate.as_ref() {
+        Some(crate_map) => seed_partition_by_crate(graph, node_count, crate_map),
+        None => (0..node_count).collect(),
+    };
 
     if m <= 0.0 {
         // Edgeless graph: every node is its own community. Skip the
@@ -200,6 +251,73 @@ pub fn detect_communities_with_resolution(
 
     // Step 5: materialize Community structs from the final partition.
     materialize_communities(graph, &partition, &adjacency, m, min_size)
+}
+
+/// Resolve a node's file path to a crate name via the longest matching
+/// prefix in `crate_map`, mirroring `crate_aggregation::resolve_crate`.
+/// Returns `None` when the node has no `file_path` or the path matches
+/// no crate (i.e. it lives outside any known crate boundary); such nodes
+/// are left as singletons by [`seed_partition_by_crate`].
+fn resolve_crate_for_node<'a>(
+    file_path: Option<&std::path::Path>,
+    crate_map: &'a BTreeMap<std::path::PathBuf, String>,
+) -> Option<&'a str> {
+    let path = file_path?;
+    let mut best: Option<(&'a str, usize)> = None;
+    for (prefix, name) in crate_map {
+        if path.starts_with(prefix) {
+            let len = prefix.as_os_str().len();
+            let take = match best {
+                Some((_, prev_len)) => len > prev_len,
+                None => true,
+            };
+            if take {
+                best = Some((name.as_str(), len));
+            }
+        }
+    }
+    best.map(|(name, _)| name)
+}
+
+/// Build the initial community partition by grouping nodes that share a
+/// crate (longest-prefix match against `crate_map`) into a single
+/// starting community. Nodes with no `file_path` or whose path matches
+/// no crate each start as singletons so the local-moving phase can
+/// place them freely. Community ids are assigned contiguously: distinct
+/// crates receive ascending ids first, then each unmatched node gets its
+/// own id.
+fn seed_partition_by_crate(
+    graph: &RepoDependencyGraph,
+    node_count: usize,
+    crate_map: &BTreeMap<std::path::PathBuf, String>,
+) -> Vec<usize> {
+    let pg = graph.graph();
+    let mut crate_to_comm: BTreeMap<String, usize> = BTreeMap::new();
+    let mut next_comm = 0usize;
+    let mut partition = vec![0usize; node_count];
+    for v in 0..node_count {
+        let node = &pg[NodeIndex::new(v)];
+        match resolve_crate_for_node(node.file_path.as_deref(), crate_map) {
+            Some(crate_name) => {
+                let comm = *crate_to_comm
+                    .entry(crate_name.to_string())
+                    .or_insert_with(|| {
+                        let id = next_comm;
+                        next_comm += 1;
+                        id
+                    });
+                partition[v] = comm;
+            }
+            None => {
+                // No crate matches this node: start it as a singleton so
+                // the local-moving phase can relocate it freely.
+                let comm = next_comm;
+                next_comm += 1;
+                partition[v] = comm;
+            }
+        }
+    }
+    partition
 }
 
 /// Run one pass of the local-moving phase. Returns `true` iff at least
@@ -1203,6 +1321,170 @@ mod tests {
             "fine resolution should produce >= coarse communities: fine={}, coarse={}",
             fine.len(),
             coarse.len()
+        );
+    }
+
+    #[test]
+    fn community_detection_options_default_is_unseeded_medium() {
+        let opts = CommunityDetectionOptions::default();
+        assert_eq!(opts.resolution, Resolution::Medium);
+        assert!(opts.seed_by_crate.is_none());
+    }
+
+    #[test]
+    fn detect_communities_with_options_unseeded_matches_default() {
+        let graph = two_cluster_graph();
+        let legacy = detect_communities(&graph);
+        let via_options =
+            detect_communities_with_options(&graph, CommunityDetectionOptions::default());
+        assert_eq!(
+            legacy, via_options,
+            "unseeded options path must be identical to the legacy entry point"
+        );
+    }
+
+    #[test]
+    fn detect_communities_with_options_resolution_matches_legacy() {
+        let graph = two_cluster_graph();
+        for resolution in [Resolution::Fine, Resolution::Medium, Resolution::Coarse] {
+            let legacy = detect_communities_with_resolution(&graph, resolution);
+            let via_options = detect_communities_with_options(
+                &graph,
+                CommunityDetectionOptions {
+                    resolution,
+                    seed_by_crate: None,
+                },
+            );
+            assert_eq!(
+                legacy, via_options,
+                "resolution {:?}: options path must match legacy wrapper",
+                resolution
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_crate_for_node_longest_prefix_wins() {
+        let mut crate_map = BTreeMap::new();
+        crate_map.insert(PathBuf::from("src"), "root".to_string());
+        crate_map.insert(PathBuf::from("src/auth"), "auth".to_string());
+
+        // Longer prefix wins over the shorter parent.
+        let resolved =
+            resolve_crate_for_node(Some(std::path::Path::new("src/auth/login.rs")), &crate_map);
+        assert_eq!(resolved, Some("auth"));
+
+        // No file_path → None (no resolution possible).
+        assert_eq!(resolve_crate_for_node(None, &crate_map), None);
+
+        // Path outside any known crate prefix → None.
+        assert_eq!(
+            resolve_crate_for_node(Some(std::path::Path::new("other/x.rs")), &crate_map),
+            None,
+        );
+    }
+
+    #[test]
+    fn seed_partition_by_crate_groups_crate_mates() {
+        let graph = two_cluster_graph();
+        let mut crate_map = BTreeMap::new();
+        crate_map.insert(PathBuf::from("src/auth"), "auth".to_string());
+        crate_map.insert(PathBuf::from("src/billing"), "billing".to_string());
+
+        let partition = seed_partition_by_crate(&graph, 6, &crate_map);
+        assert_eq!(partition.len(), 6);
+
+        // auth cluster (nodes 0,1,2) share one community ...
+        assert_eq!(partition[0], partition[1]);
+        assert_eq!(partition[1], partition[2]);
+        // billing cluster (nodes 3,4,5) share another ...
+        assert_eq!(partition[3], partition[4]);
+        assert_eq!(partition[4], partition[5]);
+        // ... and the two crates are distinct.
+        assert_ne!(partition[0], partition[3]);
+    }
+
+    #[test]
+    fn seed_partition_by_crate_merges_paths_sharing_a_crate_name() {
+        let graph = two_cluster_graph();
+        // Two different prefixes map to the SAME crate name → one seed
+        // community, exercising the name-based grouping.
+        let mut crate_map = BTreeMap::new();
+        crate_map.insert(PathBuf::from("src/auth"), "monolib".to_string());
+        crate_map.insert(PathBuf::from("src/billing"), "monolib".to_string());
+
+        let partition = seed_partition_by_crate(&graph, 6, &crate_map);
+        let first = partition[0];
+        for v in 0..6 {
+            assert_eq!(
+                partition[v], first,
+                "node {v} should share the single monolib seed community"
+            );
+        }
+    }
+
+    #[test]
+    fn seed_partition_by_crate_empty_map_leaves_singletons() {
+        let graph = two_cluster_graph();
+        // Empty crate_map → nothing matches → every node is its own
+        // singleton community (degrades to the unseeded initial state).
+        let crate_map = BTreeMap::new();
+        let partition = seed_partition_by_crate(&graph, 6, &crate_map);
+
+        let mut ids = partition.clone();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 6, "each node should be a singleton community");
+    }
+
+    #[test]
+    fn seed_partition_by_crate_nodes_outside_crate_are_singletons() {
+        let graph = two_cluster_graph();
+        // Map only auth; billing nodes (3,4,5) match no crate prefix.
+        let mut crate_map = BTreeMap::new();
+        crate_map.insert(PathBuf::from("src/auth"), "auth".to_string());
+
+        let partition = seed_partition_by_crate(&graph, 6, &crate_map);
+
+        // auth nodes grouped together.
+        assert_eq!(partition[0], partition[1]);
+        assert_eq!(partition[1], partition[2]);
+
+        // Each billing node gets a distinct singleton id, all different
+        // from the auth community and from each other.
+        assert_ne!(partition[3], partition[0]);
+        assert_ne!(partition[4], partition[0]);
+        assert_ne!(partition[5], partition[0]);
+        assert_ne!(partition[3], partition[4]);
+        assert_ne!(partition[4], partition[5]);
+        assert_ne!(partition[3], partition[5]);
+    }
+
+    #[test]
+    fn detect_communities_with_options_seeded_keeps_crate_purity() {
+        let graph = two_cluster_graph();
+        let mut crate_map = BTreeMap::new();
+        crate_map.insert(PathBuf::from("src/auth"), "auth".to_string());
+        crate_map.insert(PathBuf::from("src/billing"), "billing".to_string());
+
+        let communities = detect_communities_with_options(
+            &graph,
+            CommunityDetectionOptions {
+                resolution: Resolution::Medium,
+                seed_by_crate: Some(crate_map),
+            },
+        );
+
+        // Seeding should keep the auth cluster predominantly together.
+        let auth_comm = communities
+            .iter()
+            .find(|c| c.member_ids.contains(&0))
+            .expect("auth_login should belong to some community");
+        let auth_in_same = (0..3).filter(|v| auth_comm.member_ids.contains(v)).count();
+        assert!(
+            auth_in_same >= 2,
+            "seeding should keep ≥2/3 auth nodes together, got {auth_in_same}: {:?}",
+            auth_comm.member_ids
         );
     }
 }
