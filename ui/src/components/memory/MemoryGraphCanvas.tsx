@@ -28,6 +28,8 @@ import {
 import {
   buildMemoryGraph,
   parseMemoryGraphResponse,
+  TYPED_EDGE_STYLES,
+  TYPED_EDGE_KINDS,
 } from "@/lib/memoryGraphAdapter";
 import { useSigmaGraph } from "@/hooks/useSigmaGraph";
 import { useGraphReducers } from "@/hooks/useGraphReducers";
@@ -105,6 +107,8 @@ export function MemoryGraphCanvas({
 
   const coAccessEnabled = useMemoryGraphStore((s) => s.coAccessEnabled);
   const setCoAccessEnabled = useMemoryGraphStore((s) => s.setCoAccessEnabled);
+  const typedEdgesEnabled = useMemoryGraphStore((s) => s.typedEdgesEnabled);
+  const setTypedEdgesEnabled = useMemoryGraphStore((s) => s.setTypedEdgesEnabled);
 
   // ── Fetch memory_graph on project / reload change ──────────────────────────
   useEffect(() => {
@@ -280,13 +284,26 @@ export function MemoryGraphCanvas({
             size: coAccessEdgeSize(weight),
           };
         }
+        // Typed-edge kinds (builds_on, contradicts, supersedes, exemplifies, derived_from)
+        if (TYPED_EDGE_KINDS.has(kind ?? "")) {
+          if (!typedEdgesEnabled) {
+            return { ...attrs, hidden: true };
+          }
+          const style = TYPED_EDGE_STYLES[kind!] ?? { color: "#94a3b8", size: 1.0, dashed: false };
+          return {
+            ...attrs,
+            color: style.color,
+            size: style.size,
+            ...(style.dashed ? { type: "dashed" } : {}),
+          };
+        }
         // Delegate to the base code-graph edge reducer for selection/dim logic.
         return baseReducers.edgeReducer
           ? baseReducers.edgeReducer(id, attrs)
           : attrs;
       },
     };
-  }, [baseReducers, graph]);
+  }, [baseReducers, graph, typedEdgesEnabled]);
 
   const { layoutRunning, sigma } = useSigmaGraph(
     containerRef,
@@ -356,12 +373,19 @@ export function MemoryGraphCanvas({
         className="absolute inset-0"
         style={{ cursor: "grab" }}
       />
-      <CoAccessToggle
-        enabled={coAccessEnabled}
-        loading={coAccessLoading}
-        onChange={setCoAccessEnabled}
-        disabled={state.status !== "ready"}
-      />
+      <div className="absolute right-3 top-3 z-10 flex flex-col gap-2">
+        <CoAccessToggle
+          enabled={coAccessEnabled}
+          loading={coAccessLoading}
+          onChange={setCoAccessEnabled}
+          disabled={state.status !== "ready"}
+        />
+        <TypedEdgesToggle
+          enabled={typedEdgesEnabled}
+          onChange={setTypedEdgesEnabled}
+          disabled={state.status !== "ready"}
+        />
+      </div>
       <MemoryGraphOverlay state={state} layoutRunning={layoutRunning} />
     </div>
   );
@@ -381,31 +405,60 @@ function CoAccessToggle({
   disabled: boolean;
 }) {
   return (
-    <div className="absolute right-3 top-3 z-10">
-      <label
-        className={cn(
-          "flex items-center gap-2 rounded-lg border border-[#2d2d3d] bg-black/50 px-3 py-1.5 text-[11px] text-zinc-300 backdrop-blur",
-          disabled && "cursor-not-allowed opacity-50",
-        )}
-      >
-        <input
-          type="checkbox"
-          checked={enabled}
-          disabled={disabled}
-          onChange={(e) => onChange(e.target.checked)}
-          className="h-3 w-3 accent-cyan-400"
-          aria-label="Toggle co-access edges"
-        />
-        {loading ? (
-          <span className="flex items-center gap-1.5">
-            <span className="h-2 w-2 animate-spin rounded-full border border-cyan-400 border-t-transparent" />
-            Loading co-access…
-          </span>
-        ) : (
-          <span>Co-access edges</span>
-        )}
-      </label>
-    </div>
+    <label
+      className={cn(
+        "flex items-center gap-2 rounded-lg border border-[#2d2d3d] bg-black/50 px-3 py-1.5 text-[11px] text-zinc-300 backdrop-blur",
+        disabled && "cursor-not-allowed opacity-50",
+      )}
+    >
+      <input
+        type="checkbox"
+        checked={enabled}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        className="h-3 w-3 accent-cyan-400"
+        aria-label="Toggle co-access edges"
+      />
+      {loading ? (
+        <span className="flex items-center gap-1.5">
+          <span className="h-2 w-2 animate-spin rounded-full border border-cyan-400 border-t-transparent" />
+          Loading co-access…
+        </span>
+      ) : (
+        <span>Co-access edges</span>
+      )}
+    </label>
+  );
+}
+
+// ── Typed-edges toggle ───────────────────────────────────────────────────────
+
+function TypedEdgesToggle({
+  enabled,
+  onChange,
+  disabled,
+}: {
+  enabled: boolean;
+  onChange: (enabled: boolean) => void;
+  disabled: boolean;
+}) {
+  return (
+    <label
+      className={cn(
+        "flex items-center gap-2 rounded-lg border border-[#2d2d3d] bg-black/50 px-3 py-1.5 text-[11px] text-zinc-300 backdrop-blur",
+        disabled && "cursor-not-allowed opacity-50",
+      )}
+    >
+      <input
+        type="checkbox"
+        checked={enabled}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        className="h-3 w-3 accent-green-400"
+        aria-label="Toggle typed edges"
+      />
+      <span>Typed edges</span>
+    </label>
   );
 }
 

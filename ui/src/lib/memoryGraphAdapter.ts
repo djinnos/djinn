@@ -219,6 +219,9 @@ export const TYPED_EDGE_STYLES: Readonly<Record<string, { color: string; size: n
   derived_from: { color: "#8b5cf6", size: 1.5, dashed: false }, // violet-500
 });
 
+/** Set of all typed edge kinds for fast membership tests in reducers. */
+export const TYPED_EDGE_KINDS = new Set<string>(["builds_on", "contradicts", "supersedes", "exemplifies", "derived_from"]);
+
 // ── Response parser (pure runtime guard) ────────────────────────────────────
 
 function isRecord(value: unknown): value is Record<string, unknown> {
