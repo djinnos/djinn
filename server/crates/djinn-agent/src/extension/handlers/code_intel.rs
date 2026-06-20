@@ -1404,6 +1404,14 @@ pub(crate) async fn call_code_graph_inner(
             attach_workspace_hint(&mut value, scope.hint);
             value
         }
+        "crate_graph" => {
+            let result = graph_ops.crate_graph(ctx).await?;
+            serde_json::json!({
+                "crates": result.crates,
+                "edges": result.edges,
+                "message": result.message,
+            })
+        }
         other => {
             return Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
@@ -1414,7 +1422,7 @@ pub(crate) async fn call_code_graph_inner(
                  'complexity', 'refactor_candidates', 'api_surface', 'metrics_at', 'dead_symbols', \
                  'deprecated_callers', 'touches_hot_path', 'coupling_hubs', \
                  'status', 'snapshot', 'workspaces', 'symbols_at', 'diff_touches', \
-                 'detect_changes'"
+                 'detect_changes', 'crate_graph'"
             ));
         }
     };
@@ -1608,7 +1616,7 @@ fn code_graph_capabilities() -> serde_json::Value {
             "complexity", "refactor_candidates", "api_surface", "metrics_at", "dead_symbols",
             "deprecated_callers", "touches_hot_path", "coupling_hubs",
             "status", "snapshot", "workspaces", "symbols_at", "diff_touches",
-            "detect_changes",
+            "detect_changes", "crate_graph",
         ],
         "default_search_mode": std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE")
             .unwrap_or_else(|_| "name".to_string()),

@@ -22,8 +22,7 @@ use crate::repo_graph::{CrateEdge, CrateGraph, CrateNode, RepoDependencyGraph, R
 ///
 /// Aggregates cross-crate edges: for each edge where source node's crate ≠
 /// target node's crate, adds or accumulates a `CrateEdge` between those crates.
-#[allow(dead_code)] // consumed by sibling tasks 35is & wz2o (not yet implemented)
-pub(crate) fn build_crate_graph(
+pub fn build_crate_graph(
     graph: &RepoDependencyGraph,
     crate_map: &BTreeMap<PathBuf, String>,
 ) -> CrateGraph {

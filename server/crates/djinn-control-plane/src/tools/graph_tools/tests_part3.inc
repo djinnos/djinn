@@ -191,6 +191,7 @@
             CodeGraphResponse::ShapeCheck(r) => r.next_step.as_deref(),
             CodeGraphResponse::ApiImpact(r) => r.next_step.as_deref(),
             CodeGraphResponse::Flow(r) => r.next_step.as_deref(),
+            CodeGraphResponse::CrateGraph(r) => r.next_step.as_deref(),
         }
     }
 
@@ -794,6 +795,7 @@
             is_test: false,
             x: 0.0,
             y: 0.0,
+            keywords: Vec::new(),
         });
         response.snapshot.edges.push(crate::bridge::SnapshotEdge {
             from: "file:src/main.rs".to_string(),
@@ -915,6 +917,7 @@
             is_test: false,
             x: 0.0,
             y: 0.0,
+            keywords: Vec::new(),
         };
         let json = serde_json::to_value(node).expect("serialize node");
         assert!(
@@ -973,6 +976,7 @@
             CodeGraphResponse::ShapeCheck(r) => &r.graph_staleness,
             CodeGraphResponse::ApiImpact(r) => &r.graph_staleness,
             CodeGraphResponse::Flow(r) => &r.graph_staleness,
+            CodeGraphResponse::CrateGraph(r) => &r.graph_staleness,
         }
     }
 

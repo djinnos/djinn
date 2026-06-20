@@ -33,7 +33,7 @@ use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
 use crate::roles::AgentRole;
 use crate::skills::ResolvedSkill;
-use djinn_db::TaskRepository;
+use djinn_db::{ProposalRepository, TaskRepository};
 
 /// Fully-assembled prompt context for a single role session.
 ///
@@ -283,6 +283,107 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
                             };
                             ctx_lines
                                 .push(format!("- [{}] {}: {}", status_marker, t.short_id, t.title));
+                        }
+                    }
+
+                    match epic_repo.list_blockers(epic_id).await {
+                        Ok(blockers) if !blockers.is_empty() => {
+                            ctx_lines.push("\n### Blocking Epics".to_string());
+                            for blocker in &blockers {
+                                ctx_lines.push(format!(
+                                    "- **{}** ({}) — {}",
+                                    blocker.title, blocker.short_id, blocker.status
+                                ));
+                                match task_repo_ctx
+                                    .list_filtered(djinn_db::ListQuery {
+                                        parent: Some(blocker.epic_id.clone()),
+                                        status: Some("closed".to_string()),
+                                        limit: 20,
+                                        ..Default::default()
+                                    })
+                                    .await
+                                {
+                                    Ok(closed_tasks) => {
+                                        for t in &closed_tasks.tasks {
+                                            ctx_lines.push(format!("  - Delivered: {}", t.title));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            epic_id = %epic_id,
+                                            blocking_epic_id = %blocker.epic_id,
+                                            error = %e,
+                                            "Lifecycle: failed to list closed tasks for blocking epic"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::debug!(
+                                epic_id = %epic_id,
+                                error = %e,
+                                "Lifecycle: failed to list blocking epics for prompt context"
+                            );
+                        }
+                    }
+
+                    let proposal_repo =
+                        ProposalRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+                    match proposal_repo.proposal_for_epic(epic_id).await {
+                        Ok(Some(proposal)) => {
+                            match proposal_repo.graduated_epics(&proposal.id).await {
+                                Ok(siblings) => {
+                                    let sibling_ids: Vec<_> = siblings
+                                        .into_iter()
+                                        .filter(|(sid, _)| sid != epic_id)
+                                        .collect();
+                                    if !sibling_ids.is_empty() {
+                                        ctx_lines.push(format!(
+                                            "\n### Proposal Sibling Epics ({})",
+                                            proposal.title
+                                        ));
+                                        for (sid, _) in &sibling_ids {
+                                            match epic_repo.get(sid).await {
+                                                Ok(Some(sibling_epic)) => {
+                                                    ctx_lines.push(format!(
+                                                        "- **{}** ({}) — {}",
+                                                        sibling_epic.title,
+                                                        sibling_epic.short_id,
+                                                        sibling_epic.status
+                                                    ));
+                                                }
+                                                Ok(None) => {}
+                                                Err(e) => {
+                                                    tracing::debug!(
+                                                        epic_id = %epic_id,
+                                                        sibling_epic_id = %sid,
+                                                        error = %e,
+                                                        "Lifecycle: failed to load proposal sibling epic for prompt context"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        epic_id = %epic_id,
+                                        proposal_id = %proposal.id,
+                                        error = %e,
+                                        "Lifecycle: failed to list proposal sibling epics for prompt context"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::debug!(
+                                epic_id = %epic_id,
+                                error = %e,
+                                "Lifecycle: failed to find parent proposal for prompt context"
+                            );
                         }
                     }
                     Some(ctx_lines.join("\n"))
