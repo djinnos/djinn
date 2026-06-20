@@ -563,13 +563,13 @@ impl UsageAnalyticsRepository {
                      ta.completed_count::DOUBLE PRECISION \
                      / GREATEST(1, ta.closed_count)::DOUBLE PRECISION, \
                      0.0 \
-                 )                                          AS \"success_rate!: f64\", \
-                 COALESCE(ta.avg_reopens, 0.0)              AS \"avg_reopens!: f64\", \
+                 )                                          AS \"success_rate!\", \
+                 COALESCE(ta.avg_reopens, 0.0)              AS \"avg_reopens!\", \
                  COALESCE( \
                      ta.verified_count::DOUBLE PRECISION \
                      / GREATEST(1, ta.closed_count)::DOUBLE PRECISION, \
                      0.0 \
-                 )                                          AS \"verification_pass_rate!: f64\" \
+                 )                                          AS \"verification_pass_rate!\" \
              FROM session_agg sa \
              LEFT JOIN task_agg ta ON ta.model_id = sa.model_id \
              ORDER BY sa.model_id"
@@ -610,9 +610,9 @@ impl UsageAnalyticsRepository {
                     tokens_in,
                     tokens_out,
                     shared_credit_completed_task_count: completed,
-                    success_rate: r.get("success_rate!: f64"),
-                    avg_reopens: r.get("avg_reopens!: f64"),
-                    verification_pass_rate: r.get("verification_pass_rate!: f64"),
+                    success_rate: r.get("success_rate!"),
+                    avg_reopens: r.get("avg_reopens!"),
+                    verification_pass_rate: r.get("verification_pass_rate!"),
                     cost_per_completed_task,
                     tokens_per_task,
                 }
