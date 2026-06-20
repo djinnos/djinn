@@ -11144,6 +11144,11 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "mdx": {
+          "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
         "pending_reconcile": {
           "description": "True when the in-flight build is behind the latest proposal revision.",
           "type": "boolean"
@@ -11210,6 +11215,142 @@ expression: signatures
         }
       },
       "title": "ProposalDeleteResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_export",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ProposalExportParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Structured acceptance criteria (`{criterion, met}` or plain string),\nsame shape as tasks. `met` means \"agreed during scoping\".",
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterionItem"
+          },
+          "type": "array"
+        },
+        "author_user_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "body_format": {
+          "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
+          "type": "string"
+        },
+        "build_owner_user_id": {
+          "description": "Build owner once graduated.",
+          "nullable": true,
+          "type": "string"
+        },
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_reconciled_revision_seq": {
+          "description": "Last proposal revision that the in-flight build has reconciled against.",
+          "format": "int32",
+          "nullable": true,
+          "type": "integer"
+        },
+        "latest_revision_seq": {
+          "description": "Head revision number (sign-offs anchored earlier are stale).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "mdx": {
+          "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "pending_reconcile": {
+          "description": "True when the in-flight build is behind the latest proposal revision.",
+          "type": "boolean"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "description": "Lifecycle: draft | in_review | approved | building | done | rejected |\narchived | superseded.",
+          "type": "string"
+        },
+        "superseded_by": {
+          "nullable": true,
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "unresolved_feedback_count": {
+          "default": 0,
+          "description": "Count of unresolved feedback entries — drives the per-row badge in the\nproposals list. Only populated on `proposal_list`; `0` on show paths.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "ProposalSingleResponse",
       "type": "object"
     }
   },
@@ -11565,6 +11706,11 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "mdx": {
+          "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
         "pending_reconcile": {
           "description": "True when the in-flight build is behind the latest proposal revision.",
           "type": "boolean"
@@ -11695,6 +11841,11 @@ expression: signatures
           "description": "Head revision number (sign-offs anchored earlier are stale).",
           "format": "int32",
           "type": "integer"
+        },
+        "mdx": {
+          "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
         },
         "pending_reconcile": {
           "description": "True when the in-flight build is behind the latest proposal revision.",
@@ -12650,6 +12801,11 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "mdx": {
+          "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
         "pending_reconcile": {
           "description": "True when the in-flight build is behind the latest proposal revision.",
           "type": "boolean"
@@ -12785,6 +12941,11 @@ expression: signatures
           "description": "Head revision number (sign-offs anchored earlier are stale).",
           "format": "int32",
           "type": "integer"
+        },
+        "mdx": {
+          "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
         },
         "pending_reconcile": {
           "description": "True when the in-flight build is behind the latest proposal revision.",
@@ -13064,6 +13225,11 @@ expression: signatures
           "description": "Head revision number (sign-offs anchored earlier are stale).",
           "format": "int32",
           "type": "integer"
+        },
+        "mdx": {
+          "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
         },
         "pending_reconcile": {
           "description": "True when the in-flight build is behind the latest proposal revision.",

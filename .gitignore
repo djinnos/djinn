@@ -30,3 +30,6 @@ node_modules/
 
 # Local research / planning scratch (reference-repo mining, implementation plans). Not tracked.
 /plans/
+
+# Ephemeral per-run scratch (avoid junk-file review loops from interrupted sessions)
+.cache/
