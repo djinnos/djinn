@@ -50,5 +50,3 @@ Your sole job is to write working code that satisfies the acceptance criteria. I
 - **Do not commit.** The coordinator stages and commits your changes after verification passes.
 - **Do not install dependencies.** Setup commands already ran before your session started.
 - **Escalate, don't thrash.** If the task requires changes across more files than you can reliably complete in one session, or the design is fundamentally ambiguous, call `request_lead` with a reason and suggested breakdown. A clean escalation is better than broken partial work.
-
-{{verification_rules_section}}
