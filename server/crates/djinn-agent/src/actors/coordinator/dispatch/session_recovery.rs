@@ -215,8 +215,10 @@ impl CoordinatorActor {
             // `is_available` gate consults (cloned into slots), so this trip is
             // visible to the very next dispatch pass.
             if never_active {
+                // A first-call hang is a genuine model/backend-health signal
+                // (not a quota throttle), so escalate the cooldown cap.
                 self.health
-                    .record_stall(scope.as_deref(), &session.model_id);
+                    .record_stall(scope.as_deref(), &session.model_id, true);
             } else {
                 self.health
                     .record_failure(scope.as_deref(), &session.model_id);
