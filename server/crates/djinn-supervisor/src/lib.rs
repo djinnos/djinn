@@ -135,7 +135,7 @@ pub enum StageError {
     #[error("model resolution: {0}")]
     ModelResolution(String),
 
-    #[error("setup/verification: {0}")]
+    #[error("setup: {0}")]
     Setup(String),
 
     #[error("session create: {0}")]

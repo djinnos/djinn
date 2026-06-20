@@ -273,8 +273,9 @@ impl CoordinatorActor {
         // `merge_group` Actions run PERSISTS with
         // `head_branch = gh-readonly-queue/.../pr-<number>-<sha>` and a
         // `head_sha` whose check runs also persist — so we look it up there.
-        // Reuses `log_ci_failure_comment`, which logs a `comment`/`verification`
-        // entry surfaced to the worker via `recent_feedback`, naming the failed
+        // Reuses `log_ci_failure_comment`, which logs a `comment` entry with
+        // `actor_role="verification"` (CI failure logging) surfaced to the
+        // worker via `recent_feedback`, naming the failed
         // workflow/job/step plus `ci_job_log` hints to read the real log.
         let pr_marker = format!("pr-{pull_number}-");
         match gh_client
