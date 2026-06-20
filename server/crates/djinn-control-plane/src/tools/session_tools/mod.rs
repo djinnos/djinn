@@ -7,7 +7,6 @@ use djinn_db::ActivityQuery;
 use djinn_db::SessionMessageRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
-use djinn_db::VerificationResultRepository;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct SessionListParams {
@@ -229,17 +228,6 @@ fn render_timeline_activity(e: &djinn_core::models::ActivityEntry) -> TimelineAc
     }
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct TimelineVerificationStep {
-    pub phase: String,
-    pub index: i32,
-    pub name: String,
-    pub command: String,
-    pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
-    pub duration_ms: i64,
-}
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct TaskTimelineResponse {
@@ -249,8 +237,6 @@ pub struct TaskTimelineResponse {
     pub messages: Option<Vec<TimelineMessage>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<Vec<TimelineActivity>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verification_steps: Option<Vec<TimelineVerificationStep>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -593,7 +579,6 @@ impl DjinnMcpServer {
                 sessions: None,
                 messages: None,
                 activity: None,
-                verification_steps: None,
                 error: Some(e),
             })
         };
@@ -665,7 +650,6 @@ impl DjinnMcpServer {
             .collect();
 
         // 3. Get activity log entries
-        let task_id_owned = task.id.clone();
         let q = ActivityQuery {
             project_id: Some(project_id),
             task_id: Some(task.id),
@@ -681,27 +665,6 @@ impl DjinnMcpServer {
             Err(e) => return err(e.to_string()),
         };
 
-        // 4. Get persisted verification step results
-        let vr_repo = VerificationResultRepository::new(self.state.db().clone());
-        let verification_steps = vr_repo
-            .list_for_task(&task_id_owned)
-            .await
-            .ok()
-            .filter(|rows| !rows.is_empty())
-            .map(|rows| {
-                rows.into_iter()
-                    .map(|r| TimelineVerificationStep {
-                        phase: r.phase,
-                        index: r.step_index,
-                        name: r.name,
-                        command: r.command,
-                        exit_code: r.exit_code,
-                        stdout: r.stdout,
-                        stderr: r.stderr,
-                        duration_ms: r.duration_ms,
-                    })
-                    .collect()
-            });
 
         let task_run_repo =
             djinn_db::repositories::task_run::TaskRunRepository::new(self.state.db().clone());
@@ -713,7 +676,6 @@ impl DjinnMcpServer {
             sessions: Some(sessions_out),
             messages: Some(messages),
             activity: Some(activity),
-            verification_steps,
             error: None,
         })
     }

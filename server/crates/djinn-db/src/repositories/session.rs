@@ -3,6 +3,7 @@ use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::provider::Pricing;
 use djinn_core::models::{SessionRecord, SessionStatus};
 use serde_json::Value;
+use sqlx::Row;
 
 use crate::Result;
 use crate::database::Database;
@@ -430,35 +431,25 @@ impl SessionRepository {
     /// conversation's lifetime, and must not share a budget with autonomous
     /// task-runs — otherwise an open (or leaked) chat tab silently starves the
     /// user's task dispatch (fatal at `max_sessions = 1`).
-    ///
-    /// Sessions whose owning task is in the `verifying` stage are ALSO excluded:
-    /// once the worker stage hands off to verification the model is no longer in
-    /// use (in-pod verification runs `cargo test`/`clippy` and consumes ZERO
-    /// model tokens), even though the worker pod / slot is still held while it
-    /// compiles. The cap protects the *model*, not the pod/CPU budget, so a
-    /// verify-stage run must free a model slot for the next session to dispatch
-    /// on a different pod. Without this a single verify (minutes long) keeps
-    /// counting against the per-model cap and wedges an otherwise-idle model.
     pub async fn count_active_by_user_and_model(
         &self,
     ) -> Result<Vec<(Option<String>, String, i64)>> {
         self.db.ensure_initialized().await?;
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             r#"SELECT COALESCE(s.created_by_user_id, t.created_by_user_id) AS creator,
-                      s.model_id AS "model_id!",
-                      COUNT(*) AS "cnt!"
+                      s.model_id AS model_id,
+                      COUNT(*) AS cnt
                  FROM sessions s
                  LEFT JOIN tasks t ON t.id = s.task_id
                 WHERE s.status = 'running'
                   AND s.agent_type <> 'chat'
-                  AND (t.status IS NULL OR t.status <> 'verifying')
                 GROUP BY COALESCE(s.created_by_user_id, t.created_by_user_id), s.model_id"#
         )
         .fetch_all(self.db.pool())
         .await?;
         Ok(rows
             .into_iter()
-            .map(|r| (r.creator, r.model_id, r.cnt))
+            .map(|r| (r.get("creator"), r.get("model_id"), r.get("cnt")))
             .collect())
     }
 
@@ -1255,13 +1246,10 @@ mod tests {
         );
     }
 
-    /// A running worker session whose owning task has handed off to the
-    /// `verifying` stage must NOT count against the per-model concurrency cap:
-    /// in-pod verification consumes the pod/CPU but ZERO model tokens, so the
-    /// model slot is free for the next session. Without this exclusion a
-    /// minutes-long verify keeps the model "busy" and wedges dispatch.
+    /// Running worker sessions count against the per-model concurrency cap
+    /// regardless of the owning task status.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn count_active_by_user_and_model_excludes_verifying_stage_sessions() {
+    async fn count_active_by_user_and_model_counts_running_worker_sessions() {
         let db = test_db();
         let (bus, _captured) = capturing_bus();
         db.ensure_initialized().await.unwrap();
@@ -1271,7 +1259,7 @@ mod tests {
             "INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)",
             user,
             7101i64,
-            "verify-cap"
+            "cap-test"
         )
         .execute(db.pool())
         .await
@@ -1292,10 +1280,8 @@ mod tests {
         ) -> String {
             let id = uuid::Uuid::now_v7().to_string();
             let short_id = format!("t{}{}", &id[..6], &id[id.len() - 6..]);
-            // Runtime `sqlx::query` (no `query!` macro) — the test sets a
-            // per-row `status` (`in_progress` / `verifying`) so the query
-            // string varies per call and would otherwise need a fresh
-            // `.sqlx/` cache entry for each variant.
+            // Runtime `sqlx::query` (no `query!` macro) keeps this helper
+            // independent from per-status offline cache entries.
             sqlx::query(
                 "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                                     issue_type, priority, owner, status, continuation_count,
@@ -1315,11 +1301,10 @@ mod tests {
         }
 
         let repo = SessionRepository::new(db.clone(), bus.clone());
-        // One in_progress (generating) task and one verifying task, both with a
-        // running worker session on the same model under the same creator.
+        // Two running worker sessions on the same model under the same creator.
         let t_gen = mk_task(&db, &project_id, &epic.id, &user, "in_progress").await;
-        let t_verify = mk_task(&db, &project_id, &epic.id, &user, "verifying").await;
-        for t in [&t_gen, &t_verify] {
+        let t_review = mk_task(&db, &project_id, &epic.id, &user, "needs_task_review").await;
+        for t in [&t_gen, &t_review] {
             repo.create(CreateSessionParams {
                 project_id: &project_id,
                 task_id: Some(t),
@@ -1340,11 +1325,10 @@ mod tests {
             .into_iter()
             .filter_map(|(c, m, n)| c.map(|c| ((c, m), n)))
             .collect();
-        // Only the in_progress task counts; the verifying one is excluded.
         assert_eq!(
             map.get(&(user.clone(), "openai/gpt-5.5".to_string())),
-            Some(&1),
-            "verifying-stage worker session must not count against the per-model cap"
+            Some(&2),
+            "running worker sessions must count against the per-model cap"
         );
     }
 

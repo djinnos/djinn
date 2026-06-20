@@ -113,11 +113,4 @@ pub use repositories::{
     },
     user::{User, UserRepository},
     user_settings::UserSettingsRepository,
-    verification::VerificationRepository,
-    verification_cache::{CachedVerification, VerificationCacheRepository},
-    verification_result::{
-        VerificationResultRepository, VerificationStepInsert, VerificationStepRow,
-    },
-    verification_run::{VerificationRun, VerificationRunRepository, VerificationRunStatus},
-    verification_test::{VerificationTestRepository, VerificationTestRun, VerificationTestStatus},
 };

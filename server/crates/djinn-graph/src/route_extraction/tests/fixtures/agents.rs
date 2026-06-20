@@ -75,7 +75,6 @@ struct AgentResponse {
     mcp_servers: Vec<String>,
     skills: Vec<String>,
     model_preference: Option<String>,
-    verification_command: Option<String>,
     is_default: bool,
     learned_prompt: Option<String>,
     created_at: String,
@@ -100,7 +99,6 @@ impl From<&Agent> for AgentResponse {
             mcp_servers: parse_json_string_array(&r.mcp_servers),
             skills: parse_json_string_array(&r.skills),
             model_preference: r.model_preference.clone(),
-            verification_command: r.verification_command.clone(),
             is_default: r.is_default,
             learned_prompt: r.learned_prompt.clone(),
             created_at: r.created_at.clone(),
@@ -158,7 +156,6 @@ struct CreateBody {
     mcp_servers: Option<Vec<String>>,
     skills: Option<Vec<String>>,
     model_preference: Option<String>,
-    verification_command: Option<String>,
 }
 
 async fn create_agent(
@@ -184,7 +181,6 @@ async fn create_agent(
                 description: body.description.as_deref().unwrap_or(""),
                 system_prompt_extensions: &extensions,
                 model_preference: body.model_preference.as_deref(),
-                verification_command: body.verification_command.as_deref(),
                 mcp_servers: mcp_servers_json.as_deref(),
                 skills: skills_json.as_deref(),
                 is_default: false,
@@ -205,7 +201,6 @@ struct UpdateBody {
     mcp_servers: Option<Vec<String>>,
     skills: Option<Vec<String>>,
     model_preference: Option<String>,
-    verification_command: Option<String>,
 }
 
 async fn update_agent(
@@ -245,11 +240,6 @@ async fn update_agent(
     } else {
         existing.model_preference.as_deref()
     };
-    let verification_command = if body.verification_command.is_some() {
-        body.verification_command.as_deref()
-    } else {
-        existing.verification_command.as_deref()
-    };
 
     let updated = repo
         .update(
@@ -259,7 +249,6 @@ async fn update_agent(
                 description: &description,
                 system_prompt_extensions: &extensions,
                 model_preference,
-                verification_command,
                 mcp_servers: &mcp_servers_str,
                 skills: &skills_str,
                 learned_prompt: existing.learned_prompt.as_deref(),
@@ -408,6 +397,37 @@ struct AvailableMcpServersResponse {
     servers: Vec<AvailableMcpServer>,
 }
 
+#[derive(Deserialize)]
+struct McpServersFile {
+    #[serde(default)]
+    mcp_servers: std::collections::BTreeMap<String, McpServerConfig>,
+}
+
+#[derive(Deserialize)]
+struct McpServerConfig {
+    url: Option<String>,
+}
+
+fn load_available_mcp_servers(project_root: &StdPath) -> Vec<AvailableMcpServer> {
+    let path = project_root.join(".mcp.json");
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(file) = serde_json::from_str::<McpServersFile>(&raw) else {
+        return Vec::new();
+    };
+    file.mcp_servers
+        .into_iter()
+        .map(|(name, config)| {
+            let transport = if config.url.is_some() { "http" } else { "stdio" };
+            AvailableMcpServer {
+                name,
+                transport: transport.to_string(),
+            }
+        })
+        .collect()
+}
+
 async fn available_mcp_servers(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,
@@ -428,18 +448,7 @@ async fn available_mcp_servers(
         })?;
 
     let project_root = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
-    let registry = djinn_agent::verification::settings::load_mcp_server_registry(&project_root);
-    let servers = registry
-        .into_iter()
-        .map(|(name, config)| {
-            let transport = if config.url.is_some() {
-                "http".to_string()
-            } else {
-                "stdio".to_string()
-            };
-            AvailableMcpServer { name, transport }
-        })
-        .collect::<Vec<_>>();
+    let servers = load_available_mcp_servers(&project_root);
 
     Ok(Json(AvailableMcpServersResponse { servers }))
 }

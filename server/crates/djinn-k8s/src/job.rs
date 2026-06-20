@@ -508,9 +508,9 @@ fn build_task_run_env(
 }
 
 /// Runtime env vars routing the shared Rust toolchain caches to the persistent
-/// `/cache` PVC. Warm/verification Pods use the per-project base target dir;
-/// task-run Pods use `task_run_cache_env_vars` so their writable target dir is
-/// private per task run while still sharing registry and sccache settings.
+/// `/cache` PVC. Warm Pods use the per-project base target dir; task-run Pods
+/// use `task_run_cache_env_vars` so their writable target dir is private per
+/// task run while still sharing registry and sccache settings.
 /// The common cache routing stays single-sourced here on
 /// purpose: the DB env once drifted because the task-run path was updated and
 /// the warm path was missed (see the comment in warm_job.rs) — keeping shared
@@ -532,8 +532,8 @@ fn build_task_run_env(
 /// - CARGO_TARGET_DIR: compiled artifacts are workspace-specific. The shared
 ///   warm base is namespaced per project; the warm job pre-compiles main into it
 ///   with `CARGO_INCREMENTAL=1` so it carries a clean, incremental-enabled
-///   main-based cache (CI-style, like Swatinem/rust-cache). Task-runs AND
-///   verification get a deterministic private dir (under
+///   main-based cache (CI-style, like Swatinem/rust-cache). Task-runs get a
+///   deterministic private dir (under
 ///   `/cache/cargo-target-runs/<id>`) seeded from that warm base, so they never
 ///   write the shared base directly or contend on Cargo's shared build-dir lock,
 ///   and recompile only their delta incrementally. (Default is
@@ -556,12 +556,11 @@ fn common_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
         // `CARGO_INCREMENTAL=0` here. The fast path is incremental compilation
         // over a warm, main-based per-project target base (CI-style, like
         // Swatinem/rust-cache): the warm job pre-compiles the workspace into the
-        // base with `CARGO_INCREMENTAL=1`, task-run/verification pods seed a
-        // private run target dir from that base and recompile only their delta
-        // incrementally. Forcing sccache (which requires CARGO_INCREMENTAL=0)
-        // disables incremental and was the wrong lever — it made every
-        // verification cold-build (~14-29min clippy). SCCACHE_DIR is left set
-        // below so a repo that *itself* pins `rustc-wrapper = "sccache"` in its
+        // base with `CARGO_INCREMENTAL=1`, task-run pods seed a private run
+        // target dir from that base and recompile only their delta incrementally.
+        // Forcing sccache (which requires CARGO_INCREMENTAL=0) disables
+        // incremental and was the wrong lever. SCCACHE_DIR is left set below so
+        // a repo that *itself* pins `rustc-wrapper = "sccache"` in its
         // .cargo/config.toml still gets a writable, Landlock-allowed cache dir;
         // we just don't impose the wrapper on repos that don't ask for it.
         env_var(
@@ -571,7 +570,7 @@ fn common_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
         // Default is 10G, which evicts fast on a large workspace; give sccache
         // more headroom on the shared PVC.
         env_var("SCCACHE_CACHE_SIZE", "20G"),
-        // Build-in-pod contexts (task-run, warm, verification) have no Postgres
+        // Build-in-pod contexts (task-run, warm) have no Postgres
         // reachable, but a repo's .cargo/config.toml may bake a DATABASE_URL for
         // local online sqlx (djinn itself bakes :5433). Force offline so the
         // compile-time sqlx macros use the committed .sqlx cache instead of
@@ -582,9 +581,7 @@ fn common_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
 }
 
 /// Base cache env vars routing CARGO_TARGET_DIR at the shared per-project warm
-/// base. Warm/verification-test Pods write this base directly; verification Pods
-/// use it only as the seed source + fallback (the worker overrides
-/// CARGO_TARGET_DIR to a private run dir).
+/// base.
 pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     let mut env = common_cache_env_vars(project_id);
     env.push(env_var(
@@ -621,24 +618,6 @@ pub(crate) fn warm_cache_env_vars(
     env
 }
 
-/// Cache env vars for verification Pods. Verification reuses the warm
-/// per-project base as a read-only SEED: the worker (`run_verify_task`) seeds
-/// a private run target dir from the warm base and overrides `CARGO_TARGET_DIR`
-/// to point there before running `verify_commit`, so it never writes the shared
-/// base or contends on Cargo's build-dir lock.
-///
-/// Must match `warm_cache_env_vars` / `task_run_cache_env_vars`:
-/// `CARGO_INCREMENTAL=1` + `RUSTC_WRAPPER=""` so the seed is reusable.
-pub(crate) fn verify_cache_env_vars(
-    project_id: &str,
-    _policy: Option<&djinn_stack::environment::CargoCachePolicy>,
-) -> Vec<EnvVar> {
-    let mut env = cache_env_vars(project_id);
-    env.push(env_var("CARGO_INCREMENTAL", "1"));
-    env.push(env_var("RUSTC_WRAPPER", ""));
-    env
-}
-
 /// Cache env vars for task-run Pods. The target dir is private to the canonical
 /// task run id, not the generated Kubernetes resource name, so task Pods avoid
 /// the shared Cargo build-dir lock while preserving the warm per-project base as
@@ -650,10 +629,9 @@ pub(crate) fn verify_cache_env_vars(
 /// rebuild (~9min for a large crate like `djinn-agent`) every edit.
 ///
 /// Always `CARGO_INCREMENTAL=1` and `RUSTC_WRAPPER=""` (clearing any repo
-/// `rustc-wrapper = "sccache"`), matching `warm_cache_env_vars` and
-/// `verify_cache_env_vars`. Warm == verify == worker must use the SAME compile
-/// strategy or the warm seed is wasted. `policy` is accepted for signature
-/// parity but no longer flips incremental.
+/// `rustc-wrapper = "sccache"`), matching `warm_cache_env_vars` so the warm
+/// seed is reusable. `policy` is accepted for signature parity but no longer
+/// flips incremental.
 fn task_run_cache_env_vars(
     project_id: &str,
     task_run_id: &str,
@@ -1244,7 +1222,7 @@ mod tests {
         );
 
         // --- Compile strategy MUST be identical (parity invariant) ---
-        // Warm == verify == worker: incremental=1 + RUSTC_WRAPPER="" so the
+        // Warm == worker: incremental=1 + RUSTC_WRAPPER="" so the
         // warm seed is reusable across all three.
         assert_eq!(
             warm_env.get("CARGO_INCREMENTAL").copied(),
@@ -1350,7 +1328,7 @@ mod tests {
     }
 
     /// Incremental is now an invariant (always 1) regardless of policy: even an
-    /// explicit `sccache=false` policy yields incremental=1 for warm/verify/worker.
+    /// explicit `sccache=false` policy yields incremental=1 for warm/worker.
     #[test]
     fn explicit_policy_no_sccache_enables_incremental_for_warm_and_verify() {
         let project_id = "explicit-no-sccache";
@@ -1372,30 +1350,18 @@ mod tests {
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        let verify_vars = verify_cache_env_vars(project_id, Some(&policy));
-        let verify_env: BTreeMap<&str, &str> = verify_vars
-            .iter()
-            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
-            .collect();
-
         let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        // Warm/verify with sccache=false → incremental enabled
+        // Warm/worker with sccache=false → incremental enabled
         assert_eq!(
             warm_env.get("CARGO_INCREMENTAL").copied(),
             Some("1"),
             "warm must enable incremental when policy.sccache=false"
         );
-        assert_eq!(
-            verify_env.get("CARGO_INCREMENTAL").copied(),
-            Some("1"),
-            "verify must enable incremental when policy.sccache=false"
-        );
-
         // Task-run unchanged
         assert_eq!(
             worker_env.get("CARGO_INCREMENTAL").copied(),
@@ -1410,7 +1376,7 @@ mod tests {
     }
 
     /// Even an explicit `sccache=true` policy can NOT re-enable sccache or
-    /// disable incremental on djinn build pods: warm/verify/worker force
+    /// disable incremental on djinn build pods: warm/worker force
     /// incremental=1 + RUSTC_WRAPPER="" so the warm seed stays reusable. (The
     /// clone-config normalization step enforces the same on the cloned tree.)
     #[test]
@@ -1434,12 +1400,6 @@ mod tests {
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        let verify_vars = verify_cache_env_vars(project_id, Some(&policy));
-        let verify_env: BTreeMap<&str, &str> = verify_vars
-            .iter()
-            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
-            .collect();
-
         let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
@@ -1449,7 +1409,6 @@ mod tests {
         // All three force incremental=1 + RUSTC_WRAPPER="" regardless of policy.
         for (label, env) in [
             ("warm", &warm_env),
-            ("verify", &verify_env),
             ("worker", &worker_env),
         ] {
             assert_eq!(
@@ -1477,13 +1436,6 @@ mod tests {
         assert_eq!(
             warm_vars_none, warm_vars_auto,
             "AutoDetected must match None for warm"
-        );
-
-        let verify_vars_none = verify_cache_env_vars(project_id, None);
-        let verify_vars_auto = verify_cache_env_vars(project_id, Some(&policy));
-        assert_eq!(
-            verify_vars_none, verify_vars_auto,
-            "AutoDetected must match None for verify"
         );
 
         let worker_vars_none = task_run_cache_env_vars(project_id, &task_run_id, None);
