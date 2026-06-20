@@ -40,7 +40,7 @@ pub enum SlotError {
 }
 
 fn truncate_output(s: &str) -> String {
-    // 10KB / 100 lines — enough for diagnosis of setup/verification command failures.
+    // 10KB / 100 lines — enough for diagnosis of setup command failures.
     crate::truncate::smart_truncate_lines(s, 10_000, 100)
 }
 

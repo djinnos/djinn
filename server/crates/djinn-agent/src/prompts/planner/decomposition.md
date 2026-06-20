@@ -73,8 +73,145 @@ In this pruning/repair arm:
 - **MANDATORY: Every task MUST include `acceptance_criteria` with at least one criterion.** Tasks created without AC cannot be dispatched and will block the entire execution pipeline. Example: `acceptance_criteria=[{"criterion": "X is implemented and tests pass", "met": false}]`
 - Every created acceptance criterion must be objectively checkable by the executing role's actual tool surface and environment. Do not create AC that require external-infrastructure proof, production/operator-only checks, credentials the role lacks, or validation that duplicates an external rollout/operations process; document those proofs in runbook, checklist, or other operational artifacts instead of task AC.
 - Set `blocked_by` relationships when tasks depend on each other.
-- **Overlapping-files rule:** if two tasks in this wave will touch the same files (per their design), chain them with `blocked_by` instead of dispatching both in parallel — racing edits to the same files cause PR merge conflicts and rework loops. This is a nudge, not hard serialization: only serialize the genuinely overlapping pair, and keep independent tasks parallel. Beware the extraction trap: tasks that each extract a different piece OUT OF the same source file all edit that source file and its module root (`mod.rs`/`lib.rs`), so they overlap even though their target files differ — chain the whole split sequence.
+- **Overlapping-files rule (lightweight):** if two tasks in this wave will touch the same files (per their design), chain them with `blocked_by` instead of dispatching both in parallel — racing edits to the same files cause PR merge conflicts and rework loops. Only serialize the genuinely overlapping pair, and keep independent tasks parallel. Beware the extraction trap: tasks that each extract a different piece OUT OF the same source file all edit that source file and its module root (`mod.rs`/`lib.rs`), so they overlap even though their target files differ — chain the whole split sequence. **For cross-crate API/crate/file removals or renames, the Overlapping-files rule is not sufficient — you MUST follow the Impact preflight contract below first.**
 - Reference relevant ADR permalinks in `memory_refs` when architectural decisions apply.
+
+### B4a. Impact preflight for destructive changes (MANDATORY tool call)
+
+**Rule:** Before creating tasks that **remove, rename, relocate, or change the signature/visibility of any public API, public file, crate, SQL migration, or shared type**, you MUST call the `impact_check` MCP tool and obey its `recommendation`. Skipping this step is the root cause of the 2026-06-20 verification-gate-removal incident described below.
+
+#### When this rule applies (trigger checklist)
+
+Call `impact_check` if the proposed wave touches ANY of:
+
+- A public symbol (function, struct, enum, trait, type alias, const) — removal, rename, signature change, visibility change (pub → pub(crate)), or #[deprecated] → #[removed].
+- A public file path that other crates import (`use crate::...`, `mod foo;` across crate boundaries).
+- A whole crate rename or removal from the workspace (`Cargo.toml` member changes).
+- A SQL migration that drops or renames a table, column, type, function, or view referenced by any repository.
+- A shared type that appears in more than one crate (e.g., an error type, an event payload, a wire format, a generated schema).
+- A control-plane MCP tool whose handler is implemented in another crate.
+
+If the wave only adds new code, refactors inside a single crate without changing public surface, or edits tests/docs, `impact_check` is NOT required.
+
+#### The exact `impact_check` call
+
+```
+impact_check(
+  proposed_changes=[
+    {"kind": "remove_symbol",   "crate": "<crate-name>", "symbol": "<path::to::Symbol>"},
+    {"kind": "rename_symbol",   "crate": "<crate-name>", "symbol": "<path::to::Symbol>", "new_name": "<new>"},
+    {"kind": "remove_file",     "crate": "<crate-name>", "path": "<relative/path.rs>"},
+    {"kind": "remove_crate",    "crate": "<crate-name>"},
+    {"kind": "drop_migration",  "crate": "<crate-name>", "migration": "NN_drop_<name>.sql", "objects": ["table_a","col_b"]}
+  ],
+  proposed_task_scope=["<task_id_1>", "<task_id_2>", ...]   // optional, omit for pre-planning checks
+)
+```
+
+#### How to interpret the result
+
+`impact_check` returns an **advisory** response (it does NOT block task creation in v1 — see soft enforcement). The response shape:
+
+- `affected_crates: [String]` — every crate that compiles against the proposed change.
+- `affected_files:  [String]` — files with broken references (relative to repo root).
+- `affected_symbols:[String]` — symbol keys with broken references.
+- `consumer_crate_set: [String]` — the dep-inverse of the target crate (who depends on it). `is_external` dependents (vendored, out-of-workspace) are filtered out.
+- `safe_independent_slice: bool` — `true` iff every consumer is contained in the proposed task scope.
+- `recommendation: "ok_independent" | "chain_tasks" | "atomic_cutover" | "needs_spike"` — see decision tree below.
+- `low_confidence: bool` — `true` when the canonical graph is missing or staler than HEAD; treat the result as untrusted when this is set.
+- `graph_head: String | null` — the `CachedGraph.git_head` the result was computed against.
+
+**If `low_confidence == true`:** the graph is stale; do not trust the consumer set. Default to `needs_spike` and re-run after the canonical graph warms.
+
+#### The recommendation enum — decision tree
+
+You MUST apply this decision tree verbatim. Do not improvise variants.
+
+| `recommendation` returned | What to do |
+|---|---|
+| `ok_independent`  | **Slice freely.** Consumer set is empty or contained entirely in the proposed task scope. Proceed with per-crate/per-area tasks in parallel; chain only the genuinely overlapping pairs (see Overlapping-files rule above). |
+| `chain_tasks`     | **Slice, but order them.** Consumer set is non-empty and contained in the proposed task scope, but consumers must receive the change as a dependency. Create the tasks as planned, then add `blocked_by` edges so each consumer task waits for the producer task in the same wave. Do NOT dispatch in parallel. |
+| `atomic_cutover`  | **Do NOT slice.** Consumer set contains crates/files outside the proposed task scope, OR the change is a single cross-crename (e.g. crate rename + every consumer). Collapse the wave into ONE task producing ONE PR, OR spawn a spike first to redesign the change as a less-coupled decomposition. Do not create N parallel per-crate tasks and rely on `blocked_by` — that deadlocks (see worked example). |
+| `needs_spike`     | **Create a spike task first.** Graph is stale (`low_confidence=true`), the proposed scope is ambiguous, or the dependency graph is too tangled to decompose safely. Dispatch `issue_type="spike"` to investigate; do NOT create worker tasks for the destructive change until the spike resolves the ambiguity. |
+
+#### Defaulting to atomic cutover or spike (checklist)
+
+Apply this checklist whenever `impact_check` returns consumer crates outside the proposed task scope:
+
+- [ ] Did `impact_check` return `consumer_crate_set` containing any crate NOT in `proposed_task_scope`?
+  - If **YES** and the proposed wave already slices by crate → switch `recommendation` to `atomic_cutover`. Do not create the per-crate tasks. Either:
+    - Collapse into ONE single-PR task that touches every consumer crate, OR
+    - Create a `spike` task first to redesign the change so consumers are not entangled.
+  - If **NO** → `recommendation` stays as reported (`ok_independent` or `chain_tasks`); proceed.
+- [ ] Did `impact_check` return `low_confidence == true` (stale graph)?
+  - If **YES** → switch to `needs_spike`. Spawn a spike to warm the canonical graph and re-run `impact_check` before any worker tasks are created.
+- [ ] Did the proposed change alter a SQL migration that drops/renames tables or columns referenced by repositories in other crates?
+  - If **YES** → `impact_check` MUST be re-run with `drop_migration` entries. The migration is a hard cross-crate coupling that the default `remove_symbol`/`remove_file` query will not see.
+- [ ] Did `impact_check` return `recommendation="atomic_cutover"`?
+  - If **YES** → do not create per-crate tasks. Either collapse to a single PR or create a spike. Document the chosen path in the task description / acceptance criteria.
+
+If any box above is YES and the plan still creates per-crate tasks, the plan is wrong. Stop and revise.
+
+#### Worked example: 2026-06-20 verification-gate-removal incident
+
+**What happened:** The planner sliced "remove the verification pre-PR gate" into per-crate tasks (djinn-core model, djinn-db repositories, djinn-agent modules, djinn-k8s job builders, djinn-control-plane MCP tools), each branching from main HEAD and dispatched in parallel. The plan never called `impact_check` because no such tool existed.
+
+**Failure sequence:**
+
+1. Worker for djinn-db landed first: deleted `djinn-db/src/repositories/verification*.rs` and removed `verification_command` from `agent.rs`.
+2. djinn-control-plane, djinn-k8s, djinn-runtime, and djinn-supervisor PRs (branched from main HEAD **before** the djinn-db merge landed) all referenced the deleted symbols.
+3. Whole-workspace CI (`cargo check --workspace`) went red on every consumer PR simultaneously.
+4. The fix tasks the planner then created were `blocked_by` the breaking task — but the breaking task had already merged, so fix tasks needed a new patch on top, which required another per-crate PR, which hit the same compile error against djinn-db's removal.
+5. Result: 2-hour rework loops, a 13M-token orphan task that never converged, and three consumer branches stuck behind main for hours.
+
+**How `impact_check` would have prevented it:** A single call before creating the wave:
+
+```
+impact_check(
+  proposed_changes=[
+    {"kind":"remove_file","crate":"djinn-db",         "path":"src/repositories/verification.rs"},
+    {"kind":"remove_file","crate":"djinn-db",         "path":"src/repositories/verification_cache.rs"},
+    {"kind":"remove_file","crate":"djinn-db",         "path":"src/repositories/verification_result.rs"},
+    {"kind":"remove_file","crate":"djinn-db",         "path":"src/repositories/verification_run.rs"},
+    {"kind":"remove_file","crate":"djinn-db",         "path":"src/repositories/verification_test.rs"},
+    {"kind":"remove_symbol","crate":"djinn-db",       "symbol":"repositories::agent::AgentCreateInput::verification_command"}
+  ],
+  proposed_task_scope=["34pj","fspe","npn6"]   # the per-crate tasks the planner was about to create
+)
+```
+
+would have returned:
+
+```
+{
+  "affected_crates":       ["djinn-control-plane","djinn-k8s","djinn-runtime","djinn-supervisor","djinn-agent"],
+  "affected_files":        [...],
+  "consumer_crate_set":    ["djinn-control-plane","djinn-k8s","djinn-runtime","djinn-supervisor"],
+  "safe_independent_slice": false,
+  "recommendation":         "atomic_cutover",
+  "low_confidence":         false,
+  "graph_head":             "<main HEAD>"
+}
+```
+
+Because `consumer_crate_set` ∉ `proposed_task_scope` and `safe_independent_slice == false`, the contract forces `recommendation="atomic_cutover"`: collapse to ONE single-PR task (or spawn a spike first). The per-crate slice is mechanically rejected.
+
+**Lesson:** Any time `impact_check` says `safe_independent_slice=false`, slicing by crate is a deadlock waiting to happen. Treat `atomic_cutover` as the only safe answer; either ship as one PR or spike first.
+
+#### Self-contained checklist before calling `task_create`
+
+Before you call `task_create` for ANY task in a wave, confirm:
+
+- [ ] I have read the proposed change and identified every public symbol, file, crate, migration, and shared type that is being removed/renamed/relocated.
+- [ ] I called `impact_check` with all of the above in `proposed_changes`. If the wave has no such changes, I noted that and skipped the call.
+- [ ] I read the returned `recommendation` and applied the matching branch of the decision tree above.
+- [ ] If `recommendation=="atomic_cutover"`, I did NOT create per-crate tasks; I either collapsed to one task or created a spike.
+- [ ] If `recommendation=="needs_spike"`, I created a spike task first and did NOT create the destructive worker tasks.
+- [ ] If `recommendation=="chain_tasks"`, I added `blocked_by` edges so consumers run after the producer in the same wave.
+- [ ] If `low_confidence==true`, I treated the result as advisory only and defaulted to `needs_spike` until the canonical graph re-warms.
+- [ ] I documented the `impact_check` result (consumer set + recommendation) in the task descriptions or the roadmap note so reviewers can audit the slicing decision.
+
+A wave that fails any of the above boxes is malformed. Revise the plan before calling `submit_grooming`.
 
 ### B5. Submit Planning
 

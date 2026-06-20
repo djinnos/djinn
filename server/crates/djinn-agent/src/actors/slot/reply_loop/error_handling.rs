@@ -142,6 +142,39 @@ pub(super) fn should_retry_empty_assistant_turn(
     }
 }
 
+/// Discriminate a **reasoning-only** turn from a quota **empty-200** when the
+/// assembled assistant content is empty (idea 5).
+///
+/// Both surface as "empty assistant turn", but they are opposite failure modes:
+/// - All counts zero (`reasoning_tokens == 0`): a genuine empty-200. On the
+///   Codex/OpenAI consumer backend this is the over-quota account answering with
+///   an empty `response.completed` — a THROTTLE that should drive failover.
+/// - `reasoning_tokens > 0` with no visible message and no tool call: the model
+///   spent reasoning tokens but emitted nothing usable (a reasoning-only stall,
+///   e.g. encrypted reasoning we couldn't surface, or summaries-off). This is NOT
+///   a throttle — the backend answered, the model just didn't externalize a
+///   result. The right response is a NUDGE asking it to emit its answer / call a
+///   tool, not a failover.
+///
+/// Returns `true` when the empty turn is reasoning-only and should be nudged.
+pub(super) fn empty_turn_is_reasoning_only(reasoning_tokens_out: u32) -> bool {
+    reasoning_tokens_out > 0
+}
+
+/// Build the nudge injected after a reasoning-only empty turn (see
+/// [`empty_turn_is_reasoning_only`]). It tells the model its visible output was
+/// empty and asks it to actually emit the answer or call a tool this turn.
+pub(super) fn reasoning_only_nudge_message() -> Message {
+    Message::user(
+        "<system-reminder>\n\
+         Your previous turn produced reasoning but NO visible output and NO tool \
+         call, so nothing was delivered. Do not just think — this turn you MUST \
+         either reply with your answer as text or call an appropriate tool to make \
+         progress.\n\
+         </system-reminder>",
+    )
+}
+
 /// Backoff before retrying an empty / no-event provider turn. A 200-empty
 /// completion is a refusal/throttle signal, not a transient blip — notably the
 /// ChatGPT-account Codex backend (`chatgpt.com/backend-api/codex`) signals
@@ -255,6 +288,32 @@ mod tests {
         // Defensive: clamps so an out-of-range retry never panics or runs away.
         assert_eq!(empty_turn_backoff(0), std::time::Duration::from_secs(3));
         assert_eq!(empty_turn_backoff(10), std::time::Duration::from_secs(27));
+    }
+
+    #[test]
+    fn empty_turn_reasoning_only_discriminator() {
+        // Idea 5: an empty assistant turn that spent reasoning tokens is a
+        // reasoning-only stall (nudge), distinct from an all-zero quota empty-200
+        // (throttle/failover). The reasoning-token count is the discriminator.
+        assert!(
+            empty_turn_is_reasoning_only(1),
+            "reasoning tokens spent → reasoning-only stall (nudge path)"
+        );
+        assert!(empty_turn_is_reasoning_only(512));
+        assert!(
+            !empty_turn_is_reasoning_only(0),
+            "all-zero empty turn → genuine empty-200 (throttle path)"
+        );
+        // The nudge body must steer the model to externalize output / call a tool.
+        let msg = reasoning_only_nudge_message();
+        let text: String = msg
+            .content
+            .iter()
+            .filter_map(djinn_provider::message::ContentBlock::as_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("NO visible output"), "{text}");
+        assert!(text.contains("system-reminder"), "{text}");
     }
 
     #[test]

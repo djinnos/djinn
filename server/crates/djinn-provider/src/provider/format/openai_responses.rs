@@ -442,11 +442,27 @@ fn parse_responses_line(line: &str, accumulated_items: &mut Vec<OutputItemInfo>)
                 .filter(|i| matches!(i, OutputItemInfo::Reasoning { .. }))
                 .count();
             if n_msg == 0 && n_call == 0 {
+                // Idea 5: distinguish the two empty-output modes for downstream
+                // triage. `n_reasoning > 0` = reasoning-only stall (the model
+                // spent reasoning but emitted nothing usable; the reply loop
+                // nudges it). All-zero = a genuine empty-200, which on the
+                // Codex/OpenAI consumer backend is the over-quota account
+                // answering with an empty `response.completed` (a throttle that
+                // drives failover). The reply loop's authoritative discriminator
+                // is the reasoning-token count from the usage frame, not these
+                // final-item counts (encrypted/summary-off reasoning may surface
+                // no reasoning item), but logging both aids diagnosis.
+                let mode = if n_reasoning > 0 {
+                    "reasoning-only stall"
+                } else {
+                    "all-zero (likely Codex/OpenAI quota empty-200 throttle)"
+                };
                 tracing::warn!(
                     target: "djinn_provider::request",
                     total_items = final_items.len(),
                     reasoning_items = n_reasoning,
-                    "openai_responses: response.completed with NO message and NO function_call (reasoning-only/empty) — surfaces upstream as an empty assistant turn"
+                    mode,
+                    "openai_responses: response.completed with NO message and NO function_call — surfaces upstream as an empty assistant turn"
                 );
             }
 

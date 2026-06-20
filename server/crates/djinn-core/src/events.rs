@@ -400,14 +400,6 @@ impl DjinnEventEnvelope {
             from_sync: false,
         }
     }
-    pub fn verification_step(
-        project_id: &str,
-        task_id: Option<&str>,
-        phase: &str,
-        step: &impl serde::Serialize,
-    ) -> Self {
-        Self { entity_type: "verification", action: "step", payload: serde_json::to_value(serde_json::json!({"project_id": project_id, "task_id": task_id, "phase": phase, "step": step})).unwrap(), id: None, project_id: Some(project_id.to_string()), from_sync: false }
-    }
     pub fn task_lifecycle_step(task_id: &str, step: &str, detail: &serde_json::Value) -> Self {
         Self {
             entity_type: "lifecycle",
@@ -708,37 +700,6 @@ mod tests {
         assert_eq!(envelope.payload()["actor"], "resumer");
         assert_eq!(envelope.payload()["changed_at"], "2026-06-12T00:05:00.000Z");
         assert_eq!(envelope.payload()["reason"], serde_json::Value::Null);
-    }
-
-    #[test]
-    fn envelope_verification_step_maps_entity_action_and_payload() {
-        #[derive(serde::Serialize)]
-        #[serde(tag = "type")]
-        enum TestStep {
-            Started {
-                index: u32,
-                total: u32,
-                name: String,
-                command: String,
-            },
-        }
-
-        let step = TestStep::Started {
-            index: 1,
-            total: 3,
-            name: "clippy".into(),
-            command: "cargo clippy".into(),
-        };
-        let envelope =
-            DjinnEventEnvelope::verification_step("p1", Some("t1"), "verification", &step);
-
-        assert_eq!(envelope.entity_type(), "verification");
-        assert_eq!(envelope.action(), "step");
-        assert_eq!(envelope.project_id.as_deref(), Some("p1"));
-        let payload = envelope.payload();
-        assert_eq!(payload["project_id"], "p1");
-        assert_eq!(payload["task_id"], "t1");
-        assert_eq!(payload["phase"], "verification");
     }
 
     #[test]
