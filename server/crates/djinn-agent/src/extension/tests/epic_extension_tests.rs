@@ -320,7 +320,7 @@ async fn proposal_ac_set_records_successful_reconcile_for_graduated_epics() {
                 acceptance_criteria: r#"[{"criterion":"Ship it better","met":false}]"#,
                 status: "building",
                 superseded_by: None,
-                body_format: None,
+                body_format: Some("markdown"),
             },
         )
         .await
@@ -400,7 +400,7 @@ async fn proposal_reconcile_obsolete_epic_then_ac_set_preserves_unrelated_epics(
                 acceptance_criteria: r#"[{"criterion":"Ship revised scope","met":false}]"#,
                 status: "building",
                 superseded_by: None,
-                body_format: None,
+                body_format: Some("markdown"),
             },
         )
         .await

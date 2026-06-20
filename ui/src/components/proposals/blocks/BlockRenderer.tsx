@@ -8,7 +8,7 @@ import { getBlockByTag } from "@/lib/blockRegistry";
 
 import { parseMdxBody } from "./parseMdxBody";
 
-interface BlockRendererProps {
+export interface BlockRendererProps {
   body: string;
   feedback?: ProposalFeedback[];
   proposal: Proposal;
