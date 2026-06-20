@@ -77,13 +77,25 @@ pub fn render_local_conn(conn_template: &str, port: i32) -> String {
         .replace("{port}", &port.to_string())
 }
 
-/// The env var the worker container exports for this service's connection.
-pub fn sidecar_conn_env(spec: &BackingServiceSpec) -> EnvVar {
-    EnvVar {
-        name: spec.conn_env_var.clone(),
-        value: Some(render_local_conn(&spec.conn_template, spec.port)),
-        ..EnvVar::default()
-    }
+/// The env var(s) the worker container exports for this service's connection.
+///
+/// `conn_env_var` is a comma-separated LIST of names (e.g.
+/// `DATABASE_URL,TEST_POSTGRES_URL`); the same rendered connection string is
+/// emitted under each so a project can reach for the conventional name
+/// (`DATABASE_URL`) or a bespoke one. Empty / whitespace-only entries are
+/// skipped.
+pub fn sidecar_conn_env(spec: &BackingServiceSpec) -> Vec<EnvVar> {
+    let value = render_local_conn(&spec.conn_template, spec.port);
+    spec.conn_env_var
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| EnvVar {
+            name: name.to_string(),
+            value: Some(value.clone()),
+            ..EnvVar::default()
+        })
+        .collect()
 }
 
 /// Build the native-sidecar `Container` for one backing service. The caller
@@ -270,18 +282,30 @@ mod tests {
             cpu_limit: "500m".into(),
             memory_limit: "512Mi".into(),
             conn_template: "postgres://postgres:postgres@{host}:{port}/app_test".into(),
-            conn_env_var: "TEST_POSTGRES_URL".into(),
+            conn_env_var: "DATABASE_URL,TEST_POSTGRES_URL".into(),
         }
     }
 
     #[test]
     fn conn_env_renders_loopback_host() {
-        let env = sidecar_conn_env(&spec());
-        assert_eq!(env.name, "TEST_POSTGRES_URL");
-        assert_eq!(
-            env.value.as_deref(),
-            Some("postgres://postgres:postgres@127.0.0.1:5432/app_test")
-        );
+        let envs = sidecar_conn_env(&spec());
+        let expected = "postgres://postgres:postgres@127.0.0.1:5432/app_test";
+        // Both the conventional DATABASE_URL and the bespoke TEST_POSTGRES_URL
+        // are emitted with the same loopback connection string.
+        assert_eq!(envs.len(), 2);
+        assert_eq!(envs[0].name, "DATABASE_URL");
+        assert_eq!(envs[0].value.as_deref(), Some(expected));
+        assert_eq!(envs[1].name, "TEST_POSTGRES_URL");
+        assert_eq!(envs[1].value.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn conn_env_skips_empty_and_whitespace_names() {
+        let mut s = spec();
+        s.conn_env_var = " DATABASE_URL , ,TEST_POSTGRES_URL,".into();
+        let envs = sidecar_conn_env(&s);
+        let names: Vec<&str> = envs.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["DATABASE_URL", "TEST_POSTGRES_URL"]);
     }
 
     #[test]

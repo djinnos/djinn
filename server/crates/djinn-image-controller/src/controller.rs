@@ -33,7 +33,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use djinn_db::{Database, Image, ImageRepository, ImageStatus, ProjectRepository};
+use djinn_db::{
+    Database, Image, ImageRepository, ImageStatus, ProjectRepository, ServicePresetRepository,
+};
 use djinn_image_builder::{
     AgentWorkerImage, BuildContext, compute_environment_hash, generate_dockerfile,
 };
@@ -307,13 +309,76 @@ impl ImageController {
     /// [`Self::enqueue`] but reads/writes the `images` row. `image` is the
     /// already-fetched row (callers have it in hand); `image_repo` is reused
     /// to avoid re-opening it.
+    /// Union the CLI client package (e.g. `postgresql-client`) of every backing
+    /// service preset attached to this image into `cfg.system_packages`.
+    ///
+    /// Codebase-agnostic and best-effort: any failure (junction read, preset
+    /// read, NULL/absent `client_package`, unknown preset) is logged and
+    /// skipped so a service-catalog problem never blocks the image build. The
+    /// dockerfile generator dedups + sorts `system_packages`, so duplicates with
+    /// a project's own apt packages are harmless.
+    async fn inject_preset_client_packages(
+        &self,
+        image_id: &str,
+        image_repo: &ImageRepository,
+        cfg: &mut EnvironmentConfig,
+    ) {
+        let preset_ids = match image_repo.list_service_presets(image_id).await {
+            Ok(ids) => ids,
+            Err(error) => {
+                warn!(
+                    image_id = %image_id,
+                    %error,
+                    "image_controller: list_service_presets failed; installing no service client packages"
+                );
+                return;
+            }
+        };
+        if preset_ids.is_empty() {
+            return;
+        }
+
+        let preset_repo = ServicePresetRepository::new(self.db.clone());
+        for preset_id in preset_ids {
+            match preset_repo.get(&preset_id).await {
+                Ok(Some(preset)) => {
+                    if let Some(pkg) = preset
+                        .client_package
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                    {
+                        debug!(
+                            image_id = %image_id,
+                            preset_id = %preset_id,
+                            package = %pkg,
+                            "image_controller: adding service client package to image"
+                        );
+                        cfg.system_packages.push(pkg.to_string());
+                    }
+                }
+                Ok(None) => warn!(
+                    image_id = %image_id,
+                    preset_id = %preset_id,
+                    "image_controller: image references an unknown service preset; skipping client package"
+                ),
+                Err(error) => warn!(
+                    image_id = %image_id,
+                    preset_id = %preset_id,
+                    %error,
+                    "image_controller: service preset read failed; skipping client package"
+                ),
+            }
+        }
+    }
+
     pub async fn enqueue_image(
         &self,
         image_id: String,
         image_repo: &ImageRepository,
         image: Image,
     ) -> Result<()> {
-        let cfg: EnvironmentConfig =
+        let mut cfg: EnvironmentConfig =
             serde_json::from_str(&image.config).map_err(|e| ImageControllerError::ConfigParse {
                 project_id: image_id.clone(),
                 reason: e.to_string(),
@@ -323,6 +388,15 @@ impl ImageController {
                 project_id: image_id.clone(),
                 source,
             })?;
+
+        // Auto-install the CLI client of every backing service this image
+        // attaches (e.g. `postgresql-client` for `psql`) so an agent can reach
+        // for it by default. Best-effort: a NULL/absent client_package, unknown
+        // preset, or failed lookup logs and is skipped — never fail the build.
+        // Union into system_packages BEFORE the hash so the packages are part of
+        // the image identity; the dockerfile generator dedups + sorts them.
+        self.inject_preset_client_packages(&image_id, image_repo, &mut cfg)
+            .await;
 
         let agent_worker_ref = self.config.agent_worker_image.clone();
         let new_hash = compute_environment_hash(&cfg, &agent_worker_ref);

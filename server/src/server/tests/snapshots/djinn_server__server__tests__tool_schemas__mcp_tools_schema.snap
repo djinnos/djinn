@@ -14023,7 +14023,13 @@ expression: signatures
       "$defs": {
         "ServicePresetDto": {
           "properties": {
+            "client_package": {
+              "description": "System (apt) package providing this service's CLI client, auto-installed\ninto images that attach the preset. `null` = none.",
+              "nullable": true,
+              "type": "string"
+            },
             "conn_env_var": {
+              "description": "Comma-separated list of env-var names the connection string is exported\nunder (e.g. `DATABASE_URL,TEST_POSTGRES_URL`).",
               "type": "string"
             },
             "id": {
