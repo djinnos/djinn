@@ -1328,19 +1328,17 @@ mod tests {
         assert_eq!(worker_env.get("RUSTC_WRAPPER").copied(), Some(""));
     }
 
-    /// Incremental is now an invariant (always 1) regardless of policy: even an
-    /// explicit `sccache=false` policy yields incremental=1 for warm/verify/worker.
+    /// Incremental is now an invariant (always 1) regardless of policy: an
+    /// explicit policy still yields incremental=1 for warm/verify/worker.
     #[test]
-    fn explicit_policy_no_sccache_enables_incremental_for_warm_and_verify() {
-        let project_id = "explicit-no-sccache";
+    fn explicit_policy_enables_incremental_for_warm_and_verify() {
+        let project_id = "explicit-policy";
         let task_run_id = Uuid::now_v7().to_string();
         let policy = djinn_stack::environment::CargoCachePolicy::Explicit(
             djinn_stack::environment::CargoCachePolicyOverride {
                 workspace: false,
                 features: vec![],
                 all_features: false,
-                sccache: false,
-                incremental: true,
                 warm_commands: vec![],
             },
         );
@@ -1357,11 +1355,11 @@ mod tests {
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        // Warm with sccache=false → incremental enabled
+        // Warm → incremental enabled
         assert_eq!(
             warm_env.get("CARGO_INCREMENTAL").copied(),
             Some("1"),
-            "warm must enable incremental when policy.sccache=false"
+            "warm must enable incremental"
         );
 
         // Task-run unchanged
@@ -1373,25 +1371,23 @@ mod tests {
         assert_eq!(
             worker_env.get("RUSTC_WRAPPER").copied(),
             Some(""),
-            "worker must still clear RUSTC_WRAPPER when policy.sccache=false"
+            "worker must still clear RUSTC_WRAPPER"
         );
     }
 
-    /// Even an explicit `sccache=true` policy can NOT re-enable sccache or
-    /// disable incremental on djinn build pods: warm/verify/worker force
-    /// incremental=1 + RUSTC_WRAPPER="" so the warm seed stays reusable. (The
-    /// clone-config normalization step enforces the same on the cloned tree.)
+    /// An explicit policy can NOT re-enable sccache or disable incremental on
+    /// djinn build pods: warm/verify/worker force incremental=1 +
+    /// RUSTC_WRAPPER="" so the warm seed stays reusable. (The clone-config
+    /// normalization step enforces the same on the cloned tree.)
     #[test]
-    fn explicit_policy_sccache_still_forces_incremental_and_clears_wrapper() {
-        let project_id = "explicit-sccache";
+    fn explicit_policy_forces_incremental_and_clears_wrapper() {
+        let project_id = "explicit-policy";
         let task_run_id = Uuid::now_v7().to_string();
         let policy = djinn_stack::environment::CargoCachePolicy::Explicit(
             djinn_stack::environment::CargoCachePolicyOverride {
                 workspace: false,
                 features: vec![],
                 all_features: false,
-                sccache: true,
-                incremental: false,
                 warm_commands: vec![],
             },
         );
@@ -1413,7 +1409,7 @@ mod tests {
             assert_eq!(
                 env.get("CARGO_INCREMENTAL").copied(),
                 Some("1"),
-                "{label} must force incremental even when policy.sccache=true"
+                "{label} must force incremental regardless of policy"
             );
             assert_eq!(
                 env.get("RUSTC_WRAPPER").copied(),
@@ -1650,21 +1646,18 @@ mod tests {
     /// Consistency test (epic AC #4): `warm_cache_env_vars` and
     /// `task_run_cache_env_vars` resolve CARGO_INCREMENTAL and RUSTC_WRAPPER
     /// IDENTICALLY (incremental=1, wrapper cleared) even for an explicit
-    /// `sccache=true` policy — the warm-cache fast path requires all djinn build
-    /// pods to share one compile strategy, so the seed is reusable.
+    /// policy — the warm-cache fast path requires all djinn build pods to share
+    /// one compile strategy, so the seed is reusable.
     #[test]
     fn policy_derived_env_consistent_across_warm_and_worker() {
         let project_id = "consistency-test";
         let task_run_id = Uuid::now_v7().to_string();
 
-        // sccache=true, incremental=false
         let policy = djinn_stack::environment::CargoCachePolicy::Explicit(
             djinn_stack::environment::CargoCachePolicyOverride {
                 workspace: true,
                 features: vec![],
                 all_features: false,
-                sccache: true,
-                incremental: false,
                 warm_commands: vec![],
             },
         );
