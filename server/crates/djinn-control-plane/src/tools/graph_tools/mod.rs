@@ -11,13 +11,14 @@ use tracing::Instrument;
 
 use crate::bridge::{
     ApiImpactResult, ApiSurfaceEntry, BoundaryRule, BoundaryViolation, Candidate, ChangedRange,
-    ChurnEntry, ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup,
-    DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, EdgeEntry, FileGroupEntry, FlowResult,
-    GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult,
-    MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, ProjectCtx, QuerySubgraphRequest,
-    QuerySubgraphResult, RankedNode, RefactorCandidate, ResolveOutcome, RouteMapResult, SearchHit,
-    ShapeCheckResult, SnapshotLevel, SnapshotPayload, SymbolAtHit, SymbolContext,
-    SymbolDescription, TouchedSymbol, WorkspacesResult,
+    ChurnEntry, ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry,
+    CrateEdgeEntry, CrateNodeEntry, CycleGroup, DeadSymbolEntry, DeprecatedHit,
+    DetectedChangesResult, EdgeEntry, FileGroupEntry, FlowResult, GraphNeighbor, GraphStatus,
+    HotPathHit, HotspotEntry, ImpactEntry, ImpactResult, MetricsAtResult, NeighborsResult,
+    OrphanEntry, PathResult, ProjectCtx, QuerySubgraphRequest, QuerySubgraphResult, RankedNode,
+    RefactorCandidate, ResolveOutcome, RouteMapResult, SearchHit, ShapeCheckResult, SnapshotLevel,
+    SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription, TouchedSymbol,
+    WorkspacesResult,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::graph_exclusions::GraphExclusions;
