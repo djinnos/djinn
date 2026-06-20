@@ -789,6 +789,8 @@
             mode: None,
             target: None,
             tests: None,
+            impact_targets: None,
+            scope_crates: None,
             offset: None,
             summary_only: None,
             by_depth_counts: None,
