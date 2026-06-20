@@ -438,6 +438,37 @@ async fn graph_proximity_edge_kind_filter_limits_traversal() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_proximity_supersedes_source_to_target_returns_negative_score() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    let old = repo
+        .create(&project.id, "Old", "", "research", "[]")
+        .await
+        .unwrap();
+    let canonical = repo
+        .create(&project.id, "Canonical", "", "research", "[]")
+        .await
+        .unwrap();
+
+    repo.upsert_typed_association(&old.id, &canonical.id, NoteAssociationKind::Supersedes, 1.0)
+        .await
+        .unwrap();
+
+    let only_supersedes = vec!["supersedes".to_string()];
+    let (scores, _warnings) = repo
+        .graph_proximity_scores_with_edge_kinds(&[old.id.clone()], 1, Some(&only_supersedes))
+        .await
+        .unwrap();
+
+    let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
+    assert!((m.get(&canonical.id).copied().unwrap() - (-0.5)).abs() < 1e-9);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn graph_proximity_contradicts_returns_warning_without_score() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();

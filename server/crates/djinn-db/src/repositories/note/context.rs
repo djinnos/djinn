@@ -36,6 +36,7 @@ impl NoteRepository {
     /// * L2 (Primary/Seed): Full content, uncapped, never dropped
     /// * L1 (Direct neighbors): Overview text (fallback first 500 chars), 60% of post-seed budget
     /// * L0 (Discovered non-direct): Abstract text (fallback first 100 chars), 40% of post-seed budget
+    #[allow(clippy::too_many_arguments)]
     pub async fn build_context(
         &self,
         project_id: &str,
@@ -267,17 +268,22 @@ impl NoteRepository {
         let rows: Vec<(String, String, String)> = q.fetch_all(self.db.pool()).await?;
 
         let mut annotations: Vec<ContradictsAnnotation> = Vec::new();
+        let mut seen: HashSet<(String, String)> = HashSet::new();
         for (note_a_id, note_b_id, kind) in rows {
-            // If both endpoints are in the context set, annotate each with the
-            // other's ID.
-            if context_ids.contains(&note_a_id) && context_ids.contains(&note_b_id) {
+            // Root annotations at notes in the context set. If only one
+            // endpoint is in the final context, surface the outside note as the
+            // contradicting note_id. If both endpoints are present, surface both
+            // directions so either affected entry can discover its counterpart.
+            if context_ids.contains(&note_a_id) && seen.insert((note_b_id.clone(), kind.clone())) {
                 annotations.push(ContradictsAnnotation {
                     note_id: note_b_id.clone(),
                     edge_kind: kind.clone(),
                 });
+            }
+            if context_ids.contains(&note_b_id) && seen.insert((note_a_id.clone(), kind.clone())) {
                 annotations.push(ContradictsAnnotation {
-                    note_id: note_a_id.clone(),
-                    edge_kind: kind.clone(),
+                    note_id: note_a_id,
+                    edge_kind: kind,
                 });
             }
         }
@@ -1142,5 +1148,4 @@ mod tests {
             result.contradicts
         );
     }
-
 }

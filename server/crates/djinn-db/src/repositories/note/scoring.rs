@@ -375,7 +375,10 @@ impl NoteRepository {
                     let next_depth = depth + 1;
                     let next_score = score * neighbor.multiplier;
 
-                    let current_best = best_scores.get(&neighbor.target).copied().unwrap_or(0.0);
+                    let current_best = best_scores
+                        .get(&neighbor.target)
+                        .copied()
+                        .unwrap_or(f64::NEG_INFINITY);
                     if next_score > current_best {
                         best_scores.insert(neighbor.target.clone(), next_score);
                         queue.push_back((neighbor.target.clone(), next_depth, next_score));
