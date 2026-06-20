@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE note_associations\n         SET last_co_access = to_char((now() at time zone 'utc') - interval '100 day', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')\n         WHERE (note_a_id = $1 AND note_b_id = $2)\n            OR (note_a_id = $3 AND note_b_id = $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "29b7c2a881d9f9ed00fceec936a8ff4020fc9e44c04ea77e440e895114a7d187"
+}

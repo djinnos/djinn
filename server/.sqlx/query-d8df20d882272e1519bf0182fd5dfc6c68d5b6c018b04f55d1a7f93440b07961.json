@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) AS \"count!: i64\" FROM blockers b\n                             JOIN tasks bt ON b.blocking_task_id = bt.id\n                             WHERE b.task_id = $1\n                               AND bt.status != 'closed'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d8df20d882272e1519bf0182fd5dfc6c68d5b6c018b04f55d1a7f93440b07961"
+}

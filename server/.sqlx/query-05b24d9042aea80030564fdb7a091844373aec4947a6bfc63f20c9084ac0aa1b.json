@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE projects\n                SET image_tag = $1,\n                    image_hash = $2,\n                    image_status = $3,\n                    image_last_error = $4\n              WHERE id = $5",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "05b24d9042aea80030564fdb7a091844373aec4947a6bfc63f20c9084ac0aa1b"
+}

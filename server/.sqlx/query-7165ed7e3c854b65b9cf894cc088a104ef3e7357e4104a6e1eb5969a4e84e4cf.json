@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE agents SET is_default = FALSE\n             WHERE project_id = $1 AND base_role = $2 AND is_default = TRUE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7165ed7e3c854b65b9cf894cc088a104ef3e7357e4104a6e1eb5969a4e84e4cf"
+}

@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, project_id, permalink, title, note_type, folder, scope_paths::text AS \"scope_paths!\", content,\n                    abstract AS abstract_, overview, confidence\n             FROM notes\n             WHERE project_id = $1\n               AND note_type = $2\n               AND storage = 'db'\n             ORDER BY permalink ASC, id ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "permalink",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "note_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "folder",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "scope_paths!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "content",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "abstract_",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "overview",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "confidence",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "27a8e1e70a4413c5ff63052b388ead180a7abe02e9c7ac320bd6681e00dda0fe"
+}
