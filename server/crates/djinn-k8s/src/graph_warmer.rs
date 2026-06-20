@@ -450,7 +450,6 @@ async fn discover_mirror_main_tip(project_id: &str) -> Option<String> {
 
 #[async_trait]
 impl GraphWarmerService for K8sGraphWarmer {
-
     async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), WarmerError> {
         let client = self.client.as_ref().ok_or_else(|| {
             WarmerError::Backend("task-run Job teardown requires a live kube client".to_string())

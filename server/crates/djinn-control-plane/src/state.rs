@@ -272,7 +272,6 @@ impl McpState {
         self.runtime.trigger_graph_warm(project_id).await;
     }
 
-
     /// Best-effort/idempotent foreground deletion of the canonical task-run Job
     /// (`djinn-taskrun-{task_run_id}`), routed through the runtime bridge so
     /// control-plane/agent callers never depend on djinn-k8s directly.

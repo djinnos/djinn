@@ -443,7 +443,7 @@ impl SessionRepository {
                  LEFT JOIN tasks t ON t.id = s.task_id
                 WHERE s.status = 'running'
                   AND s.agent_type <> 'chat'
-                GROUP BY COALESCE(s.created_by_user_id, t.created_by_user_id), s.model_id"#
+                GROUP BY COALESCE(s.created_by_user_id, t.created_by_user_id), s.model_id"#,
         )
         .fetch_all(self.db.pool())
         .await?;

@@ -96,7 +96,6 @@ pub struct ProjectEnvironmentConfigResetParams {
     pub project: String,
 }
 
-
 // ── Response structs ─────────────────────────────────────────────────────────
 
 #[derive(Serialize, JsonSchema)]
@@ -154,7 +153,6 @@ pub struct ProjectEnvironmentConfigResetResponse {
     #[schemars(with = "Option<djinn_stack::environment::EnvironmentConfig>")]
     pub config: Option<ObjectJson>,
 }
-
 
 // ── Tools ────────────────────────────────────────────────────────────────────
 
@@ -410,5 +408,4 @@ impl DjinnMcpServer {
             config: json,
         })
     }
-
 }

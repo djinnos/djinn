@@ -228,7 +228,6 @@ fn render_timeline_activity(e: &djinn_core::models::ActivityEntry) -> TimelineAc
     }
 }
 
-
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct TaskTimelineResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -664,7 +663,6 @@ impl DjinnMcpServer {
             Ok(entries) => entries.iter().map(render_timeline_activity).collect(),
             Err(e) => return err(e.to_string()),
         };
-
 
         let task_run_repo =
             djinn_db::repositories::task_run::TaskRunRepository::new(self.state.db().clone());

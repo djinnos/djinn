@@ -102,10 +102,10 @@ pub fn anchor_embedding_replay_fixture() -> ReplayFixture {
                 id: "case-review-feedback-loop",
                 title: "Reviewer feedback loop converges with bounded local checks",
                 note_type: "case",
-                tags: &["review", "verification", "scope"],
+                tags: &["review", "scope"],
                 content: "A worker received reviewer feedback after a narrow Rust change. The successful follow-up read the activity log, made only the requested edits, ran the smallest focused cargo test, and submitted with remaining caveats. The body also mentions migrations, Kubernetes, Qdrant, prompt templates, OAuth, and graph extraction as unrelated examples that should not dominate retrieval.",
-                retrieval_anchor: "When a worker resumes after reviewer or verification feedback and must make only the requested scoped fix.",
-                injected_summary: "On reviewer/verification retry, inspect feedback first, patch only the requested scope, and use the narrowest local check before submit.",
+                retrieval_anchor: "When a worker resumes after reviewer feedback and must make only the requested scoped fix.",
+                injected_summary: "On reviewer retry, inspect feedback first, patch only the requested scope, and use the narrowest local check before submit.",
             },
             ReplayNote {
                 id: "pattern-parity-gate",
@@ -147,7 +147,7 @@ pub fn anchor_embedding_replay_fixture() -> ReplayFixture {
         queries: vec![
             ReplayQuery {
                 id: "reviewer-retry-scope",
-                text: "worker resumes after reviewer feedback verification failure scoped fix narrow cargo test",
+                text: "worker resumes after reviewer feedback scoped fix narrow cargo test",
                 relevant_note_ids: &["case-review-feedback-loop"],
             },
             ReplayQuery {

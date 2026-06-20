@@ -1407,10 +1407,7 @@ mod tests {
             .collect();
 
         // All three force incremental=1 + RUSTC_WRAPPER="" regardless of policy.
-        for (label, env) in [
-            ("warm", &warm_env),
-            ("worker", &worker_env),
-        ] {
+        for (label, env) in [("warm", &warm_env), ("worker", &worker_env)] {
             assert_eq!(
                 env.get("CARGO_INCREMENTAL").copied(),
                 Some("1"),

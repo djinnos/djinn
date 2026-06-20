@@ -21,7 +21,7 @@ fn toolset_for_role(role: &str) -> &'static [&'static str] {
         ],
         "reviewer" => &["task_review"],
         "architect" => &["board_health_review", "stuck_task_review"],
-        _ => &["code_changes", "tests", "verification_fix"],
+        _ => &["code_changes", "tests", "review_fix"],
     }
 }
 
