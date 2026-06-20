@@ -128,6 +128,13 @@ pub fn derive_graph_caches(
     graph: &crate::repo_graph::RepoDependencyGraph,
     project_root: &Path,
 ) -> DerivedGraphCaches {
+    derive_graph_caches_with_crate_map(graph, derive_crate_map(project_root))
+}
+
+pub fn derive_graph_caches_with_crate_map(
+    graph: &crate::repo_graph::RepoDependencyGraph,
+    crate_map: CrateMap,
+) -> DerivedGraphCaches {
     use crate::repo_graph::RepoGraphNodeKind;
     let pagerank = Arc::new(graph.rank());
     let sccs = Arc::new(CachedSccs {
@@ -136,7 +143,7 @@ pub fn derive_graph_caches(
         symbol: graph.strongly_connected_components(Some(RepoGraphNodeKind::Symbol), 2),
     });
     let layout_positions = Arc::new(crate::layout::derive_layout_positions(graph));
-    let crate_map = Arc::new(derive_crate_map(project_root));
+    let crate_map = Arc::new(crate_map);
     (pagerank, sccs, layout_positions, crate_map)
 }
 
@@ -600,6 +607,8 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             let total_parsed_files: usize =
                 parsed.iter().map(|p| p.files.len()).sum();
             let ooc_engaged = crate::out_of_core::resolve_out_of_core_config(total_parsed_files);
+            let crate_map_for_build = derive_crate_map(&project_root_for_blocking);
+            let graph_build_options = crate::repo_graph::RepoGraphBuildOptions::from_env();
 
             // If out-of-core is engaged, shard the parsed data to disk
             // and build the graph from the store's file iterator. The
@@ -630,9 +639,11 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                             tracing::warn!(
                                 "ensure_canonical_graph: sharding failed; falling back to in-memory build"
                             );
-                            crate::repo_graph::RepoDependencyGraph::try_build_with_source(
+                            crate::repo_graph::RepoDependencyGraph::try_build_with_source_options_and_crate_map(
                                 &parsed,
                                 Some(&project_root_for_blocking),
+                                graph_build_options,
+                                Some(&crate_map_for_build),
                             )?
                         } else {
                             tracing::info!(
@@ -657,11 +668,13 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                                 .flat_map(|idx| idx.external_symbols.iter().cloned())
                                 .collect();
                             let graph_result =
-                                crate::repo_graph::RepoDependencyGraph::try_build_with_scip_file_iter(
+                                crate::repo_graph::RepoDependencyGraph::try_build_with_scip_file_iter_options_and_crate_map(
                                     ooc_store.scip_file_iter(),
                                     &first.workspace_slug,
                                     &all_external,
                                     Some(&project_root_for_blocking),
+                                    graph_build_options,
+                                    Some(&crate_map_for_build),
                                 );
                             // Drop the in-memory parsed file data now that
                             // it has been sharded to disk. This frees the
@@ -676,18 +689,22 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                             storage_path = %ooc_config.storage_path.display(),
                             "ensure_canonical_graph: failed to open out-of-core store; proceeding with in-memory path"
                         );
-                        crate::repo_graph::RepoDependencyGraph::try_build_with_source(
+                        crate::repo_graph::RepoDependencyGraph::try_build_with_source_options_and_crate_map(
                             &parsed,
                             Some(&project_root_for_blocking),
+                            graph_build_options,
+                            Some(&crate_map_for_build),
                         )?
                     }
                 }
             } else {
                 // Out-of-core not engaged (env flag off or below threshold):
                 // use the existing in-memory build path unchanged.
-                crate::repo_graph::RepoDependencyGraph::try_build_with_source(
+                crate::repo_graph::RepoDependencyGraph::try_build_with_source_options_and_crate_map(
                     &parsed,
                     Some(&project_root_for_blocking),
+                    graph_build_options,
+                    Some(&crate_map_for_build),
                 )?
             };
             // DB-access post-processor: opt-in via
@@ -716,7 +733,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
 
             let t_derive = std::time::Instant::now();
             let (pagerank, sccs, layout_positions, crate_map) =
-                derive_graph_caches(&graph, &project_root_for_blocking);
+                derive_graph_caches_with_crate_map(&graph, crate_map_for_build);
             graph.set_layout_positions((*layout_positions).clone());
             let derive_ms = t_derive.elapsed().as_millis() as u64;
 

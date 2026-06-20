@@ -33,6 +33,8 @@ use super::{
     edge_weight, is_test_path,
 };
 
+pub(crate) type CommunitySeedCrateMap = BTreeMap<PathBuf, String>;
+
 #[derive(Default)]
 pub(crate) struct RepoDependencyGraphBuilder {
     pub(super) graph: DiGraph<RepoGraphNode, RepoGraphEdge>,
@@ -59,6 +61,10 @@ pub(crate) struct RepoDependencyGraphBuilder {
     /// Workspace slug of the ParsedScipIndex currently being replayed into
     /// the builder. Stamped on every SCIP-derived node created during the pass.
     pub(super) current_workspace: Option<String>,
+    /// Optional crate map supplied by a caller that explicitly opted into
+    /// crate-aware community seeding. `None` keeps the legacy unseeded
+    /// community-detection behaviour.
+    pub(super) community_seed_by_crate: Option<CommunitySeedCrateMap>,
 }
 
 impl RepoDependencyGraphBuilder {
@@ -574,7 +580,16 @@ impl RepoDependencyGraphBuilder {
         // graph it lands in the ~hundreds-of-ms range — comparable to
         // the SCC pass that already runs in `derive_graph_caches`.
         if crate::communities::detection_enabled() {
-            let communities = crate::communities::detect_communities(&graph);
+            let communities = match self.community_seed_by_crate.take() {
+                Some(crate_map) => crate::communities::detect_communities_with_options(
+                    &graph,
+                    crate::communities::CommunityDetectionOptions {
+                        seed_by_crate: Some(crate_map),
+                        ..Default::default()
+                    },
+                ),
+                None => crate::communities::detect_communities(&graph),
+            };
             graph.install_communities(communities);
         }
 
