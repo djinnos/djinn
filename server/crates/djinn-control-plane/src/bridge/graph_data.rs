@@ -407,6 +407,10 @@ pub struct SnapshotNode {
     /// Warm-time layout coordinate (y axis). See [`SnapshotNode::x`].
     #[serde(default)]
     pub y: f64,
+    /// Keywords extracted from community member names. Populated for
+    /// community nodes; empty or omitted for symbol/file nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
 }
 
 /// PR D2: snapshot edge — one entry in the `snapshot.edges` array.
