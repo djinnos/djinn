@@ -12,6 +12,118 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
 
+/// Stable v1 proposal block types.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockType {
+    RichText,
+    Diagram,
+    AnnotatedCode,
+    DataModel,
+    ApiEndpoint,
+    Decisions,
+    FileTree,
+    QuestionForm,
+}
+
+impl BlockType {
+    /// Return the kebab-case block type identifier used in the registry.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BlockType::RichText => "rich-text",
+            BlockType::Diagram => "diagram",
+            BlockType::AnnotatedCode => "annotated-code",
+            BlockType::DataModel => "data-model",
+            BlockType::ApiEndpoint => "api-endpoint",
+            BlockType::Decisions => "decisions",
+            BlockType::FileTree => "file-tree",
+            BlockType::QuestionForm => "question-form",
+        }
+    }
+
+    /// Return the MDX component tag name for this block type.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            BlockType::RichText => "RichText",
+            BlockType::Diagram => "Diagram",
+            BlockType::AnnotatedCode => "AnnotatedCode",
+            BlockType::DataModel => "DataModel",
+            BlockType::ApiEndpoint => "ApiEndpoint",
+            BlockType::Decisions => "Decisions",
+            BlockType::FileTree => "FileTree",
+            BlockType::QuestionForm => "QuestionForm",
+        }
+    }
+}
+
+/// Errors produced by the block registry parser and validator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockError {
+    /// An unknown MDX block tag was encountered.
+    UnknownBlock(String),
+    /// A block is missing its required `id` attribute.
+    MissingId(String),
+    /// A block id is used more than once.
+    DuplicateId(String),
+    /// An opening tag has no matching closing tag.
+    UnclosedBlock(String),
+    /// A low-level regex or parsing failure.
+    ParseError(String),
+}
+
+impl std::fmt::Display for BlockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BlockError::UnknownBlock(tag) => write!(f, "Unknown MDX block tag: '{tag}'"),
+            BlockError::MissingId(tag) => {
+                write!(f, "{tag} block is missing a required `id` attribute")
+            }
+            BlockError::DuplicateId(id) => write!(f, "duplicate block id: `{id}`"),
+            BlockError::UnclosedBlock(tag) => {
+                write!(f, "unclosed <{tag}> block (no closing </{tag}> found)")
+            }
+            BlockError::ParseError(msg) => write!(f, "block parser error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for BlockError {}
+
+/// Registry mapping each [`BlockType`] to its MDX tag name and field schema.
+#[derive(Debug, Clone)]
+pub struct BlockRegistry {
+    definitions: BTreeMap<&'static str, ProposalBlockDefinition>,
+}
+
+impl BlockRegistry {
+    /// Create a new registry populated with the v1 block definitions.
+    pub fn new() -> Self {
+        Self {
+            definitions: proposal_block_registry(),
+        }
+    }
+
+    /// Look up a block definition by its MDX tag name.
+    pub fn definition_for_tag(&self, tag: &str) -> Option<&ProposalBlockDefinition> {
+        self.definitions.values().find(|def| def.tag == tag)
+    }
+
+    /// Return the set of known MDX tag names.
+    pub fn tags(&self) -> HashSet<&str> {
+        self.definitions.values().map(|def| def.tag).collect()
+    }
+
+    /// Return all registered block definitions.
+    pub fn definitions(&self) -> &BTreeMap<&'static str, ProposalBlockDefinition> {
+        &self.definitions
+    }
+}
+
+impl Default for BlockRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ProposalBlockFieldSchema {
     /// Primitive schema kind: `string`, `boolean`, `object`, or `array`.
@@ -280,9 +392,9 @@ pub fn proposal_block_tags() -> HashSet<&'static str> {
 /// This lightweight parser is intended for validation/introspection workflows,
 /// not for rendering arbitrary MDX. It recognizes the PascalCase component tags
 /// published in [`PROPOSAL_BLOCK_REGISTRY`] and skips unrelated HTML/MDX tags.
-pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedProposalBlock>, String> {
+pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedProposalBlock>, BlockError> {
     let re = regex::Regex::new(r"<([A-Z][A-Za-z0-9]*)([^>]*)>")
-        .map_err(|e| format!("block parser regex error: {e}"))?;
+        .map_err(|e| BlockError::ParseError(format!("block parser regex error: {e}")))?;
     let mut blocks = Vec::new();
 
     for cap in re.captures_iter(body) {
@@ -301,9 +413,7 @@ pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedProposalBlock>, String> 
             let close_start = body[open_end..]
                 .find(&closing_tag)
                 .map(|pos| open_end + pos)
-                .ok_or_else(|| {
-                    format!("unclosed <{tag}> block (no closing {closing_tag} found)")
-                })?;
+                .ok_or_else(|| BlockError::UnclosedBlock(tag.to_string()))?;
             body[open_end..close_start].to_string()
         };
 
@@ -319,12 +429,34 @@ pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedProposalBlock>, String> 
     Ok(blocks)
 }
 
+/// Validate an MDX body against the block registry.
+///
+/// Extracts every PascalCase component tag and rejects the first unknown tag
+/// with [`BlockError::UnknownBlock`]. Registered tags (including self-closing
+/// and nested variants) pass silently. Empty or whitespace-only bodies are
+/// accepted.
+pub fn validate_mdx_blocks(body: &str) -> Result<(), BlockError> {
+    if body.trim().is_empty() {
+        return Ok(());
+    }
+    let allowed = proposal_block_tags();
+    let re = regex::Regex::new(r"<([A-Z][A-Za-z0-9]*)")
+        .map_err(|e| BlockError::ParseError(format!("tag regex error: {e}")))?;
+    for cap in re.captures_iter(body) {
+        let tag = cap[1].to_string();
+        if !allowed.contains(tag.as_str()) {
+            return Err(BlockError::UnknownBlock(tag));
+        }
+    }
+    Ok(())
+}
+
 /// Enforce the MDX proposal question form placement contract.
 ///
 /// MDX proposals must contain exactly one registered `question-form` block, and
 /// that block must be the final parsed proposal block in the body.
 pub fn validate_question_form_placement(body: &str) -> Result<(), String> {
-    let blocks = parse_mdx_blocks(body)?;
+    let blocks = parse_mdx_blocks(body).map_err(|e| e.to_string())?;
     let question_form_count = blocks
         .iter()
         .filter(|block| block.block_type == "question-form")
@@ -454,6 +586,34 @@ mod tests {
     }
 
     #[test]
+    fn block_type_enum_covers_v1() {
+        let types = vec![
+            BlockType::RichText,
+            BlockType::Diagram,
+            BlockType::AnnotatedCode,
+            BlockType::DataModel,
+            BlockType::ApiEndpoint,
+            BlockType::Decisions,
+            BlockType::FileTree,
+            BlockType::QuestionForm,
+        ];
+        for bt in types {
+            assert!(!bt.as_str().is_empty());
+            assert!(!bt.tag().is_empty());
+        }
+    }
+
+    #[test]
+    fn block_registry_new_has_all_definitions() {
+        let reg = BlockRegistry::new();
+        assert_eq!(reg.definitions().len(), 8);
+        assert!(reg.definition_for_tag("RichText").is_some());
+        assert!(reg.definition_for_tag("UnknownTag").is_none());
+        assert!(reg.tags().contains("RichText"));
+        assert!(!reg.tags().contains("UnknownTag"));
+    }
+
+    #[test]
     fn registry_contains_field_schemas() {
         let registry = proposal_block_registry();
         let diagram_type = registry["diagram"].fields["type"].clone();
@@ -504,6 +664,108 @@ fn main() {}
         );
         assert!(blocks[1].raw_content.contains("graph TD"));
         assert_eq!(blocks[2].block_type, "annotated-code");
+    }
+
+    #[test]
+    fn parse_mdx_blocks_extracts_stable_ids() {
+        let body = r#"
+<DataModel id="user-schema" name="User" />
+<ApiEndpoint id="create-user" method="POST" path="/users" />
+"#;
+        let blocks = parse_mdx_blocks(body).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].id, "user-schema");
+        assert_eq!(blocks[1].id, "create-user");
+    }
+
+    #[test]
+    fn parse_mdx_blocks_multiple_blocks_in_one_body() {
+        let body = r#"# Proposal
+
+<RichText id="intro" content="Hello" />
+<Diagram id="flow" type="mermaid">
+graph TD;
+</Diagram>
+<Decisions id="choices" />
+<QuestionForm id="questions" title="Open questions" />
+"#;
+        let blocks = parse_mdx_blocks(body).unwrap();
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0].tag, "RichText");
+        assert_eq!(blocks[1].tag, "Diagram");
+        assert_eq!(blocks[2].tag, "Decisions");
+        assert_eq!(blocks[3].tag, "QuestionForm");
+    }
+
+    #[test]
+    fn parse_mdx_blocks_empty_and_whitespace() {
+        assert!(parse_mdx_blocks("").unwrap().is_empty());
+        assert!(parse_mdx_blocks("   ").unwrap().is_empty());
+        assert!(parse_mdx_blocks("\n\n  \n").unwrap().is_empty());
+        assert!(
+            parse_mdx_blocks("plain markdown with no blocks")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn validate_mdx_blocks_accepts_known_tags() {
+        let body = r#"
+<RichText id="intro" />
+<Diagram id="flow" type="mermaid">
+graph TD;
+</Diagram>
+"#;
+        assert!(validate_mdx_blocks(body).is_ok());
+    }
+
+    #[test]
+    fn validate_mdx_blocks_rejects_unknown_tag() {
+        let body = r#"
+<RichText id="intro" />
+<FooBar id="bad" />
+"#;
+        let err = validate_mdx_blocks(body).unwrap_err();
+        assert_eq!(err, BlockError::UnknownBlock("FooBar".to_string()));
+        assert!(err.to_string().contains("Unknown MDX block tag: 'FooBar'"));
+    }
+
+    #[test]
+    fn validate_mdx_blocks_rejects_first_unknown_of_many() {
+        let body = r#"
+<RichText id="a" />
+<BogusOne id="b" />
+<AlsoBad id="c" />
+"#;
+        let err = validate_mdx_blocks(body).unwrap_err();
+        assert_eq!(err, BlockError::UnknownBlock("BogusOne".to_string()));
+    }
+
+    #[test]
+    fn validate_mdx_blocks_empty_body() {
+        assert!(validate_mdx_blocks("").is_ok());
+        assert!(validate_mdx_blocks("   \n  ").is_ok());
+    }
+
+    #[test]
+    fn validate_mdx_blocks_ignores_lowercase_html() {
+        let body = "<div>\n  <span>plain html</span>\n</div>";
+        assert!(validate_mdx_blocks(body).is_ok());
+    }
+
+    #[test]
+    fn validate_mdx_blocks_nested_unknown_rejected() {
+        let body = "<RichText>\n  <GhostBlock />\n</RichText>";
+        let err = validate_mdx_blocks(body).unwrap_err();
+        assert_eq!(err, BlockError::UnknownBlock("GhostBlock".to_string()));
+    }
+
+    #[test]
+    fn parse_mdx_blocks_returns_unclosed_error() {
+        let body = "<Diagram id=\"flow\" type=\"mermaid\">\ngraph TD;";
+        let err = parse_mdx_blocks(body).unwrap_err();
+        assert_eq!(err, BlockError::UnclosedBlock("Diagram".to_string()));
     }
 
     #[test]
