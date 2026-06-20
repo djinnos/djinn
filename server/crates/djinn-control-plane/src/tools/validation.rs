@@ -448,6 +448,50 @@ fn main() {}
     }
 
     #[test]
+    fn mdx_body_valid_all_eight_canonical_blocks() {
+        // This is the Rust-side counterpart to the canonical proposal.mdx fixture
+        // used by the UI test suite. It proves that backend validation accepts
+        // every v1 block type when they appear together in a single MDX body.
+        let body = r#"# Canonical Proposal
+
+<RichText id="intro">
+Welcome to the proposal.
+</RichText>
+
+<Diagram id="arch-overview" type="mermaid">
+graph TD
+  A[Client] --> B[API]
+</Diagram>
+
+<AnnotatedCode id="handler" language="rust">
+fn handle_request(req: Request) -> Response {}
+</AnnotatedCode>
+
+<DataModel id="user-schema" name="User">
+  id: uuid
+</DataModel>
+
+<ApiEndpoint id="get-users" method="GET" path="/api/users">
+Returns a list of all users.
+</ApiEndpoint>
+
+<Decisions id="auth-choice">
+We chose JWT over session cookies.
+</Decisions>
+
+<FileTree id="project-layout" root="src">
+  src/
+    main.rs
+</FileTree>
+
+<QuestionForm id="open-questions" title="Open Questions">
+Should we use Redis or Memcached?
+</QuestionForm>
+"#;
+        assert!(validate_mdx_body(body, Some("mdx")).is_ok());
+    }
+
+    #[test]
     fn mdx_body_rejects_single_unknown_block() {
         let body = r#"
 <RichText id="intro" />
