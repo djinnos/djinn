@@ -1,5 +1,21 @@
+//! Durable per-step results for task verification runs
+//! (`verification_results` table).
+//!
+//! Verification is being removed (epic sehj). The `verification_results`
+//! table is dropped by migration 72 but this repository module remains
+//! temporarily pending the full removal of all verification references. It
+//! uses the non-macro `sqlx::query` form (like the other verification repos)
+//! so it does not require the table to exist for offline `.sqlx` cache
+//! compilation.
+//!
+//! All methods gracefully degrade when the table no longer exists (post
+//! migration 72): reads return empty, writes are silent no-ops.
+
+use sqlx::Row;
+
 use crate::Result;
 use crate::database::Database;
+use crate::repositories::verification_common::ok_if_table_dropped;
 
 #[derive(Clone, Debug, sqlx::FromRow, serde::Serialize)]
 pub struct VerificationStepRow {
@@ -52,32 +68,41 @@ impl VerificationResultRepository {
         let pool = self.db.pool();
 
         // Delete previous results for this task.
-        sqlx::query!(
-            "DELETE FROM verification_results WHERE task_id = $1",
-            task_id
-        )
-        .execute(pool)
-        .await?;
+        let res = sqlx::query("DELETE FROM verification_results WHERE task_id = $1")
+            .bind(task_id)
+            .execute(pool)
+            .await;
+        match res {
+            Ok(_) => {}
+            Err(e) if ok_if_table_dropped(&e) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        }
 
         for step in steps {
-            sqlx::query!(
-                "INSERT INTO verification_results \
-                 (project_id, task_id, run_id, phase, step_index, name, command, exit_code, stdout, stderr, duration_ms) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-                step.project_id,
-                step.task_id,
-                step.run_id,
-                step.phase,
-                step.step_index,
-                step.name,
-                step.command,
-                step.exit_code,
-                step.stdout,
-                step.stderr,
-                step.duration_ms,
+            let res = sqlx::query(
+                r#"INSERT INTO verification_results
+                   (project_id, task_id, run_id, phase, step_index, name, command,
+                    exit_code, stdout, stderr, duration_ms)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
             )
+            .bind(&step.project_id)
+            .bind(&step.task_id)
+            .bind(&step.run_id)
+            .bind(&step.phase)
+            .bind(step.step_index)
+            .bind(&step.name)
+            .bind(&step.command)
+            .bind(step.exit_code)
+            .bind(&step.stdout)
+            .bind(&step.stderr)
+            .bind(step.duration_ms)
             .execute(pool)
-            .await?;
+            .await;
+            match res {
+                Ok(_) => {}
+                Err(e) if ok_if_table_dropped(&e) => return Ok(()),
+                Err(e) => return Err(e.into()),
+            }
         }
 
         Ok(())
@@ -86,146 +111,75 @@ impl VerificationResultRepository {
     /// List the latest verification results for a task, ordered by step_index.
     pub async fn list_for_task(&self, task_id: &str) -> Result<Vec<VerificationStepRow>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            VerificationStepRow,
-            "SELECT id, project_id, task_id, run_id, phase, step_index, name, command, \
-             exit_code, stdout, stderr, duration_ms, created_at \
-             FROM verification_results WHERE task_id = $1 ORDER BY step_index ASC",
-            task_id,
+        let rows = sqlx::query(
+            r#"SELECT id, project_id, task_id, run_id, phase, step_index, name, command,
+                      exit_code, stdout, stderr, duration_ms, created_at
+                 FROM verification_results
+                WHERE task_id = $1
+                ORDER BY step_index ASC"#,
         )
+        .bind(task_id)
         .fetch_all(self.db.pool())
-        .await?)
+        .await;
+
+        match rows {
+            Ok(rows) => Ok(rows
+                .into_iter()
+                .map(|r| VerificationStepRow {
+                    id: r.get("id"),
+                    project_id: r.get("project_id"),
+                    task_id: r.get("task_id"),
+                    run_id: r.get("run_id"),
+                    phase: r.get("phase"),
+                    step_index: r.get("step_index"),
+                    name: r.get("name"),
+                    command: r.get("command"),
+                    exit_code: r.get("exit_code"),
+                    stdout: r.get("stdout"),
+                    stderr: r.get("stderr"),
+                    duration_ms: r.get("duration_ms"),
+                    created_at: r.get("created_at"),
+                })
+                .collect()),
+            Err(e) => {
+                if ok_if_table_dropped(&e) {
+                    Ok(Vec::new())
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
     }
 
     /// Delete all results for a task.
     pub async fn delete_for_task(&self, task_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "DELETE FROM verification_results WHERE task_id = $1",
-            task_id
-        )
-        .execute(self.db.pool())
-        .await?;
-        Ok(())
+        let res = sqlx::query("DELETE FROM verification_results WHERE task_id = $1")
+            .bind(task_id)
+            .execute(self.db.pool())
+            .await;
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) if ok_if_table_dropped(&e) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Prune results older than N days.
     pub async fn prune_older_than(&self, days: i64) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            r#"DELETE FROM verification_results WHERE created_at < to_char((now() at time zone 'utc') - (interval '1 day' * $1), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
-            days as f64,
+        let res = sqlx::query(
+            r#"DELETE FROM verification_results
+                WHERE created_at < to_char((now() at time zone 'utc') - (interval '1 day' * $1),
+                                           'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
         )
+        .bind(days as f64)
         .execute(self.db.pool())
-        .await?;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::database::Database;
-
-    async fn test_repo() -> VerificationResultRepository {
-        let db = Database::open_in_memory().expect("in-memory db");
-        VerificationResultRepository::new(db)
-    }
-
-    fn sample_steps(project_id: &str, task_id: &str, run_id: &str) -> Vec<VerificationStepInsert> {
-        vec![
-            VerificationStepInsert {
-                project_id: project_id.to_string(),
-                task_id: Some(task_id.to_string()),
-                run_id: run_id.to_string(),
-                phase: "setup".to_string(),
-                step_index: 1,
-                name: "cargo-build".to_string(),
-                command: "cargo build --workspace".to_string(),
-                exit_code: 0,
-                stdout: "Compiling...".to_string(),
-                stderr: String::new(),
-                duration_ms: 5000,
-            },
-            VerificationStepInsert {
-                project_id: project_id.to_string(),
-                task_id: Some(task_id.to_string()),
-                run_id: run_id.to_string(),
-                phase: "verification".to_string(),
-                step_index: 2,
-                name: "verify-1".to_string(),
-                command: "cargo check -p alt-db".to_string(),
-                exit_code: 0,
-                stdout: "ok".to_string(),
-                stderr: String::new(),
-                duration_ms: 3000,
-            },
-        ]
-    }
-
-    #[tokio::test]
-    async fn insert_and_list_round_trip() {
-        let repo = test_repo().await;
-        let steps = sample_steps("p1", "t1", "run1");
-        repo.replace_for_task("t1", &steps).await.expect("insert");
-
-        let rows = repo.list_for_task("t1").await.expect("list");
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].phase, "setup");
-        assert_eq!(rows[0].name, "cargo-build");
-        assert_eq!(rows[1].phase, "verification");
-        assert_eq!(rows[1].name, "verify-1");
-    }
-
-    #[tokio::test]
-    async fn replace_deletes_old_results() {
-        let repo = test_repo().await;
-        let steps = sample_steps("p1", "t1", "run1");
-        repo.replace_for_task("t1", &steps).await.expect("insert");
-
-        let new_steps = vec![VerificationStepInsert {
-            project_id: "p1".to_string(),
-            task_id: Some("t1".to_string()),
-            run_id: "run2".to_string(),
-            phase: "verification".to_string(),
-            step_index: 1,
-            name: "verify-only".to_string(),
-            command: "cargo test".to_string(),
-            exit_code: 1,
-            stdout: "FAILED".to_string(),
-            stderr: "error".to_string(),
-            duration_ms: 2000,
-        }];
-        repo.replace_for_task("t1", &new_steps)
-            .await
-            .expect("replace");
-
-        let rows = repo.list_for_task("t1").await.expect("list");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "verify-only");
-        assert_eq!(rows[0].run_id, "run2");
-    }
-
-    #[tokio::test]
-    async fn list_empty_returns_empty() {
-        let repo = test_repo().await;
-        let rows = repo.list_for_task("missing").await.expect("list");
-        assert!(rows.is_empty());
-    }
-
-    #[tokio::test]
-    async fn delete_for_task_removes_only_that_task() {
-        let repo = test_repo().await;
-        repo.replace_for_task("t1", &sample_steps("p1", "t1", "r1"))
-            .await
-            .expect("insert t1");
-        repo.replace_for_task("t2", &sample_steps("p1", "t2", "r2"))
-            .await
-            .expect("insert t2");
-
-        repo.delete_for_task("t1").await.expect("delete t1");
-
-        assert!(repo.list_for_task("t1").await.expect("list t1").is_empty());
-        assert_eq!(repo.list_for_task("t2").await.expect("list t2").len(), 2);
+        .await;
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) if ok_if_table_dropped(&e) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 }

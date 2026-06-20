@@ -1230,60 +1230,68 @@ impl RepoGraphBridge {
     }
 
     pub(super) async fn crate_graph(&self, ctx: &ProjectCtx) -> Result<CrateGraphResponse, String> {
-        let (_project_root, index_tree_path) =
-            djinn_graph::canonical_graph::normalize_graph_query_paths(&ctx.clone_path);
+        crate_graph_from_warmed_cache(ctx).await
+    }
+}
 
-        let (graph, crate_map) = {
-            let cache = djinn_graph::canonical_graph::GRAPH_CACHE.read().await;
-            let Some(cached) = cache
-                .as_ref()
-                .filter(|cached| cached.project_path == index_tree_path)
-            else {
-                return Err("canonical graph not warmed yet — K8s graph warmer will populate it once the project's devcontainer image is ready".to_string());
-            };
-            (cached.graph.clone(), cached.crate_map.clone())
-        };
+async fn crate_graph_from_warmed_cache(ctx: &ProjectCtx) -> Result<CrateGraphResponse, String> {
+    let (_project_root, index_tree_path) =
+        djinn_graph::canonical_graph::normalize_graph_query_paths(&ctx.clone_path);
 
-        if crate_map.is_empty() {
+    let (graph, crate_map) = {
+        let cache = djinn_graph::canonical_graph::GRAPH_CACHE.read().await;
+        let Some(cached) = cache
+            .as_ref()
+            .filter(|cached| cached.project_path == index_tree_path)
+        else {
             return Ok(CrateGraphResponse {
                 crates: Vec::new(),
                 edges: Vec::new(),
-                message: Some(
-                    "crate_graph is empty because the warmed graph has no Rust workspace crate map"
-                        .to_string(),
-                ),
+                message: Some("Graph not warmed for this workspace.".to_string()),
             });
-        }
+        };
+        (cached.graph.clone(), cached.crate_map.clone())
+    };
 
-        let crate_graph = djinn_graph::repo_graph::build_crate_graph(&graph, crate_map.as_ref());
-        Ok(CrateGraphResponse {
-            crates: crate_graph
-                .crates
-                .into_iter()
-                .map(|node| CrateNodeEntry {
-                    name: node.name,
-                    manifest_path: node.manifest_path.to_string_lossy().into_owned(),
-                    loc: node.loc,
-                    node_count: node.node_count,
-                    fan_in: node.fan_in,
-                    fan_out: node.fan_out,
-                    inbound_weight: node.inbound_weight,
-                    outbound_weight: node.outbound_weight,
-                })
-                .collect(),
-            edges: crate_graph
-                .edges
-                .into_iter()
-                .map(|edge| CrateEdgeEntry {
-                    source: edge.source,
-                    target: edge.target,
-                    weight: edge.weight,
-                    edge_count: edge.edge_count,
-                })
-                .collect(),
-            message: None,
-        })
+    if crate_map.is_empty() {
+        return Ok(CrateGraphResponse {
+            crates: Vec::new(),
+            edges: Vec::new(),
+            message: Some(
+                "No crate mapping found — not a Rust workspace or workspace not yet warmed."
+                    .to_string(),
+            ),
+        });
     }
+
+    let crate_graph = djinn_graph::repo_graph::build_crate_graph(&graph, crate_map.as_ref());
+    Ok(CrateGraphResponse {
+        crates: crate_graph
+            .crates
+            .into_iter()
+            .map(|node| CrateNodeEntry {
+                name: node.name,
+                manifest_path: node.manifest_path.to_string_lossy().into_owned(),
+                loc: node.loc,
+                node_count: node.node_count,
+                fan_in: node.fan_in,
+                fan_out: node.fan_out,
+                inbound_weight: node.inbound_weight,
+                outbound_weight: node.outbound_weight,
+            })
+            .collect(),
+        edges: crate_graph
+            .edges
+            .into_iter()
+            .map(|edge| CrateEdgeEntry {
+                source: edge.source,
+                target: edge.target,
+                weight: edge.weight,
+                edge_count: edge.edge_count,
+            })
+            .collect(),
+        message: None,
+    })
 }
 
 /// Collect the implementor symbols for the trait/interface node at
@@ -1359,5 +1367,143 @@ pub(super) mod test_helpers {
             node_index,
             &GraphExclusions::empty(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod crate_graph_tests {
+    use super::*;
+    use djinn_graph::canonical_graph::{CachedGraph, GRAPH_CACHE, derive_graph_caches};
+    use djinn_graph::repo_graph::{
+        REPO_GRAPH_ARTIFACT_VERSION, RepoDependencyGraph, RepoGraphArtifact, RepoGraphNode,
+        RepoGraphNodeKind, RepoNodeKey, RouteExclusionConfig,
+    };
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, LazyLock};
+
+    static GRAPH_CACHE_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    fn crate_graph_ctx(clone_path: &str) -> ProjectCtx {
+        ProjectCtx {
+            id: "crate-graph-test-project".to_string(),
+            clone_path: clone_path.to_string(),
+            workspace: None,
+            sub_path: None,
+        }
+    }
+
+    fn one_crate_graph() -> RepoDependencyGraph {
+        let node = RepoGraphNode {
+            id: RepoNodeKey::File(PathBuf::from("crate-a/src/lib.rs")),
+            kind: RepoGraphNodeKind::File,
+            display_name: "crate-a/src/lib.rs".to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(PathBuf::from("crate-a/src/lib.rs")),
+            symbol: None,
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: vec![],
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: None,
+            route_framework: None,
+            route_handler_symbol: None,
+        };
+        RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes: vec![node],
+            edges: vec![],
+            symbol_ranges: BTreeMap::new(),
+            communities: vec![],
+            processes: vec![],
+            route_exclusion_config: RouteExclusionConfig::default(),
+            layout_positions: BTreeMap::new(),
+        })
+    }
+
+    async fn install_cached_graph(
+        clone_path: &str,
+        graph: RepoDependencyGraph,
+        crate_map: BTreeMap<PathBuf, String>,
+    ) {
+        let (_project_root, index_tree_path) =
+            djinn_graph::canonical_graph::normalize_graph_query_paths(clone_path);
+        let (pagerank, sccs, layout_positions, _) =
+            derive_graph_caches(&graph, Path::new("/var/tmp/djinn-crate-graph-test"));
+        let mut cache = GRAPH_CACHE.write().await;
+        *cache = Some(CachedGraph {
+            graph,
+            project_path: index_tree_path,
+            git_head: "test-head".to_string(),
+            pagerank,
+            sccs,
+            layout_positions,
+            crate_map: Arc::new(crate_map),
+        });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn crate_graph_returns_message_when_graph_cache_is_empty() {
+        let _guard = GRAPH_CACHE_TEST_LOCK.lock().await;
+        *GRAPH_CACHE.write().await = None;
+
+        let response = crate_graph_from_warmed_cache(&crate_graph_ctx("/workspace/no-cache"))
+            .await
+            .expect("crate_graph should return a non-error empty response");
+
+        assert!(response.crates.is_empty());
+        assert!(response.edges.is_empty());
+        assert_eq!(
+            response.message.as_deref(),
+            Some("Graph not warmed for this workspace.")
+        );
+
+        *GRAPH_CACHE.write().await = None;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn crate_graph_returns_message_when_crate_map_is_empty() {
+        let _guard = GRAPH_CACHE_TEST_LOCK.lock().await;
+        let clone_path = "/workspace/empty-crate-map";
+        install_cached_graph(clone_path, one_crate_graph(), BTreeMap::new()).await;
+
+        let response = crate_graph_from_warmed_cache(&crate_graph_ctx(clone_path))
+            .await
+            .expect("crate_graph should return a non-error empty response");
+
+        assert!(response.crates.is_empty());
+        assert!(response.edges.is_empty());
+        assert_eq!(
+            response.message.as_deref(),
+            Some("No crate mapping found — not a Rust workspace or workspace not yet warmed.")
+        );
+
+        *GRAPH_CACHE.write().await = None;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn crate_graph_maps_warmed_crate_graph_to_bridge_response() {
+        let _guard = GRAPH_CACHE_TEST_LOCK.lock().await;
+        let clone_path = "/workspace/warmed-crate-map";
+        let crate_map = BTreeMap::from([(PathBuf::from("crate-a"), "crate-a".to_string())]);
+        install_cached_graph(clone_path, one_crate_graph(), crate_map).await;
+
+        let response = crate_graph_from_warmed_cache(&crate_graph_ctx(clone_path))
+            .await
+            .expect("crate_graph should aggregate the warmed graph");
+
+        assert_eq!(response.message, None);
+        assert_eq!(response.crates.len(), 1);
+        assert_eq!(response.crates[0].name, "crate-a");
+        assert_eq!(response.crates[0].manifest_path, "crate-a");
+        assert_eq!(response.crates[0].node_count, 1);
+        assert!(response.edges.is_empty());
+
+        *GRAPH_CACHE.write().await = None;
     }
 }
