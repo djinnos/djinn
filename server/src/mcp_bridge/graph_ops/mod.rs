@@ -4,13 +4,13 @@ use async_trait::async_trait;
 use djinn_control_plane::bridge::{
     ApiImpactResult, ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangeKind,
     ChangedRange, ChurnEntry, ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry,
-    CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit, DetectedChangesResult,
-    DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory, EdgeEntry, FlowResult, GraphNeighbor,
-    GraphStatus, GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactResult, MetricsAtResult,
-    NeighborsResult, OrphanEntry, PathHop, PathResult, ProcessRef, ProjectCtx,
-    QuerySubgraphBudget as WireQuerySubgraphBudget, QuerySubgraphEdge as WireQuerySubgraphEdge,
-    QuerySubgraphNode as WireQuerySubgraphNode, QuerySubgraphRequest,
-    QuerySubgraphResult as WireQuerySubgraphResult,
+    CrateEdgeEntry, CrateGraphResponse, CrateNodeEntry, CycleGroup, CycleMember, DeadSymbolEntry,
+    DeprecatedHit, DetectedChangesResult, DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory,
+    EdgeEntry, FlowResult, GraphNeighbor, GraphStatus, GraphWorkspaceEntry, HotPathHit,
+    HotspotEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathHop, PathResult,
+    ProcessRef, ProjectCtx, QuerySubgraphBudget as WireQuerySubgraphBudget,
+    QuerySubgraphEdge as WireQuerySubgraphEdge, QuerySubgraphNode as WireQuerySubgraphNode,
+    QuerySubgraphRequest, QuerySubgraphResult as WireQuerySubgraphResult,
     QuerySubgraphSeedDebug as WireQuerySubgraphSeedDebug,
     QuerySubgraphTraversalDebug as WireQuerySubgraphTraversalDebug, RankedNode, RefactorCandidate,
     RelatedSymbol, RepoGraphOps, ResolveOutcome, RouteMapResult, SearchHit, ShapeCheckResult,
@@ -416,5 +416,9 @@ impl RepoGraphOps for RepoGraphBridge {
         kind_hint: Option<&str>,
     ) -> Result<ResolveOutcome, String> {
         RepoGraphBridge::resolve(self, ctx, key, kind_hint).await
+    }
+
+    async fn crate_graph(&self, ctx: &ProjectCtx) -> Result<CrateGraphResponse, String> {
+        RepoGraphBridge::crate_graph(self, ctx).await
     }
 }

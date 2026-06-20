@@ -4,7 +4,6 @@
 /// (CoordinatorHandle, SlotPoolHandle, LspManager, AppState).
 /// McpState holds Arc<dyn Trait> so the MCP layer never imports server types.
 mod coordinator_bridge;
-mod crate_graph_data;
 mod git_bridge;
 mod graph_bridge;
 mod graph_data;
@@ -15,17 +14,15 @@ mod runtime_bridge;
 mod slot_pool_bridge;
 
 pub use self::coordinator_bridge::{CoordinatorOps, CoordinatorStatus};
-pub use self::crate_graph_data::{
-    CrateEdgeEntry, CrateGraphRequest, CrateGraphResponse, CrateNodeEntry,
-};
 pub use self::git_bridge::GitOps;
 pub use self::graph_bridge::RepoGraphOps;
 pub use self::graph_data::{
     ApiImpactEntry, ApiImpactResult, ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef,
     Candidate, ChangeKind, ChangedRange, ChurnEntry, ComplexityMetrics, ComplexityResult,
-    CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup, CycleMember, DeadSymbolEntry,
-    DeprecatedHit, DetectedChangesResult, DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory,
-    EdgeEntry, FileComplexityEntry, FileGroupEntry, FlowHit, FlowResult, FunctionComplexityEntry,
+    CoupledPairEntry, CouplingEntry, CouplingHubEntry, CrateEdgeEntry, CrateGraphRequest,
+    CrateGraphResponse, CrateNodeEntry, CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit,
+    DetectedChangesResult, DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory, EdgeEntry,
+    FileComplexityEntry, FileGroupEntry, FlowHit, FlowResult, FunctionComplexityEntry,
     GraphNeighbor, GraphStatus, GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactEntry,
     ImpactResult, MethodMeta, MethodParam, MetricsAtResult, NeighborsResult, OrphanEntry,
     PagerankTier, PathHop, PathResult, ProcessRef, ProjectCtx, RankedNode, RefactorCandidate,

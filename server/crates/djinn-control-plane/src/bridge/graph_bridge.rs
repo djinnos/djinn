@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 
-use super::crate_graph_data::*;
 use super::graph_data::*;
 use super::graph_query_data::*;
 
@@ -554,7 +553,7 @@ pub trait RepoGraphOps: Send + Sync {
         Ok(CrateGraphResponse {
             crates: Vec::new(),
             edges: Vec::new(),
-            message: Some("crate_graph not yet implemented".to_string()),
+            message: None,
         })
     }
 }
