@@ -571,7 +571,18 @@ impl CoordinatorActor {
         let repo = self.task_repo();
         let mut affected = 0u64;
 
-        for status in ["in_progress", "in_task_review", "in_lead_intervention"] {
+        let session_repo = djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+
+        for status in [
+            "in_progress",
+            "in_task_review",
+            "in_lead_intervention",
+            "open",
+            "needs_task_review",
+        ] {
             let tasks = match repo.list_by_status(status).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -586,6 +597,89 @@ impl CoordinatorActor {
                 {
                     continue;
                 }
+
+                if matches!(task.status.as_str(), "open" | "needs_task_review") {
+                    let sessions = match session_repo.list_for_task(&task.id).await {
+                        Ok(sessions) => sessions,
+                        Err(e) => {
+                            tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: failed to query sessions for ready-state orphan scan");
+                            continue;
+                        }
+                    };
+                    let Some(running_session) = sessions
+                        .iter()
+                        .find(|session| session.status.as_str() == "running")
+                    else {
+                        continue;
+                    };
+
+                    let Some(session_predates_ready_state) =
+                        session_predates_task_status(&running_session.started_at, &task.updated_at)
+                    else {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            session_id = %running_session.id,
+                            session_started_at = %running_session.started_at,
+                            task_updated_at = %task.updated_at,
+                            "CoordinatorActor: failed to compare ready-state task/session timestamps for orphan scan"
+                        );
+                        continue;
+                    };
+                    if !session_predates_ready_state {
+                        continue;
+                    }
+
+                    let has_session = match self.pool.has_session(&task.id).await {
+                        Ok(b) => b,
+                        Err(PoolError::ActorDead) => {
+                            tracing::error!(
+                                "CoordinatorActor: slot pool actor dead, aborting stuck scan"
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: has_session query failed");
+                            continue;
+                        }
+                    };
+                    if has_session {
+                        continue;
+                    }
+
+                    let has_background_work = {
+                        let guard = self
+                            .background_work_tracker
+                            .lock()
+                            .expect("background work tracker mutex poisoned");
+                        guard.contains(&task.id)
+                    };
+                    if has_background_work {
+                        continue;
+                    }
+
+                    match session_repo.interrupt_running_for_task(&task.id).await {
+                        Ok(interrupted) if interrupted > 0 => {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                status = %task.status,
+                                interrupted,
+                                session_id = %running_session.id,
+                                "CoordinatorActor: finalized stale ready-state running session"
+                            );
+                            affected += 1;
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                error = %e,
+                                "CoordinatorActor: failed to finalize stale ready-state sessions"
+                            );
+                        }
+                    }
+                    continue;
+                }
+
                 let has_session = match self.pool.has_session(&task.id).await {
                     Ok(b) => b,
                     Err(PoolError::ActorDead) => {
@@ -650,10 +744,6 @@ impl CoordinatorActor {
                         );
                         // Finalize any orphaned "running" session records for this
                         // task so they don't accumulate as ghost rows.
-                        let session_repo = djinn_db::SessionRepository::new(
-                            self.db.clone(),
-                            crate::events::event_bus_for(&self.events_tx),
-                        );
                         if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
                             tracing::warn!(
                                 task_id = %task.short_id,
@@ -764,4 +854,10 @@ fn parse_iso_elapsed(started_at: &str) -> Option<u64> {
     let now = OffsetDateTime::now_utc();
     let elapsed = (now - parsed).whole_seconds();
     Some(if elapsed < 0 { 0 } else { elapsed as u64 })
+}
+
+fn session_predates_task_status(session_started_at: &str, task_updated_at: &str) -> Option<bool> {
+    let session_elapsed = parse_iso_elapsed(session_started_at)?;
+    let task_updated_elapsed = parse_iso_elapsed(task_updated_at)?;
+    Some(session_elapsed > task_updated_elapsed)
 }
