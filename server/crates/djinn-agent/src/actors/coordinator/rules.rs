@@ -1618,7 +1618,7 @@ mod tests {
                     acceptance_criteria: r#"[{"criterion":"do X better","met":false}]"#,
                     status: "building",
                     superseded_by: None,
-                    body_format: None,
+                    body_format: Some("markdown"),
                 },
             )
             .await
@@ -1678,7 +1678,7 @@ mod tests {
                     acceptance_criteria: r#"[{"criterion":"do X v2","met":false}]"#,
                     status: "building",
                     superseded_by: None,
-                    body_format: None,
+                    body_format: Some("markdown"),
                 },
             )
             .await
@@ -1692,7 +1692,7 @@ mod tests {
                     acceptance_criteria: r#"[{"criterion":"do X v3","met":false}]"#,
                     status: "building",
                     superseded_by: None,
-                    body_format: None,
+                    body_format: Some("markdown"),
                 },
             )
             .await
@@ -1759,7 +1759,7 @@ mod tests {
                     acceptance_criteria: r#"[{"criterion":"do X after downtime","met":false}]"#,
                     status: "building",
                     superseded_by: None,
-                    body_format: None,
+                    body_format: Some("markdown"),
                 },
             )
             .await
@@ -1823,7 +1823,7 @@ mod tests {
                     acceptance_criteria: r#"[{"criterion":"do X maybe","met":false}]"#,
                     status: "draft",
                     superseded_by: None,
-                    body_format: None,
+                    body_format: Some("markdown"),
                 },
             )
             .await
@@ -1955,7 +1955,7 @@ mod tests {
                     acceptance_criteria: "[]",
                     status: "building",
                     superseded_by: None,
-                    body_format: None,
+                    body_format: Some("markdown"),
                 },
             )
             .await
@@ -2090,7 +2090,7 @@ mod tests {
                     acceptance_criteria: "[]",
                     status: "building",
                     superseded_by: None,
-                    body_format: None,
+                    body_format: Some("markdown"),
                 },
             )
             .await

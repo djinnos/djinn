@@ -28,8 +28,9 @@ use crate::tools::proposal_ops::{
     ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
 };
 use crate::tools::validation::{
-    validate_ac_count, validate_body, validate_design, validate_limit, validate_offset,
-    validate_proposal_create_status, validate_proposal_status, validate_sort, validate_title,
+    validate_ac_count, validate_body, validate_design, validate_limit, validate_mdx_body,
+    validate_offset, validate_proposal_create_status, validate_proposal_status, validate_sort,
+    validate_title,
 };
 use djinn_db::{
     EpicRepository, ProjectRepository, ProposalListQuery, ProposalRepository, TaskRepository,
@@ -289,10 +290,11 @@ impl DjinnMcpServer {
         if let Err(e) = validate_design(body) {
             return Json(err_single(e));
         }
+        if let Err(e) = validate_mdx_body(body, p.body_format.as_deref()) {
+            return Json(err_single(e));
+        }
         let body_format = p.body_format.as_deref().unwrap_or("markdown");
-        if body_format == "mdx"
-            && let Err(e) = validate_question_form_placement(body)
-        {
+        if body_format == "mdx" && let Err(e) = validate_question_form_placement(body) {
             return Json(err_single(e));
         }
         let ac = p.acceptance_criteria.unwrap_or_default();
@@ -494,7 +496,15 @@ impl DjinnMcpServer {
         if let Err(e) = validate_design(body) {
             return Json(err_single(e));
         }
-        let body_format = p.body_format.as_deref().unwrap_or(&existing.body_format);
+        // Effective body_format: explicitly passed, else the proposal's current
+        // format (matches the repository's own fallback on update).
+        let body_format = p
+            .body_format
+            .as_deref()
+            .unwrap_or(existing.body_format.as_str());
+        if let Err(e) = validate_mdx_body(body, Some(body_format)) {
+            return Json(err_single(e));
+        }
         if p.body.is_some()
             && body_format == "mdx"
             && let Err(e) = validate_question_form_placement(body)

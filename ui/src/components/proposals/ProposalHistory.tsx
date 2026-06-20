@@ -44,12 +44,12 @@ function revisionBodyPreview(revision: ProposalHistoryEntry): string {
   if (format !== "mdx") return truncatePreview(body);
 
   const blockTags = Array.from(
-    body.matchAll(/<([a-z][\w-]*)(?:\s[^>]*)?>/gi),
+    body.matchAll(/<([A-Z][A-Za-z0-9]*)(?:\s[^>]*)?>/g),
     (match) => match[1],
   );
   const uniqueBlockTags = [...new Set(blockTags)];
   const textPreview = truncatePreview(
-    body.replace(/<\/?[a-z][\w-]*(?:\s[^>]*)?>/gi, " "),
+    body.replace(/<\/?[A-Z][A-Za-z0-9]*(?:\s[^>]*)?>/g, " "),
   );
 
   if (uniqueBlockTags.length === 0) return truncatePreview(body);

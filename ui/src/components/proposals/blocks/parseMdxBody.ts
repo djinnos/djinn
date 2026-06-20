@@ -1,11 +1,12 @@
 import type { ProposalFeedback } from "@/api/types";
 
-// Matches <tag-name attributes>content</tag-name> — same pattern as the
-// server-side Rust parser so block boundaries are identical in both places.
-const BLOCK_REGEX = /<([a-z-]+)([^>]*)>([\s\S]*?)<\/\1>/g;
+// Matches <PascalCaseTag attributes>content</PascalCaseTag> and self-closing
+// <PascalCaseTag attributes /> blocks — the same custom component convention as
+// the server-side Rust parser so block boundaries are identical in both places.
+const BLOCK_REGEX = /<([A-Z][A-Za-z0-9]*)([^>]*?)(?:\/>|>([\s\S]*?)<\/\1>)/g;
 
 /** Key="value" pairs inside a block's opening tag. */
-const ATTR_REGEX = /([a-z_-]+)="([^"]*)"/g;
+const ATTR_REGEX = /([A-Za-z_][A-Za-z0-9_-]*)="([^"]*)"/g;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Types
