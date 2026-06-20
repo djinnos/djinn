@@ -6,8 +6,7 @@
 //! aggregate to `::bigint` so `row.get::<i64>(…)` succeeds.
 //!
 //! Also includes model-effectiveness regression tests exercising shared-credit
-//! attribution, NULL-cost semantics, no-inflation of task counts, and
-//! verification_pass_rate correctness.
+//! attribution, NULL-cost semantics, and no-inflation of task counts.
 
 use djinn_db::repositories::usage_analytics::GroupDimension;
 use djinn_db::{Database, ModelEffectivenessRow, UsageAnalyticsQuery, UsageAnalyticsRepository};
@@ -48,7 +47,7 @@ async fn seed_project(db: &Database, name: &str) -> String {
     id
 }
 
-/// Seed a task row with the given status/close_reason/verification fields.
+/// Seed a task row with the given status/close_reason fields.
 async fn seed_task(
     db: &Database,
     task_id: &str,
@@ -56,7 +55,6 @@ async fn seed_task(
     status: &str,
     close_reason: Option<&str>,
     total_reopen_count: i32,
-    total_verification_failure_count: i32,
 ) {
     let short_id = format!("t{}", &task_id[..10.min(task_id.len())]);
     sqlx::query(
@@ -66,7 +64,7 @@ async fn seed_task(
           total_reopen_count, total_verification_failure_count, \
           labels, acceptance_criteria, memory_refs) \
          VALUES ($1, $2, $3, $4, '', '', \
-                 $5, $6, $7, $8, \
+                 $5, $6, $7, 0, \
                  '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
     )
     .bind(task_id)
@@ -76,7 +74,6 @@ async fn seed_task(
     .bind(status)
     .bind(close_reason)
     .bind(total_reopen_count)
-    .bind(total_verification_failure_count)
     .execute(db.pool())
     .await
     .expect("insert task");
@@ -324,12 +321,12 @@ async fn effectiveness_shared_credit_attribution() {
 
     let proj = seed_project(&db, "shared-credit-proj").await;
 
-    // Task 1: closed/completed, no reopens, no verification failures.
-    seed_task(&db, "task-1-aaa", &proj, "closed", Some("completed"), 0, 0).await;
+    // Task 1: closed/completed, no reopens.
+    seed_task(&db, "task-1-aaa", &proj, "closed", Some("completed"), 0).await;
     // Task 2: closed/completed.
-    seed_task(&db, "task-2-bbb", &proj, "closed", Some("completed"), 0, 0).await;
+    seed_task(&db, "task-2-bbb", &proj, "closed", Some("completed"), 0).await;
     // Task 3: closed/failed.
-    seed_task(&db, "task-3-ccc", &proj, "closed", Some("failed"), 0, 1).await;
+    seed_task(&db, "task-3-ccc", &proj, "closed", Some("failed"), 0).await;
 
     // model-a: sessions on task-1 and task-2
     seed_worker_session(
@@ -435,7 +432,7 @@ async fn effectiveness_shared_credit_attribution() {
 /// Multiple worker sessions from the same model on the same completed task
 /// must count as exactly 1 completed task (no inflation).
 ///
-/// Also asserts success_rate and verification_pass_rate never exceed 1.0.
+/// Also asserts success_rate never exceeds 1.0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn effectiveness_no_inflation_from_duplicate_sessions() {
     let db = create_test_db();
@@ -443,8 +440,8 @@ async fn effectiveness_no_inflation_from_duplicate_sessions() {
 
     let proj = seed_project(&db, "no-inflation-proj").await;
 
-    // One completed task with reopens=2 and zero verification failures.
-    seed_task(&db, "task-dup-1", &proj, "closed", Some("completed"), 2, 0).await;
+    // One completed task with reopens=2.
+    seed_task(&db, "task-dup-1", &proj, "closed", Some("completed"), 2).await;
 
     // Three worker sessions from the same model on the same task.
     for i in 0..3 {
@@ -490,19 +487,6 @@ async fn effectiveness_no_inflation_from_duplicate_sessions() {
         "success_rate should be exactly 1.0 (1/1 closed tasks completed), got {sr}"
     );
 
-    // verification_pass_rate must not exceed 1.0.
-    let vpr = x
-        .verification_pass_rate
-        .expect("verification_pass_rate should be Some");
-    assert!(
-        vpr <= 1.0_f64 + 1e-9,
-        "verification_pass_rate must not exceed 1.0, got {vpr}"
-    );
-    assert!(
-        (vpr - 1.0_f64).abs() < 1e-9,
-        "verification_pass_rate should be 1.0 (0 failures), got {vpr}"
-    );
-
     // avg_reopens should reflect the task's total_reopen_count = 2.0.
     let avg = x.avg_reopens.expect("avg_reopens should be Some");
     assert!(
@@ -532,7 +516,7 @@ async fn effectiveness_null_cost_spend_remains_none() {
     let proj = seed_project(&db, "null-cost-eff-proj").await;
 
     // One completed task.
-    seed_task(&db, "task-null-1", &proj, "closed", Some("completed"), 0, 0).await;
+    seed_task(&db, "task-null-1", &proj, "closed", Some("completed"), 0).await;
 
     // Priced session from model-priced.
     seed_worker_session(
@@ -589,82 +573,4 @@ async fn effectiveness_null_cost_spend_remains_none() {
     assert_eq!(unpriced.tokens_in, 500, "tokens_in should be counted");
     assert_eq!(unpriced.tokens_out, 600, "tokens_out should be counted");
     assert_eq!(unpriced.sessions, 1, "should have 1 session");
-}
-
-/// Verify `verification_pass_rate` is present and correct: it should equal
-/// the fraction of closed tasks with zero verification failures per model.
-///
-/// Seed data:
-///   - task-v1 (closed/completed, verification_failures=0) → pass
-///   - task-v2 (closed/completed, verification_failures=1) → fail
-///   - task-v3 (closed/failed,    verification_failures=0) → pass (0 failures)
-///
-/// Expected for model-v:
-///   closed_count = 3, verified_count = 2 → verification_pass_rate = 2/3
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn effectiveness_verification_pass_rate_correctness() {
-    let db = create_test_db();
-    db.ensure_initialized().await.expect("ensure_initialized");
-
-    let proj = seed_project(&db, "vpr-proj").await;
-
-    // Task v1: closed/completed, 0 verification failures → pass.
-    seed_task(&db, "task-v1-ddd", &proj, "closed", Some("completed"), 0, 0).await;
-    // Task v2: closed/completed, 1 verification failure → fail.
-    seed_task(&db, "task-v2-eee", &proj, "closed", Some("completed"), 0, 1).await;
-    // Task v3: closed/failed, 0 verification failures → pass.
-    seed_task(&db, "task-v3-fff", &proj, "closed", Some("failed"), 0, 0).await;
-
-    // model-v: sessions on all three tasks.
-    for (task_id, started) in [
-        ("task-v1-ddd", "2025-06-10T10:00:00.000Z"),
-        ("task-v2-eee", "2025-06-11T10:00:00.000Z"),
-        ("task-v3-fff", "2025-06-12T10:00:00.000Z"),
-    ] {
-        seed_worker_session(
-            &db,
-            &uuid::Uuid::now_v7().to_string(),
-            &proj,
-            task_id,
-            "model-v",
-            Some(0.10),
-            100,
-            200,
-            started,
-        )
-        .await;
-    }
-
-    let repo = UsageAnalyticsRepository::new(db);
-    let (effectiveness, _matrix) = repo
-        .query_effectiveness(&effectiveness_params())
-        .await
-        .expect("query_effectiveness should succeed");
-
-    let v = find_model(&effectiveness, "model-v");
-
-    assert_eq!(v.sessions, 3, "model-v should have 3 sessions");
-
-    // All 3 tasks are closed; 2 are completed.
-    assert_eq!(
-        v.shared_credit_completed_task_count, 2,
-        "model-v completed tasks should be 2 (task-v1, task-v2)"
-    );
-
-    let sr = v.success_rate.expect("success_rate should be Some");
-    // completed_count=2, closed_count=3 → 2/3
-    assert!(
-        (sr - (2.0 / 3.0)).abs() < 1e-9,
-        "success_rate should be ~0.6667, got {sr}"
-    );
-
-    // Verification pass rate: tasks with 0 failures among closed = task-v1, task-v3.
-    // verified_count=2, closed_count=3 → 2/3.
-    let vpr = v
-        .verification_pass_rate
-        .expect("verification_pass_rate should be Some");
-    assert!(
-        (vpr - (2.0 / 3.0)).abs() < 1e-9,
-        "verification_pass_rate should be ~0.6667 (2/3), got {vpr}"
-    );
 }
