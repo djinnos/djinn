@@ -383,6 +383,7 @@ impl RepoGraphOps for StubRepoGraph {
         &self,
         _ctx: &ProjectCtx,
         _rules: &[BoundaryRule],
+        _level: &str,
     ) -> std::result::Result<Vec<BoundaryViolation>, String> {
         Ok(Vec::new())
     }

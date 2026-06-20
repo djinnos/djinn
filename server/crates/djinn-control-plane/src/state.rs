@@ -591,6 +591,7 @@ pub mod stubs {
             &self,
             _: &crate::bridge::ProjectCtx,
             _: &[crate::bridge::BoundaryRule],
+            _: &str,
         ) -> Result<Vec<crate::bridge::BoundaryViolation>, String> {
             Ok(vec![])
         }

@@ -557,8 +557,9 @@ mod tests {
             &self,
             ctx: &ProjectCtx,
             r: &[djinn_control_plane::bridge::BoundaryRule],
+            level: &str,
         ) -> Result<Vec<djinn_control_plane::bridge::BoundaryViolation>, String> {
-            StubRepoGraph.boundary_check(ctx, r).await
+            StubRepoGraph.boundary_check(ctx, r, level).await
         }
         async fn hotspots(
             &self,
