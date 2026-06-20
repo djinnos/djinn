@@ -463,9 +463,10 @@ mod tests {
         )
         .await;
         let v = verification_for_project_id(&db, "p1").await;
-        assert_eq!(v.rules.len(), 1);
-        assert_eq!(v.rules[0].match_pattern, "crates/**");
-        assert_eq!(v.rules[0].commands, vec!["cargo test"]);
+        assert!(
+            v.rules.is_empty(),
+            "verification rules table is dropped; stale seeded rules are ignored"
+        );
     }
 
     #[test]
@@ -522,6 +523,9 @@ mod tests {
         // A subdirectory under the project path should resolve by walking
         // ancestors until `{owner}/{repo}` matches a registered project.
         let v = verification_for_path(&db, Path::new("/tmp/test/fuzzy-proj/crates/foo")).await;
-        assert_eq!(v.rules.len(), 1);
+        assert!(
+            v.rules.is_empty(),
+            "verification rules table is dropped; path resolution yields no rules"
+        );
     }
 }
