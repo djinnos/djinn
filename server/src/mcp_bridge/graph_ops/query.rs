@@ -1228,6 +1228,62 @@ impl RepoGraphBridge {
                     }),
         })
     }
+
+    pub(super) async fn crate_graph(&self, ctx: &ProjectCtx) -> Result<CrateGraphResponse, String> {
+        let (_project_root, index_tree_path) =
+            djinn_graph::canonical_graph::normalize_graph_query_paths(&ctx.clone_path);
+
+        let (graph, crate_map) = {
+            let cache = djinn_graph::canonical_graph::GRAPH_CACHE.read().await;
+            let Some(cached) = cache
+                .as_ref()
+                .filter(|cached| cached.project_path == index_tree_path)
+            else {
+                return Err("canonical graph not warmed yet — K8s graph warmer will populate it once the project's devcontainer image is ready".to_string());
+            };
+            (cached.graph.clone(), cached.crate_map.clone())
+        };
+
+        if crate_map.is_empty() {
+            return Ok(CrateGraphResponse {
+                crates: Vec::new(),
+                edges: Vec::new(),
+                message: Some(
+                    "crate_graph is empty because the warmed graph has no Rust workspace crate map"
+                        .to_string(),
+                ),
+            });
+        }
+
+        let crate_graph = djinn_graph::repo_graph::build_crate_graph(&graph, crate_map.as_ref());
+        Ok(CrateGraphResponse {
+            crates: crate_graph
+                .crates
+                .into_iter()
+                .map(|node| CrateNodeEntry {
+                    name: node.name,
+                    manifest_path: node.manifest_path.to_string_lossy().into_owned(),
+                    loc: node.loc,
+                    node_count: node.node_count,
+                    fan_in: node.fan_in,
+                    fan_out: node.fan_out,
+                    inbound_weight: node.inbound_weight,
+                    outbound_weight: node.outbound_weight,
+                })
+                .collect(),
+            edges: crate_graph
+                .edges
+                .into_iter()
+                .map(|edge| CrateEdgeEntry {
+                    source: edge.source,
+                    target: edge.target,
+                    weight: edge.weight,
+                    edge_count: edge.edge_count,
+                })
+                .collect(),
+            message: None,
+        })
+    }
 }
 
 /// Collect the implementor symbols for the trait/interface node at
