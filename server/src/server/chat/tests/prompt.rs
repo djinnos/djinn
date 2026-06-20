@@ -340,8 +340,9 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
             &self,
             ctx: &ProjectCtx,
             r: &[djinn_control_plane::bridge::BoundaryRule],
+            level: &str,
         ) -> Result<Vec<djinn_control_plane::bridge::BoundaryViolation>, String> {
-            StubRepoGraph.boundary_check(ctx, r).await
+            StubRepoGraph.boundary_check(ctx, r, level).await
         }
         async fn hotspots(
             &self,

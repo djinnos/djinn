@@ -1182,11 +1182,11 @@ mod tests {
     fn community_count_not_collapsed() {
         let graph = monorepo_cluster_graph();
         let communities = detect_communities(&graph);
-        // With 9 nodes in 3 tight clusters, we should get at least 2
-        // communities (not collapsed into one giant community).
+        // With 9 nodes in 3 tight clusters, we should get at least 3
+        // communities (not collapsed into one or two giant communities).
         assert!(
-            communities.len() >= 2,
-            "community count should not collapse to 1, got {}",
+            communities.len() >= 3,
+            "community count should not collapse for a 3-crate fixture, got {}",
             communities.len()
         );
     }
