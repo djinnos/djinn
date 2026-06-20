@@ -162,7 +162,7 @@ pub(crate) async fn supervisor_pr_open(
     // surfaces as a persistent "PR blocked" health banner and re-attempts every
     // tick. There is nothing to open a PR with, so close the task as completed
     // (Close is valid from any non-closed status — covers both the supervisor
-    // body's in_progress/verifying caller and the coordinator's approved
+    // body's in_progress caller and the coordinator's approved
     // re-cycle caller) and report the run as Closed rather than Failed.
     match task_branch_commits_ahead(
         mirror.as_ref(),
@@ -680,7 +680,7 @@ pub(crate) async fn handle_noop_disposition(
     let disposition = decide_run_disposition(progress, task.continuation_count, NUDGE_CAP);
 
     // The nudge requires releasing the task back to a worker-redispatchable
-    // state. Only `in_progress`/`verifying` (the supervisor-body callers) can
+    // state. Only `in_progress` (the supervisor-body caller) can
     // be released without stepping on a terminal-action path; the coordinator
     // re-cycle reaches `open_pr` from `approved`, which we must NOT bounce back
     // to open. If no safe release action exists, downgrade Nudge → Close.
@@ -875,7 +875,7 @@ pub(super) async fn close_noop(
 
     let reason = NOOP_CLOSE_REASON;
     // `Close` is valid from any non-closed status — covers both the supervisor
-    // body's in_progress/verifying caller and the coordinator's approved
+    // body's in_progress caller and the coordinator's approved
     // re-cycle caller.
     if let Err(e) = task_repo
         .transition(
