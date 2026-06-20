@@ -2,11 +2,19 @@ import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import type { ProposalFeedback } from "@/api/types";
+import type { Proposal, ProposalFeedback } from "@/api/types";
+import { FeedbackThread } from "@/pages/ProposalsPage";
 import { getBlockByTag } from "@/lib/blockRegistry";
 
-import type { BlockRendererProps } from "./parseMdxBody";
 import { parseMdxBody } from "./parseMdxBody";
+
+export interface BlockRendererProps {
+  body: string;
+  feedback?: ProposalFeedback[];
+  proposal: Proposal;
+  canEdit: boolean;
+  onChanged: () => void;
+}
 
 /**
  * Parse an MDX proposal body and render each segment: custom block tags are
@@ -17,7 +25,7 @@ import { parseMdxBody } from "./parseMdxBody";
  * browser anchors and feedback `target_section` references can scroll to
  * the correct location within the proposal.
  */
-export function BlockRenderer({ body, feedback }: BlockRendererProps) {
+export function BlockRenderer({ body, feedback = [], proposal, canEdit, onChanged }: BlockRendererProps) {
   const segments = useMemo(() => parseMdxBody(body), [body]);
 
   // Index feedback by target_section for O(1) lookup per block
@@ -42,7 +50,10 @@ export function BlockRenderer({ body, feedback }: BlockRendererProps) {
       {segments.map((segment) => {
         if (segment.kind === "markdown") {
           return (
-            <div key={`md-${segment.text.slice(0, 32)}`} className="prose prose-sm max-w-none dark:prose-invert">
+            <div
+              key={`md-${segment.text.slice(0, 32)}`}
+              className="prose prose-sm max-w-none dark:prose-invert"
+            >
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {segment.text}
               </ReactMarkdown>
@@ -65,17 +76,32 @@ export function BlockRenderer({ body, feedback }: BlockRendererProps) {
         }
 
         const BlockComponent = def.component;
-        const blockFeedback = feedbackBySection.get(segment.id);
+        const blockFeedback = feedbackBySection.get(segment.id) ?? [];
 
         return (
-          <div key={`block-${segment.id}-${segment.index}`} id={segment.id}>
-            <BlockComponent
-              id={segment.id}
-              attributes={segment.attributes}
-              feedback={blockFeedback}
-            >
-              {segment.content}
-            </BlockComponent>
+          <div
+            key={`block-${segment.id}-${segment.index}`}
+            id={segment.id}
+            className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,22rem)]"
+          >
+            <div className="min-w-0">
+              <BlockComponent
+                id={segment.id}
+                attributes={segment.attributes}
+                feedback={blockFeedback}
+              >
+                {segment.content}
+              </BlockComponent>
+            </div>
+            <aside className="min-w-0 rounded-lg border bg-muted/20 p-3">
+              <FeedbackThread
+                proposal={proposal}
+                feedback={feedback}
+                blockId={segment.id}
+                canEdit={canEdit}
+                onChanged={onChanged}
+              />
+            </aside>
           </div>
         );
       })}

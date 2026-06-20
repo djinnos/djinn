@@ -30,7 +30,9 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
          public surface and route/flow health; boundary_check/blast_radius/touches_hot_path = \
          change-impact analysis; hotspots/cochange/churn/coupling_hubs = git-coupling × PageRank \
          centrality; complexity/refactor_candidates = budget-conscious discovery of \
-         risky/refactorable code. AFTER THIS: after capabilities call the chosen op with only \
+         risky/refactorable code; crate_graph = workspace dependency graph with crates as \
+         nodes and aggregated cross-crate edges, including per-crate rollups (LOC, node \
+         count, fan-in/out, edge weights). AFTER THIS: after capabilities call the chosen op with only \
          required fields; after query_subgraph inspect returned seeds/budget/truncation and \
          retry with context_filter, file_filter, edge_filters, max_depth/max_seeds, or \
          token_budget if too broad; after search pass a returned key to describe, neighbors, \
@@ -53,7 +55,7 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                         "blast_radius", "hotspots", "complexity", "refactor_candidates", "cochange",
                         "churn", "coupling_hubs", "metrics_at", "dead_symbols",
                         "deprecated_callers", "touches_hot_path", "status",
-                        "snapshot", "workspaces", "capabilities"
+                        "snapshot", "workspaces", "capabilities", "crate_graph"
                     ],
                     "description": "Graph query to perform. Start with capabilities for cheap supported-op discovery; use query_subgraph with natural-language query for a focused token-budgeted subgraph; use search when you need a key, describe/context for one key, neighbors for direct edges, and impact for bounded transitive dependents."
                 },
