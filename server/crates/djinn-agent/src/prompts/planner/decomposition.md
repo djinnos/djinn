@@ -81,7 +81,7 @@ In this pruning/repair arm:
 **Rule:** Before creating tasks that **remove, rename, relocate, or change the signature/visibility of any public API, public file, crate, SQL migration, or shared type**, you MUST call the `impact_check` MCP tool and obey its `recommendation`.
 
 **Trigger checklist — call `impact_check` if the wave touches ANY of:**
-- A public symbol (fn, struct, enum, trait, type alias, const): removal, rename, signature change, or visibility narrowing (`pub` → `pub(crate)`).
+- A public symbol (fn, struct, enum, trait, type alias, const): removal, rename, signature change, or visibility narrowing (pub → pub(crate)).
 - A public file path imported across crate boundaries (`use crate::...`, cross-crate `mod`).
 - A whole crate rename/removal (`Cargo.toml` member changes).
 - A SQL migration that drops/renames a table, column, type, function, or view referenced by any repository.
