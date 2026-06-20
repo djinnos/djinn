@@ -26,7 +26,10 @@ export type Epic = Omit<EpicListOutputSchema.EpicModel, "owner"> & {
 // Global proposals layer (project-independent). `acceptance_criteria` arrives
 // as a parsed array from the MCP tools; SSE sends it as a JSON string which the
 // SSE handler normalizes to an array before storing.
-export type Proposal = ProposalShowOutputSchema.ProposalModel;
+export type Proposal = ProposalShowOutputSchema.ProposalModel & {
+  /** Body format: 'markdown' (legacy default) or 'mdx' (block-aware). */
+  body_format?: "markdown" | "mdx" | string | null;
+};
 export type ProposalFeedback = ProposalShowOutputSchema.ProposalFeedbackModel;
 export type ProposalTarget = ProposalShowOutputSchema.ProposalTargetModel;
 export type ProposalRevision = ProposalShowOutputSchema.ProposalRevisionModel;

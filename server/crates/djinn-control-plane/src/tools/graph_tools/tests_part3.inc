@@ -191,6 +191,7 @@
             CodeGraphResponse::ShapeCheck(r) => r.next_step.as_deref(),
             CodeGraphResponse::ApiImpact(r) => r.next_step.as_deref(),
             CodeGraphResponse::Flow(r) => r.next_step.as_deref(),
+            CodeGraphResponse::CrateGraph(r) => r.next_step.as_deref(),
         }
     }
 
@@ -975,6 +976,7 @@
             CodeGraphResponse::ShapeCheck(r) => &r.graph_staleness,
             CodeGraphResponse::ApiImpact(r) => &r.graph_staleness,
             CodeGraphResponse::Flow(r) => &r.graph_staleness,
+            CodeGraphResponse::CrateGraph(r) => &r.graph_staleness,
         }
     }
 
