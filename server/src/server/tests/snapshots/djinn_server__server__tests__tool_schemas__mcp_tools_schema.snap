@@ -740,6 +740,11 @@ expression: signatures
         "BoundaryRule": {
           "description": "A single boundary-check rule — a pair of globs. Every rule is\ntreated as a forbidden edge; callers submit only the rules they want\nflagged as violations.",
           "properties": {
+            "description": {
+              "description": "Optional human-readable explanation of why this rule exists,\nsurfaced in CI output so violations are self-documenting.",
+              "nullable": true,
+              "type": "string"
+            },
             "from_glob": {
               "type": "string"
             },
@@ -8428,6 +8433,11 @@ expression: signatures
         "BoundaryRule": {
           "description": "A single boundary-check rule — a pair of globs. Every rule is\ntreated as a forbidden edge; callers submit only the rules they want\nflagged as violations.",
           "properties": {
+            "description": {
+              "description": "Optional human-readable explanation of why this rule exists,\nsurfaced in CI output so violations are self-documenting.",
+              "nullable": true,
+              "type": "string"
+            },
             "from_glob": {
               "type": "string"
             },

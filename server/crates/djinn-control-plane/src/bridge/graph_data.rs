@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
