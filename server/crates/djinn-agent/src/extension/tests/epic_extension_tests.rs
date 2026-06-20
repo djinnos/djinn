@@ -21,6 +21,7 @@ async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
                 status: None,
                 auto_breakdown: None,
                 originating_adr_id: None,
+                blocked_by: None,
             },
         )
         .await

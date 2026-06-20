@@ -22,12 +22,19 @@ export interface MemoryGraphState {
    * on triggers N `memory_associations` calls (one per node).
    */
   coAccessEnabled: boolean;
+  /**
+   * Typed edge layer toggle. OFF by default: when ON, typed edges
+   * (builds_on / contradicts / supersedes / exemplifies / derived_from)
+   * from the graphology graph are visible.
+   */
+  typedEdgesEnabled: boolean;
 }
 
 export interface MemoryGraphActions {
   setSelectedNodeId: (id: string | null) => void;
   setHoveredNodeId: (id: string | null) => void;
   setCoAccessEnabled: (enabled: boolean) => void;
+  setTypedEdgesEnabled: (enabled: boolean) => void;
   reset: () => void;
 }
 
@@ -35,6 +42,7 @@ const INITIAL_STATE: MemoryGraphState = {
   selectedNodeId: null,
   hoveredNodeId: null,
   coAccessEnabled: false,
+  typedEdgesEnabled: false,
 };
 
 export const useMemoryGraphStore = create<MemoryGraphState & MemoryGraphActions>(
@@ -44,6 +52,7 @@ export const useMemoryGraphStore = create<MemoryGraphState & MemoryGraphActions>
     setSelectedNodeId: (id) => set({ selectedNodeId: id }),
     setHoveredNodeId: (id) => set({ hoveredNodeId: id }),
     setCoAccessEnabled: (enabled) => set({ coAccessEnabled: enabled }),
+    setTypedEdgesEnabled: (enabled) => set({ typedEdgesEnabled: enabled }),
 
     reset: () => set({ ...INITIAL_STATE }),
   }),

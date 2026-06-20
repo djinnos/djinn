@@ -451,7 +451,8 @@ pub(crate) fn tool_memory_search() -> RmcpTool {
                 "folder": {"type": "string"},
                 "type": {"type": "string"},
                 "task_id": {"type": "string", "description": "Task ID for affinity scoring; defaults to the current session task"},
-                "limit": {"type": "integer"}
+                "limit": {"type": "integer"},
+                "edge_kinds": {"type": "array", "items": {"type": "string"}, "description": "Optional list of edge kinds to include in graph traversal scoring. When provided, only edges whose kind matches one of these values participate in spreading activation. Omit to use all edge kinds."}
             }
         }),
     )
@@ -520,7 +521,8 @@ pub(crate) fn tool_memory_build_context() -> RmcpTool {
                 "task_id": {"type": "string", "description": "Task ID to gather related memory for; defaults to current session task when omitted"},
                 "query": {"type": "string", "description": "Optional free-text query to bias retrieval"},
                 "limit": {"type": "integer", "description": "Maximum notes to include (default 8)"},
-                "min_confidence": {"type": "number", "description": "Minimum confidence threshold for related notes (default 0.1). Notes below this are excluded."}
+                "min_confidence": {"type": "number", "description": "Minimum confidence threshold for related notes (default 0.1). Notes below this are excluded."},
+                "edge_kinds": {"type": "array", "items": {"type": "string"}, "description": "Optional list of edge kinds to include in graph traversal scoring. When provided, only edges whose kind matches one of these values participate in spreading activation. Omit to use all edge kinds."}
             }
         }),
     )

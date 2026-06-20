@@ -367,7 +367,7 @@ pub(crate) async fn execute_stage(
 
     // ── Role-level overrides: specialist (Worker stage) or project default ────
     // Picks up `system_prompt_extensions`, `learned_prompt`, role-level MCP
-    // server + skill lists, `verification_command`, and swaps `runtime_role`
+    // server + skill lists, and swaps `runtime_role`
     // when a Worker stage's `task.agent_type` names a specialist whose
     // `base_role` differs from the injected RoleKind.  Non-Worker stages
     // always use the default-role path.
@@ -377,7 +377,6 @@ pub(crate) async fn execute_stage(
         learned_prompt,
         mcp_servers: role_mcp_servers,
         skills: role_skills,
-        verification_command: role_verification_command,
         model_preference: _role_model_preference,
         specialist_overrode_runtime_role,
     } = resolve_role_overrides(task, role_kind, agent_context).await;
@@ -489,7 +488,7 @@ pub(crate) async fn execute_stage(
     } = match resolve_setup_and_verification_context(
         env_config.lifecycle.pre_verification,
         verification_rules,
-        role_verification_command.as_deref(),
+        None,
         worktree_path,
         &task.id,
         &task.short_id,

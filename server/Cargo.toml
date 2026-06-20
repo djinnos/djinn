@@ -14,6 +14,10 @@ edition = "2024"
 [lib]
 doctest = false
 
+[[bin]]
+name = "check-boundaries"
+path = "ci/check_boundaries.rs"
+
 [features]
 default = []
 qdrant = ["djinn-db/qdrant"]
@@ -64,6 +68,7 @@ sqlx = { version = "0.8", features = ["mysql", "postgres", "runtime-tokio-rustls
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.9"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

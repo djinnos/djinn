@@ -2940,6 +2940,12 @@ export namespace MemoryBuildContextInputSchema {
    */
   depth?: number
   /**
+   * Optional list of edge kinds to include in graph traversal scoring.
+   * When provided, only edges whose `kind` matches one of these values
+   * participate in spreading activation. Omit to use all edge kinds.
+   */
+  edge_kinds?: string[] | null
+  /**
    * Maximum related notes to return (default 10).
    */
   max_related?: number
@@ -3223,6 +3229,17 @@ export namespace MemoryGraphOutputSchema {
   edges: GraphEdge[]
   error?: string
   nodes: GraphNode[]
+  typed_edges?: TypedEdge[]
+  [k: string]: any
+  }
+  /**
+   * A typed association edge between two notes.
+   */
+  export interface TypedEdge {
+  source_id: string
+  target_id: string
+  kind: string
+  weight: number
   [k: string]: any
   }
   /**
@@ -3567,6 +3584,12 @@ export namespace MemoryRepairEmbeddingsOutputSchema {
 export type MemoryRepairEmbeddingsOutput = MemoryRepairEmbeddingsOutputSchema.MemoryRepairEmbeddingsOutput;
 export namespace MemorySearchInputSchema {
   export interface MemorySearchInput {
+  /**
+   * Optional list of edge kinds to include in graph traversal scoring.
+   * When provided, only edges whose `kind` matches one of these values
+   * participate in spreading activation. Omit to use all edge kinds.
+   */
+  edge_kinds?: string[] | null
   folder?: string
   limit?: number
   project: string

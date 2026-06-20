@@ -373,6 +373,7 @@ pub async fn epic_update(
                 status: Some(status),
                 auto_breakdown: None,
                 originating_adr_id: None,
+                blocked_by: None,
             },
         )
         .await
