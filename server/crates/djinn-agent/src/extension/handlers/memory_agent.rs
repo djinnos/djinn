@@ -40,6 +40,7 @@ pub(super) async fn call_memory_search(
                 folder: p.folder,
                 note_type: p.note_type,
                 limit: p.limit,
+                edge_kinds: None,
             },
             task_id.as_deref(),
         )
@@ -97,6 +98,7 @@ pub(super) async fn call_memory_build_context(
                 budget: p.budget,
                 task_id: task_id.clone(),
                 min_confidence: p.min_confidence,
+                edge_kinds: None,
             },
             task_id.as_deref(),
         )

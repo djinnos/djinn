@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 510
 expression: signatures
 ---
 [
@@ -2495,14 +2494,6 @@ expression: signatures
           "description": "When `false`, the coordinator will NOT auto-dispatch a breakdown\nPlanner when this epic is created — the way to stage an epic without\nrunning it (replaces the old `drafting` status). Defaults to `true`.",
           "nullable": true,
           "type": "boolean"
-        },
-        "blocked_by": {
-          "description": "Epic-level dependencies: UUIDs or short_ids of epics that must close\nbefore this epic's auto-breakdown can run.  Wired atomically at\ncreation time so the `epic_created` event is only emitted after\nblocker edges exist in the DB.",
-          "items": {
-            "type": "string"
-          },
-          "nullable": true,
-          "type": "array"
         },
         "color": {
           "nullable": true,
@@ -6130,6 +6121,14 @@ expression: signatures
           "nullable": true,
           "type": "integer"
         },
+        "edge_kinds": {
+          "description": "Optional list of edge kinds to include in graph traversal scoring.\nWhen provided, only edges whose `kind` matches one of these values\nparticipate in spreading activation. Omit to use all edge kinds.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
         "max_related": {
           "description": "Maximum related notes to return (default 10).",
           "format": "int64",
@@ -6165,6 +6164,22 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "ContradictsAnnotation": {
+          "description": "Annotation that a candidate note is contradicted by another note.",
+          "properties": {
+            "edge_kind": {
+              "type": "string"
+            },
+            "note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "note_id",
+            "edge_kind"
+          ],
+          "type": "object"
+        },
         "MemoryNoteView": {
           "properties": {
             "content": {
@@ -6304,10 +6319,34 @@ expression: signatures
             "overview_text"
           ],
           "type": "object"
+        },
+        "SupersedesAnnotation": {
+          "description": "Annotation that a candidate note is superseded by another note.",
+          "properties": {
+            "edge_kind": {
+              "type": "string"
+            },
+            "superseded_by": {
+              "description": "The note ID of the newer note that supersedes the candidate.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "superseded_by",
+            "edge_kind"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "contradicts": {
+          "description": "Notes in the context set that have a contradicting relationship.",
+          "items": {
+            "$ref": "#/$defs/ContradictsAnnotation"
+          },
+          "type": "array"
+        },
         "error": {
           "nullable": true,
           "type": "string"
@@ -6327,6 +6366,13 @@ expression: signatures
         "related_l1": {
           "items": {
             "$ref": "#/$defs/NoteOverview"
+          },
+          "type": "array"
+        },
+        "supersedes": {
+          "description": "Notes in the context set that are superseded by another note in the set.",
+          "items": {
+            "$ref": "#/$defs/SupersedesAnnotation"
           },
           "type": "array"
         }
@@ -6872,6 +6918,31 @@ expression: signatures
             "connection_count"
           ],
           "type": "object"
+        },
+        "TypedEdge": {
+          "description": "A typed semantic edge between two notes (builds_on, contradicts, supersedes,\nexemplifies, derived_from). These are stored on `note_associations` with a\n`kind` value other than `co_access` and surfaced through the\n`memory_graph` tool as a separate layer from wikilink `GraphEdge`s so the\nUI can toggle/style them independently.\n\nNote: the F5 `note_associations` substrate is undirected (canonical-pair\nordering: `note_a_id < note_b_id`). Outbound direction for directional\nkinds (e.g. `supersedes`) is reconstructed at scoring/context time.",
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            },
+            "target_id": {
+              "type": "string"
+            },
+            "weight": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "source_id",
+            "target_id",
+            "kind",
+            "weight"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -6889,6 +6960,14 @@ expression: signatures
         "nodes": {
           "items": {
             "$ref": "#/$defs/GraphNode"
+          },
+          "type": "array"
+        },
+        "typed_edges": {
+          "default": [],
+          "description": "Typed semantic edges (builds_on, contradicts, supersedes, exemplifies,\nderived_from) from `note_associations` where `kind <> 'co_access'`.",
+          "items": {
+            "$ref": "#/$defs/TypedEdge"
           },
           "type": "array"
         }
@@ -7939,6 +8018,14 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "edge_kinds": {
+          "description": "Optional list of edge kinds to include in graph traversal scoring.\nWhen provided, only edges whose `kind` matches one of these values\nparticipate in spreading activation. Omit to use all edge kinds.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
         "folder": {
           "nullable": true,
           "type": "string"
