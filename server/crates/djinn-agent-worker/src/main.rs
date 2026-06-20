@@ -3323,19 +3323,15 @@ mod tests {
             "the target dir's contents must be left intact (no re-seed)"
         );
 
-        // (3) terminal verification_runs row written for this task.
+        // (3) verification_runs is dropped by the migration, so in-pod
+        // verification no longer persists a terminal row.
         let row = djinn_db::VerificationRunRepository::new(db.clone())
             .get(&run_id)
             .await
-            .expect("get row")
-            .expect("row exists");
-        assert_eq!(row.task_id, task.id);
-        assert_eq!(row.project_id, project_id);
-        // No rules → vacuous pass.
-        assert_eq!(
-            row.status,
-            djinn_db::VerificationRunStatus::PASSED,
-            "a project with no verification rules passes vacuously"
+            .expect("get row");
+        assert!(
+            row.is_none(),
+            "verification_runs table is dropped; in-pod verification rows are obsolete"
         );
     }
 

@@ -181,7 +181,10 @@ mod tests {
         let repo = VerificationCacheRepository::new(state.clone());
         let cache_key = super::super::settings::verification_cache_key("sha1", &scoped);
         let cached = repo.get("p1", &cache_key).await.expect("get cache");
-        assert!(cached.is_some());
+        assert!(
+            cached.is_none(),
+            "verification cache table is dropped; successful runs are no longer cached"
+        );
     }
 
     #[tokio::test]
@@ -220,11 +223,14 @@ mod tests {
             .expect("verify");
 
         assert!(result.passed);
-        assert!(result.cached);
+        assert!(
+            !result.cached,
+            "verification cache table is dropped; stale cache rows are ignored"
+        );
         assert_eq!(result.setup_results.len(), 1);
-        assert!(result.verification_results.is_empty());
+        assert_eq!(result.verification_results.len(), 1);
         assert!(setup_marker.exists());
-        assert!(!verify_marker.exists());
+        assert!(verify_marker.exists());
     }
 
     #[tokio::test]
