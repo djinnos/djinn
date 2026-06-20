@@ -319,6 +319,67 @@ pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedProposalBlock>, String> 
     Ok(blocks)
 }
 
+/// Enforce the MDX proposal question form placement contract.
+///
+/// MDX proposals must contain exactly one registered `question-form` block, and
+/// that block must be the final parsed proposal block in the body.
+pub fn validate_question_form_placement(body: &str) -> Result<(), String> {
+    let blocks = parse_mdx_blocks(body)?;
+    let question_form_count = blocks
+        .iter()
+        .filter(|block| block.block_type == "question-form")
+        .count();
+
+    if question_form_count != 1 {
+        return Err(format!(
+            "Exactly one question-form block is required in MDX proposals (found {question_form_count})"
+        ));
+    }
+
+    if !matches!(
+        blocks.last(),
+        Some(block) if block.block_type == "question-form"
+    ) {
+        return Err(
+            "The question-form block must be the last block in the proposal body".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Validate question-form placement for MDX bodies; markdown bodies intentionally
+/// skip this block-level constraint.
+pub fn validate_question_form_placement_for_format(
+    body: &str,
+    body_format: &str,
+) -> Result<(), String> {
+    if body_format == "mdx" {
+        validate_question_form_placement(body)
+    } else {
+        Ok(())
+    }
+}
+
+/// Extract all PascalCase component (JSX-like) tag names from an MDX body, in
+/// first-seen order and de-duplicated. Unlike [`parse_mdx_blocks`], this does
+/// NOT filter to registered tags — it returns every opening tag whose name
+/// starts with an uppercase letter, so callers (e.g. body validation) can
+/// detect unknown blocks. Lowercase HTML tags (`<div>`, `<span>`, …) and
+/// closing tags (`</Tag>`) are intentionally ignored.
+pub fn extract_custom_block_tags(body: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"<([A-Z][A-Za-z0-9]*)").expect("tag regex should compile");
+    let mut tags = Vec::new();
+    let mut seen = HashSet::new();
+    for cap in re.captures_iter(body) {
+        let tag = cap[1].to_string();
+        if seen.insert(tag.clone()) {
+            tags.push(tag);
+        }
+    }
+    tags
+}
+
 /// Parse `key="value"` and `key='value'` attributes from an MDX opening tag.
 fn parse_attributes(attrs_str: &str) -> HashMap<String, String> {
     let re = regex::Regex::new(r#"([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#)
@@ -499,5 +560,112 @@ fn main() {}
         ];
         let err = validate_block_ids(&blocks).unwrap_err();
         assert!(err.contains("duplicate block id"));
+    }
+
+    #[test]
+    fn test_validate_question_form_missing() {
+        let body = r#"# Proposal
+
+<DataModel id="schema" name="User" />"#;
+
+        let err = validate_question_form_placement(body).unwrap_err();
+        assert_eq!(
+            err,
+            "Exactly one question-form block is required in MDX proposals (found 0)"
+        );
+    }
+
+    #[test]
+    fn test_validate_question_form_multiple() {
+        let body = r#"# Proposal
+
+<QuestionForm id="questions-a" title="Open questions" />
+
+<QuestionForm id="questions-b" title="More questions" />"#;
+
+        let err = validate_question_form_placement(body).unwrap_err();
+        assert_eq!(
+            err,
+            "Exactly one question-form block is required in MDX proposals (found 2)"
+        );
+    }
+
+    #[test]
+    fn test_validate_question_form_not_last() {
+        let body = r#"# Proposal
+
+<QuestionForm id="questions" title="Open questions" />
+
+<Decisions id="decisions" />"#;
+
+        let err = validate_question_form_placement(body).unwrap_err();
+        assert_eq!(
+            err,
+            "The question-form block must be the last block in the proposal body"
+        );
+    }
+
+    #[test]
+    fn test_validate_question_form_valid() {
+        let body = r#"# Proposal
+
+<DataModel id="schema" name="User" />
+
+<QuestionForm id="questions" title="Open questions" />"#;
+
+        assert!(validate_question_form_placement(body).is_ok());
+    }
+
+    #[test]
+    fn test_validate_question_form_markdown_skipped() {
+        let body = "# Proposal\n\nPlain markdown proposal with no MDX blocks.";
+
+        assert!(validate_question_form_placement_for_format(body, "markdown").is_ok());
+    }
+
+    #[test]
+    fn extract_tags_returns_registered_and_unknown() {
+        let body = r#"
+# Proposal
+
+<RichText id="intro" />
+<UnknownBlock id="x" />
+<Diagram id="flow">
+graph TD;
+</Diagram>
+"#;
+        let tags = extract_custom_block_tags(body);
+        // PascalCase tags, first-seen order, de-duplicated.
+        assert_eq!(tags, vec!["RichText", "UnknownBlock", "Diagram"]);
+    }
+
+    #[test]
+    fn extract_tags_ignores_lowercase_and_closing_tags() {
+        let body = "<div>\n<RichText />\n</RichText>\n</div>\n<span>hi</span>";
+        let tags = extract_custom_block_tags(body);
+        // `div`/`span` (lowercase) and `</RichText>` (closing) are ignored.
+        assert_eq!(tags, vec!["RichText"]);
+    }
+
+    #[test]
+    fn extract_tags_dedupes_repeated_tags() {
+        let body = "<RichText />\n<RichText />\n<Diagram />";
+        let tags = extract_custom_block_tags(body);
+        assert_eq!(tags, vec!["RichText", "Diagram"]);
+    }
+
+    #[test]
+    fn extract_tags_nested_blocks() {
+        // A registered block nested inside another registered block — both
+        // opening tags are extracted, enabling validation of nesting.
+        let body = "<RichText>\n  <Diagram>\n    graph TD\n  </Diagram>\n</RichText>";
+        let tags = extract_custom_block_tags(body);
+        assert_eq!(tags, vec!["RichText", "Diagram"]);
+    }
+
+    #[test]
+    fn extract_tags_empty_body() {
+        assert!(extract_custom_block_tags("").is_empty());
+        assert!(extract_custom_block_tags("plain markdown only").is_empty());
     }
 }

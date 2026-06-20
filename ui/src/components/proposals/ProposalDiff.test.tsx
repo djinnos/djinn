@@ -90,25 +90,25 @@ describe("ProposalDiff", () => {
             body_format: "mdx",
             body: [
               "Plan the data contract.",
-              '<data-model id="users">',
+              '<DataModel id="users">',
               "User { id: uuid }",
-              "</data-model>",
-              '<question-form id="open-questions">',
+              "</DataModel>",
+              '<QuestionForm id="open-questions">',
               "- Should user IDs be public?",
-              "</question-form>",
+              "</QuestionForm>",
             ].join("\n"),
           }),
           revision(2, {
             body_format: "mdx",
             body: [
               "Plan the data contract.",
-              '<data-model id="users">',
+              '<DataModel id="users">',
               "User { id: uuid, email: string }",
-              "</data-model>",
-              '<question-form id="open-questions">',
+              "</DataModel>",
+              '<QuestionForm id="open-questions">',
               "- Should user IDs be public?",
               "- Who owns PII deletion?",
-              "</question-form>",
+              "</QuestionForm>",
             ].join("\n"),
           }),
         ]}
@@ -120,14 +120,14 @@ describe("ProposalDiff", () => {
     await user.click(screen.getByRole("button", { name: "Show diff" }));
 
     expect(screen.getByText("## Body (mdx)")).toBeInTheDocument();
-    expect(screen.getByText('<data-model id="users">')).toBeInTheDocument();
+    expect(screen.getByText('<DataModel id="users">')).toBeInTheDocument();
     expect(screen.getByText("User { id: uuid }")).toBeInTheDocument();
     expect(
       screen.getByText("User { id: uuid, email: string }"),
     ).toBeInTheDocument();
     expect(screen.getByText("- Who owns PII deletion?")).toBeInTheDocument();
-    expect(container.querySelector("data-model")).toBeNull();
-    expect(container.querySelector("question-form")).toBeNull();
+    expect(container.querySelector("DataModel")).toBeNull();
+    expect(container.querySelector("QuestionForm")).toBeNull();
   });
 
   it("renders a graceful missing base revision state", async () => {
