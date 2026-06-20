@@ -33,6 +33,11 @@ export interface SnapshotNode {
   pagerank: number;
   community_id?: string;
   /**
+   * Server-derived topical keywords for collapsed community nodes. Undefined on
+   * legacy snapshots and non-community nodes.
+   */
+  keywords?: string[];
+  /**
    * Semantic-zoom community metadata (server `SnapshotNode` wire shape).
    * Only populated for collapsed `kind: "community"` nodes emitted by a
    * `level=community` snapshot. Symbol/file/folder nodes leave these
@@ -195,6 +200,7 @@ export function parseSnapshotResponse(value: unknown): SnapshotPayload | null {
           pagerank: Number(n.pagerank ?? 0),
           community_id:
             typeof n.community_id === "string" ? n.community_id : undefined,
+          keywords: normalizeKeywords(n.keywords),
           member_count:
             typeof n.member_count === "number" &&
             Number.isFinite(n.member_count) &&
@@ -242,6 +248,14 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : undefined;
+}
+
+function normalizeKeywords(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const keywords = value
+    .map(nonEmptyString)
+    .filter((keyword): keyword is string => keyword !== undefined);
+  return keywords.length > 0 ? keywords : undefined;
 }
 
 function normalizeKind(value: unknown): SnapshotNodeKind {
@@ -729,10 +743,19 @@ function addNode(
   const normalized = node.pagerank / maxRank;
   const size = scaledNodeSize(node, normalized, nodeCount);
   const workspaceColor = node.workspace ? colorForWorkspace(node.workspace) : undefined;
-  const label = node.workspace ? `${node.label} · ${node.workspace}` : node.label;
+  const primaryLabel =
+    node.workspace && node.workspace_context === true
+      ? `${node.label} · ${node.workspace}`
+      : node.label;
+  const keywordSubtitle = communityKeywordSubtitle(node);
+  const label = keywordSubtitle
+    ? `${primaryLabel}\n${keywordSubtitle}`
+    : primaryLabel;
   graph.addNode(node.id, {
     label,
     baseLabel: node.label,
+    subtitle: keywordSubtitle,
+    keywords: keywordSubtitle ? normalizeKeywords(node.keywords) : undefined,
     x: pos.x,
     y: pos.y,
     size,
@@ -764,6 +787,11 @@ function addNode(
     /** Stash the topology color so we can restore it when toggling modes. */
     topologyColor: colorForNode(node),
   });
+}
+
+function communityKeywordSubtitle(node: SnapshotNode): string | undefined {
+  if (node.kind !== "community") return undefined;
+  return normalizeKeywords(node.keywords)?.join(", ");
 }
 
 /**
