@@ -755,4 +755,19 @@ impl DjinnMcpServer {
             graph_staleness: None,
         }))
     }
+
+    pub(super) async fn code_graph_crate_graph(
+        &self,
+        ctx: &ProjectCtx,
+        _params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let result = self.state.repo_graph().crate_graph(ctx).await?;
+        Ok(CodeGraphResponse::CrateGraph(CrateGraphOpResponse {
+            crates: result.crates,
+            edges: result.edges,
+            message: result.message,
+            next_step: None,
+            graph_staleness: None,
+        }))
+    }
 }
