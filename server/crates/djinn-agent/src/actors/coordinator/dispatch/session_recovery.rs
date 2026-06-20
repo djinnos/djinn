@@ -296,7 +296,41 @@ impl CoordinatorActor {
             if session.agent_type == "chat" {
                 continue;
             }
-            if session.tokens_in != 0 || session.tokens_out != 0 {
+
+            // Load the owning task BEFORE the token-nonzero skip so we can
+            // bypass that skip when DB truth says the session is an orphan.
+            // Terminal/parked/reset tasks have no valid owner — their sessions
+            // should be reaped regardless of accumulated tokens.
+            let task_row = task_repo.get(task_id).await;
+            let cached_task = match &task_row {
+                Ok(Some(t)) => Some(t.clone()),
+                _ => None,
+            };
+            let status_overrides_token_skip = match cached_task.as_ref() {
+                Some(task) => {
+                    match task.status.as_str() {
+                        // Terminal or parked — session is orphaned regardless of tokens.
+                        "force_closed" | "closed" | "parked_permanently" | "parked_for_review" => {
+                            true
+                        }
+                        // Task was reset to `open` while the session was still
+                        // running — the session predates the reset.
+                        "open" => {
+                            session_predates_task_status(&session.started_at, &task.updated_at)
+                                .unwrap_or(false)
+                        }
+                        // In-progress / in-task-review / in-lead-intervention:
+                        // healthy long-running session, preserve the skip.
+                        _ => false,
+                    }
+                }
+                // Task not found — treat as orphaned (no valid owner).
+                None if matches!(task_row, Ok(None)) => true,
+                // Lookup error — skip this session (avoid acting on bad data).
+                _ => continue,
+            };
+
+            if !status_overrides_token_skip && (session.tokens_in != 0 || session.tokens_out != 0) {
                 continue;
             }
             let Some(age) = parse_iso_elapsed(&session.started_at) else {
@@ -348,13 +382,29 @@ impl CoordinatorActor {
                 agent_type = %session.agent_type,
                 age_seconds = age,
                 model_id = %session.model_id,
-                "CoordinatorActor: reaping zombie session (running, zero tokens, past hard cap, no live worker)"
+                status_overrides_token_skip,
+                "CoordinatorActor: reaping zombie session (no live worker, past hard cap)"
             );
 
+            let token_info = if session.tokens_in != 0 || session.tokens_out != 0 {
+                format!(
+                    "{} tokens (in={}, out={})",
+                    session.tokens_in + session.tokens_out,
+                    session.tokens_in,
+                    session.tokens_out
+                )
+            } else {
+                "zero tokens".to_string()
+            };
+            let status_note = if status_overrides_token_skip {
+                " Task status indicates orphan (terminal/parked/reset)."
+            } else {
+                ""
+            };
             let payload = serde_json::json!({
                 "message": format!(
-                    "Coordinator zombie-session backstop: {} session was `running` with zero tokens for {}s (hard cap {}s) with no live worker. Session finalized and task released for redispatch.",
-                    session.agent_type, age, ZOMBIE_HARD_CAP_SECS
+                    "Coordinator zombie-session backstop: {} session was `running` with {} for {}s (hard cap {}s) with no live worker.{} Session finalized and task released for redispatch.",
+                    session.agent_type, token_info, age, ZOMBIE_HARD_CAP_SECS, status_note
                 )
             })
             .to_string();
@@ -447,7 +497,7 @@ impl CoordinatorActor {
             // it up again. Mirrors the orphan reconciler's status→action map,
             // but does not depend on `has_session` (which is exactly the gate
             // that drifted).
-            match task_repo.get(task_id).await {
+            match task_row {
                 Ok(Some(task)) => {
                     let release = match task.status.as_str() {
                         "in_progress" => Some((TransitionAction::Release, "open")),
@@ -468,7 +518,7 @@ impl CoordinatorActor {
                                 "coordinator",
                                 "system",
                                 Some(
-                                    "Recovered by coordinator: zombie session reaped (running, zero tokens, no live worker)",
+                                    "Recovered by coordinator: zombie session reaped (no live worker, past hard cap)",
                                 ),
                                 None,
                             )
@@ -571,7 +621,18 @@ impl CoordinatorActor {
         let repo = self.task_repo();
         let mut affected = 0u64;
 
-        for status in ["in_progress", "in_task_review", "in_lead_intervention"] {
+        let session_repo = djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+
+        for status in [
+            "in_progress",
+            "in_task_review",
+            "in_lead_intervention",
+            "open",
+            "needs_task_review",
+        ] {
             let tasks = match repo.list_by_status(status).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -586,6 +647,89 @@ impl CoordinatorActor {
                 {
                     continue;
                 }
+
+                if matches!(task.status.as_str(), "open" | "needs_task_review") {
+                    let sessions = match session_repo.list_for_task(&task.id).await {
+                        Ok(sessions) => sessions,
+                        Err(e) => {
+                            tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: failed to query sessions for ready-state orphan scan");
+                            continue;
+                        }
+                    };
+                    let Some(running_session) = sessions
+                        .iter()
+                        .find(|session| session.status.as_str() == "running")
+                    else {
+                        continue;
+                    };
+
+                    let Some(session_predates_ready_state) =
+                        session_predates_task_status(&running_session.started_at, &task.updated_at)
+                    else {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            session_id = %running_session.id,
+                            session_started_at = %running_session.started_at,
+                            task_updated_at = %task.updated_at,
+                            "CoordinatorActor: failed to compare ready-state task/session timestamps for orphan scan"
+                        );
+                        continue;
+                    };
+                    if !session_predates_ready_state {
+                        continue;
+                    }
+
+                    let has_session = match self.pool.has_session(&task.id).await {
+                        Ok(b) => b,
+                        Err(PoolError::ActorDead) => {
+                            tracing::error!(
+                                "CoordinatorActor: slot pool actor dead, aborting stuck scan"
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: has_session query failed");
+                            continue;
+                        }
+                    };
+                    if has_session {
+                        continue;
+                    }
+
+                    let has_background_work = {
+                        let guard = self
+                            .background_work_tracker
+                            .lock()
+                            .expect("background work tracker mutex poisoned");
+                        guard.contains(&task.id)
+                    };
+                    if has_background_work {
+                        continue;
+                    }
+
+                    match session_repo.interrupt_running_for_task(&task.id).await {
+                        Ok(interrupted) if interrupted > 0 => {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                status = %task.status,
+                                interrupted,
+                                session_id = %running_session.id,
+                                "CoordinatorActor: finalized stale ready-state running session"
+                            );
+                            affected += 1;
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                error = %e,
+                                "CoordinatorActor: failed to finalize stale ready-state sessions"
+                            );
+                        }
+                    }
+                    continue;
+                }
+
                 let has_session = match self.pool.has_session(&task.id).await {
                     Ok(b) => b,
                     Err(PoolError::ActorDead) => {
@@ -650,10 +794,6 @@ impl CoordinatorActor {
                         );
                         // Finalize any orphaned "running" session records for this
                         // task so they don't accumulate as ghost rows.
-                        let session_repo = djinn_db::SessionRepository::new(
-                            self.db.clone(),
-                            crate::events::event_bus_for(&self.events_tx),
-                        );
                         if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
                             tracing::warn!(
                                 task_id = %task.short_id,
@@ -764,4 +904,10 @@ fn parse_iso_elapsed(started_at: &str) -> Option<u64> {
     let now = OffsetDateTime::now_utc();
     let elapsed = (now - parsed).whole_seconds();
     Some(if elapsed < 0 { 0 } else { elapsed as u64 })
+}
+
+fn session_predates_task_status(session_started_at: &str, task_updated_at: &str) -> Option<bool> {
+    let session_elapsed = parse_iso_elapsed(session_started_at)?;
+    let task_updated_elapsed = parse_iso_elapsed(task_updated_at)?;
+    Some(session_elapsed > task_updated_elapsed)
 }

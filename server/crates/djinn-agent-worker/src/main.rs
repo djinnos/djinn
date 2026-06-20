@@ -434,7 +434,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
     // same absolute workspace_dir. The cargo warm path uses the SAME canonical
     // form (see `warm_cargo_target_base`), so emitting both absolute paths
     // lets the coordinator health sweep confirm the seed outcome for the
-    // workspace verification will compile in.
+    // workspace task-run will compile in.
     let workspace_dir = match std::fs::canonicalize(workspace_path) {
         Ok(canonical) => canonical,
         Err(err) => {
@@ -634,9 +634,9 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
 /// single first-level subdir. Returns `None` when no cargo workspace exists
 /// (non-Rust repo) so the caller can skip the warm cleanly.
 ///
-/// Must resolve to the SAME absolute dir verification compiles in. Verification
+/// Must resolve to the SAME absolute dir task-run compiles in. Task-run
 /// runs its scoped commands (`cd server && cargo …`) from `DJINN_PROJECT_ROOT`,
-/// and both warm and verify clone to `/workspace/<sanitize_id(project)>`, so a
+/// and both warm and task-run clone to `/workspace/<sanitize_id(project)>`, so a
 /// dir like `<project_root>/server` lines up byte-for-byte across the two pods —
 /// a prerequisite for cargo fingerprints (which embed absolute source paths) to
 /// match and reuse to hit.
@@ -675,21 +675,21 @@ fn resolve_cargo_workspace_dir(
 }
 
 /// Pre-compile the cargo workspace from `main` into the warm per-project target
-/// base so verification (and task-run) pods seed it and recompile only their
-/// delta incrementally instead of cold-building.
+/// base so task-run pods seed it and recompile only their delta incrementally
+/// instead of cold-building.
 ///
-/// Runs the SAME work verification compiles (`cargo clippy --workspace
+/// Runs the SAME work task-run compiles (`cargo clippy --workspace
 /// --all-targets --all-features`, falling back to `cargo build`, then `cargo
 /// test --workspace --all-targets --all-features --no-run`) so the artifacts +
-/// fingerprints in the base actually match what verification produces. The warm
+/// fingerprints in the base actually match what task-run produces. The warm
 /// pod's env already routes `CARGO_TARGET_DIR=/cache/cargo-target/<project>`
 /// (the warm base) with `CARGO_INCREMENTAL=1`, so these compiles write straight
 /// into the base.
 ///
 /// Caller MUST have normalized tracked-file mtimes (`normalize_mtimes_at`)
-/// first: cargo freshness keys on file mtimes, and verification normalizes the
+/// first: cargo freshness keys on file mtimes, and task-run normalizes the
 /// same way before it compiles — without matching mtimes the base's fingerprints
-/// won't match verification's fresh clone and reuse never hits.
+/// won't match task-run's fresh clone and reuse never hits.
 ///
 /// Best-effort throughout: a missing cargo workspace (non-Rust repo) or any
 /// compile failure logs and returns — it never fails the graph warm.
@@ -709,7 +709,7 @@ async fn warm_cargo_target_base(
 
     // Canonicalize once so every structured event and metric for this warm
     // shares the same absolute workspace_dir. Cargo fingerprints embed
-    // absolute source paths, so the canonical form is what verification will
+    // absolute source paths, so the canonical form is what task-run will
     // also resolve to at task-run time — emitting it here is what lets the
     // coordinator health sweep correlate the warm path with the run path.
     let workspace_dir = match std::fs::canonicalize(&workspace_dir) {
@@ -750,7 +750,7 @@ async fn warm_cargo_target_base(
         return;
     }
 
-    // clippy is the heavier of verification's two passes and produces the same
+    // clippy is the heavier of the two passes and produces the same
     // check artifacts; fall back to a plain build if clippy is unavailable.
     // Each command carries its own feature_args — no policy.features()
     // chaining needed (and omitted to avoid double-adding features in the
@@ -1919,15 +1919,15 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
         }
     };
 
-    // Warm the cargo target base from `main` so verification/task-run pods seed
+    // Warm the cargo target base from `main` so task-run pods seed
     // it and recompile only their delta incrementally. This runs in the worker
     // (not the warm-Job shell) so we can normalize tracked-file mtimes to commit
-    // times FIRST — the SAME normalization verification applies before it
+    // times FIRST — the SAME normalization task-run applies before it
     // compiles. Cargo freshness keys on mtimes, so without matching them the
-    // base's fingerprints would never match verification's fresh clone and reuse
+    // base's fingerprints would never match task-run's fresh clone and reuse
     // would never hit (the bug this fixes). `lifecycle_root` is
     // `DJINN_PROJECT_ROOT` = the cloned `main` tree; `resolve_cargo_workspace_dir`
-    // lands on `<root>/server` — the exact dir verification's `cd server`
+    // lands on `<root>/server` — the exact dir task-run's `cd server`
     // compiles in. Best-effort: never fails the graph warm.
     djinn_workspace::normalize_mtimes_at(&lifecycle_root).await;
     let policy =

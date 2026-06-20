@@ -49,11 +49,12 @@ const DEFAULT_SORT: Record<BreakdownKind, SortKey> = {
 };
 
 export function UsageBreakdownsTab({ data }: { data: UsageAnalyticsResponse }) {
+  const breakdowns = data.breakdowns;
   const configs: BreakdownConfig[] = [
-    { kind: "user", value: "user", label: "By User", rows: data.breakdowns.by_user },
-    { kind: "project", value: "project", label: "By Project", rows: data.breakdowns.by_project },
-    { kind: "proposal", value: "proposal", label: "By Proposal", rows: data.breakdowns.by_proposal },
-    { kind: "task", value: "task", label: "By Task", rows: data.breakdowns.by_task },
+    { kind: "user", value: "user", label: "By User", rows: breakdowns?.by_user ?? [] },
+    { kind: "project", value: "project", label: "By Project", rows: breakdowns?.by_project ?? [] },
+    { kind: "proposal", value: "proposal", label: "By Proposal", rows: breakdowns?.by_proposal ?? [] },
+    { kind: "task", value: "task", label: "By Task", rows: breakdowns?.by_task ?? [] },
   ];
 
   return (

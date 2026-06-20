@@ -126,8 +126,7 @@ pub fn resolve_cargo_cache_policy(
         .map(|c| c.features.clone())
         .unwrap_or_default();
     // Only the explicit `.cargo/config.toml` `build.features = "all-features"`
-    // override can opt into an all-features warm.  Former verification-rule
-    // scanning was removed when the verification gate was deleted.
+    // override can opt into an all-features warm.
     let all_features = config_features.contains(&"all-features".to_string());
 
     let features = if all_features {
@@ -199,9 +198,8 @@ fn detect_workspace_layout(workspace_dir: &Path) -> bool {
     raw.contains_key("workspace")
 }
 
-// `detect_all_features_from_env_config` and `hook_contains` were removed
-// when the verification gate was deleted.  All-features warm is now opt-in
-// only via `.cargo/config.toml` `build.features = "all-features"`.
+// All-features warm is now opt-in only via `.cargo/config.toml`
+// `build.features = "all-features"`.
 /// Detect whether the project uses `cargo-nextest` (a `.config/nextest.toml` or
 /// `nextest.toml` at the cargo workspace root). Drives whether the test-compile
 /// warm step uses `cargo nextest run --no-run` vs `cargo test --no-run`.
@@ -248,9 +246,9 @@ fn build_warm_commands(
 ) -> Vec<CargoWarmCommand> {
     // Single-pass warm: always one clippy + one build fallback, matching
     // the worker's feature set exactly.  The former dual-pass
-    // (all-features + default-features for workspace) was removed when the
-    // verification gate was deleted — there is no longer an in-cluster
-    // consumer for the all-features warm pass on workspace projects.
+    // (all-features + default-features for workspace) was removed — there is
+    // no longer an in-cluster consumer for the all-features warm pass on
+    // workspace projects.
     let detected_features: Vec<String> = if all_features {
         vec!["--all-features".to_string()]
     } else if !features.is_empty() {
@@ -412,7 +410,7 @@ version = "0.1.0"
     }
 
     // (b) workspace with `--all-features` lifecycle hook → single default-
-    // features pass (lifecycle hook scanning was removed with verification)
+    // features pass
     #[test]
     fn workspace_with_lifecycle_hook_no_longer_triggers_all_features() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -731,7 +729,7 @@ version = "0.1.0"
     }
 
     // (d1) build_warm_commands: workspace + all_features → single-pass with
-    //      --all-features (dual-pass was removed with verification gate)
+    //      --all-features (dual-pass was removed)
     #[test]
     fn build_warm_commands_workspace_all_features_single_pass() {
         let cmds = build_warm_commands(true, true, &[], false);

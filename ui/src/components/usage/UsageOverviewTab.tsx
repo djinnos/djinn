@@ -90,7 +90,7 @@ export function UsageOverviewTab({
   const [grouping, setGrouping] = useState<SpendGrouping>("model");
 
   const seriesRows = useMemo(
-    () => buildSeriesRows(data.time_series, data, grouping),
+    () => buildSeriesRows(data.time_series ?? [], data, grouping),
     [data, grouping],
   );
 
@@ -100,7 +100,7 @@ export function UsageOverviewTab({
 
   return (
     <div className="space-y-4">
-      <KpiRow kpis={data.kpis} />
+      <KpiRow kpis={data.kpis ?? []} />
 
       <ChartSection
         title="Spend over time"
@@ -339,8 +339,8 @@ function buildSeriesRows(
   grouping: SpendGrouping,
 ): SeriesRow[] {
   const projectNames = new Map<string, string>();
-  for (const row of data.breakdowns.by_project) projectNames.set(row.id, row.name);
-  for (const cell of data.project_model_matrix) {
+  for (const row of data.breakdowns?.by_project ?? []) projectNames.set(row.id, row.name);
+  for (const cell of data.project_model_matrix ?? []) {
     projectNames.set(cell.project_id, cell.project_name);
   }
 

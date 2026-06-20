@@ -508,7 +508,7 @@ fn build_task_run_env(
 }
 
 /// Runtime env vars routing the shared Rust toolchain caches to the persistent
-/// `/cache` PVC. Warm/verification Pods use the per-project base target dir;
+/// `/cache` PVC. Warm Pods use the per-project base target dir;
 /// task-run Pods use `task_run_cache_env_vars` so their writable target dir is
 /// private per task run while still sharing registry and sccache settings.
 /// The common cache routing stays single-sourced here on
@@ -532,8 +532,7 @@ fn build_task_run_env(
 /// - CARGO_TARGET_DIR: compiled artifacts are workspace-specific. The shared
 ///   warm base is namespaced per project; the warm job pre-compiles main into it
 ///   with `CARGO_INCREMENTAL=1` so it carries a clean, incremental-enabled
-///   main-based cache (CI-style, like Swatinem/rust-cache). Task-runs AND
-///   verification get a deterministic private dir (under
+///   main-based cache (CI-style, like Swatinem/rust-cache). Task-runs get a deterministic private dir (under
 ///   `/cache/cargo-target-runs/<id>`) seeded from that warm base, so they never
 ///   write the shared base directly or contend on Cargo's shared build-dir lock,
 ///   and recompile only their delta incrementally. (Default is
@@ -556,11 +555,11 @@ fn common_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
         // `CARGO_INCREMENTAL=0` here. The fast path is incremental compilation
         // over a warm, main-based per-project target base (CI-style, like
         // Swatinem/rust-cache): the warm job pre-compiles the workspace into the
-        // base with `CARGO_INCREMENTAL=1`, task-run/verification pods seed a
+        // base with `CARGO_INCREMENTAL=1`, task-run pods seed a
         // private run target dir from that base and recompile only their delta
         // incrementally. Forcing sccache (which requires CARGO_INCREMENTAL=0)
         // disables incremental and was the wrong lever — it made every
-        // verification cold-build (~14-29min clippy). SCCACHE_DIR is left set
+        // task-run cold-build (~14-29min clippy). SCCACHE_DIR is left set
         // below so a repo that *itself* pins `rustc-wrapper = "sccache"` in its
         // .cargo/config.toml still gets a writable, Landlock-allowed cache dir;
         // we just don't impose the wrapper on repos that don't ask for it.
@@ -571,7 +570,7 @@ fn common_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
         // Default is 10G, which evicts fast on a large workspace; give sccache
         // more headroom on the shared PVC.
         env_var("SCCACHE_CACHE_SIZE", "20G"),
-        // Build-in-pod contexts (task-run, warm, verification) have no Postgres
+        // Build-in-pod contexts (task-run, warm) have no Postgres
         // reachable, but a repo's .cargo/config.toml may bake a DATABASE_URL for
         // local online sqlx (djinn itself bakes :5433). Force offline so the
         // compile-time sqlx macros use the committed .sqlx cache instead of
@@ -582,9 +581,8 @@ fn common_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
 }
 
 /// Base cache env vars routing CARGO_TARGET_DIR at the shared per-project warm
-/// base. Warm/verification-test Pods write this base directly; verification Pods
-/// use it only as the seed source + fallback (the worker overrides
-/// CARGO_TARGET_DIR to a private run dir).
+/// base. Warm Pods write this base directly; task-run Pods seed a private
+/// run dir from it (the worker overrides CARGO_TARGET_DIR to a private run dir).
 pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     let mut env = common_cache_env_vars(project_id);
     env.push(env_var(
@@ -597,9 +595,9 @@ pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
 /// Cache env vars for warm Pods that populate the shared per-project cargo
 /// target base.
 ///
-/// Warm, verify, and task-run pods must use the SAME compile strategy or the
+/// Warm and task-run pods must use the SAME compile strategy or the
 /// warm base is wasted (cargo fingerprints fold in `CARGO_INCREMENTAL` and the
-/// rustc wrapper). All three therefore force `CARGO_INCREMENTAL=1` and clear
+/// rustc wrapper). Both therefore force `CARGO_INCREMENTAL=1` and clear
 /// any repo `rustc-wrapper = "sccache"` (`RUSTC_WRAPPER=""`). A project that
 /// hard-pins `CARGO_INCREMENTAL=0 force=true` in its own `.cargo/config.toml`
 /// can still beat env, but that clamps warm AND worker identically, so

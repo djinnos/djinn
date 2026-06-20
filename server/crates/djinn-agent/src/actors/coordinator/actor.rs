@@ -92,7 +92,7 @@ pub(super) struct CoordinatorActor {
     /// successful stage transition to a different dispatch role.
     // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
     pub(super) dispatch_failure_streak: HashMap<String, u32>,
-    /// Shared tracker for in-flight verification background tasks.
+    /// Shared tracker for in-flight background tasks.
     pub(super) background_work_tracker: BackgroundWorkTracker,
     /// Per-task state of the PR poller's offloaded clean-merge fast path. The
     /// heavy mechanical merge (fetch + ephemeral clone + merge + push) runs in a

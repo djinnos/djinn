@@ -4166,7 +4166,7 @@ expression: signatures
     "input_schema": {
       "$defs": {
         "CargoCachePolicy": {
-          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup/verification command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
+          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
           "oneOf": [
             {
               "description": "Resolve the policy from the project itself at warm/worker runtime.",
@@ -4322,7 +4322,7 @@ expression: signatures
               "default": {
                 "mode": "auto-detected"
               },
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup/verification command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -4418,7 +4418,7 @@ expression: signatures
               "type": "object"
             }
           ],
-          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+          "description": "A lifecycle / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
         },
         "JavaLanguage": {
           "properties": {
@@ -4561,7 +4561,7 @@ expression: signatures
             },
             "pre_verification": {
               "default": [],
-              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "description": "Workspace setup hook that runs once in the task-run Pod before the\nsupervisor starts. Typically `pnpm install` / `cargo build` / similar\n— commands that prepare the workspace for the agent session.",
               "items": {
                 "$ref": "#/$defs/HookCommand"
               },
@@ -4769,7 +4769,7 @@ expression: signatures
     "output_schema": {
       "$defs": {
         "CargoCachePolicy": {
-          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup/verification command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
+          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
           "oneOf": [
             {
               "description": "Resolve the policy from the project itself at warm/worker runtime.",
@@ -4925,7 +4925,7 @@ expression: signatures
               "default": {
                 "mode": "auto-detected"
               },
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup/verification command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -5021,7 +5021,7 @@ expression: signatures
               "type": "object"
             }
           ],
-          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+          "description": "A lifecycle / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
         },
         "ImageDto": {
           "properties": {
@@ -5201,7 +5201,7 @@ expression: signatures
             },
             "pre_verification": {
               "default": [],
-              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "description": "Workspace setup hook that runs once in the task-run Pod before the\nsupervisor starts. Typically `pnpm install` / `cargo build` / similar\n— commands that prepare the workspace for the agent session.",
               "items": {
                 "$ref": "#/$defs/HookCommand"
               },
@@ -5392,7 +5392,7 @@ expression: signatures
     "input_schema": {
       "$defs": {
         "CargoCachePolicy": {
-          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup/verification command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
+          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
           "oneOf": [
             {
               "description": "Resolve the policy from the project itself at warm/worker runtime.",
@@ -5548,7 +5548,7 @@ expression: signatures
               "default": {
                 "mode": "auto-detected"
               },
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup/verification command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -5644,7 +5644,7 @@ expression: signatures
               "type": "object"
             }
           ],
-          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+          "description": "A lifecycle / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
         },
         "JavaLanguage": {
           "properties": {
@@ -5787,7 +5787,7 @@ expression: signatures
             },
             "pre_verification": {
               "default": [],
-              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "description": "Workspace setup hook that runs once in the task-run Pod before the\nsupervisor starts. Typically `pnpm install` / `cargo build` / similar\n— commands that prepare the workspace for the agent session.",
               "items": {
                 "$ref": "#/$defs/HookCommand"
               },
@@ -8897,7 +8897,7 @@ expression: signatures
     "output_schema": {
       "$defs": {
         "CargoCachePolicy": {
-          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup/verification command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
+          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
           "oneOf": [
             {
               "description": "Resolve the policy from the project itself at warm/worker runtime.",
@@ -9053,7 +9053,7 @@ expression: signatures
               "default": {
                 "mode": "auto-detected"
               },
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup/verification command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -9149,7 +9149,7 @@ expression: signatures
               "type": "object"
             }
           ],
-          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+          "description": "A lifecycle / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
         },
         "JavaLanguage": {
           "properties": {
@@ -9292,7 +9292,7 @@ expression: signatures
             },
             "pre_verification": {
               "default": [],
-              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "description": "Workspace setup hook that runs once in the task-run Pod before the\nsupervisor starts. Typically `pnpm install` / `cargo build` / similar\n— commands that prepare the workspace for the agent session.",
               "items": {
                 "$ref": "#/$defs/HookCommand"
               },
@@ -9460,7 +9460,7 @@ expression: signatures
     "output_schema": {
       "$defs": {
         "CargoCachePolicy": {
-          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup/verification command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
+          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
           "oneOf": [
             {
               "description": "Resolve the policy from the project itself at warm/worker runtime.",
@@ -9616,7 +9616,7 @@ expression: signatures
               "default": {
                 "mode": "auto-detected"
               },
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup/verification command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -9712,7 +9712,7 @@ expression: signatures
               "type": "object"
             }
           ],
-          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+          "description": "A lifecycle / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
         },
         "JavaLanguage": {
           "properties": {
@@ -9855,7 +9855,7 @@ expression: signatures
             },
             "pre_verification": {
               "default": [],
-              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "description": "Workspace setup hook that runs once in the task-run Pod before the\nsupervisor starts. Typically `pnpm install` / `cargo build` / similar\n— commands that prepare the workspace for the agent session.",
               "items": {
                 "$ref": "#/$defs/HookCommand"
               },
@@ -10000,7 +10000,7 @@ expression: signatures
     "input_schema": {
       "$defs": {
         "CargoCachePolicy": {
-          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup/verification command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
+          "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
           "oneOf": [
             {
               "description": "Resolve the policy from the project itself at warm/worker runtime.",
@@ -10156,7 +10156,7 @@ expression: signatures
               "default": {
                 "mode": "auto-detected"
               },
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup/verification command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected feature/sccache/incremental choices at the environment-config\nlevel. `None` is accepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers."
             },
             "env": {
               "additionalProperties": {
@@ -10252,7 +10252,7 @@ expression: signatures
               "type": "object"
             }
           ],
-          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+          "description": "A lifecycle / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
         },
         "JavaLanguage": {
           "properties": {
@@ -10395,7 +10395,7 @@ expression: signatures
             },
             "pre_verification": {
               "default": [],
-              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "description": "Workspace setup hook that runs once in the task-run Pod before the\nsupervisor starts. Typically `pnpm install` / `cargo build` / similar\n— commands that prepare the workspace for the agent session.",
               "items": {
                 "$ref": "#/$defs/HookCommand"
               },
@@ -14887,7 +14887,7 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "actor_role": {
-          "description": "Filter by actor_role (e.g. \"lead\", \"reviewer\", \"worker\", \"verification\", \"system\").",
+          "description": "Filter by actor_role (e.g. \"lead\", \"reviewer\", \"worker\", \"system\").",
           "nullable": true,
           "type": "string"
         },
@@ -15912,7 +15912,7 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "action": {
-          "description": "Transition action: start, submit_verification,\nverification_pass, verification_fail, release_verification,\nsubmit_task_review, task_review_start,\ntask_review_reject, task_review_reject_conflict, task_review_approve,\npr_created, pr_undraft, pr_ci_failed, pr_conflict,\npr_merge, pr_changes_requested,\nreopen, close, release, release_task_review, force_close,\nuser_override.",
+          "description": "Transition action: start,\nsubmit_task_review, task_review_start,\ntask_review_reject, task_review_reject_conflict, task_review_approve,\npr_created, pr_undraft, pr_ci_failed, pr_conflict,\npr_merge, pr_changes_requested,\nreopen, close, release, release_task_review, force_close,\nuser_override.",
           "type": "string"
         },
         "actor_id": {
@@ -15932,7 +15932,7 @@ expression: signatures
           "type": "string"
         },
         "reason": {
-          "description": "Required for: verification_fail, release_verification,\ntask_review_reject, task_review_reject_conflict,\npr_changes_requested,\nreopen, release, release_task_review, force_close.",
+          "description": "Required for:\ntask_review_reject, task_review_reject_conflict,\npr_changes_requested,\nreopen, release, release_task_review, force_close.",
           "nullable": true,
           "type": "string"
         },

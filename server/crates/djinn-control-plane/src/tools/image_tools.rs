@@ -324,7 +324,7 @@ impl DjinnMcpServer {
     }
 
     #[tool(
-        description = "Set which backing-service presets are injected as native sidecars into every task-run / verification Pod that runs this image (full replacement; empty clears all). Each becomes reachable on 127.0.0.1 with its connection string in the preset's env var (e.g. TEST_POSTGRES_URL)."
+        description = "Set which backing-service presets are injected as native sidecars into every task-run Pod that runs this image (full replacement; empty clears all). Each becomes reachable on 127.0.0.1 with its connection string in the preset's env var (e.g. TEST_POSTGRES_URL)."
     )]
     pub async fn image_set_services(
         &self,
