@@ -11085,6 +11085,99 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_blocks",
+    "read_only": true,
+    "destructive": false,
+    "idempotent": true,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ProposalBlocksParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalBlockDefinition": {
+          "properties": {
+            "fields": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ProposalBlockFieldSchema"
+              },
+              "description": "Field schema keyed by field name.",
+              "type": "object"
+            },
+            "tag": {
+              "description": "MDX component tag, e.g. `AnnotatedCode`.",
+              "type": "string"
+            },
+            "type": {
+              "description": "Stable proposal block type identifier, e.g. `annotated-code`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "tag",
+            "fields"
+          ],
+          "type": "object"
+        },
+        "ProposalBlockFieldSchema": {
+          "properties": {
+            "enum_values": {
+              "items": {
+                "type": "string"
+              },
+              "nullable": true,
+              "type": "array"
+            },
+            "fields": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ProposalBlockFieldSchema"
+              },
+              "nullable": true,
+              "type": "object"
+            },
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProposalBlockFieldSchema"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ]
+            },
+            "type": {
+              "description": "Primitive schema kind: `string`, `boolean`, `object`, or `array`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "blocks": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ProposalBlockDefinition"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "blocks"
+      ],
+      "title": "ProposalBlocksResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_create",
     "read_only": false,
     "destructive": true,
