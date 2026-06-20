@@ -794,6 +794,7 @@
             is_test: false,
             x: 0.0,
             y: 0.0,
+            keywords: Vec::new(),
         });
         response.snapshot.edges.push(crate::bridge::SnapshotEdge {
             from: "file:src/main.rs".to_string(),
@@ -915,6 +916,7 @@
             is_test: false,
             x: 0.0,
             y: 0.0,
+            keywords: Vec::new(),
         };
         let json = serde_json::to_value(node).expect("serialize node");
         assert!(
