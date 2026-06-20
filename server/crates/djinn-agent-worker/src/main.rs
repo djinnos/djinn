@@ -2303,9 +2303,8 @@ async fn run_verify_test(test_id: &str) -> Result<()> {
 /// (`verify_commit`) the server runs inline on the non-Kubernetes path.
 ///
 /// Faithful to the server-side pipeline (`actors/slot/verification.rs`): it
-/// normalizes tracked-file mtimes (cargo-cache reuse), resolves the role-level
-/// `verification_command` override + the project's scoped rules, then runs
-/// `verify_commit` keyed on the real HEAD commit.
+/// normalizes tracked-file mtimes (cargo-cache reuse), resolves the project's
+/// scoped rules, then runs `verify_commit` keyed on the real HEAD commit.
 async fn run_verify_task(run_id: &str) -> Result<()> {
     let db = bootstrap_warm_database().await?;
     let repo = djinn_db::VerificationRunRepository::new(db.clone());
@@ -2369,10 +2368,10 @@ async fn run_verify_task(run_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Shared core of a pre-PR verification run: resolve the role override + scoped
-/// commands against `project_root` (already checked out to the committed task
-/// tree), run the SAME `verify_commit` pipeline the server runs, and write the
-/// terminal outcome (`passed`/`failed`/`error`) to the `verification_runs` row.
+/// Shared core of a pre-PR verification run: resolve scoped commands against
+/// `project_root` (already checked out to the committed task tree), run the SAME
+/// `verify_commit` pipeline the server runs, and write the terminal outcome
+/// (`passed`/`failed`/`error`) to the `verification_runs` row.
 ///
 /// `CARGO_TARGET_DIR` is assumed to already point at the run's target dir (the
 /// separate-pod path seeds it from the warm base; the in-pod-after-task path
@@ -2388,18 +2387,14 @@ pub(crate) async fn run_verification_into_run(
     project_id: &str,
     target_branch: &str,
     project_root: &Path,
-    task: &djinn_core::models::Task,
+    _task: &djinn_core::models::Task,
 ) {
-    // Role/specialist `verification_command` override (absolute priority in
-    // resolve_scoped_commands), mirroring the server pipeline.
-    let role_cmd_override = verify_task_role_override(db, task).await;
-
     let scoped_commands = djinn_agent::verification::scoped::resolve_scoped_commands(
         db,
         Some(project_id),
         project_root,
         target_branch,
-        role_cmd_override.as_deref(),
+        None,
     )
     .await;
 
@@ -2449,25 +2444,6 @@ pub(crate) async fn run_verification_into_run(
             warn!(run_id, error = %msg, "verification run errored");
         }
     }
-}
-
-/// Resolve the role-level `verification_command` override for a task, mirroring
-/// `role_verification_command_for_task` in the server pipeline. Returns `None`
-/// when the task has no `agent_type`, the role is missing, or its command is
-/// empty.
-async fn verify_task_role_override(
-    db: &Database,
-    task: &djinn_core::models::Task,
-) -> Option<String> {
-    let specialist_name = task.agent_type.as_deref().filter(|s| !s.is_empty())?;
-    let role_repo = djinn_db::AgentRepository::new(db.clone(), EventBus::noop());
-    let role = role_repo
-        .get_by_name_for_project(&task.project_id, specialist_name)
-        .await
-        .ok()
-        .flatten()?;
-    role.verification_command
-        .filter(|cmd| !cmd.trim().is_empty())
 }
 
 /// Resolve the HEAD commit of the checked-out task branch in `project_root`.
