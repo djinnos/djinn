@@ -398,7 +398,7 @@ impl DjinnMcpServer {
     }
 
     /// Aggregate effectiveness metrics per agent: success rate, token usage,
-    /// session duration, verification pass rate, reopen rate.
+    /// session duration, reopen rate.
     /// Optionally filter to a single agent by UUID or name.
     #[tool(
         description = "Return aggregated effectiveness metrics per agent (success_rate, avg_tokens, avg_time_seconds, avg_reopens). Accepts optional agent_id filter and window_days (default 30)."

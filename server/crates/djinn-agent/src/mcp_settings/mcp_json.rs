@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::settings::McpServerConfig;
+use super::McpServerConfig;
 
 const DISCOVERY_PATHS: [&str; 3] = ["mcp.json", ".cursor/mcp.json", ".opencode/mcp.json"];
 

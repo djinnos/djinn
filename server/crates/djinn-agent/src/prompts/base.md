@@ -48,5 +48,3 @@ If your tool surface includes task comments, treat file-placement claims as veri
 {{tools_section}}
 
 {{setup_commands_section}}
-
-{{verification_section}}

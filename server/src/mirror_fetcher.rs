@@ -234,9 +234,7 @@ pub(crate) async fn fetch_one(
     // `project_has_indexable_code` resolves through the assigned catalog
     // image — catalog projects keep an empty per-project languages block by
     // design (`project_set_image` never copies the image config).
-    if djinn_agent::verification::environment::project_has_indexable_code(state.db(), project_id)
-        .await
-    {
+    if djinn_agent::environment::project_has_indexable_code(state.db(), project_id).await {
         state.graph_warmer().await.trigger(project_id).await;
     } else {
         tracing::debug!(

@@ -14,7 +14,6 @@ use crate::server::AppState;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 const SESSION_MESSAGE_MIN_INTERVAL: Duration = Duration::from_millis(50);
 const SESSION_TOKEN_UPDATE_MIN_INTERVAL: Duration = Duration::from_millis(500);
-const VERIFICATION_STEP_MIN_INTERVAL: Duration = Duration::from_millis(200);
 // Browser-visible liveness ping interval. The axum KeepAlive comment frames
 // emitted by Sse::keep_alive are invisible to EventSource listeners, so we
 // also emit a named ping event on this cadence. Pings never carry an id,
@@ -71,10 +70,6 @@ impl BatchAccumulator {
                 key: "session.token_update",
                 min_interval: SESSION_TOKEN_UPDATE_MIN_INTERVAL,
             },
-            ("verification", "step") => EventTier::Throttled {
-                key: "verification.step",
-                min_interval: VERIFICATION_STEP_MIN_INTERVAL,
-            },
             _ => EventTier::Immediate,
         }
     }
@@ -118,7 +113,6 @@ impl BatchAccumulator {
             let min_interval = match key {
                 "session.message" => SESSION_MESSAGE_MIN_INTERVAL,
                 "session.token_update" => SESSION_TOKEN_UPDATE_MIN_INTERVAL,
-                "verification.step" => VERIFICATION_STEP_MIN_INTERVAL,
                 _ => continue,
             };
             let allowed = self
@@ -318,7 +312,6 @@ fn is_wsl() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use djinn_agent::verification::StepEvent;
     use serde_json::json;
 
     fn task_updated_envelope(id: &str, title: &str) -> DjinnEventEnvelope {
@@ -562,44 +555,6 @@ mod tests {
         let flushed = accumulator.flush();
         assert_eq!(flushed.len(), 1);
         assert_eq!(flushed[0].payload()["tokens"], 2);
-    }
-
-    #[test]
-    fn adr_045_throttles_verification_steps() {
-        let mut accumulator = BatchAccumulator::new();
-        let first = DjinnEventEnvelope::verification_step(
-            "p1",
-            Some("t1"),
-            "verification",
-            &StepEvent::Started {
-                index: 1,
-                total: 2,
-                name: "test".into(),
-                command: "cargo test".into(),
-            },
-        );
-        let second = DjinnEventEnvelope::verification_step(
-            "p1",
-            Some("t1"),
-            "verification",
-            &StepEvent::Finished {
-                index: 1,
-                name: "test".into(),
-                exit_code: 0,
-                duration_ms: 1,
-                stdout: String::new(),
-                stderr: String::new(),
-            },
-        );
-        assert_eq!(accumulator.push(first).len(), 1);
-        assert!(accumulator.push(second).is_empty());
-        accumulator.throttled_last_sent.insert(
-            "verification.step",
-            Instant::now() - VERIFICATION_STEP_MIN_INTERVAL,
-        );
-        let flushed = accumulator.flush();
-        assert_eq!(flushed.len(), 1);
-        assert!(flushed[0].payload()["step"].get("Finished").is_some());
     }
 
     #[test]

@@ -12,8 +12,6 @@
 //! - `learned_prompt` — auto-improvement amendments, also appended.
 //! - `mcp_servers` / `skills` — per-role tool/skill lists (override project
 //!   defaults from `settings.json`).
-//! - `verification_command` — role-level override for the project's
-//!   `environment_config.verification` rules (fetched from Dolt in P8+).
 //! - `model_preference` — role-level preference that dispatch uses to seed
 //!   `TaskRunSpec::model_id_per_role`.
 //!
@@ -48,7 +46,7 @@ use crate::roles::{AgentRole, role_impl_for};
 
 /// Per-stage role-config bundle consumed by `execute_stage` when composing
 /// `PromptContextInputs`, `resolve_mcp_and_skills`, and
-/// `resolve_setup_and_verification_context`.
+/// `resolve_setup_context`.
 ///
 /// All fields have sensible empty defaults so the stage can proceed even when
 /// the project has no DB-level role rows configured.
@@ -128,7 +126,7 @@ fn agent_type_for_role_kind(kind: RoleKind) -> AgentType {
 /// 1. If `task.agent_type` names a specialist that resolves to an `Agent`
 ///    row, the specialist wins: its `base_role` picks the runtime
 ///    `AgentRole`, and its field values (prompt extensions, learned prompt,
-///    MCP servers, skills, verification command, model preference) populate
+///    MCP servers, skills, model preference) populate
 ///    every override slot.  If the specialist's `base_role` string fails to
 ///    parse, we keep the injected role but still pick up the specialist's
 ///    override fields (legacy-parity behaviour — `AgentType::from_str`

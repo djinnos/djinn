@@ -46,15 +46,15 @@ pub(crate) fn recent_feedback(
         .collect()
 }
 
-/// Extract worker submission summary/concerns and the last verification failure
-/// from the activity log so the reviewer sees why the worker made certain changes.
+/// Extract worker submission summary/concerns from the activity log so the
+/// reviewer sees why the worker made certain changes.
 ///
-/// Returns `(worker_summary, worker_concerns, verification_failure)`.
+/// Returns `(worker_summary, worker_concerns)`.
 pub(crate) fn extract_worker_context(
     activity: &Option<Vec<djinn_core::models::ActivityEntry>>,
-) -> (Option<String>, Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>) {
     let Some(entries) = activity else {
-        return (None, None, None);
+        return (None, None);
     };
 
     // Last work_submitted entry — contains summary and remaining_concerns.
@@ -91,21 +91,7 @@ pub(crate) fn extract_worker_context(
         })
         .unwrap_or((None, None));
 
-    // Last verification failure comment.
-    let verification_failure = entries
-        .iter()
-        .rev()
-        .find(|e| e.event_type == "comment" && e.actor_role == "verification")
-        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.payload).ok())
-        .and_then(|payload| {
-            payload
-                .get("body")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| truncate_feedback(s, MAX_VERIFICATION_CHARS))
-        });
-
-    (worker_summary, worker_concerns, verification_failure)
+    (worker_summary, worker_concerns)
 }
 
 /// Build a formatted PR review feedback section for the worker prompt.

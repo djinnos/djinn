@@ -13,8 +13,7 @@ pub struct TaskrunJobRef {
     pub task_run_id: String,
 }
 
-/// Structured error returned from runtime dispatch calls
-/// (`dispatch_verification`, `dispatch_verification_test`) so callers can
+/// Structured error returned from runtime dispatch calls so callers can
 /// distinguish transient `ImageNotReady` (catalog image mid-rebuild) from
 /// hard backend failures. The string-form preserved via `Display` is the
 /// historical wire format; structured fields let callers decide whether to
@@ -23,9 +22,8 @@ pub struct TaskrunJobRef {
 pub enum RuntimeDispatchError {
     /// The project's dispatch image is not currently `ready`. See
     /// [`djinn_runtime::WarmerError::ImageNotReady`] for the underlying
-    /// semantics; the bridge preserves the structured fields so the agent
-    /// slot actor and the MCP verification-test tool can implement a
-    /// bounded requeue without parsing strings.
+    /// semantics; the bridge preserves the structured fields so callers
+    /// can implement a bounded requeue without parsing strings.
     ImageNotReady {
         project_id: String,
         image_status: String,
@@ -121,32 +119,6 @@ pub trait RuntimeOps: Send + Sync {
     /// trigger a dispatch pass. Fire-and-forget; a no-op on runtimes without a
     /// live coordinator/pool.
     async fn apply_user_model_change(&self);
-    /// Dispatch a one-shot verification-test Job for `test_id` in `project_id`'s
-    /// image (the worker writes the outcome to `verification_test_runs`). Routes
-    /// to the K8s graph warmer; errors on runtimes without a kube client.
-    /// Returns a structured [`RuntimeDispatchError`] so callers can distinguish
-    /// transient `ImageNotReady` (catalog image mid-rebuild) from hard
-    /// backend failures.
-    async fn dispatch_verification_test(
-        &self,
-        test_id: &str,
-        project_id: &str,
-    ) -> Result<(), RuntimeDispatchError>;
-    /// Dispatch a one-shot pre-PR verification run for `run_id` in `project_id`'s
-    /// image (the worker writes per-command results + pass/fail to the
-    /// `verification_runs` row). The Job clones `target_branch`, fetches +
-    /// checks out `task_branch`, then runs the real verification pipeline.
-    /// Routes to the K8s graph warmer; errors on runtimes without a kube
-    /// client. Returns a structured [`RuntimeDispatchError`] so callers can
-    /// distinguish transient `ImageNotReady` (catalog image mid-rebuild)
-    /// from hard backend failures.
-    async fn dispatch_verification(
-        &self,
-        run_id: &str,
-        project_id: &str,
-        task_branch: &str,
-        target_branch: &str,
-    ) -> Result<(), RuntimeDispatchError>;
     /// Reconcile a catalog image's build (migration 46): build the shared
     /// image once so every assigned project can use it. A no-op on runtimes
     /// without an image controller (dev mode).
@@ -175,9 +147,9 @@ pub trait RuntimeOps: Send + Sync {
 mod tests {
     use super::*;
 
-    // Pin the discriminator contract that the slot actor and MCP
-    // verification-test tool rely on: a transient `ImageNotReady` is
-    // requeueable; a permanent `ImageNotReady` and any `Backend` error
+    // Pin the discriminator contract that dispatch callers rely on: a
+    // transient `ImageNotReady` is requeueable; a permanent
+    // `ImageNotReady` and any `Backend` error
     // are terminal. The string-form preserved via `Display` is
     // historical; structured fields are what callers actually match on.
     #[test]
