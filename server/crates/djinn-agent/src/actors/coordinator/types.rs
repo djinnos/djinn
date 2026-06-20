@@ -340,8 +340,8 @@ pub(super) const MAX_DISPATCH_FAILURES: u32 = 10;
 /// Trigger A (`reopen_count >= REOPEN_INTERVENTION_THRESHOLD`) only sees loops
 /// that pass through `open`: a reviewer rejection reopens the task and bumps
 /// the count. A review-cycle livelock never reopens — the task bounces
-/// `needs_task_review → in_progress → verifying → needs_task_review`, each
-/// cycle a same-role reappearance, `reopen_count` pinned at 0 — so the only
+/// `needs_task_review → in_progress → needs_task_review`, each cycle a
+/// same-role reappearance, `reopen_count` pinned at 0 — so the only
 /// bound was the terminal close at streak 10, which force-closes a task whose
 /// worker output may be perfectly fine (the t9wi/32bk wedge, 2026-06-11:
 /// streaks of 7-8 with 30-min cooldowns while the reviewer stage never ran).

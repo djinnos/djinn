@@ -359,8 +359,8 @@ impl CoordinatorActor {
     ///
     /// Trigger A only sees loops that pass through `open` (a reviewer rejection
     /// bumps `reopen_count`). A review-cycle livelock never reopens: the task
-    /// bounces `needs_task_review → in_progress → verifying →
-    /// needs_task_review`, each cycle a same-role reappearance counted on
+    /// bounces `needs_task_review → in_progress → needs_task_review`, each
+    /// cycle a same-role reappearance counted on
     /// `dispatch_failure_streak` while `reopen_count` stays 0 — so the only
     /// bound was the terminal close at [`MAX_DISPATCH_FAILURES`], which
     /// force-closes a task whose durable worker output may be perfectly fine

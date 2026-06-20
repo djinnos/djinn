@@ -147,7 +147,6 @@ impl CoordinatorActor {
                     | "in_lead_intervention"
                     | "needs_task_review"
                     | "needs_lead_intervention"
-                    | "verifying"
             )
         });
 
@@ -700,7 +699,6 @@ impl CoordinatorActor {
                     | "in_lead_intervention"
                     | "needs_task_review"
                     | "needs_lead_intervention"
-                    | "verifying"
             )
         });
         if any_in_progress {
