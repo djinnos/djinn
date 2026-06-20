@@ -6,6 +6,8 @@ import type { Proposal, ProposalEpic } from "@/api/types";
 import { render, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { ProposalsPage } from "./ProposalsPage";
 
+const scrollIntoViewMock = vi.fn();
+
 vi.mock("@/api/mcpClient", () => ({
   callMcpTool: vi.fn(),
 }));
@@ -147,6 +149,70 @@ describe("ProposalsPage", () => {
     vi.mocked(callMcpTool).mockReset();
     vi.mocked(fetchUsers).mockReset();
     vi.mocked(fetchUsers).mockResolvedValue(users);
+    scrollIntoViewMock.mockReset();
+    Element.prototype.scrollIntoView = scrollIntoViewMock;
+    window.history.pushState({}, "", "/");
+  });
+
+  it("scrolls to and temporarily highlights an MDX block from the block query param", async () => {
+    let removeHighlight: (() => void) | undefined;
+    const setTimeoutSpy = vi
+      .spyOn(window, "setTimeout")
+      .mockImplementation((handler: TimerHandler, timeout?: number) => {
+        if (timeout === 3000 && typeof handler === "function") {
+          removeHighlight = handler as () => void;
+        }
+        return 1;
+      });
+    const proposal = makeProposal({
+      id: "proposal-anchor",
+      short_id: "anch",
+      title: "Anchored proposal",
+      status: "draft",
+      body_format: "mdx",
+      body: '<RichText id="target-block">Anchored block content</RichText>',
+    });
+
+    mockProposalShow(proposal);
+
+    try {
+      renderProposalsRoute("/proposals/proposal-anchor?block=target-block");
+
+      expect(await screen.findByText("Anchored block content")).toBeInTheDocument();
+
+      const target = document.getElementById("target-block");
+      expect(target).not.toBeNull();
+      expect(scrollIntoViewMock).toHaveBeenCalledWith({
+        behavior: "smooth",
+        block: "center",
+      });
+      expect(target).toHaveClass("ring-2", "ring-primary", "duration-1000");
+      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 3000);
+
+      removeHighlight?.();
+
+      expect(target).not.toHaveClass("ring-2", "ring-primary");
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it("treats a block query param on markdown proposals as a no-op", async () => {
+    const proposal = makeProposal({
+      id: "proposal-markdown-anchor",
+      short_id: "mkan",
+      title: "Markdown anchored proposal",
+      status: "draft",
+      body_format: "markdown",
+      body: "## Plain markdown\n\nNo block ids here.",
+    });
+
+    mockProposalShow(proposal);
+
+    renderProposalsRoute("/proposals/proposal-markdown-anchor?block=missing-block");
+
+    expect(await screen.findByText("No block ids here.")).toBeInTheDocument();
+    expect(scrollIntoViewMock).not.toHaveBeenCalled();
   });
 
   it("renders proposals grouped by visible lifecycle status", async () => {
