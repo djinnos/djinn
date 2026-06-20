@@ -46,7 +46,7 @@ async fn metrics_returns_prometheus_text_without_auth() {
     let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
     state
         .health_tracker()
-        .record_stall(Some("metrics-user"), "metrics-model");
+        .record_stall(Some("metrics-user"), "metrics-model", true);
     let app = server::router(state, false);
 
     let req = axum::http::Request::builder()

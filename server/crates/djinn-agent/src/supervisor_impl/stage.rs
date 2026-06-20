@@ -101,6 +101,26 @@ use djinn_runtime::{LoopGuardKind as RuntimeLoopGuardKind, LoopGuardTrip, Provid
 
 use super::SupervisorCallbackContext;
 
+/// Conservative quota-reset window synthesized for an exhausted Codex/OpenAI
+/// empty-200 throttle (idea A6/idea 3).
+///
+/// The ChatGPT consumer Codex backend signals an over-quota *account* by
+/// answering a turn with an empty 200 (`response.completed`, zero tokens)
+/// instead of an HTTP 429 — so unlike a real 429 there is **no `Retry-After` /
+/// rate-limit-reset header** to read (the empty-200 arrives as a normal stream
+/// end, never through the client's status-error path that parses headers in
+/// `provider/client.rs::retry_after_ms`). Without a provider-stated window the
+/// per-task redispatch cooldown would otherwise probe the model again on the
+/// fast 60/120/240s ladder, immediately re-hitting the still-exhausted quota.
+///
+/// We therefore floor the redispatch cooldown on a conservative constant: an
+/// account quota resets on a clock (typically hourly/daily), not in seconds, so
+/// a ~20-minute hold lets dispatch fail over to the user's next model and avoids
+/// hammering the depleted account while still self-healing well within a normal
+/// reset window. This is the floor only — a longer escalating cooldown still
+/// wins via `max()`.
+const CODEX_EMPTY_QUOTA_RETRY_AFTER_MS: u64 = 20 * 60 * 1000;
+
 /// Classify a reply-loop terminal error into the breaker-relevant
 /// [`ProviderFailureClass`] the host should act on, or `None` when the host
 /// circuit-breaker should stay out of it.
@@ -120,12 +140,23 @@ use super::SupervisorCallbackContext;
 ///   keeps rejecting, or a flapping backend. Fed to the gentler
 ///   consecutive-failure breaker so a single transient blip doesn't demote the
 ///   user's preferred model; only repeats trip it.
-/// - `RateLimit` → [`ProviderFailureClass::Throttle`]. A throttle/quota signal;
-///   fed to the immediate-failover breaker so dispatch moves to the next model
-///   at once with a cooldown that outlasts the task's redispatch ladder. The
-///   provider's `retry_after_ms` (a `Retry-After` / rate-limit-reset window, if
-///   it supplied one) rides along so the coordinator can floor the redispatch
-///   cooldown on a multi-hour reset instead of probing on the fixed ladder (A6).
+/// - `RateLimit` | `EmptyCompletion` → [`ProviderFailureClass::Throttle`]. A
+///   throttle/quota signal; fed to the immediate-failover breaker
+///   (`record_stall`) so dispatch moves to the next model at once with a
+///   cooldown that outlasts the task's redispatch ladder. `RateLimit` is an
+///   explicit 429: its `retry_after_ms` (a `Retry-After` / rate-limit-reset
+///   window, if the provider supplied one) rides along so the coordinator can
+///   floor the redispatch cooldown on a multi-hour reset instead of probing on
+///   the fixed ladder (A6). `EmptyCompletion` is the Codex/OpenAI consumer
+///   backend's *implicit* throttle: an over-quota ACCOUNT answers a turn with an
+///   empty 200 (zero-token `response.completed`) instead of a 429, so the reply
+///   loop classifies an exhausted empty-turn streak on that family as
+///   `EmptyCompletion` (see `reply_loop::turn::empty_turn_terminal_error`). It
+///   carries no header, so we synthesize a conservative
+///   [`CODEX_EMPTY_QUOTA_RETRY_AFTER_MS`] window. Routing it here (instead of the
+///   old `None`) stops a *throttle* from being miscounted as a broken provider
+///   via `record_failure`, which polluted health stats and escalated the
+///   auto-disable cooldown for what is merely an account over quota.
 /// - `Transport` → [`ProviderFailureClass::Failure`]. A hard network death
 ///   (connection refused / instant timeout / broken stream) that kills the
 ///   session with no work done — quiet-but-broken, just like a 5xx. Fed to the
@@ -133,12 +164,9 @@ use super::SupervisorCallbackContext;
 ///   successful session resets the counter via `record_success`) but a model
 ///   that dies on every dispatch finally auto-disables instead of being
 ///   re-selected forever (the kimi-for-coding/k2p7 incident).
-/// - `ContextOverflow` | `EmptyCompletion` → `None`. Excluded by design:
-///   ContextOverflow is handled by reactive compaction (not a model health
-///   problem); EmptyCompletion has its own empty-turn backoff breaker in the
-///   reply loop (Codex consumer-backend throttling), so demoting the model here
-///   would punish mere throttling. Tripping the breaker on these would
-///   needlessly demote a healthy model.
+/// - `ContextOverflow` → `None`. Excluded by design: handled by reactive
+///   compaction (the conversation is too big, not a model-health problem).
+///   Tripping the breaker on it would needlessly demote a healthy model.
 /// - An untyped/legacy error (no `ProviderError` source) → `None`, so non-
 ///   provider failures (git, tools, finalize-tool misuse) never trip it.
 fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass> {
@@ -155,6 +183,18 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
         ProviderError::RateLimit { .. } => Some(ProviderFailureClass::Throttle {
             retry_after_ms: provider_err.retry_after_ms(),
         }),
+        // The Codex/OpenAI consumer backend's implicit throttle: an over-quota
+        // account answers a turn with an empty 200 (zero-token
+        // `response.completed`) instead of a 429, surfaced as `EmptyCompletion`
+        // by `reply_loop::turn::empty_turn_terminal_error` for that family only.
+        // Route it to the SAME immediate-failover `Throttle` path as a 429 so a
+        // throttle is no longer miscounted as a broken provider (which would feed
+        // `record_failure` and escalate the auto-disable cooldown). There is no
+        // `Retry-After` header on an empty 200, so floor the redispatch cooldown
+        // on a conservative synthesized quota window.
+        ProviderError::EmptyCompletion => Some(ProviderFailureClass::Throttle {
+            retry_after_ms: Some(CODEX_EMPTY_QUOTA_RETRY_AFTER_MS),
+        }),
         // A hard transport failure (connection refused, instant timeout, broken
         // stream) that kills the session is "quiet but broken" the same way a 5xx
         // is: the model produced no work and exited fast, invisible to the
@@ -167,12 +207,10 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
         // (the kimi-for-coding/k2p7 incident: instant Transport death, 0 tokens,
         // re-dispatched forever, absent from model_health) finally auto-disables.
         ProviderError::Transport => Some(ProviderFailureClass::Failure),
-        // EmptyCompletion has its own empty-turn backoff breaker in the reply loop
-        // (Codex consumer-backend throttling answers a turn with an empty 200);
-        // tripping the model-health breaker on it would wrongly demote a model
-        // that is merely being throttled. ContextOverflow is handled by reactive
-        // compaction — also not a model-health problem. Both stay `None`.
-        ProviderError::ContextOverflow | ProviderError::EmptyCompletion => None,
+        // ContextOverflow is handled by reactive compaction (the conversation is
+        // too big), not a model-health problem — stays `None` so the breaker
+        // doesn't demote a healthy model.
+        ProviderError::ContextOverflow => None,
     }
 }
 
@@ -982,20 +1020,36 @@ mod tests {
 
     #[test]
     fn breaker_excluded_variants_map_to_none() {
-        // ContextOverflow → reactive compaction; EmptyCompletion → empty-turn
-        // backoff breaker. None must feed the model-health breaker. (Transport is
-        // NO LONGER excluded — a hard transport death now feeds the gentle
-        // consecutive-failure breaker; see `transport_error_is_breaker_worthy`.)
-        for e in [
-            ProviderError::ContextOverflow,
-            ProviderError::EmptyCompletion,
-        ] {
-            assert_eq!(
-                classify_provider_failure(&typed(e.clone())),
-                None,
-                "{e:?} must not feed the breaker",
-            );
-        }
+        // ContextOverflow → reactive compaction (not a model-health problem), so
+        // it must NOT feed the model-health breaker. (Transport is NO LONGER
+        // excluded — a hard transport death feeds the gentle consecutive-failure
+        // breaker; see `transport_error_is_breaker_worthy`. EmptyCompletion is NO
+        // LONGER excluded either — it is now the Codex/OpenAI implicit throttle;
+        // see `empty_completion_maps_to_throttle_with_synthesized_window`.)
+        assert_eq!(
+            classify_provider_failure(&typed(ProviderError::ContextOverflow)),
+            None,
+            "ContextOverflow must not feed the breaker",
+        );
+    }
+
+    #[test]
+    fn empty_completion_maps_to_throttle_with_synthesized_window() {
+        // An exhausted Codex/OpenAI empty-200 streak is an account-quota THROTTLE,
+        // not a broken provider. It must route to the immediate-failover
+        // `Throttle` class (→ `record_stall`), NOT `record_failure`, and — since
+        // the empty 200 carries no `Retry-After` header — floor the redispatch
+        // cooldown on the conservative synthesized quota window so the next
+        // dispatch doesn't re-probe the still-exhausted account on the fast ladder.
+        assert_eq!(
+            classify_provider_failure(&typed(ProviderError::EmptyCompletion)),
+            Some(ProviderFailureClass::Throttle {
+                retry_after_ms: Some(CODEX_EMPTY_QUOTA_RETRY_AFTER_MS),
+            }),
+        );
+        // Sanity-check the constant is a conservative multi-minute window, not a
+        // few-second probe value.
+        const { assert!(CODEX_EMPTY_QUOTA_RETRY_AFTER_MS >= 10 * 60 * 1000) };
     }
 
     #[test]
@@ -1174,16 +1228,12 @@ mod tests {
     }
 
     #[test]
-    fn empty_completion_and_context_overflow_stay_out_of_the_breaker() {
-        // EmptyCompletion has its own empty-turn backoff (Codex consumer-backend
-        // throttling answers with an empty 200); demoting the model here would
-        // punish mere throttling. ContextOverflow is handled by reactive
-        // compaction. Both must stay `None` even after the Transport change.
-        assert_eq!(
-            classify_provider_failure(&anyhow::Error::new(ProviderError::EmptyCompletion)),
-            None,
-            "EmptyCompletion is handled by the empty-turn backoff, not the model-health breaker",
-        );
+    fn context_overflow_stays_out_of_the_breaker() {
+        // ContextOverflow is handled by reactive compaction (the conversation is
+        // too big), so it must stay `None` even after the Transport change.
+        // (EmptyCompletion is no longer `None` — it is the Codex/OpenAI implicit
+        // throttle and maps to `Throttle`; see
+        // `empty_completion_maps_to_throttle_with_synthesized_window`.)
         assert_eq!(
             classify_provider_failure(&anyhow::Error::new(ProviderError::ContextOverflow)),
             None,

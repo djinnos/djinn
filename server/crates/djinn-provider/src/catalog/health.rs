@@ -301,7 +301,18 @@ impl HealthTracker {
     /// model in the creator's ordered list instead of re-selecting the bad one.
     /// The cooldown still auto-expires (self-heal), and repeated stalls escalate
     /// `disable_ttl_trips` so a persistently-bad model stays demoted at the cap.
-    pub fn record_stall(&self, scope: Option<&str>, model_id: &str) {
+    ///
+    /// `escalate` controls whether this trip advances `disable_ttl_trips` (which
+    /// grows the cooldown cap across repeated trips):
+    /// - `true` for a genuine `Failure` / `AuthInvalid` / infra-stall signal — a
+    ///   persistently-bad model SHOULD stay demoted longer the more it misbehaves.
+    /// - `false` for a **throttle-classified** stall (the Codex/OpenAI empty-200
+    ///   account-quota signal). A quota resets on a clock, not on model health, so
+    ///   escalating the cooldown cap is wrong: the model isn't getting "more
+    ///   broken", the account is merely over quota until its window resets. We
+    ///   still apply the `STALL_MIN_COOLDOWN` floor so failover still happens —
+    ///   we just don't ratchet the cap.
+    pub fn record_stall(&self, scope: Option<&str>, model_id: &str, escalate: bool) {
         let mut map = self.inner.lock().unwrap();
         let key = HealthKey::new(scope, model_id);
         let state = map.entry(key.clone()).or_default();
@@ -325,7 +336,11 @@ impl HealthTracker {
         let cooldown = state.compute_cooldown().max(STALL_MIN_COOLDOWN);
         state.auto_disabled = true;
         state.cooldown_until = Some(Instant::now() + cooldown);
-        state.disable_ttl_trips += 1;
+        // A throttle resets on a clock, not on model health — don't ratchet the
+        // escalating cooldown cap for it (idea 6). Genuine failures still do.
+        if escalate {
+            state.disable_ttl_trips += 1;
+        }
         djinn_telemetry::breaker::increment_trip();
         tracing::warn!(
             model_id = %key.model_id,
@@ -806,7 +821,7 @@ mod tests {
     fn stall_trips_immediately_without_consecutive_threshold() {
         let ht = HealthTracker::new();
         // A single stall (well below CIRCUIT_BREAKER_THRESHOLD) disables the model.
-        ht.record_stall(S, TEST_MODEL);
+        ht.record_stall(S, TEST_MODEL, true);
         assert!(!ht.is_available(S, TEST_MODEL));
         let h = ht.model_health(S, TEST_MODEL);
         assert!(h.auto_disabled);
@@ -824,7 +839,7 @@ mod tests {
         const MAX_TASK_REDISPATCH_COOLDOWN_SECS: u64 = 240;
 
         let ht = HealthTracker::new();
-        ht.record_stall(S, TEST_MODEL);
+        ht.record_stall(S, TEST_MODEL, true);
         let remaining = ht
             .model_health(S, TEST_MODEL)
             .cooldown_seconds_remaining
@@ -841,7 +856,7 @@ mod tests {
     #[test]
     fn stall_self_heals_after_cooldown_then_success_resets() {
         let ht = HealthTracker::new();
-        ht.record_stall(S, TEST_MODEL);
+        ht.record_stall(S, TEST_MODEL, true);
         assert!(!ht.is_available(S, TEST_MODEL));
 
         // Cooldown expires → model auto-re-enables (one-off stall self-heals).
@@ -861,7 +876,7 @@ mod tests {
     fn repeated_stalls_escalate_trips_and_stay_capped() {
         let ht = HealthTracker::new();
         for expected_trip in 1..=4 {
-            ht.record_stall(S, TEST_MODEL);
+            ht.record_stall(S, TEST_MODEL, true);
             let h = ht.model_health(S, TEST_MODEL);
             assert_eq!(h.disable_ttl_trips, expected_trip);
             assert!(h.auto_disabled);
@@ -875,15 +890,42 @@ mod tests {
     }
 
     #[test]
+    fn throttle_stalls_trip_for_failover_without_escalating_the_cap() {
+        // Idea 6: a throttle-classified stall (`escalate = false`) — the
+        // Codex/OpenAI empty-200 account-quota signal — must still trip the
+        // breaker (so dispatch fails over) AND floor the cooldown at the cap (so
+        // the model is unavailable past the task redispatch ladder), but it must
+        // NOT advance `disable_ttl_trips`: a quota resets on a clock, not on model
+        // health, so ratcheting the escalating cooldown cap would be wrong.
+        let ht = HealthTracker::new();
+        for _ in 1..=4 {
+            ht.record_stall(S, TEST_MODEL, false);
+            let h = ht.model_health(S, TEST_MODEL);
+            // Tripped + floored for failover, exactly like a genuine stall.
+            assert!(h.auto_disabled);
+            assert!(!ht.is_available(S, TEST_MODEL));
+            let remaining = h.cooldown_seconds_remaining.unwrap();
+            assert!(remaining <= STALL_MIN_COOLDOWN.as_secs());
+            assert!(remaining >= STALL_MIN_COOLDOWN.as_secs().saturating_sub(1));
+            // …but the escalation cap counter never advances.
+            assert_eq!(
+                h.disable_ttl_trips, 0,
+                "a throttle stall must not escalate disable_ttl_trips",
+            );
+            expire_cooldown(&ht, S, TEST_MODEL);
+        }
+    }
+
+    #[test]
     fn stall_while_cooling_down_does_not_shorten_cooldown() {
         let ht = HealthTracker::new();
-        ht.record_stall(S, TEST_MODEL);
+        ht.record_stall(S, TEST_MODEL, true);
         let first = ht.model_health(S, TEST_MODEL);
         assert_eq!(first.disable_ttl_trips, 1);
 
         // A second stall arriving while still cooling down is a no-op for the
         // cooldown window (no re-trip, no reset) — it only bumps failure counts.
-        ht.record_stall(S, TEST_MODEL);
+        ht.record_stall(S, TEST_MODEL, true);
         let second = ht.model_health(S, TEST_MODEL);
         assert_eq!(second.disable_ttl_trips, 1, "no re-trip while cooling down");
         assert_eq!(second.consecutive_failures, 2);
@@ -898,7 +940,7 @@ mod tests {
         let a = Some("user-a");
         let b = Some("user-b");
 
-        ht.record_stall(a, TEST_MODEL);
+        ht.record_stall(a, TEST_MODEL, true);
 
         assert!(!ht.is_available(a, TEST_MODEL), "A's bucket is disabled");
         assert!(ht.is_available(b, TEST_MODEL), "B's bucket is untouched");
@@ -916,11 +958,11 @@ mod tests {
     #[test]
     fn enable_and_reset_all_scopes_hit_every_bucket() {
         let ht = HealthTracker::new();
-        ht.record_stall(Some("user-a"), TEST_MODEL);
-        ht.record_stall(Some("user-b"), TEST_MODEL);
-        ht.record_stall(None, TEST_MODEL);
+        ht.record_stall(Some("user-a"), TEST_MODEL, true);
+        ht.record_stall(Some("user-b"), TEST_MODEL, true);
+        ht.record_stall(None, TEST_MODEL, true);
         // A different model must be left alone.
-        ht.record_stall(Some("user-a"), "other-model");
+        ht.record_stall(Some("user-a"), "other-model", true);
 
         let re_enabled = ht.enable_model_all_scopes(TEST_MODEL);
         assert_eq!(re_enabled, 3);
@@ -1082,9 +1124,9 @@ mod tests {
     fn breaker_metric_snapshot_covers_closed_half_open_and_open() {
         let ht = HealthTracker::new();
         ht.record_success(Some("user-closed"), "closed-model");
-        ht.record_stall(Some("user-half"), "half-model");
+        ht.record_stall(Some("user-half"), "half-model", true);
         expire_cooldown(&ht, Some("user-half"), "half-model");
-        ht.record_stall(None, "open-model");
+        ht.record_stall(None, "open-model", true);
 
         let snapshot = ht.breaker_metric_snapshot();
         assert_eq!(snapshot.len(), 3);
@@ -1110,7 +1152,7 @@ mod tests {
             ht.record_failure(Some("trip-metric-user"), "trip-metric-model");
         }
         ht.record_failure(Some("trip-metric-user"), "trip-metric-model");
-        ht.record_stall(Some("trip-metric-user"), "trip-metric-model");
+        ht.record_stall(Some("trip-metric-user"), "trip-metric-model", true);
 
         assert_eq!(
             ht.model_health(Some("trip-metric-user"), "trip-metric-model")

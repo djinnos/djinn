@@ -32,7 +32,7 @@ async fn stalled_model_is_skipped_and_dispatch_fails_over_to_next() {
     let model_ids = vec![bad.clone(), good.clone()];
 
     // Trip the preferred model on a zero-token stall.
-    actor.health.record_stall(None, &bad);
+    actor.health.record_stall(None, &bad, true);
     assert!(!actor.health.is_available(None, &bad));
     assert!(actor.health.is_available(None, &good));
 
@@ -75,7 +75,7 @@ async fn stalled_model_recovers_after_cooldown_expires() {
     let actor = coordinator_actor_for_tests(&db, &tx);
 
     let bad = "openai/gpt-5.5".to_string();
-    actor.health.record_stall(None, &bad);
+    actor.health.record_stall(None, &bad, true);
     assert!(!actor.health.is_available(None, &bad));
 
     // Simulate cooldown expiry, then a successful run resets the breaker.
