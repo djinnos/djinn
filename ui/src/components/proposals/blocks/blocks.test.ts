@@ -10,47 +10,47 @@ const SAMPLE_MDX = `# Proposal Title
 
 Some introductory markdown text.
 
-<rich-text id="intro">
+<RichText id="intro">
 Welcome to the proposal. This is **rich text** content.
-</rich-text>
+</RichText>
 
 ## Architecture
 
-<diagram id="arch-overview" type="mermaid">
+<Diagram id="arch-overview" type="mermaid">
 graph TD
   A[Client] --> B[API]
   B --> C[Database]
-</diagram>
+</Diagram>
 
-<annotated-code id="handler" lang="rust">
+<AnnotatedCode id="handler" lang="rust">
 fn handle_request(req: Request) -> Response {
   let data = parse(req);
   process(data)
 }
-</annotated-code>
+</AnnotatedCode>
 
-<data-model id="user-schema">
+<DataModel id="user-schema">
 Users table with id, email, name columns.
-</data-model>
+</DataModel>
 
-<api-endpoint id="get-users" method="GET" path="/api/users">
+<ApiEndpoint id="get-users" method="GET" path="/api/users">
 Returns a list of all users.
-</api-endpoint>
+</ApiEndpoint>
 
-<decisions id="auth-choice">
+<Decisions id="auth-choice">
 We chose JWT over session cookies for stateless auth.
-</decisions>
+</Decisions>
 
-<file-tree id="project-layout">
+<FileTree id="project-layout">
 src/
   main.rs
   lib.rs
 tests/
-</file-tree>
+</FileTree>
 
-<question-form id="open-questions">
+<QuestionForm id="open-questions">
 Should we use Redis or Memcached for caching?
-</question-form>
+</QuestionForm>
 
 Some trailing markdown.
 `;
@@ -61,8 +61,8 @@ describe("block registry round-trip", () => {
     expect(new Set(tags).size).toBe(tags.length);
   });
 
-  it("all P1 block tags (rich-text, diagram, annotated-code) are registered", () => {
-    const p1Tags = ["rich-text", "diagram", "annotated-code"];
+  it("all P1 canonical block tags (RichText, Diagram, AnnotatedCode) are registered", () => {
+    const p1Tags = ["RichText", "Diagram", "AnnotatedCode"];
     for (const tag of p1Tags) {
       expect(getBlockByTag(tag)).toBeDefined();
       expect(getBlockByTag(tag)!.requiredFields).toContain("id");
@@ -77,14 +77,14 @@ describe("block registry round-trip", () => {
 
     // All 8 block types should be present
     expect(extractedTags).toEqual([
-      "rich-text",
-      "diagram",
-      "annotated-code",
-      "data-model",
-      "api-endpoint",
-      "decisions",
-      "file-tree",
-      "question-form",
+      "RichText",
+      "Diagram",
+      "AnnotatedCode",
+      "DataModel",
+      "ApiEndpoint",
+      "Decisions",
+      "FileTree",
+      "QuestionForm",
     ]);
   });
 

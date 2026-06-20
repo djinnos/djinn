@@ -1,3 +1,5 @@
+import type { ComponentType } from "react";
+
 import type { BlockProps } from "@/components/proposals/blocks/types";
 import {
   AnnotatedCode,
@@ -9,80 +11,76 @@ import {
   QuestionFormBlock,
   RichText,
 } from "@/components/proposals/blocks";
+import {
+  PROPOSAL_BLOCK_REGISTRY,
+  type ProposalBlockDefinition,
+} from "@/lib/proposalBlocks";
 
-export interface BlockTypeDefinition {
-  tag: string;
+type ProposalBlockType = keyof typeof PROPOSAL_BLOCK_REGISTRY;
+
+export interface BlockTypeDefinition extends ProposalBlockDefinition {
   displayName: string;
   requiredFields: string[];
-  component: React.ComponentType<BlockProps>;
+  component: ComponentType<BlockProps>;
 }
 
+const BLOCK_COMPONENTS: Record<ProposalBlockType, ComponentType<BlockProps>> = {
+  "rich-text": RichText,
+  diagram: Diagram,
+  "annotated-code": AnnotatedCode,
+  "data-model": DataModelBlock,
+  "api-endpoint": ApiEndpointBlock,
+  decisions: DecisionsBlock,
+  "file-tree": FileTreeBlock,
+  "question-form": QuestionFormBlock,
+};
+
+const BLOCK_DISPLAY_NAMES: Record<ProposalBlockType, string> = {
+  "rich-text": "Rich Text",
+  diagram: "Diagram",
+  "annotated-code": "Annotated Code",
+  "data-model": "Data Model",
+  "api-endpoint": "API Endpoint",
+  decisions: "Decisions",
+  "file-tree": "File Tree",
+  "question-form": "Open Questions",
+};
+
 /**
- * Registry of all known block types (P1 + P2). Each entry maps an MDX tag name
- * to its display metadata, required fields, and the React component responsible
- * for rendering it.
+ * Render registry derived from the canonical proposal block contract.
+ *
+ * The MDX tag names come exclusively from PROPOSAL_BLOCK_REGISTRY, which mirrors
+ * the Rust proposal_blocks registry. Component/display metadata is keyed by the
+ * stable block type so this file cannot drift into a second, contradictory tag
+ * list.
  *
  * All blocks require an `id` attribute so that feedback comments and the debate
  * trail can anchor to a specific block across proposal revisions.
  */
-export const BLOCK_TYPES: BlockTypeDefinition[] = [
-  // P1 blocks
-  {
-    tag: "rich-text",
-    displayName: "Rich Text",
+const TYPED_PROPOSAL_BLOCK_REGISTRY = PROPOSAL_BLOCK_REGISTRY as unknown as Record<
+  ProposalBlockType,
+  ProposalBlockDefinition
+>;
+
+export const BLOCK_TYPES: BlockTypeDefinition[] = (
+  Object.keys(TYPED_PROPOSAL_BLOCK_REGISTRY) as ProposalBlockType[]
+).map((type) => {
+  const definition = TYPED_PROPOSAL_BLOCK_REGISTRY[type];
+  return {
+    ...definition,
+    displayName: BLOCK_DISPLAY_NAMES[type],
     requiredFields: ["id"],
-    component: RichText,
-  },
-  {
-    tag: "diagram",
-    displayName: "Diagram",
-    requiredFields: ["id"],
-    component: Diagram,
-  },
-  {
-    tag: "annotated-code",
-    displayName: "Annotated Code",
-    requiredFields: ["id"],
-    component: AnnotatedCode,
-  },
-  // P2 blocks
-  {
-    tag: "data-model",
-    displayName: "Data Model",
-    requiredFields: ["id"],
-    component: DataModelBlock,
-  },
-  {
-    tag: "api-endpoint",
-    displayName: "API Endpoint",
-    requiredFields: ["id"],
-    component: ApiEndpointBlock,
-  },
-  {
-    tag: "decisions",
-    displayName: "Decisions",
-    requiredFields: ["id"],
-    component: DecisionsBlock,
-  },
-  {
-    tag: "file-tree",
-    displayName: "File Tree",
-    requiredFields: ["id"],
-    component: FileTreeBlock,
-  },
-  {
-    tag: "question-form",
-    displayName: "Open Questions",
-    requiredFields: ["id"],
-    component: QuestionFormBlock,
-  },
-];
+    component: BLOCK_COMPONENTS[type],
+  };
+});
+
+const BLOCK_TYPES_BY_TAG = new Map(BLOCK_TYPES.map((block) => [block.tag, block]));
 
 /**
- * Look up a block type definition by its MDX tag name.
+ * Look up a block type definition by its canonical PascalCase MDX tag name.
  *
  * Returns `undefined` when no registered block type matches the given tag.
  */
 export function getBlockByTag(tag: string): BlockTypeDefinition | undefined {
-  return BLOCK_TYPES.find((b) => b.tag === tag);
+  return BLOCK_TYPES_BY_TAG.get(tag);
 }
