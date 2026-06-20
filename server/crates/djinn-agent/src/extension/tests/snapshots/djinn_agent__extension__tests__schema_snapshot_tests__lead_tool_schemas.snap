@@ -145,6 +145,13 @@ expression: tool_schemas_lead()
         },
         "limit": {
           "type": "integer"
+        },
+        "edge_kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional list of edge kinds to include in graph traversal scoring. When provided, only edges whose kind matches one of these values participate in spreading activation. Omit to use all edge kinds."
         }
       }
     },

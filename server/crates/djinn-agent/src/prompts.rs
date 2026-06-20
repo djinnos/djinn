@@ -15,7 +15,7 @@ use djinn_core::models::Task;
 /// Hard cap on rendered system prompt size (chars). Individual sections have
 /// their own soft limits, but this catches cases where multiple sections
 /// combine to blow past a reasonable size.
-const MAX_SYSTEM_PROMPT_CHARS: usize = 30_000;
+const MAX_SYSTEM_PROMPT_CHARS: usize = 31_000;
 
 // ─── Embedded templates ────────────────────────────────────────────────────────
 

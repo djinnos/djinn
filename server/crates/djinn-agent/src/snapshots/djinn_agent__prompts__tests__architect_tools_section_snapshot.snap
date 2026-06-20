@@ -1,13 +1,12 @@
 ---
 source: crates/djinn-agent/src/prompts/tests.rs
-assertion_line: 845
 expression: section
 ---
 - `task_show(id)` — Show details of a work item including recent activity and blockers.
 - `task_list(issue_type?, label?, limit?, offset?, parent?, priority?, sort?, status?, text?)` — List tasks with optional filters and pagination.
 - `task_activity_list(id, actor_role?, event_type?, limit?)` — Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.
 - `memory_read(identifier)` — Read a note by permalink or title.
-- `memory_search(query, folder?, limit?, task_id?, type?)` — Search notes in project memory.
+- `memory_search(query, edge_kinds?, folder?, limit?, task_id?, type?)` — Search notes in project memory.
 - `memory_list(depth?, folder?, status?, type?)` — List notes in project memory. Returns compact summaries without full content.
 - `shell(command, timeout_ms?)` — Execute shell commands in the task worktree. Commands always run from the worktree root.
 - `read(file_path, limit?, offset?, project?)` — Read a file with line numbers and pagination. Rejects binary files. Pass `project` (UUID or owner/repo slug) to read a file from ANOTHER registered repo — served read-only from its default branch (no checkout); omit it to read your task worktree.
@@ -30,7 +29,7 @@ expression: section
 - `epic_create(title, auto_breakdown?, blocked_by?, description?, memory_refs?, project?, proposal_id?, read_sources?)` — Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — e.g. when decomposing a graduated proposal (Planner Mode D) or when a health sweep identifies a gap that needs its own delivery container. Returns the created epic.
 - `task_transition(action, id, reason?, replacement_task_ids?)` — Transition a task using a named workflow action.
 - `task_comment_add(body, id)` — Add a comment or strategic observation to a task's activity log.
-- `memory_build_context(limit?, min_confidence?, query?, task_id?)` — Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.
+- `memory_build_context(edge_kinds?, limit?, min_confidence?, query?, task_id?)` — Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.
 - `memory_health()` — Returns aggregate health report: total notes, broken link count, orphan note count, low-confidence note count, stale note count, stale notes by folder, lifecycle counts, and recent lifecycle sweep metrics.
 - `memory_extracted_audit()` — Audit existing extracted case/pattern/pitfall notes against ADR-054 taxonomy and required structure. Returns grouped cleanup backlogs for merge candidates, underspecified notes, demotion-to-working-spec candidates, and archive candidates, plus rerun guidance.
 - `memory_broken_links(folder?)` — Lists all broken wikilinks with source context (permalink, title, raw text, target permalink).

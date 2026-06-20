@@ -176,6 +176,11 @@ pub struct EpicCreateParams {
     /// (Planner Mode D), pass the proposal UUID or short_id to record the
     /// `proposal → epic` link so the proposal can track what it became.
     pub proposal_id: Option<String>,
+    /// Epic-level dependencies: UUIDs or short_ids of epics that must close
+    /// before this epic's auto-breakdown can run.  Wired atomically at
+    /// creation time so the `epic_created` event is only emitted after
+    /// blocker edges exist in the DB.
+    pub blocked_by: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -367,6 +372,31 @@ impl DjinnMcpServer {
                 });
             }
         };
+
+        // Resolve blocked_by refs to UUIDs so create_for_project can wire
+        // blocker edges atomically before emitting the epic_created event.
+        let blocked_by_ids: Option<Vec<String>> = match &p.blocked_by {
+            Some(refs) if !refs.is_empty() => {
+                let mut ids = Vec::new();
+                for r in refs {
+                    match repo.resolve(r).await {
+                        Ok(Some(e)) => ids.push(e.id),
+                        _ => {
+                            return Json(EpicSingleResponse {
+                                epic: None,
+                                error: Some(format!("blocker epic not found: {r}")),
+                            });
+                        }
+                    }
+                }
+                Some(ids)
+            }
+            _ => None,
+        };
+        let blocked_by_refs: Option<Vec<&str>> = blocked_by_ids
+            .as_ref()
+            .map(|ids| ids.iter().map(|s| s.as_str()).collect());
+
         match repo
             .create_for_project(
                 &project_id,
@@ -380,6 +410,7 @@ impl DjinnMcpServer {
                     status,
                     auto_breakdown: p.auto_breakdown,
                     originating_adr_id: p.originating_adr_id.as_deref(),
+                    blocked_by: blocked_by_refs.as_deref(),
                 },
             )
             .await

@@ -1893,6 +1893,7 @@ mod stop_build_tests {
                     status: None,
                     auto_breakdown: Some(false),
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await
@@ -2074,6 +2075,7 @@ mod stop_build_tests {
                     status: None,
                     auto_breakdown: Some(false),
                     originating_adr_id: None,
+                    blocked_by: None,
                 },
             )
             .await
