@@ -6,7 +6,7 @@
 // server sees a single `Self::project_tool_router()` entry point.
 //
 //   * `lifecycle_ops` — project add / remove / list / branches
-//   * `config_ops`    — project config, environment config, verification
+//   * `config_ops`    — project config and environment config
 //   * `indexer_ops`   — graph exclusions, stack, devcontainer status,
 //                       image rebuild, workspace warm status
 //   * `github_ops`    — list repos from the bound GitHub App installation

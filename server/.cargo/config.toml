@@ -1,11 +1,17 @@
 [build]
-rustc-wrapper = "sccache"
+# NOTE: `rustc-wrapper = "sccache"` is intentionally NOT set here. The djinn
+# platform (warm/verify/worker pods) reuses a warm, main-based per-project
+# cargo target base with INCREMENTAL compilation (CI-style, like
+# Swatinem/rust-cache); sccache forbids incremental, so forcing it here would
+# disable the whole warm-cache fast path. CI keeps sccache by setting
+# `RUSTC_WRAPPER: sccache` + `CARGO_INCREMENTAL: 0` explicitly in
+# `.github/workflows/quality-gate.yml` (so the GitHub Actions cache stays
+# small and incremental). Local dev + djinn pods therefore default to cargo's
+# normal incremental dev/test profiles.
+#
 # NOTE: do NOT hardcode `target-dir` here, and do NOT add a setup script
 # that mutates this file at runtime.  Each git worktree gets its own
-# default `target/` directory (cargo's default behavior).  Cross-worktree
-# dep sharing is handled by `sccache` above, which caches each
-# compilation unit by hash-of-inputs — the rust-cache equivalent of
-# stripping first-party artifacts and reusing dep builds.
+# default `target/` directory (cargo's default behavior).
 #
 # History: commit 4befbf9b accidentally contaminated main with a literal
 # `target-dir = "/tmp/.../0bhg-server"` because a setup script was
@@ -41,27 +47,17 @@ DJINN_TEST_DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:5433/postgres"
 # this env var ahead of DJINN_HOME and ~/.djinn. Override at command
 # line only when deliberately exercising the production vault.
 DJINN_VAULT_KEY_PATH = "/var/tmp/djinn-test-vault/vault.key"
-# Force-disable incremental compilation at the cargo level. The workspace
-# pins `rustc-wrapper = "sccache"` (see [build] above), and sccache rejects
-# incremental compilation ("increment compilation is prohibited"). The
-# `[profile.*]` settings below set `incremental = false` in profiles, but a
-# `CARGO_INCREMENTAL=1` env var (still injected by older deployed k8s job
-# definitions, see commit 74c88ac5) overrides those profile defaults. Using
-# `force = true` here makes cargo clamp `CARGO_INCREMENTAL` to "0" even when
-# the environment says "1", so verification pods that haven't been redeployed
-# with the fixed job definition still work. This is a no-op for local dev and
-# for pods that already inject `CARGO_INCREMENTAL=0` (same value).
-CARGO_INCREMENTAL = { value = "0", force = true }
+# NOTE: incremental compilation is left at cargo's profile defaults
+# (dev/test = ON). We deliberately do NOT clamp `CARGO_INCREMENTAL` here:
+# the djinn warm/verify/worker pods rely on consistent incremental-on so the
+# warm-base seed is reusable, and a `force = true` clamp would override the
+# env they set. CI still pins `CARGO_INCREMENTAL: 0` + sccache in
+# `.github/workflows/quality-gate.yml`, so the GitHub Actions cache stays
+# incremental-free.
 
-[profile.dev]
-incremental = false          # required for sccache effectiveness
-
-[profile.test]
-incremental = false
-
-# Release profile keeps default LLVM backend for optimized output
-[profile.release]
-incremental = false
+# Release profile keeps default LLVM backend for optimized output. Profiles
+# are left at cargo defaults (dev/test incremental ON) so the warm-cache fast
+# path works; see the [build] note above.
 
 [net]
 git-fetch-with-cli = true

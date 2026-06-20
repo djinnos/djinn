@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 510
 expression: signatures
 ---
 [
@@ -11084,6 +11085,99 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_blocks",
+    "read_only": true,
+    "destructive": false,
+    "idempotent": true,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ProposalBlocksParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalBlockDefinition": {
+          "properties": {
+            "fields": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ProposalBlockFieldSchema"
+              },
+              "description": "Field schema keyed by field name.",
+              "type": "object"
+            },
+            "tag": {
+              "description": "MDX component tag, e.g. `AnnotatedCode`.",
+              "type": "string"
+            },
+            "type": {
+              "description": "Stable proposal block type identifier, e.g. `annotated-code`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "tag",
+            "fields"
+          ],
+          "type": "object"
+        },
+        "ProposalBlockFieldSchema": {
+          "properties": {
+            "enum_values": {
+              "items": {
+                "type": "string"
+              },
+              "nullable": true,
+              "type": "array"
+            },
+            "fields": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ProposalBlockFieldSchema"
+              },
+              "nullable": true,
+              "type": "object"
+            },
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProposalBlockFieldSchema"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ]
+            },
+            "type": {
+              "description": "Primitive schema kind: `string`, `boolean`, `object`, or `array`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "blocks": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ProposalBlockDefinition"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "blocks"
+      ],
+      "title": "ProposalBlocksResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_create",
     "read_only": false,
     "destructive": true,
@@ -11129,7 +11223,12 @@ expression: signatures
           "type": "array"
         },
         "body": {
-          "description": "Markdown spec body.",
+          "description": "Spec body (markdown or MDX depending on `body_format`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "body_format": {
+          "description": "Body encoding: `markdown` (default) or `mdx` (block-aware).",
           "nullable": true,
           "type": "string"
         },
@@ -11198,6 +11297,10 @@ expression: signatures
           "type": "string"
         },
         "body": {
+          "type": "string"
+        },
+        "body_format": {
+          "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
           "type": "string"
         },
         "build_owner_user_id": {
@@ -11617,6 +11720,10 @@ expression: signatures
         "body": {
           "type": "string"
         },
+        "body_format": {
+          "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
+          "type": "string"
+        },
         "build_owner_user_id": {
           "description": "Build owner once graduated.",
           "nullable": true,
@@ -11770,6 +11877,10 @@ expression: signatures
             "body": {
               "type": "string"
             },
+            "body_format": {
+              "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
+              "type": "string"
+            },
             "build_owner_user_id": {
               "description": "Build owner once graduated.",
               "nullable": true,
@@ -11829,6 +11940,7 @@ expression: signatures
             "short_id",
             "title",
             "body",
+            "body_format",
             "acceptance_criteria",
             "status",
             "created_at",
@@ -12239,6 +12351,10 @@ expression: signatures
             "body": {
               "type": "string"
             },
+            "body_format": {
+              "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
+              "type": "string"
+            },
             "build_owner_user_id": {
               "description": "Build owner once graduated.",
               "nullable": true,
@@ -12298,6 +12414,7 @@ expression: signatures
             "short_id",
             "title",
             "body",
+            "body_format",
             "acceptance_criteria",
             "status",
             "created_at",
@@ -12316,6 +12433,10 @@ expression: signatures
               "type": "array"
             },
             "body": {
+              "type": "string"
+            },
+            "body_format": {
+              "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
               "type": "string"
             },
             "created_at": {
@@ -12357,6 +12478,7 @@ expression: signatures
             "seq",
             "title",
             "body",
+            "body_format",
             "acceptance_criteria",
             "event_kind",
             "created_at"
@@ -12552,6 +12674,10 @@ expression: signatures
         "body": {
           "type": "string"
         },
+        "body_format": {
+          "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
+          "type": "string"
+        },
         "build_owner_user_id": {
           "description": "Build owner once graduated.",
           "nullable": true,
@@ -12682,6 +12808,10 @@ expression: signatures
           "type": "string"
         },
         "body": {
+          "type": "string"
+        },
+        "body_format": {
+          "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
           "type": "string"
         },
         "build_owner_user_id": {
@@ -12885,6 +13015,11 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "body_format": {
+          "description": "Body encoding: `markdown` (default) or `mdx` (block-aware).",
+          "nullable": true,
+          "type": "string"
+        },
         "id": {
           "description": "Proposal UUID or short_id.",
           "type": "string"
@@ -12952,6 +13087,10 @@ expression: signatures
           "type": "string"
         },
         "body": {
+          "type": "string"
+        },
+        "body_format": {
+          "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
           "type": "string"
         },
         "build_owner_user_id": {

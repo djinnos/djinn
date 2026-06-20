@@ -40,6 +40,7 @@ use crate::tools::project_tools::{
     ProjectEnvironmentConfigSetParams, ProjectGraphExclusionsGetParams,
     ProjectGraphExclusionsSetParams, ProjectRemoveParams, RetriggerImageBuildParams,
 };
+use crate::tools::proposal_blocks::ProposalBlocksParams;
 use crate::tools::proposal_tools::{
     ProposalCreateParams, ProposalDeleteParams, ProposalFeedbackAddParams,
     ProposalFeedbackResolveParams, ProposalGraduateParams, ProposalListParams,
@@ -389,6 +390,11 @@ impl DjinnMcpServer {
             "proposal_create" => map_json(
                 name,
                 self.proposal_create(Parameters(decode_args::<ProposalCreateParams>(name, args)?))
+                    .await,
+            ),
+            "proposal_blocks" => map_json(
+                name,
+                self.proposal_blocks(Parameters(decode_args::<ProposalBlocksParams>(name, args)?))
                     .await,
             ),
             "proposal_show" => map_json(

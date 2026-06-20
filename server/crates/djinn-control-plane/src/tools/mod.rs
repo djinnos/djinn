@@ -16,6 +16,7 @@ pub mod list_response;
 pub mod memory_tools;
 pub mod pr_review_tools;
 pub mod project_tools;
+pub mod proposal_blocks;
 pub mod proposal_ops;
 pub mod proposal_tools;
 pub mod provider_tools;

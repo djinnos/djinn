@@ -121,13 +121,12 @@ elif [ -f package-lock.json ]; then
   ( npm ci || npm install ) || true
 fi
 # The cargo target base is warmed by `warm-graph` itself (in the worker), NOT
-# here: the worker normalizes tracked-file mtimes to commit times — the SAME
-# normalization verification applies before it compiles — then compiles the
-# cargo workspace into the warm base. Doing it in this shell wrapper (with
-# clone-time mtimes, and gated on a root `Cargo.toml` that djinn's `server/`
-# workspace doesn't have) produced a base whose cargo fingerprints never matched
-# verification's tree, so verification recompiled cold every run. See
-# `warm_cargo_target_base` in djinn-agent-worker.
+# here: the worker normalizes tracked-file mtimes to commit times before it
+# compiles the cargo workspace into the warm base. Doing it in this shell wrapper
+# (with clone-time mtimes, and gated on a root `Cargo.toml` that djinn's
+# `server/` workspace doesn't have) produced a base whose cargo fingerprints
+# never matched task-run trees. See `warm_cargo_target_base` in
+# djinn-agent-worker.
 exec {bin} warm-graph "{project_id}"
 "#,
         mirror_path = mirror_path,
@@ -468,7 +467,7 @@ mod tests {
         );
         assert!(cmd[2].contains("pnpm install"));
         // The cargo target base is warmed inside `warm-graph` (the worker), where
-        // mtimes are normalized to match verification — NOT in this shell wrapper.
+        // mtimes are normalized before compiling — NOT in this shell wrapper.
         // The old in-shell `cargo` step gated on a root `Cargo.toml` djinn's
         // `server/` workspace lacks, so it never ran; guard against its return.
         assert!(
@@ -508,22 +507,20 @@ mod tests {
         assert!(!envs.contains_key("DJINN_MYSQL_URL"));
 
         // Warm cache routing must keep the shared per-project target base as the
-        // warm-owned seed, disable incremental state in that base, and preserve
-        // shared registry/sccache/sqlx settings while task-run Pods use private
-        // run target dirs.
+        // warm-owned seed with INCREMENTAL compilation enabled (warm == verify ==
+        // worker parity) while task-run Pods use private run target dirs.
         assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
         assert_eq!(
             envs.get("CARGO_TARGET_DIR").copied(),
             Some("/cache/cargo-target/proj-xyz"),
         );
-        // CARGO_INCREMENTAL=0: the repo pins rustc-wrapper=sccache, which forbids
-        // incremental. Reuse is cargo freshness over the warm base + sccache.
-        assert_eq!(envs.get("CARGO_INCREMENTAL").copied(), Some("0"));
-        // We no longer force the sccache wrapper (it requires CARGO_INCREMENTAL=0
-        // and disabled the incremental fast path).
-        assert!(
-            !envs.contains_key("RUSTC_WRAPPER"),
-            "warm pod must not force RUSTC_WRAPPER=sccache (disables incremental)"
+        // CARGO_INCREMENTAL=1 + RUSTC_WRAPPER="": all djinn build pods share one
+        // incremental-on, sccache-off strategy so the warm seed is reusable.
+        assert_eq!(envs.get("CARGO_INCREMENTAL").copied(), Some("1"));
+        assert_eq!(
+            envs.get("RUSTC_WRAPPER").copied(),
+            Some(""),
+            "warm pod must clear RUSTC_WRAPPER so incremental works"
         );
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),
@@ -616,11 +613,12 @@ mod tests {
             limits.get("memory").map(|q| q.0.as_str()),
             Some(cfg.warm_memory_limit.as_str())
         );
-        // Defaults pin the documented values.
+        // Defaults pin the documented values. Memory limit bumped 4Gi → 6Gi to
+        // cover the added test-compile warm pass (--all-targets test codegen).
         assert_eq!(cfg.warm_cpu_request, "1");
         assert_eq!(cfg.warm_cpu_limit, "2");
         assert_eq!(cfg.warm_memory_request, "2Gi");
-        assert_eq!(cfg.warm_memory_limit, "4Gi");
+        assert_eq!(cfg.warm_memory_limit, "6Gi");
     }
 
     #[test]
