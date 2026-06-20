@@ -12,7 +12,7 @@ use crate::test_helpers::{initialize_mcp_session, mcp_call_tool};
 
 // `project_remove` deletes the `projects` row, which fans out across ~8
 // `ON DELETE CASCADE` FKs (epics, tasks, notes, sessions, agents,
-// consolidation_metrics, verification_cache, task_runs).  `create_test_project_with_dir`
+// consolidation_metrics, task_runs).  `create_test_project_with_dir`
 // also seeds 5 default agent rows.  Against the current test Dolt image
 // (port 3307) the cascade fan-out drops the connection mid-query and sqlx
 // surfaces `Io(UnexpectedEof)`.  This is the same Dolt limitation tracked on

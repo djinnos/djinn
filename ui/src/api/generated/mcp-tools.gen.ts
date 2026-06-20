@@ -2322,7 +2322,7 @@ export namespace GithubSearchOutputSchema {
 export type GithubSearchOutput = GithubSearchOutputSchema.GithubSearchOutput;
 export namespace ImageCreateInputSchema {
   /**
-   * A lifecycle / verification / setup command.
+   * A lifecycle / setup command.
    * 
    * Shape matches the `LifecycleCommand` enum in
    * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
@@ -2509,7 +2509,7 @@ export namespace ImageListInputSchema {
 export type ImageListInput = ImageListInputSchema.ImageListInput;
 export namespace ImageListOutputSchema {
   /**
-   * A lifecycle / verification / setup command.
+   * A lifecycle / setup command.
    * 
    * Shape matches the `LifecycleCommand` enum in
    * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
@@ -2699,7 +2699,7 @@ export namespace ImageSetServicesOutputSchema {
 export type ImageSetServicesOutput = ImageSetServicesOutputSchema.ImageSetServicesOutput;
 export namespace ImageUpdateInputSchema {
   /**
-   * A lifecycle / verification / setup command.
+   * A lifecycle / setup command.
    * 
    * Shape matches the `LifecycleCommand` enum in
    * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
@@ -3994,7 +3994,7 @@ export namespace ProjectEnvironmentConfigGetInputSchema {
 export type ProjectEnvironmentConfigGetInput = ProjectEnvironmentConfigGetInputSchema.ProjectEnvironmentConfigGetInput;
 export namespace ProjectEnvironmentConfigGetOutputSchema {
   /**
-   * A lifecycle / verification / setup command.
+   * A lifecycle / setup command.
    * 
    * Shape matches the `LifecycleCommand` enum in
    * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
@@ -4159,7 +4159,7 @@ export namespace ProjectEnvironmentConfigResetInputSchema {
 export type ProjectEnvironmentConfigResetInput = ProjectEnvironmentConfigResetInputSchema.ProjectEnvironmentConfigResetInput;
 export namespace ProjectEnvironmentConfigResetOutputSchema {
   /**
-   * A lifecycle / verification / setup command.
+   * A lifecycle / setup command.
    * 
    * Shape matches the `LifecycleCommand` enum in
    * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
@@ -4307,7 +4307,7 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
 export type ProjectEnvironmentConfigResetOutput = ProjectEnvironmentConfigResetOutputSchema.ProjectEnvironmentConfigResetOutput;
 export namespace ProjectEnvironmentConfigSetInputSchema {
   /**
-   * A lifecycle / verification / setup command.
+   * A lifecycle / setup command.
    * 
    * Shape matches the `LifecycleCommand` enum in
    * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
@@ -6424,7 +6424,7 @@ export type SystemPingOutput = SystemPingOutputSchema.SystemPingOutput;
 export namespace TaskActivityListInputSchema {
   export interface TaskActivityListInput {
   /**
-   * Filter by actor_role (e.g. "lead", "reviewer", "worker", "verification", "system").
+   * Filter by actor_role (e.g. "lead", "reviewer", "worker", "system").
    */
   actor_role?: string
   /**

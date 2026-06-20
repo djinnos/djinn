@@ -4,7 +4,7 @@ expression: section
 ---
 - `task_show(id)` — Show details of a work item including recent activity and blockers.
 - `task_list(issue_type?, label?, limit?, offset?, parent?, priority?, sort?, status?, text?)` — List tasks with optional filters and pagination.
-- `task_activity_list(id, actor_role?, event_type?, limit?)` — Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.
+- `task_activity_list(id, actor_role?, event_type?, limit?)` — Query a task's activity log with optional filters. Returns comments, status transitions, and other events. Use to inspect Lead guidance, reviewer feedback, or history.
 - `memory_read(identifier)` — Read a note by permalink or title.
 - `memory_search(query, edge_kinds?, folder?, limit?, task_id?, type?)` — Search notes in project memory.
 - `memory_list(depth?, folder?, status?, type?)` — List notes in project memory. Returns compact summaries without full content.
