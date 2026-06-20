@@ -147,15 +147,10 @@ impl SupervisorFlow {
 pub fn role_sequence(flow: SupervisorFlow) -> &'static [RoleKind] {
     use RoleKind::*;
     match flow {
-        // Worker-only. The run ENDS after the worker stage: the supervisor
-        // fires `submit_verification` (in_progress → verifying) and the HOST
-        // spawns the slot-free verification pipeline (the task-run pod is
-        // gone, the model slot is freed). Verification green transitions
-        // verifying → needs_task_review, and the coordinator re-dispatches a
+        // Worker-only. The run ENDS after the worker stage. The coordinator
+        // transitions the task to needs_task_review and re-dispatches a
         // reviewer-only `ReviewResume` run (the worker output is durable on
-        // the mirror task_branch). This is the "verification runs BETWEEN the
-        // worker and the reviewer" design — the reviewer prompt's "verification
-        // already ran and passed" claim is now TRUE.
+        // the mirror task_branch).
         //
         // The wave-planner already broke the work down upstream, so no
         // upfront Planner stage here.
@@ -163,14 +158,13 @@ pub fn role_sequence(flow: SupervisorFlow) -> &'static [RoleKind] {
         // ReviewResponse (reviewer rejected / human asked for more) and
         // ConflictRetry (merge-conflict fixup) both re-enter at the worker and
         // must verify before the next review, exactly like NewTask — so they
-        // are also worker-only and flow through the verification gate.
+        // ReviewResponse (reviewer rejected / human asked for more) and
+        // ConflictRetry (merge-conflict fixup) both re-enter at the worker,
+        // exactly like NewTask — so they are also worker-only.
         SupervisorFlow::ReviewResponse | SupervisorFlow::ConflictRetry => &[Worker],
         // Reviewer-only resume: the worker stage already ran on a prior run and
-        // its commits are durable on the mirror task_branch (the host verified
-        // this before choosing the flow). Verification has ALSO already run and
-        // passed (that's what moved the task to needs_task_review). Skip
-        // straight to the reviewer, which reviews the diff cloned from
-        // task_branch.
+        // its commits are durable on the mirror task_branch. Skip straight to
+        // the reviewer, which reviews the diff cloned from task_branch.
         SupervisorFlow::ReviewResume => &[Reviewer],
         SupervisorFlow::Spike => &[Architect],
         SupervisorFlow::Planning => &[Planner],
@@ -358,17 +352,13 @@ pub enum TaskRunOutcome {
         body_excerpt: Option<String>,
     },
     Interrupted,
-    /// The worker stage completed and the supervisor fired `submit_verification`
-    /// (in_progress → verifying). The run ends here — no PR is opened. The HOST
-    /// (`run_supervisor_dispatch`) reacts to this outcome by spawning the
-    /// slot-free verification pipeline against the durable task_branch; a green
-    /// pipeline transitions verifying → needs_task_review (which the coordinator
-    /// then re-dispatches as a reviewer-only `ReviewResume` run), a red one
-    /// releases the task for worker rework with the failure feedback. This is the
+    /// The worker stage completed. The run ends here — no PR is opened.
+    /// The coordinator transitions the task to needs_task_review and
+    /// re-dispatches a reviewer-only `ReviewResume` run. This is the
     /// terminal outcome of every worker-only flow (NewTask / ReviewResponse /
-    /// ConflictRetry) under the "verify before review" pipeline; it maps to a
-    /// `Completed` task-run status (the worker stage genuinely succeeded) so it
-    /// feeds `record_success` and never trips the model breaker.
+    /// ConflictRetry); it maps to a `Completed` task-run status (the worker
+    /// stage genuinely succeeded) so it feeds `record_success` and never trips
+    /// the model breaker.
     ///
     /// Added LAST to preserve the bincode discriminants of the existing variants
     /// on the worker→host `TerminalReport` wire (bincode is positional/
@@ -403,20 +393,7 @@ pub struct TaskRunReport {
     pub task_run_id: String,
     pub outcome: TaskRunOutcome,
     pub stages_completed: Vec<RoleKind>,
-    /// `verification_runs.id` of an IN-POD pre-PR verification the worker ran
-    /// itself, right after committing to the task branch and BEFORE its private
-    /// Cargo target dir was torn down — reusing those already-compiled artifacts
-    /// instead of re-seeding the warm base in a separate verify Job (the
-    /// double-compile this avoids). `Some(id)` means the row is already terminal
-    /// (`passed`/`failed`/`error`); the host's verification pipeline consumes it
-    /// directly instead of dispatching its own Job. `None` (the default, and the
-    /// only value on the host/test runtimes or when in-pod verify wasn't
-    /// applicable) keeps the existing separate-pod path as the fallback.
-    ///
-    /// Added LAST and `#[serde(default)]` so the worker→host bincode frame
-    /// (positional fields) decodes older reports that omit it as `None`.
-    #[serde(default)]
-    pub verification_run_id: Option<String>,
+    // (field removed — verification pre-PR gate deleted)
 }
 
 #[cfg(test)]
@@ -427,8 +404,8 @@ mod tests {
     fn new_task_flow_is_worker_only() {
         // Planner ran upstream as a Planning task; NewTask is the worker's
         // domain and doesn't re-plan. The reviewer leg no longer rides this
-        // run: the worker submits to verification (verify before review), and
-        // a passing verification re-dispatches a reviewer-only ReviewResume.
+        // run: the worker completes and the coordinator re-dispatches a
+        // reviewer-only ReviewResume.
         let seq = SupervisorFlow::NewTask.role_sequence();
         assert!(!seq.contains(&RoleKind::Planner));
         assert!(!seq.contains(&RoleKind::Reviewer));
@@ -451,7 +428,7 @@ mod tests {
 
     #[test]
     fn review_resume_is_reviewer_only() {
-        // The reviewer leg arrives exclusively via the verification → ReviewResume
+        // The reviewer leg arrives exclusively via the worker → ReviewResume
         // path now; ReviewResume stays reviewer-only.
         assert_eq!(
             SupervisorFlow::ReviewResume.role_sequence(),
@@ -476,35 +453,22 @@ mod tests {
 
     #[test]
     fn worker_submitted_outcome_bincode_roundtrip() {
-        // The verify-before-review terminal worker outcome must survive the
-        // worker→host bincode frame.
+        // The WorkerSubmitted terminal outcome must survive the worker→host
+        // bincode frame.
         let report = TaskRunReport {
             task_run_id: "run-ws".to_string(),
             outcome: TaskRunOutcome::WorkerSubmitted,
             stages_completed: vec![RoleKind::Worker],
-            verification_run_id: None,
         };
         let bytes = bincode::serialize(&report).expect("serialize");
         let back: TaskRunReport = bincode::deserialize(&bytes).expect("deserialize");
         assert!(matches!(back.outcome, TaskRunOutcome::WorkerSubmitted));
         assert_eq!(back.stages_completed, vec![RoleKind::Worker]);
-        assert_eq!(back.verification_run_id, None);
     }
 
     #[test]
-    fn worker_submitted_carries_in_pod_verification_run_id_over_bincode() {
-        // The in-pod verification run id must survive the worker→host bincode
-        // frame so the host can consume the row instead of dispatching a second
-        // verify Job (the double-compile fix).
-        let report = TaskRunReport {
-            task_run_id: "run-ws".to_string(),
-            outcome: TaskRunOutcome::WorkerSubmitted,
-            stages_completed: vec![RoleKind::Worker],
-            verification_run_id: Some("vr-019e6a03".to_string()),
-        };
-        let bytes = bincode::serialize(&report).expect("serialize");
-        let back: TaskRunReport = bincode::deserialize(&bytes).expect("deserialize");
-        assert_eq!(back.verification_run_id.as_deref(), Some("vr-019e6a03"));
+    fn worker_submitted_in_pod_run_id_removed() {
+        // Test removed — verification pre-PR gate deleted.
     }
 
     #[test]
@@ -554,7 +518,6 @@ mod tests {
                 sha: "deadbeef".to_string(),
             },
             stages_completed: vec![RoleKind::Planner, RoleKind::Worker],
-            verification_run_id: None,
         };
 
         let bytes = bincode::serialize(&report).expect("serialize");
@@ -589,7 +552,6 @@ mod tests {
                 body_excerpt: None,
             },
             stages_completed: vec![RoleKind::Worker],
-            verification_run_id: None,
         };
 
         let bytes = bincode::serialize(&report).expect("serialize");
@@ -632,7 +594,6 @@ mod tests {
                 body_excerpt: None,
             },
             stages_completed: vec![RoleKind::Worker],
-            verification_run_id: None,
         };
 
         let bytes = bincode::serialize(&report).expect("serialize");
@@ -675,7 +636,6 @@ mod tests {
                 task_run_id: "run-loop-guard".to_string(),
                 outcome: loop_guard_outcome(kind),
                 stages_completed: vec![RoleKind::Worker],
-                verification_run_id: None,
             };
 
             let bytes = bincode::serialize(&report).expect("serialize");

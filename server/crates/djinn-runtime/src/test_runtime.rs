@@ -209,7 +209,6 @@ impl Default for TestRuntime {
                     reason: "TestRuntime default runner: no runner wired".to_string(),
                 },
                 stages_completed: Vec::new(),
-                verification_run_id: None,
             })
         })
     }
@@ -371,7 +370,6 @@ impl SessionRuntime for TestRuntime {
                     task_run_id: handle.task_run_id.clone(),
                     outcome: TaskRunOutcome::Interrupted,
                     stages_completed: Vec::new(),
-                    verification_run_id: None,
                 }
             }
             Ok(Err(join_err)) => {
@@ -452,7 +450,6 @@ mod tests {
                     reason: "happy path: fake runner done".into(),
                 },
                 stages_completed: vec![RoleKind::Planner],
-                verification_run_id: None,
             })
         });
 
@@ -510,7 +507,6 @@ mod tests {
                         reason: "should not reach here".into(),
                     },
                     stages_completed: Vec::new(),
-                    verification_run_id: None,
                 })
             }
         });
