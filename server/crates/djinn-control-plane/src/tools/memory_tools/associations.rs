@@ -2,11 +2,11 @@ use super::*;
 
 #[tool_router(router = memory_associations_router, vis = "pub(super)")]
 impl DjinnMcpServer {
-    /// List implicit associations for a note, sorted by weight descending.
-    /// Returns the connected notes with their co-access weight and count.
+    /// List associations for a note, sorted by weight descending.
+    /// Returns the connected notes with their weight, count, and edge kind.
     /// Returns an empty array for notes that have no associations.
     #[tool(
-        description = "List implicit associations for a note, sorted by weight descending. Returns connected notes with co-access weight and count. Returns [] for notes with no associations."
+        description = "List associations for a note, sorted by weight descending. Returns connected notes with weight, count, and edge kind (e.g. co_access, builds_on, contradicts, supersedes, exemplifies, derived_from). Returns [] for notes with no associations."
     )]
     pub async fn memory_associations(
         &self,
