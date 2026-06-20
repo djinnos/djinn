@@ -1,12 +1,12 @@
 ---
-source: crates/djinn-agent/src/prompts.rs
+source: crates/djinn-agent/src/prompts/tests.rs
 expression: section
 ---
 - `task_show(id)` — Show details of a work item including recent activity and blockers.
 - `task_list(issue_type?, label?, limit?, offset?, parent?, priority?, sort?, status?, text?)` — List tasks with optional filters and pagination.
 - `task_activity_list(id, actor_role?, event_type?, limit?)` — Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.
 - `memory_read(identifier)` — Read a note by permalink or title.
-- `memory_search(query, folder?, limit?, task_id?, type?)` — Search notes in project memory.
+- `memory_search(query, edge_kinds?, folder?, limit?, task_id?, type?)` — Search notes in project memory.
 - `memory_list(depth?, folder?, status?, type?)` — List notes in project memory. Returns compact summaries without full content.
 - `shell(command, timeout_ms?)` — Execute shell commands in the task worktree. Commands always run from the worktree root.
 - `read(file_path, limit?, offset?, project?)` — Read a file with line numbers and pagination. Rejects binary files. Pass `project` (UUID or owner/repo slug) to read a file from ANOTHER registered repo — served read-only from its default branch (no checkout); omit it to read your task worktree.
@@ -17,5 +17,5 @@ expression: section
 - `github_search(query, language?, path?, repo?)` — Search GitHub code across public repositories using the GitHub Code Search API. Returns compact, navigable matches with snippets, file paths, URLs, and metadata. Each result has a result_id for reference. Use github_fetch_file to inspect the full file of a promising result.
 - `output_view(tool_use_id, limit?, offset?)` — Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.
 - `output_grep(pattern, tool_use_id, context_lines?)` — Regex search within a truncated tool output. Returns matching lines with context from the full stashed output.
-- `memory_build_context(limit?, min_confidence?, query?, task_id?)` — Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.
+- `memory_build_context(edge_kinds?, limit?, min_confidence?, query?, task_id?)` — Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.
 - `submit_review(task_id, verdict, acceptance_criteria?, feedback?)` — Submit the task review outcome with per-criterion AC verdicts. This atomically sets acceptance criteria met/unmet state on the task. Your session ends after this call.
