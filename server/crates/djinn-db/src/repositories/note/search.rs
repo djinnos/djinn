@@ -242,6 +242,7 @@ impl NoteRepository {
             note_type,
             limit,
             semantic_scores,
+            edge_kinds,
         } = params;
 
         let folder = folder.unwrap_or("");
@@ -259,7 +260,9 @@ impl NoteRepository {
         }
 
         let temporal_scores = self.temporal_scores(project_id, &candidate_ids).await?;
-        let graph_scores = self.graph_proximity_scores(&candidate_ids, 2).await?;
+        let (graph_scores, _graph_warnings) = self
+            .graph_proximity_scores_with_edge_kinds(&candidate_ids, 2, edge_kinds)
+            .await?;
         let task_scores = self.task_affinity_scores(project_id, task_id).await?;
 
         let confidence_map = self.note_confidence_map(&candidate_ids).await?;

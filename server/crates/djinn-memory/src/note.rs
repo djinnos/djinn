@@ -296,6 +296,29 @@ pub struct StaleFolder {
     pub count: i64,
 }
 
+/// A warning that a `contradicts` edge exists between two notes.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ContradictionWarning {
+    pub source_id: String,
+    pub target_id: String,
+    pub kind: String,
+}
+
+/// Annotation that a candidate note is superseded by another note.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SupersedesAnnotation {
+    /// The note ID of the newer note that supersedes the candidate.
+    pub superseded_by: String,
+    pub edge_kind: String,
+}
+
+/// Annotation that a candidate note is contradicted by another note.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ContradictsAnnotation {
+    pub note_id: String,
+    pub edge_kind: String,
+}
+
 /// Context built from a seed note + linked related notes.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BuildContextResponse {
@@ -305,6 +328,12 @@ pub struct BuildContextResponse {
     pub related_l1: Vec<NoteOverview>,
     /// L0 abstract notes reached by deeper link traversal.
     pub related_l0: Vec<NoteAbstract>,
+    /// Notes in the context set that are superseded by another note in the set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supersedes: Vec<SupersedesAnnotation>,
+    /// Notes in the context set that have a contradicting relationship.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contradicts: Vec<ContradictsAnnotation>,
 }
 
 /// Result of a filesystem-to-index reconciliation pass.

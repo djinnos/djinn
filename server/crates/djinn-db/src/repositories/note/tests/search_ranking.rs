@@ -163,6 +163,7 @@ async fn fts5_search() {
             note_type: None,
             limit: 10,
             semantic_scores: None,
+            edge_kinds: None,
         })
         .await
         .unwrap();
@@ -201,6 +202,7 @@ async fn fts5_search_folder_filter() {
             note_type: None,
             limit: 10,
             semantic_scores: None,
+            edge_kinds: None,
         })
         .await
         .unwrap();
@@ -255,6 +257,7 @@ async fn fts_search_prefers_title_over_content() {
             note_type: None,
             limit: 10,
             semantic_scores: None,
+            edge_kinds: None,
         })
         .await
         .unwrap();
@@ -306,6 +309,7 @@ async fn fts_search_prefers_tags_over_content() {
             note_type: None,
             limit: 10,
             semantic_scores: None,
+            edge_kinds: None,
         })
         .await
         .unwrap();
@@ -515,6 +519,7 @@ async fn search_rrf_prefers_higher_access_count_for_equivalent_matches() {
             note_type: None,
             limit: 10,
             semantic_scores: None,
+            edge_kinds: None,
         })
         .await
         .unwrap();
@@ -607,6 +612,7 @@ async fn search_rrf_confidence_lowers_equivalent_match_ranking() {
             note_type: None,
             limit: 10,
             semantic_scores: None,
+            edge_kinds: None,
         })
         .await
         .unwrap();

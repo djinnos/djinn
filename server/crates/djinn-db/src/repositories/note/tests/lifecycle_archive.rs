@@ -342,6 +342,7 @@ async fn archive_sweep_archived_notes_are_hidden_from_retrieval_but_listable_by_
             None,
             20,
             Some(0.0),
+            None,
         )
         .await
         .unwrap();
@@ -364,6 +365,7 @@ async fn archive_sweep_archived_notes_are_hidden_from_retrieval_but_listable_by_
             None,
             20,
             Some(0.0),
+            None,
         )
         .await
         .unwrap();
@@ -383,6 +385,7 @@ async fn archive_sweep_archived_notes_are_hidden_from_retrieval_but_listable_by_
             note_type: None,
             limit: 20,
             semantic_scores: None,
+            edge_kinds: None,
         })
         .await
         .unwrap();

@@ -151,6 +151,7 @@ mod tests {
                     budget: Some(500),
                     task_id: None,
                     min_confidence: None,
+                    edge_kinds: None,
                 },
             ))
             .await;
@@ -166,6 +167,7 @@ mod tests {
                     budget: Some(4096),
                     task_id: None,
                     min_confidence: None,
+                    edge_kinds: None,
                 },
             ))
             .await;
@@ -220,6 +222,7 @@ mod tests {
                     budget: Some(100),
                     task_id: None,
                     min_confidence: None,
+                    edge_kinds: None,
                 },
             ))
             .await;
@@ -235,6 +238,7 @@ mod tests {
                     budget: Some(4096),
                     task_id: None,
                     min_confidence: None,
+                    edge_kinds: None,
                 },
             ))
             .await;
@@ -293,6 +297,7 @@ mod tests {
                     budget: Some(4096),
                     task_id: None,
                     min_confidence: None,
+                    edge_kinds: None,
                 },
             ))
             .await;
@@ -308,6 +313,7 @@ mod tests {
                     budget: Some(1500),
                     task_id: None,
                     min_confidence: None,
+                    edge_kinds: None,
                 },
             ))
             .await;
@@ -323,6 +329,7 @@ mod tests {
                     budget: Some(500),
                     task_id: None,
                     min_confidence: None,
+                    edge_kinds: None,
                 },
             ))
             .await;
@@ -394,6 +401,7 @@ mod tests {
                     budget: None,
                     task_id: None,
                     min_confidence: None,
+                    edge_kinds: None,
                 },
             ))
             .await;
@@ -409,6 +417,7 @@ mod tests {
                     budget: Some(4096),
                     task_id: None,
                     min_confidence: None,
+                    edge_kinds: None,
                 },
             ))
             .await;
@@ -448,6 +457,7 @@ mod tests {
                     budget: Some(4096),
                     task_id: Some("test-task-123".to_string()),
                     min_confidence: None,
+                    edge_kinds: None,
                 },
             ))
             .await;
@@ -552,6 +562,7 @@ mod tests {
                     budget: Some(8192),
                     task_id: None,
                     min_confidence: None, // uses default 0.1
+                    edge_kinds: None,
                 },
             ))
             .await;
@@ -602,6 +613,7 @@ mod tests {
                     budget: Some(8192),
                     task_id: None,
                     min_confidence: Some(0.0),
+                    edge_kinds: None,
                 },
             ))
             .await;
@@ -652,6 +664,7 @@ mod tests {
                     budget: Some(8192),
                     task_id: None,
                     min_confidence: Some(0.0),
+                    edge_kinds: None,
                 },
             ))
             .await;
