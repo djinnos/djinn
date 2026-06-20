@@ -201,6 +201,12 @@ async fn seed_project(db: &djinn_db::Database, project_id: &str, name: &str) {
     .expect("failed to seed project");
 }
 
+fn model_effectiveness_row<'a>(rows: &'a [Value], model_id: &str) -> &'a Value {
+    rows.iter()
+        .find(|row| row.get("model_id").and_then(Value::as_str) == Some(model_id))
+        .unwrap_or_else(|| panic!("missing model_effectiveness row for {model_id}: {rows:?}"))
+}
+
 // ── Admin gating ─────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -733,7 +739,7 @@ async fn admin_request_with_worker_session_returns_model_effectiveness_fields() 
         "model_effectiveness should have at least one element"
     );
 
-    let first = &me[0];
+    let first = model_effectiveness_row(me, "test-model");
     for field in [
         "model_id",
         "sessions",
@@ -751,6 +757,17 @@ async fn admin_request_with_worker_session_returns_model_effectiveness_fields() 
             "missing model_effectiveness field '{field}' in response: {first}"
         );
     }
+
+    assert!(first.get("model_id").unwrap().is_string());
+    assert!(first.get("sessions").unwrap().is_number());
+    assert!(first.get("tokens_in").unwrap().is_number());
+    assert!(first.get("tokens_out").unwrap().is_number());
+    assert!(first.get("completed_task_count").unwrap().is_number());
+    assert!(first.get("success_rate").unwrap().is_number());
+    assert!(first.get("avg_reopens").unwrap().is_number());
+    assert!(first.get("verification_pass_rate").unwrap().is_number());
+    assert!(first.get("cost_per_completed_task").unwrap().is_number());
+    assert!(first.get("tokens_per_task").unwrap().is_number());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -800,7 +817,7 @@ async fn model_effectiveness_response_contains_all_metric_fields() {
         "model_effectiveness should have at least one element"
     );
 
-    let first = &me[0];
+    let first = model_effectiveness_row(me, "metric-model");
     assert!(first.get("model_id").unwrap().is_string());
     assert!(first.get("sessions").unwrap().is_number());
     assert!(first.get("tokens_in").unwrap().is_number());
@@ -860,7 +877,7 @@ async fn model_effectiveness_null_cost_serializes_correctly() {
         "model_effectiveness should have at least one element"
     );
 
-    let first = &me[0];
+    let first = model_effectiveness_row(me, "unpriced-model");
     assert!(
         first.get("spend_usd").unwrap().is_null(),
         "expected spend_usd to be JSON null for unpriced model, got: {}",
