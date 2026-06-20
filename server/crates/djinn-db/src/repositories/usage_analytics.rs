@@ -610,9 +610,9 @@ impl UsageAnalyticsRepository {
                     tokens_in,
                     tokens_out,
                     shared_credit_completed_task_count: completed,
-                    success_rate: r.get("success_rate"),
-                    avg_reopens: r.get("avg_reopens"),
-                    verification_pass_rate: r.get("verification_pass_rate!"),
+                    success_rate: r.get("success_rate!: f64"),
+                    avg_reopens: r.get("avg_reopens!: f64"),
+                    verification_pass_rate: r.get("verification_pass_rate!: f64"),
                     cost_per_completed_task,
                     tokens_per_task,
                 }
