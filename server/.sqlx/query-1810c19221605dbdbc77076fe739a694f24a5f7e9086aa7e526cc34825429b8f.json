@@ -1,1 +1,23 @@
-{"db_name":"PostgreSQL","describe":{"parameters":{"Left":["Varchar","Varchar","Varchar","Varchar","Text","Jsonb","Varchar","Jsonb","Jsonb","Bool"]},"nullable":[],"columns":[]},"hash":"1810c19221605dbdbc77076fe739a694f24a5f7e9086aa7e526cc34825429b8f","query":"INSERT INTO agents (\n                id, project_id, name, base_role, description,\n                system_prompt_extensions, model_preference,\n                mcp_servers, skills, is_default\n             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"}
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO agents (\n                id, project_id, name, base_role, description,\n                system_prompt_extensions, model_preference,\n                mcp_servers, skills, is_default\n             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Jsonb",
+        "Varchar",
+        "Jsonb",
+        "Jsonb",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1810c19221605dbdbc77076fe739a694f24a5f7e9086aa7e526cc34825429b8f"
+}

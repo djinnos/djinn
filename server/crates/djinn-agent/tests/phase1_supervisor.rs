@@ -69,7 +69,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         db,
         event_bus: EventBus::noop(),
         git_actors: Arc::new(Mutex::new(HashMap::new())),
-        verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
+        background_work_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
         role_registry: Arc::new(RoleRegistry::new()),
         health_tracker: HealthTracker::new(),
         file_time: Arc::new(FileTime::new()),

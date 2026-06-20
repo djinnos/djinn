@@ -358,8 +358,8 @@ mod tests {
 
     use super::*;
     use crate::actors::coordinator::{
-        AutoMergeTracker, DEFAULT_MODEL_ID, STUCK_INTERVAL, SharedCoordinatorState,
-        VerificationTracker,
+        AutoMergeTracker, BackgroundWorkTracker, DEFAULT_MODEL_ID, STUCK_INTERVAL,
+        SharedCoordinatorState,
     };
     use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
     use crate::roles::RoleRegistry;
@@ -456,7 +456,7 @@ mod tests {
             inflight_dispatches: std::collections::HashMap::new(),
             dispatch_cooldowns: std::collections::HashMap::new(),
             dispatch_failure_streak: std::collections::HashMap::new(),
-            verification_tracker: VerificationTracker::default(),
+            background_work_tracker: BackgroundWorkTracker::default(),
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: runner,
             last_stale_sweep: StdInstant::now(),

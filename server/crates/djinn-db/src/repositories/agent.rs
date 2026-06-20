@@ -151,7 +151,7 @@ impl AgentRepository {
                 description AS "description!",
                 CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
                      THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
-                model_preference, verification_command,
+                model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
@@ -227,7 +227,7 @@ impl AgentRepository {
                 description AS "description!",
                 CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
                      THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
-                model_preference, verification_command,
+                model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
@@ -258,7 +258,7 @@ impl AgentRepository {
                 description AS "description!",
                 CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
                      THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
-                model_preference, verification_command,
+                model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
@@ -293,7 +293,7 @@ impl AgentRepository {
                 description AS "description!",
                 CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
                      THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
-                model_preference, verification_command,
+                model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
@@ -321,7 +321,7 @@ impl AgentRepository {
                 description AS "description!",
                 CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
                      THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
-                model_preference, verification_command,
+                model_preference,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
@@ -532,7 +532,7 @@ impl AgentRepository {
             r#"SELECT id, project_id, name, base_role, description,
                     CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
                          THEN system_prompt_extensions #>> '{{}}' ELSE '' END AS system_prompt_extensions,
-                    model_preference, verification_command,
+                    model_preference,
                     mcp_servers::text AS mcp_servers, skills::text AS skills, is_default,
                     (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
                      FROM learned_prompt_history h

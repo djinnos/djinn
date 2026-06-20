@@ -621,24 +621,6 @@ pub(crate) fn warm_cache_env_vars(
     env
 }
 
-/// Cache env vars for verification Pods. Verification reuses the warm
-/// per-project base as a read-only SEED: the worker (`run_verify_task`) seeds
-/// a private run target dir from the warm base and overrides `CARGO_TARGET_DIR`
-/// to point there before running `verify_commit`, so it never writes the shared
-/// base or contends on Cargo's build-dir lock.
-///
-/// Must match `warm_cache_env_vars` / `task_run_cache_env_vars`:
-/// `CARGO_INCREMENTAL=1` + `RUSTC_WRAPPER=""` so the seed is reusable.
-pub(crate) fn verify_cache_env_vars(
-    project_id: &str,
-    _policy: Option<&djinn_stack::environment::CargoCachePolicy>,
-) -> Vec<EnvVar> {
-    let mut env = cache_env_vars(project_id);
-    env.push(env_var("CARGO_INCREMENTAL", "1"));
-    env.push(env_var("RUSTC_WRAPPER", ""));
-    env
-}
-
 /// Cache env vars for task-run Pods. The target dir is private to the canonical
 /// task run id, not the generated Kubernetes resource name, so task Pods avoid
 /// the shared Cargo build-dir lock while preserving the warm per-project base as
@@ -650,10 +632,9 @@ pub(crate) fn verify_cache_env_vars(
 /// rebuild (~9min for a large crate like `djinn-agent`) every edit.
 ///
 /// Always `CARGO_INCREMENTAL=1` and `RUSTC_WRAPPER=""` (clearing any repo
-/// `rustc-wrapper = "sccache"`), matching `warm_cache_env_vars` and
-/// `verify_cache_env_vars`. Warm == verify == worker must use the SAME compile
-/// strategy or the warm seed is wasted. `policy` is accepted for signature
-/// parity but no longer flips incremental.
+/// `rustc-wrapper = "sccache"`), matching `warm_cache_env_vars`. Warm ==
+/// worker must use the SAME compile strategy or the warm seed is wasted.
+/// `policy` is accepted for signature parity but no longer flips incremental.
 fn task_run_cache_env_vars(
     project_id: &str,
     task_run_id: &str,
@@ -1372,28 +1353,17 @@ mod tests {
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        let verify_vars = verify_cache_env_vars(project_id, Some(&policy));
-        let verify_env: BTreeMap<&str, &str> = verify_vars
-            .iter()
-            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
-            .collect();
-
         let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        // Warm/verify with sccache=false → incremental enabled
+        // Warm with sccache=false → incremental enabled
         assert_eq!(
             warm_env.get("CARGO_INCREMENTAL").copied(),
             Some("1"),
             "warm must enable incremental when policy.sccache=false"
-        );
-        assert_eq!(
-            verify_env.get("CARGO_INCREMENTAL").copied(),
-            Some("1"),
-            "verify must enable incremental when policy.sccache=false"
         );
 
         // Task-run unchanged
@@ -1434,24 +1404,14 @@ mod tests {
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        let verify_vars = verify_cache_env_vars(project_id, Some(&policy));
-        let verify_env: BTreeMap<&str, &str> = verify_vars
-            .iter()
-            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
-            .collect();
-
         let worker_vars = task_run_cache_env_vars(project_id, &task_run_id, Some(&policy));
         let worker_env: BTreeMap<&str, &str> = worker_vars
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
-        // All three force incremental=1 + RUSTC_WRAPPER="" regardless of policy.
-        for (label, env) in [
-            ("warm", &warm_env),
-            ("verify", &verify_env),
-            ("worker", &worker_env),
-        ] {
+        // Both force incremental=1 + RUSTC_WRAPPER="" regardless of policy.
+        for (label, env) in [("warm", &warm_env), ("worker", &worker_env)] {
             assert_eq!(
                 env.get("CARGO_INCREMENTAL").copied(),
                 Some("1"),
@@ -1477,13 +1437,6 @@ mod tests {
         assert_eq!(
             warm_vars_none, warm_vars_auto,
             "AutoDetected must match None for warm"
-        );
-
-        let verify_vars_none = verify_cache_env_vars(project_id, None);
-        let verify_vars_auto = verify_cache_env_vars(project_id, Some(&policy));
-        assert_eq!(
-            verify_vars_none, verify_vars_auto,
-            "AutoDetected must match None for verify"
         );
 
         let worker_vars_none = task_run_cache_env_vars(project_id, &task_run_id, None);

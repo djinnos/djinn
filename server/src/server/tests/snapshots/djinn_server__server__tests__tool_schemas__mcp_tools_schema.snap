@@ -57,11 +57,6 @@ expression: signatures
           "description": "Additional system prompt content appended to the base role prompt.",
           "nullable": true,
           "type": "string"
-        },
-        "verification_command": {
-          "description": "Custom verification command (falls back to project default).",
-          "nullable": true,
-          "type": "string"
         }
       },
       "required": [
@@ -128,10 +123,6 @@ expression: signatures
           "type": "string"
         },
         "updated_at": {
-          "type": "string"
-        },
-        "verification_command": {
-          "nullable": true,
           "type": "string"
         }
       },
@@ -225,10 +216,6 @@ expression: signatures
               "type": "string"
             },
             "updated_at": {
-              "type": "string"
-            },
-            "verification_command": {
-              "nullable": true,
               "type": "string"
             }
           },
@@ -515,10 +502,6 @@ expression: signatures
         },
         "updated_at": {
           "type": "string"
-        },
-        "verification_command": {
-          "nullable": true,
-          "type": "string"
         }
       },
       "title": "AgentSingleResponse",
@@ -578,10 +561,6 @@ expression: signatures
           "type": "array"
         },
         "system_prompt_extensions": {
-          "nullable": true,
-          "type": "string"
-        },
-        "verification_command": {
           "nullable": true,
           "type": "string"
         }
@@ -649,10 +628,6 @@ expression: signatures
           "type": "string"
         },
         "updated_at": {
-          "type": "string"
-        },
-        "verification_command": {
-          "nullable": true,
           "type": "string"
         }
       },
@@ -10839,283 +10814,6 @@ expression: signatures
     }
   },
   {
-    "name": "project_verification_get",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "project": {
-          "description": "Project UUID or `owner/repo` slug.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "project"
-      ],
-      "title": "ProjectVerificationGetParams",
-      "type": "object"
-    },
-    "output_schema": {
-      "$defs": {
-        "VerificationRule": {
-          "additionalProperties": false,
-          "description": "One verification rule.\n\nField names and semantics match the pre-cut-over\n`djinn_db::repositories::project::VerificationRule`, so the P5 boot hook\ncan copy `projects.verification_rules` straight into\n`environment_config.verification.rules` without a translation step.",
-          "properties": {
-            "commands": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "match_pattern": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "match_pattern",
-            "commands"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "rules": {
-          "description": "Verification rules from the `project_verifications` table (migration\n44). Empty when the project has none.",
-          "items": {
-            "$ref": "#/$defs/VerificationRule"
-          },
-          "type": "array"
-        },
-        "status": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "status",
-        "rules"
-      ],
-      "title": "ProjectVerificationGetResponse",
-      "type": "object"
-    }
-  },
-  {
-    "name": "project_verification_set",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$defs": {
-        "VerificationRule": {
-          "additionalProperties": false,
-          "description": "One verification rule.\n\nField names and semantics match the pre-cut-over\n`djinn_db::repositories::project::VerificationRule`, so the P5 boot hook\ncan copy `projects.verification_rules` straight into\n`environment_config.verification.rules` without a translation step.",
-          "properties": {
-            "commands": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "match_pattern": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "match_pattern",
-            "commands"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "project": {
-          "description": "Project UUID or `owner/repo` slug.",
-          "type": "string"
-        },
-        "rules": {
-          "description": "Full replacement set of verification rules (glob `match_pattern` +\nshell `commands`). Validated server-side before persisting.",
-          "items": {
-            "$ref": "#/$defs/VerificationRule"
-          },
-          "type": "array"
-        },
-        "test_id": {
-          "default": null,
-          "description": "Id from a prior `project_verification_test` whose run PASSED, proving\nthese exact rules work. REQUIRED when `rules` is non-empty (the save is\nrejected otherwise, so a broken rule can't disrupt live tasks); an empty\nrule set needs no test.",
-          "nullable": true,
-          "type": "string"
-        }
-      },
-      "required": [
-        "project",
-        "rules"
-      ],
-      "title": "ProjectVerificationSetParams",
-      "type": "object"
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "status": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "status"
-      ],
-      "title": "ProjectVerificationSetResponse",
-      "type": "object"
-    }
-  },
-  {
-    "name": "project_verification_test",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$defs": {
-        "VerificationRule": {
-          "additionalProperties": false,
-          "description": "One verification rule.\n\nField names and semantics match the pre-cut-over\n`djinn_db::repositories::project::VerificationRule`, so the P5 boot hook\ncan copy `projects.verification_rules` straight into\n`environment_config.verification.rules` without a translation step.",
-          "properties": {
-            "commands": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "match_pattern": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "match_pattern",
-            "commands"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "project": {
-          "description": "Project UUID or `owner/repo` slug.",
-          "type": "string"
-        },
-        "rules": {
-          "description": "Candidate verification rules to test (not saved). Their commands run in\nthe project's image against the default branch.",
-          "items": {
-            "$ref": "#/$defs/VerificationRule"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "project",
-        "rules"
-      ],
-      "title": "ProjectVerificationTestParams",
-      "type": "object"
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "status": {
-          "type": "string"
-        },
-        "test_id": {
-          "description": "Poll `project_verification_test_status` with this id for the result,\nthen pass it to `project_verification_set` once it has passed.",
-          "nullable": true,
-          "type": "string"
-        }
-      },
-      "required": [
-        "status"
-      ],
-      "title": "ProjectVerificationTestResponse",
-      "type": "object"
-    }
-  },
-  {
-    "name": "project_verification_test_status",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "test_id": {
-          "description": "The `test_id` returned by `project_verification_test`.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "test_id"
-      ],
-      "title": "ProjectVerificationTestStatusParams",
-      "type": "object"
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "passed": {
-          "description": "True once `run_status == \"passed\"`.",
-          "type": "boolean"
-        },
-        "results_json": {
-          "description": "Per-command results as a JSON array string\n(`[{name,command,exit_code,stdout,stderr,duration_ms}]`).",
-          "type": "string"
-        },
-        "run_error": {
-          "description": "Populated when the run itself errored (couldn't dispatch/clone/etc.).",
-          "nullable": true,
-          "type": "string"
-        },
-        "run_status": {
-          "description": "Test-run lifecycle: pending | running | passed | failed | error.",
-          "type": "string"
-        },
-        "status": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "status",
-        "run_status",
-        "passed",
-        "results_json"
-      ],
-      "title": "ProjectVerificationTestStatusResponse",
-      "type": "object"
-    }
-  },
-  {
     "name": "proposal_add_target",
     "read_only": false,
     "destructive": true,
@@ -16151,48 +15849,6 @@ expression: signatures
             "timestamp"
           ],
           "type": "object"
-        },
-        "TimelineVerificationStep": {
-          "properties": {
-            "command": {
-              "type": "string"
-            },
-            "duration_ms": {
-              "format": "int64",
-              "type": "integer"
-            },
-            "exit_code": {
-              "format": "int32",
-              "type": "integer"
-            },
-            "index": {
-              "format": "int32",
-              "type": "integer"
-            },
-            "name": {
-              "type": "string"
-            },
-            "phase": {
-              "type": "string"
-            },
-            "stderr": {
-              "type": "string"
-            },
-            "stdout": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "phase",
-            "index",
-            "name",
-            "command",
-            "exit_code",
-            "stdout",
-            "stderr",
-            "duration_ms"
-          ],
-          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -16218,13 +15874,6 @@ expression: signatures
         "sessions": {
           "items": {
             "$ref": "#/$defs/SessionToolSession"
-          },
-          "nullable": true,
-          "type": "array"
-        },
-        "verification_steps": {
-          "items": {
-            "$ref": "#/$defs/TimelineVerificationStep"
           },
           "nullable": true,
           "type": "array"

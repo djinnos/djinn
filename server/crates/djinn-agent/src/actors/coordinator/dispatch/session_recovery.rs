@@ -1,5 +1,5 @@
 use super::super::*;
-use djinn_core::models::{TaskStatus, TransitionAction};
+use djinn_core::models::TransitionAction;
 use tracing::Instrument as _;
 
 /// A `running`, zero-token session older than this has slipped past the
@@ -560,11 +560,10 @@ impl CoordinatorActor {
     /// and release them back to a dispatch-ready state (AGENT-08).
     ///
     /// For slot-based statuses (in_progress, in_task_review, in_lead_intervention),
-    /// we check `has_session` in the slot pool.
-    ///
-    /// For "verifying", we check the shared `VerificationTracker` — if no
-    /// background verification pipeline is registered for the task, it was
-    /// orphaned (e.g. server restart) and gets released back to open.
+    /// we check `has_session` in the slot pool, and skip tasks with in-flight
+    /// post-session background work registered in the shared
+    /// `BackgroundWorkTracker` (e.g. a non-worker merge/transition still running
+    /// after the slot freed its session).
     pub(in crate::actors::coordinator) async fn detect_and_recover_stuck_filtered(
         &mut self,
         project_filter: Option<&str>,
@@ -606,13 +605,13 @@ impl CoordinatorActor {
                 }
 
                 // Non-worker roles free the slot immediately and run post-session
-                // work (merge, transition) in a background task. The verification
-                // tracker covers both verification pipelines AND post-session work.
+                // work (merge, transition) in a background task. The
+                // background-work tracker covers that in-flight post-session work.
                 let has_background_work = {
                     let guard = self
-                        .verification_tracker
+                        .background_work_tracker
                         .lock()
-                        .expect("verification tracker mutex poisoned");
+                        .expect("background work tracker mutex poisoned");
                     guard.contains(&task.id)
                 };
                 if has_background_work {
@@ -667,247 +666,6 @@ impl CoordinatorActor {
                     Err(e) => {
                         tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: failed to recover stuck task")
                     }
-                }
-            }
-        }
-
-        let verifying = match repo.list_by_status("verifying").await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "CoordinatorActor: list_by_status(verifying) failed");
-                Vec::new()
-            }
-        };
-
-        for task in verifying {
-            if let Some(project_id) = project_filter
-                && task.project_id != project_id
-            {
-                continue;
-            }
-
-            let tracked = {
-                let guard = self
-                    .verification_tracker
-                    .lock()
-                    .expect("verification tracker mutex poisoned");
-                guard.contains(&task.id)
-            };
-            if tracked {
-                continue;
-            }
-
-            // Grace period: the task enters `verifying` when the in-pod
-            // supervisor fires `submit_verification`, but the host only
-            // registers the pipeline in the tracker after the pod's
-            // WorkerSubmitted report arrives and `spawn_verification` runs —
-            // a window on every run. A sweep tick landing inside it flipped
-            // freshly-verifying tasks straight back to `open` (observed: gx2q
-            // recovered 0.8s after entering verifying → spurious full worker
-            // redo). Only recover tasks that have sat in `verifying` well past
-            // any plausible report+spawn latency. Timestamps are
-            // `YYYY-MM-DDTHH:MM:SS.mmmZ` strings, lexically comparable — same
-            // cutoff idiom as `reap_stale_task_runs`.
-            //
-            // IN-POD VERIFICATION (the double-compile fix): the worker runs the
-            // verification pipeline ITSELF, inside the live task-run pod, BETWEEN
-            // entering `verifying` and emitting its report — so the task-run row
-            // stays `running` for the whole verify (clippy + test, minutes even
-            // when fast via artifact reuse), and the tracker has not registered
-            // it yet. That is a LIVE task, not an orphan. NEVER recover a
-            // verifying task while a task-run for it is still running: a hung
-            // in-pod verify is backstopped by the task-run's own stall reaper and
-            // the pod's K8s active-deadline. Only a verifying task with NO running
-            // task-run is a true orphan (its verify pod/Job died, or it's still
-            // in the brief pre-tracker window), and we recover it on a short
-            // grace. This gates on task-run liveness instead of a blunt timeout,
-            // so genuine orphans recover promptly while in-pod verifies of any
-            // duration are protected.
-            //
-            // BUG 2 (leaked `running` row strands the task for hours): a
-            // `running, ended_at=NULL` task-run left behind by a pod that died
-            // out-of-band (OOM / eviction / deploy-kill) WITHOUT writing its
-            // terminal RPC makes the naive `has_live_run` test true FOREVER —
-            // so this recovery is skipped until `reap_stale_running` clears the
-            // row, which keys on a 4-HOUR `STALE_TASK_RUN_THRESHOLD_SECS` and
-            // only runs on the 15-minute stale-resource sweep. That produced the
-            // observed 3.7–5h silent stalls. Guard against it: a `running` row is
-            // only treated as LIVE while it is also RECENTLY active — its
-            // `started_at` is within a short liveness grace comfortably above any
-            // real in-pod verify duration. A `running` row older than that grace
-            // is a leaked orphan, not a live verify, so recovery proceeds within
-            // minutes instead of hours. `started_at` is the same
-            // `YYYY-MM-DDTHH:MM:SS.mmmZ` string format as the cutoff below, so
-            // the comparison is a lexical string compare (same idiom as
-            // `reap_stale_task_runs`).
-            const RUNNING_RUN_LIVENESS_GRACE_SECS: i64 = 600;
-            let running_cutoff = time::OffsetDateTime::now_utc()
-                - time::Duration::seconds(RUNNING_RUN_LIVENESS_GRACE_SECS);
-            let running_cutoff_iso = running_cutoff
-                .format(&time::macros::format_description!(
-                    "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
-                ))
-                .ok();
-            let runs = djinn_db::TaskRunRepository::new(self.db.clone())
-                .list_for_task(&task.id)
-                .await
-                .unwrap_or_default();
-            let mut has_stale_running_run = false;
-            let has_live_run = runs.iter().any(|r| {
-                let is_running = r.status == djinn_core::models::TaskRunStatus::Running.as_str()
-                    && r.ended_at.is_none();
-                if !is_running {
-                    return false;
-                }
-                // Live only if started recently. If we couldn't format a cutoff
-                // (clock/format error), conservatively treat it as live.
-                match running_cutoff_iso.as_deref() {
-                    Some(cutoff) if r.started_at.as_str() < cutoff => {
-                        has_stale_running_run = true;
-                        false
-                    }
-                    _ => true,
-                }
-            });
-            if has_live_run {
-                continue;
-            }
-            if has_stale_running_run {
-                // Loud, so the stall is visible instead of silently waiting on
-                // the 4-hour reaper. A `verifying` task whose only task-run is a
-                // leaked `running` row is exactly the Bug-2 wedge.
-                tracing::error!(
-                    task_id = %task.short_id,
-                    task_uuid = %task.id,
-                    "CoordinatorActor: verifying task has a STALE `running` task-run \
-                     (started > liveness grace ago, no terminal write — likely an \
-                     OOM/eviction/deploy-killed pod); recovering instead of waiting \
-                     on the 4-hour stale-run reaper"
-                );
-            }
-
-            // Short grace for true orphans: still skip the few-second window
-            // between `submit_verification` (task → `verifying`) and
-            // `spawn_verification` registering the pipeline in the tracker.
-            // Timestamps are `YYYY-MM-DDTHH:MM:SS.mmmZ` strings, lexically
-            // comparable — same cutoff idiom as `reap_stale_task_runs`.
-            const VERIFYING_RECOVERY_GRACE_SECS: i64 = 180;
-            let cutoff = time::OffsetDateTime::now_utc()
-                - time::Duration::seconds(VERIFYING_RECOVERY_GRACE_SECS);
-            let format = time::macros::format_description!(
-                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
-            );
-            if let Ok(cutoff_iso) = cutoff.format(&format)
-                && task.updated_at.as_str() > cutoff_iso.as_str()
-            {
-                continue;
-            }
-
-            // BUG 1 defense-in-depth: before releasing this `verifying` task back
-            // to `open` (which discards completed-and-verified work), check for a
-            // worker-written terminal in-pod `verification_runs` row. Its presence
-            // means the worker DID finish verification in-pod but its
-            // WorkerSubmitted report frame was lost (e.g. the task-run pod was
-            // TTL-GC'd before the host could consume it), so the host pipeline was
-            // never armed. Re-arm it against the existing row instead of throwing
-            // the run away. `spawn_verification_with_in_pod_run` is idempotent
-            // against the unchanged commit and re-registers the task in the
-            // verification tracker, so a redundant tick won't double-process it.
-            match djinn_db::VerificationRunRepository::new(self.db.clone())
-                .latest_terminal_for_task(&task.id)
-                .await
-            {
-                Ok(Some(run_id)) => {
-                    let project_path = self
-                        .project_path_for_id(&task.project_id)
-                        .await
-                        .unwrap_or_default();
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        verification_run_id = %run_id,
-                        "CoordinatorActor: orphaned verifying task has a terminal in-pod \
-                         verification row; re-arming host verification pipeline instead of \
-                         releasing to open"
-                    );
-                    crate::actors::slot::verification::spawn_verification_with_in_pod_run(
-                        task.id.clone(),
-                        project_path,
-                        self.maintenance_context(),
-                        Some(run_id),
-                    );
-                    affected += 1;
-                    continue;
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!(
-                    task_id = %task.short_id,
-                    error = %e,
-                    "CoordinatorActor: failed to look up in-pod verification row during \
-                     verifying recovery; falling through to release-to-open"
-                ),
-            }
-
-            let evidence = match self.collect_live_mover_evidence(&task).await {
-                Ok(evidence) => evidence,
-                Err(e) => {
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        error = %e,
-                        "CoordinatorActor: orphaned verifying no-mover disposition skipped; failed to collect live-mover evidence"
-                    );
-                    continue;
-                }
-            };
-            let merge_target = match ProjectRepository::new(
-                self.db.clone(),
-                crate::events::event_bus_for(&self.events_tx),
-            )
-            .get_config(&task.project_id)
-            .await
-            {
-                Ok(Some(config)) => config.target_branch,
-                _ => "main".to_owned(),
-            };
-            if let Some(outcome) =
-                crate::supervisor_impl::pr::handle_settled_noop_without_live_mover(
-                    &task,
-                    &repo,
-                    &merge_target,
-                    &evidence,
-                )
-                .await
-            {
-                tracing::info!(
-                    task_id = %task.short_id,
-                    outcome = ?outcome,
-                    "CoordinatorActor: orphaned verifying task routed through no-mover no-op disposition"
-                );
-                affected += 1;
-                continue;
-            }
-
-            match repo
-                .transition(
-                    &task.id,
-                    TransitionAction::Release,
-                    "coordinator",
-                    "system",
-                    Some("Recovered by coordinator: no active verification pipeline"),
-                    Some(TaskStatus::Open),
-                )
-                .await
-            {
-                Ok(_) => {
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        from = "verifying",
-                        to = "open",
-                        "CoordinatorActor: recovered orphaned verifying task"
-                    );
-                    affected += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: failed to recover verifying task")
                 }
             }
         }

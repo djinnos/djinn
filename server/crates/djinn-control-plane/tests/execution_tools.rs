@@ -429,7 +429,7 @@ impl RealPoolKillHarness {
             db: db.clone(),
             event_bus: event_bus.clone(),
             git_actors: Arc::new(TokioMutex::new(HashMap::new())),
-            verifying_tasks: Arc::new(Mutex::new(HashSet::new())),
+            background_work_tasks: Arc::new(Mutex::new(HashSet::new())),
             role_registry: Arc::new(RoleRegistry::new()),
             health_tracker: HealthTracker::new(),
             file_time: Arc::new(FileTime::new()),
@@ -883,24 +883,6 @@ impl RuntimeOps for RecordingRuntimeOps {
     async fn trigger_graph_warm(&self, _project_id: &str) {}
 
     async fn apply_user_model_change(&self) {}
-
-    async fn dispatch_verification_test(
-        &self,
-        _test_id: &str,
-        _project_id: &str,
-    ) -> Result<(), djinn_control_plane::bridge::RuntimeDispatchError> {
-        Ok(())
-    }
-
-    async fn dispatch_verification(
-        &self,
-        _run_id: &str,
-        _project_id: &str,
-        _task_branch: &str,
-        _target_branch: &str,
-    ) -> Result<(), djinn_control_plane::bridge::RuntimeDispatchError> {
-        Ok(())
-    }
 
     async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String> {
         self.teardown_calls

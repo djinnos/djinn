@@ -1,5 +1,4 @@
-//! Setup-command execution + verification-command/rules resolution for the
-//! task lifecycle.
+//! Setup-command execution for the task lifecycle.
 //!
 //! This is a pure code-motion extraction from `run_task_lifecycle` (task #14
 //! preparatory work). The caller is responsible for reacting to
@@ -12,17 +11,15 @@ use std::path::Path;
 use crate::actors::slot::helpers::format_command_details;
 use crate::commands::run_commands;
 use crate::context::AgentContext;
-use crate::verification::environment::hook_commands_to_specs;
+use crate::environment::hook_commands_to_specs;
 
 /// Resolved prompt-context fragments produced after running project setup
-/// commands and resolving the verification configuration.
-pub(crate) struct SetupAndVerificationContext {
+/// commands.
+pub(crate) struct SetupContext {
     pub prompt_setup_commands: Option<String>,
-    pub prompt_verification_commands: Option<String>,
-    pub prompt_verification_rules: Option<String>,
 }
 
-/// Failure from [`resolve_setup_and_verification_context`].
+/// Failure from [`resolve_setup_context`].
 ///
 /// Carries the human-readable reason string that the caller will thread into
 /// the task-status transition (preserving the original error-to-transition
@@ -31,12 +28,10 @@ pub(crate) struct SetupError {
     pub reason: String,
 }
 
-/// Run project setup commands (if any), format them for the prompt, and
-/// resolve verification commands + rules.
+/// Run project setup commands (if any) and format them for the prompt.
 ///
-/// Setup commands come from `environment_config.lifecycle.pre_verification`
-/// and rules come from `environment_config.verification.rules`; callers
-/// fetch both upstream and pass them in.
+/// Setup commands come from `environment_config.lifecycle.pre_verification`;
+/// callers fetch them upstream and pass them in.
 ///
 /// This mirrors the byte-for-byte behaviour of the former inline block in
 /// `run_task_lifecycle`:
@@ -48,15 +43,13 @@ pub(crate) struct SetupError {
 ///
 /// The caller is responsible for all task-status transitions and worktree
 /// teardown on error — this function does not touch either.
-pub(crate) async fn resolve_setup_and_verification_context(
+pub(crate) async fn resolve_setup_context(
     pre_verification_hooks: Vec<djinn_stack::environment::HookCommand>,
-    verification_rules: Vec<djinn_stack::environment::VerificationRule>,
-    role_verification_command: Option<&str>,
     worktree_path: &Path,
     task_id: &str,
     task_short_id: &str,
     app_state: &AgentContext,
-) -> Result<SetupAndVerificationContext, SetupError> {
+) -> Result<SetupContext, SetupError> {
     let emit_step = |step: &str, detail: serde_json::Value| {
         app_state
             .event_bus
@@ -67,22 +60,6 @@ pub(crate) async fn resolve_setup_and_verification_context(
 
     let setup_specs = hook_commands_to_specs(&pre_verification_hooks);
     let prompt_setup_commands = format_command_details(&setup_specs);
-    // Role-level verification_command overrides the project's environment
-    // config when set.
-    let prompt_verification_commands = if let Some(cmd) = role_verification_command {
-        if !cmd.trim().is_empty() {
-            tracing::debug!(
-                task_id = %task_short_id,
-                command = %cmd,
-                "Lifecycle: using role-level verification_command override"
-            );
-            Some(cmd.to_string())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
     if !setup_specs.is_empty() {
         let setup_start = std::time::Instant::now();
         tracing::info!(
@@ -161,29 +138,7 @@ pub(crate) async fn resolve_setup_and_verification_context(
             }
         }
     }
-    // Format verification_rules as a markdown list for the prompt.
-    // Each rule becomes: "- `<pattern>`: `cmd1`, `cmd2`"
-    let prompt_verification_rules = if verification_rules.is_empty() {
-        None
-    } else {
-        let formatted = verification_rules
-            .iter()
-            .map(|r| {
-                let cmds = r
-                    .commands
-                    .iter()
-                    .map(|c| format!("`{c}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("- `{}`: {}", r.match_pattern, cmds)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        Some(formatted)
-    };
-    Ok(SetupAndVerificationContext {
+    Ok(SetupContext {
         prompt_setup_commands,
-        prompt_verification_commands,
-        prompt_verification_rules,
     })
 }

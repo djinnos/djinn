@@ -107,7 +107,6 @@ pub struct AgentUpdateParams {
     pub description: Option<String>,
     pub system_prompt_extensions: Option<String>,
     pub model_preference: Option<String>,
-    pub verification_command: Option<String>,
     pub mcp_servers: Option<Vec<AnyJson>>,
     pub skills: Option<Vec<AnyJson>>,
     /// Deprecated: direct setting of learned_prompt bypasses history and evaluator
@@ -247,7 +246,7 @@ impl DjinnMcpServer {
     /// learned_prompt is machine-managed: use agent_amend_prompt (Planner) or
     /// the clear endpoint; direct setting via agent_update is rejected.
     #[tool(
-        description = "Update a specialist agent (name, description, system_prompt_extensions, model_preference, verification_command, mcp_servers, skills). Cannot modify default agents' is_default flag. Accepts agent UUID or name. learned_prompt is machine-managed and cannot be set directly here."
+        description = "Update a specialist agent (name, description, system_prompt_extensions, model_preference, mcp_servers, skills). Cannot modify default agents' is_default flag. Accepts agent UUID or name. learned_prompt is machine-managed and cannot be set directly here."
     )]
     pub async fn agent_update(
         &self,
@@ -332,11 +331,6 @@ impl DjinnMcpServer {
         } else {
             role.model_preference.as_deref()
         };
-        let verification_command = if p.verification_command.is_some() {
-            p.verification_command.as_deref()
-        } else {
-            role.verification_command.as_deref()
-        };
         let mcp_servers_str = p
             .mcp_servers
             .as_ref()
@@ -385,7 +379,6 @@ impl DjinnMcpServer {
                     description,
                     system_prompt_extensions,
                     model_preference,
-                    verification_command,
                     mcp_servers: &mcp_servers_str,
                     skills: &skills_str,
                     learned_prompt: learned_prompt_value,
@@ -405,7 +398,7 @@ impl DjinnMcpServer {
     }
 
     /// Aggregate effectiveness metrics per agent: success rate, token usage,
-    /// session duration, verification pass rate, reopen rate.
+    /// session duration, reopen rate.
     /// Optionally filter to a single agent by UUID or name.
     #[tool(
         description = "Return aggregated effectiveness metrics per agent (success_rate, avg_tokens, avg_time_seconds, avg_reopens). Accepts optional agent_id filter and window_days (default 30)."

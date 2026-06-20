@@ -502,61 +502,6 @@ impl SupervisorServices for WorkerSupervisorServices {
     ) -> Result<serde_json::Value, String> {
         self.rpc.tool_ci_job_log(session_task_id, arguments).await
     }
-
-    /// IN-POD pre-PR verification (the double-compile fix). Called by the
-    /// supervisor at the `WorkerSubmitted` hand-off, BEFORE it tears down the
-    /// worker's private Cargo target dir. We reuse the worker's already-compiled
-    /// artifacts (`CARGO_TARGET_DIR` is still set process-wide) and the live
-    /// ephemeral stage clone (`captured_workspace_path`, captured on the first
-    /// `execute_stage` and still on disk at this point), instead of letting the
-    /// host dispatch a separate verify Job that re-seeds the warm base.
-    ///
-    /// Returns `Ok(None)` — meaning this verification belongs to the STANDALONE
-    /// verification path (the host dispatches a verify Job) — when no workspace
-    /// was captured: a stage that never ran `execute_stage`, a chat session, or
-    /// the run dir is gone. That path is the canonical mechanism whenever there
-    /// is no live worker build to reuse; it is not a fallback for this case, it
-    /// is the correct path for it.
-    /// Returns `Err(_)` on a hard verify error; the supervisor logs it and the
-    /// host re-runs the verification standalone (error recovery).
-    async fn verify_committed_tree(
-        &self,
-        spec: &TaskRunSpec,
-        task: &Task,
-    ) -> Result<Option<String>, String> {
-        // The live ephemeral stage clone the worker committed into. Absent →
-        // no live build to reuse → this verification runs standalone.
-        let workspace_path = {
-            self.captured_workspace_path
-                .lock()
-                .map_err(|_| "captured_workspace_path mutex poisoned".to_string())?
-                .clone()
-        };
-        let Some(workspace_path) = workspace_path else {
-            tracing::info!(
-                task_id = %task.id,
-                "no captured workspace; this verification runs standalone (host verify Job)"
-            );
-            return Ok(None);
-        };
-
-        tracing::info!(
-            task_id = %task.id,
-            project_id = %spec.project_id,
-            workspace = %workspace_path.display(),
-            "in-pod verification: running against committed task tree (reusing worker artifacts)"
-        );
-
-        crate::run_in_pod_verification(
-            &self.agent_context.db,
-            &spec.project_id,
-            task,
-            &workspace_path,
-        )
-        .await
-        .map(Some)
-        .map_err(|e| format!("{e:#}"))
-    }
 }
 
 #[cfg(test)]

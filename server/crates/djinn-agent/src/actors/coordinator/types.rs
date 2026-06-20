@@ -87,10 +87,11 @@ pub struct DebugTotals {
     pub open_breakers: usize,
 }
 
-/// Shared tracker for in-flight verification pipelines.  The verification
-/// spawner registers task IDs here; the coordinator checks it during stuck
-/// detection so it can distinguish live pipelines from orphans after restart.
-pub type VerificationTracker = Arc<std::sync::Mutex<HashSet<String>>>;
+/// Shared tracker for in-flight post-session background work (merge/transition
+/// for non-worker roles, knowledge extraction). The slot teardown registers
+/// task IDs here; the coordinator checks it during stuck detection so it can
+/// distinguish tasks with live background work from orphans after restart.
+pub type BackgroundWorkTracker = Arc<std::sync::Mutex<HashSet<String>>>;
 
 /// State of the PR-poller's mechanical clean-merge fast path for one task.
 ///
@@ -129,7 +130,7 @@ pub struct CoordinatorDeps {
     pub catalog: CatalogService,
     pub health: HealthTracker,
     pub role_registry: Arc<RoleRegistry>,
-    pub verification_tracker: VerificationTracker,
+    pub background_work_tracker: BackgroundWorkTracker,
     pub lsp: crate::lsp::LspManager,
     /// Optional ADR-051 §3 canonical-graph warmer.  When `Some`, the
     /// coordinator tick loop calls `trigger` for every dispatch-enabled
@@ -165,7 +166,7 @@ impl CoordinatorDeps {
         catalog: CatalogService,
         health: HealthTracker,
         role_registry: Arc<RoleRegistry>,
-        verification_tracker: VerificationTracker,
+        background_work_tracker: BackgroundWorkTracker,
         lsp: crate::lsp::LspManager,
     ) -> Self {
         Self {
@@ -176,7 +177,7 @@ impl CoordinatorDeps {
             catalog,
             health,
             role_registry,
-            verification_tracker,
+            background_work_tracker,
             lsp,
             graph_warmer: None,
             consolidation_runner: None,

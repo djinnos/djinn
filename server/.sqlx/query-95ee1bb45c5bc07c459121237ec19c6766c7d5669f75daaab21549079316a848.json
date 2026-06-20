@@ -1,1 +1,95 @@
-{"query":"SELECT id AS \"id!\", project_id AS \"project_id!\",\n                name AS \"name!\", base_role AS \"base_role!\",\n                description AS \"description!\",\n                CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'\n                     THEN system_prompt_extensions #>> '{}' ELSE '' END AS \"system_prompt_extensions!\",\n                model_preference,\n                mcp_servers::text AS \"mcp_servers!\", skills::text AS \"skills!\",\n                is_default AS \"is_default!: bool\",\n                (SELECT string_agg(h.proposed_text, E'\\n\\n---\\n\\n' ORDER BY h.created_at ASC)\n                 FROM learned_prompt_history h\n                 WHERE h.agent_id = agents.id\n                   AND h.action IN ('keep','confirmed')\n                ) AS learned_prompt,\n                created_at AS \"created_at!\", updated_at AS \"updated_at!\"\n             FROM agents WHERE project_id = $1 AND name = $2","hash":"95ee1bb45c5bc07c459121237ec19c6766c7d5669f75daaab21549079316a848","db_name":"PostgreSQL","describe":{"parameters":{"Left":["Varchar","Varchar"]},"nullable":[false,false,false,false,false,null,true,null,null,false,null,false,false],"columns":[{"type_info":"Varchar","ordinal":0,"name":"id!"},{"type_info":"Varchar","ordinal":1,"name":"project_id!"},{"name":"name!","ordinal":2,"type_info":"Varchar"},{"type_info":"Varchar","ordinal":3,"name":"base_role!"},{"type_info":"Text","ordinal":4,"name":"description!"},{"ordinal":5,"type_info":"Text","name":"system_prompt_extensions!"},{"name":"model_preference","type_info":"Varchar","ordinal":6},{"ordinal":7,"type_info":"Text","name":"mcp_servers!"},{"name":"skills!","type_info":"Text","ordinal":8},{"ordinal":9,"type_info":"Bool","name":"is_default!: bool"},{"name":"learned_prompt","ordinal":10,"type_info":"Text"},{"name":"created_at!","type_info":"Varchar","ordinal":11},{"name":"updated_at!","ordinal":12,"type_info":"Varchar"}]}}
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id AS \"id!\", project_id AS \"project_id!\",\n                name AS \"name!\", base_role AS \"base_role!\",\n                description AS \"description!\",\n                CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'\n                     THEN system_prompt_extensions #>> '{}' ELSE '' END AS \"system_prompt_extensions!\",\n                model_preference,\n                mcp_servers::text AS \"mcp_servers!\", skills::text AS \"skills!\",\n                is_default AS \"is_default!: bool\",\n                (SELECT string_agg(h.proposed_text, E'\\n\\n---\\n\\n' ORDER BY h.created_at ASC)\n                 FROM learned_prompt_history h\n                 WHERE h.agent_id = agents.id\n                   AND h.action IN ('keep','confirmed')\n                ) AS learned_prompt,\n                created_at AS \"created_at!\", updated_at AS \"updated_at!\"\n             FROM agents WHERE project_id = $1 AND name = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "name!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "base_role!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "description!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "system_prompt_extensions!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "model_preference",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "mcp_servers!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "skills!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "is_default!: bool",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 10,
+        "name": "learned_prompt",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "updated_at!",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      true,
+      null,
+      null,
+      false,
+      null,
+      false,
+      false
+    ]
+  },
+  "hash": "95ee1bb45c5bc07c459121237ec19c6766c7d5669f75daaab21549079316a848"
+}
