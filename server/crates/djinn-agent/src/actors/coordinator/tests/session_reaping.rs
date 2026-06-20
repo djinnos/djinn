@@ -1051,3 +1051,468 @@ async fn taskrun_job_backstop_continues_after_delete_failure() {
         "teardown failures are best-effort and must not stop the sweep"
     );
 }
+
+// ── Orphan-session burn safeguards ──────────────────────────────────────
+
+/// A task sitting in `open` with a stale `running` session (one whose start
+/// predates the task's most recent `updated_at` transition) and no live pool
+/// session or `BackgroundWorkTracker` entry is detected by
+/// `detect_and_recover_stuck_filtered`. The stale session row is finalized
+/// via `interrupt_running_for_task`, and the task stays in `open` (no status
+/// transition — ready-state orphans only finalize the session, they don't
+/// re-transition the task).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ready_state_stale_orphan_session_is_finalized() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "ready-stale-orphan").await;
+
+    // Task stays `open` (its default after creation).
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+        })
+        .await
+        .unwrap();
+
+    // Backdate the session so it predates the task's `updated_at`. The task
+    // was just created so its `updated_at` is ~now; the session is 20 minutes
+    // older, making `session_predates_task_status` return true.
+    sqlx::query(
+        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+    )
+    .bind(&session.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    assert!(
+        session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "precondition: stale session should be listed as running"
+    );
+
+    // The test coordinator has no pool session for this task and no
+    // BackgroundWorkTracker entry — exactly the orphan condition.
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.detect_and_recover_stuck_filtered(None).await;
+
+    assert!(
+        !session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "stale ready-state orphan session must be finalized via interrupt_running_for_task"
+    );
+
+    let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status, "open",
+        "ready-state orphan recovery finalizes the session but does NOT transition the task"
+    );
+}
+
+/// A task in `open` with a running session whose start is NEWER than the
+/// task's `updated_at` is NOT finalized — the session was legitimately
+/// created after the task entered its current state (e.g. just redispatched).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ready_state_newer_session_is_not_finalized() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "ready-newer-session").await;
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+        })
+        .await
+        .unwrap();
+
+    // Backdate the TASK's `updated_at` so the session's `started_at` is
+    // NEWER. This models a just-redispatched task whose fresh session started
+    // after the task's last status transition.
+    sqlx::query(
+        "UPDATE tasks SET updated_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+    )
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.detect_and_recover_stuck_filtered(None).await;
+
+    assert!(
+        session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "a newer ready-state session must NOT be finalized"
+    );
+}
+
+/// A task in a terminal status (`force_closed`) with a running session that
+/// has nonzero tokens is reaped by `reap_zombie_sessions`. The kill-on-status
+/// guard bypasses the `tokens_in/out != 0` skip because the owning task is
+/// terminal — the session is an orphan regardless of accumulated tokens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn token_bearing_terminal_orphan_is_reaped() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "terminal-token-orphan").await;
+
+    // Put the task in a terminal status.
+    sqlx::query("UPDATE tasks SET status = 'force_closed' WHERE id = $1")
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let run_id = "run-terminal-token";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind(run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+        })
+        .await
+        .unwrap();
+    // Set nonzero tokens to exercise the kill-on-status bypass, and backdate
+    // past the zombie hard cap so the age gate passes.
+    sqlx::query(
+        "UPDATE sessions SET tokens_in = 100, tokens_out = 50, \
+         started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') \
+         WHERE id = $1",
+    )
+    .bind(&session.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let runtime = RecordingRuntimeOps::new(false);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.runtime_ops = Some(Arc::new(runtime.clone()));
+    actor.reap_zombie_sessions().await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![run_id.to_string()],
+        "terminal orphan session with nonzero tokens must have its task-run Job torn down"
+    );
+    assert!(
+        !session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "token-bearing terminal orphan session must be reaped despite nonzero tokens"
+    );
+}
+
+/// A task that was reset back to `open` while its session was still running
+/// (the session's `started_at` predates the reset's `updated_at`) is reaped
+/// even when it has nonzero tokens. The kill-on-status guard recognizes the
+/// session predates the reset and bypasses the token skip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn token_bearing_open_reset_orphan_is_reaped() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "open-reset-token-orphan").await;
+
+    let run_id = "run-open-reset-token";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind(run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+        })
+        .await
+        .unwrap();
+    // Set nonzero tokens and backdate the session to 20 minutes ago (predating
+    // the task reset below).
+    sqlx::query(
+        "UPDATE sessions SET tokens_in = 100, tokens_out = 50, \
+         started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') \
+         WHERE id = $1",
+    )
+    .bind(&session.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // Now "reset" the task to `open` with a fresh `updated_at` (now), so the
+    // session's started_at predates the reset. The task is already `open`
+    // from `create_task_with_note`, but we explicitly touch `updated_at` to
+    // ensure it is newer than the backdated session.
+    sqlx::query(
+        "UPDATE tasks SET status = 'open', \
+         updated_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+    )
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let runtime = RecordingRuntimeOps::new(false);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.runtime_ops = Some(Arc::new(runtime.clone()));
+    actor.reap_zombie_sessions().await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![run_id.to_string()],
+        "open-reset orphan session with nonzero tokens must have its task-run Job torn down"
+    );
+    assert!(
+        !session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "token-bearing open-reset orphan session must be reaped despite nonzero tokens"
+    );
+}
+
+/// A session whose live token count exceeds `SESSION_TOKEN_CEILING` is killed
+/// by `enforce_session_stall_timeout`, routed through loop-guard planner
+/// intervention, and the model circuit breaker is NOT tripped — this is a
+/// runaway/session-ownership guard, not provider-health evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn budget_ceiling_kill_routes_loop_guard_without_tripping_breaker() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "ceiling-kill").await;
+    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+        })
+        .await
+        .unwrap();
+
+    // Stand up a pool with the task dispatched into a slot, then inject a
+    // token count exceeding the ceiling via the test-only override.
+    let cancel = CancellationToken::new();
+    let app_state = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+    let activity = app_state.register_activity(&task.id);
+    // Touch activity so the pool reports activity_tracked=true (avoids the
+    // first-call stall path masking the ceiling check).
+    activity.store(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: "openai/gpt-5.5".to_string(),
+                max_slots: 1,
+                roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+            let runner: crate::actors::slot::TestLifecycleRunner = Arc::new(
+                |_task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                    Box::pin(async move {
+                        kill.cancelled().await;
+                        Ok(())
+                    })
+                },
+            );
+            SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+    pool.dispatch(&task.id, "test-project", "openai/gpt-5.5")
+        .await
+        .expect("dispatch should create a slot mapping");
+
+    // Inject a token count well above SESSION_TOKEN_CEILING (2_000_000).
+    pool.test_set_token_override(&task.id, 3_000_000, 10).await;
+
+    // Give the fire-and-forget override message time to be processed.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.pool = pool.clone();
+    actor.enforce_session_stall_timeout().await;
+
+    assert!(
+        actor.stall_killed.contains(&session.id),
+        "ceiling-tripped session must be killed (added to stall_killed set)"
+    );
+
+    // The model breaker must NOT be tripped — budget kills are not provider
+    // evidence.
+    assert!(
+        actor.health.is_available(None, "openai/gpt-5.5"),
+        "budget ceiling kill must NOT trip the model circuit breaker (not provider evidence)"
+    );
+
+    // The task must be routed through loop-guard planner intervention. We
+    // check for the planner_intervention activity marker.
+    let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let markers = planner_intervention_markers(&task_repo, &task.id).await;
+    assert_eq!(
+        markers.len(),
+        1,
+        "ceiling kill must route the task through loop-guard planner intervention"
+    );
+
+    cancel.cancel();
+}
+
+/// A long-running session with nonzero tokens (persisted on the DB row),
+/// valid in-progress task state, and activity well under ceiling limits is
+/// NOT killed by either `reap_zombie_sessions` or
+/// `enforce_session_stall_timeout`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn healthy_under_ceiling_session_is_not_killed() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "healthy-under-ceiling").await;
+    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+        })
+        .await
+        .unwrap();
+    // Set nonzero tokens on the DB row (this is how they look mid-flight) and
+    // keep started_at recent so the zombie hard cap doesn't fire.
+    sqlx::query("UPDATE sessions SET tokens_in = 1000, tokens_out = 500 WHERE id = $1")
+        .bind(&session.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+
+    // Run BOTH recovery mechanisms — neither should kill the healthy session.
+    actor.reap_zombie_sessions().await;
+    actor.enforce_session_stall_timeout().await;
+
+    assert!(
+        session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "a healthy under-ceiling session must NOT be killed by zombie reap or ceiling enforcement"
+    );
+    assert!(
+        !actor.stall_killed.contains(&session.id),
+        "a healthy under-ceiling session must not be added to the stall_killed set"
+    );
+
+    let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status, "in_progress",
+        "a healthy under-ceiling task must remain in_progress"
+    );
+}

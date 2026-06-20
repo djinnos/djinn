@@ -138,6 +138,16 @@ pub enum PoolMessage {
         reason: String,
         respond_to: Reply<()>,
     },
+    /// Test-only: inject a live `(token_count, turn_count)` override for a
+    /// task so the coordinator's session ceiling logic can observe a runaway
+    /// session without a real worker bridging `touch_activity`. No-op in
+    /// non-test builds (the variant is behind `#[cfg(test)]`).
+    #[cfg(test)]
+    TestSetTokenOverride {
+        task_id: String,
+        token_count: u64,
+        turn_count: u64,
+    },
 }
 
 pub(super) fn now_unix_string() -> String {
