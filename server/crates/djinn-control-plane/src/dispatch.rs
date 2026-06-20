@@ -42,7 +42,7 @@ use crate::tools::project_tools::{
 };
 use crate::tools::proposal_blocks::ProposalBlocksParams;
 use crate::tools::proposal_tools::{
-    ProposalCreateParams, ProposalDeleteParams, ProposalFeedbackAddParams,
+    ProposalCreateParams, ProposalDeleteParams, ProposalExportParams, ProposalFeedbackAddParams,
     ProposalFeedbackResolveParams, ProposalGraduateParams, ProposalImportParams,
     ProposalListParams, ProposalReconcileObsoleteEpicParams, ProposalShowParams,
     ProposalSignoffParams, ProposalStopBuildParams, ProposalTargetParams, ProposalUpdateParams,
@@ -395,6 +395,11 @@ impl DjinnMcpServer {
             "proposal_import" => map_json(
                 name,
                 self.proposal_import(Parameters(decode_args::<ProposalImportParams>(name, args)?))
+                    .await,
+            ),
+            "proposal_export" => map_json(
+                name,
+                self.proposal_export(Parameters(decode_args::<ProposalExportParams>(name, args)?))
                     .await,
             ),
             "proposal_blocks" => map_json(

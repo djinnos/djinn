@@ -136,6 +136,12 @@ pub struct ProposalImportParams {
     pub mdx: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalExportParams {
+    /// Proposal UUID or short_id.
+    pub id: String,
+}
+
 #[derive(Debug)]
 struct ImportedProposalMdx<'a> {
     id: Option<String>,
@@ -447,6 +453,7 @@ impl DjinnMcpServer {
 
         Json(ProposalSingleResponse {
             proposal: Some(ProposalModel::from(&proposal)),
+            mdx: None,
             error: None,
         })
     }
@@ -524,6 +531,93 @@ impl DjinnMcpServer {
 
         Json(ProposalSingleResponse {
             proposal: Some(ProposalModel::from(&proposal)),
+            mdx: None,
+            error: None,
+        })
+    }
+
+    /// Export a proposal as a portable proposal.mdx string.
+    #[tool(
+        description = "Export a proposal (by UUID or short_id) as a portable proposal.mdx string. Returns the proposal and an `mdx` field containing YAML frontmatter (title, body_format, acceptance_criteria) followed by the body exactly as stored. For mdx proposals the output is validated for round-trip fidelity through the block registry parser."
+    )]
+    pub async fn proposal_export(
+        &self,
+        Parameters(p): Parameters<ProposalExportParams>,
+    ) -> Json<ProposalSingleResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(err_single(proposal_not_found_error(&p.id)));
+        };
+
+        // Build the YAML frontmatter matching the parse_proposal_mdx format.
+        let ac_items: Vec<JsonValue> =
+            serde_json::from_str::<serde_json::Value>(&proposal.acceptance_criteria)
+                .ok()
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default();
+
+        let ac_yaml_lines: Vec<String> = ac_items
+            .iter()
+            .map(|item| {
+                // Each AC is either a plain string or a {criterion, met} object.
+                if let Some(s) = item.as_str() {
+                    format!("  - {s}")
+                } else {
+                    // Structured: { "criterion": "...", "met": bool }
+                    let criterion = item.get("criterion").and_then(|v| v.as_str()).unwrap_or("");
+                    let met = item.get("met").and_then(|v| v.as_bool()).unwrap_or(false);
+                    format!("  - criterion: {criterion}\n    met: {met}")
+                }
+            })
+            .collect();
+
+        let ac_section = if ac_yaml_lines.is_empty() {
+            String::from("acceptance_criteria: []\n")
+        } else {
+            format!("acceptance_criteria:\n{}\n", ac_yaml_lines.join("\n"))
+        };
+
+        let mdx_output = format!(
+            "---\ntitle: {}\nbody_format: {}\n{}---\n{}",
+            proposal.title, proposal.body_format, ac_section, proposal.body,
+        );
+
+        // For mdx proposals: round-trip validate by parsing the output through
+        // parse_mdx_blocks and confirming structural equality.
+        if proposal.body_format == "mdx" {
+            match parse_mdx_blocks(&proposal.body) {
+                Err(e) => {
+                    return Json(err_single(format!("round-trip validation failed: {e}")));
+                }
+                Ok(original_blocks) => {
+                    // Extract the body from the exported mdx (after second ---)
+                    let exported_body = split_proposal_mdx_frontmatter(&mdx_output)
+                        .ok()
+                        .map(|(_, body)| body)
+                        .unwrap_or("");
+                    match parse_mdx_blocks(exported_body) {
+                        Err(e) => {
+                            return Json(err_single(format!(
+                                "round-trip parse failed on exported body: {e}"
+                            )));
+                        }
+                        Ok(exported_blocks) => {
+                            if original_blocks != exported_blocks {
+                                return Json(err_single(
+                                    "round-trip validation failed: exported MDX blocks \
+                                     differ from original"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Json(ProposalSingleResponse {
+            proposal: Some(ProposalModel::from(&proposal)),
+            mdx: Some(mdx_output),
             error: None,
         })
     }
@@ -733,6 +827,7 @@ impl DjinnMcpServer {
         {
             Ok(updated) => Json(ProposalSingleResponse {
                 proposal: Some(ProposalModel::from(&updated)),
+                mdx: None,
                 error: None,
             }),
             Err(e) => Json(err_single(e.to_string())),
@@ -959,6 +1054,7 @@ impl DjinnMcpServer {
         match repo.add_signoff(&proposal.id, &p.kind, &user_id).await {
             Ok(updated) => Json(ProposalSingleResponse {
                 proposal: Some(ProposalModel::from(&updated)),
+                mdx: None,
                 error: None,
             }),
             Err(e) => Json(err_single(e.to_string())),
@@ -985,6 +1081,7 @@ impl DjinnMcpServer {
         match repo.clear_signoff(&proposal.id, &p.kind, &user_id).await {
             Ok(updated) => Json(ProposalSingleResponse {
                 proposal: Some(ProposalModel::from(&updated)),
+                mdx: None,
                 error: None,
             }),
             Err(e) => Json(err_single(e.to_string())),
@@ -1123,6 +1220,7 @@ impl DjinnMcpServer {
         match repo.set_building(&proposal.id, &owner).await {
             Ok(updated) => Json(ProposalSingleResponse {
                 proposal: Some(ProposalModel::from(&updated)),
+                mdx: None,
                 error: None,
             }),
             Err(e) => Json(err_single(e.to_string())),
@@ -1688,6 +1786,7 @@ async fn graduated_epic_models(
 fn err_single(error: impl Into<String>) -> ProposalSingleResponse {
     ProposalSingleResponse {
         proposal: None,
+        mdx: None,
         error: Some(error.into()),
     }
 }
@@ -1836,6 +1935,113 @@ mod import_tests {
             serde_json::from_str::<JsonValue>(&stored.acceptance_criteria).unwrap(),
             serde_json::json!([])
         );
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{Database, ProposalCreateInput};
+
+    async fn test_server() -> (DjinnMcpServer, Database) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_export_markdown_preserves_frontmatter_and_body() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db, EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "My Proposal",
+                body: "# Hello\n\nSome markdown body.",
+                acceptance_criteria: Some(
+                    r#"["First criterion", {"criterion": "Second criterion", "met": true}]"#,
+                ),
+                status: None,
+                body_format: Some("markdown"),
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .proposal_export(Parameters(ProposalExportParams {
+                id: proposal.id.clone(),
+            }))
+            .await
+            .0;
+
+        let mdx = response.mdx.as_deref().expect("mdx field should be set");
+        // Verify frontmatter structure.
+        assert!(mdx.starts_with("---\n"), "mdx should start with ---");
+        assert!(mdx.contains("title: My Proposal\n"));
+        assert!(mdx.contains("body_format: markdown\n"));
+        assert!(mdx.contains("  - First criterion\n"));
+        assert!(mdx.contains("  - criterion: Second criterion\n    met: true\n"));
+
+        // Verify the body is exactly preserved after the closing delimiter.
+        let body_start = mdx.find("\n---\n").unwrap() + 5;
+        assert_eq!(&mdx[body_start..], "# Hello\n\nSome markdown body.");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_export_mdx_round_trips_through_block_parser() {
+        let (server, db) = test_server().await;
+        let body = "Intro\n\n<Diagram id=\"arch\" title=\"Architecture\">\nA -> B\n</Diagram>\n";
+        let repo = ProposalRepository::new(db, EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "MDX Proposal",
+                body,
+                acceptance_criteria: Some(
+                    r#"[{"criterion": "Round-trip fidelity", "met": false}]"#,
+                ),
+                status: None,
+                body_format: Some("mdx"),
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .proposal_export(Parameters(ProposalExportParams {
+                id: proposal.id.clone(),
+            }))
+            .await
+            .0;
+
+        let mdx = response.mdx.as_deref().expect("mdx field should be set");
+        assert!(mdx.contains("body_format: mdx\n"));
+
+        // Round-trip: re-parse the exported mdx and verify structural equality.
+        let (_, exported_body) = split_proposal_mdx_frontmatter(mdx).unwrap();
+        let original_blocks = parse_mdx_blocks(body).unwrap();
+        let exported_blocks = parse_mdx_blocks(exported_body).unwrap();
+        assert_eq!(
+            original_blocks, exported_blocks,
+            "exported MDX blocks must be structurally identical to the original"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_export_nonexistent_id_returns_error() {
+        let (server, _db) = test_server().await;
+
+        let response = server
+            .proposal_export(Parameters(ProposalExportParams {
+                id: "nonexistent-id".to_string(),
+            }))
+            .await
+            .0;
+
+        assert!(response.proposal.is_none());
+        assert!(response.mdx.is_none());
+        let error = response.error.as_deref().expect("should have error");
+        assert!(error.contains("proposal not found"), "error was: {error}");
     }
 }
 
