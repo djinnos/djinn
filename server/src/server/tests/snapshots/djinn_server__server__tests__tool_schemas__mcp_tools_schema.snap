@@ -740,6 +740,11 @@ expression: signatures
         "BoundaryRule": {
           "description": "A single boundary-check rule — a pair of globs. Every rule is\ntreated as a forbidden edge; callers submit only the rules they want\nflagged as violations.",
           "properties": {
+            "description": {
+              "description": "Optional human-readable explanation of why this rule exists,\nsurfaced in CI output so violations are self-documenting.",
+              "nullable": true,
+              "type": "string"
+            },
             "from_glob": {
               "type": "string"
             },
@@ -2494,6 +2499,14 @@ expression: signatures
           "description": "When `false`, the coordinator will NOT auto-dispatch a breakdown\nPlanner when this epic is created — the way to stage an epic without\nrunning it (replaces the old `drafting` status). Defaults to `true`.",
           "nullable": true,
           "type": "boolean"
+        },
+        "blocked_by": {
+          "description": "Epic-level dependencies: UUIDs or short_ids of epics that must close\nbefore this epic's auto-breakdown can run.  Wired atomically at\ncreation time so the `epic_created` event is only emitted after\nblocker edges exist in the DB.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
         },
         "color": {
           "nullable": true,
@@ -8428,6 +8441,11 @@ expression: signatures
         "BoundaryRule": {
           "description": "A single boundary-check rule — a pair of globs. Every rule is\ntreated as a forbidden edge; callers submit only the rules they want\nflagged as violations.",
           "properties": {
+            "description": {
+              "description": "Optional human-readable explanation of why this rule exists,\nsurfaced in CI output so violations are self-documenting.",
+              "nullable": true,
+              "type": "string"
+            },
             "from_glob": {
               "type": "string"
             },

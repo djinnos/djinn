@@ -391,10 +391,16 @@ pub trait RepoGraphOps: Send + Sync {
 
     /// Match edges whose source matches `from_glob` AND target matches
     /// `to_glob`, returning the forbidden ones.
+    ///
+    /// `level` controls the granularity: `"file"` (default) checks
+    /// file/symbol-level edges in the canonical graph; `"crate"` checks
+    /// crate-level aggregated edges from the `CrateGraph`, matching crate
+    /// names against the glob rules.
     async fn boundary_check(
         &self,
         ctx: &ProjectCtx,
         rules: &[BoundaryRule],
+        level: &str,
     ) -> Result<Vec<BoundaryViolation>, String>;
 
     /// Churn × centrality ranking over files in the project.

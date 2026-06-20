@@ -268,6 +268,7 @@
             &self,
             _: &ProjectCtx,
             _: &[BoundaryRule],
+            _: &str,
         ) -> Result<Vec<BoundaryViolation>, String> {
             unreachable!("query_subgraph tests should not call boundary_check")
         }
@@ -1947,6 +1948,7 @@
             &self,
             _: &ProjectCtx,
             _: &[BoundaryRule],
+            _: &str,
         ) -> Result<Vec<BoundaryViolation>, String> {
             Ok(Vec::new())
         }

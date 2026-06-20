@@ -293,6 +293,7 @@ pub(crate) async fn call_epic_create(
                 status: Some("open"),
                 auto_breakdown: p.auto_breakdown,
                 originating_adr_id: None,
+                blocked_by: None,
             },
         )
         .await

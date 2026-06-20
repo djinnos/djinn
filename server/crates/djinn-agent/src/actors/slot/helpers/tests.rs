@@ -202,6 +202,7 @@ impl RepoGraphOps for FakeRepoGraphOps {
         &self,
         _: &ProjectCtx,
         _: &[BoundaryRule],
+        _: &str,
     ) -> Result<Vec<BoundaryViolation>, String> {
         Err("unused in test".into())
     }

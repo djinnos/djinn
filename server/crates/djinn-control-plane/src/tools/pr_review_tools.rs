@@ -418,7 +418,7 @@ impl DjinnMcpServer {
                 let all = self
                     .state
                     .repo_graph()
-                    .boundary_check(&ctx, &params.boundary_rules)
+                    .boundary_check(&ctx, &params.boundary_rules, "file")
                     .await?;
                 all.into_iter()
                     .filter(|v| {
