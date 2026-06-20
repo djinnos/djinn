@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 510
 expression: signatures
 ---
 [
@@ -14870,7 +14869,7 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "actor_role": {
-          "description": "Filter by actor_role (e.g. \"lead\", \"reviewer\", \"worker\", \"verification\", \"system\").",
+          "description": "Filter by actor_role (e.g. \"lead\", \"reviewer\", \"worker\", \"system\").",
           "nullable": true,
           "type": "string"
         },
@@ -15895,7 +15894,7 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "action": {
-          "description": "Transition action: start, submit_verification,\nverification_pass, verification_fail, release_verification,\nsubmit_task_review, task_review_start,\ntask_review_reject, task_review_reject_conflict, task_review_approve,\npr_created, pr_undraft, pr_ci_failed, pr_conflict,\npr_merge, pr_changes_requested,\nreopen, close, release, release_task_review, force_close,\nuser_override.",
+          "description": "Transition action: start,\nsubmit_task_review, task_review_start,\ntask_review_reject, task_review_reject_conflict, task_review_approve,\npr_created, pr_undraft, pr_ci_failed, pr_conflict,\npr_merge, pr_changes_requested,\nreopen, close, release, release_task_review, force_close,\nuser_override.",
           "type": "string"
         },
         "actor_id": {
@@ -15915,7 +15914,7 @@ expression: signatures
           "type": "string"
         },
         "reason": {
-          "description": "Required for: verification_fail, release_verification,\ntask_review_reject, task_review_reject_conflict,\npr_changes_requested,\nreopen, release, release_task_review, force_close.",
+          "description": "Required for:\ntask_review_reject, task_review_reject_conflict,\npr_changes_requested,\nreopen, release, release_task_review, force_close.",
           "nullable": true,
           "type": "string"
         },

@@ -403,8 +403,8 @@ mod tests {
     fn new_task_flow_is_worker_only() {
         // Planner ran upstream as a Planning task; NewTask is the worker's
         // domain and doesn't re-plan. The reviewer leg no longer rides this
-        // run: the worker submits to verification (verify before review), and
-        // a passing verification re-dispatches a reviewer-only ReviewResume.
+        // run: the worker submits to task review, and
+        // a passing task review re-dispatches a reviewer-only ReviewResume.
         let seq = SupervisorFlow::NewTask.role_sequence();
         assert!(!seq.contains(&RoleKind::Planner));
         assert!(!seq.contains(&RoleKind::Reviewer));

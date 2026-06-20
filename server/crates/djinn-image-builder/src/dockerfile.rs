@@ -289,7 +289,7 @@ fn emit_language_blocks(
 }
 
 // `rust-analyzer` is mandatory (the warm-graph SCIP indexer calls it).
-// `clippy` + `rustfmt` are baked in for the verification gate (`cargo clippy
+// `clippy` + `rustfmt` are baked in for the task-run gate (`cargo clippy
 // -- -D warnings`, `cargo fmt --check`): without them rustup would try to
 // `component add` them at SESSION time for the repo's pinned toolchain, which
 // writes to the (non-root-owned) RUSTUP_HOME and fails with
