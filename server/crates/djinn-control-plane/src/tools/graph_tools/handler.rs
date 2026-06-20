@@ -6,7 +6,7 @@ use super::*;
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph and file-coupling index. Prefer `uid` as the stable exact node input; fall back to `name` + `file_path` + `kind` when a UID is unavailable; ambiguous names return ranked candidates. Agent-boundary traversal triage controls include `limit`, `offset`, `pageLimit`, `summaryOnly`, and `byDepthCounts`. Partial pages and capped summaries are triage views; absence from a page or summary is NOT evidence a node/edge/pair is absent from the full graph. Operations include workspaces, neighbors, ranked, impact, implementations, search, query_subgraph, route_map, shape_check, api_impact, flow, cycles, orphans, path, edges, symbols_at, diff_touches, detect_changes, describe, context, status, snapshot, api_surface, boundary_check, hotspots, complexity, refactor_candidates, metrics_at, dead_symbols, deprecated_callers, touches_hot_path, coupling, churn, coupling_hotspots, and coupling_hubs."
+        description = "Query the repository dependency graph and file-coupling index. Prefer `uid` as the stable exact node input; fall back to `name` + `file_path` + `kind` when a UID is unavailable; ambiguous names return ranked candidates. Agent-boundary traversal triage controls include `limit`, `offset`, `pageLimit`, `summaryOnly`, and `byDepthCounts`. Partial pages and capped summaries are triage views; absence from a page or summary is NOT evidence a node/edge/pair is absent from the full graph. Operations include workspaces, neighbors, ranked, impact, implementations, search, query_subgraph, route_map, shape_check, api_impact, flow, cycles, orphans, path, edges, symbols_at, diff_touches, detect_changes, describe, context, status, snapshot, api_surface, boundary_check, hotspots, complexity, refactor_candidates, metrics_at, dead_symbols, deprecated_callers, touches_hot_path, coupling, churn, coupling_hotspots, coupling_hubs, and crate_graph."
     )]
     pub async fn code_graph(
         &self,
@@ -240,6 +240,7 @@ impl DjinnMcpServer {
             "churn" => self.code_graph_churn(ctx, params).await,
             "coupling_hotspots" => self.code_graph_coupling_hotspots(ctx, params).await,
             "coupling_hubs" => self.code_graph_coupling_hubs(ctx, params).await,
+            "crate_graph" => self.code_graph_crate_graph(ctx, params).await,
             "snapshot" => self.code_graph_snapshot(ctx, params).await,
             other => Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
@@ -252,6 +253,7 @@ impl DjinnMcpServer {
                  'refactor_candidates', 'metrics_at', \
                  'dead_symbols', 'deprecated_callers', 'touches_hot_path', \
                  'coupling', 'churn', 'coupling_hotspots', 'coupling_hubs', \
+                 'crate_graph', \
                  .snapshot, route_map, shape_check, api_impact."
             )),
         }

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use super::graph_data::*;
+use super::graph_query_data::*;
 
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
@@ -539,4 +540,20 @@ pub trait RepoGraphOps: Send + Sync {
         key: &str,
         kind_hint: Option<&str>,
     ) -> Result<ResolveOutcome, String>;
+
+    /// Crate-level dependency graph: nodes are workspace crates, edges
+    /// are aggregated cross-crate references (sum of file/symbol edges
+    /// that cross a crate boundary), weighted, with per-crate rollups
+    /// (LOC / node count / fan-in / fan-out / inbound vs outbound edge
+    /// weight).
+    ///
+    /// Default returns an empty graph so implementations that don't yet
+    /// support crate aggregation compile without change.
+    async fn crate_graph(&self, _ctx: &ProjectCtx) -> Result<CrateGraphResponse, String> {
+        Ok(CrateGraphResponse {
+            crates: Vec::new(),
+            edges: Vec::new(),
+            message: None,
+        })
+    }
 }
