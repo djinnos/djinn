@@ -1075,7 +1075,7 @@ mod tests {
         // Fresh shallow clone. `--no-local` is required because `git clone
         // file://...` defaults to a local fast-path that ignores `--depth`,
         // which would silently defeat the shallow setup this test is
-        // trying to verify. Production (warm Pod, verification Job) clones
+        // trying to verify. Production (warm Pod, task-run Pod) clones
         // from `https://...` so they get the depth; this is purely a
         // test-harness fixup.
         let shallow = tmp.path().join("shallow");

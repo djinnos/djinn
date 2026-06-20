@@ -285,6 +285,20 @@ pub struct CodeGraphParams {
     /// test-handling.
     #[serde(default)]
     pub tests: Option<String>,
+    /// Proposed removals/renames for `impact_check`. Each entry is a
+    /// symbol key, repository-relative file path, or crate name whose
+    /// compile-time consumers should be analysed. The handler
+    /// auto-detects whether a target is a crate (by checking the crate
+    /// graph) or a symbol/file (resolved through the canonical graph).
+    #[serde(default)]
+    pub impact_targets: Option<Vec<String>>,
+    /// Crate names in the proposed task slice for `impact_check`. Used
+    /// to determine `safe_independent_slice`: true only when every
+    /// affected consumer crate is within this set. Omit to treat the
+    /// proposed changes as crate-only (safe_independent_slice is true
+    /// when no external crate consumers are found).
+    #[serde(default)]
+    pub scope_crates: Option<Vec<String>>,
     /// df6s: page offset for paginated traversal ops (`neighbors`,
     /// `impact`, `coupling_hotspots`). Sliced **only** when
     /// constructing the agent-facing response DTO — the underlying

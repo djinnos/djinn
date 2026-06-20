@@ -17,8 +17,9 @@ use super::budget::{
     SessionBudgetPolicy, hard_budget_threshold_exceeded, soft_budget_threshold_exceeded,
 };
 use super::error_handling::{
-    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_turn_backoff, is_context_length_error,
-    is_orphaned_tool_call_error, next_nudge_message, should_retry_after_tool_call_compaction,
+    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_turn_backoff,
+    empty_turn_is_reasoning_only, is_context_length_error, is_orphaned_tool_call_error,
+    next_nudge_message, reasoning_only_nudge_message, should_retry_after_tool_call_compaction,
     should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
     tool_choice_for_turn, wind_down_message,
 };
@@ -30,6 +31,18 @@ use super::persistence::{persist_session_message, serialize_llm_input, serialize
 use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
 
+/// True when `model_id` (a `provider/model` string) is served by the Codex /
+/// OpenAI consumer backend that signals over-quota by answering a turn with an
+/// empty 200 (`response.completed`, zero tokens) instead of an HTTP 429. The
+/// `chatgpt_codex` OAuth backend is rate-limited per ChatGPT *account*; the
+/// `openai` Responses backend can throttle the same way on a depleted key. For
+/// these families an exhausted empty-turn streak is a THROTTLE (account over
+/// quota), not a broken model — see [`empty_turn_terminal_error`].
+fn is_codex_openai_family(model_id: &str) -> bool {
+    let provider = model_id.split('/').next().unwrap_or("").to_ascii_lowercase();
+    matches!(provider.as_str(), "openai" | "chatgpt_codex")
+}
+
 /// Build the terminal error for a reply loop that gave up after the bounded
 /// empty/no-event-turn retries.
 ///
@@ -40,22 +53,39 @@ use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runti
 /// events) returned a plain `anyhow` error → classified `None` → breaker never
 /// fed → dispatch re-selected the dead model forever (it broke `twty`/`oy1q`).
 ///
-/// We mirror the Codex empty-200 mid-stream path (`from_stream_error`'s default)
-/// and use `ProviderInternal { status: 500 }`, which `classify_provider_failure`
-/// maps to the GENTLE consecutive-failure breaker (`Failure`): a one-off blip is
-/// absorbed (a successful session resets the streak) but a model that produces
-/// empty turns on EVERY dispatch finally auto-disables / fails over. We do NOT
-/// use `EmptyCompletion`, which is deliberately `None` (it has its own in-loop
-/// backoff for Codex consumer-backend throttling). The readable diagnostic rides
-/// along as `.context` so the existing string-based detectors still match on the
-/// top-level Display.
-fn empty_turn_terminal_error(kind: &str, retries: u32, diag: String) -> anyhow::Error {
-    anyhow::Error::new(djinn_provider::provider::ProviderError::ProviderInternal { status: 500 })
-        .context(format!(
-            "provider returned {retries} empty {kind} turns — the backend likely refused or \
-             throttled the request (a ChatGPT-account Codex rate limit returns empty 200s, \
-             not 429s; verify provider/account status or switch to an API-key backend); {diag}"
-        ))
+/// The class is **provider-family-gated** because the two failures look
+/// identical (empty turn, zero tokens) but mean opposite things:
+/// - For the Codex / OpenAI consumer family ([`is_codex_openai_family`]) an
+///   exhausted empty-turn streak is a THROTTLE: the ChatGPT account is over its
+///   per-account quota and is answering with empty 200s instead of a 429. We
+///   emit `EmptyCompletion`, which `classify_provider_failure` now routes to the
+///   `Throttle` arm (`record_stall`: clean immediate failover, cooldown floored
+///   so the next dispatch picks another model, NO `disable_ttl_trips`
+///   escalation since a quota resets on a clock, not on model health).
+/// - For every OTHER provider (e.g. `kimi-for-coding/k2p7`) a model that produces
+///   empty turns on EVERY dispatch is genuinely dead, so we keep
+///   `ProviderInternal { status: 500 }` → the GENTLE consecutive-failure breaker
+///   (`Failure`): a one-off blip is absorbed (a successful session resets the
+///   streak) but a persistently-empty model finally auto-disables / fails over.
+///
+/// The readable diagnostic rides along as `.context` so the existing
+/// string-based detectors still match on the top-level Display.
+fn empty_turn_terminal_error(
+    kind: &str,
+    retries: u32,
+    model_id: &str,
+    diag: String,
+) -> anyhow::Error {
+    let class = if is_codex_openai_family(model_id) {
+        djinn_provider::provider::ProviderError::EmptyCompletion
+    } else {
+        djinn_provider::provider::ProviderError::ProviderInternal { status: 500 }
+    };
+    anyhow::Error::new(class).context(format!(
+        "provider returned {retries} empty {kind} turns — the backend likely refused or \
+         throttled the request (a ChatGPT-account Codex rate limit returns empty 200s, \
+         not 429s; verify provider/account status or switch to an API-key backend); {diag}"
+    ))
 }
 
 fn permission_denial_text(text: &str) -> bool {
@@ -805,6 +835,7 @@ pub(crate) async fn run_reply_loop(
                 return Err(empty_turn_terminal_error(
                     "no-event",
                     empty_turn_retries,
+                    model_id,
                     diag,
                 ));
             }
@@ -829,6 +860,30 @@ pub(crate) async fn run_reply_loop(
             }
 
             if assistant_content.is_empty() {
+                // ── Idea 5: reasoning-only stall vs quota empty-200 ──────────
+                // The model spent reasoning tokens but produced no visible
+                // message and no tool call. This is NOT the Codex/OpenAI
+                // over-quota empty-200 (which has ALL counts zero, including
+                // reasoning) — the backend answered, the model just didn't
+                // externalize a result. Drive a NUDGE asking it to emit output /
+                // call a tool, NOT the empty-turn throttle terminal that would
+                // fail over off a healthy model. The all-zero case falls through
+                // to the retry/terminal path below, which is the only path that
+                // reaches `empty_turn_terminal_error` (idea 1's throttle).
+                if empty_turn_is_reasoning_only(turn_reasoning_out) {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        session_id = %session_id,
+                        turn = turns,
+                        reasoning_tokens_out = turn_reasoning_out,
+                        "ReplyLoop: reasoning-only empty turn (reasoning spent, no visible \
+                         output/tool-call) — nudging instead of failing over"
+                    );
+                    let nudge = reasoning_only_nudge_message();
+                    persist_session_message(&msg_repo, session_id, task_id, &nudge).await;
+                    conversation.push(nudge);
+                    continue;
+                }
                 if let Some(next_retry) =
                     should_retry_empty_assistant_turn(assistant_content.is_empty(), empty_turn_retries)
                 {
@@ -847,6 +902,7 @@ pub(crate) async fn run_reply_loop(
                 return Err(empty_turn_terminal_error(
                     "assistant",
                     empty_turn_retries,
+                    model_id,
                     diag,
                 ));
             }
@@ -1309,13 +1365,13 @@ mod tests {
         // it returned a plain `anyhow!` string → downcast failed → `None` → the
         // breaker was never fed and the dead model was re-selected forever.
         for kind in ["no-event", "assistant"] {
-            let err = empty_turn_terminal_error(kind, 2, "diag".to_string());
+            let err = empty_turn_terminal_error(kind, 2, "kimi-for-coding/k2p7", "diag".to_string());
             let typed = err
                 .downcast_ref::<ProviderError>()
                 .expect("terminal empty-turn error must carry a typed ProviderError source");
-            // ProviderInternal{500} mirrors the Codex empty-200 path and maps to
-            // the GENTLE consecutive-failure breaker (`Failure`), NOT
-            // `EmptyCompletion` (which classifies as `None` by design).
+            // A non-Codex empty turn = genuinely dead model → ProviderInternal{500}
+            // → the GENTLE consecutive-failure breaker (`Failure`), so a
+            // persistently-empty model finally auto-disables (dead-model protection).
             assert_eq!(*typed, ProviderError::ProviderInternal { status: 500 });
             assert!(
                 typed.retryable(),
@@ -1326,5 +1382,41 @@ mod tests {
             assert!(display.contains("empty"), "{kind}: {display}");
             assert!(display.contains("diag"), "{kind}: {display}");
         }
+    }
+
+    #[test]
+    fn empty_turn_terminal_error_codex_family_is_throttle_not_failure() {
+        // The Codex / OpenAI consumer backend signals an over-quota ACCOUNT by
+        // answering a turn with an empty 200 (zero-token `response.completed`),
+        // not an HTTP 429. An exhausted empty-turn streak on that family is a
+        // THROTTLE — emit `EmptyCompletion`, which `classify_provider_failure`
+        // routes to the `Throttle` arm (clean failover, no breaker escalation),
+        // NOT `ProviderInternal{500}` (which would miscount a throttle as a
+        // broken provider and escalate the auto-disable cooldown).
+        for model_id in ["openai/gpt-5.5", "chatgpt_codex/codex-mini", "OpenAI/Gpt-5.5"] {
+            for kind in ["no-event", "assistant"] {
+                let err = empty_turn_terminal_error(kind, 2, model_id, "diag".to_string());
+                let typed = err
+                    .downcast_ref::<ProviderError>()
+                    .expect("terminal empty-turn error must carry a typed ProviderError source");
+                assert_eq!(
+                    *typed,
+                    ProviderError::EmptyCompletion,
+                    "{model_id}/{kind}: Codex/OpenAI empty turn must classify as EmptyCompletion (throttle)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn is_codex_openai_family_gating() {
+        assert!(is_codex_openai_family("openai/gpt-5.5"));
+        assert!(is_codex_openai_family("chatgpt_codex/codex-mini"));
+        assert!(is_codex_openai_family("OPENAI/gpt-5.5"));
+        // Other providers must keep the dead-model `ProviderInternal{500}` path.
+        assert!(!is_codex_openai_family("kimi-for-coding/k2p7"));
+        assert!(!is_codex_openai_family("anthropic/claude-sonnet-4-5"));
+        assert!(!is_codex_openai_family("synthetic/Kimi-K2.5"));
+        assert!(!is_codex_openai_family(""));
     }
 }

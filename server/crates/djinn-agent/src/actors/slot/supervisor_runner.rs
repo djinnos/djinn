@@ -603,9 +603,11 @@ pub(crate) async fn run_supervisor_dispatch(
     // terminal MAX_DISPATCH_FAILURES streak (A3) and redispatches with backoff
     // rather than immediately re-hanging on the same model.
     if handshake_timed_out {
+        // An infra handshake failure is a genuine "this model/backend is bad
+        // right now" signal (not a quota throttle), so escalate the cooldown cap.
         app_state
             .health_tracker
-            .record_stall(creator_scope.as_deref(), &model_id);
+            .record_stall(creator_scope.as_deref(), &model_id, true);
         app_state.health_tracker.note_task_provider_failure(
             &task.id,
             djinn_provider::catalog::health::TaskFailureSignal {
@@ -754,9 +756,15 @@ pub(crate) async fn run_supervisor_dispatch(
             if let Some(class) = provider_failure_class_for_report(&report) {
                 let (is_throttle, retry_after_ms) = match class {
                     djinn_runtime::ProviderFailureClass::Throttle { retry_after_ms } => {
-                        app_state
-                            .health_tracker
-                            .record_stall(creator_scope.as_deref(), &model_id);
+                        // A throttle (rate-limit / Codex empty-200 account quota)
+                        // resets on a clock, not on model health — trip for
+                        // immediate failover but do NOT escalate the cooldown cap
+                        // (`escalate = false`); only genuine failures ratchet it.
+                        app_state.health_tracker.record_stall(
+                            creator_scope.as_deref(),
+                            &model_id,
+                            false,
+                        );
                         (true, retry_after_ms)
                     }
                     djinn_runtime::ProviderFailureClass::Failure => {
@@ -770,10 +778,15 @@ pub(crate) async fn run_supervisor_dispatch(
                         // breaker IMMEDIATELY (like a throttle) so dispatch fails
                         // over to the user's next model at once, and persist +
                         // surface the revocation so the owner is told to
-                        // reconnect (F5-safe row + live event).
-                        app_state
-                            .health_tracker
-                            .record_stall(creator_scope.as_deref(), &model_id);
+                        // reconnect (F5-safe row + live event). Escalate the
+                        // cooldown cap: unlike a quota throttle, a dead credential
+                        // is a genuine model-health problem that should stay
+                        // demoted longer the more it keeps failing.
+                        app_state.health_tracker.record_stall(
+                            creator_scope.as_deref(),
+                            &model_id,
+                            true,
+                        );
                         surface_credential_revocation(
                             &app_state,
                             creator_scope.as_deref(),

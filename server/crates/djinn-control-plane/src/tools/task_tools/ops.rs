@@ -30,6 +30,18 @@ use crate::tools::task_tools::types::{
 use djinn_core::models::{ActivityEntry, Task, TaskStatus, TransitionAction};
 use djinn_db::{EpicRepository, TaskRepository};
 
+const IMPACT_CHECK_WARNING: &str = "This task appears to involve a removal or rename. Consider calling `impact_check` before proceeding to avoid breaking compile-time consumers in other crates. See the planner prompt contract for details.";
+const DESTRUCTIVE_TASK_KEYWORDS: [&str; 8] = [
+    "remove",
+    "delete",
+    "drop",
+    "rename",
+    "relocate",
+    "move",
+    "extract",
+    "split out",
+];
+
 pub(crate) fn task_to_response(task: &Task) -> TaskResponse {
     TaskResponse {
         id: task.id.clone(),
@@ -163,6 +175,31 @@ pub(crate) fn not_found(id: &str) -> ErrorResponse {
     ErrorResponse::new(format!("task not found: {id}"))
 }
 
+fn impact_check_warning_for_create(request: &CreateTaskRequest) -> Option<String> {
+    let title_and_description =
+        format!("{}\n{}", request.title, request.description).to_lowercase();
+    let has_destructive_keyword = DESTRUCTIVE_TASK_KEYWORDS
+        .iter()
+        .any(|keyword| title_and_description.contains(keyword));
+
+    if !has_destructive_keyword {
+        return None;
+    }
+
+    let description_references_impact_check =
+        request.description.to_lowercase().contains("impact_check");
+    let memory_refs_reference_impact_check = request
+        .memory_refs
+        .iter()
+        .any(|memory_ref| memory_ref.to_lowercase().contains("impact_check"));
+
+    if description_references_impact_check || memory_refs_reference_impact_check {
+        None
+    } else {
+        Some(IMPACT_CHECK_WARNING.to_owned())
+    }
+}
+
 pub async fn create_task(
     server: &DjinnMcpServer,
     project_id: &str,
@@ -171,6 +208,8 @@ pub async fn create_task(
     if let Err(e) = super::validate_create_request(&request) {
         return Json(ErrorOr::Error(e));
     }
+
+    let warning = impact_check_warning_for_create(&request);
 
     let epic_id = if let Some(epic_ref) = request.epic_ref.as_deref() {
         let epic_repo =
@@ -292,7 +331,9 @@ pub async fn create_task(
         }
     }
 
-    Json(ErrorOr::Ok(task_to_response(&task)))
+    let mut response = task_to_response(&task);
+    response.warning = warning;
+    Json(ErrorOr::Ok(response))
 }
 
 pub async fn update_task(
@@ -595,6 +636,38 @@ mod tests {
             agent_type: None,
             epic_ref: Some(epic_ref.to_owned()),
         }
+    }
+
+    #[test]
+    fn create_task_warns_for_destructive_keywords_without_impact_check() {
+        let mut request = planning_task_request("Remove legacy API", "epic");
+        request.description = "Delete the old public helper and move callers.".to_owned();
+
+        assert_eq!(
+            impact_check_warning_for_create(&request).as_deref(),
+            Some(IMPACT_CHECK_WARNING)
+        );
+    }
+
+    #[test]
+    fn create_task_suppresses_destructive_warning_with_impact_check_reference() {
+        let mut request = planning_task_request("Rename public API", "epic");
+        request.description = "Covered by prior `impact_check` for downstream crates.".to_owned();
+
+        assert_eq!(impact_check_warning_for_create(&request), None);
+
+        let mut request = planning_task_request("Relocate public API", "epic");
+        request.memory_refs = vec!["research/impact_check-public-api-relocation".to_owned()];
+
+        assert_eq!(impact_check_warning_for_create(&request), None);
+    }
+
+    #[test]
+    fn create_task_does_not_warn_without_destructive_keywords() {
+        let mut request = planning_task_request("Add status endpoint", "epic");
+        request.description = "Implement a new read-only endpoint.".to_owned();
+
+        assert_eq!(impact_check_warning_for_create(&request), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

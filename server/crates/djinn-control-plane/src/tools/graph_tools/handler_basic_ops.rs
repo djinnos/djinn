@@ -770,4 +770,211 @@ impl DjinnMcpServer {
             graph_staleness: None,
         }))
     }
+
+    /// Advisory impact preflight: determine which crates, files, and
+    /// symbols would break if the proposed removals/renames land, and
+    /// whether the proposed task slice can ship independently.
+    ///
+    /// For crate-level targets, uses `crate_graph().edges` to find
+    /// inbound consumer crates. For symbol/file targets, uses
+    /// `impact()` with `is_external` already filtered out by the
+    /// bridge.
+    pub(super) async fn code_graph_impact_check(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let targets = params.impact_targets.as_ref().ok_or_else(|| {
+            "impact_check requires `impact_targets` — a non-empty list of \
+             symbol keys, file paths, or crate names to analyse"
+                .to_string()
+        })?;
+        if targets.is_empty() {
+            return Err(
+                "impact_check requires at least one entry in `impact_targets`".to_string(),
+            );
+        }
+
+        let scope_crates: std::collections::HashSet<String> = params
+            .scope_crates
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .cloned()
+            .collect();
+
+        // ── Graph freshness check ────────────────────────────────────────
+        // Compare the caller-supplied HEAD against the cached graph's
+        // pinned commit.  When the graph is missing or stale, the
+        // impact analysis would be unreliable — return `needs_spike`.
+        let graph_status = self.state.repo_graph().status(ctx).await;
+        let pinned_commit = graph_status.ok().and_then(|s| s.pinned_commit);
+        let caller_head = params
+            .current_head
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let low_confidence = match (caller_head, &pinned_commit) {
+            (Some(head), Some(pinned)) => head != pinned.trim(),
+            (Some(_), None) => true, // caller HEAD provided but graph not warmed
+            (None, None) => true,    // no caller HEAD and graph not warmed
+            (None, Some(_)) => false, // no caller HEAD but graph is warmed
+        };
+
+        if low_confidence {
+            let staleness = caller_head.map(|head| {
+                GraphStaleness::compute(head, pinned_commit.as_deref())
+            });
+            return Ok(CodeGraphResponse::ImpactCheck(ImpactCheckResponse {
+                affected_crates: Vec::new(),
+                affected_files: Vec::new(),
+                affected_symbols: Vec::new(),
+                safe_independent_slice: false,
+                recommendation: "needs_spike".to_string(),
+                low_confidence: true,
+                next_step: Some(
+                    "Graph is stale or missing.  Warm the graph for this \
+                     project and retry, or run a tech spike to manually \
+                     verify compile-time consumers."
+                        .to_string(),
+                ),
+                graph_staleness: staleness,
+            }));
+        }
+
+        // ── Build crate graph for crate-level analysis ───────────────────
+        let crate_result = self.state.repo_graph().crate_graph(ctx).await?;
+        let known_crates: std::collections::HashSet<&str> = crate_result
+            .crates
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+
+        // Pre-compute crate directory prefixes for file→crate mapping.
+        // Each entry is (crate_name, directory_prefix).
+        let crate_dirs: Vec<(String, String)> = crate_result
+            .crates
+            .iter()
+            .filter_map(|c| {
+                let manifest = std::path::Path::new(&c.manifest_path);
+                let dir = manifest.parent()?.to_string_lossy().into_owned();
+                if c.name == "<external>" {
+                    None
+                } else {
+                    Some((c.name.clone(), dir))
+                }
+            })
+            .collect();
+
+        // ── Analyse each target ──────────────────────────────────────────
+        let mut affected_crates: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut affected_files: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut affected_symbols: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        for target in targets {
+            if known_crates.contains(target.as_str()) {
+                // Crate-level: find inbound edges where the target is
+                // the consumer (edge.target == target).
+                for edge in &crate_result.edges {
+                    if edge.target == *target && edge.source != "<external>" {
+                        affected_crates.insert(edge.source.clone());
+                    }
+                }
+            } else {
+                // Symbol/file: run impact() via the bridge.  The bridge
+                // already filters `is_external` nodes, so every entry
+                // in the result is a workspace-internal consumer.
+                let depth = params.limit.unwrap_or(3).max(0) as usize;
+                match self
+                    .state
+                    .repo_graph()
+                    .impact(ctx, params.workspace.as_deref(), target, depth, None, params.min_confidence)
+                    .await
+                {
+                    Ok(ImpactResult::Detailed(entries)) => {
+                        for entry in &entries {
+                            affected_symbols.insert(entry.key.clone());
+                            if let Some(ref fp) = entry.file_path {
+                                affected_files.insert(fp.clone());
+                                // Map file back to its crate.
+                                for (crate_name, dir_prefix) in &crate_dirs {
+                                    if fp.starts_with(dir_prefix) {
+                                        affected_crates.insert(crate_name.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(ImpactResult::Grouped(groups)) => {
+                        // Grouped results only have file paths.
+                        for group in &groups {
+                            affected_files.insert(group.file.clone());
+                            for (crate_name, dir_prefix) in &crate_dirs {
+                                if group.file.starts_with(dir_prefix) {
+                                    affected_crates.insert(crate_name.clone());
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Target not found or bridge error — skip
+                        // gracefully so other targets still contribute.
+                    }
+                }
+            }
+        }
+
+        // Remove synthetic / external crate from the result set.
+        affected_crates.remove("<external>");
+
+        // ── Determine safe_independent_slice ─────────────────────────────
+        let safe_independent_slice = if affected_crates.is_empty() {
+            // No workspace-internal consumers — nothing to break.
+            true
+        } else if scope_crates.is_empty() {
+            // No scope provided — can't verify consumers are within
+            // scope, so assume not safe.
+            false
+        } else {
+            // Safe only when every affected crate is inside the caller's
+            // proposed slice.
+            affected_crates.iter().all(|c| scope_crates.contains(c))
+        };
+
+        // ── Determine recommendation ─────────────────────────────────────
+        let recommendation = if safe_independent_slice {
+            if affected_crates.is_empty() {
+                // No consumers at all — each task can ship independently.
+                "ok_independent"
+            } else {
+                // Consumers exist but they're all within the proposed
+                // slice — tasks need explicit ordering.
+                "chain_tasks"
+            }
+        } else {
+            // Consumers outside the proposed slice — must be a single
+            // atomic cutover.
+            "atomic_cutover"
+        };
+
+        // Attach staleness metadata for the caller.
+        let staleness = caller_head.map(|head| {
+            GraphStaleness::compute(head, pinned_commit.as_deref())
+        });
+
+        Ok(CodeGraphResponse::ImpactCheck(ImpactCheckResponse {
+            affected_crates: affected_crates.into_iter().collect(),
+            affected_files: affected_files.into_iter().collect(),
+            affected_symbols: affected_symbols.into_iter().collect(),
+            safe_independent_slice,
+            recommendation: recommendation.to_string(),
+            low_confidence: false,
+            next_step: None,
+            graph_staleness: staleness,
+        }))
+    }
 }

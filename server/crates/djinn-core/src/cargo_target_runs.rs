@@ -1,6 +1,6 @@
 //! Reaping primitives for per-task-run private Cargo target directories.
 //!
-//! Task-run / verification Pods seed a private Cargo target dir under
+//! Task-run Pods seed a private Cargo target dir under
 //! `/cache/cargo-target-runs/<id>` (see `djinn-agent-worker::cargo_target_seed`)
 //! so concurrent runs never contend on a shared target lock. Those dirs are
 //! meant to be EPHEMERAL — discarded once the run reaches a terminal state.
