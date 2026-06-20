@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { BLOCK_TYPES, getBlockByTag } from "@/lib/blockRegistry";
+import {
+  PROPOSAL_BLOCK_REGISTRY,
+  getProposalBlockDefinitionByTag,
+} from "@/lib/proposalBlocks";
 
 import {
   extractBlockTags,
@@ -8,142 +11,190 @@ import {
   parseMdxBody,
 } from "./parseMdxBody";
 
-// All known P1 + P2 MDX tags
-const KNOWN_TAGS = new Set(BLOCK_TYPES.map((b) => b.tag));
+// ------------------------------------------------------------------------------
+// Canonical v1 tag set — single source of truth for parity assertions.
+// If a new block type is added, this array MUST be updated and the Rust
+// registry must be updated in the same commit to prevent tag drift.
+// ------------------------------------------------------------------------------
+export const CANONICAL_V1_TAGS = [
+  "RichText",
+  "Diagram",
+  "AnnotatedCode",
+  "DataModel",
+  "ApiEndpoint",
+  "Decisions",
+  "FileTree",
+  "QuestionForm",
+] as const;
 
-const SAMPLE_MDX = `# Proposal Title
+export type CanonicalV1Tag = (typeof CANONICAL_V1_TAGS)[number];
 
-Some introductory markdown text.
+// Import the canonical fixture as a raw string so the test suite exercises
+// the exact same MDX sample that backend validation tests use.
+const CANONICAL_MDX = (await import("./__fixtures__/canonicalProposal.mdx?raw"))
+  .default as string;
 
-<RichText id="intro">
-Welcome to the proposal. This is **rich text** content.
-</RichText>
+// ------------------------------------------------------------------------------
+// Parity: canonical tag set
+// ------------------------------------------------------------------------------
 
-## Architecture
-
-<Diagram id="arch-overview" type="mermaid">
-graph TD
-  A[Client] --> B[API]
-  B --> C[Database]
-</Diagram>
-
-<AnnotatedCode id="handler" lang="rust">
-fn handle_request(req: Request) -> Response {
-  let data = parse(req);
-  process(data)
-}
-</AnnotatedCode>
-
-<DataModel id="user-schema">
-Users table with id, email, name columns.
-</DataModel>
-
-<ApiEndpoint id="get-users" method="GET" path="/api/users">
-Returns a list of all users.
-</ApiEndpoint>
-
-<Decisions id="auth-choice">
-We chose JWT over session cookies for stateless auth.
-</Decisions>
-
-<FileTree id="project-layout">
-\tsrc/
-  main.rs
-  lib.rs
-tests/
-</FileTree>
-
-<QuestionForm id="open-questions">
-Should we use Redis or Memcached for caching?
-</QuestionForm>
-
-Some trailing markdown.
-`;
-
-describe("block registry round-trip", () => {
-  it("all tags in BLOCK_TYPES are unique", () => {
-    const tags = BLOCK_TYPES.map((b) => b.tag);
-    expect(new Set(tags).size).toBe(tags.length);
+describe("canonical tag set parity", () => {
+  it("PROPOSAL_BLOCK_REGISTRY contains exactly the eight canonical v1 tags", () => {
+    const registryTags = Object.values(PROPOSAL_BLOCK_REGISTRY).map(
+      (def) => def.tag,
+    );
+    expect(registryTags.sort()).toEqual([...CANONICAL_V1_TAGS].sort());
   });
 
-  it("all P1 canonical block tags (RichText, Diagram, AnnotatedCode) are registered", () => {
-    const p1Tags = ["RichText", "Diagram", "AnnotatedCode"];
-    for (const tag of p1Tags) {
-      expect(getBlockByTag(tag)).toBeDefined();
-      expect(getBlockByTag(tag)!.requiredFields).toContain("id");
+  it("every canonical tag resolves to a registry definition", () => {
+    for (const tag of CANONICAL_V1_TAGS) {
+      const def = getProposalBlockDefinitionByTag(tag);
+      expect(def, `${tag} should be in PROPOSAL_BLOCK_REGISTRY`).toBeDefined();
+      expect(def!.tag).toBe(tag);
     }
   });
 
-  it("parseMdxBody extracts all block tags from the sample MDX", () => {
-    const segments = parseMdxBody(SAMPLE_MDX);
-    const blockSegments = segments.filter((s) => s.kind === "block");
-
-    const extractedTags = blockSegments.map((s) => s.tag);
-
-    // All 8 block types should be present
-    expect(extractedTags).toEqual([
-      "RichText",
-      "Diagram",
-      "AnnotatedCode",
-      "DataModel",
-      "ApiEndpoint",
-      "Decisions",
-      "FileTree",
-      "QuestionForm",
-    ]);
-  });
-
-  it("all parsed block tags are known to the registry", () => {
-    const segments = parseMdxBody(SAMPLE_MDX);
-    const blockSegments = segments.filter((s) => s.kind === "block");
-
-    for (const segment of blockSegments) {
+  it("no extra tags exist in the registry beyond the canonical set", () => {
+    const registryTags = Object.values(PROPOSAL_BLOCK_REGISTRY).map(
+      (def) => def.tag,
+    );
+    expect(registryTags).toHaveLength(CANONICAL_V1_TAGS.length);
+    for (const tag of registryTags) {
       expect(
-        KNOWN_TAGS.has(segment.tag),
-        `Unknown block tag: ${segment.tag}`,
+        CANONICAL_V1_TAGS.includes(tag as CanonicalV1Tag),
+        `${tag} is not in the canonical v1 tag set`,
       ).toBe(true);
     }
   });
+});
 
-  it("all parsed blocks have structural equality with registry entries", () => {
-    const segments = parseMdxBody(SAMPLE_MDX);
+// ------------------------------------------------------------------------------
+// Round-trip: canonical MDX → parser → registry
+// ------------------------------------------------------------------------------
+
+describe("canonical proposal.mdx round-trip", () => {
+  it("parses all eight v1 block types from the canonical fixture", () => {
+    const segments = parseMdxBody(CANONICAL_MDX);
+    const blockSegments = segments.filter((s) => s.kind === "block");
+    const extractedTags = blockSegments.map((s) => s.tag);
+
+    expect(extractedTags).toEqual(CANONICAL_V1_TAGS);
+  });
+
+  it("every parsed block resolves to the TS registry definition", () => {
+    const segments = parseMdxBody(CANONICAL_MDX);
     const blockSegments = segments.filter((s) => s.kind === "block");
 
     for (const segment of blockSegments) {
-      const def = getBlockByTag(segment.tag);
-      expect(def).toBeDefined();
-
-      // Structural equality: tag matches, id attribute is present
+      const def = getProposalBlockDefinitionByTag(segment.tag);
+      expect(
+        def,
+        `${segment.tag} should resolve to a registry definition`,
+      ).toBeDefined();
       expect(def!.tag).toBe(segment.tag);
-      expect(segment.attributes.id).toBeDefined();
-      expect(segment.id).toBe(segment.attributes.id);
-
-      // Content is non-empty
-      expect(segment.content.trim().length).toBeGreaterThan(0);
+      expect(def!.type).toBeDefined();
     }
   });
 
-  it("markdown segments are preserved between blocks", () => {
-    const segments = parseMdxBody(SAMPLE_MDX);
+  it("asserts parsed tag, block id, and registry mapping consistency for all eight v1 types", () => {
+    const segments = parseMdxBody(CANONICAL_MDX);
+    const blockSegments = segments.filter((s) => s.kind === "block");
+
+    expect(blockSegments).toHaveLength(CANONICAL_V1_TAGS.length);
+
+    // Build a map for easy lookup by tag
+    const byTag = new Map(
+      blockSegments.map((s) => [s.tag, s as (typeof blockSegments)[number]]),
+    );
+
+    // RichText
+    const richText = byTag.get("RichText");
+    expect(richText).toBeDefined();
+    expect(richText!.id).toBe("intro");
+    expect(richText!.content).toContain("rich text");
+    expect(getProposalBlockDefinitionByTag("RichText")!.type).toBe("rich-text");
+
+    // Diagram
+    const diagram = byTag.get("Diagram");
+    expect(diagram).toBeDefined();
+    expect(diagram!.id).toBe("arch-overview");
+    expect(diagram!.attributes.type).toBe("mermaid");
+    expect(diagram!.content).toContain("graph TD");
+    expect(getProposalBlockDefinitionByTag("Diagram")!.type).toBe("diagram");
+
+    // AnnotatedCode
+    const annotatedCode = byTag.get("AnnotatedCode");
+    expect(annotatedCode).toBeDefined();
+    expect(annotatedCode!.id).toBe("handler");
+    expect(annotatedCode!.attributes.language).toBe("rust");
+    expect(annotatedCode!.content).toContain("fn handle_request");
+    expect(getProposalBlockDefinitionByTag("AnnotatedCode")!.type).toBe(
+      "annotated-code",
+    );
+
+    // DataModel
+    const dataModel = byTag.get("DataModel");
+    expect(dataModel).toBeDefined();
+    expect(dataModel!.id).toBe("user-schema");
+    expect(dataModel!.attributes.name).toBe("User");
+    expect(dataModel!.content).toContain("uuid");
+    expect(getProposalBlockDefinitionByTag("DataModel")!.type).toBe(
+      "data-model",
+    );
+
+    // ApiEndpoint
+    const apiEndpoint = byTag.get("ApiEndpoint");
+    expect(apiEndpoint).toBeDefined();
+    expect(apiEndpoint!.id).toBe("get-users");
+    expect(apiEndpoint!.attributes.method).toBe("GET");
+    expect(apiEndpoint!.attributes.path).toBe("/api/users");
+    expect(apiEndpoint!.content).toContain("Returns a list");
+    expect(getProposalBlockDefinitionByTag("ApiEndpoint")!.type).toBe(
+      "api-endpoint",
+    );
+
+    // Decisions
+    const decisions = byTag.get("Decisions");
+    expect(decisions).toBeDefined();
+    expect(decisions!.id).toBe("auth-choice");
+    expect(decisions!.content).toContain("JWT");
+    expect(getProposalBlockDefinitionByTag("Decisions")!.type).toBe(
+      "decisions",
+    );
+
+    // FileTree
+    const fileTree = byTag.get("FileTree");
+    expect(fileTree).toBeDefined();
+    expect(fileTree!.id).toBe("project-layout");
+    expect(fileTree!.attributes.root).toBe("src");
+    expect(fileTree!.content).toContain("main.rs");
+    expect(getProposalBlockDefinitionByTag("FileTree")!.type).toBe("file-tree");
+
+    // QuestionForm
+    const questionForm = byTag.get("QuestionForm");
+    expect(questionForm).toBeDefined();
+    expect(questionForm!.id).toBe("open-questions");
+    expect(questionForm!.attributes.title).toBe("Open Questions");
+    expect(questionForm!.content).toContain("Redis");
+    expect(getProposalBlockDefinitionByTag("QuestionForm")!.type).toBe(
+      "question-form",
+    );
+  });
+
+  it("markdown segments are preserved between blocks in the canonical fixture", () => {
+    const segments = parseMdxBody(CANONICAL_MDX);
     const mdSegments = segments.filter((s) => s.kind === "markdown");
 
-    // Should have at least 2 markdown segments: intro + trailing
     expect(mdSegments.length).toBeGreaterThanOrEqual(2);
-    expect(mdSegments[0].text).toContain("# Proposal Title");
-    expect(mdSegments[0].text).toContain("introductory markdown");
-    // The last markdown segment should contain trailing text
+    expect(mdSegments[0].text).toContain("# Canonical Proposal");
     const last = mdSegments[mdSegments.length - 1];
     expect(last.text).toContain("trailing markdown");
   });
-
-  it("block count in parsed body equals BLOCK_TYPES count", () => {
-    const segments = parseMdxBody(SAMPLE_MDX);
-    const blockSegments = segments.filter((s) => s.kind === "block");
-
-    // The sample MDX contains exactly one of each block type
-    expect(blockSegments.length).toBe(BLOCK_TYPES.length);
-  });
 });
+
+// ------------------------------------------------------------------------------
+// Parser behaviour (not dependent on the canonical fixture)
+// ------------------------------------------------------------------------------
 
 describe("parseMdxBody — self-closing tags", () => {
   it("parses a self-closing <Diagram /> tag", () => {
@@ -155,7 +206,6 @@ describe("parseMdxBody — self-closing tags", () => {
     expect(blocks[0].tag).toBe("Diagram");
     expect(blocks[0].id).toBe("d1");
     expect(blocks[0].attributes.type).toBe("mermaid");
-    // Self-closing form has no inner content
     expect(blocks[0].content).toBe("");
   });
 
@@ -179,7 +229,7 @@ describe("parseMdxBody — self-closing tags", () => {
       "",
       '<Diagram id="d1" type="mermaid" />',
       "",
-      '<AnnotatedCode id="a1" lang="rust">',
+      '<AnnotatedCode id="a1" language="rust">',
       "fn main() {}",
       "</AnnotatedCode>",
     ].join("\n");
@@ -193,12 +243,10 @@ describe("parseMdxBody — self-closing tags", () => {
       "Diagram",
       "AnnotatedCode",
     ]);
-    // RichText has content, Diagram (self-closing) does not, AnnotatedCode does
     expect(blocks[0].content).toContain("Hello");
     expect(blocks[1].content).toBe("");
     expect(blocks[2].content).toContain("fn main");
 
-    // Markdown segments: at least the title and the empty lines between blocks
     expect(mds.length).toBeGreaterThanOrEqual(1);
     expect(mds[0].text).toContain("# Title");
   });
@@ -212,7 +260,6 @@ describe("parseMdxBody — lowercase and non-PascalCase tags are NOT parsed as b
     const blocks = segments.filter((s) => s.kind === "block");
 
     expect(blocks).toHaveLength(0);
-    // Everything should be markdown
     expect(segments).toHaveLength(1);
     expect(segments[0].kind).toBe("markdown");
   });
@@ -238,12 +285,9 @@ describe("parseMdxBody — lowercase and non-PascalCase tags are NOT parsed as b
 
 describe("isPascalCaseTag", () => {
   it("returns true for canonical block tags", () => {
-    expect(isPascalCaseTag("RichText")).toBe(true);
-    expect(isPascalCaseTag("Diagram")).toBe(true);
-    expect(isPascalCaseTag("AnnotatedCode")).toBe(true);
-    expect(isPascalCaseTag("DataModel")).toBe(true);
-    expect(isPascalCaseTag("ApiEndpoint")).toBe(true);
-    expect(isPascalCaseTag("QuestionForm")).toBe(true);
+    for (const tag of CANONICAL_V1_TAGS) {
+      expect(isPascalCaseTag(tag)).toBe(true);
+    }
   });
 
   it("returns true for single PascalCase word", () => {
@@ -267,18 +311,9 @@ describe("isPascalCaseTag", () => {
 });
 
 describe("extractBlockTags", () => {
-  it("extracts all PascalCase block tags from a body", () => {
-    const tags = extractBlockTags(SAMPLE_MDX);
-    expect(tags).toEqual([
-      "RichText",
-      "Diagram",
-      "AnnotatedCode",
-      "DataModel",
-      "ApiEndpoint",
-      "Decisions",
-      "FileTree",
-      "QuestionForm",
-    ]);
+  it("extracts all PascalCase block tags from the canonical fixture", () => {
+    const tags = extractBlockTags(CANONICAL_MDX);
+    expect(tags).toEqual(CANONICAL_V1_TAGS);
   });
 
   it("extracts self-closing tags", () => {
@@ -295,49 +330,5 @@ describe("extractBlockTags", () => {
 
   it("returns empty array for empty string", () => {
     expect(extractBlockTags("")).toEqual([]);
-  });
-});
-
-describe("P1 canonical tag integration with registry", () => {
-  it("RichText, Diagram, and AnnotatedCode parse and resolve through the registry", () => {
-    const body = [
-      '<RichText id="rt-1">',
-      "Some **rich** content.",
-      "</RichText>",
-      "",
-      '<Diagram id="dg-1" type="mermaid">',
-      "graph LR\n  A-->B",
-      "</Diagram>",
-      "",
-      '<AnnotatedCode id="ac-1" lang="typescript">',
-      "const x: number = 42;",
-      "</AnnotatedCode>",
-    ].join("\n");
-
-    const segments = parseMdxBody(body);
-    const blocks = segments.filter((s) => s.kind === "block");
-
-    expect(blocks).toHaveLength(3);
-
-    // Each P1 tag resolves to a registered block definition with a component
-    for (const block of blocks) {
-      const def = getBlockByTag(block.tag);
-      expect(def, `${block.tag} should be in the registry`).toBeDefined();
-      expect(def!.component, `${block.tag} should have a component`).toBeDefined();
-      expect(def!.tag).toBe(block.tag);
-    }
-
-    // Verify specific P1 tags
-    expect(blocks[0].tag).toBe("RichText");
-    expect(blocks[0].id).toBe("rt-1");
-    expect(blocks[0].content).toContain("rich");
-
-    expect(blocks[1].tag).toBe("Diagram");
-    expect(blocks[1].id).toBe("dg-1");
-    expect(blocks[1].attributes.type).toBe("mermaid");
-
-    expect(blocks[2].tag).toBe("AnnotatedCode");
-    expect(blocks[2].id).toBe("ac-1");
-    expect(blocks[2].attributes.lang).toBe("typescript");
   });
 });
