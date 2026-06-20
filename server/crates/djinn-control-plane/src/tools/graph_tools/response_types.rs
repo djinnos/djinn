@@ -652,6 +652,21 @@ pub struct FlowResponse {
     pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
 }
 
+/// Response for the `crate_graph` op — workspace crates as nodes with
+/// aggregated cross-crate edges.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CrateGraphOpResponse {
+    pub crates: Vec<CrateNodeEntry>,
+    pub edges: Vec<CrateEdgeEntry>,
+    /// Present when the graph is empty (e.g. not a Rust workspace).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_staleness: Option<crate::tools::graph_tools::GraphStaleness>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CodeGraphResponse {
@@ -702,4 +717,7 @@ pub enum CodeGraphResponse {
     ShapeCheck(ShapeCheckResponse),
     ApiImpact(ApiImpactResponse),
     Flow(FlowResponse),
+    /// Crate-level dependency graph: workspace crates as nodes,
+    /// aggregated cross-crate references as edges.
+    CrateGraph(CrateGraphOpResponse),
 }
