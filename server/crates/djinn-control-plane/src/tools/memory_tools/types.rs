@@ -287,7 +287,10 @@ pub struct MemoryRunEnrichmentResponse {
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct AssociationsParams {
     pub project: String,
-    /// Note ID or permalink (e.g. "decisions/my-adr").
+    /// Note ID or permalink (e.g. "decisions/my-adr"). Also accepts a
+    /// proposal ID or short_id (e.g. "abc1"); the tool resolves the
+    /// identifier to the correct entity type (note or proposal)
+    /// automatically.
     pub identifier: String,
     /// Minimum association weight [0.0, 1.0]. Default: 0.0 (all associations).
     pub min_weight: Option<f64>,
@@ -297,22 +300,55 @@ pub struct AssociationsParams {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryAssociationEntry {
+    /// Entity type of the associated target: "note" or "proposal".
+    /// Defaults to "note" for backward compatibility with older responses
+    /// that only ever returned note associations.
+    #[serde(default = "default_note_entity_type")]
+    pub entity_type: String,
+    /// Stable identifier of the associated entity (note id or proposal id).
+    /// Defaults to empty string for responses populated through legacy
+    /// note-only fields.
+    #[serde(default)]
+    pub entity_id: String,
+    /// Human-readable title of the associated entity.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub entity_title: String,
+    /// Permalink/short_id of the associated entity (note permalink or
+    /// proposal short_id). Defaults to empty string for responses populated
+    /// through legacy note-only fields.
+    #[serde(default)]
+    pub entity_permalink: String,
+    // ── Legacy note-only fields (backward compatibility) ────────────────────
+    // The following fields are preserved for clients that read the original
+    // note-only response shape. They are populated from `entity_permalink` /
+    // `entity_title` when the target is a note, and left empty otherwise.
     pub note_permalink: String,
     pub note_title: String,
     pub weight: f64,
-    /// Association edge kind as stored on `note_associations.kind` (e.g. `"co_access"`).
-    /// Today the only value written is `"co_access"`; future wave-1 graph-typed edges
-    /// (builds_on / contradicts / supersedes / exemplifies) will widen the value set
-    /// — see Epic 2chl. `#[serde(default)]` keeps older clients deserialising cleanly
-    /// until they adopt the new field.
+    /// Association edge kind as stored on `note_associations.kind`
+    /// (e.g. `"co_access"`) or `memory_entity_associations.kind` (e.g.
+    /// `"builds_on"`, `"derived_from"`). `#[serde(default)]` keeps older
+    /// clients deserialising cleanly until they adopt the new field.
     #[serde(default)]
     pub kind: String,
     pub co_access_count: i64,
     pub last_co_access: String,
 }
 
+/// Default value for `entity_type` / `seed_entity_type` fields: `"note"`.
+/// Keeps older responses (which only carried note associations)
+/// deserialising cleanly when clients don't supply the field.
+fn default_note_entity_type() -> String {
+    "note".to_string()
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryAssociationsResponse {
+    /// The entity type that the seed `identifier` resolved to: "note" or
+    /// "proposal". Useful for callers that pass an opaque identifier and
+    /// need to know whether the seed was a note or a proposal.
+    #[serde(default = "default_note_entity_type")]
+    pub seed_entity_type: String,
     pub associations: Vec<MemoryAssociationEntry>,
     pub error: Option<String>,
 }
@@ -356,6 +392,12 @@ pub struct MemoryNoteResponse {
     /// Short_id mentions found in note body, resolved to entities.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolved_mentions: Vec<ResolvedMention>,
+    /// Tasks whose memory_refs contain this note's permalink.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<MemoryTaskRefItem>,
+    /// Proposals reachable through this note's tasks/epics (via proposal_epics).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<MemoryProposalRefItem>,
     pub error: Option<String>,
 }
 
@@ -596,6 +638,8 @@ impl MemoryNoteResponse {
             last_accessed: Some(note.last_accessed.clone()),
             deduplicated,
             resolved_mentions: vec![],
+            tasks: vec![],
+            proposals: vec![],
             error: None,
         }
     }
@@ -618,6 +662,8 @@ impl MemoryNoteResponse {
             last_accessed: None,
             deduplicated: false,
             resolved_mentions: vec![],
+            tasks: vec![],
+            proposals: vec![],
             error: Some(error),
         }
     }

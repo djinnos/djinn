@@ -38,7 +38,7 @@ impl CoordinatorActor {
     /// Shared handler for a "CI checks failed on PR" event, used by both the
     /// `pr_draft` and `pr_review` polling paths.
     ///
-    /// Fixes the infinite CI-failure rework loop by gating the rework on three
+    /// Fixes the infinite CI-failure rework loop by gating the rework on four
     /// things, in order:
     ///
     /// 1. **Blocking-only filter.** The failed check-runs are intersected with
@@ -52,12 +52,19 @@ impl CoordinatorActor {
     ///    heuristic. If nothing blocking remains, we do **not** reopen — the
     ///    required checks are green and the PR is fine to proceed.
     ///
-    /// 2. **Diff-empty short-circuit.** If the PR head has no commits ahead of
+    /// 2. **Same-CI-signature check.** A stable fingerprint is computed from the
+    ///    blocking check names and structured CI failure sections. If the same
+    ///    fingerprint appears `SAME_CI_SIGNATURE_THRESHOLD` times in a row,
+    ///    we escalate to the Planner via `route_planner_intervention` faster
+    ///    than the blind cycle-count threshold. The counter resets when the
+    ///    fingerprint changes (different failures = progress).
+    ///
+    /// 3. **Diff-empty short-circuit.** If the PR head has no commits ahead of
     ///    base on GitHub (`ahead_by == 0`), the previous worker iteration
     ///    produced no new diff — re-dispatching cannot change anything. We
     ///    escalate to the Planner and force-close instead of looping.
     ///
-    /// 3. **Cycle cap.** Each CI-failure rework records a `pr_ci_cycle` marker.
+    /// 4. **Cycle cap.** Each CI-failure rework records a `pr_ci_cycle` marker.
     ///    Past `PR_CI_FAILURE_THRESHOLD` we escalate to the Planner and
     ///    force-close rather than redispatch. Escalation is terminal — the
     ///    counter is never reset on the reopen that re-arms the loop.
@@ -143,7 +150,88 @@ impl CoordinatorActor {
             sections
         };
 
-        // ── 2. Diff-empty short-circuit ───────────────────────────────────────
+        // ── 2. Same-CI-signature check (content-aware escalation) ───────────────
+        // Compute a fingerprint from the blocking failures + structured CI
+        // sections. If the same fingerprint appears K times in a row, escalate
+        // to the Planner faster than the blind cycle-count threshold.
+        let fingerprint = compute_ci_failure_fingerprint(&blocking, &ci_failure_sections);
+
+        let task_repo = self.task_repo();
+        let prior_signatures = match task_repo
+            .query_activity(ActivityQuery {
+                task_id: Some(task_id.to_owned()),
+                event_type: Some(SAME_CI_SIGNATURE_EVENT.to_string()),
+                actor_role: Some("system".to_string()),
+                project_id: None,
+                from_time: None,
+                to_time: None,
+                limit: 100,
+                offset: 0,
+            })
+            .await
+        {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    error = %e,
+                    "PR poller: failed to query same_ci_signature markers; assuming none"
+                );
+                Vec::new()
+            }
+        };
+
+        let consecutive = count_consecutive_identical(&prior_signatures, &fingerprint);
+        // The current failure is the (consecutive + 1)th identical fingerprint.
+        let total_consecutive = consecutive + 1;
+
+        if total_consecutive >= SAME_CI_SIGNATURE_THRESHOLD {
+            let blocking_names: Vec<&str> = blocking.iter().map(|cr| cr.name.as_str()).collect();
+            let reason = format!(
+                "PR #{pull_number}: CI has failed with the identical fingerprint {total_consecutive} \
+                 consecutive times (checks: {check_names}). The worker is not making progress on \
+                 these specific failures. Escalating for planner intervention.",
+                check_names = blocking_names.join(", "),
+            );
+            tracing::warn!(
+                task_id = %task_short_id,
+                pr = pull_number,
+                fingerprint = %fingerprint,
+                consecutive = total_consecutive,
+                threshold = SAME_CI_SIGNATURE_THRESHOLD,
+                "PR poller: same CI failure signature detected — escalating for planner intervention"
+            );
+            let sections_text = ci_failure_sections.join("\n");
+            self.route_planner_intervention(task, "worker", &reason, Some(&sections_text))
+                .await;
+            return true;
+        }
+
+        // Record this fingerprint marker so future rounds can detect repeats.
+        let signature_payload = serde_json::json!({
+            "fingerprint": fingerprint,
+            "round": total_consecutive,
+            "check_names": blocking.iter().map(|cr| cr.name.as_str()).collect::<Vec<&str>>(),
+        })
+        .to_string();
+        if let Err(e) = task_repo
+            .log_activity(
+                Some(task_id),
+                "coordinator",
+                "system",
+                SAME_CI_SIGNATURE_EVENT,
+                &signature_payload,
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task_short_id,
+                error = %e,
+                "PR poller: failed to store same_ci_signature marker"
+            );
+        }
+
+        // ── 3. Diff-empty short-circuit ───────────────────────────────────────
         // If the head has no commits ahead of base, the last worker iteration
         // produced no new diff. Re-dispatching cannot change the outcome, so
         // escalate + force-close instead of looping on the same SHA.
@@ -184,8 +272,7 @@ impl CoordinatorActor {
             }
         }
 
-        // ── 3. Cycle cap ──────────────────────────────────────────────────────
-        let task_repo = self.task_repo();
+        // ── 4. Cycle cap ──────────────────────────────────────────────────────
         let prior_cycles = match task_repo
             .query_activity(ActivityQuery {
                 task_id: Some(task_id.to_owned()),
@@ -631,4 +718,79 @@ pub(in crate::actors::coordinator) fn advisory_checks_section(
          merging — make those green._",
         lines.join("\n")
     ))
+}
+
+/// Compute a stable fingerprint from normalized failing-check names and CI
+/// failure sections. The fingerprint is a hash of:
+/// 1. Sorted, deduplicated failing check-run names (normalized: lowercase, trimmed)
+/// 2. The workflow names + failed job names + failed step names from the CI
+///    failure sections (the structured content, not the full text)
+///
+/// Returns a hex string. Two CI failures with the same fingerprint indicate
+/// the worker is hitting the exact same checks/errors across pushes.
+pub(in crate::actors::coordinator) fn compute_ci_failure_fingerprint(
+    failed_checks: &[&CheckRun],
+    ci_failure_sections: &[String],
+) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // 1. Normalize check names
+    let mut check_names: Vec<String> = failed_checks
+        .iter()
+        .map(|cr| cr.name.to_lowercase().trim().to_string())
+        .collect();
+    check_names.sort();
+    check_names.dedup();
+
+    // 2. Extract structured failure markers from sections
+    //    Parse lines starting with "**Failed job:**" or "**Failed step:**"
+    let mut failure_markers: Vec<String> = ci_failure_sections
+        .iter()
+        .filter_map(|s| {
+            if s.starts_with("**Failed job:**") || s.starts_with("**Failed step:**") {
+                Some(s.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    failure_markers.sort();
+    failure_markers.dedup();
+
+    // 3. Hash combined content
+    let combined = format!(
+        "checks:{}|failures:{}",
+        check_names.join(","),
+        failure_markers.join(",")
+    );
+    let mut hasher = DefaultHasher::new();
+    combined.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+/// Walk activity entries in reverse chronological order and count how many
+/// consecutive entries have a fingerprint matching `current_fp`.
+/// Stops at the first different fingerprint.
+fn count_consecutive_identical(
+    entries: &[djinn_core::models::ActivityEntry],
+    current_fp: &str,
+) -> u32 {
+    let mut count = 0u32;
+    for entry in entries.iter().rev() {
+        let parsed: serde_json::Value = match serde_json::from_str(&entry.payload) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        let fp = match parsed.get("fingerprint").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => break,
+        };
+        if fp == current_fp {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    count
 }
