@@ -57,6 +57,12 @@ export interface UserSettings {
    * `{}` when unset; consumers default missing entries to 1.
    */
   maxSessions: Record<string, number>;
+  /**
+   * Cross-model ("Thorough") review. When true (the default), the reviewer
+   * prefers a model id different from the implementer's. A degenerate
+   * single-model selection falls back to same-model review.
+   */
+  diverseReview: boolean;
 }
 
 interface RawGet {
@@ -65,6 +71,7 @@ interface RawGet {
   auto_approve_prs?: boolean;
   lanes?: Partial<ModelLanes> | null;
   max_sessions?: Record<string, number> | null;
+  diverse_review?: boolean | null;
   error?: string | null;
 }
 
@@ -74,6 +81,7 @@ interface RawSet {
   auto_approve_prs?: boolean | null;
   lanes?: Partial<ModelLanes> | null;
   max_sessions?: Record<string, number> | null;
+  diverse_review?: boolean | null;
   error?: string | null;
 }
 
@@ -90,6 +98,8 @@ export async function fetchUserSettings(): Promise<UserSettings> {
     autoApprovePrs: Boolean(resp?.auto_approve_prs),
     lanes: parseLanes(resp?.lanes),
     maxSessions: parseMaxSessions(resp?.max_sessions),
+    // Cross-model review defaults ON; only an explicit `false` disables it.
+    diverseReview: resp?.diverse_review !== false,
   };
 }
 
@@ -99,6 +109,8 @@ export async function patchUserSettings(patch: {
   lanes?: ModelLanes;
   /** Per-model caps keyed by full `"provider/model"` id. Omit to keep current. */
   maxSessions?: Record<string, number>;
+  /** Cross-model ("Thorough") review toggle. Omit to keep current. */
+  diverseReview?: boolean;
 }): Promise<UserSettings> {
   const args: Record<string, unknown> = {};
   if (patch.autoApprovePrs !== undefined) {
@@ -110,6 +122,9 @@ export async function patchUserSettings(patch: {
   if (patch.maxSessions !== undefined) {
     args.max_sessions = patch.maxSessions;
   }
+  if (patch.diverseReview !== undefined) {
+    args.diverse_review = patch.diverseReview;
+  }
   const resp = (await callMcpTool("user_settings_set", args)) as RawSet;
   if (resp?.ok === false) {
     throw new Error(resp.error ?? "failed to save user settings");
@@ -118,5 +133,6 @@ export async function patchUserSettings(patch: {
     autoApprovePrs: Boolean(resp?.auto_approve_prs),
     lanes: parseLanes(resp?.lanes),
     maxSessions: parseMaxSessions(resp?.max_sessions),
+    diverseReview: resp?.diverse_review !== false,
   };
 }

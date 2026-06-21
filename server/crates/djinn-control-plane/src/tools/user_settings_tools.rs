@@ -81,6 +81,11 @@ pub struct UserSettingsGetResponse {
     /// The sole admission control at dispatch; empty ⇒ default 1 per model.
     #[schemars(with = "std::collections::HashMap<String, i64>")]
     pub max_sessions: HashMap<String, u32>,
+    /// Cross-model ("Thorough") review. When true (the default), a task
+    /// dispatched to the reviewer role prefers a model id different from the one
+    /// that implemented it. A degenerate single-model selection falls back to
+    /// same-model review.
+    pub diverse_review: bool,
     pub error: Option<String>,
 }
 
@@ -100,6 +105,10 @@ pub struct UserSettingsSetParams {
     /// 1 per model). Omit to keep the current value.
     #[schemars(with = "Option<std::collections::HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
+    /// Enable or disable cross-model ("Thorough") review for THIS user. When on
+    /// (the default), the reviewer prefers a model id different from the
+    /// implementer's. Omit to keep the current value.
+    pub diverse_review: Option<bool>,
     /// Admin-only: act on behalf of this user id (e.g. another user to
     /// configure). Non-admins must omit it.
     #[serde(default)]
@@ -116,6 +125,8 @@ pub struct UserSettingsSetResponse {
     /// The resulting per-model concurrency caps after the patch.
     #[schemars(with = "Option<std::collections::HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
+    /// The resulting cross-model review toggle after the patch.
+    pub diverse_review: Option<bool>,
     pub error: Option<String>,
 }
 
@@ -146,6 +157,7 @@ impl DjinnMcpServer {
                         auto_approve_prs: false,
                         lanes: ModelLanesPayload::default(),
                         max_sessions: HashMap::new(),
+                        diverse_review: true,
                         error: Some(missing_session()),
                     });
                 }
@@ -156,6 +168,7 @@ impl DjinnMcpServer {
                         auto_approve_prs: false,
                         lanes: ModelLanesPayload::default(),
                         max_sessions: HashMap::new(),
+                        diverse_review: true,
                         error: Some(e),
                     });
                 }
@@ -168,6 +181,7 @@ impl DjinnMcpServer {
                 auto_approve_prs: s.auto_approve_prs,
                 lanes: s.lanes.unwrap_or_default().into(),
                 max_sessions: s.max_sessions.unwrap_or_default(),
+                diverse_review: s.diverse_review,
                 error: None,
             }),
             Err(e) => Json(UserSettingsGetResponse {
@@ -176,6 +190,7 @@ impl DjinnMcpServer {
                 auto_approve_prs: false,
                 lanes: ModelLanesPayload::default(),
                 max_sessions: HashMap::new(),
+                diverse_review: true,
                 error: Some(e.to_string()),
             }),
         }
@@ -202,6 +217,7 @@ impl DjinnMcpServer {
                         auto_approve_prs: None,
                         lanes: None,
                         max_sessions: None,
+                        diverse_review: None,
                         error: Some(missing_session()),
                     });
                 }
@@ -212,6 +228,7 @@ impl DjinnMcpServer {
                         auto_approve_prs: None,
                         lanes: None,
                         max_sessions: None,
+                        diverse_review: None,
                         error: Some(e),
                     });
                 }
@@ -225,6 +242,7 @@ impl DjinnMcpServer {
                 auto_approve_prs: None,
                 lanes: None,
                 max_sessions: None,
+                diverse_review: None,
                 error: Some(msg),
             })
         };
@@ -268,6 +286,16 @@ impl DjinnMcpServer {
             applied = true;
         }
 
+        // Cross-model ("Thorough") review toggle. No validation needed — it is a
+        // pure dispatch-time preference; a degenerate single-model selection
+        // falls back to same-model review.
+        if let Some(target) = p.diverse_review {
+            if let Err(e) = repo.upsert_diverse_review(&user_id, target).await {
+                return err(e.to_string());
+            }
+            applied = true;
+        }
+
         // A changed model selection or cap can make more work dispatchable now,
         // so kick a dispatch pass. No-op for auto-approve-only patches.
         if p.lanes.is_some() || p.max_sessions.is_some() {
@@ -281,6 +309,7 @@ impl DjinnMcpServer {
                 auto_approve_prs: Some(s.auto_approve_prs),
                 lanes: Some(s.lanes.unwrap_or_default().into()),
                 max_sessions: Some(s.max_sessions.unwrap_or_default()),
+                diverse_review: Some(s.diverse_review),
                 error: None,
             }),
             Err(e) => err(e.to_string()),

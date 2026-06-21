@@ -56,6 +56,7 @@ impl UserSettingsRepository {
         // decode it directly.
         let row = sqlx::query!(
             r#"SELECT user_id, auto_approve_prs AS "auto_approve_prs!: bool",
+                      diverse_review AS "diverse_review!: bool",
                       model_lanes, max_sessions, created_at, updated_at
                FROM user_settings WHERE user_id = $1"#,
             user_id,
@@ -67,6 +68,7 @@ impl UserSettingsRepository {
             auto_approve_prs: r.auto_approve_prs,
             lanes: parse_lanes(r.model_lanes.as_deref()),
             max_sessions: parse_max_sessions(r.max_sessions.as_deref()),
+            diverse_review: r.diverse_review,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }))
@@ -115,6 +117,31 @@ impl UserSettingsRepository {
                      to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
              ON CONFLICT (user_id) DO UPDATE SET
                  auto_approve_prs = EXCLUDED.auto_approve_prs,
+                 updated_at = EXCLUDED.updated_at"#,
+            user_id,
+            value,
+        )
+        .execute(self.db.pool())
+        .await?;
+        self.get(user_id).await?.ok_or_else(|| {
+            crate::Error::Internal(format!(
+                "user_settings row missing after upsert for {user_id}"
+            ))
+        })
+    }
+
+    /// Upsert the `diverse_review` (cross-model "Thorough" review) toggle.
+    /// Returns the resulting row. On first write the row is inserted with
+    /// `auto_approve_prs = FALSE` and the explicit `diverse_review` value.
+    pub async fn upsert_diverse_review(&self, user_id: &str, value: bool) -> Result<UserSettings> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            r#"INSERT INTO user_settings (user_id, auto_approve_prs, diverse_review, created_at, updated_at)
+             VALUES ($1, FALSE, $2,
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (user_id) DO UPDATE SET
+                 diverse_review = EXCLUDED.diverse_review,
                  updated_at = EXCLUDED.updated_at"#,
             user_id,
             value,
@@ -400,6 +427,30 @@ mod tests {
                 "x/y".to_string(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn diverse_review_defaults_true_and_round_trips() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let user_id = seed_user(&db, "diverse").await;
+        let repo = UserSettingsRepository::new(db);
+
+        // Never-written user: defaults to true (matches the DB column default).
+        assert!(repo.get_or_default(&user_id).await.unwrap().diverse_review);
+
+        // Toggle off, then back on — round-trips and does not clobber lanes.
+        repo.upsert_lanes(
+            &user_id,
+            &ModelLanes::from_flat(vec!["openai/gpt-5.5".to_string()]),
+        )
+        .await
+        .unwrap();
+        let off = repo.upsert_diverse_review(&user_id, false).await.unwrap();
+        assert!(!off.diverse_review);
+        assert_eq!(off.lanes.unwrap().plan, vec!["openai/gpt-5.5".to_string()]);
+
+        let on = repo.upsert_diverse_review(&user_id, true).await.unwrap();
+        assert!(on.diverse_review);
     }
 
     #[tokio::test]

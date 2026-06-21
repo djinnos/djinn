@@ -134,10 +134,12 @@ function mockSuccessfulLoads() {
   vi.mocked(fetchUserModelSelection).mockResolvedValue({
     lanes: { plan: ["openai/gpt-5"], implement: [], review: [] },
     maxSessions: { "openai/gpt-5": 3 },
+    diverseReview: true,
   });
   vi.mocked(saveUserModelSelection).mockResolvedValue({
     lanes: { plan: ["openai/gpt-5"], implement: [], review: [] },
     maxSessions: { "openai/gpt-5": 3 },
+    diverseReview: true,
   });
   vi.mocked(setUserCredential).mockResolvedValue(undefined);
   vi.mocked(startUserOAuth).mockResolvedValue({ kind: "connected" });

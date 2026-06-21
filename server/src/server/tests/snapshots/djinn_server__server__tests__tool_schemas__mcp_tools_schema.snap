@@ -16823,6 +16823,10 @@ expression: signatures
           "description": "Auto-approve PRs that are otherwise ready to merge. When true, the\npoller POSTs an APPROVE review using this user's GitHub token at the\nmoment the PR has CI green + no conflicts + no existing approvals.\nDefaults to false. Each task's `created_by_user_id` decides whose\ntoggle applies; background-agent tasks (`created_by_user_id IS NULL`)\nare never auto-approved.",
           "type": "boolean"
         },
+        "diverse_review": {
+          "description": "Cross-model (\"Thorough\") review. When true (the default), a task\ndispatched to the reviewer role prefers a model id different from the one\nthat implemented it. A degenerate single-model selection falls back to\nsame-model review.",
+          "type": "boolean"
+        },
         "error": {
           "nullable": true,
           "type": "string"
@@ -16852,7 +16856,8 @@ expression: signatures
         "ok",
         "auto_approve_prs",
         "lanes",
-        "max_sessions"
+        "max_sessions",
+        "diverse_review"
       ],
       "title": "UserSettingsGetResponse",
       "type": "object"
@@ -16902,6 +16907,11 @@ expression: signatures
       "properties": {
         "auto_approve_prs": {
           "description": "Enable or disable auto-approve. Omit to keep the current value.",
+          "nullable": true,
+          "type": "boolean"
+        },
+        "diverse_review": {
+          "description": "Enable or disable cross-model (\"Thorough\") review for THIS user. When on\n(the default), the reviewer prefers a model id different from the\nimplementer's. Omit to keep the current value.",
           "nullable": true,
           "type": "boolean"
         },
@@ -16975,6 +16985,11 @@ expression: signatures
           "type": "boolean"
         },
         "auto_approve_prs": {
+          "nullable": true,
+          "type": "boolean"
+        },
+        "diverse_review": {
+          "description": "The resulting cross-model review toggle after the patch.",
           "nullable": true,
           "type": "boolean"
         },

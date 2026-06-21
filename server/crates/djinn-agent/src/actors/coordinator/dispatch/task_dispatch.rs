@@ -534,6 +534,97 @@ impl CoordinatorActor {
         Ok(next_count)
     }
 
+    /// Cross-model ("Thorough") review steering for a reviewer dispatch.
+    ///
+    /// When the task creator has `diverse_review` enabled, reorder `model_ids`
+    /// (the resolved review-lane fallback list) so the first viable entry is a
+    /// model id DIFFERENT from the one that implemented the task. The
+    /// implementer's model id is read from the most recent `worker` session for
+    /// the task. Behavior:
+    ///
+    /// - `diverse_review` off, or no implementer model on file yet, or no
+    ///   distinct alternative exists → leave the order untouched (same-model
+    ///   review is the graceful fallback; the task is never blocked).
+    /// - Otherwise → stable-partition so all ids != implementer come first
+    ///   (priority preserved within each group), then ids == implementer.
+    ///
+    /// Records the outcome (log + `djinn_cross_model_review_total`) so the
+    /// substitution/fallback is observable.
+    #[cfg(not(test))]
+    async fn apply_diverse_review_ordering(
+        &self,
+        task: &djinn_core::models::Task,
+        creator: Option<&str>,
+        model_ids: &mut [String],
+    ) {
+        let Some(uid) = creator else {
+            return;
+        };
+        let us_repo = djinn_db::UserSettingsRepository::new(self.db.clone());
+        let diverse = match us_repo.get(uid).await {
+            // Default ON when the user has never written settings (matches the
+            // DB column default + `defaults_for`).
+            Ok(Some(s)) => s.diverse_review,
+            Ok(None) => true,
+            Err(_) => return,
+        };
+        if !diverse {
+            return;
+        }
+
+        // The model that implemented the task = the most recent worker session's
+        // model id. Unknown (no worker session yet) → nothing to diverge from.
+        let implementer = match djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        )
+        .latest_model_for_task_role(&task.id, "worker")
+        .await
+        {
+            Ok(Some(m)) if !m.trim().is_empty() => m,
+            _ => return,
+        };
+
+        let has_alternative = model_ids.iter().any(|m| m != &implementer);
+        if !has_alternative {
+            // The whole viable review list collapses to the implementer's model
+            // — proceed same-model rather than blocking the review.
+            tracing::info!(
+                task_id = %task.short_id,
+                implementer_model = %implementer,
+                "CoordinatorActor: diverse review wanted but only the implementer's \
+                 model is viable — proceeding same-model"
+            );
+            djinn_telemetry::dispatch::record_cross_model_review("same_fallback");
+            return;
+        }
+
+        // Stable partition: ids != implementer keep their relative priority and
+        // move ahead of any id == implementer.
+        model_ids.sort_by_key(|m| m == &implementer);
+        tracing::info!(
+            task_id = %task.short_id,
+            implementer_model = %implementer,
+            reviewer_model = %model_ids.first().map(String::as_str).unwrap_or(""),
+            "CoordinatorActor: cross-model review — steering reviewer to a model \
+             distinct from the implementer"
+        );
+        djinn_telemetry::dispatch::record_cross_model_review("different");
+    }
+
+    /// Test-build no-op: the in-process dispatch fixtures seed no real users or
+    /// sessions, and `resolve_user_model_priority` already returns empty under
+    /// test, so cross-model steering has nothing to act on. The production path
+    /// is exercised via the live MCP/session flow + the repo-level unit tests.
+    #[cfg(test)]
+    async fn apply_diverse_review_ordering(
+        &self,
+        _task: &djinn_core::models::Task,
+        _creator: Option<&str>,
+        _model_ids: &mut [String],
+    ) {
+    }
+
     #[tracing::instrument(
         name = "djinn.dispatch",
         skip(self, model_ids, dispatch_fn),
@@ -1217,6 +1308,16 @@ impl CoordinatorActor {
                 if seen.insert(id.clone()) {
                     model_ids.push(id.clone());
                 }
+            }
+
+            // Cross-model ("Thorough") review: when this is a reviewer dispatch
+            // and the creator has `diverse_review` on, steer the fallback list so
+            // the first viable model id differs from the one that implemented the
+            // task. Reorders in place (entries != implementer first, preserving
+            // priority); collapses to same-model when nothing else is viable.
+            if role == "reviewer" {
+                self.apply_diverse_review_ordering(&task, creator.as_deref(), &mut model_ids)
+                    .await;
             }
 
             // No model whose provider this task's owner has connected → the task

@@ -520,6 +520,31 @@ impl SessionRepository {
         .await?)
     }
 
+    /// The `model_id` of the most recent session for `task_id` whose
+    /// `agent_type` matches `agent_type` (e.g. `"worker"` to find the model that
+    /// implemented the task). `None` when no such session exists yet.
+    ///
+    /// Used by the cross-model ("Thorough") review path: at reviewer dispatch we
+    /// look up the implementer's model id so the reviewer can pick a different
+    /// one. Reads the latest by `started_at` so a re-implemented task uses the
+    /// model of its newest worker run.
+    pub async fn latest_model_for_task_role(
+        &self,
+        task_id: &str,
+        agent_type: &str,
+    ) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar!(
+            r#"SELECT model_id FROM sessions
+               WHERE task_id = $1 AND agent_type = $2
+               ORDER BY started_at DESC LIMIT 1"#,
+            task_id,
+            agent_type,
+        )
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
     pub async fn count_for_task(&self, task_id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_scalar!(
@@ -1135,6 +1160,59 @@ mod tests {
         .unwrap();
 
         (epic.project_id, task_id)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn latest_model_for_task_role_returns_newest_matching_session() {
+        let db = test_db();
+        let (bus, _captured) = capturing_bus();
+        db.ensure_initialized().await.unwrap();
+        let (project_id, task_id) = create_task(&db, bus.clone()).await;
+        let repo = SessionRepository::new(db.clone(), bus.clone());
+
+        // No worker session yet → None.
+        assert_eq!(
+            repo.latest_model_for_task_role(&task_id, "worker")
+                .await
+                .unwrap(),
+            None
+        );
+
+        // First worker run on model A, then a re-implementation on model B.
+        for model in ["openai/gpt-a", "anthropic/opus-b"] {
+            repo.create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model,
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .unwrap();
+        }
+        // A reviewer session must NOT be picked up by the "worker" lookup.
+        repo.create(CreateSessionParams {
+            project_id: &project_id,
+            task_id: Some(&task_id),
+            model: "x/reviewer-model",
+            agent_type: "reviewer",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+        })
+        .await
+        .unwrap();
+
+        // Newest worker session's model (B) wins.
+        assert_eq!(
+            repo.latest_model_for_task_role(&task_id, "worker")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("anthropic/opus-b")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
