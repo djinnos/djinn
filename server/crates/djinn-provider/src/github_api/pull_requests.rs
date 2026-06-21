@@ -3,7 +3,7 @@ use crate::github_api::GitHubApiError;
 use anyhow::{Result, anyhow};
 
 use crate::github_api::transport::handle_rate_limit;
-use crate::github_api::types::{CompareResponse, RequiredStatusChecksResponse};
+use crate::github_api::types::{CompareResponse, PrFile, RequiredStatusChecksResponse};
 use crate::github_api::{
     AutoMergeRequest, CheckRun, CheckRunsResponse, CreatePrParams, DequeueEvent, GitHubApiClient,
     MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrMergeQueueState, PullRequest,
@@ -1667,6 +1667,47 @@ impl GitHubApiClient {
         }
 
         Ok(parse_required_contexts_from_rollup(&json))
+    }
+
+    /// Fetch the list of files changed in a PR via `GET /repos/{owner}/{repo}/pulls/{pull_number}/files`.
+    /// Returns the list of file paths (relative to repo root) that the PR modifies,
+    /// adds, or deletes. Used by the scope-inversion check to determine what the
+    /// PR actually touches.
+    pub async fn get_pr_files(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) -> Result<Vec<PrFile>> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{}/files?per_page=100",
+            self.base_url, owner, repo, pull_number
+        );
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("get_pr_files failed ({}): {}", status, body));
+        }
+        let files: Vec<PrFile> = resp.json().await?;
+        Ok(files)
     }
 
     /// Return how many commits `head` is ahead of `base` on GitHub via the
