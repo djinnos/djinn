@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use djinn_control_plane::{
@@ -31,6 +31,70 @@ use djinn_provider::catalog::{CatalogService, HealthTracker};
 /// Shared tracker for per-task last-activity timestamps (unix seconds).
 /// Used by stall detection to kill sessions that stop producing tokens.
 pub type ActivityTracker = Arc<std::sync::Mutex<HashMap<String, Arc<AtomicU64>>>>;
+
+/// Configuration for the periodic reconciliation sweep that reaps stale PRs,
+/// branches, and orphan worker sessions.
+///
+/// Read from environment variables at construction time.  Defaults are
+/// conservative: the sweep is **disabled** and in **dry-run** mode so that
+/// first runs are safe.  Operators opt in by setting
+/// `DJINN_RECONCILIATION_SWEEP_ENABLED=true`.
+#[derive(Debug, Clone)]
+pub struct ReconciliationSweepConfig {
+    /// Whether the reconciliation sweep is active.
+    /// Env: `DJINN_RECONCILIATION_SWEEP_ENABLED` (default `false`).
+    pub enabled: bool,
+    /// When `true`, the sweep logs what it *would* do without calling GitHub.
+    /// Env: `DJINN_RECONCILIATION_SWEEP_DRY_RUN` (default `true`).
+    pub dry_run: bool,
+    /// Seconds after a task closes before its PR/branch becomes eligible for
+    /// sweep reaping.
+    /// Env: `DJINN_RECONCILIATION_SWEEP_GRACE_PERIOD_SECS` (default `600`).
+    pub grace_period: Duration,
+}
+
+impl Default for ReconciliationSweepConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dry_run: true,
+            grace_period: Duration::from_secs(600),
+        }
+    }
+}
+
+impl ReconciliationSweepConfig {
+    /// Build a config from environment variables, falling back to safe defaults.
+    pub fn from_env() -> Self {
+        let enabled = std::env::var("DJINN_RECONCILIATION_SWEEP_ENABLED")
+            .map(|v| parse_bool_env(&v))
+            .unwrap_or(false);
+
+        let dry_run = std::env::var("DJINN_RECONCILIATION_SWEEP_DRY_RUN")
+            .map(|v| parse_bool_env(&v))
+            .unwrap_or(true);
+
+        let grace_period_secs = std::env::var("DJINN_RECONCILIATION_SWEEP_GRACE_PERIOD_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(600);
+
+        Self {
+            enabled,
+            dry_run,
+            grace_period: Duration::from_secs(grace_period_secs),
+        }
+    }
+}
+
+/// Parse a boolean environment variable value.  Accepts `1`, `true`, `yes`
+/// (case-insensitive) as truthy; everything else is falsy.
+fn parse_bool_env(val: &str) -> bool {
+    matches!(
+        val.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
+}
 
 /// Subset of application state required by agent lifecycle, coordinator, and
 /// slot code.  Cheaply cloneable — all fields are either `Clone` or wrapped in
@@ -118,6 +182,11 @@ pub struct AgentContext {
     /// surface + multi-project planners) where the caller IS expected to
     /// disambiguate.
     pub default_project_id: Option<String>,
+    /// Configuration for the periodic reconciliation sweep (stale PRs,
+    /// branches, and orphan worker sessions).  Read from environment
+    /// variables at `AgentContext` construction time via
+    /// [`ReconciliationSweepConfig::from_env`].
+    pub reconciliation_sweep: ReconciliationSweepConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
