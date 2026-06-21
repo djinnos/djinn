@@ -1,0 +1,296 @@
+#![allow(dead_code)]
+
+use std::collections::HashSet;
+use std::time::Duration;
+
+use anyhow::{Result, anyhow};
+use async_trait::async_trait;
+use djinn_core::models::Task;
+use djinn_provider::github_api::{GitHubApiClient, PrMergeQueueState, PullRequest};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+const DEFAULT_GRACE_PERIOD_SECS: u64 = 600;
+
+/// GitHub operations needed by PR/branch cleanup guardrails.
+///
+/// This trait keeps [`PrCleanupPolicy`] unit-testable while the production impl
+/// delegates to `GitHubApiClient`.
+#[async_trait]
+pub(crate) trait PrCleanupGitHub: Send + Sync {
+    async fn get_pr_merge_queue_state(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) -> Result<PrMergeQueueState>;
+
+    async fn list_pulls_by_base(
+        &self,
+        owner: &str,
+        repo: &str,
+        base: &str,
+    ) -> Result<Vec<PullRequest>>;
+
+    async fn delete_ref(&self, owner: &str, repo: &str, ref_name: &str) -> Result<()>;
+}
+
+#[async_trait]
+impl PrCleanupGitHub for GitHubApiClient {
+    async fn get_pr_merge_queue_state(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) -> Result<PrMergeQueueState> {
+        GitHubApiClient::get_pr_merge_queue_state(self, owner, repo, pull_number).await
+    }
+
+    async fn list_pulls_by_base(
+        &self,
+        owner: &str,
+        repo: &str,
+        base: &str,
+    ) -> Result<Vec<PullRequest>> {
+        GitHubApiClient::list_pulls_by_base(self, owner, repo, base).await
+    }
+
+    async fn delete_ref(&self, owner: &str, repo: &str, ref_name: &str) -> Result<()> {
+        GitHubApiClient::delete_ref(self, owner, repo, ref_name).await
+    }
+}
+
+/// Configuration for shared PR/branch cleanup guardrails.
+#[derive(Debug, Clone)]
+pub(crate) struct PrCleanupPolicyConfig {
+    pub enabled: bool,
+    pub dry_run: bool,
+    pub grace_period: Duration,
+    pub owner: String,
+    pub repo: String,
+    pub bot_logins: HashSet<String>,
+    pub protected_branches: HashSet<String>,
+    pub allowed_branch_prefixes: Vec<String>,
+}
+
+impl PrCleanupPolicyConfig {
+    pub(crate) fn new(owner: impl Into<String>, repo: impl Into<String>) -> Self {
+        Self {
+            owner: owner.into(),
+            repo: repo.into(),
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for PrCleanupPolicyConfig {
+    fn default() -> Self {
+        let mut bot_logins = HashSet::new();
+        if let Ok(slug) = std::env::var("GITHUB_APP_SLUG") {
+            let slug = slug.trim();
+            if !slug.is_empty() {
+                bot_logins.insert(format!("{slug}[bot]"));
+            }
+        }
+        bot_logins.insert("djinn-bot[bot]".to_string());
+
+        let mut protected_branches = HashSet::new();
+        protected_branches.insert("main".to_string());
+
+        Self {
+            enabled: true,
+            dry_run: false,
+            grace_period: Duration::from_secs(DEFAULT_GRACE_PERIOD_SECS),
+            owner: String::new(),
+            repo: String::new(),
+            bot_logins,
+            protected_branches,
+            allowed_branch_prefixes: vec!["task/".to_string(), "chore/".to_string()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BranchCleanupOutcome {
+    Skipped,
+    DryRunWouldDelete,
+    Deleted,
+}
+
+/// Shared cleanup guardrail policy for inline cleanup and periodic sweeps.
+#[derive(Debug, Clone)]
+pub(crate) struct PrCleanupPolicy<C> {
+    github: C,
+    config: PrCleanupPolicyConfig,
+    now_override: Option<OffsetDateTime>,
+}
+
+impl<C> PrCleanupPolicy<C> {
+    pub(crate) fn new(github: C, config: PrCleanupPolicyConfig) -> Self {
+        Self {
+            github,
+            config,
+            now_override: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_now(github: C, config: PrCleanupPolicyConfig, now: OffsetDateTime) -> Self {
+        Self {
+            github,
+            config,
+            now_override: Some(now),
+        }
+    }
+
+    pub(crate) fn config(&self) -> &PrCleanupPolicyConfig {
+        &self.config
+    }
+}
+
+impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
+    /// Return true when it is safe and intended to clean up the PR.
+    pub(crate) async fn should_cleanup_pr(&self, task: &Task, pr: &PullRequest) -> Result<bool> {
+        if !self.config.enabled {
+            tracing::info!(task_id = %task.short_id, pr = pr.number, "PR cleanup disabled; skipping PR cleanup");
+            return Ok(false);
+        }
+
+        if self.within_grace_period(task)? {
+            tracing::info!(task_id = %task.short_id, pr = pr.number, "PR cleanup skipped during grace period");
+            return Ok(false);
+        }
+
+        let Some(user) = pr.user.as_ref() else {
+            tracing::warn!(task_id = %task.short_id, pr = pr.number, "PR cleanup skipped because PR author is unavailable");
+            return Ok(false);
+        };
+        if !self.config.bot_logins.contains(&user.login) {
+            tracing::info!(
+                task_id = %task.short_id,
+                pr = pr.number,
+                author = %user.login,
+                "PR cleanup skipped for human/non-bot-authored PR"
+            );
+            return Ok(false);
+        }
+
+        let merge_queue_state = self
+            .github
+            .get_pr_merge_queue_state(&self.config.owner, &self.config.repo, pr.number)
+            .await?;
+        if let Some(entry) = merge_queue_state.merge_queue_entry {
+            tracing::info!(
+                task_id = %task.short_id,
+                pr = pr.number,
+                state = ?entry.state,
+                "PR cleanup skipped because PR is in the merge queue"
+            );
+            return Ok(false);
+        }
+
+        if self.config.dry_run {
+            tracing::info!(task_id = %task.short_id, pr = pr.number, "PR cleanup dry-run: would close PR");
+        }
+
+        Ok(true)
+    }
+
+    /// Return true when it is safe and intended to delete `branch`.
+    pub(crate) async fn should_delete_branch(&self, task: &Task, branch: &str) -> Result<bool> {
+        if !self.config.enabled {
+            tracing::info!(task_id = %task.short_id, branch, "PR cleanup disabled; skipping branch deletion");
+            return Ok(false);
+        }
+
+        if self.within_grace_period(task)? {
+            tracing::info!(task_id = %task.short_id, branch, "Branch cleanup skipped during grace period");
+            return Ok(false);
+        }
+
+        let branch = normalize_branch_name(branch);
+        if self.config.protected_branches.contains(branch) {
+            tracing::info!(task_id = %task.short_id, branch, "Branch cleanup skipped for protected branch");
+            return Ok(false);
+        }
+
+        if !self.config.allowed_branch_prefixes.is_empty()
+            && !self
+                .config
+                .allowed_branch_prefixes
+                .iter()
+                .any(|prefix| branch.starts_with(prefix))
+        {
+            tracing::info!(task_id = %task.short_id, branch, "Branch cleanup skipped for non-bot branch prefix");
+            return Ok(false);
+        }
+
+        let dependent_prs = self
+            .github
+            .list_pulls_by_base(&self.config.owner, &self.config.repo, branch)
+            .await?;
+        if dependent_prs.iter().any(|pr| pr.base.ref_name == branch) {
+            tracing::info!(
+                task_id = %task.short_id,
+                branch,
+                dependent_pr_count = dependent_prs.len(),
+                "Branch cleanup skipped because branch is the base of another open PR"
+            );
+            return Ok(false);
+        }
+
+        if self.config.dry_run {
+            tracing::info!(task_id = %task.short_id, branch, "PR cleanup dry-run: would delete branch");
+        }
+
+        Ok(true)
+    }
+
+    /// Delete `branch` when guardrails allow it; dry-run mode logs but does not
+    /// call GitHub.
+    pub(crate) async fn delete_branch_if_allowed(
+        &self,
+        task: &Task,
+        branch: &str,
+    ) -> Result<BranchCleanupOutcome> {
+        if !self.should_delete_branch(task, branch).await? {
+            return Ok(BranchCleanupOutcome::Skipped);
+        }
+
+        let branch = normalize_branch_name(branch);
+        if self.config.dry_run {
+            tracing::info!(task_id = %task.short_id, branch, "PR cleanup dry-run: not deleting branch");
+            return Ok(BranchCleanupOutcome::DryRunWouldDelete);
+        }
+
+        self.github
+            .delete_ref(
+                &self.config.owner,
+                &self.config.repo,
+                &format!("heads/{branch}"),
+            )
+            .await?;
+        Ok(BranchCleanupOutcome::Deleted)
+    }
+
+    fn within_grace_period(&self, task: &Task) -> Result<bool> {
+        let timestamp = task.closed_at.as_deref().unwrap_or(&task.updated_at);
+        let closed_or_updated_at = OffsetDateTime::parse(timestamp, &Rfc3339).map_err(|e| {
+            anyhow!("failed to parse task close/update timestamp {timestamp:?}: {e}")
+        })?;
+        let grace_period = time::Duration::try_from(self.config.grace_period)
+            .map_err(|e| anyhow!("invalid PR cleanup grace period: {e}"))?;
+        Ok(self.now() < closed_or_updated_at + grace_period)
+    }
+
+    fn now(&self) -> OffsetDateTime {
+        self.now_override.unwrap_or_else(OffsetDateTime::now_utc)
+    }
+}
+
+fn normalize_branch_name(branch: &str) -> &str {
+    branch
+        .strip_prefix("refs/heads/")
+        .or_else(|| branch.strip_prefix("heads/"))
+        .unwrap_or(branch)
+}
