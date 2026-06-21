@@ -202,10 +202,7 @@ export const LENS_PRESETS: Record<
       symbol: true,
     },
     symbolKindFilters: Object.fromEntries(
-      SYMBOL_KIND_FILTERS.map((k) => [
-        k,
-        k === "function" || k === "method",
-      ]),
+      SYMBOL_KIND_FILTERS.map((k) => [k, k === "function" || k === "method"]),
     ),
     edgeKindFilters: Object.fromEntries(
       EDGE_KINDS.map((k) => [k, ["Reads", "Writes", "Defines"].includes(k)]),
@@ -240,11 +237,11 @@ export interface CodeGraphHighlightState {
   /** Server-sampled impact ids folded into the unified DOI focus model. */
   doiImpactIds: Set<string>;
   /**
-   * Internal canvas fallback state for collapsed community snapshots.
-   * This is not a user-facing node-kind filter; it only lets the canvas
-   * splice symbol members into legacy `kind: "community"` payloads.
+   * Node ids revealed via click-to-expand. Nodes in this set bypass
+   * LOD tier and viewport culling so the user can progressively
+   * explore culled regions without a global semantic zoom mode.
    */
-  expandedCommunityIds: Set<string>;
+  expandedRegions: Set<string>;
   hoverId: string | null;
   edgeKindFilters: Record<string, boolean>;
   nodeKindFilters: Record<string, boolean>;
@@ -295,9 +292,10 @@ export interface CodeGraphHighlightActions {
   /** Merge server impact samples into the DOI focus/context render path. */
   setDoiImpact: (ids: Iterable<string>) => void;
   clearDoiImpact: () => void;
-  expandCommunity: (communityId: string) => void;
-  collapseCommunity: (communityId: string) => void;
-  clearExpandedCommunities: () => void;
+  /** Reveal a node (and its local neighborhood) from LOD/viewport culling. */
+  expandRegion: (nodeId: string, neighborIds?: Iterable<string>) => void;
+  /** Clear all expanded regions (e.g. on project change). */
+  clearExpandedRegions: () => void;
   setHover: (id: string | null) => void;
   toggleEdgeKind: (kind: string) => void;
   setEdgeKindEnabled: (kind: string, enabled: boolean) => void;
@@ -331,7 +329,7 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   toolHighlightIds: new Set(),
   blastRadiusFrontier: new Set(),
   doiImpactIds: new Set(),
-  expandedCommunityIds: new Set(),
+  expandedRegions: new Set(),
   hoverId: null,
   edgeKindFilters: { ...LENS_PRESETS.architecture.edgeKindFilters },
   nodeKindFilters: { ...LENS_PRESETS.architecture.nodeKindFilters },
@@ -388,24 +386,19 @@ export const useCodeGraphStore = create<
     set({ doiImpactIds: new Set() });
   },
 
-  expandCommunity: (communityId) => {
-    set((state) => ({
-      expandedCommunityIds: new Set(state.expandedCommunityIds).add(
-        communityId,
-      ),
-    }));
-  },
-
-  collapseCommunity: (communityId) => {
+  expandRegion: (nodeId, neighborIds) => {
     set((state) => {
-      const next = new Set(state.expandedCommunityIds);
-      next.delete(communityId);
-      return { expandedCommunityIds: next };
+      const next = new Set(state.expandedRegions);
+      next.add(nodeId);
+      if (neighborIds) {
+        for (const id of neighborIds) next.add(id);
+      }
+      return { expandedRegions: next };
     });
   },
 
-  clearExpandedCommunities: () => {
-    set({ expandedCommunityIds: new Set() });
+  clearExpandedRegions: () => {
+    set({ expandedRegions: new Set() });
   },
 
   setHover: (id) => {
@@ -523,7 +516,7 @@ export const useCodeGraphStore = create<
       toolHighlightIds: new Set(),
       blastRadiusFrontier: new Set(),
       doiImpactIds: new Set(),
-      expandedCommunityIds: new Set(),
+      expandedRegions: new Set(),
       edgeKindFilters: { ...LENS_PRESETS.architecture.edgeKindFilters },
       nodeKindFilters: { ...LENS_PRESETS.architecture.nodeKindFilters },
       symbolKindFilters: { ...LENS_PRESETS.architecture.symbolKindFilters },

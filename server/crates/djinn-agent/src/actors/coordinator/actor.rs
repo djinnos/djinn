@@ -806,6 +806,7 @@ impl CoordinatorActor {
             mirror: self.mirror.clone(),
             rpc_registry: self.rpc_registry.clone(),
             default_project_id: None,
+            reconciliation_sweep: crate::context::ReconciliationSweepConfig::from_env(),
         }
     }
 
@@ -1426,8 +1427,6 @@ impl CoordinatorActor {
             crate::events::event_bus_for(&self.events_tx),
         )
     }
-
-
 
     /// Handle the end of a planner session by re-evaluating the epic its
     /// task was attached to.  Non-planner sessions and task-less sessions

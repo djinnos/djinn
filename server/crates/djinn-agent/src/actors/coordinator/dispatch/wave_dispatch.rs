@@ -49,6 +49,7 @@ impl CoordinatorActor {
             mirror: self.mirror.clone(),
             rpc_registry: None,
             default_project_id: None,
+            reconciliation_sweep: crate::context::ReconciliationSweepConfig::from_env(),
         };
 
         for task in tasks {

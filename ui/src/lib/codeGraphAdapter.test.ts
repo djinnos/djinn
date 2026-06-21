@@ -4,7 +4,11 @@ import {
   COMMUNITY_HULLS_ATTRIBUTE,
   CONTAINMENT_EDGE_KINDS,
   DOUBLE_CLICK_INTERVAL_MS,
+  LOD_FAR_RATIO,
+  LOD_MID_RATIO,
   PRECOMPUTED_LAYOUT_ATTRIBUTE,
+  VIEWPORT_CULLING_MARGIN,
+  VIEWPORT_CULLING_THRESHOLD,
   WORKSPACE_COLORS,
   buildGraphFromSnapshot,
   colorForCommunity,
@@ -16,12 +20,17 @@ import {
   hasPrecomputedCoordinates,
   isContainmentEdgeKind,
   isDoubleClick,
+  isSymbolVisibleAtMidTier,
+  isInViewport,
+  lodTierForZoom,
   massForNode,
   parseSnapshotResponse,
   prettifyLabel,
   type CommunityHull,
+  type LodTier,
   type SnapshotNode,
   type SnapshotPayload,
+  type ViewportBounds,
 } from "@/lib/codeGraphAdapter";
 
 const fixtureSnapshot: SnapshotPayload = {
@@ -105,7 +114,10 @@ describe("parseSnapshotResponse", () => {
     const wire = {
       snapshot: {
         ...fixtureSnapshot,
-        nodes: [...fixtureSnapshot.nodes, { id: "", kind: "file", label: "", pagerank: 0 }],
+        nodes: [
+          ...fixtureSnapshot.nodes,
+          { id: "", kind: "file", label: "", pagerank: 0 },
+        ],
         edges: [
           ...fixtureSnapshot.edges,
           { from: "", to: "x", kind: "X", confidence: 0 },
@@ -159,7 +171,10 @@ describe("parseSnapshotResponse", () => {
         ...fixtureSnapshot,
         nodes: [
           { ...fixtureSnapshot.nodes[1], cognitive: null },
-          { ...fixtureSnapshot.nodes[2], cognitive: "huge" as unknown as number },
+          {
+            ...fixtureSnapshot.nodes[2],
+            cognitive: "huge" as unknown as number,
+          },
         ],
       },
     };
@@ -368,7 +383,11 @@ describe("parseSnapshotResponse", () => {
         ...fixtureSnapshot,
         nodes: [
           { ...fixtureSnapshot.nodes[0], x: null, y: "left" },
-          { ...fixtureSnapshot.nodes[1], x: Number.NaN, y: Number.POSITIVE_INFINITY },
+          {
+            ...fixtureSnapshot.nodes[1],
+            x: Number.NaN,
+            y: Number.POSITIVE_INFINITY,
+          },
           { ...fixtureSnapshot.nodes[2], x: Number.NEGATIVE_INFINITY, y: null },
           { ...fixtureSnapshot.nodes[3] }, // missing
         ],
@@ -421,9 +440,7 @@ describe("prettifyLabel", () => {
 
   it("strips a SCIP method descriptor and keeps the parens", () => {
     expect(
-      prettifyLabel(
-        "scip-go gomod github.com/golang/go/src . fmt/Errorf().",
-      ),
+      prettifyLabel("scip-go gomod github.com/golang/go/src . fmt/Errorf()."),
     ).toBe("Errorf()");
   });
 
@@ -533,7 +550,9 @@ describe("filterSnapshotForWorkspace", () => {
     expect(filterSnapshotForWorkspace(workspaceSnapshot, null)).toBe(
       workspaceSnapshot,
     );
-    expect(filterSnapshotForWorkspace(workspaceSnapshot, "")).toBe(workspaceSnapshot);
+    expect(filterSnapshotForWorkspace(workspaceSnapshot, "")).toBe(
+      workspaceSnapshot,
+    );
   });
 
   it("keeps selected nodes plus remote endpoints for cross-workspace edges", () => {
@@ -661,18 +680,14 @@ describe("buildGraphFromSnapshot", () => {
       ),
     };
     const graph = buildGraphFromSnapshot(withWorkspace);
-    expect(graph.getNodeAttribute("file:src/main.rs", "workspace")).toBe(
-      "app",
-    );
+    expect(graph.getNodeAttribute("file:src/main.rs", "workspace")).toBe("app");
     expect(graph.getNodeAttribute("file:src/main.rs", "workspaceColor")).toBe(
       colorForWorkspace("app"),
     );
     expect(graph.getNodeAttribute("file:src/main.rs", "workspaceBadge")).toBe(
       "A",
     );
-    expect(graph.getNodeAttribute("file:src/main.rs", "label")).toBe(
-      "main.rs",
-    );
+    expect(graph.getNodeAttribute("file:src/main.rs", "label")).toBe("main.rs");
     expect(graph.getNodeAttribute("file:src/main.rs", "baseLabel")).toBe(
       "main.rs",
     );
@@ -692,7 +707,10 @@ describe("buildGraphFromSnapshot", () => {
     };
     const graph = buildGraphFromSnapshot(withWorkspaceContext);
     expect(
-      graph.getNodeAttribute("symbol:scip-rust . . . User#", "isWorkspaceContext"),
+      graph.getNodeAttribute(
+        "symbol:scip-rust . . . User#",
+        "isWorkspaceContext",
+      ),
     ).toBe(true);
     expect(
       graph.getNodeAttribute("file:src/main.rs", "isWorkspaceContext"),
@@ -832,14 +850,18 @@ describe("buildGraphFromSnapshot", () => {
     expect(graph.hasNode("community:legacy")).toBe(false);
     // The file node is still present without a subtitle.
     expect(graph.getNodeAttribute("file:src/main.rs", "label")).toBe("main.rs");
-    expect(graph.getNodeAttribute("file:src/main.rs", "subtitle")).toBeUndefined();
+    expect(
+      graph.getNodeAttribute("file:src/main.rs", "subtitle"),
+    ).toBeUndefined();
     // Hull metadata carries the legacy label + keywords.
-    const hulls = graph.getAttribute(COMMUNITY_HULLS_ATTRIBUTE) as CommunityHull[];
+    const hulls = graph.getAttribute(
+      COMMUNITY_HULLS_ATTRIBUTE,
+    ) as CommunityHull[];
     const authHull = hulls.find((h) => h.id === "auth");
     expect(authHull).toBeDefined();
     expect(authHull?.label).toBe("auth");
     expect(authHull?.keywords).toEqual(["tokens", "sessions"]);
-    const legacyHull = hulls.find((h) => h.id === "legacy");
+    const legacyHull = hulls.find((h) => h.id === "community:legacy");
     expect(legacyHull).toBeDefined();
     expect(legacyHull?.label).toBe("legacy");
     expect(legacyHull?.keywords).toBeUndefined();
@@ -911,7 +933,10 @@ describe("buildGraphFromSnapshot", () => {
       ...fixtureSnapshot,
       edges: baseEdges,
       nodes: fixtureSnapshot.nodes.map((n) => {
-        if (n.id === "file:src/main.rs" || n.id === "symbol:scip-rust . . . main()") {
+        if (
+          n.id === "file:src/main.rs" ||
+          n.id === "symbol:scip-rust . . . main()"
+        ) {
           return { ...n, workspace: "app" };
         }
         if (n.id === "symbol:scip-rust . . . User#") {
@@ -968,10 +993,9 @@ describe("buildGraphFromSnapshot", () => {
       ),
     };
     const graph = buildGraphFromSnapshot(withCommunity);
-    const a = graph.getNodeAttributes("symbol:scip-rust . . . main()") as Record<
-      string,
-      unknown
-    >;
+    const a = graph.getNodeAttributes(
+      "symbol:scip-rust . . . main()",
+    ) as Record<string, unknown>;
     const b = graph.getNodeAttributes("symbol:scip-rust . . . User#") as Record<
       string,
       unknown
@@ -1163,18 +1187,16 @@ describe("buildGraphFromSnapshot", () => {
     const graph = buildGraphFromSnapshot(withServerCoords());
     expect(graph.getNodeAttribute("file:src/main.rs", "x")).toBe(12.5);
     expect(graph.getNodeAttribute("file:src/main.rs", "y")).toBe(-7.25);
-    expect(
-      graph.getNodeAttribute("symbol:scip-rust . . . main()", "x"),
-    ).toBe(100);
-    expect(
-      graph.getNodeAttribute("symbol:scip-rust . . . main()", "y"),
-    ).toBe(200);
-    expect(
-      graph.getNodeAttribute("symbol:scip-rust . . . User#", "x"),
-    ).toBe(-50);
-    expect(
-      graph.getNodeAttribute("symbol:scip-rust . . . User#", "y"),
-    ).toBe(0);
+    expect(graph.getNodeAttribute("symbol:scip-rust . . . main()", "x")).toBe(
+      100,
+    );
+    expect(graph.getNodeAttribute("symbol:scip-rust . . . main()", "y")).toBe(
+      200,
+    );
+    expect(graph.getNodeAttribute("symbol:scip-rust . . . User#", "x")).toBe(
+      -50,
+    );
+    expect(graph.getNodeAttribute("symbol:scip-rust . . . User#", "y")).toBe(0);
     expect(graph.getNodeAttribute("file:src/user.rs", "x")).toBe(0.001);
     expect(graph.getNodeAttribute("file:src/user.rs", "y")).toBe(-0.001);
   });
@@ -1271,8 +1293,12 @@ describe("buildGraphFromSnapshot", () => {
     const graph1 = buildGraphFromSnapshot(fixtureSnapshot);
     const graph2 = buildGraphFromSnapshot(fixtureSnapshot);
     for (const id of graph1.nodes()) {
-      expect(graph1.getNodeAttribute(id, "x")).toBe(graph2.getNodeAttribute(id, "x"));
-      expect(graph1.getNodeAttribute(id, "y")).toBe(graph2.getNodeAttribute(id, "y"));
+      expect(graph1.getNodeAttribute(id, "x")).toBe(
+        graph2.getNodeAttribute(id, "x"),
+      );
+      expect(graph1.getNodeAttribute(id, "y")).toBe(
+        graph2.getNodeAttribute(id, "y"),
+      );
     }
   });
 });
@@ -1543,8 +1569,13 @@ describe("deriveCommunityHulls", () => {
     const alpha = hulls.find((h) => h.id === "alpha");
     // Two symbols in fixtureSnapshot carry community_id "alpha".
     expect(alpha?.memberCount).toBe(2);
-    // No legacy entry → label falls back to the id.
+    // No legacy entry → label falls back to the id, but the visible member ids
+    // are retained so the canvas can draw a non-clickable background hull.
     expect(alpha?.label).toBe("alpha");
+    expect(alpha?.memberIds.sort()).toEqual([
+      "symbol:scip-rust . . . User#",
+      "symbol:scip-rust . . . main()",
+    ]);
   });
 
   it("is deterministic across calls", () => {
@@ -1659,14 +1690,132 @@ describe("isDoubleClick", () => {
 
   it("returns true at exactly the interval boundary (inclusive)", () => {
     const prev = { nodeId: "node-a", at: 1000 };
-    expect(
-      isDoubleClick(prev, "node-a", 1000 + DOUBLE_CLICK_INTERVAL_MS),
-    ).toBe(true);
+    expect(isDoubleClick(prev, "node-a", 1000 + DOUBLE_CLICK_INTERVAL_MS)).toBe(
+      true,
+    );
   });
 
   it("respects a custom interval override", () => {
     const prev = { nodeId: "node-a", at: 1000 };
     expect(isDoubleClick(prev, "node-a", 1050, 100)).toBe(true);
     expect(isDoubleClick(prev, "node-a", 1200, 100)).toBe(false);
+  });
+});
+
+// ── LOD tier helpers ──────────────────────────────────────────────────────
+
+describe("lodTierForZoom", () => {
+  it("returns 'far' when camera ratio >= LOD_FAR_RATIO", () => {
+    expect(lodTierForZoom(LOD_FAR_RATIO)).toBe("far");
+    expect(lodTierForZoom(3.0)).toBe("far");
+    expect(lodTierForZoom(100)).toBe("far");
+  });
+
+  it("returns 'mid' when camera ratio is between MID and FAR thresholds", () => {
+    expect(lodTierForZoom(LOD_MID_RATIO)).toBe("mid");
+    expect(lodTierForZoom(1.0)).toBe("mid");
+    expect(lodTierForZoom(LOD_FAR_RATIO - 0.01)).toBe("mid");
+  });
+
+  it("returns 'close' when camera ratio < LOD_MID_RATIO", () => {
+    expect(lodTierForZoom(LOD_MID_RATIO - 0.01)).toBe("close");
+    expect(lodTierForZoom(0.1)).toBe("close");
+    expect(lodTierForZoom(0.001)).toBe("close");
+  });
+
+  it("returns 'close' for non-finite camera ratios", () => {
+    expect(lodTierForZoom(Infinity)).toBe("close");
+    expect(lodTierForZoom(NaN)).toBe("close");
+    expect(lodTierForZoom(-Infinity)).toBe("close");
+  });
+
+  it("treats ratio 0 as close (zoomed in past natural extent)", () => {
+    expect(lodTierForZoom(0)).toBe("close");
+  });
+});
+
+describe("isSymbolVisibleAtMidTier", () => {
+  it("returns true for top-level / structural symbol kinds", () => {
+    for (const kind of [
+      "class",
+      "struct",
+      "interface",
+      "trait",
+      "enum",
+      "function",
+      "method",
+      "constructor",
+      "impl",
+      "type",
+    ]) {
+      expect(isSymbolVisibleAtMidTier(kind)).toBe(true);
+    }
+  });
+
+  it("returns false for low-priority symbol kinds", () => {
+    for (const kind of [
+      "variable",
+      "const",
+      "static",
+      "property",
+      "field",
+      "import",
+      "other",
+    ]) {
+      expect(isSymbolVisibleAtMidTier(kind)).toBe(false);
+    }
+  });
+
+  it("returns true when symbol kind is undefined (treat as structural)", () => {
+    expect(isSymbolVisibleAtMidTier(undefined)).toBe(true);
+  });
+});
+
+// ── Viewport culling ─────────────────────────────────────────────────────
+
+describe("isInViewport", () => {
+  const bounds: ViewportBounds = { minX: 0, minY: 0, maxX: 100, maxY: 100 };
+
+  it("returns true for a node inside the bounds", () => {
+    expect(isInViewport(50, 50, bounds)).toBe(true);
+  });
+
+  it("returns true for a node on the boundary", () => {
+    expect(isInViewport(0, 0, bounds)).toBe(true);
+    expect(isInViewport(100, 100, bounds)).toBe(true);
+  });
+
+  it("returns true for a node just outside bounds but within margin", () => {
+    // VIEWPORT_CULLING_MARGIN is the default margin
+    const m = VIEWPORT_CULLING_MARGIN;
+    expect(isInViewport(-m + 1, 50, bounds)).toBe(true);
+    expect(isInViewport(100 + m - 1, 50, bounds)).toBe(true);
+  });
+
+  it("returns false for a node outside bounds + margin", () => {
+    const m = VIEWPORT_CULLING_MARGIN;
+    expect(isInViewport(-m - 10, 50, bounds)).toBe(false);
+    expect(isInViewport(100 + m + 10, 50, bounds)).toBe(false);
+    expect(isInViewport(50, -m - 10, bounds)).toBe(false);
+    expect(isInViewport(50, 100 + m + 10, bounds)).toBe(false);
+  });
+
+  it("works with negative coordinate bounds", () => {
+    const negBounds: ViewportBounds = {
+      minX: -200,
+      minY: -200,
+      maxX: -100,
+      maxY: -100,
+    };
+    expect(isInViewport(-150, -150, negBounds)).toBe(true);
+    // (0, 0) is outside bounds but within VIEWPORT_CULLING_MARGIN;
+    // (500, 500) is far enough outside to be culled.
+    expect(isInViewport(500, 500, negBounds)).toBe(false);
+  });
+});
+
+describe("VIEWPORT_CULLING_THRESHOLD", () => {
+  it("is 8000 (matches the large-graph target)", () => {
+    expect(VIEWPORT_CULLING_THRESHOLD).toBe(8_000);
   });
 });
