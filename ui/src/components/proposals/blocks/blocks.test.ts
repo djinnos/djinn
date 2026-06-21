@@ -29,6 +29,7 @@ export const CANONICAL_V1_TAGS = [
   "Callout",
   "Table",
   "Checklist",
+  "Code",
   "QuestionForm",
 ] as const;
 
@@ -207,6 +208,15 @@ describe("canonical proposal.mdx round-trip", () => {
     expect(getProposalBlockDefinitionByTag("Checklist")!.type).toBe(
       "checklist",
     );
+
+    // Code
+    const code = byTag.get("Code");
+    expect(code).toBeDefined();
+    expect(code!.id).toBe("snippet");
+    expect(code!.attributes.filename).toBe("src/util.ts");
+    expect(code!.attributes.lang).toBe("ts");
+    expect(code!.content).toContain("export function");
+    expect(getProposalBlockDefinitionByTag("Code")!.type).toBe("code");
 
     // QuestionForm
     const questionForm = byTag.get("QuestionForm");
