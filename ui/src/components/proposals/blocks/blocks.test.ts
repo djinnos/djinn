@@ -26,6 +26,9 @@ export const CANONICAL_V1_TAGS = [
   "Decisions",
   "FileTree",
   "Diff",
+  "Callout",
+  "Table",
+  "Checklist",
   "QuestionForm",
 ] as const;
 
@@ -180,6 +183,30 @@ describe("canonical proposal.mdx round-trip", () => {
     expect(diff!.attributes.lang).toBe("ts");
     expect(diff!.content).toContain("@@");
     expect(getProposalBlockDefinitionByTag("Diff")!.type).toBe("diff");
+
+    // Callout
+    const callout = byTag.get("Callout");
+    expect(callout).toBeDefined();
+    expect(callout!.id).toBe("perf-note");
+    expect(callout!.attributes.tone).toBe("warning");
+    expect(callout!.content).toContain("hot path");
+    expect(getProposalBlockDefinitionByTag("Callout")!.type).toBe("callout");
+
+    // Table
+    const table = byTag.get("Table");
+    expect(table).toBeDefined();
+    expect(table!.id).toBe("tradeoffs");
+    expect(table!.content).toContain("Option");
+    expect(getProposalBlockDefinitionByTag("Table")!.type).toBe("table");
+
+    // Checklist
+    const checklist = byTag.get("Checklist");
+    expect(checklist).toBeDefined();
+    expect(checklist!.id).toBe("acceptance");
+    expect(checklist!.content).toContain("[x]");
+    expect(getProposalBlockDefinitionByTag("Checklist")!.type).toBe(
+      "checklist",
+    );
 
     // QuestionForm
     const questionForm = byTag.get("QuestionForm");

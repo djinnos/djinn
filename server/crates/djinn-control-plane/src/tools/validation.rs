@@ -493,6 +493,22 @@ We chose JWT over session cookies.
  }
 </Diff>
 
+<Callout id="perf-note" tone="warning">
+This runs on the hot path.
+</Callout>
+
+<Table id="tradeoffs">
+| Option    | Latency |
+| --------- | ------- |
+| Redis     | low     |
+| Memcached | low     |
+</Table>
+
+<Checklist id="acceptance">
+- [x] Schema migration written
+- [ ] Backfill job verified
+</Checklist>
+
 <QuestionForm id="open-questions" title="Open Questions">
 Should we use Redis or Memcached?
 </QuestionForm>

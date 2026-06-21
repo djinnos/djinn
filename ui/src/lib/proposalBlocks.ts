@@ -131,6 +131,26 @@ export const PROPOSAL_BLOCK_REGISTRY = {
       lang: { type: "string" },
     },
   },
+  callout: {
+    type: "callout",
+    tag: "Callout",
+    fields: {
+      tone: {
+        type: "string",
+        enum_values: ["info", "decision", "risk", "warning", "success"],
+      },
+    },
+  },
+  table: {
+    type: "table",
+    tag: "Table",
+    fields: {},
+  },
+  checklist: {
+    type: "checklist",
+    tag: "Checklist",
+    fields: {},
+  },
   "question-form": {
     type: "question-form",
     tag: "QuestionForm",

@@ -4,6 +4,8 @@ import type { BlockProps } from "@/components/proposals/blocks/types";
 import {
   AnnotatedCode,
   ApiEndpointBlock,
+  CalloutBlock,
+  ChecklistBlock,
   DataModelBlock,
   DecisionsBlock,
   Diagram,
@@ -11,6 +13,7 @@ import {
   FileTreeBlock,
   QuestionFormBlock,
   RichText,
+  TableBlock,
 } from "@/components/proposals/blocks";
 import {
   PROPOSAL_BLOCK_REGISTRY,
@@ -34,6 +37,9 @@ const BLOCK_COMPONENTS: Record<ProposalBlockType, ComponentType<BlockProps>> = {
   decisions: DecisionsBlock,
   "file-tree": FileTreeBlock,
   diff: DiffBlock,
+  callout: CalloutBlock,
+  table: TableBlock,
+  checklist: ChecklistBlock,
   "question-form": QuestionFormBlock,
 };
 
@@ -46,6 +52,9 @@ const BLOCK_DISPLAY_NAMES: Record<ProposalBlockType, string> = {
   decisions: "Decisions",
   "file-tree": "File Tree",
   diff: "Diff",
+  callout: "Callout",
+  table: "Table",
+  checklist: "Checklist",
   "question-form": "Open Questions",
 };
 

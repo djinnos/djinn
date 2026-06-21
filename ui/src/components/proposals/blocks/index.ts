@@ -8,6 +8,9 @@ export { RichText } from "./RichText";
 export { Diagram } from "./Diagram";
 export { AnnotatedCode } from "./AnnotatedCode";
 export { DiffBlock } from "./DiffBlock";
+export { CalloutBlock } from "./CalloutBlock";
+export { TableBlock } from "./TableBlock";
+export { ChecklistBlock } from "./ChecklistBlock";
 
 // Reusable line-anchored annotation engine (pure parsing + React rail UI). The
 // `annotated-code` block consumes it; `diff` and future blocks can adopt it.
