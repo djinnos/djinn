@@ -7025,6 +7025,11 @@ expression: signatures
               "format": "int64",
               "type": "integer"
             },
+            "entity_type": {
+              "default": "note",
+              "description": "Entity type discriminator: `\"note\"` for note rows, `\"proposal\"` for\nproposal rows. Defaults to `\"note\"` so existing serialized responses\nremain backward-compatible.",
+              "type": "string"
+            },
             "folder": {
               "type": "string"
             },
@@ -7061,7 +7066,17 @@ expression: signatures
             "kind": {
               "type": "string"
             },
+            "source_entity_type": {
+              "default": "note",
+              "description": "Entity type of the source endpoint. Defaults to `\"note\"` for backward\ncompatibility with existing serialized responses.",
+              "type": "string"
+            },
             "source_id": {
+              "type": "string"
+            },
+            "target_entity_type": {
+              "default": "note",
+              "description": "Entity type of the target endpoint. Defaults to `\"note\"` for backward\ncompatibility with existing serialized responses.",
               "type": "string"
             },
             "target_id": {

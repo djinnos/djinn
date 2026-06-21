@@ -437,6 +437,15 @@ pub struct GraphNode {
     pub is_orphan: bool,
     #[serde(default)]
     pub broken_targets: Vec<String>,
+    /// Entity type discriminator: `"note"` for note rows, `"proposal"` for
+    /// proposal rows. Defaults to `"note"` so existing serialized responses
+    /// remain backward-compatible.
+    #[serde(default = "default_note_entity_type")]
+    pub entity_type: String,
+}
+
+fn default_note_entity_type() -> String {
+    "note".to_string()
 }
 
 /// A resolved wikilink edge between two notes.
@@ -463,6 +472,14 @@ pub struct TypedEdge {
     pub target_id: String,
     pub kind: String,
     pub weight: f64,
+    /// Entity type of the source endpoint. Defaults to `"note"` for backward
+    /// compatibility with existing serialized responses.
+    #[serde(default = "default_note_entity_type")]
+    pub source_entity_type: String,
+    /// Entity type of the target endpoint. Defaults to `"note"` for backward
+    /// compatibility with existing serialized responses.
+    #[serde(default = "default_note_entity_type")]
+    pub target_entity_type: String,
 }
 
 /// Full knowledge graph: all nodes and all resolved edges.
