@@ -31,6 +31,14 @@ impl DjinnMcpServer {
     /// in `report.warnings` rather than propagated as blocking errors, so
     /// retrieval and the memory-graph UI never gate on this pass.
     ///
+    /// Proposal-aware: the pass also fetches proposals targeting the project
+    /// and includes them as first-class graph entities in each batch prompt.
+    /// Edges involving proposals (note↔proposal, proposal↔proposal) are
+    /// persisted through the heterogeneous `memory_entity_associations`
+    /// substrate via `upsert_typed_entity_association`, so proposals
+    /// participate in the same association graph as notes. Only edges with
+    /// textual evidence are emitted for proposal endpoints.
+    ///
     /// Defaults to synchronous execution (`background=false`). Set
     /// `background=true` to fire-and-forget the pass on a tokio task; the
     /// tool returns immediately with `status="queued"` and the structured
@@ -42,7 +50,7 @@ impl DjinnMcpServer {
     /// `run_enrichment_tests::memory_graph_concurrent_with_enrichment_does_not_block`
     /// regression asserts this contract.
     #[tool(
-        description = "Run the best-effort LLM memory enrichment pass for a project. Persists claim/entity nodes and typed implicit edges (builds_on / contradicts / supersedes / exemplifies) through the widened note_associations substrate. All persistence is best-effort: provider or parse failures are surfaced as warnings, never as blocking errors. Set background=true to fire-and-forget on a tokio task; the response then returns immediately with status=queued. Concurrency: the pass yields cooperatively so memory_graph stays responsive while enrichment runs."
+        description = "Run the best-effort LLM memory enrichment pass for a project. Persists claim/entity nodes and typed implicit edges (builds_on / contradicts / supersedes / exemplifies) through the widened note_associations substrate. Proposal-aware: also includes proposals targeting the project as first-class graph entities and persists note↔proposal / proposal↔proposal edges through the heterogeneous memory_entity_associations substrate. All persistence is best-effort: provider or parse failures are surfaced as warnings, never as blocking errors. Set background=true to fire-and-forget on a tokio task; the response then returns immediately with status=queued. Concurrency: the pass yields cooperatively so memory_graph stays responsive while enrichment runs."
     )]
     pub async fn memory_run_enrichment(
         &self,

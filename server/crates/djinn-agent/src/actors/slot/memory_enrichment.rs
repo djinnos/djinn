@@ -29,8 +29,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use djinn_db::repositories::note::NoteAssociationKind;
-use djinn_db::{Database, NoteRepository};
+use djinn_db::repositories::note::{
+    MemoryEntityKind, MemoryEntityRef, MemoryEntityType, NoteAssociationKind,
+};
+use djinn_db::{Database, NoteRepository, ProposalListQuery, ProposalRepository};
 use djinn_memory::Note;
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider_for_user};
@@ -50,6 +52,13 @@ pub(crate) const BATCH_SIZE: usize = 8;
 
 /// Maximum characters of note content fed to the LLM per note in a batch.
 const MAX_NOTE_CONTENT_CHARS: usize = 800;
+
+/// Maximum characters of proposal body fed to the LLM per proposal in a batch.
+/// Proposals tend to be longer than notes, so we cap harder.
+const MAX_PROPOSAL_CONTENT_CHARS: usize = 600;
+
+/// Maximum number of proposals included per enrichment batch prompt.
+const MAX_PROPOSALS_PER_BATCH: usize = 10;
 
 /// Max output tokens for the enrichment completion.
 const ENRICHMENT_MAX_TOKENS: u32 = 4096;
@@ -81,12 +90,23 @@ pub struct EnrichmentClaim {
 }
 
 /// A reportable typed implicit edge extracted by the enrichment pass.
+///
+/// The endpoint IDs (`source_note_id` / `target_note_id`) may reference either
+/// a note or a proposal; the `source_entity_type` / `target_entity_type`
+/// discriminators carry that. When the discriminator is missing (e.g. edges
+/// persisted by the legacy note-only path) the default `"note"` is assumed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnrichmentEdge {
     pub source_note_id: String,
     pub target_note_id: String,
     pub kind: String,
     pub confidence: f64,
+    /// Entity type of the source endpoint: `"note"` (default) or `"proposal"`.
+    #[serde(default = "default_entity_type")]
+    pub source_entity_type: String,
+    /// Entity type of the target endpoint: `"note"` (default) or `"proposal"`.
+    #[serde(default = "default_entity_type")]
+    pub target_entity_type: String,
     #[serde(default)]
     pub evidence_quote: Option<String>,
 }
@@ -148,12 +168,26 @@ struct LlmEdge {
     kind: String,
     #[serde(default = "default_confidence")]
     confidence: f64,
+    /// Entity type of the source endpoint: `"note"` (default) or `"proposal"`.
+    /// Backwards-compatible: if the LLM omits this field, notes are assumed.
+    #[serde(default = "default_entity_type")]
+    source_entity_type: String,
+    /// Entity type of the target endpoint: `"note"` (default) or `"proposal"`.
+    #[serde(default = "default_entity_type")]
+    target_entity_type: String,
     #[serde(default)]
     evidence_quote: Option<String>,
 }
 
 fn default_confidence() -> f64 {
     0.7
+}
+
+/// Serde default for `*_entity_type` fields — `"note"`. Keeping the legacy
+/// field names `source_note_id` / `target_note_id` preserves JSON backward
+/// compatibility with note-only LLM responses.
+fn default_entity_type() -> String {
+    "note".to_string()
 }
 
 // ── Provider resolution ───────────────────────────────────────────────────────
@@ -176,8 +210,21 @@ async fn resolve_enrichment_provider(db: &Database) -> EnrichmentProviderResolut
 
 // ── Prompt construction ───────────────────────────────────────────────────────
 
-/// Render the enrichment prompt for a batch of notes.
-fn build_enrichment_prompt(notes: &[&Note]) -> String {
+/// A compact proposal summary used by the enrichment prompt. We fetch proposals
+/// from `ProposalRepository::list_filtered` and carry only the fields the LLM
+/// needs (id + title + truncated body). We deliberately do **not** duplicate
+/// proposal bodies into notes — proposals are surfaced here as first-class
+/// graph entities.
+#[derive(Clone, Debug)]
+struct ProposalSummary {
+    id: String,
+    title: String,
+    /// Truncated body (at most `MAX_PROPOSAL_CONTENT_CHARS` chars).
+    body_excerpt: String,
+}
+
+/// Render the enrichment prompt for a batch of notes and proposals.
+fn build_enrichment_prompt(notes: &[&Note], proposals: &[ProposalSummary]) -> String {
     let mut note_entries = Vec::new();
     for note in notes {
         let truncated_content: String = note.content.chars().take(MAX_NOTE_CONTENT_CHARS).collect();
@@ -192,31 +239,59 @@ fn build_enrichment_prompt(notes: &[&Note]) -> String {
     }
     let notes_block = note_entries.join("\n");
 
+    let mut proposal_entries = Vec::new();
+    for p in proposals {
+        proposal_entries.push(format!(
+            "--- PROPOSAL ---\n\
+             id: {}\n\
+             title: {}\n\
+             entity_type: proposal\n\
+             body_excerpt:\n{}\n",
+            p.id, p.title, p.body_excerpt
+        ));
+    }
+    let proposals_block = proposal_entries.join("\n");
+
+    let entities_section = if proposals.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n         PROPOSALS (entity_type: proposal — first-class graph entities):\n{proposals_block}"
+        )
+    };
+
     format!(
-        "You are enriching a project's knowledge graph from its notes.\n\
-         Below is a batch of notes. Extract:\n\n\
+        "You are enriching a project's knowledge graph from its notes and proposals.\n\
+         Below is a batch of notes{qualifier}. Extract:\n\n\
          1. ENTITIES — recurring systems, concepts, or components mentioned in the notes.\n\
          2. CLAIMS — key decisions or assertions the notes make.\n\
-         3. EDGES — typed implicit relationships between notes, supported by textual evidence.\n\n\
+         3. EDGES — typed implicit relationships between notes and/or proposals, supported by textual evidence.\n\n\
          EDGE KINDS: builds_on, contradicts, supersedes, exemplifies\n\n\
          GUARDRAILS:\n\
          - CONSERVATIVE: emit edges only with clear textual evidence. Never invent unsupported edges.\n\
-         - Only emit edges between notes present in this batch (use their ids).\n\
+         - Only emit edges between notes or proposals present in this batch (use their ids).\n\
          - Emit AT MOST {max_edges} edges.\n\
-         - Each edge must reference source_note_id and target_note_id from the notes below.\n\
+         - Each edge must reference source_note_id and target_note_id from the notes or proposals below.\n\
+         - Set source_entity_type and target_entity_type to \"note\" or \"proposal\" to match the endpoint kind.\n\
          - confidence: 0.0–1.0 (contradicts ~0.9, builds_on ~0.8, exemplifies ~0.7, supersedes ~0.9).\n\
-         - Include a brief evidence_quote from the note prose for each edge.\n\
+         - Include a brief evidence_quote from the prose for each edge.\n\
          - If an explicit supersession is stated (e.g. \"FIXED ... closes the gap\"), emit a supersedes edge.\n\n\
-         NOTES:\n{notes_block}\n\n\
+         NOTES:\n{notes_block}{entities_section}\n\n\
          Return JSON in exactly this shape:\n\
          {{\n\
            \"entities\": [{{\"canonical_name\": \"...\", \"aliases\": [\"...\"]}}],\n\
            \"claims\": [{{\"statement\": \"...\", \"source_note_id\": \"...\", \"evidence_quote\": \"...\"}}],\n\
-           \"edges\": [{{\"source_note_id\": \"...\", \"target_note_id\": \"...\", \"kind\": \"builds_on|contradicts|supersedes|exemplifies\", \"confidence\": 0.8, \"evidence_quote\": \"...\"}}]\n\
+           \"edges\": [{{\"source_note_id\": \"...\", \"target_note_id\": \"...\", \"source_entity_type\": \"note|proposal\", \"target_entity_type\": \"note|proposal\", \"kind\": \"builds_on|contradicts|supersedes|exemplifies\", \"confidence\": 0.8, \"evidence_quote\": \"...\"}}]\n\
          }}\n\
          Return empty arrays if nothing significant is found.",
+        qualifier = if proposals.is_empty() {
+            ""
+        } else {
+            " and proposals"
+        },
         max_edges = MAX_EDGES_PER_BATCH,
         notes_block = notes_block,
+        entities_section = entities_section,
     )
 }
 
@@ -373,6 +448,33 @@ fn parse_edge_kind(kind: &str) -> Option<NoteAssociationKind> {
         "contradicts" | "contradict" => Some(NoteAssociationKind::Contradicts),
         "supersedes" | "supersede" => Some(NoteAssociationKind::Supersedes),
         "exemplifies" | "exemplify" | "example_of" => Some(NoteAssociationKind::Exemplifies),
+        _ => None,
+    }
+}
+
+/// Parse the LLM's edge kind string into a `MemoryEntityKind` (the
+/// heterogeneous typed-edge kind used by
+/// `upsert_typed_entity_association`). Accepts the same aliases as
+/// [`parse_edge_kind`]; `derived_from` is also accepted because proposal
+/// involvement may carry provenance semantics, though the enrichment prompt
+/// itself does not emit it.
+fn parse_edge_kind_entity(kind: &str) -> Option<MemoryEntityKind> {
+    match kind.trim().to_lowercase().as_str() {
+        "builds_on" | "build_on" | "builds-upon" => Some(MemoryEntityKind::BuildsOn),
+        "contradicts" | "contradict" => Some(MemoryEntityKind::Contradicts),
+        "supersedes" | "supersede" => Some(MemoryEntityKind::Supersedes),
+        "exemplifies" | "exemplify" | "example_of" => Some(MemoryEntityKind::Exemplifies),
+        "derived_from" => Some(MemoryEntityKind::DerivedFrom),
+        _ => None,
+    }
+}
+
+/// Parse the LLM's `*_entity_type` string into a `MemoryEntityType`.
+/// Returns `None` for unrecognized strings.
+fn parse_entity_type(s: &str) -> Option<MemoryEntityType> {
+    match s.trim().to_lowercase().as_str() {
+        "note" => Some(MemoryEntityType::Note),
+        "proposal" => Some(MemoryEntityType::Proposal),
         _ => None,
     }
 }
@@ -589,6 +691,46 @@ async fn run_memory_enrichment_inner(
         return report;
     }
 
+    // ── Load proposals ─────────────────────────────────────────────────────
+    // Proposals are surfaced to the LLM as first-class graph entities so the
+    // enrichment pass can relate notes to proposals (and proposals to each
+    // other) via typed edges. We fetch proposals targeting this project and
+    // carry only id + title + truncated body — we never duplicate proposal
+    // bodies into notes.
+    let proposal_repo = ProposalRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let proposal_summaries = match proposal_repo
+        .list_filtered(ProposalListQuery {
+            target_project_id: Some(project_id.to_string()),
+            limit: MAX_PROPOSALS_PER_BATCH as i64,
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(result) => result
+            .proposals
+            .into_iter()
+            .map(|(p, _)| ProposalSummary {
+                id: p.id,
+                title: p.title,
+                body_excerpt: p.body.chars().take(MAX_PROPOSAL_CONTENT_CHARS).collect(),
+            })
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            // Best-effort: if proposals can't be loaded, continue with
+            // note-only enrichment so the pass still works.
+            tracing::debug!(
+                project_id = %project_id,
+                error = %e,
+                "memory_enrichment: failed to load proposals; continuing note-only"
+            );
+            report.warnings.push(format!(
+                "failed to load proposals (continuing note-only): {e}"
+            ));
+            Vec::new()
+        }
+    };
+    let proposal_ids: HashSet<String> = proposal_summaries.iter().map(|p| p.id.clone()).collect();
+
     // ── Resolve provider ────────────────────────────────────────────────────
     let provider: Box<dyn LlmProvider> = match provider_override {
         Some(p) => wrap_arc_provider(p),
@@ -611,7 +753,7 @@ async fn run_memory_enrichment_inner(
         let batch_ids: Vec<String> = batch.iter().map(|n| n.id.clone()).collect();
 
         // ── Call LLM ─────────────────────────────────────────────────────
-        let prompt = build_enrichment_prompt(&batch_refs);
+        let prompt = build_enrichment_prompt(&batch_refs, &proposal_summaries);
         let response = match complete(
             provider.as_ref(),
             CompletionRequest {
@@ -796,10 +938,60 @@ async fn run_memory_enrichment_inner(
                 break;
             }
 
-            // Validate both endpoints are in the batch.
-            if !batch_ids.contains(&llm_edge.source_note_id)
-                || !batch_ids.contains(&llm_edge.target_note_id)
-            {
+            // Resolve endpoint entity types. The LLM may omit these (default
+            // "note" via serde), or emit "note"/"proposal". Unknown types are
+            // skipped with a debug log.
+            let source_type = match parse_entity_type(&llm_edge.source_entity_type) {
+                Some(t) => t,
+                None => {
+                    tracing::debug!(
+                        project_id = %project_id,
+                        source_entity_type = %llm_edge.source_entity_type,
+                        "memory_enrichment: dropping edge with unknown source_entity_type"
+                    );
+                    continue;
+                }
+            };
+            let target_type = match parse_entity_type(&llm_edge.target_entity_type) {
+                Some(t) => t,
+                None => {
+                    tracing::debug!(
+                        project_id = %project_id,
+                        target_entity_type = %llm_edge.target_entity_type,
+                        "memory_enrichment: dropping edge with unknown target_entity_type"
+                    );
+                    continue;
+                }
+            };
+
+            // Validate both endpoints are in the known set for their type:
+            // notes must be in the current batch, proposals must be in the
+            // fetched proposal set. Unknown/malformed endpoints are skipped
+            // with a debug log, never a panic.
+            let source_known = match source_type {
+                MemoryEntityType::Note => batch_ids.contains(&llm_edge.source_note_id),
+                MemoryEntityType::Proposal => proposal_ids.contains(&llm_edge.source_note_id),
+            };
+            if !source_known {
+                tracing::debug!(
+                    project_id = %project_id,
+                    source_entity_type = ?source_type,
+                    source_id = %llm_edge.source_note_id,
+                    "memory_enrichment: dropping edge with unknown source endpoint"
+                );
+                continue;
+            }
+            let target_known = match target_type {
+                MemoryEntityType::Note => batch_ids.contains(&llm_edge.target_note_id),
+                MemoryEntityType::Proposal => proposal_ids.contains(&llm_edge.target_note_id),
+            };
+            if !target_known {
+                tracing::debug!(
+                    project_id = %project_id,
+                    target_entity_type = ?target_type,
+                    target_id = %llm_edge.target_note_id,
+                    "memory_enrichment: dropping edge with unknown target endpoint"
+                );
                 continue;
             }
 
@@ -816,33 +1008,92 @@ async fn run_memory_enrichment_inner(
                 }
             };
 
-            // Dedup against explicit wikilinks.
-            if is_wikilink_duplicate(
-                &wikilink_pairs,
-                &llm_edge.source_note_id,
-                &llm_edge.target_note_id,
-            ) {
+            // Determine whether any endpoint is a proposal — if so, route
+            // through the heterogeneous `upsert_typed_entity_association` API.
+            let involves_proposal = source_type == MemoryEntityType::Proposal
+                || target_type == MemoryEntityType::Proposal;
+
+            // Only emit edges with evidence quotes — never invent unsupported
+            // proposal relationships.
+            if involves_proposal && llm_edge.evidence_quote.is_none() {
+                tracing::debug!(
+                    project_id = %project_id,
+                    "memory_enrichment: dropping proposal-involving edge without evidence_quote"
+                );
+                continue;
+            }
+
+            // Wikilink dedup only applies to note↔note edges.
+            if !involves_proposal
+                && is_wikilink_duplicate(
+                    &wikilink_pairs,
+                    &llm_edge.source_note_id,
+                    &llm_edge.target_note_id,
+                )
+            {
                 report.edges_dropped_wikilink_dup += 1;
                 continue;
             }
 
-            // Persist the typed association (idempotent via ON CONFLICT).
-            if let Err(e) = note_repo
-                .upsert_typed_association(
-                    &llm_edge.source_note_id,
-                    &llm_edge.target_note_id,
-                    kind,
-                    llm_edge.confidence,
-                )
-                .await
-            {
-                tracing::debug!(
-                    project_id = %project_id,
-                    error = %e,
-                    "memory_enrichment: typed association write failed (non-fatal)"
-                );
-                report.warnings.push(e.to_string());
-                continue;
+            // Persist the typed association.
+            if involves_proposal {
+                // Route through the heterogeneous entity-association substrate.
+                let entity_kind = match parse_edge_kind_entity(&llm_edge.kind) {
+                    Some(k) => k,
+                    None => {
+                        // Already caught by parse_edge_kind above, but guard
+                        // defensively.
+                        continue;
+                    }
+                };
+                let source_ref = match source_type {
+                    MemoryEntityType::Note => MemoryEntityRef::note(&llm_edge.source_note_id),
+                    MemoryEntityType::Proposal => {
+                        MemoryEntityRef::proposal(&llm_edge.source_note_id)
+                    }
+                };
+                let target_ref = match target_type {
+                    MemoryEntityType::Note => MemoryEntityRef::note(&llm_edge.target_note_id),
+                    MemoryEntityType::Proposal => {
+                        MemoryEntityRef::proposal(&llm_edge.target_note_id)
+                    }
+                };
+                if let Err(e) = note_repo
+                    .upsert_typed_entity_association(
+                        source_ref,
+                        target_ref,
+                        entity_kind,
+                        llm_edge.confidence,
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        project_id = %project_id,
+                        error = %e,
+                        "memory_enrichment: typed entity association write failed (non-fatal)"
+                    );
+                    report.warnings.push(e.to_string());
+                    continue;
+                }
+            } else {
+                // Note-only edge: existing path via `upsert_typed_association`.
+                if let Err(e) = note_repo
+                    .upsert_typed_association(
+                        &llm_edge.source_note_id,
+                        &llm_edge.target_note_id,
+                        kind,
+                        llm_edge.confidence,
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        project_id = %project_id,
+                        error = %e,
+                        "memory_enrichment: typed association write failed (non-fatal)"
+                    );
+                    report.warnings.push(e.to_string());
+                    continue;
+                }
             }
 
             batch_edge_count += 1;
@@ -851,6 +1102,8 @@ async fn run_memory_enrichment_inner(
                 target_note_id: llm_edge.target_note_id.clone(),
                 kind: kind.as_str().to_string(),
                 confidence: llm_edge.confidence,
+                source_entity_type: llm_edge.source_entity_type.clone(),
+                target_entity_type: llm_edge.target_entity_type.clone(),
                 evidence_quote: llm_edge.evidence_quote.clone(),
             });
         }
@@ -1732,5 +1985,367 @@ mod tests {
         assert!(report.entities.is_empty());
         assert!(report.claims.is_empty());
         assert!(report.edges.is_empty());
+    }
+
+    // ── Proposal-aware enrichment tests ──────────────────────────────────────
+
+    /// Helper: create a proposal that targets `project_id`.
+    async fn create_targeted_proposal(
+        db: &djinn_db::Database,
+        project_id: &str,
+        title: &str,
+        body: &str,
+    ) -> djinn_core::models::Proposal {
+        let proposal_repo =
+            ProposalRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let proposal = proposal_repo
+            .create(djinn_db::ProposalCreateInput {
+                title,
+                body,
+                acceptance_criteria: Some("[]"),
+                status: Some("draft"),
+                body_format: None,
+            })
+            .await
+            .expect("create proposal");
+        proposal_repo
+            .add_target(&proposal.id, project_id, "target")
+            .await
+            .expect("add proposal target");
+        proposal
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_to_proposal_edge_is_parsed_and_persisted() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo = NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        // Create a few source notes so the pass doesn't early-return.
+        let _n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 1",
+            &make_note_content("Note 1", "filler"),
+        )
+        .await;
+        let _n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 2",
+            &make_note_content("Note 2", "filler"),
+        )
+        .await;
+        let _n3 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 3",
+            &make_note_content("Note 3", "filler"),
+        )
+        .await;
+        let _n4 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 4",
+            &make_note_content("Note 4", "filler"),
+        )
+        .await;
+        let _n5 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 5",
+            &make_note_content("Note 5", "filler"),
+        )
+        .await;
+
+        let p1 = create_targeted_proposal(&db, &project.id, "Proposal A", "First proposal").await;
+        let p2 =
+            create_targeted_proposal(&db, &project.id, "Proposal B", "Builds on Proposal A").await;
+
+        // LLM emits a proposal↔proposal `builds_on` edge with evidence.
+        let llm_json = format!(
+            r#"{{
+                "entities": [],
+                "claims": [],
+                "edges": [
+                    {{"source_note_id": "{}", "target_note_id": "{}", "source_entity_type": "proposal", "target_entity_type": "proposal", "kind": "builds_on", "confidence": 0.85, "evidence_quote": "Builds on Proposal A"}}
+                ]
+            }}"#,
+            p2.id, p1.id
+        );
+
+        let provider = Arc::new(FakeProvider::text(llm_json));
+        let report = run_memory_enrichment_with_provider(&project.id, &db, provider).await;
+
+        // The edge should appear in the report.
+        let prop_edges: Vec<&EnrichmentEdge> = report
+            .edges
+            .iter()
+            .filter(|e| e.source_entity_type == "proposal" && e.target_entity_type == "proposal")
+            .collect();
+        assert_eq!(
+            prop_edges.len(),
+            1,
+            "exactly one proposal↔proposal edge expected; got edges: {:?}",
+            report.edges
+        );
+        assert_eq!(prop_edges[0].source_note_id, p2.id);
+        assert_eq!(prop_edges[0].target_note_id, p1.id);
+        assert_eq!(prop_edges[0].kind, "builds_on");
+
+        // Verify persistence through the heterogeneous substrate.
+        let edges = note_repo
+            .list_typed_entity_associations_for(MemoryEntityRef::proposal(&p2.id), 0.0, 10)
+            .await
+            .expect("list entity associations");
+        assert!(
+            edges.iter().any(|e| {
+                e.source == MemoryEntityRef::proposal(&p2.id)
+                    && e.target == MemoryEntityRef::proposal(&p1.id)
+                    && e.kind == MemoryEntityKind::BuildsOn
+            }),
+            "proposal↔proposal edge should be persisted; got: {:?}",
+            edges
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn note_to_proposal_edge_is_parsed_and_persisted() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo = NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Implementation Note",
+            &make_note_content(
+                "Implementation Note",
+                "This note exemplifies the proposed design.",
+            ),
+        )
+        .await;
+        let _n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 2",
+            &make_note_content("Note 2", "filler"),
+        )
+        .await;
+        let _n3 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 3",
+            &make_note_content("Note 3", "filler"),
+        )
+        .await;
+        let _n4 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 4",
+            &make_note_content("Note 4", "filler"),
+        )
+        .await;
+        let _n5 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 5",
+            &make_note_content("Note 5", "filler"),
+        )
+        .await;
+
+        let p1 =
+            create_targeted_proposal(&db, &project.id, "Design Proposal", "The proposed design")
+                .await;
+
+        // LLM emits a note→proposal `exemplifies` edge with evidence.
+        let llm_json = format!(
+            r#"{{
+                "entities": [],
+                "claims": [],
+                "edges": [
+                    {{"source_note_id": "{}", "target_note_id": "{}", "source_entity_type": "note", "target_entity_type": "proposal", "kind": "exemplifies", "confidence": 0.75, "evidence_quote": "exemplifies the proposed design"}}
+                ]
+            }}"#,
+            n1.id, p1.id
+        );
+
+        let provider = Arc::new(FakeProvider::text(llm_json));
+        let report = run_memory_enrichment_with_provider(&project.id, &db, provider).await;
+
+        // The edge should appear in the report.
+        let mixed_edges: Vec<&EnrichmentEdge> = report
+            .edges
+            .iter()
+            .filter(|e| e.source_entity_type == "note" && e.target_entity_type == "proposal")
+            .collect();
+        assert_eq!(
+            mixed_edges.len(),
+            1,
+            "exactly one note↔proposal edge expected; got edges: {:?}",
+            report.edges
+        );
+        assert_eq!(mixed_edges[0].source_note_id, n1.id);
+        assert_eq!(mixed_edges[0].target_note_id, p1.id);
+        assert_eq!(mixed_edges[0].kind, "exemplifies");
+
+        // Verify persistence through the heterogeneous substrate.
+        let edges = note_repo
+            .list_typed_entity_associations_for(MemoryEntityRef::proposal(&p1.id), 0.0, 10)
+            .await
+            .expect("list entity associations");
+        assert!(
+            edges.iter().any(|e| {
+                e.source == MemoryEntityRef::note(&n1.id)
+                    && e.target == MemoryEntityRef::proposal(&p1.id)
+                    && e.kind == MemoryEntityKind::Exemplifies
+            }),
+            "note↔proposal edge should be persisted; got: {:?}",
+            edges
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unknown_proposal_endpoint_edge_is_skipped_not_panicked() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo = NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        // Only one real proposal in the batch.
+        let _n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 1",
+            &make_note_content("Note 1", "filler"),
+        )
+        .await;
+        let _n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 2",
+            &make_note_content("Note 2", "filler"),
+        )
+        .await;
+        let _n3 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 3",
+            &make_note_content("Note 3", "filler"),
+        )
+        .await;
+        let _n4 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 4",
+            &make_note_content("Note 4", "filler"),
+        )
+        .await;
+        let _n5 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note 5",
+            &make_note_content("Note 5", "filler"),
+        )
+        .await;
+
+        let p1 = create_targeted_proposal(&db, &project.id, "Real Proposal", "real").await;
+
+        // LLM emits two edges:
+        // (a) a valid note→proposal edge (should persist)
+        // (b) an edge referencing a non-existent proposal id (should be skipped)
+        let fake_proposal_id = "019eeb1e-fake-dead-beef-000000000001";
+        let llm_json = format!(
+            r#"{{
+                "entities": [],
+                "claims": [],
+                "edges": [
+                    {{"source_note_id": "{}", "target_note_id": "{}", "source_entity_type": "note", "target_entity_type": "proposal", "kind": "builds_on", "confidence": 0.8, "evidence_quote": "real evidence"}},
+                    {{"source_note_id": "{}", "target_note_id": "{}", "source_entity_type": "note", "target_entity_type": "proposal", "kind": "builds_on", "confidence": 0.8, "evidence_quote": "bogus evidence"}}
+                ]
+            }}"#,
+            _n1.id, p1.id, _n2.id, fake_proposal_id
+        );
+
+        let provider = Arc::new(FakeProvider::text(llm_json));
+        let report = run_memory_enrichment_with_provider(&project.id, &db, provider).await;
+
+        // Only the valid edge should be in the report.
+        assert_eq!(
+            report.edges.len(),
+            1,
+            "unknown proposal endpoint edge should be skipped; got: {:?}",
+            report.edges
+        );
+        assert_eq!(report.edges[0].target_note_id, p1.id);
+
+        // The bogus proposal id should NOT have produced any rows.
+        let edges = note_repo
+            .list_typed_entity_associations_for(
+                MemoryEntityRef::proposal(fake_proposal_id),
+                0.0,
+                10,
+            )
+            .await
+            .expect("list entity associations");
+        assert!(
+            edges.is_empty(),
+            "no edges should exist for the unknown proposal id"
+        );
+    }
+
+    #[test]
+    fn parse_edge_kind_entity_recognizes_all_kinds() {
+        assert_eq!(
+            parse_edge_kind_entity("builds_on"),
+            Some(MemoryEntityKind::BuildsOn)
+        );
+        assert_eq!(
+            parse_edge_kind_entity("contradicts"),
+            Some(MemoryEntityKind::Contradicts)
+        );
+        assert_eq!(
+            parse_edge_kind_entity("supersedes"),
+            Some(MemoryEntityKind::Supersedes)
+        );
+        assert_eq!(
+            parse_edge_kind_entity("exemplifies"),
+            Some(MemoryEntityKind::Exemplifies)
+        );
+        assert_eq!(
+            parse_edge_kind_entity("derived_from"),
+            Some(MemoryEntityKind::DerivedFrom)
+        );
+    }
+
+    #[test]
+    fn parse_entity_type_recognizes_note_and_proposal() {
+        assert_eq!(parse_entity_type("note"), Some(MemoryEntityType::Note));
+        assert_eq!(
+            parse_entity_type("proposal"),
+            Some(MemoryEntityType::Proposal)
+        );
+        assert_eq!(parse_entity_type("NOTE"), Some(MemoryEntityType::Note));
+        assert_eq!(parse_entity_type("unknown"), None);
+        assert_eq!(parse_entity_type(""), None);
+    }
+
+    #[test]
+    fn default_entity_type_is_note() {
+        assert_eq!(default_entity_type(), "note");
+    }
+
+    #[test]
+    fn llm_edge_defaults_entity_type_to_note_when_omitted() {
+        // Backwards compatibility: LLM responses without entity_type fields
+        // should deserialize with "note" defaults.
+        let json = r#"{
+            "source_note_id": "n1",
+            "target_note_id": "n2",
+            "kind": "builds_on",
+            "confidence": 0.8
+        }"#;
+        let edge: LlmEdge = serde_json::from_str(json).expect("parse");
+        assert_eq!(edge.source_entity_type, "note");
+        assert_eq!(edge.target_entity_type, "note");
     }
 }
