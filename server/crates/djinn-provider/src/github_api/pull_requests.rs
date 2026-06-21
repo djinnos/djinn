@@ -240,6 +240,62 @@ impl GitHubApiClient {
         })?)
     }
 
+    /// Close an open pull request by setting its state to `"closed"`.
+    ///
+    /// Mirrors [`Self::reopen_pull_request`] in reverse. Used by the inline
+    /// PR/branch cleanup path when a task transitions to a terminal non-merge
+    /// close (force_close, auto-park, abandoned, superseded) so the orphaned
+    /// bot PR is closed instead of lingering open.
+    ///
+    /// Idempotent: GitHub accepts PATCHing `{"state": "closed"}` on an
+    /// already-closed PR and simply returns it unchanged, so callers do not
+    /// need to check state first.
+    pub async fn close_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) -> Result<PullRequest> {
+        let path = format!("/repos/{owner}/{repo}/pulls/{pull_number}");
+        let url = format!("{}{}", self.base_url, path);
+        let body = serde_json::json!({ "state": "closed" });
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let body = body.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .patch(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(github_pr_write_error(
+                "PATCH",
+                &path,
+                Some(status),
+                &body,
+                "close_pull_request",
+            )
+            .into());
+        }
+        Ok(resp.json().await.map_err(|e| {
+            GitHubApiError::transport("close_pull_request", path.clone(), e.to_string())
+        })?)
+    }
+
     /// Enable auto-merge on an existing pull request.
     pub async fn enable_auto_merge(
         &self,
@@ -1019,6 +1075,56 @@ impl GitHubApiClient {
             return Err(anyhow!("re_request_review failed ({}): {}", status, body));
         }
         Ok(())
+    }
+
+    /// Post an issue comment on a pull request.
+    ///
+    /// Posts `{"body": "..."}` to `/repos/{owner}/{repo}/issues/{pull_number}/comments`.
+    /// GitHub treats PRs as issues for the purposes of top-level conversation
+    /// comments, so the issue-comment endpoint is the standard way to leave a
+    /// visible message on a PR (e.g. an explanatory "closed because the task
+    /// was abandoned" note during inline PR/branch cleanup).
+    ///
+    /// This is *not* a line-level review comment — use the review-comment API
+    /// for those. Returns the created comment as raw JSON on success.
+    pub async fn create_pr_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+        body: &str,
+    ) -> Result<serde_json::Value> {
+        let path = format!("/repos/{owner}/{repo}/issues/{pull_number}/comments");
+        let url = format!("{}{}", self.base_url, path);
+        let req_body = serde_json::json!({ "body": body });
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let req_body = req_body.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .post(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .json(&req_body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("create_pr_comment failed ({}): {}", status, body));
+        }
+        Ok(resp.json().await.map_err(|e| {
+            GitHubApiError::transport("create_pr_comment", path.clone(), e.to_string())
+        })?)
     }
 
     /// Post an APPROVE review on a pull request, pinned to a specific commit.
