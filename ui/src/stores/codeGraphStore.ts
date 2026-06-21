@@ -49,6 +49,24 @@ export const EDGE_KINDS = [
 export type EdgeKind = (typeof EDGE_KINDS)[number];
 
 /**
+ * Containment edge kinds that are never rendered as drawn Sigma edges
+ * and never re-enabled by the toolbar toggle. Mirrors
+ * `CONTAINMENT_EDGE_KINDS` in the adapter; duplicated here to avoid a
+ * cross-module import from the store (the adapter pulls in graphology
+ * at module-load time, which we keep out of the store path).
+ */
+export const CONTAINMENT_EDGE_KINDS = new Set([
+  "ContainsDefinition",
+  "DeclaredInFile",
+  "MemberOf",
+]);
+
+/** True when `kind` is a containment edge that must stay excluded. */
+export function isContainmentEdgeKind(kind: string): boolean {
+  return CONTAINMENT_EDGE_KINDS.has(kind);
+}
+
+/**
  * Top-level snapshot node-kind filter. `kind` is the wire-level
  * `SnapshotNodeKind` (file/folder/symbol); `symbol_kind` discriminators
  * (function/method/class/...) live in {@link SYMBOL_KIND_FILTERS}.
@@ -395,6 +413,10 @@ export const useCodeGraphStore = create<
   },
 
   toggleEdgeKind: (kind) => {
+    // Containment edges are structural nesting metadata, never drawn.
+    // The toggle is a no-op for containment kinds so no toolbar action
+    // can re-enable drawn containment edges.
+    if (isContainmentEdgeKind(kind)) return;
     set((state) => ({
       edgeKindFilters: {
         ...state.edgeKindFilters,
@@ -405,6 +427,7 @@ export const useCodeGraphStore = create<
   },
 
   setEdgeKindEnabled: (kind, enabled) => {
+    if (isContainmentEdgeKind(kind)) return;
     set((state) => ({
       edgeKindFilters: { ...state.edgeKindFilters, [kind]: enabled },
     }));
