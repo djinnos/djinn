@@ -766,8 +766,10 @@ async fn autolink_memory_refs(session_id: &str, permalinks: &[String], app_state
 /// Emit `derived_from` typed entity edges from a proposal to notes read or
 /// written during a session.
 ///
-/// Walks the `session → task → epic → proposal` chain via `proposal_for_epic`.
-/// When the task's epic is linked to a proposal, records a
+/// Walks the `session → task → epic → proposal` chain via `proposal_for_epic`,
+/// or the initial graduation `session → breakdown task → proposal` chain via
+/// `proposal_for_breakdown_task` before child epics exist. When a proposal is
+/// found, records a
 /// `proposal → note, kind=derived_from` edge for every note in the session
 /// (both read and written) using the heterogeneous `memory_entity_associations`
 /// substrate.
@@ -820,7 +822,8 @@ async fn emit_proposal_derived_from_edges(
 
     let session_project_id = session.project_id.as_deref();
 
-    // Load the task to get epic_id.
+    // Load the task so we can route either through its epic or, for the initial
+    // proposal breakdown Planner, through proposals.build_breakdown_task_id.
     let task_repo =
         djinn_db::TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task = match task_repo.get(task_id).await {
@@ -844,37 +847,59 @@ async fn emit_proposal_derived_from_edges(
         }
     };
 
-    let Some(epic_id) = task.epic_id.as_deref() else {
-        tracing::debug!(
-            session_id = %session_id,
-            task_id = %task_id,
-            "emit_proposal_derived_from: task has no epic_id; skipping"
-        );
-        return;
-    };
-
-    // Look up the proposal linked to this epic.
+    // Look up the proposal linked to this task. Worker tasks flow through their
+    // parent epic's proposal_epics edge. The initial proposal-decomposition
+    // Planner task has no epic yet, so fall back to proposals.build_breakdown_task_id
+    // to capture graduation-time memory reads.
     let proposal_repo =
         djinn_db::ProposalRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let proposal = match proposal_repo.proposal_for_epic(epic_id).await {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            tracing::debug!(
-                session_id = %session_id,
-                epic_id = %epic_id,
-                "emit_proposal_derived_from: epic has no linked proposal; skipping"
-            );
-            return;
+    let proposal = if let Some(epic_id) = task.epic_id.as_deref() {
+        match proposal_repo.proposal_for_epic(epic_id).await {
+            Ok(Some(p)) => Some(p),
+            Ok(None) => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    epic_id = %epic_id,
+                    "emit_proposal_derived_from: epic has no linked proposal; trying breakdown task lookup"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    epic_id = %epic_id,
+                    error = %e,
+                    "emit_proposal_derived_from: failed to look up proposal for epic; trying breakdown task lookup"
+                );
+                None
+            }
         }
-        Err(e) => {
-            tracing::warn!(
-                session_id = %session_id,
-                epic_id = %epic_id,
-                error = %e,
-                "emit_proposal_derived_from: failed to look up proposal for epic; skipping"
-            );
-            return;
-        }
+    } else {
+        None
+    };
+
+    let proposal = match proposal {
+        Some(p) => p,
+        None => match proposal_repo.proposal_for_breakdown_task(task_id).await {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    task_id = %task_id,
+                    "emit_proposal_derived_from: task is not linked to a proposal; skipping"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    task_id = %task_id,
+                    error = %e,
+                    "emit_proposal_derived_from: failed to look up proposal for breakdown task; skipping"
+                );
+                return;
+            }
+        },
     };
 
     let proposal_ref = djinn_db::MemoryEntityRef::proposal(&proposal.id);
@@ -1013,6 +1038,12 @@ pub fn derive_scope_paths(file_paths: &[String], project_root: &str) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use djinn_core::message::{ContentBlock, Message};
+    use djinn_db::{
+        CreateSessionParams, EpicCreateInput, EpicRepository, MemoryEntityKind, MemoryEntityRef,
+        MemoryEntityType, NoteRepository, ProposalCreateInput, ProposalRepository,
+        SessionRepository, TaskRepository,
+    };
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
 
@@ -1026,6 +1057,34 @@ mod tests {
             }],
             metadata: None,
         }
+    }
+
+    fn memory_write_result(tool_use_id: &str, permalink: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                content: vec![ContentBlock::text(
+                    serde_json::json!({"permalink": permalink}).to_string(),
+                )],
+                is_error: false,
+            }],
+            metadata: None,
+        }
+    }
+
+    fn has_proposal_derived_from_edge(
+        edges: &[djinn_db::MemoryEntityAssociation],
+        proposal_id: &str,
+        note_id: &str,
+    ) -> bool {
+        edges.iter().any(|edge| {
+            edge.source.entity_type == MemoryEntityType::Proposal
+                && edge.source.id == proposal_id
+                && edge.target.entity_type == MemoryEntityType::Note
+                && edge.target.id == note_id
+                && edge.kind == MemoryEntityKind::DerivedFrom
+        })
     }
 
     fn tool_result_error(tool_use_id: &str) -> Message {
@@ -1222,6 +1281,200 @@ mod tests {
             signals.stale_note_ids.is_empty(),
             "note was referenced in later tool call"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_epic_task_written_notes_emit_derived_from_edges_after_autolink() {
+        let db = crate::test_helpers::create_test_db();
+        let ctx = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+        let events = djinn_core::events::EventBus::noop();
+
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let proposal_repo = ProposalRepository::new(db.clone(), events.clone());
+        let epic_repo = EpicRepository::new(db.clone(), events.clone());
+        let task_repo = TaskRepository::new(db.clone(), events.clone());
+        let session_repo = SessionRepository::new(db.clone(), events.clone());
+        let note_repo = NoteRepository::new(db.clone(), events.clone());
+
+        let proposal = proposal_repo
+            .create(ProposalCreateInput {
+                title: "Derived provenance proposal",
+                body: "Build the fixture path",
+                acceptance_criteria: Some("[]"),
+                status: Some("building"),
+                body_format: None,
+            })
+            .await
+            .expect("create proposal");
+        let epic = epic_repo
+            .create_for_project(
+                &project.id,
+                EpicCreateInput {
+                    title: "proposal epic",
+                    description: "desc",
+                    emoji: "🧪",
+                    color: "blue",
+                    owner: "planner",
+                    memory_refs: None,
+                    status: None,
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                    blocked_by: None,
+                },
+            )
+            .await
+            .expect("create epic");
+        proposal_repo
+            .link_epic(&proposal.id, &epic.id, &project.id)
+            .await
+            .expect("link proposal epic");
+        let task = task_repo
+            .create_in_project(
+                &project.id,
+                Some(&epic.id),
+                "worker task",
+                "desc",
+                "design",
+                "task",
+                1,
+                "worker",
+                None,
+                None,
+            )
+            .await
+            .expect("create task");
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: Some(&task.id),
+                model: "test-model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .expect("create session");
+        let written = note_repo
+            .create(&project.id, "Written Case", "body", "case", "[]")
+            .await
+            .expect("create written note");
+
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "write-note".to_string(),
+                    name: "memory_write".to_string(),
+                    input: serde_json::json!({"title": "Written Case", "type": "case"}),
+                }],
+                metadata: None,
+            },
+            memory_write_result("write-note", &written.permalink),
+        ];
+
+        let taxonomy = run_structural_extraction(session.id.clone(), messages, ctx).await;
+        assert!(taxonomy.is_some());
+
+        let task_after = task_repo
+            .get(&task.id)
+            .await
+            .expect("load task")
+            .expect("task exists");
+        assert!(task_after.memory_refs.contains(&written.permalink));
+        let epic_after = epic_repo
+            .get(&epic.id)
+            .await
+            .expect("load epic")
+            .expect("epic exists");
+        assert!(epic_after.memory_refs.contains(&written.permalink));
+
+        let edges = note_repo
+            .list_typed_entity_associations_for(MemoryEntityRef::proposal(&proposal.id), 0.0, 10)
+            .await
+            .expect("list proposal associations");
+        assert!(has_proposal_derived_from_edge(
+            &edges,
+            &proposal.id,
+            &written.id
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_breakdown_task_read_notes_emit_derived_from_edges() {
+        let db = crate::test_helpers::create_test_db();
+        let ctx = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+        let events = djinn_core::events::EventBus::noop();
+
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let proposal_repo = ProposalRepository::new(db.clone(), events.clone());
+        let task_repo = TaskRepository::new(db.clone(), events.clone());
+        let session_repo = SessionRepository::new(db.clone(), events.clone());
+        let note_repo = NoteRepository::new(db.clone(), events.clone());
+
+        let proposal = proposal_repo
+            .create(ProposalCreateInput {
+                title: "Graduation provenance proposal",
+                body: "Read planning context",
+                acceptance_criteria: Some("[]"),
+                status: Some("approved"),
+                body_format: None,
+            })
+            .await
+            .expect("create proposal");
+        let breakdown_task = task_repo
+            .create_in_project(
+                &project.id,
+                None,
+                "Break down proposal",
+                "desc",
+                "design",
+                "epic_breakdown",
+                10,
+                "planner",
+                None,
+                None,
+            )
+            .await
+            .expect("create breakdown task");
+        proposal_repo
+            .set_breakdown_task(&proposal.id, &breakdown_task.id)
+            .await
+            .expect("link breakdown task");
+        let read_note = note_repo
+            .create(&project.id, "Planner Read Note", "body", "reference", "[]")
+            .await
+            .expect("create read note");
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: Some(&breakdown_task.id),
+                model: "test-model",
+                agent_type: "planner",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .expect("create session");
+
+        let messages = vec![tool_use(
+            "memory_read",
+            serde_json::json!({"identifier": read_note.permalink, "project": project.slug()}),
+        )];
+
+        let taxonomy = run_structural_extraction(session.id.clone(), messages, ctx).await;
+        assert!(taxonomy.is_some());
+
+        let edges = note_repo
+            .list_typed_entity_associations_for(MemoryEntityRef::proposal(&proposal.id), 0.0, 10)
+            .await
+            .expect("list proposal associations");
+        assert!(has_proposal_derived_from_edge(
+            &edges,
+            &proposal.id,
+            &read_note.id
+        ));
     }
 
     #[test]
