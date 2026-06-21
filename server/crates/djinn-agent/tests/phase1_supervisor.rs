@@ -94,7 +94,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         mirror: None,
         rpc_registry: None,
         default_project_id: None,
-        reconciliation_sweep: djinn_agent::context::ReconciliationSweepConfig::default(),
+        reconciliation_sweep: ReconciliationSweepConfig::default(),
     }
 }
 

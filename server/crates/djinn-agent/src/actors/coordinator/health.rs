@@ -1,3 +1,4 @@
+// djinn:allow-oversize — reconciliation sweep + health module over size-guard threshold; split when touched substantively.
 use super::*;
 
 use std::collections::{HashMap, HashSet};
