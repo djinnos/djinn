@@ -8112,6 +8112,29 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "MemoryProposalRefItem": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "status"
+          ],
+          "type": "object"
+        },
         "MemoryTaskRefItem": {
           "properties": {
             "id": {
@@ -8141,6 +8164,12 @@ expression: signatures
         "error": {
           "nullable": true,
           "type": "string"
+        },
+        "proposals": {
+          "items": {
+            "$ref": "#/$defs/MemoryProposalRefItem"
+          },
+          "type": "array"
         },
         "tasks": {
           "items": {

@@ -1,28 +1,25 @@
 /**
- * GraphToolbar — edge-kind, node-kind, and depth filters above the
+ * GraphToolbar — edge-kind, node-kind, DOI focus, and lens controls above the
  * Sigma canvas.
  *
- * Both edge / node kind toggles and the depth slider write straight to
- * the Zustand highlight store; the canvas reducer reads them on every
- * Sigma frame, so toggles take effect immediately without re-mounting
- * the graph.
+ * Store-backed controls write straight to the Zustand highlight store; the
+ * canvas reducer reads relevant slices on every Sigma frame, so toggles take
+ * effect immediately without re-mounting the graph.
  *
  * The toolbar shadows the new dark palette (border `#2d2d3d`, near-
  * black background) so it sits flush with the radial-gradient canvas
  * underneath without a visible seam.
  */
-
-import { useCallback } from "react";
-
 import {
   EDGE_KINDS,
-  MAX_DEPTH,
-  MIN_DEPTH,
+  MAX_DOI_REVEAL_COUNT,
+  MIN_DOI_REVEAL_COUNT,
   NODE_KINDS,
   SYMBOL_KIND_FILTERS,
   useCodeGraphStore,
   type ColorMode,
-  type LayoutMode,
+  type FocusDirection,
+  type LensId,
   type SemanticZoomMode,
 } from "@/stores/codeGraphStore";
 import { cn } from "@/lib/utils";
@@ -77,7 +74,6 @@ interface GraphToolbarProps {
 export function GraphToolbar({
   className,
 }: GraphToolbarProps) {
-  const disabled = !useCodeGraphStore((s) => s.graphReady);
   const edgeKindFilters = useCodeGraphStore((s) => s.edgeKindFilters);
   const toggleEdgeKind = useCodeGraphStore((s) => s.toggleEdgeKind);
   const nodeKindFilters = useCodeGraphStore((s) => s.nodeKindFilters);
@@ -86,25 +82,25 @@ export function GraphToolbar({
   const toggleSymbolKind = useCodeGraphStore((s) => s.toggleSymbolKind);
   const hideTests = useCodeGraphStore((s) => s.hideTests);
   const setHideTests = useCodeGraphStore((s) => s.setHideTests);
-  const depthFilter = useCodeGraphStore((s) => s.depthFilter);
-  const setDepthFilter = useCodeGraphStore((s) => s.setDepthFilter);
+  const focusAnchorId = useCodeGraphStore((s) => s.focusAnchorId);
+  const setFocusAnchor = useCodeGraphStore((s) => s.setFocusAnchor);
+  const focusDirection = useCodeGraphStore((s) => s.focusDirection);
+  const setFocusDirection = useCodeGraphStore((s) => s.setFocusDirection);
+  const doiRevealCount = useCodeGraphStore((s) => s.doiRevealCount);
+  const setDoiRevealCount = useCodeGraphStore((s) => s.setDoiRevealCount);
   const selectionId = useCodeGraphStore((s) => s.selectionId);
   const colorMode = useCodeGraphStore((s) => s.colorMode);
   const setColorMode = useCodeGraphStore((s) => s.setColorMode);
-  const layoutMode = useCodeGraphStore((s) => s.layoutMode);
-  const setLayoutMode = useCodeGraphStore((s) => s.setLayoutMode);
   const complexityAvailable = useCodeGraphStore((s) => s.complexityAvailable);
   const semanticZoomMode = useCodeGraphStore((s) => s.semanticZoomMode);
   const setSemanticZoomMode = useCodeGraphStore(
     (s) => s.setSemanticZoomMode,
   );
+  const activeLens = useCodeGraphStore((s) => s.activeLens);
+  const applyLens = useCodeGraphStore((s) => s.applyLens);
+  const graphReady = useCodeGraphStore((s) => s.graphReady);
 
-  const handleDepthChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      setDepthFilter(parseInt(e.target.value, 10));
-    },
-    [setDepthFilter],
-  );
+  const disabled = !graphReady;
 
   return (
     <div
@@ -114,56 +110,65 @@ export function GraphToolbar({
         className,
       )}
     >
-      <FilterGroup label="Nodes">
-        {NODE_KINDS.map((kind) => {
-          const active = nodeKindFilters[kind] ?? true;
-          return (
-            <Chip
-              key={kind}
-              active={active}
-              onClick={() => toggleNodeKind(kind)}
-              testId={`node-filter-${kind}`}
-              title={kind}
-            >
-              {NODE_KIND_LABEL[kind] ?? kind}
-            </Chip>
-          );
-        })}
-      </FilterGroup>
+      <LensSelector activeLens={activeLens} onChange={applyLens} />
 
-      <FilterGroup label="Symbols">
-        {SYMBOL_KIND_FILTERS.map((kind) => {
-          const active = symbolKindFilters[kind] ?? true;
-          return (
-            <Chip
-              key={kind}
-              active={active}
-              onClick={() => toggleSymbolKind(kind)}
-              testId={`symbol-filter-${kind}`}
-              title={kind}
-            >
-              {SYMBOL_KIND_LABEL[kind] ?? kind}
-            </Chip>
-          );
-        })}
-      </FilterGroup>
+      <details className="group">
+        <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-300">
+          Advanced
+        </summary>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-2">
+          <FilterGroup label="Nodes">
+            {NODE_KINDS.map((kind) => {
+              const active = nodeKindFilters[kind] ?? true;
+              return (
+                <Chip
+                  key={kind}
+                  active={active}
+                  onClick={() => toggleNodeKind(kind)}
+                  testId={`node-filter-${kind}`}
+                  title={kind}
+                >
+                  {NODE_KIND_LABEL[kind] ?? kind}
+                </Chip>
+              );
+            })}
+          </FilterGroup>
 
-      <FilterGroup label="Edges">
-        {EDGE_KINDS.map((kind) => {
-          const active = edgeKindFilters[kind] ?? true;
-          return (
-            <Chip
-              key={kind}
-              active={active}
-              onClick={() => toggleEdgeKind(kind)}
-              testId={`edge-filter-${kind}`}
-              title={kind}
-            >
-              {EDGE_LABEL[kind] ?? kind}
-            </Chip>
-          );
-        })}
-      </FilterGroup>
+          <FilterGroup label="Symbols">
+            {SYMBOL_KIND_FILTERS.map((kind) => {
+              const active = symbolKindFilters[kind] ?? true;
+              return (
+                <Chip
+                  key={kind}
+                  active={active}
+                  onClick={() => toggleSymbolKind(kind)}
+                  testId={`symbol-filter-${kind}`}
+                  title={kind}
+                >
+                  {SYMBOL_KIND_LABEL[kind] ?? kind}
+                </Chip>
+              );
+            })}
+          </FilterGroup>
+
+          <FilterGroup label="Edges">
+            {EDGE_KINDS.map((kind) => {
+              const active = edgeKindFilters[kind] ?? true;
+              return (
+                <Chip
+                  key={kind}
+                  active={active}
+                  onClick={() => toggleEdgeKind(kind)}
+                  testId={`edge-filter-${kind}`}
+                  title={kind}
+                >
+                  {EDGE_LABEL[kind] ?? kind}
+                </Chip>
+              );
+            })}
+          </FilterGroup>
+        </div>
+      </details>
 
       <FilterGroup label="Tests">
         <Chip
@@ -185,44 +190,127 @@ export function GraphToolbar({
           mode={semanticZoomMode}
           onChange={setSemanticZoomMode}
         />
-        <LayoutModeToggle
-          mode={layoutMode}
-          onChange={setLayoutMode}
-          disabled={disabled}
-        />
         <ColorModeToggle
           mode={colorMode}
           onChange={setColorMode}
           disabled={!complexityAvailable}
         />
-        <label
-          htmlFor="code-graph-depth"
-          className="text-[10px] font-medium uppercase tracking-wide text-zinc-500"
+        <FocusDirectionToggle
+          direction={focusDirection}
+          onChange={setFocusDirection}
+          disabled={disabled}
+        />
+        <DoiRevealControl
+          count={doiRevealCount}
+          onChange={setDoiRevealCount}
+          disabled={disabled}
+        />
+        <button
+          type="button"
+          data-testid="focus-anchor-toggle"
+          disabled={disabled || !selectionId}
+          onClick={() =>
+            setFocusAnchor(focusAnchorId === selectionId ? null : selectionId)
+          }
           title={
             selectionId
-              ? "Hop depth from the selected node"
-              : "Select a node first to apply depth filtering"
+              ? focusAnchorId === selectionId
+                ? "Clear the DOI focus anchor"
+                : "Use the selected node as the DOI focus anchor"
+              : "Select a node before anchoring DOI focus"
           }
+          className={cn(
+            "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors",
+            focusAnchorId
+              ? "border-emerald-700/70 bg-emerald-950/50 text-emerald-200"
+              : "border-zinc-800 bg-transparent text-zinc-400 hover:text-zinc-200",
+            (disabled || !selectionId) &&
+              "cursor-not-allowed opacity-50 hover:text-zinc-400",
+          )}
         >
-          Depth
-        </label>
-        <input
-          id="code-graph-depth"
-          type="range"
-          min={MIN_DEPTH}
-          max={MAX_DEPTH}
-          step={1}
-          value={depthFilter}
-          onChange={handleDepthChange}
-          disabled={!selectionId}
-          data-testid="depth-slider"
-          className="h-1 w-24 cursor-pointer accent-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-        />
-        <span className="w-4 text-center text-[11px] tabular-nums text-zinc-200">
-          {depthFilter}
-        </span>
+          {focusAnchorId ? "Focus set" : "Anchor focus"}
+        </button>
       </div>
     </div>
+  );
+}
+
+const LENS_OPTIONS: { id: LensId; label: string }[] = [
+  { id: "architecture", label: "Architecture" },
+  { id: "calls", label: "Calls" },
+  { id: "types", label: "Types" },
+  { id: "dataflow", label: "Data flow" },
+];
+
+interface LensSelectorProps {
+  activeLens: LensId | null;
+  onChange: (lensId: LensId) => void;
+}
+
+/**
+ * Segmented control for intent lenses. Each button applies a complete
+ * filter preset; the active button highlights the currently-applied
+ * lens. When the user manually toggles a filter (activeLens becomes
+ * null), no button is highlighted.
+ */
+function LensSelector({ activeLens, onChange }: LensSelectorProps) {
+  return (
+    <div className="flex items-center gap-1.5" data-testid="lens-selector">
+      <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+        Lens
+      </span>
+      <div
+        role="radiogroup"
+        aria-label="Intent lens"
+        className="flex items-center rounded-md border border-zinc-800 bg-[#0a0a10]/40 p-0.5"
+      >
+        {LENS_OPTIONS.map(({ id, label }) => (
+          <LensButton
+            key={id}
+            active={activeLens === id}
+            onClick={() => onChange(id)}
+            testId={`lens-${id}`}
+            label={label}
+            tooltip={`Apply ${label} lens`}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface LensButtonProps {
+  active: boolean;
+  onClick: () => void;
+  testId: string;
+  label: string;
+  tooltip: string;
+}
+
+function LensButton({
+  active,
+  onClick,
+  testId,
+  label,
+  tooltip,
+}: LensButtonProps) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      data-testid={testId}
+      onClick={onClick}
+      title={tooltip}
+      className={cn(
+        "rounded px-2 py-0.5 text-[11px] font-medium transition-colors",
+        active
+          ? "bg-zinc-800/80 text-zinc-100"
+          : "text-zinc-400 hover:text-zinc-200",
+      )}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -271,60 +359,60 @@ function Chip({ active, onClick, testId, title, children }: ChipProps) {
   );
 }
 
-interface LayoutModeToggleProps {
-  mode: LayoutMode;
-  onChange: (mode: LayoutMode) => void;
+interface FocusDirectionToggleProps {
+  direction: FocusDirection;
+  onChange: (direction: FocusDirection) => void;
   disabled: boolean;
 }
 
-function LayoutModeToggle({
-  mode,
+function FocusDirectionToggle({
+  direction,
   onChange,
   disabled,
-}: LayoutModeToggleProps) {
+}: FocusDirectionToggleProps) {
   return (
-    <div className="flex items-center gap-1.5" data-testid="layout-mode-toggle">
+    <div className="flex items-center gap-1.5" data-testid="focus-direction-toggle">
       <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">
-        Layout
+        Focus
       </span>
       <div
         role="radiogroup"
-        aria-label="Layout mode"
+        aria-label="DOI focus direction"
         className={cn(
           "flex items-center rounded-md border border-zinc-800 bg-[#0a0a10]/40 p-0.5",
           disabled && "opacity-50",
         )}
       >
-        <LayoutModeButton
-          active={mode === "force"}
+        <FocusDirectionButton
+          active={direction === "dependencies"}
           disabled={disabled}
-          onClick={() => onChange("force")}
-          testId="layout-mode-force"
-          label="Force"
-          tooltip="ForceAtlas2 simulation — physics-based settling, slowest on large repos"
+          onClick={() => onChange("dependencies")}
+          testId="focus-direction-dependencies"
+          label="Deps"
+          tooltip="Prioritize dependencies: what the focus anchor uses"
         />
-        <LayoutModeButton
-          active={mode === "sequential"}
+        <FocusDirectionButton
+          active={direction === "dependents"}
           disabled={disabled}
-          onClick={() => onChange("sequential")}
-          testId="layout-mode-sequential"
-          label="Sequential"
-          tooltip="Layered (folder → file → symbol) — deterministic, no physics"
+          onClick={() => onChange("dependents")}
+          testId="focus-direction-dependents"
+          label="Impact"
+          tooltip="Prioritize dependents: what uses the focus anchor"
         />
-        <LayoutModeButton
-          active={mode === "radial"}
+        <FocusDirectionButton
+          active={direction === "both"}
           disabled={disabled}
-          onClick={() => onChange("radial")}
-          testId="layout-mode-radial"
-          label="Radial"
-          tooltip="Concentric shells from the highest-PageRank focal — deterministic, no physics"
+          onClick={() => onChange("both")}
+          testId="focus-direction-both"
+          label="Both"
+          tooltip="Prioritize dependencies and dependents around the focus anchor"
         />
       </div>
     </div>
   );
 }
 
-interface LayoutModeButtonProps {
+interface FocusDirectionButtonProps {
   active: boolean;
   disabled: boolean;
   onClick: () => void;
@@ -333,14 +421,14 @@ interface LayoutModeButtonProps {
   tooltip: string;
 }
 
-function LayoutModeButton({
+function FocusDirectionButton({
   active,
   disabled,
   onClick,
   testId,
   label,
   tooltip,
-}: LayoutModeButtonProps) {
+}: FocusDirectionButtonProps) {
   return (
     <button
       type="button"
@@ -364,6 +452,43 @@ function LayoutModeButton({
   );
 }
 
+interface DoiRevealControlProps {
+  count: number;
+  onChange: (count: number) => void;
+  disabled: boolean;
+}
+
+function DoiRevealControl({
+  count,
+  onChange,
+  disabled,
+}: DoiRevealControlProps) {
+  return (
+    <label
+      className="flex items-center gap-1.5"
+      data-testid="doi-reveal-control"
+    >
+      <span
+        className="text-[10px] font-medium uppercase tracking-wide text-zinc-500"
+        title="Maximum number of high-DOI context nodes to reveal"
+      >
+        DOI
+      </span>
+      <input
+        type="number"
+        min={MIN_DOI_REVEAL_COUNT}
+        max={MAX_DOI_REVEAL_COUNT}
+        step={5}
+        value={count}
+        disabled={disabled}
+        onChange={(e) => onChange(e.currentTarget.valueAsNumber)}
+        aria-label="DOI reveal count"
+        className="h-6 w-14 rounded-md border border-zinc-800 bg-[#0a0a10]/60 px-1.5 text-right text-[11px] tabular-nums text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+      />
+    </label>
+  );
+}
+
 interface ColorModeToggleProps {
   mode: ColorMode;
   onChange: (mode: ColorMode) => void;
@@ -379,7 +504,7 @@ interface ColorModeToggleProps {
  * Iter 30: segmented control swapping between topology coloring (the
  * default dir-hash / community palette) and the cognitive-complexity
  * heatmap. Sized to fit the existing toolbar's vertical rhythm so it
- * sits next to the depth slider without breaking layout.
+ * sits alongside the DOI focus controls without breaking layout.
  */
 function ColorModeToggle({ mode, onChange, disabled }: ColorModeToggleProps) {
   return (

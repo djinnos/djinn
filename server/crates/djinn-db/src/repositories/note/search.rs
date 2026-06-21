@@ -745,6 +745,40 @@ impl NoteRepository {
             })
             .collect())
     }
+
+    /// Find proposals reachable through tasks whose `memory_refs` contains `permalink`.
+    ///
+    /// Walks `proposal_epics` to connect proposals → epics → tasks that reference
+    /// the given permalink.  Returns minimal proposal info: `(id, short_id, title, status)`.
+    pub async fn proposal_refs(&self, permalink: &str) -> Result<Vec<serde_json::Value>> {
+        self.db.ensure_initialized().await?;
+
+        // Same JSONB containment probe as `task_refs`.
+        let probe = serde_json::Value::Array(vec![serde_json::Value::String(permalink.to_owned())]);
+        let rows = sqlx::query!(
+            r#"SELECT DISTINCT p.id AS "id!", p.short_id, p.title, p.status AS "status!"
+             FROM proposals p
+             JOIN proposal_epics pe ON pe.proposal_id = p.id
+             JOIN tasks t ON t.epic_id = pe.epic_id
+             WHERE t.memory_refs @> $1
+             ORDER BY p.id"#,
+            sqlx::types::Json(probe) as _
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                serde_json::json!({
+                    "id": row.id,
+                    "short_id": row.short_id,
+                    "title": row.title,
+                    "status": row.status,
+                })
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]

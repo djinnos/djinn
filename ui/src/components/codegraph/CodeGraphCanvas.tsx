@@ -99,6 +99,9 @@ interface CodeGraphCanvasProps {
 
 const DEFAULT_NODE_CAP = 10_000;
 
+/** DOI focus-anchor camera animation duration. */
+const FOCUS_ANCHOR_DURATION_MS = 150;
+
 const CANVAS_BACKGROUND = `radial-gradient(circle at 50% 50%, rgba(124, 58, 237, 0.05) 0%, transparent 70%), linear-gradient(to bottom, #06060a, #0a0a10)`;
 
 export function CodeGraphCanvas({
@@ -112,7 +115,6 @@ export function CodeGraphCanvas({
     (s) => s.selectedWorkspaceSlug,
   );
   const semanticZoomMode = useCodeGraphStore((s) => s.semanticZoomMode);
-  const layoutMode = useCodeGraphStore((s) => s.layoutMode);
   const expandedCommunityIds = useCodeGraphStore((s) => s.expandedCommunityIds);
   const expandCommunity = useCodeGraphStore((s) => s.expandCommunity);
   const collapseCommunity = useCodeGraphStore((s) => s.collapseCommunity);
@@ -257,8 +259,8 @@ export function CodeGraphCanvas({
 
   const graph = useMemo(() => {
     if (!visibleSnapshot) return null;
-    return buildGraphFromSnapshot(visibleSnapshot, { layoutMode });
-  }, [visibleSnapshot, layoutMode]);
+    return buildGraphFromSnapshot(visibleSnapshot);
+  }, [visibleSnapshot]);
 
   // The reducers hook needs the live Sigma handle to call refresh()
   // when store slices change. We init `null` and lift the handle from
@@ -295,6 +297,8 @@ export function CodeGraphCanvas({
 
   const setSelection = useCodeGraphStore((s) => s.setSelection);
   const setHover = useCodeGraphStore((s) => s.setHover);
+  const setFocusAnchor = useCodeGraphStore((s) => s.setFocusAnchor);
+  const clearFocusAnchor = useCodeGraphStore((s) => s.clearFocusAnchor);
 
   // Ensure a symbol-level snapshot is cached for the current project so
   // expand operations can splice member nodes without a per-click fetch.
@@ -383,11 +387,15 @@ export function CodeGraphCanvas({
         return;
       }
 
-      // Normal single-click selection.
+      // Normal single-click: set selection (detail panel) and DOI
+      // focus anchor (directional traversal), then recenter camera.
       setSelection(node);
+      setFocusAnchor(node);
+      sigma.focusNode(node, FOCUS_ANCHOR_DURATION_MS);
     });
     const offStage = sigma.on("clickStage", () => {
       setSelection(null);
+      clearFocusAnchor();
       lastClick = null;
     });
     const offEnter = sigma.on("enterNode", ({ node }) => {
@@ -410,6 +418,8 @@ export function CodeGraphCanvas({
     sigma,
     setSelection,
     setHover,
+    setFocusAnchor,
+    clearFocusAnchor,
     expandedCommunityIds,
     expandCommunity,
     collapseCommunity,

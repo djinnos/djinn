@@ -63,7 +63,7 @@ export interface SigmaInstanceHandle {
   ) => () => void;
   refresh: () => void;
   getNodeAttributes: (id: string) => Attributes | null;
-  focusNode: (id: string) => void;
+  focusNode: (id: string, durationMs?: number) => void;
   focusNodes: (ids: Iterable<string>) => void;
   /**
    * Iter y3mf: read the current Sigma camera ratio. Returns `Infinity`
@@ -172,8 +172,6 @@ export function useSigmaGraph(
   const [ready, setReady] = useState(false);
   const [layoutRunning, setLayoutRunning] = useState(false);
   const [handle, setHandle] = useState<SigmaInstanceHandle | null>(null);
-
-  const layoutMode = useCodeGraphStore((s) => s.layoutMode);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -330,7 +328,7 @@ export function useSigmaGraph(
           return Infinity;
         }
       },
-      focusNode: (id) => {
+      focusNode: (id, durationMs) => {
         if (killed) return;
         try {
           if (!graph.hasNode(id)) return;
@@ -338,10 +336,12 @@ export function useSigmaGraph(
           const x = Number(attrs.x);
           const y = Number(attrs.y);
           if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-          sigmaInstance.getCamera().animate(
-            { x, y, ratio: FOCUS_NODE_RATIO },
-            { duration: FOCUS_DURATION_MS },
-          );
+          sigmaInstance
+            .getCamera()
+            .animate(
+              { x, y, ratio: FOCUS_NODE_RATIO },
+              { duration: durationMs ?? FOCUS_DURATION_MS },
+            );
         } catch {
           // unmount race / graph mutation race — no-op
         }
@@ -391,10 +391,7 @@ export function useSigmaGraph(
           const maxRatio = Number.isFinite(maxSetting)
             ? maxSetting
             : DEFAULT_MAX_CAMERA_RATIO;
-          const ratio = Math.max(
-            minRatio,
-            Math.min(maxRatio, unclampedRatio),
-          );
+          const ratio = Math.max(minRatio, Math.min(maxRatio, unclampedRatio));
 
           sigmaInstance.getCamera().animate(
             {
@@ -420,11 +417,9 @@ export function useSigmaGraph(
     // both branches: it no-ops on the precomputed case because
     // `supervisorRef.current` and `stopTimerRef.current` are still
     // null there.
-    const precomputedLayout = graph.getAttribute(
-      PRECOMPUTED_LAYOUT_ATTRIBUTE,
-    );
+    const precomputedLayout = graph.getAttribute(PRECOMPUTED_LAYOUT_ATTRIBUTE);
 
-    if (!precomputedLayout && layoutMode === "force") {
+    if (!precomputedLayout) {
       const inferred = forceAtlas2.inferSettings(graph);
       const tuned = fa2Settings(graph.order);
       const supervisor = new FA2LayoutSupervisor(graph, {
@@ -502,7 +497,7 @@ export function useSigmaGraph(
       setLayoutRunning(false);
       setHandle(null);
     };
-  }, [containerRef, graph, layoutMode]);
+  }, [containerRef, graph]);
 
   // Camera-nudge on selection change — Sigma 3 caches edge geometry
   // across frames, so an imperceptible zoom jiggle is the cheapest way

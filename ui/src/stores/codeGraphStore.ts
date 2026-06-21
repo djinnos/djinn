@@ -15,8 +15,8 @@
  *   hoverId             → hover tooltip target (transient)
  *
  * Filters live alongside because they're peer concerns of the same
- * canvas — per-edge-kind toggle, per-node-kind toggle, and depth from
- * selection. SymbolReference (the call graph) defaults OFF because at
+ * canvas — per-edge-kind toggle, per-node-kind toggle, and DOI focus
+ * controls. SymbolReference (the call graph) defaults OFF because at
  * 60-80% of edges it dominates everything else.
  */
 
@@ -45,23 +45,6 @@ export const EDGE_KINDS = [
 ] as const;
 
 export type EdgeKind = (typeof EDGE_KINDS)[number];
-
-/**
- * Edges that ship OFF. The default view shows only the *semantic spine*
- * (Implements, Extends, Defines, TypeDefines, EntryPointOf, Writes,
- * StepInProcess) — everything else is firehose noise on a 12k-node repo
- * (FileReference alone is ~33% of edges, Contains/Declared are
- * inverse duplicates of each other at ~23% each, Reads is per-query
- * useful but globally meaningless). User toggles on demand.
- */
-const NOISY_EDGE_KINDS: ReadonlySet<string> = new Set([
-  "ContainsDefinition",
-  "DeclaredInFile",
-  "FileReference",
-  "SymbolReference",
-  "Reads",
-  "MemberOf",
-]);
 
 /**
  * Top-level snapshot node-kind filter. `kind` is the wire-level
@@ -98,20 +81,127 @@ export const SYMBOL_KIND_FILTERS = [
 ] as const;
 export type SymbolKindFilter = (typeof SYMBOL_KIND_FILTERS)[number];
 
-/** Symbol kinds hidden by default — clutter without analytical value. */
-const NOISY_SYMBOL_KINDS: ReadonlySet<string> = new Set([
-  "variable",
-  "const",
-  "static",
-  "property",
-  "import",
-  "field",
-  "other",
-]);
+/**
+ * Intent lenses — named filter presets that swap the entire
+ * node/symbol/edge filter set in one action. Each lens maps a
+ * concrete analytical intent to the filter combination that serves it.
+ *
+ * - **Architecture** (default) — structural skeleton: folders, files,
+ *   symbols visible, but no symbol sub-kinds and only the semantic
+ *   spine edges.
+ * - **Calls** — call-graph view: only functions/methods/constructors,
+ *   only Defines and SymbolReference edges.
+ * - **Types** — type hierarchy: only type-defining symbols (class,
+ *   struct, interface, trait, enum, impl, type), only type-related
+ *   edges.
+ * - **Data flow** — reads/writes: only functions and methods, only
+ *   Reads/Writes/Defines edges.
+ */
+export type LensId = "architecture" | "calls" | "types" | "dataflow";
 
-export const MIN_DEPTH = 1;
-export const MAX_DEPTH = 5;
-export const DEFAULT_DEPTH = MAX_DEPTH;
+export const LENS_PRESETS: Record<
+  LensId,
+  {
+    nodeKindFilters: Record<string, boolean>;
+    symbolKindFilters: Record<string, boolean>;
+    edgeKindFilters: Record<string, boolean>;
+  }
+> = {
+  architecture: {
+    nodeKindFilters: {
+      folder: true,
+      file: true,
+      symbol: true,
+      community: false,
+    },
+    symbolKindFilters: Object.fromEntries(
+      SYMBOL_KIND_FILTERS.map((k) => [k, false]),
+    ),
+    edgeKindFilters: {
+      ContainsDefinition: false,
+      DeclaredInFile: false,
+      FileReference: false,
+      SymbolReference: false,
+      Reads: false,
+      Writes: true,
+      Extends: true,
+      Implements: true,
+      TypeDefines: true,
+      Defines: true,
+      EntryPointOf: true,
+      MemberOf: false,
+      StepInProcess: true,
+    },
+  },
+  calls: {
+    nodeKindFilters: {
+      folder: false,
+      file: false,
+      symbol: true,
+      community: false,
+    },
+    symbolKindFilters: Object.fromEntries(
+      SYMBOL_KIND_FILTERS.map((k) => [
+        k,
+        k === "function" || k === "method" || k === "constructor",
+      ]),
+    ),
+    edgeKindFilters: Object.fromEntries(
+      EDGE_KINDS.map((k) => [k, k === "Defines" || k === "SymbolReference"]),
+    ),
+  },
+  types: {
+    nodeKindFilters: {
+      folder: false,
+      file: false,
+      symbol: true,
+      community: false,
+    },
+    symbolKindFilters: Object.fromEntries(
+      SYMBOL_KIND_FILTERS.map((k) => [
+        k,
+        [
+          "class",
+          "struct",
+          "interface",
+          "trait",
+          "enum",
+          "impl",
+          "type",
+        ].includes(k),
+      ]),
+    ),
+    edgeKindFilters: Object.fromEntries(
+      EDGE_KINDS.map((k) => [
+        k,
+        ["Extends", "Implements", "TypeDefines", "Defines"].includes(k),
+      ]),
+    ),
+  },
+  dataflow: {
+    nodeKindFilters: {
+      folder: false,
+      file: false,
+      symbol: true,
+      community: false,
+    },
+    symbolKindFilters: Object.fromEntries(
+      SYMBOL_KIND_FILTERS.map((k) => [
+        k,
+        k === "function" || k === "method",
+      ]),
+    ),
+    edgeKindFilters: Object.fromEntries(
+      EDGE_KINDS.map((k) => [k, ["Reads", "Writes", "Defines"].includes(k)]),
+    ),
+  },
+};
+
+export type FocusDirection = "dependencies" | "dependents" | "both";
+export const DEFAULT_FOCUS_DIRECTION: FocusDirection = "both";
+export const MIN_DOI_REVEAL_COUNT = 10;
+export const MAX_DOI_REVEAL_COUNT = 100;
+export const DEFAULT_DOI_REVEAL_COUNT = 40;
 
 /**
  * Iter 30: color-mode discriminator for the canvas.
@@ -125,41 +215,6 @@ export const DEFAULT_DEPTH = MAX_DEPTH;
  */
 export type ColorMode = "topology" | "complexity";
 export const DEFAULT_COLOR_MODE: ColorMode = "topology";
-
-export type LayoutMode = "force" | "sequential" | "radial";
-export const DEFAULT_LAYOUT_MODE: LayoutMode = "force";
-
-const LAYOUT_MODE_STORAGE_KEY = "codegraph.layoutMode";
-const LAYOUT_MODES: ReadonlySet<string> = new Set([
-  "force",
-  "sequential",
-  "radial",
-]);
-
-function isLayoutMode(value: string | null): value is LayoutMode {
-  return value !== null && LAYOUT_MODES.has(value);
-}
-
-function readPersistedLayoutMode(): LayoutMode {
-  if (typeof window === "undefined") return DEFAULT_LAYOUT_MODE;
-
-  try {
-    const persisted = window.sessionStorage.getItem(LAYOUT_MODE_STORAGE_KEY);
-    return isLayoutMode(persisted) ? persisted : DEFAULT_LAYOUT_MODE;
-  } catch {
-    return DEFAULT_LAYOUT_MODE;
-  }
-}
-
-function persistLayoutMode(mode: LayoutMode): void {
-  if (typeof window === "undefined") return;
-
-  try {
-    window.sessionStorage.setItem(LAYOUT_MODE_STORAGE_KEY, mode);
-  } catch {
-    // Best-effort UI preference persistence; state updates should still work.
-  }
-}
 
 /**
  * Semantic zoom mode for community-collapse behaviour.
@@ -188,11 +243,14 @@ export interface CodeGraphHighlightState {
    * (canonical `is_test` classification). Default `false` (whole graph).
    */
   hideTests: boolean;
-  depthFilter: number;
+  /** Explicit DOI focus anchor. Kept separate from detail-panel selection. */
+  focusAnchorId: string | null;
+  /** Direction used by downstream dependency/dependent DOI traversal. */
+  focusDirection: FocusDirection;
+  /** Bounded top-N DOI context count to reveal around the focus anchor. */
+  doiRevealCount: number;
   /** Iter 30: see {@link ColorMode}. Default `"topology"`. */
   colorMode: ColorMode;
-  /** Layout algorithm preference for the code graph canvas. */
-  layoutMode: LayoutMode;
   /**
    * Iter 30: `true` when the current snapshot has at least one function
    * node with a populated `cognitive` value. Drives the toolbar's
@@ -220,6 +278,12 @@ export interface CodeGraphHighlightState {
    */
   expandedCommunityIds: Set<string>;
   selectedWorkspaceSlug: string | null;
+  /**
+   * Active intent lens. `null` means the user has manually toggled
+   * individual filters (Advanced mode). Applying a lens replaces all
+   * three filter maps from the preset.
+   */
+  activeLens: LensId | null;
 }
 
 export interface CodeGraphHighlightActions {
@@ -237,11 +301,16 @@ export interface CodeGraphHighlightActions {
   toggleSymbolKind: (kind: string) => void;
   /** v10: toggle hiding of test files/symbols. */
   setHideTests: (hide: boolean) => void;
-  setDepthFilter: (depth: number) => void;
+  /** Set the explicit DOI focus anchor. Selection remains detail-panel state. */
+  setFocusAnchor: (id: string | null) => void;
+  /** Clear the DOI focus anchor without changing selection. */
+  clearFocusAnchor: () => void;
+  /** Direction used by downstream DOI traversal. */
+  setFocusDirection: (direction: FocusDirection) => void;
+  /** Bounded top-N DOI context count. */
+  setDoiRevealCount: (count: number) => void;
   /** Iter 30: switch heatmap mode. */
   setColorMode: (mode: ColorMode) => void;
-  /** Switch the graph layout algorithm and persist the UI preference. */
-  setLayoutMode: (mode: LayoutMode) => void;
   /** Iter 30: canvas reports whether complexity data is present in the snapshot. */
   setComplexityAvailable: (available: boolean) => void;
   /** Canvas reports whether the graph is ready (loaded with at least one node). */
@@ -261,23 +330,9 @@ export interface CodeGraphHighlightActions {
   /** Clear all expanded communities (called on project change). */
   clearExpandedCommunities: () => void;
   setSelectedWorkspaceSlug: (slug: string | null) => void;
+  /** Apply an intent lens, replacing all three filter maps from the preset. */
+  applyLens: (lensId: LensId) => void;
   reset: () => void;
-}
-
-function defaultEdgeKindFilters(): Record<string, boolean> {
-  return Object.fromEntries(
-    EDGE_KINDS.map((k) => [k, !NOISY_EDGE_KINDS.has(k)]),
-  );
-}
-
-function defaultNodeKindFilters(): Record<string, boolean> {
-  return Object.fromEntries(NODE_KINDS.map((k) => [k, true]));
-}
-
-function defaultSymbolKindFilters(): Record<string, boolean> {
-  return Object.fromEntries(
-    SYMBOL_KIND_FILTERS.map((k) => [k, !NOISY_SYMBOL_KINDS.has(k)]),
-  );
 }
 
 const INITIAL_STATE: CodeGraphHighlightState = {
@@ -286,25 +341,26 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   toolHighlightIds: new Set(),
   blastRadiusFrontier: new Set(),
   hoverId: null,
-  edgeKindFilters: defaultEdgeKindFilters(),
-  nodeKindFilters: defaultNodeKindFilters(),
-  symbolKindFilters: defaultSymbolKindFilters(),
+  edgeKindFilters: { ...LENS_PRESETS.architecture.edgeKindFilters },
+  nodeKindFilters: { ...LENS_PRESETS.architecture.nodeKindFilters },
+  symbolKindFilters: { ...LENS_PRESETS.architecture.symbolKindFilters },
   hideTests: false,
-  depthFilter: DEFAULT_DEPTH,
+  focusAnchorId: null,
+  focusDirection: DEFAULT_FOCUS_DIRECTION,
+  doiRevealCount: DEFAULT_DOI_REVEAL_COUNT,
   colorMode: DEFAULT_COLOR_MODE,
-  layoutMode: DEFAULT_LAYOUT_MODE,
   complexityAvailable: false,
   graphReady: false,
   semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
   expandedCommunityIds: new Set<string>(),
   selectedWorkspaceSlug: null,
+  activeLens: "architecture",
 };
 
 export const useCodeGraphStore = create<
   CodeGraphHighlightState & CodeGraphHighlightActions
 >((set) => ({
   ...INITIAL_STATE,
-  layoutMode: readPersistedLayoutMode(),
 
   setSelection: (id) => {
     set({ selectionId: id });
@@ -344,6 +400,7 @@ export const useCodeGraphStore = create<
         ...state.edgeKindFilters,
         [kind]: !(state.edgeKindFilters[kind] ?? true),
       },
+      activeLens: null,
     }));
   },
 
@@ -359,6 +416,7 @@ export const useCodeGraphStore = create<
         ...state.nodeKindFilters,
         [kind]: !(state.nodeKindFilters[kind] ?? true),
       },
+      activeLens: null,
     }));
   },
 
@@ -368,6 +426,7 @@ export const useCodeGraphStore = create<
         ...state.symbolKindFilters,
         [kind]: !(state.symbolKindFilters[kind] ?? true),
       },
+      activeLens: null,
     }));
   },
 
@@ -375,18 +434,31 @@ export const useCodeGraphStore = create<
     set({ hideTests: hide });
   },
 
-  setDepthFilter: (depth) => {
-    const clamped = Math.max(MIN_DEPTH, Math.min(MAX_DEPTH, Math.round(depth)));
-    set({ depthFilter: clamped });
+  setFocusAnchor: (id) => {
+    set({ focusAnchorId: id });
+  },
+
+  clearFocusAnchor: () => {
+    set({ focusAnchorId: null });
+  },
+
+  setFocusDirection: (direction) => {
+    set({ focusDirection: direction });
+  },
+
+  setDoiRevealCount: (count) => {
+    const rounded = Number.isFinite(count)
+      ? Math.round(count)
+      : DEFAULT_DOI_REVEAL_COUNT;
+    const clamped = Math.max(
+      MIN_DOI_REVEAL_COUNT,
+      Math.min(MAX_DOI_REVEAL_COUNT, rounded),
+    );
+    set({ doiRevealCount: clamped });
   },
 
   setColorMode: (mode) => {
     set({ colorMode: mode });
-  },
-
-  setLayoutMode: (mode) => {
-    persistLayoutMode(mode);
-    set({ layoutMode: mode });
   },
 
   setComplexityAvailable: (available) => {
@@ -412,6 +484,16 @@ export const useCodeGraphStore = create<
 
   setSemanticZoomMode: (mode) => {
     set({ semanticZoomMode: mode });
+  },
+
+  applyLens: (lensId) => {
+    const preset = LENS_PRESETS[lensId];
+    set({
+      nodeKindFilters: { ...preset.nodeKindFilters },
+      symbolKindFilters: { ...preset.symbolKindFilters },
+      edgeKindFilters: { ...preset.edgeKindFilters },
+      activeLens: lensId,
+    });
   },
 
   expandCommunity: (communityId) => {
@@ -448,11 +530,11 @@ export const useCodeGraphStore = create<
       citationIds: new Set(),
       toolHighlightIds: new Set(),
       blastRadiusFrontier: new Set(),
-      edgeKindFilters: defaultEdgeKindFilters(),
-      nodeKindFilters: defaultNodeKindFilters(),
-      symbolKindFilters: defaultSymbolKindFilters(),
+      edgeKindFilters: { ...LENS_PRESETS.architecture.edgeKindFilters },
+      nodeKindFilters: { ...LENS_PRESETS.architecture.nodeKindFilters },
+      symbolKindFilters: { ...LENS_PRESETS.architecture.symbolKindFilters },
+      activeLens: "architecture",
       colorMode: DEFAULT_COLOR_MODE,
-      layoutMode: state.layoutMode,
       complexityAvailable: false,
       graphReady: false,
       semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
@@ -487,9 +569,15 @@ export const selectNodeKindFilters = (
 export const selectSymbolKindFilters = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
 ) => s.symbolKindFilters;
-export const selectDepthFilter = (
+export const selectFocusAnchorId = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
-) => s.depthFilter;
-export const selectLayoutMode = (
+) => s.focusAnchorId;
+export const selectActiveLens = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
-) => s.layoutMode;
+) => s.activeLens;
+export const selectFocusDirection = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.focusDirection;
+export const selectDoiRevealCount = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.doiRevealCount;
