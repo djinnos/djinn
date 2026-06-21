@@ -8,6 +8,7 @@ impl CoordinatorActor {
         // (resolved per-task inside the loops below).
         self.poll_pr_draft_tasks().await;
         self.poll_pr_review_tasks().await;
+        self.poll_pr_review_stuck_tasks().await;
     }
 
     // ── pr_draft polling (CI monitoring) ─────────────────────────────────────
@@ -108,6 +109,7 @@ impl CoordinatorActor {
                     .await;
                 self.pr_status_cache.remove(&task.id);
                 self.pr_draft_first_seen.remove(&task.id);
+                self.review_stuck_sha_first_seen.remove(&task.id);
                 continue;
             }
 
@@ -126,6 +128,7 @@ impl CoordinatorActor {
                 .await;
                 self.pr_status_cache.remove(&task.id);
                 self.pr_draft_first_seen.remove(&task.id);
+                self.review_stuck_sha_first_seen.remove(&task.id);
                 continue;
             }
 
@@ -178,6 +181,7 @@ impl CoordinatorActor {
                     if handled {
                         self.pr_status_cache.remove(&task.id);
                         self.pr_draft_first_seen.remove(&task.id);
+                        self.review_stuck_sha_first_seen.remove(&task.id);
                         continue;
                     }
                     // else: only advisory checks failed — fall through to the
@@ -197,6 +201,7 @@ impl CoordinatorActor {
                     AutoMergeFastPathState::Merged => {
                         self.pr_status_cache.remove(&task.id);
                         self.pr_draft_first_seen.remove(&task.id);
+                        self.review_stuck_sha_first_seen.remove(&task.id);
                         continue;
                     }
                     AutoMergeFastPathState::InFlight => {
@@ -221,6 +226,7 @@ impl CoordinatorActor {
                 self.add_conflict_blocker_for_sibling(&task).await;
                 self.pr_status_cache.remove(&task.id);
                 self.pr_draft_first_seen.remove(&task.id);
+                self.review_stuck_sha_first_seen.remove(&task.id);
                 continue;
             }
 
@@ -250,6 +256,7 @@ impl CoordinatorActor {
                         .await;
                     self.pr_status_cache.remove(&task.id);
                     self.pr_draft_first_seen.remove(&task.id);
+                    self.review_stuck_sha_first_seen.remove(&task.id);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -262,6 +269,207 @@ impl CoordinatorActor {
                 }
             }
         }
+    }
+
+    // ── needs_task_review polling (review-stuck CI monitoring) ───────────────
+
+    /// Poll tasks parked in `needs_task_review`: if blocking CI is terminal red
+    /// and the PR head SHA has not advanced for the review-stuck window, route a
+    /// Planner intervention for the reviewer loop with the CI failure details.
+    pub(in crate::actors::coordinator) async fn poll_pr_review_stuck_tasks(&mut self) {
+        let task_repo = self.task_repo();
+        let project_repo = djinn_db::ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let review_tasks = match task_repo.list_by_status("needs_task_review").await {
+            Ok(tasks) => tasks,
+            Err(e) => {
+                tracing::warn!(error = %e, "PR poller: failed to query needs_task_review tasks");
+                return;
+            }
+        };
+
+        let tasks_with_pr: Vec<_> = review_tasks
+            .into_iter()
+            .filter(|t| t.pr_url.is_some())
+            .collect();
+
+        if tasks_with_pr.is_empty() {
+            return;
+        }
+
+        tracing::debug!(
+            count = tasks_with_pr.len(),
+            "PR poller: checking {} needs_task_review task(s) for review-stuck CI",
+            tasks_with_pr.len()
+        );
+
+        for task in tasks_with_pr {
+            let pr_url = task.pr_url.as_deref().unwrap();
+            let Some((owner, repo, pull_number)) = parse_pr_url(pr_url) else {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    pr_url,
+                    "PR poller: unrecognised PR URL format for review-stuck check, skipping"
+                );
+                self.review_stuck_sha_first_seen.remove(&task.id);
+                continue;
+            };
+
+            let gh_client = match resolve_installation_client(&project_repo, &task.project_id).await
+            {
+                Some(c) => c,
+                None => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        project_id = %task.project_id,
+                        "PR poller: no installation_id on project row; skipping review-stuck check"
+                    );
+                    continue;
+                }
+            };
+            let gh_client = &gh_client;
+
+            let (pr, checks) = match gh_client.get_pull_request(&owner, &repo, pull_number).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "PR poller: failed to fetch PR status for review-stuck check"
+                    );
+                    continue;
+                }
+            };
+
+            if pr.merged == Some(true) || pr.state == PrState::Closed {
+                self.review_stuck_sha_first_seen.remove(&task.id);
+                continue;
+            }
+
+            let current_sha = pr.head.sha.clone();
+            if checks.check_runs.is_empty()
+                || !checks.check_runs.iter().all(|cr| cr.status == "completed")
+            {
+                self.review_stuck_sha_first_seen.remove(&task.id);
+                continue;
+            }
+
+            let terminal_red: Vec<&CheckRun> = checks
+                .check_runs
+                .iter()
+                .filter(|cr| is_failing_conclusion(cr.conclusion.as_deref()))
+                .collect();
+            if terminal_red.is_empty() {
+                self.review_stuck_sha_first_seen.remove(&task.id);
+                continue;
+            }
+
+            let required_contexts = self
+                .resolve_required_contexts(gh_client, &owner, &repo, &pr.base.ref_name, pull_number)
+                .await;
+            let blocking = blocking_failed_checks(&terminal_red, required_contexts.as_deref());
+            if blocking.is_empty() {
+                self.review_stuck_sha_first_seen.remove(&task.id);
+                continue;
+            }
+
+            let first_seen = match self.review_stuck_sha_first_seen.get(&task.id) {
+                Some((seen_sha, first_seen)) if seen_sha == &current_sha => *first_seen,
+                _ => {
+                    let now = StdInstant::now();
+                    self.review_stuck_sha_first_seen
+                        .insert(task.id.clone(), (current_sha.clone(), now));
+                    now
+                }
+            };
+
+            let elapsed = first_seen.elapsed();
+            if elapsed < Duration::from_secs((REVIEW_STUCK_WINDOW_MINUTES * 60) as u64) {
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    sha = %current_sha,
+                    elapsed_secs = elapsed.as_secs(),
+                    "PR poller: needs_task_review task has red CI but review-stuck window has not elapsed"
+                );
+                continue;
+            }
+
+            let failing_check_names: Vec<String> =
+                blocking.iter().map(|cr| cr.name.clone()).collect();
+            let sections_text = self
+                .build_review_stuck_ci_failure_sections(gh_client, &owner, &repo, &blocking)
+                .await;
+            let reason = format!(
+                "Task is stuck in needs_task_review with terminal red blocking CI for at least \
+                 {REVIEW_STUCK_WINDOW_MINUTES} minutes on unchanged head SHA `{}`. PR: {}. \
+                 Failing blocking check(s): {}.",
+                &current_sha[..current_sha.len().min(12)],
+                pr_url,
+                failing_check_names.join(", ")
+            );
+
+            self.review_stuck_sha_first_seen.remove(&task.id);
+            let handled = self
+                .route_planner_intervention(&task, "reviewer", &reason, Some(&sections_text))
+                .await;
+            if handled {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    sha = %current_sha,
+                    failing_checks = ?failing_check_names,
+                    "PR poller: review-stuck trigger routed task to Planner intervention"
+                );
+            }
+        }
+    }
+
+    async fn build_review_stuck_ci_failure_sections(
+        &self,
+        gh_client: &GitHubApiClient,
+        owner: &str,
+        repo: &str,
+        blocking: &[&CheckRun],
+    ) -> String {
+        let mut run_ids: Vec<u64> = Vec::new();
+        for cr in blocking {
+            if let Some(rid) = parse_actions_run_id(&cr.html_url)
+                && !run_ids.contains(&rid)
+            {
+                run_ids.push(rid);
+            }
+        }
+
+        let capped = run_ids.len() > MAX_AGGREGATED_CI_RUNS;
+        if capped {
+            run_ids.truncate(MAX_AGGREGATED_CI_RUNS);
+        }
+
+        let mut all_jobs: Vec<ActionsJob> = Vec::new();
+        let mut seen_job_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut any_fetched = false;
+        for rid in &run_ids {
+            if let Ok(jobs) = gh_client.list_run_jobs(owner, repo, *rid).await {
+                any_fetched = true;
+                for job in jobs {
+                    if seen_job_ids.insert(job.id) {
+                        all_jobs.push(job);
+                    }
+                }
+            }
+        }
+
+        let jobs: Option<&[ActionsJob]> = if any_fetched { Some(&all_jobs) } else { None };
+        let (mut sections, _) = build_ci_failure_sections(jobs, blocking);
+        if capped {
+            sections.push(format!(
+                "\n_Note: more than {MAX_AGGREGATED_CI_RUNS} workflow runs failed; \
+                 showing the first {MAX_AGGREGATED_CI_RUNS}._"
+            ));
+        }
+        sections.join("\n")
     }
 
     // ── pr_review polling (review monitoring) ────────────────────────────────

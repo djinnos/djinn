@@ -81,6 +81,7 @@ impl CoordinatorActor {
                 self.apply_pr_merge(&task.id, pr.merge_commit_sha.as_deref())
                     .await;
                 self.pr_status_cache.remove(&task.id);
+                self.review_stuck_sha_first_seen.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
                 self.delegated_to_github.remove(&task.id);
                 self.conversations_resolved.remove(&task.id);
@@ -101,6 +102,7 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.review_stuck_sha_first_seen.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
                 self.delegated_to_github.remove(&task.id);
                 self.conversations_resolved.remove(&task.id);
@@ -241,6 +243,7 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.review_stuck_sha_first_seen.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
                 self.delegated_to_github.remove(&task.id);
                 self.conversations_resolved.remove(&task.id);
@@ -293,6 +296,7 @@ impl CoordinatorActor {
                         .await;
                     if handled {
                         self.pr_status_cache.remove(&task.id);
+                        self.review_stuck_sha_first_seen.remove(&task.id);
                         self.merge_fail_count.remove(&task.id);
                         self.delegated_to_github.remove(&task.id);
                         self.conversations_resolved.remove(&task.id);
@@ -323,6 +327,7 @@ impl CoordinatorActor {
                 match self.poll_auto_merge_fast_path(&task.id, &task.short_id, &task.project_id) {
                     AutoMergeFastPathState::Merged => {
                         self.pr_status_cache.remove(&task.id);
+                        self.review_stuck_sha_first_seen.remove(&task.id);
                         self.merge_fail_count.remove(&task.id);
                         self.delegated_to_github.remove(&task.id);
                         self.conversations_resolved.remove(&task.id);
@@ -346,6 +351,7 @@ impl CoordinatorActor {
                 // reopen above) instead of looping on the moving main.
                 self.add_conflict_blocker_for_sibling(&task).await;
                 self.pr_status_cache.remove(&task.id);
+                self.review_stuck_sha_first_seen.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
                 self.delegated_to_github.remove(&task.id);
                 self.conversations_resolved.remove(&task.id);
@@ -402,6 +408,7 @@ impl CoordinatorActor {
                         // entry was pinned to the prior SHA and is now
                         // invalidated by update-branch.
                         self.pr_status_cache.remove(&task.id);
+                        self.review_stuck_sha_first_seen.remove(&task.id);
                         self.merge_fail_count.remove(&task.id);
                         self.delegated_to_github.remove(&task.id);
                         self.conversations_resolved.remove(&task.id);
@@ -442,6 +449,7 @@ impl CoordinatorActor {
                             AutoMergeFastPathState::Merged
                         ) {
                             self.pr_status_cache.remove(&task.id);
+                            self.review_stuck_sha_first_seen.remove(&task.id);
                             self.merge_fail_count.remove(&task.id);
                             self.delegated_to_github.remove(&task.id);
                             self.conversations_resolved.remove(&task.id);
@@ -627,6 +635,7 @@ impl CoordinatorActor {
                     self.apply_pr_merge(&task.id, merge_commit_sha.as_deref())
                         .await;
                     self.pr_status_cache.remove(&task.id);
+                    self.review_stuck_sha_first_seen.remove(&task.id);
                     self.merge_fail_count.remove(&task.id);
                     self.delegated_to_github.remove(&task.id);
                     self.handled_dequeues.remove(&task.id);
