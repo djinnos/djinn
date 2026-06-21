@@ -591,6 +591,41 @@ export function edgeStyleFor(kind: string): EdgeStyle {
   return EDGE_STYLES[kind] ?? DEFAULT_EDGE_STYLE;
 }
 
+/**
+ * Edge kinds that express *containment* — structural nesting between
+ * a container (file / type) and its contained definition / member.
+ * These are never drawn as Sigma edges and never traversed by the
+ * reducer / DOI frontier. Instead the adapter converts them into
+ * `parentId` nesting metadata on the child node so the rendering layer
+ * can position symbols inside their containing region.
+ *
+ * Exported so the reducers, DOI traversal, and store toggle guard can
+ * reuse the same policy instead of each re-deriving the set.
+ */
+export const CONTAINMENT_EDGE_KINDS = new Set([
+  "ContainsDefinition",
+  "DeclaredInFile",
+  "MemberOf",
+]);
+
+/** True when `kind` is a containment edge (never drawn / traversed). */
+export function isContainmentEdgeKind(kind: string): boolean {
+  return CONTAINMENT_EDGE_KINDS.has(kind);
+}
+
+function containmentEndpoints(edge: SnapshotEdge): {
+  parentId: string;
+  childId: string;
+} | null {
+  if (edge.kind === "ContainsDefinition") {
+    return { parentId: edge.from, childId: edge.to };
+  }
+  if (edge.kind === "DeclaredInFile" || edge.kind === "MemberOf") {
+    return { parentId: edge.to, childId: edge.from };
+  }
+  return null;
+}
+
 /** Base size scales with graph density — denser graphs get thinner strokes. */
 function edgeBaseSize(nodeCount: number): number {
   if (nodeCount > 20000) return 0.4;
@@ -603,8 +638,6 @@ function edgeBaseSize(nodeCount: number): number {
 export interface BuildGraphOptions {
   /** Drop self-loops? Default `true`. */
   dropSelfLoops?: boolean;
-  /** Drop `MemberOf` edges (scaffolding). Default `false`. */
-  dropMemberOf?: boolean;
 }
 
 /**
@@ -671,7 +704,6 @@ export function buildGraphFromSnapshot(
   options: BuildGraphOptions = {},
 ): Graph {
   const dropSelfLoops = options.dropSelfLoops ?? true;
-  const dropMemberOf = options.dropMemberOf ?? false;
   const graph = new Graph({ multi: true, type: "directed" });
 
   // Communities are background hull metadata, not visible graph nodes.
@@ -716,8 +748,8 @@ export function buildGraphFromSnapshot(
     }
     addEdgesFromSnapshot(graph, snapshot, nodeCount, {
       dropSelfLoops,
-      dropMemberOf,
     });
+    applyContainmentNesting(graph, snapshot);
     graph.setAttribute(PRECOMPUTED_LAYOUT_ATTRIBUTE, true);
     return graph;
   }
@@ -737,11 +769,13 @@ export function buildGraphFromSnapshot(
   // Edges — per-kind colors, base scaled by graph density, modulated
   // by per-edge confidence so hand-resolved edges trail brighter than
   // weak heuristic ones. Extracted so the precomputed-coords branch
-  // above reuses the same edge-rendering pipeline.
+  // above reuses the same edge-rendering pipeline. Containment edges
+  // (ContainsDefinition / DeclaredInFile / MemberOf) are excluded here
+  // and converted into nesting metadata by `applyContainmentNesting`.
   addEdgesFromSnapshot(graph, snapshot, nodeCount, {
     dropSelfLoops,
-    dropMemberOf,
   });
+  applyContainmentNesting(graph, snapshot);
 
   return graph;
 }
@@ -750,13 +784,17 @@ function addEdgesFromSnapshot(
   graph: Graph,
   snapshot: SnapshotPayload,
   nodeCount: number,
-  options: { dropSelfLoops: boolean; dropMemberOf: boolean },
+  options: { dropSelfLoops: boolean },
 ): void {
-  const { dropSelfLoops, dropMemberOf } = options;
+  const { dropSelfLoops } = options;
   const nodeMap = new Map(snapshot.nodes.map((n) => [n.id, n]));
   const baseSize = edgeBaseSize(nodeCount);
   for (const edge of snapshot.edges) {
-    if (dropMemberOf && edge.kind === "MemberOf") continue;
+    // Containment edges (ContainsDefinition / DeclaredInFile /
+    // MemberOf) are structural nesting metadata, not drawn or
+    // traversable edges. They are converted into `parentId` /
+    // `childIds` nesting metadata by `applyContainmentNesting`.
+    if (isContainmentEdgeKind(edge.kind)) continue;
     if (!graph.hasNode(edge.from) || !graph.hasNode(edge.to)) continue;
     if (dropSelfLoops && edge.from === edge.to) continue;
     const style = edgeStyleFor(edge.kind);
@@ -788,6 +826,46 @@ function addEdgesFromSnapshot(
       zIndex: isCrossWorkspace ? 20 : 1,
       lineStyle: isCrossWorkspace ? "dashed" : "solid",
     });
+  }
+}
+
+/**
+ * Convert raw containment edges (`ContainsDefinition`, `DeclaredInFile`,
+ * `MemberOf`) into nesting metadata on graphology nodes. For each
+ * containment edge the adapter sets `parentId` on the child node and
+ * accumulates `childIds` on the parent. The rendering layer (LOD /
+ * hull canvas) uses this to draw symbols inside their containing file
+ * or type region instead of drawing containment edges.
+ *
+ * Edge direction follows the server convention: `ContainsDefinition`
+ * points parent → child, while `DeclaredInFile` / `MemberOf` point
+ * child → parent. Both endpoints must already exist as graphology
+ * nodes — containment edges to absent nodes are silently skipped.
+ */
+function applyContainmentNesting(
+  graph: Graph,
+  snapshot: SnapshotPayload,
+): void {
+  for (const edge of snapshot.edges) {
+    const endpoints = containmentEndpoints(edge);
+    if (endpoints === null) continue;
+    const { parentId, childId } = endpoints;
+    if (!graph.hasNode(parentId) || !graph.hasNode(childId)) continue;
+    // The child may already carry a parentId from a higher-specificity
+    // containment edge (e.g. MemberOf over ContainsDefinition). We keep
+    // the first one encountered so the nesting tree stays deterministic.
+    const existingParent = graph.getNodeAttribute(childId, "parentId");
+    if (typeof existingParent === "string" && existingParent.length > 0) {
+      continue;
+    }
+    graph.setNodeAttribute(childId, "parentId", parentId);
+    const children = graph.getNodeAttribute(parentId, "childIds");
+    if (Array.isArray(children)) {
+      children.push(childId);
+      graph.setNodeAttribute(parentId, "childIds", children);
+    } else {
+      graph.setNodeAttribute(parentId, "childIds", [childId]);
+    }
   }
 }
 

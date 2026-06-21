@@ -10,12 +10,14 @@ use tokio_util::sync::CancellationToken;
 use super::consolidation::{ConsolidationRunner, DbConsolidationRunner};
 use super::health;
 use super::messages::CoordinatorMessage;
+use super::pr_poller::parse_pr_url;
+use super::pr_poller::pr_cleanup::{BranchCleanupOutcome, PrCleanupPolicy, PrCleanupPolicyConfig};
 use super::types::*;
 use crate::actors::slot::SlotPoolHandle;
 use crate::roles::RoleRegistry;
 use djinn_control_plane::bridge::RuntimeOps;
 use djinn_core::events::DjinnEventEnvelope;
-use djinn_core::models::parse_json_array;
+use djinn_core::models::{Task, parse_json_array};
 use djinn_db::Database;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
@@ -24,6 +26,7 @@ use djinn_db::{
 };
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
+use djinn_provider::github_api::{GitHubApiClient, PrState};
 use djinn_provider::rate_limit::suppression_remaining;
 
 // ─── Actor (≤20 fields — AGENT-11) ───────────────────────────────────────────
@@ -211,6 +214,18 @@ pub(super) struct CoordinatorActor {
     // Metrics
     pub(super) dispatched: u64,
     pub(super) recovered: u64,
+}
+
+/// Terminal-close cleanup flavor for PR/branch cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(in crate::actors::coordinator) enum CloseKind {
+    /// Task closed without merging its associated PR; close the bot PR before
+    /// deleting the task branch when guardrails allow it.
+    NonMerge,
+    /// Task closed because its associated PR merged; only delete the head branch
+    /// as an idempotent backstop.
+    Merge,
 }
 
 #[cfg(test)]
@@ -1407,6 +1422,390 @@ impl CoordinatorActor {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         )
+    }
+
+    #[allow(dead_code)]
+    pub(in crate::actors::coordinator) async fn cleanup_pr_and_branch_on_close(
+        &self,
+        task: &Task,
+        close_kind: CloseKind,
+    ) {
+        let Some(pr_url) = task.pr_url.as_deref() else {
+            self.log_pr_cleanup_activity(
+                task,
+                serde_json::json!({
+                    "close_kind": format!("{close_kind:?}"),
+                    "action": "skip_pr_cleanup",
+                    "outcome": "skipped",
+                    "reason": "task_has_no_pr_url",
+                }),
+            )
+            .await;
+            return;
+        };
+
+        let Some((owner, repo, pull_number)) = parse_pr_url(pr_url) else {
+            tracing::warn!(
+                task_id = %task.short_id,
+                pr_url,
+                "Coordinator terminal cleanup: unrecognised PR URL format; skipping PR/branch cleanup"
+            );
+            self.log_pr_cleanup_activity(
+                task,
+                serde_json::json!({
+                    "close_kind": format!("{close_kind:?}"),
+                    "action": "parse_pr_url",
+                    "outcome": "skipped",
+                    "pr_url": pr_url,
+                    "reason": "unrecognised_pr_url",
+                }),
+            )
+            .await;
+            return;
+        };
+
+        let project_repo = ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let gh_client = match project_repo.get_installation_id(&task.project_id).await {
+            Ok(Some(id)) => GitHubApiClient::for_installation(id),
+            Ok(None) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    project_id = %task.project_id,
+                    "Coordinator terminal cleanup: no installation_id on project row; skipping"
+                );
+                self.log_pr_cleanup_activity(
+                    task,
+                    serde_json::json!({
+                        "close_kind": format!("{close_kind:?}"),
+                        "action": "resolve_installation",
+                        "outcome": "skipped",
+                        "pr_number": pull_number,
+                        "reason": "missing_installation_id",
+                    }),
+                )
+                .await;
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    project_id = %task.project_id,
+                    error = %e,
+                    "Coordinator terminal cleanup: failed to read installation_id; skipping"
+                );
+                self.log_pr_cleanup_activity(
+                    task,
+                    serde_json::json!({
+                        "close_kind": format!("{close_kind:?}"),
+                        "action": "resolve_installation",
+                        "outcome": "error",
+                        "pr_number": pull_number,
+                        "error": e.to_string(),
+                    }),
+                )
+                .await;
+                return;
+            }
+        };
+
+        let policy = PrCleanupPolicy::new(
+            gh_client.clone(),
+            PrCleanupPolicyConfig {
+                owner: owner.clone(),
+                repo: repo.clone(),
+                ..PrCleanupPolicyConfig::default()
+            },
+        );
+
+        let pr = match gh_client.get_pull_request(&owner, &repo, pull_number).await {
+            Ok((pr, _checks)) => pr,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    error = %e,
+                    "Coordinator terminal cleanup: failed to fetch PR; skipping cleanup"
+                );
+                self.log_pr_cleanup_activity(
+                    task,
+                    serde_json::json!({
+                        "close_kind": format!("{close_kind:?}"),
+                        "action": "fetch_pull_request",
+                        "outcome": "error",
+                        "pr_number": pull_number,
+                        "error": e.to_string(),
+                    }),
+                )
+                .await;
+                return;
+            }
+        };
+
+        match close_kind {
+            CloseKind::NonMerge => {
+                let should_cleanup = match policy.should_cleanup_pr(task, &pr).await {
+                    Ok(should_cleanup) => should_cleanup,
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            error = %e,
+                            "Coordinator terminal cleanup: PR guardrail check failed; skipping cleanup"
+                        );
+                        self.log_pr_cleanup_activity(
+                            task,
+                            serde_json::json!({
+                                "close_kind": "NonMerge",
+                                "action": "check_pr_cleanup_guardrails",
+                                "outcome": "error",
+                                "pr_number": pull_number,
+                                "branch": pr.head.ref_name,
+                                "error": e.to_string(),
+                            }),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                if !should_cleanup {
+                    self.log_pr_cleanup_activity(
+                        task,
+                        serde_json::json!({
+                            "close_kind": "NonMerge",
+                            "action": "check_pr_cleanup_guardrails",
+                            "outcome": "skipped",
+                            "pr_number": pull_number,
+                            "branch": pr.head.ref_name,
+                        }),
+                    )
+                    .await;
+                    return;
+                }
+
+                let head_branch = pr.head.ref_name.as_str();
+                if policy.config().protected_branches.contains(head_branch)
+                    || (!policy.config().allowed_branch_prefixes.is_empty()
+                        && !policy
+                            .config()
+                            .allowed_branch_prefixes
+                            .iter()
+                            .any(|prefix| head_branch.starts_with(prefix)))
+                {
+                    self.log_pr_cleanup_activity(
+                        task,
+                        serde_json::json!({
+                            "close_kind": "NonMerge",
+                            "action": "check_pr_head_branch_guardrails",
+                            "outcome": "skipped",
+                            "pr_number": pull_number,
+                            "branch": head_branch,
+                            "reason": "protected_or_disallowed_pr_head_branch",
+                        }),
+                    )
+                    .await;
+                    return;
+                }
+
+                if pr.state == PrState::Closed {
+                    self.log_pr_cleanup_activity(
+                        task,
+                        serde_json::json!({
+                            "close_kind": "NonMerge",
+                            "action": "close_pull_request",
+                            "outcome": "success",
+                            "idempotent": true,
+                            "pr_number": pull_number,
+                            "reason": "pr_already_closed",
+                        }),
+                    )
+                    .await;
+                } else if policy.config().dry_run {
+                    self.log_pr_cleanup_activity(
+                        task,
+                        serde_json::json!({
+                            "close_kind": "NonMerge",
+                            "action": "close_pull_request",
+                            "outcome": "dry_run",
+                            "pr_number": pull_number,
+                        }),
+                    )
+                    .await;
+                } else {
+                    let comment = format!(
+                        "Closing this PR because task `{}` (`{}`) was closed without merge. The task branch will be cleaned up if guardrails allow it.",
+                        task.short_id, task.title
+                    );
+                    match gh_client
+                        .close_pull_request(&owner, &repo, pull_number)
+                        .await
+                    {
+                        Ok(_) => {
+                            self.log_pr_cleanup_activity(
+                                task,
+                                serde_json::json!({
+                                    "close_kind": "NonMerge",
+                                    "action": "close_pull_request",
+                                    "outcome": "success",
+                                    "pr_number": pull_number,
+                                }),
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                pr = pull_number,
+                                error = %e,
+                                "Coordinator terminal cleanup: failed to close PR; continuing to branch cleanup"
+                            );
+                            self.log_pr_cleanup_activity(
+                                task,
+                                serde_json::json!({
+                                    "close_kind": "NonMerge",
+                                    "action": "close_pull_request",
+                                    "outcome": "error",
+                                    "pr_number": pull_number,
+                                    "error": e.to_string(),
+                                }),
+                            )
+                            .await;
+                        }
+                    }
+
+                    match gh_client
+                        .create_pr_comment(&owner, &repo, pull_number, &comment)
+                        .await
+                    {
+                        Ok(_) => {
+                            self.log_pr_cleanup_activity(
+                                task,
+                                serde_json::json!({
+                                    "close_kind": "NonMerge",
+                                    "action": "create_pr_comment",
+                                    "outcome": "success",
+                                    "pr_number": pull_number,
+                                }),
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                pr = pull_number,
+                                error = %e,
+                                "Coordinator terminal cleanup: failed to create PR cleanup comment"
+                            );
+                            self.log_pr_cleanup_activity(
+                                task,
+                                serde_json::json!({
+                                    "close_kind": "NonMerge",
+                                    "action": "create_pr_comment",
+                                    "outcome": "error",
+                                    "pr_number": pull_number,
+                                    "error": e.to_string(),
+                                }),
+                            )
+                            .await;
+                        }
+                    }
+                }
+
+                let branch = format!("task/{}", task.short_id);
+                self.delete_cleanup_branch(task, &policy, close_kind, &branch, pull_number)
+                    .await;
+            }
+            CloseKind::Merge => {
+                self.delete_cleanup_branch(
+                    task,
+                    &policy,
+                    close_kind,
+                    &pr.head.ref_name,
+                    pull_number,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn delete_cleanup_branch(
+        &self,
+        task: &Task,
+        policy: &PrCleanupPolicy<GitHubApiClient>,
+        close_kind: CloseKind,
+        branch: &str,
+        pull_number: u64,
+    ) {
+        match policy.delete_branch_if_allowed(task, branch).await {
+            Ok(outcome) => {
+                let outcome_label = match outcome {
+                    BranchCleanupOutcome::Skipped => "skipped",
+                    BranchCleanupOutcome::DryRunWouldDelete => "dry_run",
+                    BranchCleanupOutcome::Deleted => "success",
+                };
+                self.log_pr_cleanup_activity(
+                    task,
+                    serde_json::json!({
+                        "close_kind": format!("{close_kind:?}"),
+                        "action": "delete_branch",
+                        "outcome": outcome_label,
+                        "pr_number": pull_number,
+                        "branch": branch,
+                    }),
+                )
+                .await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    branch,
+                    error = %e,
+                    "Coordinator terminal cleanup: failed to delete branch"
+                );
+                self.log_pr_cleanup_activity(
+                    task,
+                    serde_json::json!({
+                        "close_kind": format!("{close_kind:?}"),
+                        "action": "delete_branch",
+                        "outcome": "error",
+                        "pr_number": pull_number,
+                        "branch": branch,
+                        "error": e.to_string(),
+                    }),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn log_pr_cleanup_activity(&self, task: &Task, mut payload: serde_json::Value) {
+        if let serde_json::Value::Object(ref mut object) = payload {
+            object.insert(
+                "kind".to_string(),
+                serde_json::Value::String("terminal_pr_cleanup".to_string()),
+            );
+        }
+        let payload = payload.to_string();
+        if let Err(e) = self
+            .task_repo()
+            .log_activity(
+                Some(&task.id),
+                "coordinator",
+                "system",
+                "pr_cleanup",
+                &payload,
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "Coordinator terminal cleanup: failed to log cleanup activity"
+            );
+        }
     }
 
     // ── ADR-051 §7 exit-recheck + stale sweep ────────────────────────────────

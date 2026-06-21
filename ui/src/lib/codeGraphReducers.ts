@@ -33,6 +33,19 @@ import {
 } from "./codeGraphAdapter";
 
 /**
+ * Containment edge kinds that must never participate in traversal or
+ * highlight expansion. Mirrors `CONTAINMENT_EDGE_KINDS` in
+ * `codeGraphAdapter.ts` but duplicated here so the reducers module
+ * stays free of the adapter dependency (reducers are pure / testable
+ * without graphology). The two sets must stay in sync.
+ */
+export const TRAVERSAL_CONTAINMENT_EDGE_KINDS = new Set([
+  "ContainsDefinition",
+  "DeclaredInFile",
+  "MemberOf",
+]);
+
+/**
  * Mirror of graphology's `Attributes` shape — graphology-types isn't
  * a direct dependency in this repo, so we widen-locally rather than
  * pull in another package just for an alias.
@@ -676,8 +689,16 @@ export function edgeReducer(
   attrs: Attributes,
   view: HighlightView,
 ): Attributes {
-  // Edge-kind toggle. Default true for unknown kinds.
+  // Containment edges are never drawn. Even though the adapter excludes
+  // them at build time, this guard ensures any containment edge that
+  // slips through (legacy graph, direct Sigma mutation) is hidden
+  // regardless of the store filter state.
   const edgeKind = attrEdgeKind(attrs);
+  if (edgeKind !== null && isTraversalContainmentEdge(edgeKind)) {
+    return { ...attrs, hidden: true };
+  }
+
+  // Edge-kind toggle. Default true for unknown kinds.
   if (edgeKind !== null) {
     const enabled = view.edgeKindFilters[edgeKind];
     if (enabled === false) return { ...attrs, hidden: true };
@@ -745,6 +766,38 @@ export interface MinimalGraph {
   neighbors(id: string): string[];
 }
 
+/**
+ * Extended minimal graph that can inspect edge kinds so traversal
+ * helpers (1-hop neighborhood) can skip containment edges. The
+ * `edgeKind` function returns the relationship kind for the edge
+ * between two adjacent nodes, or `null` when the edge is missing or
+ * carries no kind.
+ */
+export interface EdgeKindAwareGraph extends MinimalGraph {
+  /**
+   * Return the edge kind between `source` and `target` (in either
+   * direction), or `null` if no edge connects them.
+   */
+  edgeKind(source: string, target: string): string | null;
+}
+
+/** True when `kind` is a containment edge excluded from traversal. */
+export function isTraversalContainmentEdge(kind: string | null): boolean {
+  return kind !== null && TRAVERSAL_CONTAINMENT_EDGE_KINDS.has(kind);
+}
+
+/**
+ * Compute the 1-hop neighborhood of `nodeId` (inclusive of `nodeId`
+ * itself). Walks both incoming and outgoing edges so the visual
+ * "neighborhood" highlight is undirected — that matches user mental
+ * model better than a strict outbound walk.
+ *
+ * When `graph` implements {@link EdgeKindAwareGraph}, containment edges
+ * (`ContainsDefinition`, `DeclaredInFile`, `MemberOf`) are excluded
+ * so the selection frontier does not expand through structural
+ * nesting. Plain {@link MinimalGraph} callers get the legacy
+ * unfiltered behavior.
+ */
 export function oneHopNeighborhood(
   graph: MinimalGraph,
   nodeId: string,
@@ -752,6 +805,14 @@ export function oneHopNeighborhood(
   const out = new Set<string>();
   if (!graph.hasNode(nodeId)) return out;
   out.add(nodeId);
-  for (const n of graph.neighbors(nodeId)) out.add(n);
+  const hasEdgeKind =
+    typeof (graph as Partial<EdgeKindAwareGraph>).edgeKind === "function";
+  for (const n of graph.neighbors(nodeId)) {
+    if (hasEdgeKind) {
+      const kind = (graph as EdgeKindAwareGraph).edgeKind(nodeId, n);
+      if (isTraversalContainmentEdge(kind)) continue;
+    }
+    out.add(n);
+  }
   return out;
 }
