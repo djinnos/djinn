@@ -208,6 +208,10 @@ pub(super) struct CoordinatorActor {
     pub(super) idle_consolidation_cancel: Option<CancellationToken>,
     /// Join handle for the spawned idle consolidation task.
     pub(super) idle_consolidation_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Inline PR/branch cleanup configuration. Consumed by the inline cleanup
+    /// hook in the terminal-close dispatch paths (sibling task hrv6).
+    #[allow(dead_code)]
+    pub(super) pr_cleanup_config: PrCleanupConfig,
     // Metrics
     pub(super) dispatched: u64,
     pub(super) recovered: u64,
@@ -348,6 +352,7 @@ impl CoordinatorActor {
             mirror,
             runtime_ops,
             rpc_registry,
+            pr_cleanup_config,
         } = deps;
         let events = events_tx.subscribe();
         let mut tick = time::interval(STUCK_INTERVAL);
@@ -399,6 +404,7 @@ impl CoordinatorActor {
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,
+            pr_cleanup_config,
             dispatched: 0,
             recovered: 0,
         }

@@ -122,6 +122,56 @@ pub enum AutoMergeFastPathState {
 /// record its outcome without touching `&mut self`.
 pub type AutoMergeTracker = Arc<std::sync::Mutex<HashMap<String, AutoMergeFastPathState>>>;
 
+/// Runtime configuration for the inline PR/branch cleanup hook that fires
+/// when a task transitions to a terminal CLOSED state.
+///
+/// This config is threaded into [`PrCleanupPolicy`] at coordinator startup.
+/// When `dry_run` is true, every cleanup decision logs at `info` level
+/// without making GitHub API calls.
+#[derive(Debug, Clone)]
+pub struct PrCleanupConfig {
+    /// Master switch — when false, no cleanup actions are taken.
+    pub enabled: bool,
+    /// When true, log intended actions but do not execute GitHub API calls.
+    pub dry_run: bool,
+    /// Seconds to wait after task close before acting on the PR/branch.
+    /// Default: 600 (10 minutes) to absorb merge→close reconciliation lag.
+    pub grace_period_secs: u64,
+    /// Branches that must never be deleted (e.g. `["main"]`).
+    pub protected_branches: Vec<String>,
+}
+
+impl Default for PrCleanupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dry_run: false,
+            grace_period_secs: 600,
+            protected_branches: vec!["main".to_string()],
+        }
+    }
+}
+
+impl PrCleanupConfig {
+    /// Convert to the policy-level config used by [`PrCleanupPolicy`].
+    #[allow(dead_code)]
+    pub(crate) fn to_policy_config(
+        &self,
+        owner: impl Into<String>,
+        repo: impl Into<String>,
+    ) -> super::pr_poller::pr_cleanup::PrCleanupPolicyConfig {
+        super::pr_poller::pr_cleanup::PrCleanupPolicyConfig {
+            enabled: self.enabled,
+            dry_run: self.dry_run,
+            grace_period: Duration::from_secs(self.grace_period_secs),
+            owner: owner.into(),
+            repo: repo.into(),
+            protected_branches: self.protected_branches.iter().cloned().collect(),
+            ..super::pr_poller::pr_cleanup::PrCleanupPolicyConfig::default()
+        }
+    }
+}
+
 pub struct CoordinatorDeps {
     pub events_tx: broadcast::Sender<DjinnEventEnvelope>,
     pub cancel: CancellationToken,
@@ -154,6 +204,8 @@ pub struct CoordinatorDeps {
     /// worker is never false-reaped. `None` in off-server/test contexts, where
     /// the reaper falls back to its DB/activity heuristics.
     pub rpc_registry: Option<Arc<ConnectionRegistry>>,
+    /// Runtime configuration for the inline PR/branch cleanup hook.
+    pub pr_cleanup_config: PrCleanupConfig,
 }
 
 impl CoordinatorDeps {
@@ -184,6 +236,7 @@ impl CoordinatorDeps {
             mirror: None,
             runtime_ops: None,
             rpc_registry: None,
+            pr_cleanup_config: PrCleanupConfig::default(),
         }
     }
 
@@ -217,6 +270,12 @@ impl CoordinatorDeps {
     /// slot/activity bookkeeping. Off-server tests omit this.
     pub fn with_rpc_registry(mut self, registry: Arc<ConnectionRegistry>) -> Self {
         self.rpc_registry = Some(registry);
+        self
+    }
+
+    /// Override the default inline PR/branch cleanup configuration.
+    pub fn with_pr_cleanup_config(mut self, config: PrCleanupConfig) -> Self {
+        self.pr_cleanup_config = config;
         self
     }
 }
