@@ -581,13 +581,7 @@ function ProposalDetailView({
         <div className="space-y-2" ref={specContainerRef} data-testid="proposal-spec">
           <Label className="text-xs uppercase text-muted-foreground">Spec</Label>
           {proposal.body_format === "mdx" ? (
-            <BlockRenderer
-              body={proposal.body || ""}
-              feedback={feedback}
-              proposal={proposal}
-              canEdit={canDirectEdit}
-              onChanged={onChanged}
-            />
+            <BlockRenderer body={proposal.body || ""} />
           ) : (
             <div className="prose prose-sm max-w-none dark:prose-invert">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
@@ -610,7 +604,6 @@ function ProposalDetailView({
         <FeedbackThread
           proposal={proposal}
           feedback={feedback}
-          includeAnchoredFeedback={proposal.body_format !== "mdx"}
           canEdit={canDirectEdit}
           onChanged={onChanged}
         />
@@ -624,15 +617,11 @@ function ProposalDetailView({
 export function FeedbackThread({
   proposal,
   feedback,
-  blockId,
-  includeAnchoredFeedback = false,
   canEdit,
   onChanged,
 }: {
   proposal: Proposal;
   feedback: ProposalFeedback[];
-  blockId?: string;
-  includeAnchoredFeedback?: boolean;
   canEdit: boolean;
   onChanged: () => void;
 }) {
@@ -660,14 +649,8 @@ export function FeedbackThread({
     }
   };
 
-  const scopedFeedback = feedback.filter((f) => {
-    if (blockId) return f.target_section === blockId;
-    if (includeAnchoredFeedback) return true;
-    return f.target_section == null;
-  });
-  const unresolved = scopedFeedback.filter((f) => f.resolved_at == null);
-  const resolved = scopedFeedback.filter((f) => f.resolved_at != null);
-  const compact = Boolean(blockId);
+  const unresolved = feedback.filter((f) => f.resolved_at == null);
+  const resolved = feedback.filter((f) => f.resolved_at != null);
 
   const authorHeader = (f: ProposalFeedback) => (
     <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
@@ -679,22 +662,17 @@ export function FeedbackThread({
           <span className="font-medium text-foreground">{authorName(f)}</span>
         </span>
       )}
-      {f.target_section && !compact && <span>· {f.target_section}</span>}
       <span>· {relativeTime(f.created_at)}</span>
       <CopyButton text={f.body} label="Copy comment" className="ml-auto" />
     </div>
   );
 
   return (
-    <div className={compact ? "space-y-3" : "space-y-4"}>
+    <div className="space-y-4">
       <div className="flex items-center justify-between">
-        {compact ? (
-          <Badge variant="secondary">{scopedFeedback.length}</Badge>
-        ) : (
-          <Label className="text-xs uppercase text-muted-foreground">Feedback</Label>
-        )}
+        <Label className="text-xs uppercase text-muted-foreground">Feedback</Label>
         <div className="flex items-center gap-2">
-          {!compact && unresolved.length > 0 && (
+          {unresolved.length > 0 && (
             <Badge variant="secondary">{unresolved.length} unresolved</Badge>
           )}
           {canEdit && (
@@ -702,7 +680,7 @@ export function FeedbackThread({
               size="sm"
               variant="outline"
               className="gap-1.5"
-              onClick={() => startChat(proposal, undefined, undefined, blockId)}
+              onClick={() => startChat(proposal)}
             >
               <HugeiconsIcon icon={Robot01Icon} size={15} />
               Ask djinn
@@ -713,27 +691,13 @@ export function FeedbackThread({
 
       <div className="space-y-3">
         {unresolved.length === 0 && (
-          <p
-            className={
-              compact
-                ? "text-xs text-muted-foreground"
-                : "text-sm text-muted-foreground"
-            }
-          >
-            {compact
-              ? "No open feedback for this block."
-              : "No open feedback. Reviewers can leave feedback via the djinn MCP, and you can ask djinn to apply it."}
+          <p className="text-sm text-muted-foreground">
+            No open feedback. Reviewers can leave feedback via the djinn MCP, and
+            you can ask djinn to apply it.
           </p>
         )}
         {unresolved.map((f) => (
-          <div
-            key={f.id}
-            className={
-              compact
-                ? "rounded-md border bg-muted/40 p-2"
-                : "rounded-md border bg-muted/40 p-3"
-            }
-          >
+          <div key={f.id} className="rounded-md border bg-muted/40 p-3">
             {authorHeader(f)}
             <div className="prose prose-sm max-w-none dark:prose-invert">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{f.body}</ReactMarkdown>
@@ -744,7 +708,7 @@ export function FeedbackThread({
                   size="sm"
                   variant="outline"
                   className="gap-1.5"
-                  onClick={() => startChat(proposal, f, authorName(f), blockId)}
+                  onClick={() => startChat(proposal, f, authorName(f))}
                 >
                   <HugeiconsIcon icon={Robot01Icon} size={15} />
                   Address with djinn
@@ -770,14 +734,7 @@ export function FeedbackThread({
           {showResolved && (
             <div className="space-y-3 opacity-70">
               {resolved.map((f) => (
-                <div
-                  key={f.id}
-                  className={
-                    compact
-                      ? "rounded-md border bg-muted/20 p-2"
-                      : "rounded-md border bg-muted/20 p-3"
-                  }
-                >
+                <div key={f.id} className="rounded-md border bg-muted/20 p-3">
                   {authorHeader(f)}
                   <div className="prose prose-sm max-w-none dark:prose-invert">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{f.body}</ReactMarkdown>

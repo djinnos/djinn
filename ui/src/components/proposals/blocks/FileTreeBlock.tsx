@@ -1,31 +1,27 @@
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-
 import type { BlockProps } from "./types";
+import { BlockShell } from "./BlockShell";
 
-export function FileTreeBlock({ id, attributes, children }: BlockProps) {
+/**
+ * FileTree — renders the tree source as preformatted monospace text. We
+ * deliberately do NOT run it through markdown: markdown collapses the single
+ * newlines that give a file tree its shape into one run-on paragraph, which is
+ * exactly the "where's my tree?" bug. `whitespace-pre` keeps the author's
+ * indentation and line breaks intact.
+ */
+export function FileTreeBlock({ attributes, children }: BlockProps) {
   const root = attributes.root;
+  const content = typeof children === "string" ? children.trim() : "";
 
   return (
-    <div id={id} className="rounded-lg border bg-card p-4 shadow-sm">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-800 dark:bg-slate-900 dark:text-slate-200">
-          File Tree
-        </span>
-        <span className="font-mono text-xs text-muted-foreground">{id}</span>
-      </div>
-      {root ? (
-        <div className="mb-3 font-mono text-xs text-muted-foreground">
-          {root}
-        </div>
-      ) : null}
-      <div className="prose prose-sm max-w-none dark:prose-invert">
-        {typeof children === "string" ? (
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
-        ) : (
-          children
-        )}
-      </div>
-    </div>
+    <BlockShell
+      label="Files"
+      accent="text-slate-400"
+      flush
+      meta={root ? <span className="truncate font-mono">{root}</span> : null}
+    >
+      <pre className="overflow-x-auto px-4 py-3 font-mono text-xs leading-relaxed text-foreground">
+        {content}
+      </pre>
+    </BlockShell>
   );
 }
