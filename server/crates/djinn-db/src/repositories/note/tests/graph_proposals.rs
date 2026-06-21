@@ -1,4 +1,5 @@
 use super::*;
+use crate::repositories::proposal::{ProposalCreateInput, ProposalRepository};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn graph_includes_proposal_nodes_and_heterogeneous_typed_edges() {
@@ -25,6 +26,10 @@ async fn graph_includes_proposal_nodes_and_heterogeneous_typed_edges() {
             status: None,
             body_format: None,
         })
+        .await
+        .unwrap();
+    proposal_repo
+        .add_target(&proposal.id, &project.id, "primary")
         .await
         .unwrap();
 

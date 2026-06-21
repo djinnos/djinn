@@ -16,6 +16,7 @@ mod consolidation_housekeeping;
 mod crud_storage;
 mod embeddings;
 mod entity_association;
+mod graph_proposals;
 mod graph_scoring;
 mod lifecycle_archive;
 mod lifecycle_decay;

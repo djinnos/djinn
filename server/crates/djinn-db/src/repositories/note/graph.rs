@@ -149,9 +149,10 @@ impl NoteRepository {
         }
 
         // ── Heterogeneous typed edges ─────────────────────────────────────────
-        // Pull typed edges from `memory_entity_associations` where at least one
-        // endpoint is a note in this project. This covers proposal↔note and
-        // proposal↔proposal edges that involve project notes.
+        // Pull typed edges from `memory_entity_associations` where both
+        // endpoints are graph entities for this project. This covers
+        // proposal↔note and proposal↔proposal edges while avoiding dangling
+        // edges to notes/proposals that are outside the project graph.
         let entity_typed_rows = sqlx::query(
             r#"SELECT mea.source_entity_type, mea.source_id,
                       mea.target_entity_type, mea.target_id,
@@ -160,13 +161,15 @@ impl NoteRepository {
                WHERE (
                      (mea.source_entity_type = 'note'
                       AND mea.source_id IN (SELECT id FROM notes WHERE project_id = $1))
-                  OR (mea.target_entity_type = 'note'
-                      AND mea.target_id IN (SELECT id FROM notes WHERE project_id = $1))
                   OR (mea.source_entity_type = 'proposal'
                       AND mea.source_id IN (
                           SELECT p.id FROM proposals p
                           JOIN proposal_targets pt ON pt.proposal_id = p.id
                           WHERE pt.project_id = $1))
+                 )
+                 AND (
+                     (mea.target_entity_type = 'note'
+                      AND mea.target_id IN (SELECT id FROM notes WHERE project_id = $1))
                   OR (mea.target_entity_type = 'proposal'
                       AND mea.target_id IN (
                           SELECT p.id FROM proposals p

@@ -491,7 +491,8 @@ pub struct MemoryGraphResponse {
     pub nodes: Vec<djinn_memory::GraphNode>,
     pub edges: Vec<djinn_memory::GraphEdge>,
     /// Typed semantic edges (builds_on, contradicts, supersedes, exemplifies,
-    /// derived_from) from `note_associations` where `kind <> 'co_access'`.
+    /// derived_from) from note associations and heterogeneous memory entity
+    /// associations.
     #[serde(default)]
     pub typed_edges: Vec<djinn_memory::TypedEdge>,
     pub error: Option<String>,
