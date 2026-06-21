@@ -110,7 +110,7 @@ async fn upsert_proposal_to_note_derived_from_round_trips() {
     assert_eq!(from_note[0], *edge);
 
     // The proposal body must NOT have leaked into `notes`.
-    assert_no_proposal_body_in_notes(&db, &[proposal_id.clone()]).await;
+    assert_no_proposal_body_in_notes(&db, std::slice::from_ref(&proposal_id)).await;
 }
 
 // ── Round-trip: note → proposal typed traversal data ────────────────────────
@@ -159,7 +159,7 @@ async fn upsert_note_to_proposal_typed_edge_round_trips() {
     assert_eq!(from_proposal.len(), 1);
     assert_eq!(from_proposal[0], from_note[0]);
 
-    assert_no_proposal_body_in_notes(&db, &[proposal_id.clone()]).await;
+    assert_no_proposal_body_in_notes(&db, std::slice::from_ref(&proposal_id)).await;
 }
 
 // ── Round-trip: proposal → proposal typed edge ─────────────────────────────
@@ -285,7 +285,7 @@ async fn duplicate_upserts_do_not_create_duplicate_rows() {
         edges[0].weight
     );
 
-    assert_no_proposal_body_in_notes(&db, &[proposal_id.clone()]).await;
+    assert_no_proposal_body_in_notes(&db, std::slice::from_ref(&proposal_id)).await;
 }
 
 // ── Same pair can carry multiple typed kinds as distinct rows ──────────────
@@ -346,7 +346,7 @@ async fn same_pair_can_carry_multiple_distinct_typed_kinds() {
     let from_note_kinds: std::collections::HashSet<_> = from_note.iter().map(|e| e.kind).collect();
     assert_eq!(from_note_kinds, kinds);
 
-    assert_no_proposal_body_in_notes(&db, &[proposal_id.clone()]).await;
+    assert_no_proposal_body_in_notes(&db, std::slice::from_ref(&proposal_id)).await;
 }
 
 // ── Directional — reverse is a distinct row ─────────────────────────────────
@@ -421,7 +421,7 @@ async fn reverse_direction_is_a_distinct_row() {
     .unwrap();
     assert_eq!(row_count, 2);
 
-    assert_no_proposal_body_in_notes(&db, &[proposal_id.clone()]).await;
+    assert_no_proposal_body_in_notes(&db, std::slice::from_ref(&proposal_id)).await;
 }
 
 // ── CHECK constraint rejects illegal entity_type / kind / self-edges ───────
@@ -574,7 +574,7 @@ async fn note_associations_substrate_is_unaffected() {
     assert_eq!(mea_count, 1);
 
     // Sanity: the proposal body never landed in `notes`.
-    assert_no_proposal_body_in_notes(&db, &[p1.clone()]).await;
+    assert_no_proposal_body_in_notes(&db, std::slice::from_ref(&p1)).await;
 }
 
 // ── Every kind in the widened F5 set is accepted ───────────────────────────
@@ -707,7 +707,7 @@ async fn list_filters_by_min_weight_and_limit() {
         .unwrap();
     assert!(empty.is_empty());
 
-    assert_no_proposal_body_in_notes(&db, &[pivot.clone()]).await;
+    assert_no_proposal_body_in_notes(&db, std::slice::from_ref(&pivot)).await;
 }
 
 // ── Helper: convert MemoryEntityKind → NoteAssociationKind for legacy path ─
