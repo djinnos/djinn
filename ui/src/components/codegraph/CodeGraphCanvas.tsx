@@ -1,4 +1,3 @@
-/* eslint-disable react-refresh/only-export-components -- LARGE_GRAPH_THRESHOLD and shouldFallbackToCommunity are exported for focused unit tests. */
 /**
  * CodeGraphCanvas — main view: fetch → adapt → render → interact.
  *
@@ -13,6 +12,12 @@
  * latest view on every frame, so toggles are flicker-free without
  * re-mounting.
  *
+ * Continuous semantic LOD is driven by the Sigma camera zoom ratio
+ * (far/mid/close tiers) — there is no user-facing community-collapse
+ * mode or semantic zoom toggle. Community hulls render as background
+ * regions; viewport culling activates for large graphs (>~8000 nodes);
+ * click-to-expand progressively reveals culled local detail.
+ *
  * The dark radial-gradient background and bottom-center "Layout
  * optimizing…" pill mirror the GitNexus aesthetic the page is
  * matching.
@@ -26,7 +31,7 @@ import {
   RefreshIcon,
 } from "@hugeicons/core-free-icons";
 
-import { fetchSnapshot, type SnapshotLevel } from "@/api/codeGraph";
+import { fetchSnapshot } from "@/api/codeGraph";
 import {
   buildGraphFromSnapshot,
   filterSnapshotForWorkspace,
@@ -46,49 +51,14 @@ type FetchState =
   | {
       status: "ready";
       snapshot: SnapshotPayload;
-      /** Semantic-zoom level that produced this snapshot. */
-      level: SnapshotLevel;
     };
-
-/**
- * Auto-semantic-zoom threshold. The canvas starts with a symbol-level
- * fetch; if the snapshot reports `truncated === true`,
- * `total_nodes >= LARGE_GRAPH_THRESHOLD`, or `total_nodes > nodeCap`, it
- * refetches the same project at `level="community"` so the user sees a
- * handful of legible blobs instead of a truncated 10k-node graph. The
- * value sits just below the server's default cap (10,000) so the collapse
- * happens precisely when the user would otherwise hit the cap.
- */
-export const LARGE_GRAPH_THRESHOLD = 8_000;
-
-/**
- * Decide whether an initial symbol-level snapshot warrants a community
- * fallback. Kept as a pure exported helper so focused tests can pin the
- * boundary without rendering the canvas.
- */
-export function shouldFallbackToCommunity(
-  snapshot: SnapshotPayload,
-  nodeCap: number,
-  threshold: number = LARGE_GRAPH_THRESHOLD,
-): boolean {
-  return (
-    snapshot.truncated ||
-    snapshot.total_nodes >= threshold ||
-    snapshot.total_nodes > nodeCap
-  );
-}
 
 interface CodeGraphCanvasProps {
   projectId: string;
   /**
    * Maximum number of nodes to fetch. Default 10,000 — the server's
    * own clamp ceiling so we render the full repo on every project that
-   * fits under it. Reference: GitNexus comfortably renders 6.5k nodes
-   * with Sigma + WebGL; Sigma 3 starts to slow at ~5k *with all edges
-   * shown*, but the toolbar defaults already strip
-   * Contains/Declared/FileRef/Reads/Calls/MemberOf so the live edge count
-   * is one-third of `total_edges`. Drop this for tests, raise it once
-   * the server clamp ceiling moves.
+   * fits under it.
    */
   nodeCap?: number;
   /** Bumping this re-issues the snapshot fetch without unmounting. */
@@ -114,18 +84,17 @@ export function CodeGraphCanvas({
   );
   const setGraphReady = useCodeGraphStore((s) => s.setGraphReady);
 
+  // Always fetch at symbol level — LOD tiers handle detail client-side.
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading" });
     setGraphReady(false);
 
-    const initialLevel: SnapshotLevel = "symbol";
-
     (async () => {
       try {
-        const raw = await fetchSnapshot(projectId, nodeCap, initialLevel);
+        const raw = await fetchSnapshot(projectId, nodeCap, "symbol");
         if (cancelled) return;
-        let snapshot = parseSnapshotResponse(raw);
+        const snapshot = parseSnapshotResponse(raw);
         if (!snapshot) {
           setState({
             status: "error",
@@ -135,11 +104,9 @@ export function CodeGraphCanvas({
           setGraphReady(false);
           return;
         }
-        let level = initialLevel;
-
 
         if (cancelled) return;
-        setState({ status: "ready", snapshot, level });
+        setState({ status: "ready", snapshot });
         setGraphReady(snapshot.nodes.length > 0);
       } catch (err) {
         if (cancelled) return;
@@ -156,15 +123,9 @@ export function CodeGraphCanvas({
     };
   }, [projectId, nodeCap, reloadKey, setGraphReady]);
 
-  const effectiveLevel: SnapshotLevel =
-    state.status === "ready" ? state.level : "symbol";
-
   const visibleSnapshot = useMemo(() => {
     if (state.status !== "ready") return null;
-    return filterSnapshotForWorkspace(
-      state.snapshot,
-      selectedWorkspaceSlug,
-    );
+    return filterSnapshotForWorkspace(state.snapshot, selectedWorkspaceSlug);
   }, [state, selectedWorkspaceSlug]);
 
   const graph = useMemo(() => {
@@ -209,15 +170,13 @@ export function CodeGraphCanvas({
   const setHover = useCodeGraphStore((s) => s.setHover);
   const setFocusAnchor = useCodeGraphStore((s) => s.setFocusAnchor);
   const clearFocusAnchor = useCodeGraphStore((s) => s.clearFocusAnchor);
+  const expandRegion = useCodeGraphStore((s) => s.expandRegion);
 
   useEffect(() => {
     if (!sigma) return;
-    // Communities are background hulls, not clickable nodes (see
-    // [[n2a1-roadmap]] wave 1). The click handler now only handles
-    // single-click selection + DOI focus anchoring. The double-click
-    // guard is retained so future progressive-expansion behavior
-    // (sibling task b5vu) can reuse the same timestamp/last-node
-    // detector, but community expand/collapse is no longer wired here.
+    // Click handler: single-click selects + DOI focus; double-click
+    // progressively expands the clicked region (reveals LOD-culled
+    // neighbors) without a global semantic zoom mode.
     let lastClick: { nodeId: string; at: number } | null = null;
 
     const offClick = sigma.on("clickNode", ({ node }) => {
@@ -227,10 +186,10 @@ export function CodeGraphCanvas({
       lastClick = { nodeId: node, at: now };
 
       if (isDouble) {
-        // Reset the guard so a triple-click doesn't look like two
-        // separate double-clicks. No community expand/collapse action
-        // — communities are non-clickable hulls now.
+        // Progressive expand: reveal the clicked node's 1-hop
+        // neighborhood so LOD culling no longer hides it.
         lastClick = null;
+        expandRegion(node, graph?.neighbors(node) ?? []);
         return;
       }
 
@@ -263,10 +222,12 @@ export function CodeGraphCanvas({
     };
   }, [
     sigma,
+    graph,
     setSelection,
     setHover,
     setFocusAnchor,
     clearFocusAnchor,
+    expandRegion,
   ]);
 
   const resetHighlights = useCodeGraphStore((s) => s.reset);
@@ -284,11 +245,7 @@ export function CodeGraphCanvas({
         className="absolute inset-0"
         style={{ cursor: "grab" }}
       />
-      <CanvasOverlay
-        state={state}
-        visibleSnapshot={visibleSnapshot}
-        level={effectiveLevel}
-      />
+      <CanvasOverlay state={state} visibleSnapshot={visibleSnapshot} />
       {layoutRunning && visibleSnapshot?.nodes.length ? (
         <LayoutOptimizingPill />
       ) : null}
@@ -411,11 +368,9 @@ export function CitationStatusBadge() {
 interface CanvasOverlayProps {
   state: FetchState;
   visibleSnapshot: SnapshotPayload | null;
-  /** Effective semantic-zoom level that produced the rendered snapshot. */
-  level: SnapshotLevel;
 }
 
-function CanvasOverlay({ state, visibleSnapshot, level }: CanvasOverlayProps) {
+function CanvasOverlay({ state, visibleSnapshot }: CanvasOverlayProps) {
   if (state.status === "loading") {
     return (
       <CenterCard>
@@ -455,10 +410,7 @@ function CanvasOverlay({ state, visibleSnapshot, level }: CanvasOverlayProps) {
 
   return (
     <div className="pointer-events-none absolute left-3 top-3 flex flex-col gap-1.5">
-      <Pill data-testid="semantic-zoom-level">
-        {level === "community" ? "Community view" : "Symbol view"}
-      </Pill>
-      <Pill>
+      <Pill data-testid="graph-node-count">
         {snapshot.nodes.length.toLocaleString()} nodes
         {snapshot.truncated && (
           <span className="ml-1 text-amber-300">

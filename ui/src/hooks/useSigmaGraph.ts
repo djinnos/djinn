@@ -31,7 +31,10 @@ import type Graph from "graphology";
 import Sigma from "sigma";
 
 import type { Attributes } from "@/lib/codeGraphReducers";
-import { PRECOMPUTED_LAYOUT_ATTRIBUTE } from "@/lib/codeGraphAdapter";
+import {
+  PRECOMPUTED_LAYOUT_ATTRIBUTE,
+  type ViewportBounds,
+} from "@/lib/codeGraphAdapter";
 import EdgeCurveProgram from "@sigma/edge-curve";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import FA2LayoutSupervisor from "graphology-layout-forceatlas2/worker";
@@ -72,6 +75,14 @@ export interface SigmaInstanceHandle {
    * "show everything" sentinel from `shouldLabelAtZoom`.
    */
   getCameraRatio: () => number;
+  /**
+   * Compute the current viewport bounds in graph-coordinate space.
+   * Returns `null` when Sigma isn't mounted or the container isn't
+   * measurable. Used by the nodeReducer for viewport culling.
+   */
+  getViewportBounds: () =>
+    | import("@/lib/codeGraphAdapter").ViewportBounds
+    | null;
 }
 
 export interface UseSigmaGraphResult {
@@ -326,6 +337,38 @@ export function useSigmaGraph(
             : Infinity;
         } catch {
           return Infinity;
+        }
+      },
+      getViewportBounds: (): ViewportBounds | null => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const cam = (sigmaInstance as any).getCamera?.();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const container = (sigmaInstance as any).getContainer?.();
+          if (!cam || !container) return null;
+          const ratio = cam.ratio;
+          const cx = cam.x;
+          const cy = cam.y;
+          if (
+            typeof ratio !== "number" ||
+            !Number.isFinite(ratio) ||
+            typeof cx !== "number" ||
+            typeof cy !== "number"
+          ) {
+            return null;
+          }
+          const w = container.clientWidth ?? 800;
+          const h = container.clientHeight ?? 600;
+          const halfW = (w * ratio) / 2;
+          const halfH = (h * ratio) / 2;
+          return {
+            minX: cx - halfW,
+            maxX: cx + halfW,
+            minY: cy - halfH,
+            maxY: cy + halfH,
+          };
+        } catch {
+          return null;
         }
       },
       focusNode: (id, durationMs) => {
