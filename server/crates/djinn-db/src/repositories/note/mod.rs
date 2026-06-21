@@ -15,6 +15,7 @@ pub(crate) mod consolidation;
 mod context;
 mod crud;
 mod embeddings;
+mod entity_association;
 mod file_helpers;
 mod graph;
 mod housekeeping;
@@ -49,6 +50,9 @@ pub use embeddings::{
     NoteVectorStore, QdrantConfig, QdrantNoteVectorStore, UpsertNoteEmbedding,
     embedding_content_hash, embedding_document_text, infer_embedding_branch_from_worktree,
     legacy_embedding_document_text, task_branch_name,
+};
+pub use entity_association::{
+    MemoryEntityAssociation, MemoryEntityKind, MemoryEntityRef, MemoryEntityType,
 };
 pub use lexical_search::{
     LexicalSearchBackend, LexicalSearchMode, LexicalSearchPlan, build_lexical_search_plan,
