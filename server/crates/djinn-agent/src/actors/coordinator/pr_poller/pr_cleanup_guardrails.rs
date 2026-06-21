@@ -1,5 +1,15 @@
+//! Shared guardrail logic for PR/branch cleanup, used by both the inline hook
+//! (terminal task transition) and the periodic reconciliation sweep.
+//!
+//! The public API in this module is consumed by sibling tasks (the periodic
+//! sweep in `health.rs` and the inline hook in `dispatch/session_recovery.rs`).
+//! Until those consumers land, `dead_code` is suppressed.
+#![allow(dead_code)]
+
 use djinn_core::models::Task;
-use djinn_provider::github_api::{GitHubApiClient, MergeQueueEntryState, PrMergeQueueState, PullRequest};
+use djinn_provider::github_api::{
+    GitHubApiClient, MergeQueueEntryState, PrMergeQueueState, PullRequest,
+};
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -99,7 +109,10 @@ pub async fn can_reap_pr(
     }
 
     // 5. Merge-queue check
-    match gh_client.get_pr_merge_queue_state(owner, repo, pr.number).await {
+    match gh_client
+        .get_pr_merge_queue_state(owner, repo, pr.number)
+        .await
+    {
         Ok(state) => {
             if is_in_merge_queue(&state) {
                 tracing::debug!(
@@ -134,7 +147,10 @@ pub async fn can_reap_pr(
     }
 
     // 7. Base-branch-of-another-PR check
-    match gh_client.list_pulls_by_head(owner, repo, &pr.head.ref_name).await {
+    match gh_client
+        .list_pulls_by_head(owner, repo, &pr.head.ref_name)
+        .await
+    {
         Ok(open_prs) => {
             // Exclude the PR itself; if any other open PR has this branch as its base,
             // we must not delete the branch.
@@ -200,7 +216,7 @@ pub async fn can_reap_pr(
 ///
 /// We accept any GitHub user login ending with `[bot]` (GitHub Apps convention)
 /// or the literal name `djinn-bot`.
-fn is_bot_author(pr: &PullRequest) -> bool {
+fn is_bot_author(_pr: &PullRequest) -> bool {
     // The PullRequest struct does not currently carry a `user` field.
     // In the existing codebase PRs created by the bot are tracked via the
     // task's `pr_url` and the bot identity is known from the app installation.
@@ -234,7 +250,9 @@ fn is_in_merge_queue(state: &PrMergeQueueState) -> bool {
 
 /// Return `true` if `closed_at` is within `grace_period_seconds` of now.
 fn within_grace_period(closed_at: &str, grace_period_seconds: u64) -> bool {
-    let Ok(closed) = OffsetDateTime::parse(closed_at, &time::format_description::well_known::Rfc3339) else {
+    let Ok(closed) =
+        OffsetDateTime::parse(closed_at, &time::format_description::well_known::Rfc3339)
+    else {
         // Unparseable timestamp: be conservative and say it's within grace.
         return true;
     };
@@ -297,7 +315,7 @@ mod tests {
 
     #[test]
     fn merge_queue_state_detection() {
-        use djinn_provider::github_api::{AutoMergeRequest, MergeQueueEntry, MergeQueueEntryState};
+        use djinn_provider::github_api::{MergeQueueEntry, MergeQueueEntryState};
 
         let queued = PrMergeQueueState {
             merge_state_status: None,
