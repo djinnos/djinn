@@ -466,6 +466,7 @@ fn coordinator_actor_for_tests(
         escalation_counts: HashMap::new(),
         pr_status_cache: HashMap::new(),
         pr_draft_first_seen: HashMap::new(),
+        review_stuck_sha_first_seen: HashMap::new(),
         merge_fail_count: HashMap::new(),
         auto_approve_attempted: HashMap::new(),
         delegated_to_github: HashMap::new(),

@@ -56,6 +56,11 @@ const PR_CI_CYCLE_EVENT: &str = "pr_ci_cycle";
 /// non-required preview/deploy infra the diff can't touch), so looping is
 /// pointless.
 const PR_CI_FAILURE_THRESHOLD: u32 = 3;
+
+/// Minimum minutes a task must have been in `needs_task_review` with a red PR
+/// and an unchanged head SHA before the review-stuck trigger fires. Prevents
+/// escalating a PR that is mid-CI or has a pending check-run.
+const REVIEW_STUCK_WINDOW_MINUTES: i64 = 10;
 mod ci_helpers;
 mod conversation_resolution;
 mod installation;
@@ -75,7 +80,7 @@ mod pr_cleanup_tests;
 use crate::github_error_render::render_github_write_error;
 use ci_helpers::{
     advisory_checks_section, blocking_failed_checks, build_ci_failure_sections, is_already_queued,
-    is_merge_queue_405, parse_actions_run_id,
+    is_failing_conclusion, is_merge_queue_405, parse_actions_run_id,
 };
 use conversation_resolution::{
     is_conversation_resolution_block, should_auto_resolve_conversations,
