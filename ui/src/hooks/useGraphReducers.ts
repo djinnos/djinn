@@ -31,12 +31,18 @@ import {
   nodeReducer as nodeReducerImpl,
   oneHopNeighborhood,
   topComplexityIds,
+  isTraversalContainmentEdge,
   type Attributes,
   type ComplexityThresholds,
+  type EdgeKindAwareGraph,
   type HighlightView,
-  type MinimalGraph,
 } from "@/lib/codeGraphReducers";
 import { computePagerankPercentiles } from "@/lib/codeGraphLabels";
+import {
+  lodTierForZoom,
+  VIEWPORT_CULLING_THRESHOLD,
+  type ViewportBounds,
+} from "@/lib/codeGraphAdapter";
 import {
   DEFAULT_DOI_REVEAL_COUNT,
   useCodeGraphStore,
@@ -45,11 +51,6 @@ import {
 import type { SigmaInstanceHandle, SigmaReducerHooks } from "./useSigmaGraph";
 
 const DOI_DISTANCE_LAMBDA = 0.18;
-const DOI_STRUCTURAL_EDGE_KINDS = new Set([
-  "ContainsDefinition",
-  "DeclaredInFile",
-  "MemberOf",
-]);
 
 interface DoiFocusResult {
   focusIds: ReadonlySet<string>;
@@ -66,11 +67,6 @@ const EMPTY_DOI_FOCUS: DoiFocusResult = {
 function normalizeEdgeKind(attrs: Attributes | undefined): string | null {
   const raw = attrs?.kind ?? attrs?.edgeKind;
   return typeof raw === "string" ? raw : null;
-}
-
-function isStructuralEdge(attrs: Attributes | undefined): boolean {
-  const kind = normalizeEdgeKind(attrs);
-  return kind !== null && DOI_STRUCTURAL_EDGE_KINDS.has(kind);
 }
 
 function edgeIdsForDirection(
@@ -146,9 +142,10 @@ export function computeDoiFocus(
       } catch {
         attrs = undefined;
       }
-      if (isStructuralEdge(attrs)) continue;
+      if (isTraversalContainmentEdge(normalizeEdgeKind(attrs))) continue;
       const next = nextNodeForDirection(graph, edgeId, nodeId, focusDirection);
-      if (next === null || distances.has(next) || !graph.hasNode(next)) continue;
+      if (next === null || distances.has(next) || !graph.hasNode(next))
+        continue;
       distances.set(next, distance + 1);
       queue.push(next);
     }
@@ -184,11 +181,13 @@ export function computeDoiFocus(
 }
 
 /**
- * Wrap a graphology `Graph` so it satisfies the `MinimalGraph`
+ * Wrap a graphology `Graph` so it satisfies the `EdgeKindAwareGraph`
  * interface the neighborhood helpers expect — Sigma's graph carries directed
- * edges, but the highlight neighborhood walks both directions.
+ * edges, but the highlight neighborhood walks both directions. The
+ * `edgeKind` reader lets `oneHopNeighborhood` skip containment edges
+ * so the selection frontier does not expand through structural nesting.
  */
-function asMinimalGraph(graph: Graph): MinimalGraph {
+function asMinimalGraph(graph: Graph): EdgeKindAwareGraph {
   return {
     hasNode: (id) => graph.hasNode(id),
     neighbors: (id) => {
@@ -199,6 +198,19 @@ function asMinimalGraph(graph: Graph): MinimalGraph {
         return graph.neighbors(id);
       } catch {
         return [];
+      }
+    },
+    edgeKind: (source, target) => {
+      try {
+        // graphology's `.edge()` returns the first edge between two
+        // nodes in either direction on a directed graph. We read the
+        // `kind` attribute from it.
+        const edge = graph.edge(source, target);
+        if (!edge) return null;
+        const kind = graph.getEdgeAttribute(edge, "kind");
+        return typeof kind === "string" ? kind : null;
+      } catch {
+        return null;
       }
     },
   };
@@ -244,6 +256,7 @@ export function useGraphReducers(
   const focusAnchorId = useCodeGraphStore((s) => s.focusAnchorId);
   const focusDirection = useCodeGraphStore((s) => s.focusDirection);
   const doiRevealCount = useCodeGraphStore((s) => s.doiRevealCount);
+  const expandedRegions = useCodeGraphStore((s) => s.expandedRegions);
 
   // ── Lazy 1-hop neighbor set (memoized) ─────────────────────────────────
   const selectionNeighbors = useMemo<ReadonlySet<string>>(() => {
@@ -279,8 +292,7 @@ export function useGraphReducers(
       const cog = graph.getNodeAttribute(id, "cognitive");
       pairs.push({
         id,
-        cognitive:
-          typeof cog === "number" && Number.isFinite(cog) ? cog : null,
+        cognitive: typeof cog === "number" && Number.isFinite(cog) ? cog : null,
       });
     }
     return topComplexityIds(pairs, TOP_COMPLEXITY_HALO_N);
@@ -307,7 +319,13 @@ export function useGraphReducers(
       pagerankPercentile,
       doiRevealCount,
     );
-  }, [graph, focusAnchorId, focusDirection, pagerankPercentile, doiRevealCount]);
+  }, [
+    graph,
+    focusAnchorId,
+    focusDirection,
+    pagerankPercentile,
+    doiRevealCount,
+  ]);
 
   const doiFocus = useMemo<DoiFocusResult>(() => {
     if (doiImpactIds.size === 0) return topologyDoiFocus;
@@ -359,6 +377,13 @@ export function useGraphReducers(
       // orthogonal: the store-mirror effect owns graph-derived
       // fields, the camera effect owns the lens.
       cameraRatio: viewRef.current.cameraRatio,
+      // Continuous semantic LOD tier — preserved across store
+      // re-syncs (the `afterRender` effect updates it).
+      lodTier: viewRef.current.lodTier,
+      // Viewport bounds — preserved across store re-syncs.
+      viewportBounds: viewRef.current.viewportBounds,
+      // Click-to-expand regions from the store.
+      expandedRegions,
     };
     sigma?.refresh();
   }, [
@@ -382,6 +407,7 @@ export function useGraphReducers(
     complexityThresholds,
     complexityHaloIds,
     pagerankPercentile,
+    expandedRegions,
   ]);
 
   // ── Pulse phase (animated only when blast frontier is non-empty) ──────
@@ -414,13 +440,36 @@ export function useGraphReducers(
   // changes — Sigma already knows to repaint via its own internal
   // camera state, the `refresh()` here is for the
   // `nodeReducer` re-running the percentile gate.
+  //
+  // Also computes LOD tier and viewport bounds from the camera state
+  // for continuous semantic zoom and viewport culling.
+  const nodeCountRef = useRef(0);
+  useEffect(() => {
+    nodeCountRef.current = graph?.order ?? 0;
+  }, [graph]);
+
   useEffect(() => {
     if (!sigma) return;
     const off = sigma.on("afterRender", () => {
       try {
         const ratio = sigma.getCameraRatio();
-        if (ratio !== viewRef.current.cameraRatio) {
-          viewRef.current = { ...viewRef.current, cameraRatio: ratio };
+        const lodTier = lodTierForZoom(ratio);
+        // Viewport culling only activates for large graphs.
+        const viewportBounds: ViewportBounds | null =
+          nodeCountRef.current >= VIEWPORT_CULLING_THRESHOLD
+            ? sigma.getViewportBounds()
+            : null;
+        if (
+          ratio !== viewRef.current.cameraRatio ||
+          lodTier !== viewRef.current.lodTier ||
+          viewportBounds !== viewRef.current.viewportBounds
+        ) {
+          viewRef.current = {
+            ...viewRef.current,
+            cameraRatio: ratio,
+            lodTier,
+            viewportBounds,
+          };
           sigma.refresh();
         }
       } catch {
@@ -428,7 +477,7 @@ export function useGraphReducers(
       }
     });
     return off;
-  }, [sigma]);
+  }, [sigma, graph]);
 
   // ── Stable reducer pair — closures read `viewRef` so the latest
   //    slice always wins without us re-creating the fns on every render.

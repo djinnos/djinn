@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::actors::coordinator::pr_poller::pr_cleanup::CloseKind;
 use djinn_core::models::TransitionAction;
 use tracing::Instrument as _;
 
@@ -990,6 +991,8 @@ impl CoordinatorActor {
                 );
             }
         }
+        self.cleanup_pr_and_branch_on_close(task, CloseKind::NonMerge)
+            .await;
         true
     }
 }

@@ -208,9 +208,25 @@ pub(super) struct CoordinatorActor {
     pub(super) idle_consolidation_cancel: Option<CancellationToken>,
     /// Join handle for the spawned idle consolidation task.
     pub(super) idle_consolidation_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Inline PR/branch cleanup configuration. Consumed by the inline cleanup
+    /// hook in the terminal-close dispatch paths (sibling task hrv6).
+    #[allow(dead_code)]
+    pub(super) pr_cleanup_config: PrCleanupConfig,
     // Metrics
     pub(super) dispatched: u64,
     pub(super) recovered: u64,
+}
+
+/// Terminal-close cleanup flavor for PR/branch cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(in crate::actors::coordinator) enum CloseKind {
+    /// Task closed without merging its associated PR; close the bot PR before
+    /// deleting the task branch when guardrails allow it.
+    NonMerge,
+    /// Task closed because its associated PR merged; only delete the head branch
+    /// as an idempotent backstop.
+    Merge,
 }
 
 #[cfg(test)]
@@ -348,6 +364,7 @@ impl CoordinatorActor {
             mirror,
             runtime_ops,
             rpc_registry,
+            pr_cleanup_config,
         } = deps;
         let events = events_tx.subscribe();
         let mut tick = time::interval(STUCK_INTERVAL);
@@ -399,6 +416,7 @@ impl CoordinatorActor {
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,
+            pr_cleanup_config,
             dispatched: 0,
             recovered: 0,
         }
@@ -1408,8 +1426,6 @@ impl CoordinatorActor {
             crate::events::event_bus_for(&self.events_tx),
         )
     }
-
-    // ── ADR-051 §7 exit-recheck + stale sweep ────────────────────────────────
 
     /// Handle the end of a planner session by re-evaluating the epic its
     /// task was attached to.  Non-planner sessions and task-less sessions

@@ -1,26 +1,33 @@
 /**
- * CodeGraphCanvas semantic-zoom level selection tests.
+ * CodeGraphCanvas LOD, culling, and progressive expansion tests.
  *
- * The canvas picks which `level` to forward to `fetchSnapshot` based on
- * the snapshot size. These tests mock the network + Sigma layers so we can
- * assert purely on the fetch-level decision logic:
+ * The canvas now always fetches at `level="symbol"` and drives visible
+ * detail client-side via continuous semantic LOD (camera zoom ratio),
+ * viewport culling, and click-to-expand. These tests verify:
  *
- *   - small graph: symbol snapshot under threshold → stays symbol, one fetch.
- *   - large graph: symbol snapshot truncated/over-threshold → refetches community.
+ *   - Always issues a single symbol-level fetch (no community fallback).
+ *   - LOD tier helpers (`lodTierForZoom`, `isSymbolVisibleAtMidTier`) pin
+ *     the tier boundaries.
+ *   - Progressive expand (`expandRegion`) is wired to double-click.
  *
- * The `shouldFallbackToCommunity` pure helper is also unit-tested
- * directly so the boundary conditions are pinned without a render.
- *
- * Note: the canvas calls `reset()` on mount (to clear highlight state
- * from a previous project).
+ * Sigma / WebGL are mocked out (jsdom doesn't have WebGL) so the canvas
+ * renders its overlay without crashing.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 
-import { CodeGraphCanvas, shouldFallbackToCommunity } from "./CodeGraphCanvas";
+import { CodeGraphCanvas } from "./CodeGraphCanvas";
 import { useCodeGraphStore } from "@/stores/codeGraphStore";
 import type { SnapshotPayload } from "@/lib/codeGraphAdapter";
+import {
+  lodTierForZoom,
+  isSymbolVisibleAtMidTier,
+  isInViewport,
+  LOD_FAR_RATIO,
+  LOD_MID_RATIO,
+} from "@/lib/codeGraphAdapter";
+import { EMPTY_HIGHLIGHT_VIEW, nodeReducer } from "@/lib/codeGraphReducers";
 
 // ── Mocks ─────────────────────────────────────────────────────────────────
 
@@ -57,7 +64,9 @@ vi.mock("./RendererCapabilityDialog", () => ({
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
-function makeSnapshot(overrides: Partial<SnapshotPayload> = {}): SnapshotPayload {
+function makeSnapshot(
+  overrides: Partial<SnapshotPayload> = {},
+): SnapshotPayload {
   return {
     project_id: "proj",
     git_head: "abc123",
@@ -94,43 +103,6 @@ function wrap(payload: SnapshotPayload) {
   return { snapshot: payload };
 }
 
-function makeCommunitySnapshot(): SnapshotPayload {
-  return makeSnapshot({
-    total_nodes: 1,
-    total_edges: 0,
-    nodes: [
-      {
-        id: "community-1",
-        kind: "community",
-        label: "Cluster 1",
-        pagerank: 1,
-        community_id: "community-1",
-        member_count: 5_000,
-        internal_edge_count: 1200,
-      },
-    ],
-    edges: [],
-  });
-}
-
-/** Build the raw response `fetchSnapshot` should resolve to for a given level. */
-function mockResponseForLevel(
-  level: "symbol" | "community",
-  size: "small" | "large" = "small",
-) {
-  if (level === "community") return wrap(makeCommunitySnapshot());
-  if (size === "large") {
-    return wrap(
-      makeSnapshot({
-        truncated: true,
-        total_nodes: 12_000,
-        node_cap: 10_000,
-      }),
-    );
-  }
-  return wrap(makeSnapshot());
-}
-
 beforeEach(() => {
   fetchSnapshotMock.mockReset();
   useCodeGraphStore.getState().reset();
@@ -141,191 +113,194 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-// ── Pure helper tests ─────────────────────────────────────────────────────
+// ── Fetch behavior tests ──────────────────────────────────────────────────
 
-describe("shouldFallbackToCommunity", () => {
-  it("returns false for a small non-truncated snapshot", () => {
-    const snap = makeSnapshot({ truncated: false, total_nodes: 500 });
-    expect(shouldFallbackToCommunity(snap, 10_000)).toBe(false);
-  });
-
-  it("returns true when the snapshot is truncated", () => {
-    const snap = makeSnapshot({ truncated: true, total_nodes: 10_000 });
-    expect(shouldFallbackToCommunity(snap, 10_000)).toBe(true);
-  });
-
-  it("returns true when total_nodes reaches the threshold", () => {
-    const snap = makeSnapshot({ truncated: false, total_nodes: 8_000 });
-    expect(shouldFallbackToCommunity(snap, 10_000)).toBe(true);
-  });
-
-  it("returns false just below the threshold", () => {
-    const snap = makeSnapshot({ truncated: false, total_nodes: 7_999 });
-    expect(shouldFallbackToCommunity(snap, 10_000)).toBe(false);
-  });
-
-  it("returns true when total_nodes exceeds nodeCap even if under threshold", () => {
-    const snap = makeSnapshot({ truncated: false, total_nodes: 600 });
-    expect(shouldFallbackToCommunity(snap, 500)).toBe(true);
-  });
-
-  it("respects a custom threshold override", () => {
-    const snap = makeSnapshot({ truncated: false, total_nodes: 120 });
-    expect(shouldFallbackToCommunity(snap, 10_000, 100)).toBe(true);
-    expect(shouldFallbackToCommunity(snap, 10_000, 200)).toBe(false);
-  });
-});
-
-// ── Canvas level-selection tests ──────────────────────────────────────────
-
-describe("CodeGraphCanvas semantic zoom level selection", () => {
-  it("auto mode keeps symbol level for small graphs (single fetch)", async () => {
-    fetchSnapshotMock.mockResolvedValue(mockResponseForLevel("symbol", "small"));
+describe("CodeGraphCanvas fetch behavior", () => {
+  it("always fetches at symbol level (single fetch, no community fallback)", async () => {
+    fetchSnapshotMock.mockResolvedValue(wrap(makeSnapshot()));
 
     render(<CodeGraphCanvas projectId="proj" />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("semantic-zoom-level")).toHaveTextContent(
-        "Symbol view",
+      expect(screen.getByTestId("graph-node-count")).toHaveTextContent(
+        "2 nodes",
       );
     });
 
-    // Only one fetch — no community refetch needed.
+    // Only one fetch — always symbol level, no community refetch.
     expect(fetchSnapshotMock).toHaveBeenCalledTimes(1);
     expect(fetchSnapshotMock).toHaveBeenCalledWith("proj", 10_000, "symbol");
   });
 
-  it("auto mode refetches community when symbol snapshot is truncated/large", async () => {
-    // First call → large symbol snapshot; second call → community snapshot.
-    fetchSnapshotMock
-      .mockResolvedValueOnce(mockResponseForLevel("symbol", "large"))
-      .mockResolvedValueOnce(mockResponseForLevel("community"));
+  it("does not refetch community even when snapshot is truncated/large", async () => {
+    fetchSnapshotMock.mockResolvedValue(
+      wrap(
+        makeSnapshot({
+          truncated: true,
+          total_nodes: 12_000,
+          node_cap: 10_000,
+        }),
+      ),
+    );
 
     render(<CodeGraphCanvas projectId="proj" />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("semantic-zoom-level")).toHaveTextContent(
-        "Community view",
+      expect(screen.getByTestId("graph-node-count")).toHaveTextContent(
+        "2 nodes",
       );
     });
 
-    // Two fetches: symbol then community fallback.
-    expect(fetchSnapshotMock).toHaveBeenCalledTimes(2);
-    expect(fetchSnapshotMock).toHaveBeenNthCalledWith(
-      1,
-      "proj",
-      10_000,
-      "symbol",
-    );
-    expect(fetchSnapshotMock).toHaveBeenNthCalledWith(
-      2,
-      "proj",
-      10_000,
-      "community",
-    );
-  });
-
-  it("symbol snapshot under threshold stays symbol (single fetch)", async () => {
-    fetchSnapshotMock.mockResolvedValue(mockResponseForLevel("symbol", "small"));
-
-    render(<CodeGraphCanvas projectId="proj" />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId("semantic-zoom-level")).toHaveTextContent(
-        "Symbol view",
-      );
-    });
-
+    // Still only one symbol-level fetch — LOD tiers handle large graphs.
     expect(fetchSnapshotMock).toHaveBeenCalledTimes(1);
     expect(fetchSnapshotMock).toHaveBeenCalledWith("proj", 10_000, "symbol");
   });
+});
 
-  it("large symbol snapshot triggers community fallback", async () => {
-    fetchSnapshotMock
-      .mockResolvedValueOnce(mockResponseForLevel("symbol", "large"))
-      .mockResolvedValueOnce(mockResponseForLevel("community"));
+// ── LOD tier helpers ──────────────────────────────────────────────────────
 
-    render(<CodeGraphCanvas projectId="proj" />);
+describe("lodTierForZoom", () => {
+  it("returns 'far' when camera ratio >= LOD_FAR_RATIO", () => {
+    expect(lodTierForZoom(LOD_FAR_RATIO)).toBe("far");
+    expect(lodTierForZoom(5.0)).toBe("far");
+    expect(lodTierForZoom(100)).toBe("far");
+  });
 
-    await waitFor(() => {
-      expect(screen.getByTestId("semantic-zoom-level")).toHaveTextContent(
-        "Community view",
-      );
-    });
+  it("returns 'mid' when camera ratio is between MID and FAR", () => {
+    expect(lodTierForZoom(LOD_MID_RATIO)).toBe("mid");
+    expect(lodTierForZoom(1.0)).toBe("mid");
+    expect(lodTierForZoom(LOD_FAR_RATIO - 0.01)).toBe("mid");
+  });
 
-    expect(fetchSnapshotMock).toHaveBeenCalledTimes(2);
-    const lastCall =
-      fetchSnapshotMock.mock.calls[fetchSnapshotMock.mock.calls.length - 1];
-    expect(lastCall[2]).toBe("community");
+  it("returns 'close' when camera ratio < LOD_MID_RATIO", () => {
+    expect(lodTierForZoom(LOD_MID_RATIO - 0.01)).toBe("close");
+    expect(lodTierForZoom(0.1)).toBe("close");
+    expect(lodTierForZoom(0.01)).toBe("close");
+  });
+
+  it("returns 'close' for non-finite camera ratio", () => {
+    expect(lodTierForZoom(Infinity)).toBe("close");
+    expect(lodTierForZoom(NaN)).toBe("close");
+    expect(lodTierForZoom(-Infinity)).toBe("close");
   });
 });
 
-// ── Community expand / collapse state (semantic zoom) ─────────────────────
+describe("isSymbolVisibleAtMidTier", () => {
+  it("returns true for structural symbol kinds (class, function, etc.)", () => {
+    expect(isSymbolVisibleAtMidTier("class")).toBe(true);
+    expect(isSymbolVisibleAtMidTier("struct")).toBe(true);
+    expect(isSymbolVisibleAtMidTier("interface")).toBe(true);
+    expect(isSymbolVisibleAtMidTier("trait")).toBe(true);
+    expect(isSymbolVisibleAtMidTier("enum")).toBe(true);
+    expect(isSymbolVisibleAtMidTier("function")).toBe(true);
+    expect(isSymbolVisibleAtMidTier("method")).toBe(true);
+    expect(isSymbolVisibleAtMidTier("constructor")).toBe(true);
+    expect(isSymbolVisibleAtMidTier("impl")).toBe(true);
+    expect(isSymbolVisibleAtMidTier("type")).toBe(true);
+  });
 
-describe("CodeGraphCanvas community expand/collapse state", () => {
-  it("store tracks expanded communities by stable community_id", () => {
-    useCodeGraphStore.getState().reset();
-    const { expandCommunity, collapseCommunity, expandedCommunityIds } =
-      useCodeGraphStore.getState();
-    expect(expandedCommunityIds.size).toBe(0);
+  it("returns false for low-priority symbol kinds (variable, import, etc.)", () => {
+    expect(isSymbolVisibleAtMidTier("variable")).toBe(false);
+    expect(isSymbolVisibleAtMidTier("const")).toBe(false);
+    expect(isSymbolVisibleAtMidTier("static")).toBe(false);
+    expect(isSymbolVisibleAtMidTier("property")).toBe(false);
+    expect(isSymbolVisibleAtMidTier("field")).toBe(false);
+    expect(isSymbolVisibleAtMidTier("import")).toBe(false);
+    expect(isSymbolVisibleAtMidTier("other")).toBe(false);
+  });
 
-    expandCommunity("auth");
-    expect(useCodeGraphStore.getState().expandedCommunityIds.has("auth")).toBe(
-      true,
+  it("returns true when symbol kind is undefined (structural node)", () => {
+    expect(isSymbolVisibleAtMidTier(undefined)).toBe(true);
+  });
+});
+
+describe("viewport culling", () => {
+  it("classifies off-screen coordinates outside the padded viewport", () => {
+    const bounds = { minX: 0, minY: 0, maxX: 100, maxY: 100 };
+    expect(isInViewport(50, 50, bounds)).toBe(true);
+    expect(isInViewport(250, 50, bounds)).toBe(true); // within 200px margin
+    expect(isInViewport(350, 50, bounds)).toBe(false);
+  });
+
+  it("hides off-screen symbols for large-graph viewport culling", () => {
+    const out = nodeReducer(
+      "symbol-a",
+      { kind: "symbol", symbolKind: "function", x: 1_000, y: 1_000 },
+      {
+        ...EMPTY_HIGHLIGHT_VIEW,
+        lodTier: "close",
+        viewportBounds: { minX: 0, minY: 0, maxX: 100, maxY: 100 },
+      },
     );
+    expect(out.hidden).toBe(true);
+  });
 
-    expandCommunity("api");
-    expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(2);
+  it("expanded regions bypass viewport culling for progressive reveal", () => {
+    const out = nodeReducer(
+      "symbol-a",
+      { kind: "symbol", symbolKind: "function", x: 1_000, y: 1_000 },
+      {
+        ...EMPTY_HIGHLIGHT_VIEW,
+        lodTier: "close",
+        viewportBounds: { minX: 0, minY: 0, maxX: 100, maxY: 100 },
+        expandedRegions: new Set(["symbol-a"]),
+      },
+    );
+    expect(out.hidden).toBeUndefined();
+  });
+});
 
-    collapseCommunity("auth");
-    expect(
-      useCodeGraphStore.getState().expandedCommunityIds.has("auth"),
-    ).toBe(false);
-    expect(useCodeGraphStore.getState().expandedCommunityIds.has("api")).toBe(
+// ── Progressive expansion (expandRegion store) ────────────────────────────
+
+describe("CodeGraphCanvas progressive expansion", () => {
+  it("expandRegion adds the node to expandedRegions", () => {
+    useCodeGraphStore.getState().reset();
+    const { expandRegion } = useCodeGraphStore.getState();
+    expect(useCodeGraphStore.getState().expandedRegions.size).toBe(0);
+
+    expandRegion("node-a");
+    expect(useCodeGraphStore.getState().expandedRegions.has("node-a")).toBe(
       true,
     );
   });
 
-  it("expandCommunity and collapseCommunity are idempotent", () => {
+  it("expandRegion with neighbor ids adds all to expandedRegions", () => {
     useCodeGraphStore.getState().reset();
-    const { expandCommunity, collapseCommunity } = useCodeGraphStore.getState();
+    const { expandRegion } = useCodeGraphStore.getState();
 
-    expandCommunity("auth");
-    expandCommunity("auth");
-    expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(1);
-
-    collapseCommunity("auth");
-    collapseCommunity("auth");
-    expect(
-      useCodeGraphStore.getState().expandedCommunityIds.has("auth"),
-    ).toBe(false);
+    expandRegion("node-a", ["node-b", "node-c"]);
+    const regions = useCodeGraphStore.getState().expandedRegions;
+    expect(regions.has("node-a")).toBe(true);
+    expect(regions.has("node-b")).toBe(true);
+    expect(regions.has("node-c")).toBe(true);
+    expect(regions.size).toBe(3);
   });
 
-  it("reset() clears expanded communities (project change)", () => {
-    const { expandCommunity, reset } = useCodeGraphStore.getState();
-    expandCommunity("auth");
-    expandCommunity("api");
-    expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(2);
+  it("expandRegion is idempotent (same node twice does not duplicate)", () => {
+    useCodeGraphStore.getState().reset();
+    const { expandRegion } = useCodeGraphStore.getState();
+
+    expandRegion("node-a");
+    expandRegion("node-a");
+    expect(useCodeGraphStore.getState().expandedRegions.size).toBe(1);
+  });
+
+  it("reset() clears expandedRegions (project change)", () => {
+    const { expandRegion, reset } = useCodeGraphStore.getState();
+    expandRegion("node-a");
+    expandRegion("node-b");
+    expect(useCodeGraphStore.getState().expandedRegions.size).toBe(2);
 
     reset();
-    expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(0);
+    expect(useCodeGraphStore.getState().expandedRegions.size).toBe(0);
   });
 
-  it("clearExpandedCommunities empties the set", () => {
-    const { expandCommunity, clearExpandedCommunities } =
-      useCodeGraphStore.getState();
-    expandCommunity("auth");
-    expandCommunity("api");
+  it("clearExpandedRegions empties the set", () => {
+    const { expandRegion, clearExpandedRegions } = useCodeGraphStore.getState();
+    expandRegion("node-a");
+    expandRegion("node-b");
 
-    clearExpandedCommunities();
-    expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(0);
-  });
-
-  it("isDoubleClick detects a double-click within the interval", async () => {
-    const { isDoubleClick } = await import("@/lib/codeGraphAdapter");
-    const prev = { nodeId: "community:auth", at: 1000 };
-    expect(isDoubleClick(prev, "community:auth", 1200)).toBe(true);
-    expect(isDoubleClick(prev, "community:auth", 1000)).toBe(true);
-    expect(isDoubleClick(prev, "community:api", 1200)).toBe(false);
+    clearExpandedRegions();
+    expect(useCodeGraphStore.getState().expandedRegions.size).toBe(0);
   });
 });

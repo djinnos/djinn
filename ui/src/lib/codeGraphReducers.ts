@@ -25,6 +25,25 @@
  */
 
 import { shouldLabelAtZoom } from "./codeGraphLabels";
+import {
+  isInViewport,
+  isSymbolVisibleAtMidTier,
+  type LodTier,
+  type ViewportBounds,
+} from "./codeGraphAdapter";
+
+/**
+ * Containment edge kinds that must never participate in traversal or
+ * highlight expansion. Mirrors `CONTAINMENT_EDGE_KINDS` in
+ * `codeGraphAdapter.ts` but duplicated here so the reducers module
+ * stays free of the adapter dependency (reducers are pure / testable
+ * without graphology). The two sets must stay in sync.
+ */
+export const TRAVERSAL_CONTAINMENT_EDGE_KINDS = new Set([
+  "ContainsDefinition",
+  "DeclaredInFile",
+  "MemberOf",
+]);
 
 /**
  * Mirror of graphology's `Attributes` shape — graphology-types isn't
@@ -97,6 +116,27 @@ export interface HighlightView {
    * `SigmaInstanceHandle.getCameraRatio()`.
    */
   cameraRatio: number;
+
+  /**
+   * Continuous semantic LOD tier derived from camera ratio.
+   * Controls which node kinds are visible at the current zoom level.
+   * See {@link LodTier} for tier definitions.
+   */
+  lodTier: LodTier;
+
+  /**
+   * Current viewport bounds in graph coordinates. `null` when
+   * viewport culling is inactive (small graphs or Sigma not mounted).
+   * Used by the nodeReducer to hide off-screen low-priority nodes.
+   */
+  viewportBounds: ViewportBounds | null;
+
+  /**
+   * Set of node ids that have been explicitly revealed via
+   * click-to-expand. These nodes bypass LOD and viewport culling
+   * so the user can progressively explore culled regions.
+   */
+  expandedRegions: ReadonlySet<string>;
 }
 
 /** Bitset-style flag describing which highlight layer wins for a node. */
@@ -132,6 +172,9 @@ export const EMPTY_HIGHLIGHT_VIEW: HighlightView = {
   complexityHaloIds: new Set<string>(),
   pagerankPercentile: new Map<string, number>(),
   cameraRatio: Infinity,
+  lodTier: "close",
+  viewportBounds: null,
+  expandedRegions: new Set<string>(),
 };
 
 /**
@@ -265,6 +308,39 @@ export function nodeReducer(
     if (enabled === false) return { ...attrs, hidden: true };
   }
 
+  // ── Continuous semantic LOD (camera-ratio-driven) ────────────────────
+  // Far/mid/close tiers hide symbol nodes based on zoom level.
+  // Expanded regions (click-to-expand) bypass LOD hiding so users
+  // can progressively reveal detail in culled areas.
+  if (!view.expandedRegions.has(nodeId)) {
+    if (view.lodTier === "far" && attrs.kind === "symbol") {
+      return { ...attrs, hidden: true };
+    }
+    if (view.lodTier === "mid" && attrs.kind === "symbol") {
+      const sk =
+        typeof attrs.symbolKind === "string" ? attrs.symbolKind : undefined;
+      if (!isSymbolVisibleAtMidTier(sk)) {
+        return { ...attrs, hidden: true };
+      }
+    }
+
+    // ── Viewport culling (large graphs only) ─────────────────────────
+    // When viewportBounds is set (graph >~8000 nodes), hide symbol
+    // nodes that fall outside the current viewport + margin. Folder
+    // and file nodes remain visible regardless (structural skeleton).
+    if (view.viewportBounds && attrs.kind === "symbol") {
+      const nx = typeof attrs.x === "number" ? attrs.x : null;
+      const ny = typeof attrs.y === "number" ? attrs.y : null;
+      if (
+        nx !== null &&
+        ny !== null &&
+        !isInViewport(nx, ny, view.viewportBounds)
+      ) {
+        return { ...attrs, hidden: true };
+      }
+    }
+  }
+
   // Iter 30: heatmap base layer. In `"complexity"` mode we replace the
   // topology color with a green→red gradient keyed off the cognitive
   // percentile; the persistent halo fires in *both* modes (always-on
@@ -302,7 +378,10 @@ export function nodeReducer(
       workspaceContextDimmed: true,
       // Keep the workspace ring/badge visible so remote context still has an
       // identity, but make it thinner than selected-workspace nodes.
-      borderSize: Math.max(1, (typeof attrs.borderSize === "number" ? attrs.borderSize : 1) * 0.7),
+      borderSize: Math.max(
+        1,
+        (typeof attrs.borderSize === "number" ? attrs.borderSize : 1) * 0.7,
+      ),
     };
   }
 
@@ -610,8 +689,16 @@ export function edgeReducer(
   attrs: Attributes,
   view: HighlightView,
 ): Attributes {
-  // Edge-kind toggle. Default true for unknown kinds.
+  // Containment edges are never drawn. Even though the adapter excludes
+  // them at build time, this guard ensures any containment edge that
+  // slips through (legacy graph, direct Sigma mutation) is hidden
+  // regardless of the store filter state.
   const edgeKind = attrEdgeKind(attrs);
+  if (edgeKind !== null && isTraversalContainmentEdge(edgeKind)) {
+    return { ...attrs, hidden: true };
+  }
+
+  // Edge-kind toggle. Default true for unknown kinds.
   if (edgeKind !== null) {
     const enabled = view.edgeKindFilters[edgeKind];
     if (enabled === false) return { ...attrs, hidden: true };
@@ -679,6 +766,38 @@ export interface MinimalGraph {
   neighbors(id: string): string[];
 }
 
+/**
+ * Extended minimal graph that can inspect edge kinds so traversal
+ * helpers (1-hop neighborhood) can skip containment edges. The
+ * `edgeKind` function returns the relationship kind for the edge
+ * between two adjacent nodes, or `null` when the edge is missing or
+ * carries no kind.
+ */
+export interface EdgeKindAwareGraph extends MinimalGraph {
+  /**
+   * Return the edge kind between `source` and `target` (in either
+   * direction), or `null` if no edge connects them.
+   */
+  edgeKind(source: string, target: string): string | null;
+}
+
+/** True when `kind` is a containment edge excluded from traversal. */
+export function isTraversalContainmentEdge(kind: string | null): boolean {
+  return kind !== null && TRAVERSAL_CONTAINMENT_EDGE_KINDS.has(kind);
+}
+
+/**
+ * Compute the 1-hop neighborhood of `nodeId` (inclusive of `nodeId`
+ * itself). Walks both incoming and outgoing edges so the visual
+ * "neighborhood" highlight is undirected — that matches user mental
+ * model better than a strict outbound walk.
+ *
+ * When `graph` implements {@link EdgeKindAwareGraph}, containment edges
+ * (`ContainsDefinition`, `DeclaredInFile`, `MemberOf`) are excluded
+ * so the selection frontier does not expand through structural
+ * nesting. Plain {@link MinimalGraph} callers get the legacy
+ * unfiltered behavior.
+ */
 export function oneHopNeighborhood(
   graph: MinimalGraph,
   nodeId: string,
@@ -686,6 +805,14 @@ export function oneHopNeighborhood(
   const out = new Set<string>();
   if (!graph.hasNode(nodeId)) return out;
   out.add(nodeId);
-  for (const n of graph.neighbors(nodeId)) out.add(n);
+  const hasEdgeKind =
+    typeof (graph as Partial<EdgeKindAwareGraph>).edgeKind === "function";
+  for (const n of graph.neighbors(nodeId)) {
+    if (hasEdgeKind) {
+      const kind = (graph as EdgeKindAwareGraph).edgeKind(nodeId, n);
+      if (isTraversalContainmentEdge(kind)) continue;
+    }
+    out.add(n);
+  }
   return out;
 }
