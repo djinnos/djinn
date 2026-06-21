@@ -58,7 +58,7 @@ describe("GraphToolbar", () => {
     expect(details!.contains(edgeToggle)).toBe(true);
   });
 
-  it("renders Tests, Zoom, Color, and Depth outside the Advanced disclosure", () => {
+  it("renders Tests, Zoom, Color, and DOI controls outside the Advanced disclosure", () => {
     render(<GraphToolbar />);
 
     const advanced = screen.getByText("Advanced");
@@ -73,7 +73,7 @@ describe("GraphToolbar", () => {
     const colorToggle = screen.getByTestId("color-mode-toggle");
     expect(details.contains(colorToggle)).toBe(false);
 
-    const depthSlider = screen.getByTestId("depth-slider");
-    expect(details.contains(depthSlider)).toBe(false);
+    const doiControl = screen.getByTestId("doi-reveal-control");
+    expect(details.contains(doiControl)).toBe(false);
   });
 });

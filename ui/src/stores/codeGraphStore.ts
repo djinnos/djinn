@@ -15,8 +15,8 @@
  *   hoverId             → hover tooltip target (transient)
  *
  * Filters live alongside because they're peer concerns of the same
- * canvas — per-edge-kind toggle, per-node-kind toggle, and depth from
- * selection. SymbolReference (the call graph) defaults OFF because at
+ * canvas — per-edge-kind toggle, per-node-kind toggle, and DOI focus
+ * controls. SymbolReference (the call graph) defaults OFF because at
  * 60-80% of edges it dominates everything else.
  */
 
@@ -197,9 +197,11 @@ export const LENS_PRESETS: Record<
   },
 };
 
-export const MIN_DEPTH = 1;
-export const MAX_DEPTH = 5;
-export const DEFAULT_DEPTH = MAX_DEPTH;
+export type FocusDirection = "dependencies" | "dependents" | "both";
+export const DEFAULT_FOCUS_DIRECTION: FocusDirection = "both";
+export const MIN_DOI_REVEAL_COUNT = 10;
+export const MAX_DOI_REVEAL_COUNT = 100;
+export const DEFAULT_DOI_REVEAL_COUNT = 40;
 
 /**
  * Iter 30: color-mode discriminator for the canvas.
@@ -241,7 +243,12 @@ export interface CodeGraphHighlightState {
    * (canonical `is_test` classification). Default `false` (whole graph).
    */
   hideTests: boolean;
-  depthFilter: number;
+  /** Explicit DOI focus anchor. Kept separate from detail-panel selection. */
+  focusAnchorId: string | null;
+  /** Direction used by downstream dependency/dependent DOI traversal. */
+  focusDirection: FocusDirection;
+  /** Bounded top-N DOI context count to reveal around the focus anchor. */
+  doiRevealCount: number;
   /** Iter 30: see {@link ColorMode}. Default `"topology"`. */
   colorMode: ColorMode;
   /**
@@ -294,7 +301,14 @@ export interface CodeGraphHighlightActions {
   toggleSymbolKind: (kind: string) => void;
   /** v10: toggle hiding of test files/symbols. */
   setHideTests: (hide: boolean) => void;
-  setDepthFilter: (depth: number) => void;
+  /** Set the explicit DOI focus anchor. Selection remains detail-panel state. */
+  setFocusAnchor: (id: string | null) => void;
+  /** Clear the DOI focus anchor without changing selection. */
+  clearFocusAnchor: () => void;
+  /** Direction used by downstream DOI traversal. */
+  setFocusDirection: (direction: FocusDirection) => void;
+  /** Bounded top-N DOI context count. */
+  setDoiRevealCount: (count: number) => void;
   /** Iter 30: switch heatmap mode. */
   setColorMode: (mode: ColorMode) => void;
   /** Iter 30: canvas reports whether complexity data is present in the snapshot. */
@@ -331,7 +345,9 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   nodeKindFilters: { ...LENS_PRESETS.architecture.nodeKindFilters },
   symbolKindFilters: { ...LENS_PRESETS.architecture.symbolKindFilters },
   hideTests: false,
-  depthFilter: DEFAULT_DEPTH,
+  focusAnchorId: null,
+  focusDirection: DEFAULT_FOCUS_DIRECTION,
+  doiRevealCount: DEFAULT_DOI_REVEAL_COUNT,
   colorMode: DEFAULT_COLOR_MODE,
   complexityAvailable: false,
   graphReady: false,
@@ -418,9 +434,27 @@ export const useCodeGraphStore = create<
     set({ hideTests: hide });
   },
 
-  setDepthFilter: (depth) => {
-    const clamped = Math.max(MIN_DEPTH, Math.min(MAX_DEPTH, Math.round(depth)));
-    set({ depthFilter: clamped });
+  setFocusAnchor: (id) => {
+    set({ focusAnchorId: id });
+  },
+
+  clearFocusAnchor: () => {
+    set({ focusAnchorId: null });
+  },
+
+  setFocusDirection: (direction) => {
+    set({ focusDirection: direction });
+  },
+
+  setDoiRevealCount: (count) => {
+    const rounded = Number.isFinite(count)
+      ? Math.round(count)
+      : DEFAULT_DOI_REVEAL_COUNT;
+    const clamped = Math.max(
+      MIN_DOI_REVEAL_COUNT,
+      Math.min(MAX_DOI_REVEAL_COUNT, rounded),
+    );
+    set({ doiRevealCount: clamped });
   },
 
   setColorMode: (mode) => {
@@ -535,9 +569,15 @@ export const selectNodeKindFilters = (
 export const selectSymbolKindFilters = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
 ) => s.symbolKindFilters;
-export const selectDepthFilter = (
+export const selectFocusAnchorId = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
-) => s.depthFilter;
+) => s.focusAnchorId;
 export const selectActiveLens = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
 ) => s.activeLens;
+export const selectFocusDirection = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.focusDirection;
+export const selectDoiRevealCount = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.doiRevealCount;

@@ -1,5 +1,5 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
@@ -7,6 +7,7 @@ use djinn_core::models::{
 };
 
 use crate::database::Database;
+use crate::repositories::note::NoteRepository;
 use crate::{Error, Result};
 
 // Global proposals layer (Phase 0). A `proposal` is project-independent; it
@@ -20,6 +21,20 @@ use crate::{Error, Result};
 #[derive(Clone, Debug)]
 enum SqlParam {
     Text(String),
+}
+
+/// Memory note reached through a proposal's graduated epics and their tasks.
+///
+/// This is a read-time projection, not a database model: the permalink/source
+/// are read from `epics.memory_refs` / `tasks.memory_refs`, while `title` and
+/// `note_type` are resolved from `notes`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProposalMemoryRef {
+    pub permalink: String,
+    pub title: String,
+    pub note_type: String,
+    pub source_entity_type: String,
+    pub source_short_id: String,
 }
 
 /// Filters and pagination for [`ProposalRepository::list_filtered`].
@@ -813,6 +828,78 @@ impl ProposalRepository {
             .collect())
     }
 
+    /// Memory notes attached to this proposal's graduated epics or their tasks.
+    ///
+    /// Walks `proposal_epics -> epics.memory_refs` and then each graduated
+    /// epic's `tasks.memory_refs`, resolving note metadata from the `notes`
+    /// table. Duplicate permalinks are returned once, keeping the first source
+    /// encountered in graduation/task order.
+    pub async fn memory_refs_for_proposal(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Vec<ProposalMemoryRef>> {
+        self.db.ensure_initialized().await?;
+        let note_repo = NoteRepository::new(self.db.clone(), self.events.clone());
+        let mut seen = HashSet::new();
+        let mut refs = Vec::new();
+
+        for (epic_id, project_id) in self.graduated_epics(proposal_id).await? {
+            let epic = sqlx::query_as::<_, (String, String)>(
+                r#"SELECT short_id, memory_refs::text
+                   FROM epics
+                   WHERE id = $1"#,
+            )
+            .bind(&epic_id)
+            .fetch_optional(self.db.pool())
+            .await?;
+
+            if let Some((epic_short_id, epic_memory_refs)) = epic {
+                for permalink in parse_memory_refs_json(&epic_memory_refs)? {
+                    if let Some(note) = note_repo.get_by_permalink(&project_id, &permalink).await?
+                        && seen.insert(permalink.clone())
+                    {
+                        refs.push(ProposalMemoryRef {
+                            permalink,
+                            title: note.title,
+                            note_type: note.note_type,
+                            source_entity_type: "epic".to_owned(),
+                            source_short_id: epic_short_id.clone(),
+                        });
+                    }
+                }
+
+                let task_rows = sqlx::query_as::<_, (String, String)>(
+                    r#"SELECT short_id, memory_refs::text
+                       FROM tasks
+                       WHERE epic_id = $1
+                       ORDER BY created_at, id"#,
+                )
+                .bind(&epic_id)
+                .fetch_all(self.db.pool())
+                .await?;
+
+                for (task_short_id, task_memory_refs) in task_rows {
+                    for permalink in parse_memory_refs_json(&task_memory_refs)? {
+                        if let Some(note) =
+                            note_repo.get_by_permalink(&project_id, &permalink).await?
+                            && seen.insert(permalink.clone())
+                        {
+                            refs.push(ProposalMemoryRef {
+                                permalink,
+                                title: note.title,
+                                note_type: note.note_type,
+                                source_entity_type: "task".to_owned(),
+                                source_short_id: task_short_id.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(refs)
+    }
+
     /// Stamp that one graduated epic has been reconciled against a proposal
     /// revision. Idempotent for repeated reconcile runs of the same revision.
     pub async fn record_epic_reconciliation(
@@ -1366,6 +1453,21 @@ async fn short_id_exists(pool: &sqlx::PgPool, short_id: &str) -> Result<bool> {
     )
     .fetch_one(pool)
     .await?)
+}
+
+fn parse_memory_refs_json(memory_refs_json: &str) -> Result<Vec<String>> {
+    let value: serde_json::Value = serde_json::from_str(memory_refs_json).map_err(|e| {
+        Error::InvalidData(format!("invalid json for proposal memory_refs walk: {e}"))
+    })?;
+    Ok(value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 // ── Dynamic query helpers ────────────────────────────────────────────────────
@@ -2200,6 +2302,148 @@ mod tests {
         .await
         .unwrap();
         id
+    }
+
+    async fn set_epic_memory_refs(db: &Database, epic_id: &str, refs: Vec<String>) {
+        let memory_refs =
+            serde_json::Value::Array(refs.into_iter().map(serde_json::Value::String).collect());
+        sqlx::query("UPDATE epics SET memory_refs = $1 WHERE id = $2")
+            .bind(memory_refs)
+            .bind(epic_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    async fn set_task_memory_refs(db: &Database, task_id: &str, refs: Vec<String>) {
+        let memory_refs =
+            serde_json::Value::Array(refs.into_iter().map(serde_json::Value::String).collect());
+        sqlx::query("UPDATE tasks SET memory_refs = $1 WHERE id = $2")
+            .bind(memory_refs)
+            .bind(task_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_refs_for_proposal_walks_epics_and_tasks_deduping() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+        let proj = insert_project(&db, "svc-memory-walk").await;
+        let proposal = repo.create(create_input("Memory walk")).await.unwrap();
+
+        let epic_one_ref = note_repo
+            .create(&proj, "Epic One Ref", "epic one", "case", "[]")
+            .await
+            .unwrap();
+        let epic_two_ref = note_repo
+            .create(&proj, "Epic Two Ref", "epic two", "pattern", "[]")
+            .await
+            .unwrap();
+        let task_one_ref = note_repo
+            .create(&proj, "Task One Ref", "task one", "pitfall", "[]")
+            .await
+            .unwrap();
+        let task_two_ref = note_repo
+            .create(&proj, "Task Two Ref", "task two", "adr", "[]")
+            .await
+            .unwrap();
+
+        let epic_one = insert_epic(&db, &proj, "mr01").await;
+        let epic_two = insert_epic(&db, &proj, "mr02").await;
+        repo.link_epic(&proposal.id, &epic_one, &proj)
+            .await
+            .unwrap();
+        repo.link_epic(&proposal.id, &epic_two, &proj)
+            .await
+            .unwrap();
+
+        set_epic_memory_refs(
+            &db,
+            &epic_one,
+            vec![
+                epic_one_ref.permalink.clone(),
+                task_one_ref.permalink.clone(),
+            ],
+        )
+        .await;
+        set_epic_memory_refs(
+            &db,
+            &epic_two,
+            vec![
+                epic_two_ref.permalink.clone(),
+                epic_one_ref.permalink.clone(),
+            ],
+        )
+        .await;
+
+        let task_one = insert_task(&db, &proj, &epic_one, "mt01").await;
+        let task_two = insert_task(&db, &proj, &epic_one, "mt02").await;
+        let task_three = insert_task(&db, &proj, &epic_two, "mt03").await;
+        let task_four = insert_task(&db, &proj, &epic_two, "mt04").await;
+        set_task_memory_refs(
+            &db,
+            &task_one,
+            vec![
+                task_one_ref.permalink.clone(),
+                task_two_ref.permalink.clone(),
+            ],
+        )
+        .await;
+        set_task_memory_refs(&db, &task_two, vec![epic_one_ref.permalink.clone()]).await;
+        set_task_memory_refs(&db, &task_three, vec![task_two_ref.permalink.clone()]).await;
+        set_task_memory_refs(&db, &task_four, vec![epic_two_ref.permalink.clone()]).await;
+
+        let refs = repo.memory_refs_for_proposal(&proposal.id).await.unwrap();
+        assert_eq!(refs.len(), 4);
+
+        let by_permalink: HashMap<_, _> = refs
+            .into_iter()
+            .map(|memory_ref| (memory_ref.permalink.clone(), memory_ref))
+            .collect();
+
+        assert_eq!(
+            by_permalink.get(&epic_one_ref.permalink).unwrap(),
+            &ProposalMemoryRef {
+                permalink: epic_one_ref.permalink.clone(),
+                title: "Epic One Ref".to_owned(),
+                note_type: "case".to_owned(),
+                source_entity_type: "epic".to_owned(),
+                source_short_id: "mr01".to_owned(),
+            }
+        );
+        assert_eq!(
+            by_permalink.get(&task_one_ref.permalink).unwrap(),
+            &ProposalMemoryRef {
+                permalink: task_one_ref.permalink.clone(),
+                title: "Task One Ref".to_owned(),
+                note_type: "pitfall".to_owned(),
+                source_entity_type: "epic".to_owned(),
+                source_short_id: "mr01".to_owned(),
+            }
+        );
+        assert_eq!(
+            by_permalink.get(&task_two_ref.permalink).unwrap(),
+            &ProposalMemoryRef {
+                permalink: task_two_ref.permalink.clone(),
+                title: "Task Two Ref".to_owned(),
+                note_type: "adr".to_owned(),
+                source_entity_type: "task".to_owned(),
+                source_short_id: "mt01".to_owned(),
+            }
+        );
+        assert_eq!(
+            by_permalink.get(&epic_two_ref.permalink).unwrap(),
+            &ProposalMemoryRef {
+                permalink: epic_two_ref.permalink.clone(),
+                title: "Epic Two Ref".to_owned(),
+                note_type: "pattern".to_owned(),
+                source_entity_type: "epic".to_owned(),
+                source_short_id: "mr02".to_owned(),
+            }
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
