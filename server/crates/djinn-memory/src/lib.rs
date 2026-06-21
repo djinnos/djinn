@@ -15,6 +15,7 @@ pub mod consolidation;
 pub mod events;
 pub mod note;
 pub mod note_association;
+pub mod proposal;
 
 pub use consolidation::{
     ConsolidatedNoteProvenance, ConsolidationCandidateEdge, ConsolidationCluster,
@@ -30,3 +31,4 @@ pub use note::{
     note_status,
 };
 pub use note_association::{NoteAssociation, association_kind, canonical_pair};
+pub use proposal::ProposalSearchResult;
