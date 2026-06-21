@@ -52,6 +52,7 @@ pub use types::{
     AutoMergeTracker, BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
     CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugCooldown, DebugDispatchState,
     DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
+    PrCleanupConfig,
 };
 
 // Re-export internal types for sibling submodules that use `use super::*;`.

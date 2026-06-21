@@ -150,19 +150,31 @@ impl<C> PrCleanupPolicy<C> {
 
 impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
     /// Return true when it is safe and intended to clean up the PR.
+    ///
+    /// Emits `djinn_inline_cleanup_skipped_total` metrics for each skip reason
+    /// and `djinn_inline_pr_closed_total` when the PR would be closed.
     pub(crate) async fn should_cleanup_pr(&self, task: &Task, pr: &PullRequest) -> Result<bool> {
         if !self.config.enabled {
             tracing::info!(task_id = %task.short_id, pr = pr.number, "PR cleanup disabled; skipping PR cleanup");
+            djinn_telemetry::inline_cleanup::increment_skipped(
+                djinn_telemetry::inline_cleanup::REASON_CONFIG_DISABLED,
+            );
             return Ok(false);
         }
 
         if self.within_grace_period(task)? {
             tracing::info!(task_id = %task.short_id, pr = pr.number, "PR cleanup skipped during grace period");
+            djinn_telemetry::inline_cleanup::increment_skipped(
+                djinn_telemetry::inline_cleanup::REASON_GRACE_PERIOD,
+            );
             return Ok(false);
         }
 
         let Some(user) = pr.user.as_ref() else {
             tracing::warn!(task_id = %task.short_id, pr = pr.number, "PR cleanup skipped because PR author is unavailable");
+            djinn_telemetry::inline_cleanup::increment_skipped(
+                djinn_telemetry::inline_cleanup::REASON_BOT_AUTHOR,
+            );
             return Ok(false);
         };
         if !self.config.bot_logins.contains(&user.login) {
@@ -171,6 +183,9 @@ impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
                 pr = pr.number,
                 author = %user.login,
                 "PR cleanup skipped for human/non-bot-authored PR"
+            );
+            djinn_telemetry::inline_cleanup::increment_skipped(
+                djinn_telemetry::inline_cleanup::REASON_BOT_AUTHOR,
             );
             return Ok(false);
         }
@@ -186,31 +201,55 @@ impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
                 state = ?entry.state,
                 "PR cleanup skipped because PR is in the merge queue"
             );
+            djinn_telemetry::inline_cleanup::increment_skipped(
+                djinn_telemetry::inline_cleanup::REASON_MERGE_QUEUE,
+            );
             return Ok(false);
         }
 
         if self.config.dry_run {
-            tracing::info!(task_id = %task.short_id, pr = pr.number, "PR cleanup dry-run: would close PR");
+            tracing::info!(
+                task_id = %task.short_id,
+                pr = pr.number,
+                "dry_run: would close PR #{} for task {}",
+                pr.number,
+                task.short_id
+            );
+            djinn_telemetry::inline_cleanup::increment_skipped(
+                djinn_telemetry::inline_cleanup::REASON_DRY_RUN,
+            );
+            return Ok(false);
         }
 
         Ok(true)
     }
 
     /// Return true when it is safe and intended to delete `branch`.
+    ///
+    /// Emits `djinn_inline_cleanup_skipped_total` metrics for each skip reason.
     pub(crate) async fn should_delete_branch(&self, task: &Task, branch: &str) -> Result<bool> {
         if !self.config.enabled {
             tracing::info!(task_id = %task.short_id, branch, "PR cleanup disabled; skipping branch deletion");
+            djinn_telemetry::inline_cleanup::increment_skipped(
+                djinn_telemetry::inline_cleanup::REASON_CONFIG_DISABLED,
+            );
             return Ok(false);
         }
 
         if self.within_grace_period(task)? {
             tracing::info!(task_id = %task.short_id, branch, "Branch cleanup skipped during grace period");
+            djinn_telemetry::inline_cleanup::increment_skipped(
+                djinn_telemetry::inline_cleanup::REASON_GRACE_PERIOD,
+            );
             return Ok(false);
         }
 
         let branch = normalize_branch_name(branch);
         if self.config.protected_branches.contains(branch) {
             tracing::info!(task_id = %task.short_id, branch, "Branch cleanup skipped for protected branch");
+            djinn_telemetry::inline_cleanup::increment_skipped(
+                djinn_telemetry::inline_cleanup::REASON_PROTECTED_BRANCH,
+            );
             return Ok(false);
         }
 
@@ -222,6 +261,9 @@ impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
                 .any(|prefix| branch.starts_with(prefix))
         {
             tracing::info!(task_id = %task.short_id, branch, "Branch cleanup skipped for non-bot branch prefix");
+            djinn_telemetry::inline_cleanup::increment_skipped(
+                djinn_telemetry::inline_cleanup::REASON_BOT_AUTHOR,
+            );
             return Ok(false);
         }
 
@@ -236,11 +278,19 @@ impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
                 dependent_pr_count = dependent_prs.len(),
                 "Branch cleanup skipped because branch is the base of another open PR"
             );
+            djinn_telemetry::inline_cleanup::increment_skipped(
+                djinn_telemetry::inline_cleanup::REASON_BASE_OF_PR,
+            );
             return Ok(false);
         }
 
         if self.config.dry_run {
-            tracing::info!(task_id = %task.short_id, branch, "PR cleanup dry-run: would delete branch");
+            tracing::info!(
+                task_id = %task.short_id,
+                branch,
+                "dry_run: would delete branch task/{}",
+                task.short_id
+            );
         }
 
         Ok(true)
@@ -248,6 +298,10 @@ impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
 
     /// Delete `branch` when guardrails allow it; dry-run mode logs but does not
     /// call GitHub.
+    ///
+    /// Emits `djinn_inline_branch_deleted_total` when a branch is successfully
+    /// deleted and `djinn_inline_cleanup_skipped_total{reason="dry_run"}` when
+    /// the deletion is skipped due to dry-run mode.
     pub(crate) async fn delete_branch_if_allowed(
         &self,
         task: &Task,
@@ -259,7 +313,10 @@ impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
 
         let branch = normalize_branch_name(branch);
         if self.config.dry_run {
-            tracing::info!(task_id = %task.short_id, branch, "PR cleanup dry-run: not deleting branch");
+            tracing::info!(task_id = %task.short_id, branch, "dry_run: not deleting branch");
+            djinn_telemetry::inline_cleanup::increment_skipped(
+                djinn_telemetry::inline_cleanup::REASON_DRY_RUN,
+            );
             return Ok(BranchCleanupOutcome::DryRunWouldDelete);
         }
 
@@ -270,6 +327,7 @@ impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
                 &format!("heads/{branch}"),
             )
             .await?;
+        djinn_telemetry::inline_cleanup::increment_branch_deleted();
         Ok(BranchCleanupOutcome::Deleted)
     }
 
