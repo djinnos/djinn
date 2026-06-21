@@ -60,6 +60,7 @@ mod ci_helpers;
 mod conversation_resolution;
 mod installation;
 mod pr_commands;
+mod pr_cleanup_guardrails;
 mod pr_review_handlers;
 mod pr_review_watcher;
 mod pr_watcher;
