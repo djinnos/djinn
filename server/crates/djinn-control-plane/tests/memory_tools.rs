@@ -1291,18 +1291,22 @@ async fn no_regression_memory_refs_autolink() {
 
 #[tokio::test]
 async fn no_regression_memory_search_ranking_notes_only() {
-    // Regression guard: memory_search currently returns only notes. The Wave 1
-    // feature adds proposals to memory_task_refs and proposal_show but must NOT
-    // change memory_search results. This test verifies that:
-    // (a) memory_search with no entity_types filter returns the same notes as
-    //     before, and
-    // (b) every result is a note (has a permalink, note_type, folder — note
-    //     fields that proposals do not have).
+    // Regression guard: memory_search returns notes ranked correctly.
+    //
+    // Wave 2 changed the default entity_types from notes-only to "both" —
+    // proposals are now interleaved in search results when entity_types is
+    // unset.  This test verifies that:
+    // (a) the two notes are still found in the result set, and
+    // (b) notes retain their expected fields (note_type, folder, permalink).
+    //
+    // Proposals MAY appear alongside notes in the default (unfiltered)
+    // result set — that is by design.  The test does not assert their
+    // absence.
     let harness = McpTestHarness::new().await;
     let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = project_row.slug();
 
-    // Create a proposal (should NOT appear in memory_search).
+    // Create a proposal (may appear in default memory_search results).
     let proposal = harness
         .call_tool(
             "proposal_create",
@@ -1339,24 +1343,31 @@ async fn no_regression_memory_search_ranking_notes_only() {
     let results = searched["results"]
         .as_array()
         .expect("results should be an array");
-    assert!(results.len() >= 2, "should find both notes: {results:?}");
 
-    // Every result must be a note (not a proposal). Notes have note_type and
-    // folder fields; proposals do not appear here.
-    for r in results {
+    // At least the two notes should be present (proposals may also appear).
+    let note_results: Vec<_> = results
+        .iter()
+        .filter(|r| {
+            r.get("note_type")
+                .and_then(|v| v.as_str())
+                .is_some_and(|nt| nt != "proposal")
+        })
+        .collect();
+    assert!(
+        note_results.len() >= 2,
+        "should find at least 2 notes (got {}): {results:?}",
+        note_results.len()
+    );
+
+    // Every note result must carry the expected note fields.
+    for r in &note_results {
         assert!(
             r.get("note_type").is_some(),
-            "every result should have note_type (it's a note): {r:?}"
+            "every note result should have note_type: {r:?}"
         );
         assert!(
             r.get("folder").is_some(),
-            "every result should have folder (it's a note): {r:?}"
-        );
-        // The result should NOT match the proposal title.
-        assert_ne!(
-            r.get("title").and_then(|v| v.as_str()),
-            Some("Search Excluded Proposal"),
-            "proposals must not appear in memory_search results"
+            "every note result should have folder: {r:?}"
         );
     }
 }

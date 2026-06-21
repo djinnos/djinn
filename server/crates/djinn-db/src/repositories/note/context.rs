@@ -251,8 +251,10 @@ impl NoteRepository {
             .collect();
 
         if !probe_tokens.is_empty() {
-            // Build ILIKE conditions: each token must appear somewhere in
-            // the concatenated proposal searchable text.
+            // Build ILIKE conditions: any token appearing in the concatenated
+            // proposal searchable text qualifies.  Using OR (not AND) because
+            // the goal is "planner sees motivating proposal", not exhaustive
+            // relevance — one matching keyword is enough.
             let mut conditions = Vec::new();
             for (i, _token) in probe_tokens.iter().enumerate() {
                 conditions.push(format!(
@@ -260,13 +262,13 @@ impl NoteRepository {
                     i + 2
                 ));
             }
-            let where_clause = conditions.join(" AND ");
+            let where_clause = conditions.join(" OR ");
 
             // NOTE: dynamic SQL (ILIKE conditions built from seed tokens) —
             // compile-time check not possible.
             let sql = format!(
                 r#"SELECT p.id, p.short_id, p.title, p.body, p.body_format,
-                          p.acceptance_criteria::text AS "acceptance_criteria!",
+                          p.acceptance_criteria::text AS acceptance_criteria,
                           p.status, p.author_user_id, p.superseded_by,
                           p.created_at, p.updated_at, p.closed_at,
                           p.latest_revision_seq, p.last_reconciled_revision_seq,
@@ -276,7 +278,7 @@ impl NoteRepository {
                    JOIN proposal_targets pt ON pt.proposal_id = p.id
                    WHERE pt.project_id = $1
                      AND p.status NOT IN ('archived', 'rejected')
-                     AND {}
+                     AND ({})
                    LIMIT 5"#,
                 where_clause
             );
