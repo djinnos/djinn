@@ -5,7 +5,7 @@
  * D2 swapped the empty canvas for `<CodeGraphCanvas>`, fetching the
  *   `code_graph snapshot` payload and rendering through Sigma + FA2.
  * D3 layered:
- *   - `<GraphToolbar>`         (edge-kind checkboxes + depth slider)
+ *   - `<GraphToolbar>`         (filters, lenses, and DOI focus controls)
  *   - `<SymbolDetailPanel>`    (right rail; opens on selection)
  *   - `<QueryPalette>`         (Cmd-K fuzzy hybrid search)
  *

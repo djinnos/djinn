@@ -3,8 +3,8 @@
  * snapshot into Sigma `nodeReducer` / `edgeReducer` outputs.
  *
  * Sigma calls these on every render frame, so the rule is: NO side
- * effects, NO BFS traversal, NO new objects unless the visual state
- * actually changes. Heavy lifting (1-hop neighbor set, depth-N BFS)
+ * effects, NO graph traversal, NO new objects unless the visual state
+ * actually changes. Heavy lifting (1-hop neighbor set, DOI scoring)
  * lives upstream in `useGraphReducers` where it's memoized via
  * `useMemo`/`useEffect` and only recomputed when selection or graph
  * topology changes.
@@ -34,9 +34,8 @@ export type Attributes = Record<string, unknown>;
 
 /**
  * Pre-computed view of the highlight store the reducers consume on
- * every Sigma frame. Caller derives `selectionNeighbors` /
- * `depthReachable` upstream (lazy BFS) so the reducer itself is O(1)
- * per node.
+ * every Sigma frame. Caller derives `selectionNeighbors` upstream so the
+ * reducer itself is O(1) per node.
  */
 export interface HighlightView {
   selectionId: string | null;
@@ -54,10 +53,14 @@ export interface HighlightView {
   /** v10: when true, hide every node marked `isTest` (test files/symbols). */
   hideTests: boolean;
   /**
-   * Set of node ids reachable within `depthFilter` hops from the
-   * selection. `null` means "depth filter disabled" (render every node).
+   * Precomputed top-N DOI focus set. Reducers only do O(1) membership checks;
+   * directional traversal/scoring happens upstream in `useGraphReducers`.
    */
-  depthReachable: ReadonlySet<string> | null;
+  doiFocusIds: ReadonlySet<string>;
+  /** Reachable-but-not-focused DOI context nodes, rendered dimmed by default. */
+  doiContextIds: ReadonlySet<string>;
+  /** Optional score map for future legends/tooltips; unused by hot paths. */
+  doiScores: ReadonlyMap<string, number>;
   /** Pulse phase ∈ [0, 1] driving the blast-radius color cycle. */
   pulsePhase: number;
   /**
@@ -103,6 +106,7 @@ export type HighlightMode =
   | "citation"
   | "tool"
   | "blast"
+  | "doiFocus"
   | "hover"
   | "dim";
 
@@ -118,7 +122,9 @@ export const EMPTY_HIGHLIGHT_VIEW: HighlightView = {
   nodeKindFilters: {},
   symbolKindFilters: {},
   hideTests: false,
-  depthReachable: null,
+  doiFocusIds: new Set<string>(),
+  doiContextIds: new Set<string>(),
+  doiScores: new Map<string, number>(),
   pulsePhase: 0,
   colorMode: "topology",
   complexityThresholds: null,
@@ -137,6 +143,8 @@ export function isViewEmpty(view: HighlightView): boolean {
     view.citationIds.size === 0 &&
     view.toolHighlightIds.size === 0 &&
     view.blastRadiusFrontier.size === 0 &&
+    view.doiFocusIds.size === 0 &&
+    view.doiContextIds.size === 0 &&
     view.hoverId === null
   );
 }
@@ -155,6 +163,7 @@ export function pickHighlightMode(
   if (view.blastRadiusFrontier.has(nodeId)) return "blast";
   if (view.toolHighlightIds.has(nodeId)) return "tool";
   if (view.citationIds.has(nodeId)) return "citation";
+  if (view.doiFocusIds.has(nodeId)) return "doiFocus";
   if (view.selectionId !== null && view.selectionNeighbors.has(nodeId))
     return "neighbor";
   if (view.hoverId === nodeId) return "hover";
@@ -171,6 +180,11 @@ const COLOR_BLAST_LO = "#fbbf24"; // amber-400: blast pulse low
 const COLOR_BLAST_HI = "#ef4444"; // red-500: blast pulse high
 const COLOR_HOVER = "#facc15"; // yellow-400: hover preview
 const COLOR_DIMMED = "rgba(100, 116, 139, 0.18)"; // slate-500 @ 18%
+
+function attrEdgeKind(attrs: Attributes): string | null {
+  const raw = attrs.kind ?? attrs.edgeKind;
+  return typeof raw === "string" ? raw : null;
+}
 
 /**
  * Linear-interpolate between two `#rrggbb` hex colors. Used for the
@@ -250,13 +264,6 @@ export function nodeReducer(
     if (enabled === false) return { ...attrs, hidden: true };
   }
 
-  // Depth filter hides nodes outside the configured BFS frontier.
-  // This sits *outside* `pickHighlightMode` so the depth gate fires
-  // even when no other highlight is active.
-  if (view.depthReachable !== null && !view.depthReachable.has(nodeId)) {
-    return { ...attrs, hidden: true };
-  }
-
   // Iter 30: heatmap base layer. In `"complexity"` mode we replace the
   // topology color with a green→red gradient keyed off the cognitive
   // percentile; the persistent halo fires in *both* modes (always-on
@@ -330,6 +337,15 @@ export function nodeReducer(
         // target has no readable identifier at far-zoom.
         label: attrs.label,
         zIndex: 100,
+        highlighted: true,
+      };
+    case "doiFocus":
+      return {
+        ...baseAttrs,
+        color: COLOR_NEIGHBOR,
+        size: attrSize(attrs, 6) * 1.12,
+        label: attrs.label,
+        zIndex: 55,
         highlighted: true,
       };
     case "neighbor":
@@ -579,7 +595,7 @@ export interface EdgeReducerOverride extends Attributes {
 /**
  * Edge reducer:
  *   - Hide edges whose `kind` is filtered off in the store.
- *   - Hide edges crossing the depth-filter frontier.
+ *   - Dim edges outside the precomputed DOI focus set rather than hard-hide them.
  *   - Highlight edges incident on the selection's 1-hop set.
  *   - Otherwise dim them so node clusters remain readable.
  *
@@ -594,19 +610,10 @@ export function edgeReducer(
   view: HighlightView,
 ): Attributes {
   // Edge-kind toggle. Default true for unknown kinds.
-  if (typeof attrs.kind === "string") {
-    const enabled = view.edgeKindFilters[attrs.kind];
+  const edgeKind = attrEdgeKind(attrs);
+  if (edgeKind !== null) {
+    const enabled = view.edgeKindFilters[edgeKind];
     if (enabled === false) return { ...attrs, hidden: true };
-  }
-
-  // Depth filter: an edge is visible only if both endpoints are visible.
-  if (view.depthReachable !== null) {
-    if (
-      !view.depthReachable.has(source) ||
-      !view.depthReachable.has(target)
-    ) {
-      return { ...attrs, hidden: true };
-    }
   }
 
   if (isViewEmpty(view)) return attrs;
@@ -621,12 +628,19 @@ export function edgeReducer(
       (view.selectionNeighbors.has(source) &&
         view.selectionNeighbors.has(target)));
 
-  if (isSelectionEdge) {
+  const isDoiFocusEdge =
+    view.doiFocusIds.size > 0 &&
+    view.doiFocusIds.has(source) &&
+    view.doiFocusIds.has(target);
+
+  if (isSelectionEdge || isDoiFocusEdge) {
     return {
       ...attrs,
-      color: isCrossWorkspace ? EDGE_COLOR_CROSS_WORKSPACE : EDGE_COLOR_HIGHLIGHTED,
+      color: isCrossWorkspace
+        ? EDGE_COLOR_CROSS_WORKSPACE
+        : EDGE_COLOR_HIGHLIGHTED,
       size: attrSize(attrs, 1) * (isCrossWorkspace ? 1.55 : 1.3),
-      zIndex: isCrossWorkspace ? 30 : 5,
+      zIndex: isSelectionEdge ? (isCrossWorkspace ? 30 : 5) : 4,
     };
   }
 
@@ -646,7 +660,7 @@ export function edgeReducer(
   };
 }
 
-// ── BFS helpers ─────────────────────────────────────────────────────────────
+// ── Graph neighborhood helpers ──────────────────────────────────────────────
 
 /**
  * Compute the 1-hop neighborhood of `nodeId` (inclusive of `nodeId`
@@ -672,36 +686,5 @@ export function oneHopNeighborhood(
   if (!graph.hasNode(nodeId)) return out;
   out.add(nodeId);
   for (const n of graph.neighbors(nodeId)) out.add(n);
-  return out;
-}
-
-/**
- * BFS up to `maxDepth` hops from `seed`. Returns `null` (= "no depth
- * filtering") when `maxDepth` is at or above {@link Number.MAX_SAFE_INTEGER}
- * so callers can use it as a sentinel.
- */
-export function bfsReachable(
-  graph: MinimalGraph,
-  seed: string,
-  maxDepth: number,
-): Set<string> {
-  const out = new Set<string>();
-  if (!graph.hasNode(seed)) return out;
-  out.add(seed);
-  if (maxDepth <= 0) return out;
-
-  let frontier: string[] = [seed];
-  for (let d = 0; d < maxDepth; d += 1) {
-    const next: string[] = [];
-    for (const id of frontier) {
-      for (const n of graph.neighbors(id)) {
-        if (out.has(n)) continue;
-        out.add(n);
-        next.push(n);
-      }
-    }
-    if (next.length === 0) break;
-    frontier = next;
-  }
   return out;
 }
