@@ -53,7 +53,7 @@ export type EdgeKind = (typeof EDGE_KINDS)[number];
  * `SnapshotNodeKind` (file/folder/symbol); `symbol_kind` discriminators
  * (function/method/class/...) live in {@link SYMBOL_KIND_FILTERS}.
  */
-export const NODE_KINDS = ["folder", "file", "symbol", "community"] as const;
+export const NODE_KINDS = ["folder", "file", "symbol"] as const;
 export type NodeKind = (typeof NODE_KINDS)[number];
 
 /**
@@ -114,7 +114,6 @@ export const LENS_PRESETS: Record<
       folder: true,
       file: true,
       symbol: true,
-      community: false,
     },
     symbolKindFilters: Object.fromEntries(
       SYMBOL_KIND_FILTERS.map((k) => [k, false]),
@@ -140,7 +139,6 @@ export const LENS_PRESETS: Record<
       folder: false,
       file: false,
       symbol: true,
-      community: false,
     },
     symbolKindFilters: Object.fromEntries(
       SYMBOL_KIND_FILTERS.map((k) => [
@@ -157,7 +155,6 @@ export const LENS_PRESETS: Record<
       folder: false,
       file: false,
       symbol: true,
-      community: false,
     },
     symbolKindFilters: Object.fromEntries(
       SYMBOL_KIND_FILTERS.map((k) => [
@@ -185,7 +182,6 @@ export const LENS_PRESETS: Record<
       folder: false,
       file: false,
       symbol: true,
-      community: false,
     },
     symbolKindFilters: Object.fromEntries(
       SYMBOL_KIND_FILTERS.map((k) => [
@@ -218,19 +214,6 @@ export const DEFAULT_DOI_REVEAL_COUNT = 40;
 export type ColorMode = "topology" | "complexity";
 export const DEFAULT_COLOR_MODE: ColorMode = "topology";
 
-/**
- * Semantic zoom mode for community-collapse behaviour.
- *   - `"auto"` (default) — the canvas decides `symbol` vs `community`
- *     based on the snapshot node-count threshold.
- *   - `"symbol"` — force a symbol-level snapshot.
- *   - `"community"` — force a community-level (collapsed) snapshot.
- *
- * This task only owns the state + toolbar control; the canvas fetch
- * wiring lives in a sibling task.
- */
-export type SemanticZoomMode = "auto" | "symbol" | "community";
-export const DEFAULT_SEMANTIC_ZOOM_MODE: SemanticZoomMode = "auto";
-
 export interface CodeGraphHighlightState {
   selectionId: string | null;
   citationIds: Set<string>;
@@ -238,6 +221,12 @@ export interface CodeGraphHighlightState {
   blastRadiusFrontier: Set<string>;
   /** Server-sampled impact ids folded into the unified DOI focus model. */
   doiImpactIds: Set<string>;
+  /**
+   * Internal canvas fallback state for collapsed community snapshots.
+   * This is not a user-facing node-kind filter; it only lets the canvas
+   * splice symbol members into legacy `kind: "community"` payloads.
+   */
+  expandedCommunityIds: Set<string>;
   hoverId: string | null;
   edgeKindFilters: Record<string, boolean>;
   nodeKindFilters: Record<string, boolean>;
@@ -256,7 +245,7 @@ export interface CodeGraphHighlightState {
   /** Iter 30: see {@link ColorMode}. Default `"topology"`. */
   colorMode: ColorMode;
   /**
-   * Iter 30: `true` when the current snapshot has at least one function
+   * Iter 30: when true, the current snapshot has at least one function
    * node with a populated `cognitive` value. Drives the toolbar's
    * heatmap-toggle disabled state — `false` means the walker hasn't
    * run for any of the project's languages yet, so the gradient would
@@ -268,19 +257,6 @@ export interface CodeGraphHighlightState {
    * Drives the toolbar's disabled state when loading or empty.
    */
   graphReady: boolean;
-  /**
-   * Semantic zoom mode — `auto` lets the canvas choose symbol vs
-   * community based on the snapshot node threshold; `symbol`/`community`
-   * force the level. Default `"auto"`. See {@link SemanticZoomMode}.
-   */
-  semanticZoomMode: SemanticZoomMode;
-  /**
-   * Stable community ids that the user has expanded via double-click.
-   * Keyed by `community_id` (the server's sha256-of-members hash) so
-   * expansion state survives snapshot re-renders for the same project
-   * and is safely reset when the project changes (via `reset`).
-   */
-  expandedCommunityIds: Set<string>;
   selectedWorkspaceSlug: string | null;
   /**
    * Active intent lens. `null` means the user has manually toggled
@@ -301,6 +277,9 @@ export interface CodeGraphHighlightActions {
   /** Merge server impact samples into the DOI focus/context render path. */
   setDoiImpact: (ids: Iterable<string>) => void;
   clearDoiImpact: () => void;
+  expandCommunity: (communityId: string) => void;
+  collapseCommunity: (communityId: string) => void;
+  clearExpandedCommunities: () => void;
   setHover: (id: string | null) => void;
   toggleEdgeKind: (kind: string) => void;
   setEdgeKindEnabled: (kind: string, enabled: boolean) => void;
@@ -322,20 +301,6 @@ export interface CodeGraphHighlightActions {
   setComplexityAvailable: (available: boolean) => void;
   /** Canvas reports whether the graph is ready (loaded with at least one node). */
   setGraphReady: (ready: boolean) => void;
-  /** Set the semantic zoom mode override (auto/symbol/community). */
-  setSemanticZoomMode: (mode: SemanticZoomMode) => void;
-  /**
-   * Mark a community as expanded (double-click). Idempotent: the stable
-   * `community_id` is stored so expansion survives snapshot re-renders.
-   */
-  expandCommunity: (communityId: string) => void;
-  /**
-   * Mark a community as collapsed (double-click on an expanded community).
-   * Idempotent.
-   */
-  collapseCommunity: (communityId: string) => void;
-  /** Clear all expanded communities (called on project change). */
-  clearExpandedCommunities: () => void;
   setSelectedWorkspaceSlug: (slug: string | null) => void;
   /** Apply an intent lens, replacing all three filter maps from the preset. */
   applyLens: (lensId: LensId) => void;
@@ -348,6 +313,7 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   toolHighlightIds: new Set(),
   blastRadiusFrontier: new Set(),
   doiImpactIds: new Set(),
+  expandedCommunityIds: new Set(),
   hoverId: null,
   edgeKindFilters: { ...LENS_PRESETS.architecture.edgeKindFilters },
   nodeKindFilters: { ...LENS_PRESETS.architecture.nodeKindFilters },
@@ -359,8 +325,6 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   colorMode: DEFAULT_COLOR_MODE,
   complexityAvailable: false,
   graphReady: false,
-  semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
-  expandedCommunityIds: new Set<string>(),
   selectedWorkspaceSlug: null,
   activeLens: "architecture",
 };
@@ -404,6 +368,26 @@ export const useCodeGraphStore = create<
 
   clearDoiImpact: () => {
     set({ doiImpactIds: new Set() });
+  },
+
+  expandCommunity: (communityId) => {
+    set((state) => ({
+      expandedCommunityIds: new Set(state.expandedCommunityIds).add(
+        communityId,
+      ),
+    }));
+  },
+
+  collapseCommunity: (communityId) => {
+    set((state) => {
+      const next = new Set(state.expandedCommunityIds);
+      next.delete(communityId);
+      return { expandedCommunityIds: next };
+    });
+  },
+
+  clearExpandedCommunities: () => {
+    set({ expandedCommunityIds: new Set() });
   },
 
   setHover: (id) => {
@@ -498,10 +482,6 @@ export const useCodeGraphStore = create<
     set({ selectedWorkspaceSlug: slug });
   },
 
-  setSemanticZoomMode: (mode) => {
-    set({ semanticZoomMode: mode });
-  },
-
   applyLens: (lensId) => {
     const preset = LENS_PRESETS[lensId];
     set({
@@ -509,33 +489,6 @@ export const useCodeGraphStore = create<
       symbolKindFilters: { ...preset.symbolKindFilters },
       edgeKindFilters: { ...preset.edgeKindFilters },
       activeLens: lensId,
-    });
-  },
-
-  expandCommunity: (communityId) => {
-    if (!communityId) return;
-    set((state) => {
-      if (state.expandedCommunityIds.has(communityId)) return state;
-      const next = new Set(state.expandedCommunityIds);
-      next.add(communityId);
-      return { expandedCommunityIds: next };
-    });
-  },
-
-  collapseCommunity: (communityId) => {
-    if (!communityId) return;
-    set((state) => {
-      if (!state.expandedCommunityIds.has(communityId)) return state;
-      const next = new Set(state.expandedCommunityIds);
-      next.delete(communityId);
-      return { expandedCommunityIds: next };
-    });
-  },
-
-  clearExpandedCommunities: () => {
-    set((state) => {
-      if (state.expandedCommunityIds.size === 0) return state;
-      return { expandedCommunityIds: new Set() };
     });
   },
 
@@ -547,6 +500,7 @@ export const useCodeGraphStore = create<
       toolHighlightIds: new Set(),
       blastRadiusFrontier: new Set(),
       doiImpactIds: new Set(),
+      expandedCommunityIds: new Set(),
       edgeKindFilters: { ...LENS_PRESETS.architecture.edgeKindFilters },
       nodeKindFilters: { ...LENS_PRESETS.architecture.nodeKindFilters },
       symbolKindFilters: { ...LENS_PRESETS.architecture.symbolKindFilters },
@@ -554,8 +508,6 @@ export const useCodeGraphStore = create<
       colorMode: DEFAULT_COLOR_MODE,
       complexityAvailable: false,
       graphReady: false,
-      semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
-      expandedCommunityIds: new Set(),
     }));
   },
 }));
