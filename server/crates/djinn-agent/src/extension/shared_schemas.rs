@@ -442,7 +442,7 @@ pub(crate) fn tool_memory_read() -> RmcpTool {
 pub(crate) fn tool_memory_search() -> RmcpTool {
     RmcpTool::new(
         "memory_search".to_string(),
-        "Search notes in project memory.".to_string(),
+        "Search notes and proposals in project memory. Returns a unified result set interleaved by relevance.".to_string(),
         object!({
             "type": "object",
             "required": ["query"],
@@ -452,7 +452,8 @@ pub(crate) fn tool_memory_search() -> RmcpTool {
                 "type": {"type": "string"},
                 "task_id": {"type": "string", "description": "Task ID for affinity scoring; defaults to the current session task"},
                 "limit": {"type": "integer"},
-                "edge_kinds": {"type": "array", "items": {"type": "string"}, "description": "Optional list of edge kinds to include in graph traversal scoring. When provided, only edges whose kind matches one of these values participate in spreading activation. Omit to use all edge kinds."}
+                "edge_kinds": {"type": "array", "items": {"type": "string"}, "description": "Optional list of edge kinds to include in graph traversal scoring. When provided, only edges whose kind matches one of these values participate in spreading activation. Omit to use all edge kinds."},
+                "entity_types": {"type": "array", "items": {"type": "string"}, "description": "Optional entity-type filter. Omit to return both notes and proposals (default). [\"note\"] for notes-only. [\"proposal\"] for proposals-only."}
             }
         }),
     )
@@ -514,7 +515,7 @@ pub(crate) fn tool_memory_edit() -> RmcpTool {
 pub(crate) fn tool_memory_build_context() -> RmcpTool {
     RmcpTool::new(
         "memory_build_context".to_string(),
-        "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.".to_string(),
+        "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Relevant proposals are surfaced alongside notes so a planner/worker sees the motivating proposal.".to_string(),
         object!({
             "type": "object",
             "properties": {

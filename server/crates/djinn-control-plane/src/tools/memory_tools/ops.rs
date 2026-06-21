@@ -328,8 +328,8 @@ pub async fn memory_search(
                         folder: r.folder,
                         note_type: r.note_type,
                         snippet: r.snippet,
-                        score: r.score,
                         entity: r.entity,
+                        score: r.score,
                     })
                     .collect(),
                 error: None,
