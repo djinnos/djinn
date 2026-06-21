@@ -76,6 +76,10 @@ pub struct SearchParams {
     #[schemars(rename = "type")]
     pub note_type: Option<String>,
     pub limit: Option<i64>,
+    /// Optional list of entity types to include: "note", "proposal".
+    /// Omit (or pass null) to include both. Pass ["note"] for notes-only,
+    /// ["proposal"] for proposals-only. Pass [] to return no results.
+    pub entity_types: Option<Vec<String>>,
     /// Optional list of edge kinds to include in graph traversal scoring.
     /// When provided, only edges whose `kind` matches one of these values
     /// participate in spreading activation. Omit to use all edge kinds.
@@ -422,6 +426,13 @@ impl MemoryConfirmResponse {
     }
 }
 
+/// A single unified search result row.
+///
+/// Entity taxonomy: the `entity` field discriminates the row type.
+/// Current values are `"note"` (memory notes) and `"proposal"` (planning
+/// proposals). Future waves may add `"task"` or `"epic"`. Use the
+/// `entity_types` field on the `SearchParams` request to scope the result
+/// set to a subset of entity types.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemorySearchResultItem {
     pub id: String,
@@ -433,6 +444,17 @@ pub struct MemorySearchResultItem {
     /// RRF fusion score (higher = more relevant). Defaults to 0.0 for backward compat.
     #[serde(default)]
     pub score: f64,
+    /// Discriminator: `"note"` (default for backward compat) or `"proposal"`.
+    /// Use `entity_types` on the request to scope the result set.
+    #[serde(default = "default_entity_note")]
+    pub entity: String,
+}
+
+/// Default value for `MemorySearchResultItem.entity`: `"note"`.
+/// Keeps older responses (which only carried note results) deserialising
+/// cleanly when clients don't supply the field.
+fn default_entity_note() -> String {
+    "note".to_string()
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -501,7 +523,29 @@ pub struct MemoryBuildContextResponse {
     /// Notes in the context set that have a contradicting relationship.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contradicts: Vec<djinn_memory::ContradictsAnnotation>,
+    /// Proposals relevant to the seed note, surfaced as related entities with
+    /// progressive disclosure (title + acceptance criteria as the overview;
+    /// call `proposal_show` for the full body).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<MemoryProposalOverview>,
     pub error: Option<String>,
+}
+
+/// Compact proposal overview for `memory_build_context` responses.
+///
+/// **Progressive disclosure:** this overview ships `title` +
+/// `acceptance_criteria` so the planner can decide whether to fetch the
+/// full body via `proposal_show`. The full proposal body is intentionally
+/// excluded to keep prompt context lean.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryProposalOverview {
+    pub id: String,
+    pub short_id: String,
+    pub title: String,
+    pub body_format: String,
+    pub acceptance_criteria: Vec<String>,
+    pub status: String,
+    pub score: Option<f64>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]

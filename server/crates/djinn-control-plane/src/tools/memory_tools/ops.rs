@@ -10,8 +10,9 @@ use super::{
     BrokenLinksParams, BuildContextParams, ExtractedAuditParams, HealthParams, ListParams,
     MemoryBrokenLinksResponse, MemoryBuildContextResponse, MemoryExtractedAuditResponse,
     MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse, MemoryOrphansResponse,
-    MemorySearchResponse, MemorySearchResultItem, OrphansParams, ReadParams, ResolvedMention,
-    SearchParams, note_to_view, parse_proposal_ref_item, parse_task_ref_item,
+    MemoryProposalOverview, MemorySearchResponse, MemorySearchResultItem, OrphansParams,
+    ReadParams, ResolvedMention, SearchParams, note_to_view, parse_proposal_ref_item,
+    parse_task_ref_item,
 };
 
 fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
@@ -302,13 +303,19 @@ pub async fn memory_search(
             limit,
             semantic_scores,
             edge_kinds: p.edge_kinds.as_deref(),
-            entity_types: None,
+            entity_types: p.entity_types.as_deref(),
         })
         .await
     {
         Ok(results) => {
-            let retrieved_note_ids: Vec<String> =
-                results.iter().map(|result| result.id.clone()).collect();
+            // Record access metrics only for note rows — proposals do not
+            // have access metrics today (spec non-goal: do not duplicate
+            // them as notes).
+            let retrieved_note_ids: Vec<String> = results
+                .iter()
+                .filter(|r| r.entity == "note")
+                .map(|result| result.id.clone())
+                .collect();
             record_retrieved_notes(server, &repo, &retrieved_note_ids).await;
 
             MemorySearchResponse {
@@ -322,6 +329,7 @@ pub async fn memory_search(
                         note_type: r.note_type,
                         snippet: r.snippet,
                         score: r.score,
+                        entity: r.entity,
                     })
                     .collect(),
                 error: None,
@@ -377,6 +385,7 @@ pub async fn memory_build_context(
                 related_l0: vec![],
                 supersedes: vec![],
                 contradicts: vec![],
+                proposals: vec![],
                 error: Some(error),
             };
         }
@@ -405,6 +414,7 @@ pub async fn memory_build_context(
             related_l0: vec![],
             supersedes: vec![],
             contradicts: vec![],
+            proposals: vec![],
             error: None,
         };
     }
@@ -427,6 +437,19 @@ pub async fn memory_build_context(
             related_l0: response.related_l0,
             supersedes: response.supersedes,
             contradicts: response.contradicts,
+            proposals: response
+                .proposals
+                .into_iter()
+                .map(|p| MemoryProposalOverview {
+                    id: p.id,
+                    short_id: p.short_id,
+                    title: p.title,
+                    body_format: p.body_format,
+                    acceptance_criteria: p.acceptance_criteria,
+                    status: p.status,
+                    score: p.score,
+                })
+                .collect(),
             error: None,
         },
         Err(e) => MemoryBuildContextResponse {
@@ -435,6 +458,7 @@ pub async fn memory_build_context(
             related_l0: vec![],
             supersedes: vec![],
             contradicts: vec![],
+            proposals: vec![],
             error: Some(format!("build_context failed: {e}")),
         },
     }
