@@ -1,26 +1,338 @@
-import type { BlockProps } from "./types";
-import { BlockMarkdown, BlockShell } from "./BlockShell";
+import { useMemo, useState } from "react";
+import {
+  ArrowDown01Icon,
+  ArrowRight01Icon,
+  CodeIcon,
+  LockKeyIcon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
+import { cn } from "@/lib/utils";
+
+import { BlockMarkdown, BlockShell } from "./BlockShell";
+import type { BlockProps } from "./types";
+import {
+  classifyStatus,
+  hasStructuredContent,
+  mentionsAuth,
+  mentionsDeprecated,
+  normalizeMethod,
+  parseApiEndpointBody,
+  type ApiMethod,
+  type ApiParam,
+  type ApiResponse,
+  type ParamLocation,
+  type StatusClass,
+} from "./apiEndpoint";
+
+/**
+ * ApiEndpoint — a Swagger / Stripe-style API reference row.
+ *
+ * djinn does not serialize structured `request_schema` / `response_schema` JSON
+ * props; the endpoint detail is the block's `method` + `path` attributes plus its
+ * *children markdown* (a prose description, an optional `## Parameters` table /
+ * list, an optional `## Responses` table / list, and fenced JSON example bodies).
+ * We parse the children (see `apiEndpoint.ts`) into a structured shape and render:
+ *
+ *   - a color-coded METHOD pill (per verb) + mono path, with an optional
+ *     `Deprecated` badge and a lock icon when the body mentions auth/bearer;
+ *   - a markdown description;
+ *   - a PARAMETERS section (NAME · IN · TYPE · REQUIRED · DESCRIPTION) with
+ *     IN-location pills (path violet / query blue / header amber / body emerald)
+ *     and a red `required` marker;
+ *   - a RESPONSES section with status-code pills colored by leading digit
+ *     (2xx emerald / 4xx amber / 5xx red), each with an optional example body.
+ *
+ * JSON example bodies render in a styled code surface for now. A dedicated
+ * interactive json-explorer block is planned — see the TODO seam in `JsonExample`.
+ *
+ * If the children have no recognizable params / responses, we fall back to the
+ * method/path header + raw `BlockMarkdown` of the children so nothing is lost and
+ * the block never crashes.
+ */
 export function ApiEndpointBlock({ attributes, children }: BlockProps) {
-  const method = attributes.method?.toUpperCase();
+  const method = normalizeMethod(attributes.method);
+  const rawMethod = attributes.method?.trim().toUpperCase();
   const path = attributes.path;
+  const content = typeof children === "string" ? children : "";
+
+  const parsed = useMemo(() => parseApiEndpointBody(content), [content]);
+  const structured = hasStructuredContent(parsed);
+  const hasAuth = useMemo(() => mentionsAuth(content), [content]);
+  const deprecated = useMemo(() => mentionsDeprecated(content), [content]);
+
+  // Default-open: proposals render full-width and reviewers want detail up front.
+  const [open, setOpen] = useState(true);
+
+  const header = (
+    <span className="flex min-w-0 items-center gap-2">
+      <MethodPill method={method} raw={rawMethod} />
+      {path ? (
+        <span className="truncate font-mono text-foreground">{path}</span>
+      ) : null}
+      {deprecated && (
+        <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+          Deprecated
+        </span>
+      )}
+      {hasAuth && (
+        <HugeiconsIcon
+          icon={LockKeyIcon}
+          size={13}
+          className="shrink-0 text-amber-400/80"
+          aria-label="Requires authentication"
+        />
+      )}
+    </span>
+  );
+
+  // No structured content — keep the method/path header and render the raw
+  // children markdown so an oddly-authored endpoint is never blanked.
+  if (!structured) {
+    return (
+      <BlockShell label="API Endpoint" accent="text-green-400" meta={header}>
+        <BlockMarkdown>{children}</BlockMarkdown>
+      </BlockShell>
+    );
+  }
 
   return (
-    <BlockShell
-      label="API Endpoint"
-      accent="text-green-400"
-      meta={
-        method || path ? (
-          <span className="flex min-w-0 items-center gap-2 font-mono">
-            {method ? (
-              <span className="font-semibold text-green-400">{method}</span>
-            ) : null}
-            {path ? <span className="truncate text-foreground">{path}</span> : null}
+    <BlockShell label="API Endpoint" accent="text-green-400" flush meta={header}>
+      <div className="flex flex-col">
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+          className="flex items-center gap-1.5 px-4 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/40"
+        >
+          <HugeiconsIcon
+            icon={open ? ArrowDown01Icon : ArrowRight01Icon}
+            size={14}
+            className="shrink-0"
+          />
+          <span className="uppercase tracking-wider">
+            {open ? "Hide details" : "Show details"}
           </span>
-        ) : null
-      }
-    >
-      <BlockMarkdown>{children}</BlockMarkdown>
+          <span className="ml-1 flex items-center gap-2 normal-case">
+            {parsed.params.length > 0 && (
+              <span>
+                {parsed.params.length}{" "}
+                {parsed.params.length === 1 ? "param" : "params"}
+              </span>
+            )}
+            {parsed.responses.length > 0 && (
+              <span>
+                {parsed.responses.length}{" "}
+                {parsed.responses.length === 1 ? "response" : "responses"}
+              </span>
+            )}
+          </span>
+        </button>
+
+        {open && (
+          <div className="flex flex-col gap-4 px-4 pb-4">
+            {parsed.description && (
+              <BlockMarkdown>{parsed.description}</BlockMarkdown>
+            )}
+
+            {parsed.params.length > 0 && (
+              <ParamsSection params={parsed.params} />
+            )}
+
+            {parsed.requestExample && (
+              <section>
+                <SectionLabel>Request body</SectionLabel>
+                <JsonExample code={parsed.requestExample} />
+              </section>
+            )}
+
+            {parsed.responses.length > 0 && (
+              <ResponsesSection responses={parsed.responses} />
+            )}
+          </div>
+        )}
+      </div>
     </BlockShell>
+  );
+}
+
+/* ── Method pill ────────────────────────────────────────────────────────────── */
+
+/** Per-verb pill palette. Dark-only theme. */
+const METHOD_STYLE: Record<ApiMethod, string> = {
+  GET: "bg-emerald-500/15 text-emerald-300",
+  POST: "bg-blue-500/15 text-blue-300",
+  PUT: "bg-amber-500/15 text-amber-300",
+  PATCH: "bg-violet-500/15 text-violet-300",
+  DELETE: "bg-red-500/15 text-red-300",
+  HEAD: "bg-slate-500/15 text-slate-300",
+  OPTIONS: "bg-slate-500/15 text-slate-300",
+};
+
+function MethodPill({
+  method,
+  raw,
+}: {
+  method: ApiMethod | undefined;
+  raw: string | undefined;
+}) {
+  const label = method ?? raw;
+  if (!label) return null;
+  return (
+    <span
+      className={cn(
+        "shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] font-bold tracking-wide",
+        method ? METHOD_STYLE[method] : "bg-slate-500/15 text-slate-300",
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
+/* ── Parameters section ─────────────────────────────────────────────────────── */
+
+/** IN-location pill palette: path violet / query blue / header amber / body emerald. */
+const LOCATION_STYLE: Record<ParamLocation, string> = {
+  path: "bg-violet-500/15 text-violet-300",
+  query: "bg-blue-500/15 text-blue-300",
+  header: "bg-amber-500/15 text-amber-300",
+  body: "bg-emerald-500/15 text-emerald-300",
+};
+
+function ParamsSection({ params }: { params: ApiParam[] }) {
+  return (
+    <section>
+      <SectionLabel>Parameters</SectionLabel>
+      <div className="overflow-hidden rounded-lg border bg-card/50">
+        <div className="divide-y divide-border/60">
+          {params.map((param, index) => (
+            <ParamRow key={`${param.name}-${index}`} param={param} />
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ParamRow({ param }: { param: ApiParam }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-[13px]">
+      <span className="font-mono font-medium text-foreground">
+        {param.name}
+      </span>
+      {param.in && (
+        <span
+          className={cn(
+            "rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none",
+            LOCATION_STYLE[param.in],
+          )}
+        >
+          {param.in}
+        </span>
+      )}
+      {param.type && (
+        <span className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+          {param.type}
+        </span>
+      )}
+      {param.required === true && (
+        <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none text-red-300">
+          required
+        </span>
+      )}
+      {param.required === false && (
+        <span className="rounded bg-slate-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none text-slate-300">
+          optional
+        </span>
+      )}
+      {param.description && (
+        <span className="w-full text-xs text-muted-foreground">
+          {param.description}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/* ── Responses section ──────────────────────────────────────────────────────── */
+
+/** Status-code pill palette: 2xx emerald / 4xx amber / 5xx red / other slate. */
+const STATUS_STYLE: Record<StatusClass, string> = {
+  success: "bg-emerald-500/15 text-emerald-300",
+  info: "bg-slate-500/15 text-slate-300",
+  warn: "bg-amber-500/15 text-amber-300",
+  error: "bg-red-500/15 text-red-300",
+};
+
+function ResponsesSection({ responses }: { responses: ApiResponse[] }) {
+  return (
+    <section>
+      <SectionLabel>Responses</SectionLabel>
+      <div className="flex flex-col gap-2">
+        {responses.map((response, index) => (
+          <ResponseRow key={`${response.status}-${index}`} response={response} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ResponseRow({ response }: { response: ApiResponse }) {
+  const cls = classifyStatus(response.status);
+  return (
+    <div className="overflow-hidden rounded-lg border bg-card/50">
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2 text-[13px]">
+        <span
+          className={cn(
+            "rounded px-1.5 py-0.5 font-mono text-[11px] font-bold leading-none",
+            STATUS_STYLE[cls],
+          )}
+        >
+          {response.status}
+        </span>
+        {response.description && (
+          <span className="min-w-0 text-foreground">{response.description}</span>
+        )}
+      </div>
+      {response.example && (
+        <div className="border-t px-3 py-2">
+          <JsonExample code={response.example} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Shared bits ────────────────────────────────────────────────────────────── */
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+      {children}
+    </div>
+  );
+}
+
+/**
+ * A JSON / example body rendered in a styled code surface.
+ *
+ * TODO(json-explorer): when the dedicated interactive `json-explorer` block
+ * lands, upgrade JSON example bodies here to a collapsible, type-colored tree
+ * (Postman-style) instead of a flat `<pre>`. This component is the seam: detect
+ * parseable JSON, mount the explorer, and keep this `<pre>` as the fallback for
+ * non-JSON / unparseable bodies.
+ */
+function JsonExample({ code }: { code: string }) {
+  return (
+    <div className="overflow-hidden rounded-md border bg-muted/30">
+      <div className="flex items-center gap-1.5 border-b bg-muted/40 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <HugeiconsIcon icon={CodeIcon} size={12} className="shrink-0" />
+        Example
+      </div>
+      <pre className="overflow-x-auto px-3 py-2 font-mono text-xs leading-relaxed text-foreground">
+        {code}
+      </pre>
+    </div>
   );
 }
