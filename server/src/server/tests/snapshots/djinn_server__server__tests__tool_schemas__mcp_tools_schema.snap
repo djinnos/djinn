@@ -6602,6 +6602,31 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "ResolvedMention": {
+          "properties": {
+            "entity_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "short_id",
+            "entity_type",
+            "title",
+            "permalink"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "content": {
@@ -6646,6 +6671,13 @@ expression: signatures
         "project_id": {
           "nullable": true,
           "type": "string"
+        },
+        "resolved_mentions": {
+          "description": "Short_id mentions found in note body, resolved to entities.",
+          "items": {
+            "$ref": "#/$defs/ResolvedMention"
+          },
+          "type": "array"
         },
         "retrieval_anchor": {
           "nullable": true,
@@ -7322,6 +7354,31 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "ResolvedMention": {
+          "properties": {
+            "entity_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "short_id",
+            "entity_type",
+            "title",
+            "permalink"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "content": {
@@ -7366,6 +7423,13 @@ expression: signatures
         "project_id": {
           "nullable": true,
           "type": "string"
+        },
+        "resolved_mentions": {
+          "description": "Short_id mentions found in note body, resolved to entities.",
+          "items": {
+            "$ref": "#/$defs/ResolvedMention"
+          },
+          "type": "array"
         },
         "retrieval_anchor": {
           "nullable": true,
@@ -7499,6 +7563,31 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "ResolvedMention": {
+          "properties": {
+            "entity_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "short_id",
+            "entity_type",
+            "title",
+            "permalink"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "content": {
@@ -7543,6 +7632,13 @@ expression: signatures
         "project_id": {
           "nullable": true,
           "type": "string"
+        },
+        "resolved_mentions": {
+          "description": "Short_id mentions found in note body, resolved to entities.",
+          "items": {
+            "$ref": "#/$defs/ResolvedMention"
+          },
+          "type": "array"
         },
         "retrieval_anchor": {
           "nullable": true,
@@ -8112,6 +8208,29 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "MemoryProposalRefItem": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "status"
+          ],
+          "type": "object"
+        },
         "MemoryTaskRefItem": {
           "properties": {
             "id": {
@@ -8141,6 +8260,12 @@ expression: signatures
         "error": {
           "nullable": true,
           "type": "string"
+        },
+        "proposals": {
+          "items": {
+            "$ref": "#/$defs/MemoryProposalRefItem"
+          },
+          "type": "array"
         },
         "tasks": {
           "items": {
@@ -8217,6 +8342,31 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "ResolvedMention": {
+          "properties": {
+            "entity_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "short_id",
+            "entity_type",
+            "title",
+            "permalink"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "content": {
@@ -8261,6 +8411,13 @@ expression: signatures
         "project_id": {
           "nullable": true,
           "type": "string"
+        },
+        "resolved_mentions": {
+          "description": "Short_id mentions found in note body, resolved to entities.",
+          "items": {
+            "$ref": "#/$defs/ResolvedMention"
+          },
+          "type": "array"
         },
         "retrieval_anchor": {
           "nullable": true,
@@ -12380,6 +12537,36 @@ expression: signatures
           ],
           "type": "object"
         },
+        "ProposalMemoryRefModel": {
+          "description": "A memory note linked to a proposal via its graduated epics/tasks.",
+          "properties": {
+            "note_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "source_entity_type": {
+              "description": "The entity the note is attached to: `\"epic\"` or `\"task\"`.",
+              "type": "string"
+            },
+            "source_short_id": {
+              "description": "Short ID of the epic or task that links the note.",
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "permalink",
+            "title",
+            "note_type",
+            "source_entity_type",
+            "source_short_id"
+          ],
+          "type": "object"
+        },
         "ProposalModel": {
           "properties": {
             "acceptance_criteria": {
@@ -12610,6 +12797,13 @@ expression: signatures
             "$ref": "#/$defs/ProposalFeedbackModel"
           },
           "nullable": true,
+          "type": "array"
+        },
+        "memory_refs": {
+          "description": "Memory notes linked to this proposal's graduated epics/tasks.",
+          "items": {
+            "$ref": "#/$defs/ProposalMemoryRefModel"
+          },
           "type": "array"
         },
         "proposal": {

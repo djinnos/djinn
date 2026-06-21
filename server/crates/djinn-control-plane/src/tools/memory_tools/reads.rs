@@ -213,6 +213,7 @@ impl DjinnMcpServer {
         let Some(_project_id) = self.project_id_for_path(&p.project).await else {
             return Json(MemoryTaskRefsResponse {
                 tasks: vec![],
+                proposals: vec![],
                 error: Some(format!("project not found: {}", p.project)),
             });
         };
@@ -225,7 +226,18 @@ impl DjinnMcpServer {
             .into_iter()
             .filter_map(parse_task_ref_item)
             .collect();
-        Json(MemoryTaskRefsResponse { tasks, error: None })
+        let proposals: Vec<MemoryProposalRefItem> = repo
+            .proposal_refs(&p.permalink)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(parse_proposal_ref_item)
+            .collect();
+        Json(MemoryTaskRefsResponse {
+            tasks,
+            proposals,
+            error: None,
+        })
     }
 
     /// Lists all broken wikilinks with source context (permalink, title, raw text,

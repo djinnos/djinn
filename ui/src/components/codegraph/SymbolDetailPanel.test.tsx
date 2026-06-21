@@ -151,6 +151,62 @@ describe("SymbolDetailPanel", () => {
     expect(screen.getByText("Result<()>")).toBeInTheDocument();
   });
 
+  it("does not render the legacy standalone blast radius CTA", () => {
+    useCodeGraphStore.getState().setSelection("foo");
+    render(<SymbolDetailPanel projectId="proj" injectedContext={ctx()} />);
+    expect(screen.queryByText("Show blast radius")).not.toBeInTheDocument();
+    expect(screen.getByText("DOI focus")).toBeInTheDocument();
+  });
+
+  it("labels dependency directions and omits containment buckets", () => {
+    useCodeGraphStore.getState().setSelection("foo");
+    render(
+      <SymbolDetailPanel
+        projectId="proj"
+        injectedContext={ctx({
+          incoming: {
+            calls: [
+              {
+                uid: "caller-1",
+                name: "caller_one",
+                kind: "function",
+                file_path: null,
+                confidence: 0.9,
+              },
+            ],
+            contains: [
+              {
+                uid: "container",
+                name: "container",
+                kind: "class",
+                file_path: null,
+                confidence: 1,
+              },
+            ],
+          },
+          outgoing: {
+            references: [
+              {
+                uid: "dep-1",
+                name: "dependency",
+                kind: "function",
+                file_path: null,
+                confidence: 0.8,
+              },
+            ],
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getAllByText("Dependents/Impact")[0]).toBeInTheDocument();
+    expect(screen.getAllByText("Dependencies")[0]).toBeInTheDocument();
+    expect(screen.getByText("caller_one")).toBeInTheDocument();
+    expect(screen.getByText("dependency")).toBeInTheDocument();
+    expect(screen.queryByText("Contains")).not.toBeInTheDocument();
+    expect(screen.queryByText("container")).not.toBeInTheDocument();
+  });
+
   it("renders a placeholder when no edges are present", () => {
     useCodeGraphStore.getState().setSelection("foo");
     render(<SymbolDetailPanel projectId="proj" injectedContext={ctx()} />);

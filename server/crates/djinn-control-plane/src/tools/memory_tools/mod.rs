@@ -107,6 +107,10 @@ fn parse_task_ref_item(raw: serde_json::Value) -> Option<MemoryTaskRefItem> {
     serde_json::from_value(raw).ok()
 }
 
+fn parse_proposal_ref_item(raw: serde_json::Value) -> Option<MemoryProposalRefItem> {
+    serde_json::from_value(raw).ok()
+}
+
 /// Parse a human-readable timeframe string into hours.
 ///
 /// Supports: "Xd", "Xh", "today", "last week", and raw integers (hours).

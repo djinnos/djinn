@@ -4,8 +4,11 @@ import {
   DEFAULT_DOI_REVEAL_COUNT,
   DEFAULT_FOCUS_DIRECTION,
   EDGE_KINDS,
+  LENS_PRESETS,
   MAX_DOI_REVEAL_COUNT,
   MIN_DOI_REVEAL_COUNT,
+  NODE_KINDS,
+  SYMBOL_KIND_FILTERS,
   useCodeGraphStore,
 } from "./codeGraphStore";
 
@@ -44,22 +47,19 @@ describe("codeGraphStore", () => {
       }
     });
 
-    it("starts with all top-level node kinds visible", () => {
+    it("starts with architecture lens defaults (folder/file/symbol on)", () => {
       const filters = useCodeGraphStore.getState().nodeKindFilters;
       expect(filters.folder).toBe(true);
       expect(filters.file).toBe(true);
       expect(filters.symbol).toBe(true);
-      expect(filters.community).toBe(true);
+      expect(filters.community).toBeUndefined();
     });
 
-    it("starts with noisy symbol kinds (variable/import/field/other) hidden", () => {
+    it("starts with all symbol kinds hidden (architecture lens)", () => {
       const filters = useCodeGraphStore.getState().symbolKindFilters;
-      expect(filters.function).toBe(true);
-      expect(filters.class).toBe(true);
-      expect(filters.variable).toBe(false);
-      expect(filters.import).toBe(false);
-      expect(filters.field).toBe(false);
-      expect(filters.other).toBe(false);
+      for (const kind of SYMBOL_KIND_FILTERS) {
+        expect(filters[kind]).toBe(false);
+      }
     });
 
     it("starts with default DOI focus state", () => {
@@ -67,6 +67,10 @@ describe("codeGraphStore", () => {
       expect(state.focusAnchorId).toBeNull();
       expect(state.focusDirection).toBe(DEFAULT_FOCUS_DIRECTION);
       expect(state.doiRevealCount).toBe(DEFAULT_DOI_REVEAL_COUNT);
+    });
+
+    it("defaults to architecture lens", () => {
+      expect(useCodeGraphStore.getState().activeLens).toBe("architecture");
     });
 
     it("starts with no selected workspace", () => {
@@ -171,6 +175,13 @@ describe("codeGraphStore", () => {
       expect(useCodeGraphStore.getState().focusAnchorId).toBeNull();
     });
 
+    it("stores and clears server impact samples for DOI focus", () => {
+      useCodeGraphStore.getState().setDoiImpact(["a", "b", "a"]);
+      expect(useCodeGraphStore.getState().doiImpactIds.size).toBe(2);
+      useCodeGraphStore.getState().clearDoiImpact();
+      expect(useCodeGraphStore.getState().doiImpactIds.size).toBe(0);
+    });
+
     it("sets the focus direction", () => {
       useCodeGraphStore.getState().setFocusDirection("dependencies");
       expect(useCodeGraphStore.getState().focusDirection).toBe("dependencies");
@@ -234,59 +245,71 @@ describe("codeGraphStore", () => {
     });
   });
 
-  describe("semanticZoomMode", () => {
-    it("defaults to auto", () => {
-      expect(useCodeGraphStore.getState().semanticZoomMode).toBe("auto");
+  describe("intent lenses", () => {
+    it("defaults to architecture lens", () => {
+      expect(useCodeGraphStore.getState().activeLens).toBe("architecture");
     });
 
-    it("setSemanticZoomMode updates the mode", () => {
-      useCodeGraphStore.getState().setSemanticZoomMode("symbol");
-      expect(useCodeGraphStore.getState().semanticZoomMode).toBe("symbol");
-      useCodeGraphStore.getState().setSemanticZoomMode("community");
-      expect(useCodeGraphStore.getState().semanticZoomMode).toBe("community");
-      useCodeGraphStore.getState().setSemanticZoomMode("auto");
-      expect(useCodeGraphStore.getState().semanticZoomMode).toBe("auto");
-    });
-  });
-
-  describe("expandedCommunityIds", () => {
-    it("defaults to an empty set", () => {
-      expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(0);
+    it("applyLens sets all three filter records from the preset", () => {
+      useCodeGraphStore.getState().applyLens("calls");
+      const state = useCodeGraphStore.getState();
+      expect(state.nodeKindFilters).toEqual(LENS_PRESETS.calls.nodeKindFilters);
+      expect(state.symbolKindFilters).toEqual(
+        LENS_PRESETS.calls.symbolKindFilters,
+      );
+      expect(state.edgeKindFilters).toEqual(
+        LENS_PRESETS.calls.edgeKindFilters,
+      );
     });
 
-    it("expandCommunity adds a stable community_id", () => {
-      useCodeGraphStore.getState().expandCommunity("auth");
-      expect(
-        useCodeGraphStore.getState().expandedCommunityIds.has("auth"),
-      ).toBe(true);
+    it("applyLens updates activeLens", () => {
+      useCodeGraphStore.getState().applyLens("types");
+      expect(useCodeGraphStore.getState().activeLens).toBe("types");
     });
 
-    it("expandCommunity is idempotent", () => {
-      useCodeGraphStore.getState().expandCommunity("auth");
-      useCodeGraphStore.getState().expandCommunity("auth");
-      expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(1);
+    it("toggleEdgeKind sets activeLens to null", () => {
+      useCodeGraphStore.getState().applyLens("calls");
+      expect(useCodeGraphStore.getState().activeLens).toBe("calls");
+      useCodeGraphStore.getState().toggleEdgeKind("Defines");
+      expect(useCodeGraphStore.getState().activeLens).toBeNull();
     });
 
-    it("collapseCommunity removes a community_id", () => {
-      useCodeGraphStore.getState().expandCommunity("auth");
-      useCodeGraphStore.getState().collapseCommunity("auth");
-      expect(
-        useCodeGraphStore.getState().expandedCommunityIds.has("auth"),
-      ).toBe(false);
+    it("toggleNodeKind sets activeLens to null", () => {
+      useCodeGraphStore.getState().applyLens("types");
+      expect(useCodeGraphStore.getState().activeLens).toBe("types");
+      useCodeGraphStore.getState().toggleNodeKind("symbol");
+      expect(useCodeGraphStore.getState().activeLens).toBeNull();
     });
 
-    it("collapseCommunity is idempotent when not expanded", () => {
-      useCodeGraphStore.getState().collapseCommunity("auth");
-      expect(
-        useCodeGraphStore.getState().expandedCommunityIds.has("auth"),
-      ).toBe(false);
+    it("toggleSymbolKind sets activeLens to null", () => {
+      useCodeGraphStore.getState().applyLens("dataflow");
+      expect(useCodeGraphStore.getState().activeLens).toBe("dataflow");
+      useCodeGraphStore.getState().toggleSymbolKind("function");
+      expect(useCodeGraphStore.getState().activeLens).toBeNull();
     });
 
-    it("clearExpandedCommunities empties the set", () => {
-      useCodeGraphStore.getState().expandCommunity("auth");
-      useCodeGraphStore.getState().expandCommunity("api");
-      useCodeGraphStore.getState().clearExpandedCommunities();
-      expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(0);
+    it("each lens preset covers all NODE_KINDS keys", () => {
+      for (const preset of Object.values(LENS_PRESETS)) {
+        for (const kind of NODE_KINDS) {
+          expect(preset.nodeKindFilters).toHaveProperty(kind);
+        }
+      }
+    });
+
+    it("each lens preset covers all SYMBOL_KIND_FILTERS keys", () => {
+      for (const preset of Object.values(LENS_PRESETS)) {
+        for (const kind of SYMBOL_KIND_FILTERS) {
+          expect(preset.symbolKindFilters).toHaveProperty(kind);
+        }
+      }
+    });
+
+    it("each lens preset covers all EDGE_KINDS keys", () => {
+      for (const preset of Object.values(LENS_PRESETS)) {
+        for (const kind of EDGE_KINDS) {
+          expect(preset.edgeKindFilters).toHaveProperty(kind);
+        }
+      }
     });
   });
 
@@ -303,7 +326,6 @@ describe("codeGraphStore", () => {
       s.setFocusAnchor("foo");
       s.setFocusDirection("dependencies");
       s.setDoiRevealCount(MIN_DOI_REVEAL_COUNT);
-      s.expandCommunity("auth");
 
       useCodeGraphStore.getState().reset();
       const after = useCodeGraphStore.getState();
@@ -318,10 +340,9 @@ describe("codeGraphStore", () => {
       expect(after.edgeKindFilters.Implements).toBe(true);
       expect(after.edgeKindFilters.Reads).toBe(false);
       expect(after.edgeKindFilters.FileReference).toBe(false);
+      expect(after.activeLens).toBe("architecture");
       expect(after.colorMode).toBe("topology");
       expect(after.complexityAvailable).toBe(false);
-      expect(after.semanticZoomMode).toBe("auto");
-      expect(after.expandedCommunityIds.size).toBe(0);
       expect(after.selectedWorkspaceSlug).toBe("api");
     });
   });

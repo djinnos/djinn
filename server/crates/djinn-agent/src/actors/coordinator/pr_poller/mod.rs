@@ -59,6 +59,7 @@ const PR_CI_FAILURE_THRESHOLD: u32 = 3;
 mod ci_helpers;
 mod conversation_resolution;
 mod installation;
+pub(crate) mod pr_cleanup;
 mod pr_commands;
 mod pr_review_handlers;
 mod pr_review_watcher;
@@ -67,6 +68,9 @@ mod state;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod pr_cleanup_tests;
 
 use crate::github_error_render::render_github_write_error;
 use ci_helpers::{

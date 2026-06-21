@@ -2,22 +2,17 @@
  * CodeGraphCanvas semantic-zoom level selection tests.
  *
  * The canvas picks which `level` to forward to `fetchSnapshot` based on
- * the store's `semanticZoomMode` and (in auto mode) the snapshot size.
- * These tests mock the network + Sigma layers so we can assert purely on
- * the fetch-level decision logic:
+ * the snapshot size. These tests mock the network + Sigma layers so we can
+ * assert purely on the fetch-level decision logic:
  *
- *   - small-auto: symbol snapshot under threshold → stays symbol, one fetch.
- *   - large-auto: symbol snapshot truncated/over-threshold → refetches community.
- *   - forced-symbol: always symbol, never falls back.
- *   - forced-community: always community, single fetch.
+ *   - small graph: symbol snapshot under threshold → stays symbol, one fetch.
+ *   - large graph: symbol snapshot truncated/over-threshold → refetches community.
  *
  * The `shouldFallbackToCommunity` pure helper is also unit-tested
  * directly so the boundary conditions are pinned without a render.
  *
  * Note: the canvas calls `reset()` on mount (to clear highlight state
- * from a previous project), which resets `semanticZoomMode` to the
- * default "auto". Tests that need a forced mode therefore set it
- * *after* the initial mount settle and then wait for the refetch.
+ * from a previous project).
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -230,76 +225,7 @@ describe("CodeGraphCanvas semantic zoom level selection", () => {
     );
   });
 
-  it("forced symbol mode fetches symbol only and never falls back", async () => {
-    // Initial auto-mode mount fetches a small symbol snapshot (no
-    // fallback). After switching to forced symbol, the mock returns a
-    // large/truncated symbol snapshot — forced mode must NOT fall back
-    // to community even though the snapshot is capped.
-    fetchSnapshotMock.mockResolvedValue(mockResponseForLevel("symbol", "small"));
-
-    render(<CodeGraphCanvas projectId="proj" />);
-
-    // Wait for the initial auto-mode fetch to complete.
-    await waitFor(() => {
-      expect(screen.getByTestId("semantic-zoom-level")).toBeInTheDocument();
-    });
-
-    // The canvas resets semanticZoomMode to "auto" on mount; switch to
-    // forced symbol after the initial settle so the refetch honors it.
-    // Now return a large snapshot so we can verify no community fallback.
-    fetchSnapshotMock.mockResolvedValue(mockResponseForLevel("symbol", "large"));
-    act(() => {
-      useCodeGraphStore.getState().setSemanticZoomMode("symbol");
-    });
-
-    await waitFor(() => {
-      expect(screen.getByTestId("semantic-zoom-level")).toHaveTextContent(
-        "Symbol view",
-      );
-    });
-
-    // The most recent fetch must be at symbol level.
-    const lastCall =
-      fetchSnapshotMock.mock.calls[fetchSnapshotMock.mock.calls.length - 1];
-    expect(lastCall[2]).toBe("symbol");
-
-    // No community fetch should ever have been issued.
-    const communityCalls = fetchSnapshotMock.mock.calls.filter(
-      (c) => c[2] === "community",
-    );
-    expect(communityCalls).toHaveLength(0);
-  });
-
-  it("forced community mode fetches community immediately", async () => {
-    fetchSnapshotMock.mockResolvedValue(mockResponseForLevel("community"));
-
-    render(<CodeGraphCanvas projectId="proj" />);
-
-    // Wait for the initial auto-mode fetch to complete.
-    await waitFor(() => {
-      expect(screen.getByTestId("semantic-zoom-level")).toBeInTheDocument();
-    });
-
-    // The canvas resets semanticZoomMode to "auto" on mount; switch to
-    // forced community after the initial settle.
-    act(() => {
-      useCodeGraphStore.getState().setSemanticZoomMode("community");
-    });
-
-    await waitFor(() => {
-      expect(screen.getByTestId("semantic-zoom-level")).toHaveTextContent(
-        "Community view",
-      );
-    });
-
-    // The most recent fetch must be at community level.
-    const lastCall =
-      fetchSnapshotMock.mock.calls[fetchSnapshotMock.mock.calls.length - 1];
-    expect(lastCall[2]).toBe("community");
-  });
-
-  it("changing the toolbar mode triggers a safe refetch at the new level", async () => {
-    // Start in auto with a small graph → symbol level.
+  it("symbol snapshot under threshold stays symbol (single fetch)", async () => {
     fetchSnapshotMock.mockResolvedValue(mockResponseForLevel("symbol", "small"));
 
     render(<CodeGraphCanvas projectId="proj" />);
@@ -310,11 +236,16 @@ describe("CodeGraphCanvas semantic zoom level selection", () => {
       );
     });
 
-    // Switch to forced community → refetch at community level.
-    fetchSnapshotMock.mockResolvedValue(mockResponseForLevel("community"));
-    act(() => {
-      useCodeGraphStore.getState().setSemanticZoomMode("community");
-    });
+    expect(fetchSnapshotMock).toHaveBeenCalledTimes(1);
+    expect(fetchSnapshotMock).toHaveBeenCalledWith("proj", 10_000, "symbol");
+  });
+
+  it("large symbol snapshot triggers community fallback", async () => {
+    fetchSnapshotMock
+      .mockResolvedValueOnce(mockResponseForLevel("symbol", "large"))
+      .mockResolvedValueOnce(mockResponseForLevel("community"));
+
+    render(<CodeGraphCanvas projectId="proj" />);
 
     await waitFor(() => {
       expect(screen.getByTestId("semantic-zoom-level")).toHaveTextContent(
@@ -322,6 +253,7 @@ describe("CodeGraphCanvas semantic zoom level selection", () => {
       );
     });
 
+    expect(fetchSnapshotMock).toHaveBeenCalledTimes(2);
     const lastCall =
       fetchSnapshotMock.mock.calls[fetchSnapshotMock.mock.calls.length - 1];
     expect(lastCall[2]).toBe("community");
