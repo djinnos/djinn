@@ -6,6 +6,7 @@ pub mod migrations;
 pub mod note_hash;
 pub mod repositories;
 pub mod retry;
+pub mod short_id;
 
 pub mod test_support {
     pub use crate::repositories::test_support::{
@@ -114,3 +115,4 @@ pub use repositories::{
     user::{User, UserRepository},
     user_settings::UserSettingsRepository,
 };
+pub use short_id::{ResolvedEntity, resolve_short_ids};
