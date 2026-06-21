@@ -12,6 +12,8 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/lib/utils";
 
 import { BlockMarkdown, BlockShell } from "./BlockShell";
+import { Badge } from "./blockBadges";
+import { ACCENT_BADGE } from "./blockBadgeColors";
 import type { BlockProps } from "./types";
 import {
   parseDataModelBlock,
@@ -208,7 +210,10 @@ function FieldRow({ field }: { field: DataModelField }) {
           {field.enumValues.map((value) => (
             <span
               key={value}
-              className="rounded bg-violet-500/15 px-1.5 py-0.5 font-mono text-[10px] text-violet-300"
+              className={cn(
+                "rounded px-1.5 py-0.5 font-mono text-[10px]",
+                ACCENT_BADGE.violet,
+              )}
             >
               {value}
             </span>
@@ -218,11 +223,9 @@ function FieldRow({ field }: { field: DataModelField }) {
 
       {/* Right-aligned badges. */}
       <span className="ml-auto flex flex-wrap items-center justify-end gap-1">
-        {field.pk && (
-          <Badge className="bg-amber-500/15 text-amber-300">PK</Badge>
-        )}
+        {field.pk && <Badge accent="amber">PK</Badge>}
         {field.fk && (
-          <Badge className="bg-blue-500/15 text-blue-300">
+          <Badge accent="blue">
             FK
             <span className="ml-1 font-mono font-normal opacity-90">
               {field.fk.table}
@@ -230,11 +233,9 @@ function FieldRow({ field }: { field: DataModelField }) {
             </span>
           </Badge>
         )}
-        {field.nullable && (
-          <Badge className="bg-slate-500/15 text-slate-300">nullable</Badge>
-        )}
+        {field.nullable && <Badge accent="slate">nullable</Badge>}
         {field.default !== undefined && (
-          <Badge className="bg-emerald-500/15 text-emerald-300 normal-case">
+          <Badge accent="emerald" className="normal-case">
             = {field.default}
           </Badge>
         )}
@@ -246,25 +247,6 @@ function FieldRow({ field }: { field: DataModelField }) {
         </span>
       )}
     </div>
-  );
-}
-
-function Badge({
-  children,
-  className,
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none",
-        className,
-      )}
-    >
-      {children}
-    </span>
   );
 }
 
@@ -311,7 +293,12 @@ function RelationsSection({ relations }: { relations: DataModelRelation[] }) {
               ({relation.label})
             </span>
             {relation.unresolved && (
-              <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
+              <span
+                className={cn(
+                  "rounded px-1.5 py-0.5 text-[10px] font-medium",
+                  ACCENT_BADGE.amber,
+                )}
+              >
                 unresolved
               </span>
             )}

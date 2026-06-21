@@ -11,12 +11,13 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/lib/utils";
 
 import { BlockShell } from "./BlockShell";
+import { ChangeChip } from "./blockBadges";
+import { CHANGE_NAME_INK } from "./blockBadgeColors";
 import type { BlockProps } from "./types";
 import {
   buildFileTree,
   parseFileTreeBody,
   tallyChanges,
-  type FileChange,
   type TreeNode,
 } from "./fileTree";
 
@@ -120,36 +121,6 @@ export function FileTreeBlock({ attributes, children }: BlockProps) {
 
 const INDENT_STEP = 14; // px per nesting level — the explorer guide spacing.
 
-const CHANGE_GLYPH: Record<FileChange, string> = {
-  added: "A",
-  modified: "M",
-  deleted: "D",
-  renamed: "R",
-};
-
-const CHANGE_LABEL: Record<FileChange, string> = {
-  added: "Added",
-  modified: "Modified",
-  deleted: "Deleted",
-  renamed: "Renamed",
-};
-
-/** Tinted badge background + saturated text. Dark-only theme. */
-const CHANGE_BADGE: Record<FileChange, string> = {
-  added: "bg-emerald-500/15 text-emerald-300",
-  modified: "bg-blue-500/15 text-blue-300",
-  deleted: "bg-red-500/15 text-red-300",
-  renamed: "bg-violet-500/15 text-violet-300",
-};
-
-/** Accent ink for the file name, echoing its change color. */
-const CHANGE_NAME_INK: Record<FileChange, string> = {
-  added: "text-emerald-300",
-  modified: "text-blue-300",
-  deleted: "text-red-300 line-through",
-  renamed: "text-violet-300",
-};
-
 interface TreeRowsProps {
   nodes: TreeNode[];
   depth: number;
@@ -224,18 +195,7 @@ function TreeRows({ nodes, depth, collapsed, toggle }: TreeRowsProps) {
             >
               {node.name}
             </span>
-            {change && (
-              <span
-                title={CHANGE_LABEL[change]}
-                aria-label={CHANGE_LABEL[change]}
-                className={cn(
-                  "ml-0.5 flex size-4 shrink-0 items-center justify-center rounded text-[10px] font-bold leading-none",
-                  CHANGE_BADGE[change],
-                )}
-              >
-                {CHANGE_GLYPH[change]}
-              </span>
-            )}
+            {change && <ChangeChip status={change} className="ml-0.5" />}
             {node.note && (
               <span className="ml-1 min-w-0 flex-1 truncate text-xs text-muted-foreground">
                 {node.note}
