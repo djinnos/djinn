@@ -32,6 +32,7 @@ use crate::tools::memory_tools::{
     ListParams, MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecentParams,
     RepairEmbeddingsParams, RunEnrichmentParams, SearchParams, TaskRefsParams, WriteParams,
 };
+use crate::tools::org_policy_tools::{OrgPolicyGetParams, OrgPolicySetParams};
 use crate::tools::pr_review_tools::PrReviewContextParams;
 use crate::tools::project_tools::{
     GetProjectDevcontainerStatusParams, GetProjectStackParams, GithubListReposParams,
@@ -573,6 +574,16 @@ impl DjinnMcpServer {
                     name, args,
                 )?))
                 .await,
+            ),
+            "org_policy_get" => map_json(
+                name,
+                self.org_policy_get(Parameters(decode_args::<OrgPolicyGetParams>(name, args)?))
+                    .await,
+            ),
+            "org_policy_set" => map_json(
+                name,
+                self.org_policy_set(Parameters(decode_args::<OrgPolicySetParams>(name, args)?))
+                    .await,
             ),
             "system_ping" => map_json(name, self.system_ping().await),
             "memory_read" => map_json(

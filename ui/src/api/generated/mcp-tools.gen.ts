@@ -4456,6 +4456,142 @@ export namespace ModelHealthOutputSchema {
 
 }
 export type ModelHealthOutput = ModelHealthOutputSchema.ModelHealthOutput;
+export namespace OrgPolicyGetInputSchema {
+  export interface OrgPolicyGetInput {
+
+  }
+
+}
+export type OrgPolicyGetInput = OrgPolicyGetInputSchema.OrgPolicyGetInput;
+export namespace OrgPolicyGetOutputSchema {
+  export interface OrgPolicyGetOutput {
+  /**
+   * The blocked subscription provider ids (subset of `subscriptions`).
+   */
+  blocked_subscriptions: string[]
+  default_lanes: OrgDefaultLanesPayload
+  error?: string
+  /**
+   * `flexible` (members may override) | `locked` (org assignment authoritative).
+   */
+  lock_level: string
+  ok: boolean
+  /**
+   * Every known subscription provider with its jurisdiction + blocked flag.
+   */
+  subscriptions: SubscriptionPolicyItem[]
+  [k: string]: any
+  }
+  /**
+   * Org-default per-role lanes new members inherit when they have none.
+   */
+  export interface OrgDefaultLanesPayload {
+  /**
+   * worker
+   */
+  implement?: string[]
+  /**
+   * planner, architect, chat
+   */
+  plan?: string[]
+  /**
+   * reviewer
+   */
+  review?: string[]
+  [k: string]: any
+  }
+  /**
+   * One subscription provider as the admin policy surface sees it: its id,
+   * display name, data-residency jurisdiction, and whether it is currently
+   * blocked. Lets the UI render the allow/block table grouped by jurisdiction
+   * without re-deriving the residency map client-side.
+   */
+  export interface SubscriptionPolicyItem {
+  /**
+   * Whether this subscription is currently blocked org-wide.
+   */
+  blocked: boolean
+  id: string
+  /**
+   * Data residency: `us`, `eu`, `cn`, or `other` (djinn-owned classification).
+   */
+  jurisdiction: string
+  name: string
+  [k: string]: any
+  }
+
+}
+export type OrgPolicyGetOutput = OrgPolicyGetOutputSchema.OrgPolicyGetOutput;
+export namespace OrgPolicySetInputSchema {
+  export interface OrgPolicySetInput {
+  /**
+   * Replacement set of blocked subscription provider ids. Only subscription
+   * providers are honored; any non-subscription id is ignored. Omit to keep
+   * the current value.
+   */
+  blocked_subscriptions?: string[]
+  /**
+   * Org-default per-role lanes new members inherit. Pass all-empty to clear.
+   * Omit to keep the current value.
+   */
+  default_lanes?: (OrgDefaultLanesPayload | null)
+  /**
+   * Lane lock level: `flexible` or `locked`. Omit to keep the current value.
+   */
+  lock_level?: string
+  }
+  /**
+   * Org-default per-role lanes over the wire (mirrors the per-user lane shape).
+   */
+  export interface OrgDefaultLanesPayload {
+  /**
+   * worker
+   */
+  implement?: string[]
+  /**
+   * planner, architect, chat
+   */
+  plan?: string[]
+  /**
+   * reviewer
+   */
+  review?: string[]
+  [k: string]: any
+  }
+
+}
+export type OrgPolicySetInput = OrgPolicySetInputSchema.OrgPolicySetInput;
+export namespace OrgPolicySetOutputSchema {
+  export interface OrgPolicySetOutput {
+  applied: boolean
+  blocked_subscriptions: string[]
+  default_lanes: OrgDefaultLanesPayload
+  error?: string
+  lock_level: string
+  ok: boolean
+  [k: string]: any
+  }
+  /**
+   * Org-default per-role lanes over the wire (mirrors the per-user lane shape).
+   */
+  export interface OrgDefaultLanesPayload {
+  /**
+   * worker
+   */
+  implement?: string[]
+  /**
+   * planner, architect, chat
+   */
+  plan?: string[]
+  /**
+   * reviewer
+   */
+  review?: string[]
+  [k: string]: any
+  }
+
+}
+export type OrgPolicySetOutput = OrgPolicySetOutputSchema.OrgPolicySetOutput;
 export namespace PrReviewContextInputSchema {
   /**
    * Input parameters for the `pr_review_context` meta-tool.
@@ -8339,6 +8475,11 @@ export namespace UserSettingsGetOutputSchema {
    */
   diverse_review: boolean
   error?: string
+  /**
+   * True when the org AI policy locks lane assignment: the member may not
+   * edit lanes (UI disables the controls; the server rejects lane writes).
+   */
+  lane_locked: boolean
   lanes: ModelLanesPayload
   /**
    * This user's per-model concurrency caps (`{ "provider/model": cap }`).
@@ -8358,6 +8499,8 @@ export namespace UserSettingsGetOutputSchema {
    * This user's per-ROLE ordered model lanes (each highest priority first),
    * full `provider/model` ids. All-empty when the user has no explicit
    * selection (callers then fall back to the global deployment model list).
+   * When the org lane policy is `locked`, this echoes the org default
+   * (member edits are ignored).
    */
   export interface ModelLanesPayload {
   /**
@@ -8484,7 +8627,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_blocks" | "proposal_create" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "org_policy_get" | "org_policy_set" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_blocks" | "proposal_create" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -8554,6 +8697,8 @@ export interface McpToolMap {
   "memory_task_refs": { input: MemoryTaskRefsInput; output: MemoryTaskRefsOutput };
   "memory_write": { input: MemoryWriteInput; output: MemoryWriteOutput };
   "model_health": { input: ModelHealthInput; output: ModelHealthOutput };
+  "org_policy_get": { input: OrgPolicyGetInput; output: OrgPolicyGetOutput };
+  "org_policy_set": { input: OrgPolicySetInput; output: OrgPolicySetOutput };
   "pr_review_context": { input: PrReviewContextInput; output: PrReviewContextOutput };
   "project_add_from_github": { input: ProjectAddFromGithubInput; output: ProjectAddFromGithubOutput };
   "project_branches": { input: ProjectBranchesInput; output: ProjectBranchesOutput };

@@ -12,6 +12,7 @@ pub mod init;
 pub mod models;
 pub mod note;
 pub mod oauth;
+pub mod org_ai_policy;
 pub mod org_config;
 pub mod project;
 pub mod project_workspace_graph;

@@ -6,6 +6,8 @@ import { CodexSignInCard } from '@/components/CodexSignInCard';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ModelSection } from '@/components/userConfig/ModelSection';
+import { AiPolicyTab } from '@/components/settings/AiPolicyTab';
+import { useAuthUser } from '@/components/AuthGate';
 import { SELF_TARGET } from '@/api/userConfig';
 import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
@@ -203,6 +205,7 @@ function PreferencesTab() {
 export function SettingsPage() {
   const { status } = useServerHealth();
   const isConnected = status === 'connected';
+  const isAdmin = useAuthUser()?.isAdmin ?? false;
 
   return (
     <div className="flex h-full flex-col overflow-hidden p-6">
@@ -212,6 +215,7 @@ export function SettingsPage() {
             <TabsTrigger value="connections">Connections</TabsTrigger>
             <TabsTrigger value="model-roles">Model Roles</TabsTrigger>
             <TabsTrigger value="preferences">Preferences</TabsTrigger>
+            {isAdmin && <TabsTrigger value="ai-policy">AI Policy</TabsTrigger>}
           </TabsList>
           <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pt-4 pb-6">
             <TabsContent value="connections">
@@ -223,6 +227,11 @@ export function SettingsPage() {
             <TabsContent value="preferences">
               <PreferencesTab />
             </TabsContent>
+            {isAdmin && (
+              <TabsContent value="ai-policy">
+                <AiPolicyTab />
+              </TabsContent>
+            )}
           </div>
         </Tabs>
       ) : (

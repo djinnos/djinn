@@ -197,10 +197,37 @@ impl McpState {
         self.runtime.apply_user_model_change().await;
     }
 
+    /// Read the org-wide AI policy (admin-owned singleton). On a read error the
+    /// policy degrades to all-defaults (no blocks, flexible) so a transient DB
+    /// hiccup never silently hides every provider from members.
+    pub async fn org_ai_policy(&self) -> djinn_core::models::OrgAiPolicy {
+        let repo = djinn_db::OrgAiPolicyRepository::new(self.db.clone());
+        match repo.get().await {
+            Ok(policy) => policy,
+            Err(e) => {
+                tracing::warn!(error = %e, "org_ai_policy: read failed; using defaults");
+                djinn_core::models::OrgAiPolicy::default()
+            }
+        }
+    }
+
+    /// The set of subscription provider ids blocked org-wide. Member-facing
+    /// provider/model surfaces filter these out; per-user model validation
+    /// rejects them. Lowercased for case-insensitive matching.
+    pub async fn blocked_subscription_ids(&self) -> std::collections::HashSet<String> {
+        self.org_ai_policy()
+            .await
+            .blocked_subscriptions
+            .iter()
+            .map(|s| s.to_ascii_lowercase())
+            .collect()
+    }
+
     /// Validate that every model in `models` belongs to a provider connected
-    /// *for `user_id`* (their own credential or the org-shared fallback). Used
-    /// by `user_settings_set` so a user can't select a model on a provider they
-    /// haven't connected. Empty selection is always valid.
+    /// *for `user_id`* (their own credential or the org-shared fallback) AND is
+    /// not a subscription blocked by org policy. Used by `user_settings_set` so
+    /// a user can't select a model on a provider they haven't connected, nor on
+    /// a subscription an admin has blocked. Empty selection is always valid.
     pub async fn validate_models_for_user(
         &self,
         models: &[String],
@@ -220,6 +247,24 @@ impl McpState {
                     .to_string()
             })
             .collect();
+
+        // Org-policy gate: reject any model on a blocked subscription provider
+        // before the connectivity check, with a distinct message.
+        let blocked = self.blocked_subscription_ids().await;
+        if !blocked.is_empty() {
+            let mut blocked_hits: Vec<String> = configured_provider_ids
+                .iter()
+                .filter(|pid| blocked.contains(&pid.to_ascii_lowercase()))
+                .cloned()
+                .collect();
+            blocked_hits.sort();
+            if !blocked_hits.is_empty() {
+                return Err(format!(
+                    "models reference subscriptions blocked by org policy: {}",
+                    blocked_hits.join(", ")
+                ));
+            }
+        }
 
         let repo = djinn_provider::repos::CredentialRepository::new(
             self.db.clone(),

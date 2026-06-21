@@ -566,6 +566,117 @@ fn is_subscription_id(provider_id: &str) -> bool {
     SUBSCRIPTION_IDS.iter().any(|exact| id == *exact)
 }
 
+/// Data-residency jurisdiction of a subscription provider's hosting.
+///
+/// models.dev has **no** region field, so this classification is djinn-owned:
+/// it is derived from the provider id/name where the catalog encodes a region
+/// (`-cn`, `-ams` = EU, `-sgp` = Singapore, "(China)") and hardcoded to `Cn`
+/// for Chinese vendors regardless of which endpoint a particular plan hits.
+/// It exists to frame the org AI-policy allow/block surface — notably the
+/// "block all China-hosted subscriptions" action — by data residency.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Jurisdiction {
+    /// United States hosted.
+    Us,
+    /// European Union hosted (e.g. Amsterdam `-ams`).
+    Eu,
+    /// Mainland-China hosted, or a Chinese vendor regardless of endpoint.
+    Cn,
+    /// Anywhere else / unknown (e.g. Singapore `-sgp`, generic gateways).
+    Other,
+}
+
+impl Jurisdiction {
+    /// True for mainland-China residency.
+    pub fn is_china(self) -> bool {
+        matches!(self, Jurisdiction::Cn)
+    }
+}
+
+/// Chinese vendor id prefixes/exact ids that are classified `Cn` regardless of
+/// which regional endpoint a particular plan authenticates against. The vendor
+/// owns the account/data even when a model is mirrored to a non-CN region, so
+/// data-residency policy treats the whole vendor as China-hosted.
+const CHINA_VENDOR_MARKERS: &[&str] = &[
+    "zai",
+    "zhipuai",
+    "zhipu",
+    "minimax",
+    "kimi",
+    "moonshotai",
+    "moonshot",
+    "xiaomi",
+    "alibaba",
+    "qwen",
+    "tencent",
+    "hunyuan",
+    "stepfun",
+    "iflowcn",
+    "siliconflow",
+    "modelscope",
+    "qiniu",
+    "qihang",
+    "bailing",
+    "deepseek",
+];
+
+/// Data-residency [`Jurisdiction`] for a (subscription) provider id.
+///
+/// djinn-owned classification (models.dev carries no region field). Resolution
+/// order, most specific first:
+/// 1. Explicit Chinese vendor markers ⇒ [`Jurisdiction::Cn`] (overrides any
+///    regional-endpoint suffix — the vendor still owns the data).
+/// 2. Regional id suffixes the catalog encodes: `-cn`/`(china)` ⇒ `Cn`,
+///    `-ams` ⇒ `Eu`, `-sgp` ⇒ `Other` (Singapore).
+/// 3. Otherwise [`Jurisdiction::Us`] for US-headquartered vendors, falling
+///    through to [`Jurisdiction::Other`] for the unknown long tail.
+///
+/// This is only meaningful for subscription providers; org policy applies it to
+/// the subscription set. The classification is intentionally coarse and safe:
+/// uncertain providers land in `Other`, never silently in `Cn`.
+pub fn provider_jurisdiction(provider_id: &str) -> Jurisdiction {
+    let id = provider_id.to_ascii_lowercase();
+
+    // 1. Chinese vendors — vendor identity wins over endpoint region.
+    if CHINA_VENDOR_MARKERS
+        .iter()
+        .any(|m| id.starts_with(m) || id.contains(&format!("-{m}")) || id.contains(m))
+    {
+        return Jurisdiction::Cn;
+    }
+
+    // 2. Regional endpoint suffixes the catalog already encodes.
+    if id.ends_with("-cn") || id.contains("china") {
+        return Jurisdiction::Cn;
+    }
+    if id.ends_with("-ams") || id.contains("-ams-") {
+        return Jurisdiction::Eu;
+    }
+    if id.ends_with("-sgp") || id.contains("-sgp-") {
+        // Singapore — not EU, not CN.
+        return Jurisdiction::Other;
+    }
+
+    // 3. Known US-headquartered subscription vendors.
+    const US_VENDORS: &[&str] = &[
+        "openai",
+        "chatgpt",
+        "anthropic",
+        "claude",
+        "github",
+        "copilot",
+    ];
+    if US_VENDORS
+        .iter()
+        .any(|v| id.starts_with(v) || id.contains(v))
+    {
+        return Jurisdiction::Us;
+    }
+
+    Jurisdiction::Other
+}
+
 /// Strip non-alphanumeric chars and lowercase for fuzzy ID matching.
 fn canonical_id(id: &str) -> String {
     id.chars()
@@ -683,6 +794,50 @@ mod tests {
                 "{id} should classify as a subscription via the id fallback"
             );
         }
+    }
+
+    #[test]
+    fn jurisdiction_classifies_china_vendors_regardless_of_endpoint() {
+        for id in [
+            "minimax-coding-plan",
+            "kimi-for-coding",
+            "zai-coding-plan",
+            "zhipuai-coding-plan",
+            "xiaomi-token-plan-ams", // EU endpoint but Chinese vendor ⇒ Cn
+            "xiaomi-token-plan-sgp", // Singapore endpoint but Chinese vendor ⇒ Cn
+            "alibaba-qwen-coding-plan",
+            "tencent-hunyuan-coding-plan",
+            "moonshotai-coding-plan",
+            "siliconflow-cn",
+        ] {
+            assert_eq!(
+                provider_jurisdiction(id),
+                Jurisdiction::Cn,
+                "{id} should classify as China-hosted"
+            );
+            assert!(provider_jurisdiction(id).is_china(), "{id} is_china");
+        }
+    }
+
+    #[test]
+    fn jurisdiction_classifies_us_and_eu_and_other() {
+        assert_eq!(provider_jurisdiction("chatgpt_codex"), Jurisdiction::Us);
+        assert_eq!(provider_jurisdiction("github-copilot"), Jurisdiction::Us);
+        assert_eq!(provider_jurisdiction("anthropic"), Jurisdiction::Us);
+        // A non-Chinese vendor on an Amsterdam endpoint reads as EU.
+        assert_eq!(
+            provider_jurisdiction("acme-token-plan-ams"),
+            Jurisdiction::Eu
+        );
+        // Unknown long tail and Singapore endpoints land in Other, never Cn.
+        assert_eq!(
+            provider_jurisdiction("some-random-coding-plan"),
+            Jurisdiction::Other
+        );
+        assert_eq!(
+            provider_jurisdiction("acme-token-plan-sgp"),
+            Jurisdiction::Other
+        );
     }
 
     #[test]

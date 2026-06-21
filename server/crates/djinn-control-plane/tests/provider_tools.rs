@@ -205,3 +205,145 @@ async fn provider_oauth_start_returns_error_shape_when_not_configured_or_invalid
     assert!(result["error"].as_str().is_some());
     assert!(result.get("oauth_supported").is_some());
 }
+
+// ── Org AI policy: subscription allow/block enforcement (slice 5 of p8py) ──────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn org_policy_blocks_subscription_from_connected_and_validation() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    // Connect a subscription provider so it would otherwise appear connected.
+    CredentialRepository::new(db, EventBus::noop())
+        .set("minimax-coding-plan", "MINIMAX_API_KEY", "sk-sub")
+        .await
+        .unwrap();
+
+    // Baseline: the subscription is connected and a model on it validates.
+    let connected_before = harness
+        .call_tool("provider_connected", json!({}))
+        .await
+        .expect("provider_connected dispatch");
+    let has_sub_before = connected_before["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["id"] == "minimax-coding-plan");
+    assert!(
+        has_sub_before,
+        "connected subscription should be visible before any block"
+    );
+    harness
+        .state()
+        .validate_models_for_user(&["minimax-coding-plan/MiniMax-M3".to_string()], None)
+        .await
+        .expect("model on connected subscription validates before block");
+
+    // Admin blocks the subscription. (No user context in the harness → the
+    // admin gate is open, matching the credential-repo trusted-path convention.)
+    let set = harness
+        .call_tool(
+            "org_policy_set",
+            json!({"blocked_subscriptions": ["minimax-coding-plan"]}),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert!(set["ok"].as_bool().unwrap_or(false), "org_policy_set ok");
+    assert!(
+        set["blocked_subscriptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "minimax-coding-plan"),
+        "blocked set persisted"
+    );
+
+    // Enforcement 1: hidden from provider_connected.
+    let connected_after = harness
+        .call_tool("provider_connected", json!({}))
+        .await
+        .expect("provider_connected dispatch");
+    assert!(
+        !connected_after["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "minimax-coding-plan"),
+        "blocked subscription must be hidden from provider_connected"
+    );
+
+    // Enforcement 2: hidden from provider_catalog.
+    let catalog_after = harness
+        .call_tool("provider_catalog", json!({}))
+        .await
+        .expect("provider_catalog dispatch");
+    assert!(
+        !catalog_after["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "minimax-coding-plan"),
+        "blocked subscription must be hidden from provider_catalog"
+    );
+
+    // Enforcement 3: hidden from provider_models_connected.
+    let models_after = harness
+        .call_tool("provider_models_connected", json!({}))
+        .await
+        .expect("provider_models_connected dispatch");
+    assert!(
+        !models_after["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["provider_id"] == "minimax-coding-plan"),
+        "blocked subscription's models must be hidden from provider_models_connected"
+    );
+
+    // Enforcement 4: validation rejects selecting a model on the blocked sub.
+    let err = harness
+        .state()
+        .validate_models_for_user(&["minimax-coding-plan/MiniMax-M3".to_string()], None)
+        .await
+        .expect_err("model on blocked subscription must be rejected");
+    assert!(
+        err.contains("blocked by org policy"),
+        "rejection should mention org policy, got: {err}"
+    );
+
+    // Admin API keys are never governed: a non-subscription id passed to the
+    // blocklist is dropped, and openai stays connectable.
+    let set_apikey = harness
+        .call_tool(
+            "org_policy_set",
+            json!({"blocked_subscriptions": ["openai"]}),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert!(
+        set_apikey["blocked_subscriptions"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "non-subscription provider must not be storable in the blocklist"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn org_policy_get_reports_jurisdiction_and_lock_default() {
+    let harness = McpTestHarness::new().await;
+    let result = harness
+        .call_tool("org_policy_get", json!({}))
+        .await
+        .expect("org_policy_get dispatch");
+    assert!(result["ok"].as_bool().unwrap_or(false));
+    assert_eq!(result["lock_level"], "flexible");
+    // The subscription table carries a jurisdiction per row.
+    if let Some(first) = result["subscriptions"].as_array().and_then(|a| a.first()) {
+        let j = first["jurisdiction"].as_str().unwrap_or("");
+        assert!(
+            matches!(j, "us" | "eu" | "cn" | "other"),
+            "jurisdiction must be one of the known buckets, got {j}"
+        );
+    }
+}

@@ -1,3 +1,8 @@
+// djinn:allow-oversize — provider_* MCP tools (catalog/connected/models/oauth/
+// validate/remove + shared response shaping) cohere as one surface and already
+// sat at the 50 KiB guideline before the slice-5 org-policy block filter pushed
+// it just over. Splitting the module would scatter the shared helpers for no
+// real readability gain; the file stays a single well-factored unit.
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -14,6 +19,19 @@ use djinn_provider::repos::CredentialRepository;
 use djinn_provider::repos::CustomProviderRepository;
 
 // ── Shared response helpers ───────────────────────────────────────────────────
+
+/// True when `provider_id` is a subscription that org policy has blocked.
+/// Member-facing catalog/connected/model surfaces use this to hide blocked
+/// subscriptions entirely. Admin API keys (non-subscription providers) are
+/// never governed by the allowlist, so a non-subscription id is never blocked
+/// even if (defensively) it appears in the set.
+fn is_blocked_subscription(provider_id: &str, blocked: &HashSet<String>) -> bool {
+    if blocked.is_empty() {
+        return false;
+    }
+    builtin::is_subscription_provider(provider_id)
+        && blocked.contains(&provider_id.to_ascii_lowercase())
+}
 
 fn model_to_output(m: &Model) -> ProviderModelOutput {
     // Always return the full "provider/model" form for API consumers, where
@@ -510,6 +528,10 @@ impl DjinnMcpServer {
             .into_iter()
             .collect();
 
+        // Org policy: hide subscriptions an admin has blocked so members never
+        // see (or can connect) them.
+        let blocked_subscriptions = self.state.blocked_subscription_ids().await;
+
         let providers: Vec<ProviderCatalogItem> = self
             .state
             .catalog()
@@ -518,6 +540,8 @@ impl DjinnMcpServer {
             .filter(|p| is_provider_usable(p, &builtin_ids))
             // Hide providers that are merged into a parent (e.g. chatgpt_codex → openai).
             .filter(|p| !merged_ids.contains(&p.id))
+            // Hide org-policy-blocked subscriptions entirely.
+            .filter(|p| !is_blocked_subscription(&p.id, &blocked_subscriptions))
             .map(|p| {
                 let oauth_keys = builtin::all_oauth_keys_for_provider(&p.id);
                 let (connected, methods) = provider_connection_status(
@@ -607,6 +631,8 @@ impl DjinnMcpServer {
             .into_iter()
             .collect();
 
+        let blocked_subscriptions = self.state.blocked_subscription_ids().await;
+
         let providers: Vec<ProviderCatalogItem> = self
             .state
             .catalog()
@@ -614,6 +640,8 @@ impl DjinnMcpServer {
             .iter()
             .filter(|p| is_provider_usable(p, &builtin_ids))
             .filter(|p| !merged_ids.contains(&p.id))
+            // Hide org-policy-blocked subscriptions entirely.
+            .filter(|p| !is_blocked_subscription(&p.id, &blocked_subscriptions))
             .filter_map(|p| {
                 let oauth_keys = builtin::all_oauth_keys_for_provider(&p.id);
                 let (connected, methods) = provider_connection_status(
@@ -728,11 +756,17 @@ impl DjinnMcpServer {
                 Vec::new()
             });
         let connected_set = self.state.catalog().connected_provider_ids(&credentials);
+        let blocked_subscriptions = self.state.blocked_subscription_ids().await;
 
-        // Collect connected provider IDs including merged children.
+        // Collect connected provider IDs including merged children. Org-policy-
+        // blocked subscriptions (parent or merged child) are skipped so their
+        // models never reach a member.
         let mut connected_provider_ids: Vec<String> = Vec::new();
         for p in self.state.catalog().list_providers().iter() {
             if !is_provider_usable(p, &builtin_ids) || !connected_set.contains(&p.id) {
+                continue;
+            }
+            if is_blocked_subscription(&p.id, &blocked_subscriptions) {
                 continue;
             }
             connected_provider_ids.push(p.id.clone());
@@ -741,6 +775,7 @@ impl DjinnMcpServer {
                 for child_id in &merged_ids {
                     if builtin::find_builtin_provider(child_id).and_then(|bp| bp.merge_into)
                         == Some(p.id.as_str())
+                        && !is_blocked_subscription(child_id, &blocked_subscriptions)
                     {
                         connected_provider_ids.push(child_id.clone());
                     }
