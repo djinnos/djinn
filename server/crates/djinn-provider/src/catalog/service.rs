@@ -674,6 +674,7 @@ mod tests {
             auth_shape: crate::catalog::builtin::DEFAULT_AUTH_SHAPE,
             streaming: true,
             max_tokens_default: None,
+            credential_class: crate::catalog::builtin::CredentialClass::ApiKey,
         }];
         catalog.inject_builtin_providers(entries);
 
@@ -708,6 +709,7 @@ mod tests {
             auth_shape: crate::catalog::builtin::DEFAULT_AUTH_SHAPE,
             streaming: true,
             max_tokens_default: None,
+            credential_class: crate::catalog::builtin::CredentialClass::ApiKey,
         }];
         catalog.inject_builtin_providers(entries);
 
