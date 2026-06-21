@@ -22,7 +22,6 @@ import {
   SYMBOL_KIND_FILTERS,
   useCodeGraphStore,
   type ColorMode,
-  type LayoutMode,
   type SemanticZoomMode,
 } from "@/stores/codeGraphStore";
 import { cn } from "@/lib/utils";
@@ -77,7 +76,6 @@ interface GraphToolbarProps {
 export function GraphToolbar({
   className,
 }: GraphToolbarProps) {
-  const disabled = !useCodeGraphStore((s) => s.graphReady);
   const edgeKindFilters = useCodeGraphStore((s) => s.edgeKindFilters);
   const toggleEdgeKind = useCodeGraphStore((s) => s.toggleEdgeKind);
   const nodeKindFilters = useCodeGraphStore((s) => s.nodeKindFilters);
@@ -91,8 +89,6 @@ export function GraphToolbar({
   const selectionId = useCodeGraphStore((s) => s.selectionId);
   const colorMode = useCodeGraphStore((s) => s.colorMode);
   const setColorMode = useCodeGraphStore((s) => s.setColorMode);
-  const layoutMode = useCodeGraphStore((s) => s.layoutMode);
-  const setLayoutMode = useCodeGraphStore((s) => s.setLayoutMode);
   const complexityAvailable = useCodeGraphStore((s) => s.complexityAvailable);
   const semanticZoomMode = useCodeGraphStore((s) => s.semanticZoomMode);
   const setSemanticZoomMode = useCodeGraphStore(
@@ -185,11 +181,6 @@ export function GraphToolbar({
           mode={semanticZoomMode}
           onChange={setSemanticZoomMode}
         />
-        <LayoutModeToggle
-          mode={layoutMode}
-          onChange={setLayoutMode}
-          disabled={disabled}
-        />
         <ColorModeToggle
           mode={colorMode}
           onChange={setColorMode}
@@ -267,99 +258,6 @@ function Chip({ active, onClick, testId, title, children }: ChipProps) {
       )}
     >
       {children}
-    </button>
-  );
-}
-
-interface LayoutModeToggleProps {
-  mode: LayoutMode;
-  onChange: (mode: LayoutMode) => void;
-  disabled: boolean;
-}
-
-function LayoutModeToggle({
-  mode,
-  onChange,
-  disabled,
-}: LayoutModeToggleProps) {
-  return (
-    <div className="flex items-center gap-1.5" data-testid="layout-mode-toggle">
-      <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">
-        Layout
-      </span>
-      <div
-        role="radiogroup"
-        aria-label="Layout mode"
-        className={cn(
-          "flex items-center rounded-md border border-zinc-800 bg-[#0a0a10]/40 p-0.5",
-          disabled && "opacity-50",
-        )}
-      >
-        <LayoutModeButton
-          active={mode === "force"}
-          disabled={disabled}
-          onClick={() => onChange("force")}
-          testId="layout-mode-force"
-          label="Force"
-          tooltip="ForceAtlas2 simulation — physics-based settling, slowest on large repos"
-        />
-        <LayoutModeButton
-          active={mode === "sequential"}
-          disabled={disabled}
-          onClick={() => onChange("sequential")}
-          testId="layout-mode-sequential"
-          label="Sequential"
-          tooltip="Layered (folder → file → symbol) — deterministic, no physics"
-        />
-        <LayoutModeButton
-          active={mode === "radial"}
-          disabled={disabled}
-          onClick={() => onChange("radial")}
-          testId="layout-mode-radial"
-          label="Radial"
-          tooltip="Concentric shells from the highest-PageRank focal — deterministic, no physics"
-        />
-      </div>
-    </div>
-  );
-}
-
-interface LayoutModeButtonProps {
-  active: boolean;
-  disabled: boolean;
-  onClick: () => void;
-  testId: string;
-  label: string;
-  tooltip: string;
-}
-
-function LayoutModeButton({
-  active,
-  disabled,
-  onClick,
-  testId,
-  label,
-  tooltip,
-}: LayoutModeButtonProps) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={active}
-      aria-disabled={disabled}
-      disabled={disabled}
-      data-testid={testId}
-      onClick={onClick}
-      title={tooltip}
-      className={cn(
-        "rounded px-2 py-0.5 text-[11px] font-medium transition-colors",
-        active
-          ? "bg-zinc-800/80 text-zinc-100"
-          : "text-zinc-400 hover:text-zinc-200",
-        disabled && "cursor-not-allowed hover:text-zinc-400",
-      )}
-    >
-      {label}
     </button>
   );
 }
