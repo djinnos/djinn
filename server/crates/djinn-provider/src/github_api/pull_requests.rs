@@ -236,6 +236,73 @@ impl GitHubApiClient {
         })?)
     }
 
+    /// List all open pull requests in a repository, paginating through all pages.
+    ///
+    /// Used by the periodic stale-PR sweep to enumerate bot-authored PRs on
+    /// `task/*` and `chore/*` branches. The caller is responsible for filtering
+    /// by head-branch prefix and author.
+    pub async fn list_open_pulls(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> std::result::Result<Vec<PullRequest>, GitHubApiError> {
+        let mut all_prs = Vec::new();
+        let mut page: u32 = 1;
+        const PER_PAGE: u32 = 100;
+
+        loop {
+            let url = format!(
+                "{}/repos/{}/{}/pulls?state=open&per_page={}&page={}",
+                self.base_url, owner, repo, PER_PAGE, page
+            );
+
+            let resp = self
+                .send_with_retry(|token| {
+                    let url = url.clone();
+                    let http = self.http.clone();
+                    async move {
+                        let resp = http
+                            .get(&url)
+                            .bearer_auth(&token)
+                            .header("Accept", "application/vnd.github+json")
+                            .header("X-GitHub-Api-Version", "2022-11-28")
+                            .send()
+                            .await?;
+                        handle_rate_limit(resp).await
+                    }
+                })
+                .await?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(GitHubApiError::http(
+                    "list_open_pulls",
+                    format!("/repos/{owner}/{repo}/pulls"),
+                    status,
+                    body,
+                ));
+            }
+
+            let page_prs: Vec<PullRequest> = resp.json().await.map_err(|e| {
+                GitHubApiError::transport(
+                    "list_open_pulls",
+                    format!("/repos/{owner}/{repo}/pulls"),
+                    e.to_string(),
+                )
+            })?;
+
+            let is_last_page = page_prs.len() < PER_PAGE as usize;
+            all_prs.extend(page_prs);
+            if is_last_page {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(all_prs)
+    }
+
     /// Close an open pull request by setting its state to `"closed"`.
     ///
     /// Inverse of [`Self::reopen_pull_request`]. Used by the periodic
