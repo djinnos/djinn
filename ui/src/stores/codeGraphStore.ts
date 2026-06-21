@@ -15,8 +15,8 @@
  *   hoverId             → hover tooltip target (transient)
  *
  * Filters live alongside because they're peer concerns of the same
- * canvas — per-edge-kind toggle, per-node-kind toggle, and depth from
- * selection. SymbolReference (the call graph) defaults OFF because at
+ * canvas — per-edge-kind toggle, per-node-kind toggle, and DOI focus
+ * controls. SymbolReference (the call graph) defaults OFF because at
  * 60-80% of edges it dominates everything else.
  */
 
@@ -109,9 +109,11 @@ const NOISY_SYMBOL_KINDS: ReadonlySet<string> = new Set([
   "other",
 ]);
 
-export const MIN_DEPTH = 1;
-export const MAX_DEPTH = 5;
-export const DEFAULT_DEPTH = MAX_DEPTH;
+export type FocusDirection = "dependencies" | "dependents" | "both";
+export const DEFAULT_FOCUS_DIRECTION: FocusDirection = "both";
+export const MIN_DOI_REVEAL_COUNT = 10;
+export const MAX_DOI_REVEAL_COUNT = 100;
+export const DEFAULT_DOI_REVEAL_COUNT = 40;
 
 /**
  * Iter 30: color-mode discriminator for the canvas.
@@ -125,41 +127,6 @@ export const DEFAULT_DEPTH = MAX_DEPTH;
  */
 export type ColorMode = "topology" | "complexity";
 export const DEFAULT_COLOR_MODE: ColorMode = "topology";
-
-export type LayoutMode = "force" | "sequential" | "radial";
-export const DEFAULT_LAYOUT_MODE: LayoutMode = "force";
-
-const LAYOUT_MODE_STORAGE_KEY = "codegraph.layoutMode";
-const LAYOUT_MODES: ReadonlySet<string> = new Set([
-  "force",
-  "sequential",
-  "radial",
-]);
-
-function isLayoutMode(value: string | null): value is LayoutMode {
-  return value !== null && LAYOUT_MODES.has(value);
-}
-
-function readPersistedLayoutMode(): LayoutMode {
-  if (typeof window === "undefined") return DEFAULT_LAYOUT_MODE;
-
-  try {
-    const persisted = window.sessionStorage.getItem(LAYOUT_MODE_STORAGE_KEY);
-    return isLayoutMode(persisted) ? persisted : DEFAULT_LAYOUT_MODE;
-  } catch {
-    return DEFAULT_LAYOUT_MODE;
-  }
-}
-
-function persistLayoutMode(mode: LayoutMode): void {
-  if (typeof window === "undefined") return;
-
-  try {
-    window.sessionStorage.setItem(LAYOUT_MODE_STORAGE_KEY, mode);
-  } catch {
-    // Best-effort UI preference persistence; state updates should still work.
-  }
-}
 
 /**
  * Semantic zoom mode for community-collapse behaviour.
@@ -188,11 +155,14 @@ export interface CodeGraphHighlightState {
    * (canonical `is_test` classification). Default `false` (whole graph).
    */
   hideTests: boolean;
-  depthFilter: number;
+  /** Explicit DOI focus anchor. Kept separate from detail-panel selection. */
+  focusAnchorId: string | null;
+  /** Direction used by downstream dependency/dependent DOI traversal. */
+  focusDirection: FocusDirection;
+  /** Bounded top-N DOI context count to reveal around the focus anchor. */
+  doiRevealCount: number;
   /** Iter 30: see {@link ColorMode}. Default `"topology"`. */
   colorMode: ColorMode;
-  /** Layout algorithm preference for the code graph canvas. */
-  layoutMode: LayoutMode;
   /**
    * Iter 30: `true` when the current snapshot has at least one function
    * node with a populated `cognitive` value. Drives the toolbar's
@@ -237,11 +207,16 @@ export interface CodeGraphHighlightActions {
   toggleSymbolKind: (kind: string) => void;
   /** v10: toggle hiding of test files/symbols. */
   setHideTests: (hide: boolean) => void;
-  setDepthFilter: (depth: number) => void;
+  /** Set the explicit DOI focus anchor. Selection remains detail-panel state. */
+  setFocusAnchor: (id: string | null) => void;
+  /** Clear the DOI focus anchor without changing selection. */
+  clearFocusAnchor: () => void;
+  /** Direction used by downstream DOI traversal. */
+  setFocusDirection: (direction: FocusDirection) => void;
+  /** Bounded top-N DOI context count. */
+  setDoiRevealCount: (count: number) => void;
   /** Iter 30: switch heatmap mode. */
   setColorMode: (mode: ColorMode) => void;
-  /** Switch the graph layout algorithm and persist the UI preference. */
-  setLayoutMode: (mode: LayoutMode) => void;
   /** Iter 30: canvas reports whether complexity data is present in the snapshot. */
   setComplexityAvailable: (available: boolean) => void;
   /** Canvas reports whether the graph is ready (loaded with at least one node). */
@@ -290,9 +265,10 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   nodeKindFilters: defaultNodeKindFilters(),
   symbolKindFilters: defaultSymbolKindFilters(),
   hideTests: false,
-  depthFilter: DEFAULT_DEPTH,
+  focusAnchorId: null,
+  focusDirection: DEFAULT_FOCUS_DIRECTION,
+  doiRevealCount: DEFAULT_DOI_REVEAL_COUNT,
   colorMode: DEFAULT_COLOR_MODE,
-  layoutMode: DEFAULT_LAYOUT_MODE,
   complexityAvailable: false,
   graphReady: false,
   semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
@@ -304,7 +280,6 @@ export const useCodeGraphStore = create<
   CodeGraphHighlightState & CodeGraphHighlightActions
 >((set) => ({
   ...INITIAL_STATE,
-  layoutMode: readPersistedLayoutMode(),
 
   setSelection: (id) => {
     set({ selectionId: id });
@@ -375,18 +350,31 @@ export const useCodeGraphStore = create<
     set({ hideTests: hide });
   },
 
-  setDepthFilter: (depth) => {
-    const clamped = Math.max(MIN_DEPTH, Math.min(MAX_DEPTH, Math.round(depth)));
-    set({ depthFilter: clamped });
+  setFocusAnchor: (id) => {
+    set({ focusAnchorId: id });
+  },
+
+  clearFocusAnchor: () => {
+    set({ focusAnchorId: null });
+  },
+
+  setFocusDirection: (direction) => {
+    set({ focusDirection: direction });
+  },
+
+  setDoiRevealCount: (count) => {
+    const rounded = Number.isFinite(count)
+      ? Math.round(count)
+      : DEFAULT_DOI_REVEAL_COUNT;
+    const clamped = Math.max(
+      MIN_DOI_REVEAL_COUNT,
+      Math.min(MAX_DOI_REVEAL_COUNT, rounded),
+    );
+    set({ doiRevealCount: clamped });
   },
 
   setColorMode: (mode) => {
     set({ colorMode: mode });
-  },
-
-  setLayoutMode: (mode) => {
-    persistLayoutMode(mode);
-    set({ layoutMode: mode });
   },
 
   setComplexityAvailable: (available) => {
@@ -452,7 +440,6 @@ export const useCodeGraphStore = create<
       nodeKindFilters: defaultNodeKindFilters(),
       symbolKindFilters: defaultSymbolKindFilters(),
       colorMode: DEFAULT_COLOR_MODE,
-      layoutMode: state.layoutMode,
       complexityAvailable: false,
       graphReady: false,
       semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
@@ -487,9 +474,12 @@ export const selectNodeKindFilters = (
 export const selectSymbolKindFilters = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
 ) => s.symbolKindFilters;
-export const selectDepthFilter = (
+export const selectFocusAnchorId = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
-) => s.depthFilter;
-export const selectLayoutMode = (
+) => s.focusAnchorId;
+export const selectFocusDirection = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
-) => s.layoutMode;
+) => s.focusDirection;
+export const selectDoiRevealCount = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.doiRevealCount;

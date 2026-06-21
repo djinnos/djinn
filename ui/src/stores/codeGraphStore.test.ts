@@ -1,24 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  DEFAULT_DEPTH,
-  DEFAULT_LAYOUT_MODE,
+  DEFAULT_DOI_REVEAL_COUNT,
+  DEFAULT_FOCUS_DIRECTION,
   EDGE_KINDS,
-  MAX_DEPTH,
-  MIN_DEPTH,
+  MAX_DOI_REVEAL_COUNT,
+  MIN_DOI_REVEAL_COUNT,
   useCodeGraphStore,
 } from "./codeGraphStore";
-
-const assertLayoutModeTypeSafety = () => {
-  // @ts-expect-error layout mode only accepts the supported algorithms.
-  useCodeGraphStore.getState().setLayoutMode("grid");
-};
-void assertLayoutModeTypeSafety;
 
 describe("codeGraphStore", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
-    useCodeGraphStore.setState({ layoutMode: DEFAULT_LAYOUT_MODE });
     useCodeGraphStore.getState().reset();
   });
 
@@ -69,16 +62,15 @@ describe("codeGraphStore", () => {
       expect(filters.other).toBe(false);
     });
 
-    it("starts at the default (max) depth", () => {
-      expect(useCodeGraphStore.getState().depthFilter).toBe(DEFAULT_DEPTH);
+    it("starts with default DOI focus state", () => {
+      const state = useCodeGraphStore.getState();
+      expect(state.focusAnchorId).toBeNull();
+      expect(state.focusDirection).toBe(DEFAULT_FOCUS_DIRECTION);
+      expect(state.doiRevealCount).toBe(DEFAULT_DOI_REVEAL_COUNT);
     });
 
     it("starts with no selected workspace", () => {
       expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
-    });
-
-    it("starts with the default force layout mode", () => {
-      expect(useCodeGraphStore.getState().layoutMode).toBe("force");
     });
   });
 
@@ -171,22 +163,34 @@ describe("codeGraphStore", () => {
     });
   });
 
-  describe("setDepthFilter", () => {
-    it("clamps below MIN_DEPTH", () => {
-      useCodeGraphStore.getState().setDepthFilter(0);
-      expect(useCodeGraphStore.getState().depthFilter).toBe(MIN_DEPTH);
-      useCodeGraphStore.getState().setDepthFilter(-3);
-      expect(useCodeGraphStore.getState().depthFilter).toBe(MIN_DEPTH);
+  describe("DOI focus model", () => {
+    it("sets and clears an explicit focus anchor", () => {
+      useCodeGraphStore.getState().setFocusAnchor("symbol:foo");
+      expect(useCodeGraphStore.getState().focusAnchorId).toBe("symbol:foo");
+      useCodeGraphStore.getState().clearFocusAnchor();
+      expect(useCodeGraphStore.getState().focusAnchorId).toBeNull();
     });
 
-    it("clamps above MAX_DEPTH", () => {
-      useCodeGraphStore.getState().setDepthFilter(99);
-      expect(useCodeGraphStore.getState().depthFilter).toBe(MAX_DEPTH);
+    it("sets the focus direction", () => {
+      useCodeGraphStore.getState().setFocusDirection("dependencies");
+      expect(useCodeGraphStore.getState().focusDirection).toBe("dependencies");
+      useCodeGraphStore.getState().setFocusDirection("dependents");
+      expect(useCodeGraphStore.getState().focusDirection).toBe("dependents");
+      useCodeGraphStore.getState().setFocusDirection("both");
+      expect(useCodeGraphStore.getState().focusDirection).toBe("both");
     });
 
-    it("rounds non-integer input", () => {
-      useCodeGraphStore.getState().setDepthFilter(2.6);
-      expect(useCodeGraphStore.getState().depthFilter).toBe(3);
+    it("clamps and rounds the DOI reveal count", () => {
+      useCodeGraphStore.getState().setDoiRevealCount(0);
+      expect(useCodeGraphStore.getState().doiRevealCount).toBe(
+        MIN_DOI_REVEAL_COUNT,
+      );
+      useCodeGraphStore.getState().setDoiRevealCount(999);
+      expect(useCodeGraphStore.getState().doiRevealCount).toBe(
+        MAX_DOI_REVEAL_COUNT,
+      );
+      useCodeGraphStore.getState().setDoiRevealCount(42.6);
+      expect(useCodeGraphStore.getState().doiRevealCount).toBe(43);
     });
   });
 
@@ -221,26 +225,6 @@ describe("codeGraphStore", () => {
     });
   });
 
-  describe("layoutMode", () => {
-    it("setLayoutMode updates state and persists to sessionStorage", () => {
-      useCodeGraphStore.getState().setLayoutMode("radial");
-
-      expect(useCodeGraphStore.getState().layoutMode).toBe("radial");
-      expect(window.sessionStorage.getItem("codegraph.layoutMode")).toBe(
-        "radial",
-      );
-    });
-
-    it("hydrates a fresh store from a valid sessionStorage value", async () => {
-      window.sessionStorage.setItem("codegraph.layoutMode", "sequential");
-      vi.resetModules();
-
-      const { useCodeGraphStore: freshStore } = await import("./codeGraphStore");
-
-      expect(freshStore.getState().layoutMode).toBe("sequential");
-    });
-  });
-
   describe("selectedWorkspaceSlug", () => {
     it("sets and clears the selected workspace slug", () => {
       useCodeGraphStore.getState().setSelectedWorkspaceSlug("api");
@@ -262,24 +246,6 @@ describe("codeGraphStore", () => {
       expect(useCodeGraphStore.getState().semanticZoomMode).toBe("community");
       useCodeGraphStore.getState().setSemanticZoomMode("auto");
       expect(useCodeGraphStore.getState().semanticZoomMode).toBe("auto");
-    });
-  });
-
-  describe("layoutMode", () => {
-    it("defaults to force", () => {
-      expect(useCodeGraphStore.getState().layoutMode).toBe("force");
-    });
-
-    it("setLayoutMode updates and persists the mode", () => {
-      useCodeGraphStore.getState().setLayoutMode("sequential");
-      expect(useCodeGraphStore.getState().layoutMode).toBe("sequential");
-      expect(sessionStorage.getItem("codegraph.layoutMode")).toBe("sequential");
-      useCodeGraphStore.getState().setLayoutMode("radial");
-      expect(useCodeGraphStore.getState().layoutMode).toBe("radial");
-      expect(sessionStorage.getItem("codegraph.layoutMode")).toBe("radial");
-      useCodeGraphStore.getState().setLayoutMode("force");
-      expect(useCodeGraphStore.getState().layoutMode).toBe("force");
-      expect(sessionStorage.getItem("codegraph.layoutMode")).toBe("force");
     });
   });
 
@@ -333,10 +299,10 @@ describe("codeGraphStore", () => {
       s.setToolHighlight(["b"]);
       s.setBlastRadiusFrontier(["c"]);
       s.setHover("foo");
-      s.setLayoutMode("radial");
       s.toggleEdgeKind("Implements");
-      s.setDepthFilter(1);
-      s.setLayoutMode("radial");
+      s.setFocusAnchor("foo");
+      s.setFocusDirection("dependencies");
+      s.setDoiRevealCount(MIN_DOI_REVEAL_COUNT);
       s.expandCommunity("auth");
 
       useCodeGraphStore.getState().reset();
@@ -346,12 +312,13 @@ describe("codeGraphStore", () => {
       expect(after.citationIds.size).toBe(0);
       expect(after.toolHighlightIds.size).toBe(0);
       expect(after.blastRadiusFrontier.size).toBe(0);
-      expect(after.depthFilter).toBe(DEFAULT_DEPTH);
+      expect(after.focusAnchorId).toBeNull();
+      expect(after.focusDirection).toBe(DEFAULT_FOCUS_DIRECTION);
+      expect(after.doiRevealCount).toBe(DEFAULT_DOI_REVEAL_COUNT);
       expect(after.edgeKindFilters.Implements).toBe(true);
       expect(after.edgeKindFilters.Reads).toBe(false);
       expect(after.edgeKindFilters.FileReference).toBe(false);
       expect(after.colorMode).toBe("topology");
-      expect(after.layoutMode).toBe("radial");
       expect(after.complexityAvailable).toBe(false);
       expect(after.semanticZoomMode).toBe("auto");
       expect(after.expandedCommunityIds.size).toBe(0);
