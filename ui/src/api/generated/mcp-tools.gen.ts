@@ -50,7 +50,10 @@ export namespace AgentCreateOutputSchema {
   id?: string
   is_default?: boolean
   /**
-   * Auto-improvement loop amendments. None if not yet set.
+   * Machine-managed prompt learning state. Derived from active
+   * learned_prompt_history amendments. Read-only in public surfaces;
+   * mutations flow through agent_amend_prompt (Planner) and the
+   * evaluator/confirmation loop.
    */
   learned_prompt?: string
   mcp_servers?: AnyJson[]
@@ -101,7 +104,10 @@ export namespace AgentListOutputSchema {
   id: string
   is_default: boolean
   /**
-   * Auto-improvement loop amendments. None if not yet set.
+   * Machine-managed prompt learning state. Derived from active
+   * learned_prompt_history amendments. Read-only in public surfaces;
+   * mutations flow through agent_amend_prompt (Planner) and the
+   * evaluator/confirmation loop.
    */
   learned_prompt?: string
   mcp_servers: AnyJson[]
@@ -184,7 +190,10 @@ export namespace AgentShowOutputSchema {
   id?: string
   is_default?: boolean
   /**
-   * Auto-improvement loop amendments. None if not yet set.
+   * Machine-managed prompt learning state. Derived from active
+   * learned_prompt_history amendments. Read-only in public surfaces;
+   * mutations flow through agent_amend_prompt (Planner) and the
+   * evaluator/confirmation loop.
    */
   learned_prompt?: string
   mcp_servers?: AnyJson[]
@@ -204,7 +213,9 @@ export namespace AgentUpdateInputSchema {
 
   export interface AgentUpdateInput {
   /**
-   * Set to true to clear learned_prompt back to NULL. Takes precedence over learned_prompt.
+   * Set to true to clear machine-managed learned_prompt back to NULL.
+   * Admin/operator reset path; learned_prompt is otherwise managed through
+   * agent_amend_prompt and the evaluator loop.
    */
   clear_learned_prompt?: boolean
   description?: string
@@ -212,10 +223,6 @@ export namespace AgentUpdateInputSchema {
    * Agent UUID or name.
    */
   id: string
-  /**
-   * Set a new learned_prompt value (auto-improvement loop only).
-   */
-  learned_prompt?: string
   mcp_servers?: AnyJson[]
   model_preference?: string
   name?: string
@@ -241,7 +248,10 @@ export namespace AgentUpdateOutputSchema {
   id?: string
   is_default?: boolean
   /**
-   * Auto-improvement loop amendments. None if not yet set.
+   * Machine-managed prompt learning state. Derived from active
+   * learned_prompt_history amendments. Read-only in public surfaces;
+   * mutations flow through agent_amend_prompt (Planner) and the
+   * evaluator/confirmation loop.
    */
   learned_prompt?: string
   mcp_servers?: AnyJson[]
@@ -407,6 +417,14 @@ export namespace CodeGraphInputSchema {
    * Group results: only `file` is supported. Applies to `impact`/`neighbors`.
    */
   group_by?: string
+  /**
+   * Proposed removals/renames for `impact_check`. Each entry is a
+   * symbol key, repository-relative file path, or crate name whose
+   * compile-time consumers should be analysed. The handler
+   * auto-detects whether a target is a crate (by checking the crate
+   * graph) or a symbol/file (resolved through the canonical graph).
+   */
+  impact_targets?: string[]
   /**
    * PR C1: when `true`, the `context` op populates
    * `symbol_context.symbol.content` with the symbol's body text
@@ -583,6 +601,14 @@ export namespace CodeGraphInputSchema {
    */
   rules?: BoundaryRule[]
   /**
+   * Crate names in the proposed task slice for `impact_check`. Used
+   * to determine `safe_independent_slice`: true only when every
+   * affected consumer crate is within this set. Omit to treat the
+   * proposed changes as crate-only (safe_independent_slice is true
+   * when no external crate consumers are found).
+   */
+  scope_crates?: string[]
+  /**
    * Entry-point symbol keys (route handlers, `main`, etc.) for
    * `touches_hot_path`.
    */
@@ -712,6 +738,11 @@ export namespace CodeGraphInputSchema {
    * flagged as violations.
    */
   export interface BoundaryRule {
+  /**
+   * Optional human-readable explanation of why this rule exists,
+   * surfaced in CI output so violations are self-documenting.
+   */
+  description?: string
   from_glob: string
   to_glob: string
   [k: string]: any
@@ -1404,6 +1435,13 @@ export namespace EpicCreateInputSchema {
    * running it (replaces the old `drafting` status). Defaults to `true`.
    */
   auto_breakdown?: boolean
+  /**
+   * Epic-level dependencies: UUIDs or short_ids of epics that must close
+   * before this epic's auto-breakdown can run.  Wired atomically at
+   * creation time so the `epic_created` event is only emitted after
+   * blocker edges exist in the DB.
+   */
+  blocked_by?: string[]
   color?: string
   description?: string
   emoji?: string
@@ -2322,6 +2360,25 @@ export namespace GithubSearchOutputSchema {
 export type GithubSearchOutput = GithubSearchOutputSchema.GithubSearchOutput;
 export namespace ImageCreateInputSchema {
   /**
+   * Per-project Cargo target-cache strategy override.
+   * 
+   * The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
+   * consumers resolve the policy by reading the project shape (Cargo workspace
+   * layout, `.cargo/config.toml`, and configured setup command
+   * patterns) instead of hardcoding one universal compile set. That resolver is
+   * intentionally non-mutating. It may observe a project's `.cargo/config.toml`,
+   * including `rustc-wrapper = "sccache"` and feature-related settings, but it
+   * must never create or modify `.cargo/config.toml`.
+   */
+  export type CargoCachePolicy = ({
+  mode: "auto-detected"
+  [k: string]: any
+  } | {
+  mode: "explicit"
+  policy: CargoCachePolicyOverride
+  [k: string]: any
+  })
+  /**
    * A lifecycle / setup command.
    * 
    * Shape matches the `LifecycleCommand` enum in
@@ -2362,6 +2419,23 @@ export namespace ImageCreateInputSchema {
   agent_mcp_defaults?: {
   [k: string]: string[]
   }
+  /**
+   * Project-level override for Cargo target-cache warming/running policy.
+   * 
+   * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
+   * cache strategy from the repository it is about to run, including the
+   * Cargo workspace layout, `.cargo/config.toml` settings such as
+   * `rustc-wrapper`, and configured setup command shapes. That
+   * detection is deliberately read-only. djinn may read `.cargo/config.toml`
+   * to keep warm-job and worker behavior consistent with the project, but it
+   * never creates, edits, or rewrites the project's `.cargo/config.toml`.
+   * 
+   * Set an explicit policy only when project authors need to override the
+   * detected cargo feature set at the environment-config level. `None` is
+   * accepted for legacy rows and is treated the same as the
+   * default auto-detected policy by consumers.
+   */
+  cargo_cache_policy?: (CargoCachePolicy | null)
   env?: {
   [k: string]: string
   }
@@ -2395,6 +2469,48 @@ export namespace ImageCreateInputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Explicit Cargo target-cache policy used when auto-detection is overridden.
+   * 
+   * NOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were
+   * removed once the platform began forcing `CARGO_INCREMENTAL=1` +
+   * `RUSTC_WRAPPER=""` on every warm/verify/worker pod (PR #874). Stored rows
+   * may still carry those keys; serde ignores them on read.
+   */
+  export interface CargoCachePolicyOverride {
+  /**
+   * Whether warm and worker cargo commands should pass `--all-features`.
+   */
+  all_features?: boolean
+  /**
+   * Feature names to pass consistently to warm and worker cargo commands.
+   * Empty means default features only. Use `all_features` for
+   * `--all-features`; do not include `all-features` in this list.
+   */
+  features?: string[]
+  /**
+   * Warm-base cargo commands derived from or overridden for this project.
+   */
+  warm_commands?: CargoWarmCommand[]
+  /**
+   * Whether the Cargo root is a workspace rather than a single package.
+   */
+  workspace?: boolean
+  [k: string]: any
+  }
+  /**
+   * One Cargo command used to warm a project's target cache.
+   */
+  export interface CargoWarmCommand {
+  /**
+   * Cargo subcommand and arguments, excluding the leading `cargo` binary.
+   */
+  args: string[]
+  /**
+   * Human-readable label for logs and metrics.
+   */
+  label: string
   }
   export interface Languages {
   clang?: (ClangLanguage | null)
@@ -2456,6 +2572,12 @@ export namespace ImageCreateInputSchema {
    * Runs in the task-run Pod before the supervisor starts.
    */
   pre_task?: HookCommand[]
+  /**
+   * Workspace setup hook that runs once in the task-run Pod before the
+   * supervisor starts. Typically `pnpm install` / `cargo build` / similar
+   * — commands that prepare the workspace for the agent session.
+   */
+  pre_verification?: HookCommand[]
   [k: string]: any
   }
   export interface Workspace {
@@ -2509,6 +2631,25 @@ export namespace ImageListInputSchema {
 export type ImageListInput = ImageListInputSchema.ImageListInput;
 export namespace ImageListOutputSchema {
   /**
+   * Per-project Cargo target-cache strategy override.
+   * 
+   * The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
+   * consumers resolve the policy by reading the project shape (Cargo workspace
+   * layout, `.cargo/config.toml`, and configured setup command
+   * patterns) instead of hardcoding one universal compile set. That resolver is
+   * intentionally non-mutating. It may observe a project's `.cargo/config.toml`,
+   * including `rustc-wrapper = "sccache"` and feature-related settings, but it
+   * must never create or modify `.cargo/config.toml`.
+   */
+  export type CargoCachePolicy = ({
+  mode: "auto-detected"
+  [k: string]: any
+  } | {
+  mode: "explicit"
+  policy: CargoCachePolicyOverride
+  [k: string]: any
+  })
+  /**
    * A lifecycle / setup command.
    * 
    * Shape matches the `LifecycleCommand` enum in
@@ -2561,6 +2702,23 @@ export namespace ImageListOutputSchema {
   agent_mcp_defaults?: {
   [k: string]: string[]
   }
+  /**
+   * Project-level override for Cargo target-cache warming/running policy.
+   * 
+   * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
+   * cache strategy from the repository it is about to run, including the
+   * Cargo workspace layout, `.cargo/config.toml` settings such as
+   * `rustc-wrapper`, and configured setup command shapes. That
+   * detection is deliberately read-only. djinn may read `.cargo/config.toml`
+   * to keep warm-job and worker behavior consistent with the project, but it
+   * never creates, edits, or rewrites the project's `.cargo/config.toml`.
+   * 
+   * Set an explicit policy only when project authors need to override the
+   * detected cargo feature set at the environment-config level. `None` is
+   * accepted for legacy rows and is treated the same as the
+   * default auto-detected policy by consumers.
+   */
+  cargo_cache_policy?: (CargoCachePolicy | null)
   env?: {
   [k: string]: string
   }
@@ -2594,6 +2752,48 @@ export namespace ImageListOutputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Explicit Cargo target-cache policy used when auto-detection is overridden.
+   * 
+   * NOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were
+   * removed once the platform began forcing `CARGO_INCREMENTAL=1` +
+   * `RUSTC_WRAPPER=""` on every warm/verify/worker pod (PR #874). Stored rows
+   * may still carry those keys; serde ignores them on read.
+   */
+  export interface CargoCachePolicyOverride {
+  /**
+   * Whether warm and worker cargo commands should pass `--all-features`.
+   */
+  all_features?: boolean
+  /**
+   * Feature names to pass consistently to warm and worker cargo commands.
+   * Empty means default features only. Use `all_features` for
+   * `--all-features`; do not include `all-features` in this list.
+   */
+  features?: string[]
+  /**
+   * Warm-base cargo commands derived from or overridden for this project.
+   */
+  warm_commands?: CargoWarmCommand[]
+  /**
+   * Whether the Cargo root is a workspace rather than a single package.
+   */
+  workspace?: boolean
+  [k: string]: any
+  }
+  /**
+   * One Cargo command used to warm a project's target cache.
+   */
+  export interface CargoWarmCommand {
+  /**
+   * Cargo subcommand and arguments, excluding the leading `cargo` binary.
+   */
+  args: string[]
+  /**
+   * Human-readable label for logs and metrics.
+   */
+  label: string
   }
   export interface Languages {
   clang?: (ClangLanguage | null)
@@ -2655,6 +2855,12 @@ export namespace ImageListOutputSchema {
    * Runs in the task-run Pod before the supervisor starts.
    */
   pre_task?: HookCommand[]
+  /**
+   * Workspace setup hook that runs once in the task-run Pod before the
+   * supervisor starts. Typically `pnpm install` / `cargo build` / similar
+   * — commands that prepare the workspace for the agent session.
+   */
+  pre_verification?: HookCommand[]
   [k: string]: any
   }
   export interface Workspace {
@@ -2699,6 +2905,25 @@ export namespace ImageSetServicesOutputSchema {
 export type ImageSetServicesOutput = ImageSetServicesOutputSchema.ImageSetServicesOutput;
 export namespace ImageUpdateInputSchema {
   /**
+   * Per-project Cargo target-cache strategy override.
+   * 
+   * The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
+   * consumers resolve the policy by reading the project shape (Cargo workspace
+   * layout, `.cargo/config.toml`, and configured setup command
+   * patterns) instead of hardcoding one universal compile set. That resolver is
+   * intentionally non-mutating. It may observe a project's `.cargo/config.toml`,
+   * including `rustc-wrapper = "sccache"` and feature-related settings, but it
+   * must never create or modify `.cargo/config.toml`.
+   */
+  export type CargoCachePolicy = ({
+  mode: "auto-detected"
+  [k: string]: any
+  } | {
+  mode: "explicit"
+  policy: CargoCachePolicyOverride
+  [k: string]: any
+  })
+  /**
    * A lifecycle / setup command.
    * 
    * Shape matches the `LifecycleCommand` enum in
@@ -2736,6 +2961,23 @@ export namespace ImageUpdateInputSchema {
   agent_mcp_defaults?: {
   [k: string]: string[]
   }
+  /**
+   * Project-level override for Cargo target-cache warming/running policy.
+   * 
+   * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
+   * cache strategy from the repository it is about to run, including the
+   * Cargo workspace layout, `.cargo/config.toml` settings such as
+   * `rustc-wrapper`, and configured setup command shapes. That
+   * detection is deliberately read-only. djinn may read `.cargo/config.toml`
+   * to keep warm-job and worker behavior consistent with the project, but it
+   * never creates, edits, or rewrites the project's `.cargo/config.toml`.
+   * 
+   * Set an explicit policy only when project authors need to override the
+   * detected cargo feature set at the environment-config level. `None` is
+   * accepted for legacy rows and is treated the same as the
+   * default auto-detected policy by consumers.
+   */
+  cargo_cache_policy?: (CargoCachePolicy | null)
   env?: {
   [k: string]: string
   }
@@ -2769,6 +3011,48 @@ export namespace ImageUpdateInputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Explicit Cargo target-cache policy used when auto-detection is overridden.
+   * 
+   * NOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were
+   * removed once the platform began forcing `CARGO_INCREMENTAL=1` +
+   * `RUSTC_WRAPPER=""` on every warm/verify/worker pod (PR #874). Stored rows
+   * may still carry those keys; serde ignores them on read.
+   */
+  export interface CargoCachePolicyOverride {
+  /**
+   * Whether warm and worker cargo commands should pass `--all-features`.
+   */
+  all_features?: boolean
+  /**
+   * Feature names to pass consistently to warm and worker cargo commands.
+   * Empty means default features only. Use `all_features` for
+   * `--all-features`; do not include `all-features` in this list.
+   */
+  features?: string[]
+  /**
+   * Warm-base cargo commands derived from or overridden for this project.
+   */
+  warm_commands?: CargoWarmCommand[]
+  /**
+   * Whether the Cargo root is a workspace rather than a single package.
+   */
+  workspace?: boolean
+  [k: string]: any
+  }
+  /**
+   * One Cargo command used to warm a project's target cache.
+   */
+  export interface CargoWarmCommand {
+  /**
+   * Cargo subcommand and arguments, excluding the leading `cargo` binary.
+   */
+  args: string[]
+  /**
+   * Human-readable label for logs and metrics.
+   */
+  label: string
   }
   export interface Languages {
   clang?: (ClangLanguage | null)
@@ -2830,6 +3114,12 @@ export namespace ImageUpdateInputSchema {
    * Runs in the task-run Pod before the supervisor starts.
    */
   pre_task?: HookCommand[]
+  /**
+   * Workspace setup hook that runs once in the task-run Pod before the
+   * supervisor starts. Typically `pnpm install` / `cargo build` / similar
+   * — commands that prepare the workspace for the agent session.
+   */
+  pre_verification?: HookCommand[]
   [k: string]: any
   }
   export interface Workspace {
@@ -2859,7 +3149,10 @@ export type ImageUpdateOutput = ImageUpdateOutputSchema.ImageUpdateOutput;
 export namespace MemoryAssociationsInputSchema {
   export interface MemoryAssociationsInput {
   /**
-   * Note ID or permalink (e.g. "decisions/my-adr").
+   * Note ID or permalink (e.g. "decisions/my-adr"). Also accepts a
+   * proposal ID or short_id (e.g. "abc1"); the tool resolves the
+   * identifier to the correct entity type (note or proposal)
+   * automatically.
    */
   identifier: string
   /**
@@ -2880,16 +3173,43 @@ export namespace MemoryAssociationsOutputSchema {
   export interface MemoryAssociationsOutput {
   associations: MemoryAssociationEntry[]
   error?: string
+  /**
+   * The entity type that the seed `identifier` resolved to: "note" or
+   * "proposal". Useful for callers that pass an opaque identifier and
+   * need to know whether the seed was a note or a proposal.
+   */
+  seed_entity_type?: string
   [k: string]: any
   }
   export interface MemoryAssociationEntry {
   co_access_count: number
   /**
-   * Association edge kind as stored on `note_associations.kind` (e.g. `"co_access"`).
-   * Today the only value written is `"co_access"`; future wave-1 graph-typed edges
-   * (builds_on / contradicts / supersedes / exemplifies) will widen the value set
-   * — see Epic 2chl. `#[serde(default)]` keeps older clients deserialising cleanly
-   * until they adopt the new field.
+   * Stable identifier of the associated entity (note id or proposal id).
+   * Defaults to empty string for responses populated through legacy
+   * note-only fields.
+   */
+  entity_id?: string
+  /**
+   * Permalink/short_id of the associated entity (note permalink or
+   * proposal short_id). Defaults to empty string for responses populated
+   * through legacy note-only fields.
+   */
+  entity_permalink?: string
+  /**
+   * Human-readable title of the associated entity.
+   */
+  entity_title?: string
+  /**
+   * Entity type of the associated target: "note" or "proposal".
+   * Defaults to "note" for backward compatibility with older responses
+   * that only ever returned note associations.
+   */
+  entity_type?: string
+  /**
+   * Association edge kind as stored on `note_associations.kind`
+   * (e.g. `"co_access"`) or `memory_entity_associations.kind` (e.g.
+   * `"builds_on"`, `"derived_from"`). `#[serde(default)]` keeps older
+   * clients deserialising cleanly until they adopt the new field.
    */
   kind?: string
   last_co_access: string
@@ -2944,7 +3264,7 @@ export namespace MemoryBuildContextInputSchema {
    * When provided, only edges whose `kind` matches one of these values
    * participate in spreading activation. Omit to use all edge kinds.
    */
-  edge_kinds?: string[] | null
+  edge_kinds?: string[]
   /**
    * Maximum related notes to return (default 10).
    */
@@ -2979,17 +3299,25 @@ export namespace MemoryBuildContextOutputSchema {
   error?: string
   primary: MemoryNoteView[]
   /**
-   * Proposals reachable from the seed note: same project via `proposal_targets`,
-   * OR whose graduated epics/tasks have memory_refs that touch the seed's task chain,
-   * ranked by lexical relevance to the seed's title + body.
+   * Proposals relevant to the seed note, surfaced as related entities with
+   * progressive disclosure (title + acceptance criteria as the overview;
+   * call `proposal_show` for the full body).
    */
-  proposals?: ProposalOverview[]
+  proposals?: MemoryProposalOverview[]
   related_l0: NoteAbstract[]
   related_l1: NoteOverview[]
   /**
    * Notes in the context set that are superseded by another note in the set.
    */
   supersedes?: SupersedesAnnotation[]
+  [k: string]: any
+  }
+  /**
+   * Annotation that a candidate note is contradicted by another note.
+   */
+  export interface ContradictsAnnotation {
+  edge_kind: string
+  note_id: string
   [k: string]: any
   }
   export interface MemoryNoteView {
@@ -3003,9 +3331,28 @@ export namespace MemoryBuildContextOutputSchema {
   permalink: string
   project_id: string
   retrieval_anchor?: string
+  status: string
   tags: string[]
   title: string
   updated_at: string
+  [k: string]: any
+  }
+  /**
+   * Compact proposal overview for `memory_build_context` responses.
+   * 
+   * **Progressive disclosure:** this overview ships `title` +
+   * `acceptance_criteria` so the planner can decide whether to fetch the
+   * full body via `proposal_show`. The full proposal body is intentionally
+   * excluded to keep prompt context lean.
+   */
+  export interface MemoryProposalOverview {
+  acceptance_criteria: string[]
+  body_format: string
+  id: string
+  score?: number
+  short_id: string
+  status: string
+  title: string
   [k: string]: any
   }
   /**
@@ -3045,39 +3392,14 @@ export namespace MemoryBuildContextOutputSchema {
   [k: string]: any
   }
   /**
-   * Compact proposal overview for `memory_build_context` responses.
-   *
-   * Progressive disclosure: this overview ships `title` + `acceptance_criteria`
-   * so the planner can decide whether to fetch the full body via `proposal_show`.
-   */
-  export interface ProposalOverview {
-  acceptance_criteria: string[]
-  body_format: string
-  id: string
-  score?: number
-  short_id: string
-  status: string
-  title: string
-  [k: string]: any
-  }
-  /**
    * Annotation that a candidate note is superseded by another note.
    */
   export interface SupersedesAnnotation {
-  candidate_permalink: string
-  candidate_title: string
-  superseder_permalink: string
-  superseder_title: string
-  [k: string]: any
-  }
+  edge_kind: string
   /**
-   * Annotation that two notes in the context set contradict each other.
+   * The note ID of the newer note that supersedes the candidate.
    */
-  export interface ContradictsAnnotation {
-  a_permalink: string
-  a_title: string
-  b_permalink: string
-  b_title: string
+  superseded_by: string
   [k: string]: any
   }
 
@@ -3216,10 +3538,44 @@ export namespace MemoryEditOutputSchema {
   note_type?: string
   permalink?: string
   project_id?: string
+  /**
+   * Proposals reachable through this note's tasks/epics (via proposal_epics).
+   */
+  proposals?: MemoryProposalRefItem[]
+  /**
+   * Short_id mentions found in note body, resolved to entities.
+   */
+  resolved_mentions?: ResolvedMention[]
   retrieval_anchor?: string
+  status?: string
   tags?: string[]
+  /**
+   * Tasks whose memory_refs contain this note's permalink.
+   */
+  tasks?: MemoryTaskRefItem[]
   title?: string
   updated_at?: string
+  [k: string]: any
+  }
+  export interface MemoryProposalRefItem {
+  id: string
+  short_id: string
+  status: string
+  title: string
+  [k: string]: any
+  }
+  export interface ResolvedMention {
+  entity_type: string
+  permalink: string
+  short_id: string
+  title: string
+  [k: string]: any
+  }
+  export interface MemoryTaskRefItem {
+  id: string
+  short_id: string
+  status: string
+  title: string
   [k: string]: any
   }
 
@@ -3279,17 +3635,11 @@ export namespace MemoryGraphOutputSchema {
   edges: GraphEdge[]
   error?: string
   nodes: GraphNode[]
-  typed_edges?: TypedEdge[]
-  [k: string]: any
-  }
   /**
-   * A typed association edge between two notes.
+   * Typed semantic edges (builds_on, contradicts, supersedes, exemplifies,
+   * derived_from) from `note_associations` where `kind <> 'co_access'`.
    */
-  export interface TypedEdge {
-  source_id: string
-  target_id: string
-  kind: string
-  weight: number
+  typed_edges?: TypedEdge[]
   [k: string]: any
   }
   /**
@@ -3310,12 +3660,46 @@ export namespace MemoryGraphOutputSchema {
    * Total resolved edges incident to this node (inbound + outbound).
    */
   connection_count: number
+  /**
+   * Entity type discriminator: `"note"` for note rows, `"proposal"` for
+   * proposal rows. Defaults to `"note"` so existing serialized responses
+   * remain backward-compatible.
+   */
+  entity_type?: string
   folder: string
   id: string
   is_orphan?: boolean
   note_type: string
   permalink: string
   title: string
+  [k: string]: any
+  }
+  /**
+   * A typed semantic edge between two notes (builds_on, contradicts, supersedes,
+   * exemplifies, derived_from). These are stored on `note_associations` with a
+   * `kind` value other than `co_access` and surfaced through the
+   * `memory_graph` tool as a separate layer from wikilink `GraphEdge`s so the
+   * UI can toggle/style them independently.
+   * 
+   * Note: the F5 `note_associations` substrate is undirected (canonical-pair
+   * ordering: `note_a_id < note_b_id`). Outbound direction for directional
+   * kinds (e.g. `supersedes`) is reconstructed at scoring/context time.
+   */
+  export interface TypedEdge {
+  kind: string
+  /**
+   * Entity type of the source endpoint. Defaults to `"note"` for backward
+   * compatibility with existing serialized responses.
+   */
+  source_entity_type?: string
+  source_id: string
+  /**
+   * Entity type of the target endpoint. Defaults to `"note"` for backward
+   * compatibility with existing serialized responses.
+   */
+  target_entity_type?: string
+  target_id: string
+  weight: number
   [k: string]: any
   }
 
@@ -3336,11 +3720,33 @@ export namespace MemoryHealthOutputSchema {
   export interface MemoryHealthOutput {
   broken_link_count?: number
   error?: string
+  lifecycle?: (LifecycleHealth | null)
   low_confidence_note_count?: number
   orphan_note_count?: number
+  recent_sweep?: (RecentSweepMetrics | null)
   stale_note_count?: number
   stale_notes_by_folder?: StaleFolder[]
   total_notes?: number
+  [k: string]: any
+  }
+  /**
+   * Lifecycle-status counts for a project's notes.
+   */
+  export interface LifecycleHealth {
+  active_notes: number
+  archived_notes: number
+  deprecated_notes: number
+  [k: string]: any
+  }
+  /**
+   * Most recent housekeeping/operator lifecycle sweep counters surfaced through
+   * `memory_health`.
+   */
+  export interface RecentSweepMetrics {
+  last_archived_count: number
+  last_decayed_count: number
+  last_superseded_source_count: number
+  last_sweep_at?: string
   [k: string]: any
   }
   /**
@@ -3395,6 +3801,11 @@ export namespace MemoryListInputSchema {
   folder?: string
   project: string
   /**
+   * Explicit lifecycle status filter. Defaults to active; use archived or
+   * deprecated to list non-live notes.
+   */
+  status?: string
+  /**
    * Filter by note type (e.g. "adr", "reference", "research").
    */
   type?: string
@@ -3418,6 +3829,7 @@ export namespace MemoryListOutputSchema {
   note_type: string
   permalink: string
   scope_paths: string
+  status: string
   title: string
   updated_at: string
   [k: string]: any
@@ -3456,10 +3868,44 @@ export namespace MemoryMoveOutputSchema {
   note_type?: string
   permalink?: string
   project_id?: string
+  /**
+   * Proposals reachable through this note's tasks/epics (via proposal_epics).
+   */
+  proposals?: MemoryProposalRefItem[]
+  /**
+   * Short_id mentions found in note body, resolved to entities.
+   */
+  resolved_mentions?: ResolvedMention[]
   retrieval_anchor?: string
+  status?: string
   tags?: string[]
+  /**
+   * Tasks whose memory_refs contain this note's permalink.
+   */
+  tasks?: MemoryTaskRefItem[]
   title?: string
   updated_at?: string
+  [k: string]: any
+  }
+  export interface MemoryProposalRefItem {
+  id: string
+  short_id: string
+  status: string
+  title: string
+  [k: string]: any
+  }
+  export interface ResolvedMention {
+  entity_type: string
+  permalink: string
+  short_id: string
+  title: string
+  [k: string]: any
+  }
+  export interface MemoryTaskRefItem {
+  id: string
+  short_id: string
+  status: string
+  title: string
   [k: string]: any
   }
 
@@ -3519,10 +3965,44 @@ export namespace MemoryReadOutputSchema {
   note_type?: string
   permalink?: string
   project_id?: string
+  /**
+   * Proposals reachable through this note's tasks/epics (via proposal_epics).
+   */
+  proposals?: MemoryProposalRefItem[]
+  /**
+   * Short_id mentions found in note body, resolved to entities.
+   */
+  resolved_mentions?: ResolvedMention[]
   retrieval_anchor?: string
+  status?: string
   tags?: string[]
+  /**
+   * Tasks whose memory_refs contain this note's permalink.
+   */
+  tasks?: MemoryTaskRefItem[]
   title?: string
   updated_at?: string
+  [k: string]: any
+  }
+  export interface MemoryProposalRefItem {
+  id: string
+  short_id: string
+  status: string
+  title: string
+  [k: string]: any
+  }
+  export interface ResolvedMention {
+  entity_type: string
+  permalink: string
+  short_id: string
+  title: string
+  [k: string]: any
+  }
+  export interface MemoryTaskRefItem {
+  id: string
+  short_id: string
+  status: string
+  title: string
   [k: string]: any
   }
 
@@ -3556,6 +4036,7 @@ export namespace MemoryRecentOutputSchema {
   note_type: string
   permalink: string
   scope_paths: string
+  status: string
   title: string
   updated_at: string
   [k: string]: any
@@ -3632,6 +4113,125 @@ export namespace MemoryRepairEmbeddingsOutputSchema {
 
 }
 export type MemoryRepairEmbeddingsOutput = MemoryRepairEmbeddingsOutputSchema.MemoryRepairEmbeddingsOutput;
+export namespace MemoryRunEnrichmentInputSchema {
+  export interface MemoryRunEnrichmentInput {
+  /**
+   * When true, schedule enrichment on a background tokio task and return
+   * immediately with `status="queued"`. When false (the default), run the
+   * pass synchronously and embed the structured report in the response.
+   * 
+   * Background execution mirrors the diei roadmap's "best-effort, never
+   * blocks retrieval" constraint: the spawn path yields to the runtime so
+   * `memory_graph` (and the wider MCP surface) keep serving while the
+   * pass runs.
+   */
+  background?: boolean
+  /**
+   * Project path, slug, or id (same forms accepted by other memory tools).
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type MemoryRunEnrichmentInput = MemoryRunEnrichmentInputSchema.MemoryRunEnrichmentInput;
+export namespace MemoryRunEnrichmentOutputSchema {
+  /**
+   * MCP response for `memory_run_enrichment`. The `report` is present when
+   * `status="completed"` (foreground execution). For
+   * `status="queued"` (background execution) the report is `None`; the pass
+   * emits the structured report through its own `INFO` log line at finish.
+   */
+  export interface MemoryRunEnrichmentOutput {
+  /**
+   * Top-level failure: project not found, enrichment subsystem not
+   * configured, provider errors that propagate before the pass begins.
+   * Per-batch provider failures land in `report.warnings` rather than
+   * here — the pass is best-effort and never blocks retrieval.
+   */
+  error?: string
+  /**
+   * Resolved DB project id (slug → id translation is performed by the
+   * tool's project resolver, same as every other memory tool).
+   */
+  project_id?: string
+  /**
+   * Structured enrichment report. Present only when
+   * `status="completed"`. None when queued, and None when the trigger
+   * fails (in which case `error` is populated).
+   */
+  report?: (EnrichmentReport | null)
+  /**
+   * Status of the trigger call — see [`crate::bridge::EnrichmentStatus`].
+   */
+  status: string
+  [k: string]: any
+  }
+  /**
+   * Structured report returned by the enrichment pass.
+   * 
+   * Mirrors `djinn_agent::actors::slot::memory_enrichment::EnrichmentReport`
+   * one-for-one. The server-side bridge converts between the two at the
+   * implementation boundary so the MCP wire shape stays stable.
+   */
+  export interface EnrichmentReport {
+  batches_sent: number
+  claims?: EnrichmentClaim[]
+  edges?: EnrichmentEdge[]
+  edges_dropped_wikilink_dup: number
+  entities?: EnrichmentEntity[]
+  entity_merges: number
+  /**
+   * Number of source notes processed. Uses `i64` on the MCP wire to avoid
+   * nonstandard unsigned integer schema formats.
+   */
+  notes_processed: number
+  project_id: string
+  /**
+   * Non-fatal warnings — provider errors, parse failures, etc. The pass
+   * always succeeds; warnings are surfaced in the response, never
+   * propagated as blocking failures.
+   */
+  warnings?: string[]
+  [k: string]: any
+  }
+  /**
+   * Claim node extracted by the enrichment pass — a decision or assertion the
+   * memory records.
+   */
+  export interface EnrichmentClaim {
+  evidence_quote?: string
+  source_note_id: string
+  statement: string
+  [k: string]: any
+  }
+  /**
+   * Typed implicit edge between two notes (`builds_on` / `contradicts` /
+   * `supersedes` / `exemplifies` / `derived_from`).
+   */
+  export interface EnrichmentEdge {
+  /**
+   * Confidence in [0.0, 1.0].
+   */
+  confidence: number
+  evidence_quote?: string
+  kind: string
+  source_note_id: string
+  target_note_id: string
+  [k: string]: any
+  }
+  /**
+   * Entity node extracted by the enrichment pass — recurring system or concept
+   * ("dispatch gate", "circuit breaker", "slot actor").
+   */
+  export interface EnrichmentEntity {
+  aliases?: string[]
+  canonical_name: string
+  [k: string]: any
+  }
+
+}
+export type MemoryRunEnrichmentOutput = MemoryRunEnrichmentOutputSchema.MemoryRunEnrichmentOutput;
 export namespace MemorySearchInputSchema {
   export interface MemorySearchInput {
   /**
@@ -3639,16 +4239,13 @@ export namespace MemorySearchInputSchema {
    * When provided, only edges whose `kind` matches one of these values
    * participate in spreading activation. Omit to use all edge kinds.
    */
-  edge_kinds?: string[] | null
+  edge_kinds?: string[]
   /**
-   * Optional entity-type filter for unified search.
-   *
-   * * Omit or `None` — return both notes and proposals (default).
-   * * `["note"]` — notes-only.
-   * * `["proposal"]` — proposals-only.
-   * * `[]` (empty) — treated as "no entities"; returns empty result.
+   * Optional list of entity types to include: "note", "proposal".
+   * Omit (or pass null) to include both. Pass ["note"] for notes-only,
+   * ["proposal"] for proposals-only. Pass [] to return no results.
    */
-  entity_types?: string[] | null
+  entity_types?: string[]
   folder?: string
   limit?: number
   project: string
@@ -3665,6 +4262,15 @@ export namespace MemorySearchOutputSchema {
   results: MemorySearchResultItem[]
   [k: string]: any
   }
+  /**
+   * A single unified search result row.
+   * 
+   * Entity taxonomy: the `entity` field discriminates the row type.
+   * Current values are `"note"` (memory notes) and `"proposal"` (planning
+   * proposals). Future waves may add `"task"` or `"epic"`. Use the
+   * `entity_types` field on the `SearchParams` request to scope the result
+   * set to a subset of entity types.
+   */
   export interface MemorySearchResultItem {
   /**
    * `"note"` | `"proposal"` — discriminates unified search results.
@@ -3697,7 +4303,15 @@ export type MemoryTaskRefsInput = MemoryTaskRefsInputSchema.MemoryTaskRefsInput;
 export namespace MemoryTaskRefsOutputSchema {
   export interface MemoryTaskRefsOutput {
   error?: string
+  proposals?: MemoryProposalRefItem[]
   tasks: MemoryTaskRefItem[]
+  [k: string]: any
+  }
+  export interface MemoryProposalRefItem {
+  id: string
+  short_id: string
+  status: string
+  title: string
   [k: string]: any
   }
   export interface MemoryTaskRefItem {
@@ -3757,10 +4371,44 @@ export namespace MemoryWriteOutputSchema {
   note_type?: string
   permalink?: string
   project_id?: string
+  /**
+   * Proposals reachable through this note's tasks/epics (via proposal_epics).
+   */
+  proposals?: MemoryProposalRefItem[]
+  /**
+   * Short_id mentions found in note body, resolved to entities.
+   */
+  resolved_mentions?: ResolvedMention[]
   retrieval_anchor?: string
+  status?: string
   tags?: string[]
+  /**
+   * Tasks whose memory_refs contain this note's permalink.
+   */
+  tasks?: MemoryTaskRefItem[]
   title?: string
   updated_at?: string
+  [k: string]: any
+  }
+  export interface MemoryProposalRefItem {
+  id: string
+  short_id: string
+  status: string
+  title: string
+  [k: string]: any
+  }
+  export interface ResolvedMention {
+  entity_type: string
+  permalink: string
+  short_id: string
+  title: string
+  [k: string]: any
+  }
+  export interface MemoryTaskRefItem {
+  id: string
+  short_id: string
+  status: string
+  title: string
   [k: string]: any
   }
 
@@ -3858,6 +4506,11 @@ export namespace PrReviewContextInputSchema {
    * flagged as violations.
    */
   export interface BoundaryRule {
+  /**
+   * Optional human-readable explanation of why this rule exists,
+   * surfaced in CI output so violations are self-documenting.
+   */
+  description?: string
   from_glob: string
   to_glob: string
   [k: string]: any
@@ -4057,6 +4710,25 @@ export namespace ProjectEnvironmentConfigGetInputSchema {
 export type ProjectEnvironmentConfigGetInput = ProjectEnvironmentConfigGetInputSchema.ProjectEnvironmentConfigGetInput;
 export namespace ProjectEnvironmentConfigGetOutputSchema {
   /**
+   * Per-project Cargo target-cache strategy override.
+   * 
+   * The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
+   * consumers resolve the policy by reading the project shape (Cargo workspace
+   * layout, `.cargo/config.toml`, and configured setup command
+   * patterns) instead of hardcoding one universal compile set. That resolver is
+   * intentionally non-mutating. It may observe a project's `.cargo/config.toml`,
+   * including `rustc-wrapper = "sccache"` and feature-related settings, but it
+   * must never create or modify `.cargo/config.toml`.
+   */
+  export type CargoCachePolicy = ({
+  mode: "auto-detected"
+  [k: string]: any
+  } | {
+  mode: "explicit"
+  policy: CargoCachePolicyOverride
+  [k: string]: any
+  })
+  /**
    * A lifecycle / setup command.
    * 
    * Shape matches the `LifecycleCommand` enum in
@@ -4099,6 +4771,23 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   agent_mcp_defaults?: {
   [k: string]: string[]
   }
+  /**
+   * Project-level override for Cargo target-cache warming/running policy.
+   * 
+   * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
+   * cache strategy from the repository it is about to run, including the
+   * Cargo workspace layout, `.cargo/config.toml` settings such as
+   * `rustc-wrapper`, and configured setup command shapes. That
+   * detection is deliberately read-only. djinn may read `.cargo/config.toml`
+   * to keep warm-job and worker behavior consistent with the project, but it
+   * never creates, edits, or rewrites the project's `.cargo/config.toml`.
+   * 
+   * Set an explicit policy only when project authors need to override the
+   * detected cargo feature set at the environment-config level. `None` is
+   * accepted for legacy rows and is treated the same as the
+   * default auto-detected policy by consumers.
+   */
+  cargo_cache_policy?: (CargoCachePolicy | null)
   env?: {
   [k: string]: string
   }
@@ -4132,6 +4821,48 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Explicit Cargo target-cache policy used when auto-detection is overridden.
+   * 
+   * NOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were
+   * removed once the platform began forcing `CARGO_INCREMENTAL=1` +
+   * `RUSTC_WRAPPER=""` on every warm/verify/worker pod (PR #874). Stored rows
+   * may still carry those keys; serde ignores them on read.
+   */
+  export interface CargoCachePolicyOverride {
+  /**
+   * Whether warm and worker cargo commands should pass `--all-features`.
+   */
+  all_features?: boolean
+  /**
+   * Feature names to pass consistently to warm and worker cargo commands.
+   * Empty means default features only. Use `all_features` for
+   * `--all-features`; do not include `all-features` in this list.
+   */
+  features?: string[]
+  /**
+   * Warm-base cargo commands derived from or overridden for this project.
+   */
+  warm_commands?: CargoWarmCommand[]
+  /**
+   * Whether the Cargo root is a workspace rather than a single package.
+   */
+  workspace?: boolean
+  [k: string]: any
+  }
+  /**
+   * One Cargo command used to warm a project's target cache.
+   */
+  export interface CargoWarmCommand {
+  /**
+   * Cargo subcommand and arguments, excluding the leading `cargo` binary.
+   */
+  args: string[]
+  /**
+   * Human-readable label for logs and metrics.
+   */
+  label: string
   }
   export interface Languages {
   clang?: (ClangLanguage | null)
@@ -4193,6 +4924,12 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
    * Runs in the task-run Pod before the supervisor starts.
    */
   pre_task?: HookCommand[]
+  /**
+   * Workspace setup hook that runs once in the task-run Pod before the
+   * supervisor starts. Typically `pnpm install` / `cargo build` / similar
+   * — commands that prepare the workspace for the agent session.
+   */
+  pre_verification?: HookCommand[]
   [k: string]: any
   }
   export interface Workspace {
@@ -4221,6 +4958,25 @@ export namespace ProjectEnvironmentConfigResetInputSchema {
 }
 export type ProjectEnvironmentConfigResetInput = ProjectEnvironmentConfigResetInputSchema.ProjectEnvironmentConfigResetInput;
 export namespace ProjectEnvironmentConfigResetOutputSchema {
+  /**
+   * Per-project Cargo target-cache strategy override.
+   * 
+   * The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
+   * consumers resolve the policy by reading the project shape (Cargo workspace
+   * layout, `.cargo/config.toml`, and configured setup command
+   * patterns) instead of hardcoding one universal compile set. That resolver is
+   * intentionally non-mutating. It may observe a project's `.cargo/config.toml`,
+   * including `rustc-wrapper = "sccache"` and feature-related settings, but it
+   * must never create or modify `.cargo/config.toml`.
+   */
+  export type CargoCachePolicy = ({
+  mode: "auto-detected"
+  [k: string]: any
+  } | {
+  mode: "explicit"
+  policy: CargoCachePolicyOverride
+  [k: string]: any
+  })
   /**
    * A lifecycle / setup command.
    * 
@@ -4258,6 +5014,23 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   agent_mcp_defaults?: {
   [k: string]: string[]
   }
+  /**
+   * Project-level override for Cargo target-cache warming/running policy.
+   * 
+   * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
+   * cache strategy from the repository it is about to run, including the
+   * Cargo workspace layout, `.cargo/config.toml` settings such as
+   * `rustc-wrapper`, and configured setup command shapes. That
+   * detection is deliberately read-only. djinn may read `.cargo/config.toml`
+   * to keep warm-job and worker behavior consistent with the project, but it
+   * never creates, edits, or rewrites the project's `.cargo/config.toml`.
+   * 
+   * Set an explicit policy only when project authors need to override the
+   * detected cargo feature set at the environment-config level. `None` is
+   * accepted for legacy rows and is treated the same as the
+   * default auto-detected policy by consumers.
+   */
+  cargo_cache_policy?: (CargoCachePolicy | null)
   env?: {
   [k: string]: string
   }
@@ -4291,6 +5064,48 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Explicit Cargo target-cache policy used when auto-detection is overridden.
+   * 
+   * NOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were
+   * removed once the platform began forcing `CARGO_INCREMENTAL=1` +
+   * `RUSTC_WRAPPER=""` on every warm/verify/worker pod (PR #874). Stored rows
+   * may still carry those keys; serde ignores them on read.
+   */
+  export interface CargoCachePolicyOverride {
+  /**
+   * Whether warm and worker cargo commands should pass `--all-features`.
+   */
+  all_features?: boolean
+  /**
+   * Feature names to pass consistently to warm and worker cargo commands.
+   * Empty means default features only. Use `all_features` for
+   * `--all-features`; do not include `all-features` in this list.
+   */
+  features?: string[]
+  /**
+   * Warm-base cargo commands derived from or overridden for this project.
+   */
+  warm_commands?: CargoWarmCommand[]
+  /**
+   * Whether the Cargo root is a workspace rather than a single package.
+   */
+  workspace?: boolean
+  [k: string]: any
+  }
+  /**
+   * One Cargo command used to warm a project's target cache.
+   */
+  export interface CargoWarmCommand {
+  /**
+   * Cargo subcommand and arguments, excluding the leading `cargo` binary.
+   */
+  args: string[]
+  /**
+   * Human-readable label for logs and metrics.
+   */
+  label: string
   }
   export interface Languages {
   clang?: (ClangLanguage | null)
@@ -4352,6 +5167,12 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
    * Runs in the task-run Pod before the supervisor starts.
    */
   pre_task?: HookCommand[]
+  /**
+   * Workspace setup hook that runs once in the task-run Pod before the
+   * supervisor starts. Typically `pnpm install` / `cargo build` / similar
+   * — commands that prepare the workspace for the agent session.
+   */
+  pre_verification?: HookCommand[]
   [k: string]: any
   }
   export interface Workspace {
@@ -4369,6 +5190,25 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
 }
 export type ProjectEnvironmentConfigResetOutput = ProjectEnvironmentConfigResetOutputSchema.ProjectEnvironmentConfigResetOutput;
 export namespace ProjectEnvironmentConfigSetInputSchema {
+  /**
+   * Per-project Cargo target-cache strategy override.
+   * 
+   * The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
+   * consumers resolve the policy by reading the project shape (Cargo workspace
+   * layout, `.cargo/config.toml`, and configured setup command
+   * patterns) instead of hardcoding one universal compile set. That resolver is
+   * intentionally non-mutating. It may observe a project's `.cargo/config.toml`,
+   * including `rustc-wrapper = "sccache"` and feature-related settings, but it
+   * must never create or modify `.cargo/config.toml`.
+   */
+  export type CargoCachePolicy = ({
+  mode: "auto-detected"
+  [k: string]: any
+  } | {
+  mode: "explicit"
+  policy: CargoCachePolicyOverride
+  [k: string]: any
+  })
   /**
    * A lifecycle / setup command.
    * 
@@ -4410,6 +5250,23 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   agent_mcp_defaults?: {
   [k: string]: string[]
   }
+  /**
+   * Project-level override for Cargo target-cache warming/running policy.
+   * 
+   * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
+   * cache strategy from the repository it is about to run, including the
+   * Cargo workspace layout, `.cargo/config.toml` settings such as
+   * `rustc-wrapper`, and configured setup command shapes. That
+   * detection is deliberately read-only. djinn may read `.cargo/config.toml`
+   * to keep warm-job and worker behavior consistent with the project, but it
+   * never creates, edits, or rewrites the project's `.cargo/config.toml`.
+   * 
+   * Set an explicit policy only when project authors need to override the
+   * detected cargo feature set at the environment-config level. `None` is
+   * accepted for legacy rows and is treated the same as the
+   * default auto-detected policy by consumers.
+   */
+  cargo_cache_policy?: (CargoCachePolicy | null)
   env?: {
   [k: string]: string
   }
@@ -4443,6 +5300,48 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Explicit Cargo target-cache policy used when auto-detection is overridden.
+   * 
+   * NOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were
+   * removed once the platform began forcing `CARGO_INCREMENTAL=1` +
+   * `RUSTC_WRAPPER=""` on every warm/verify/worker pod (PR #874). Stored rows
+   * may still carry those keys; serde ignores them on read.
+   */
+  export interface CargoCachePolicyOverride {
+  /**
+   * Whether warm and worker cargo commands should pass `--all-features`.
+   */
+  all_features?: boolean
+  /**
+   * Feature names to pass consistently to warm and worker cargo commands.
+   * Empty means default features only. Use `all_features` for
+   * `--all-features`; do not include `all-features` in this list.
+   */
+  features?: string[]
+  /**
+   * Warm-base cargo commands derived from or overridden for this project.
+   */
+  warm_commands?: CargoWarmCommand[]
+  /**
+   * Whether the Cargo root is a workspace rather than a single package.
+   */
+  workspace?: boolean
+  [k: string]: any
+  }
+  /**
+   * One Cargo command used to warm a project's target cache.
+   */
+  export interface CargoWarmCommand {
+  /**
+   * Cargo subcommand and arguments, excluding the leading `cargo` binary.
+   */
+  args: string[]
+  /**
+   * Human-readable label for logs and metrics.
+   */
+  label: string
   }
   export interface Languages {
   clang?: (ClangLanguage | null)
@@ -4504,6 +5403,12 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
    * Runs in the task-run Pod before the supervisor starts.
    */
   pre_task?: HookCommand[]
+  /**
+   * Workspace setup hook that runs once in the task-run Pod before the
+   * supervisor starts. Typically `pnpm install` / `cargo build` / similar
+   * — commands that prepare the workspace for the agent session.
+   */
+  pre_verification?: HookCommand[]
   [k: string]: any
   }
   export interface Workspace {
@@ -4722,6 +5627,52 @@ export namespace ProposalAddTargetOutputSchema {
 
 }
 export type ProposalAddTargetOutput = ProposalAddTargetOutputSchema.ProposalAddTargetOutput;
+export namespace ProposalBlocksInputSchema {
+  export interface ProposalBlocksInput {
+  [k: string]: any
+  }
+
+}
+export type ProposalBlocksInput = ProposalBlocksInputSchema.ProposalBlocksInput;
+export namespace ProposalBlocksOutputSchema {
+  export interface ProposalBlocksOutput {
+  blocks: {
+  [k: string]: ProposalBlockDefinition
+  }
+  [k: string]: any
+  }
+  export interface ProposalBlockDefinition {
+  /**
+   * Field schema keyed by field name.
+   */
+  fields: {
+  [k: string]: ProposalBlockFieldSchema
+  }
+  /**
+   * MDX component tag, e.g. `AnnotatedCode`.
+   */
+  tag: string
+  /**
+   * Stable proposal block type identifier, e.g. `annotated-code`.
+   */
+  type: string
+  [k: string]: any
+  }
+  export interface ProposalBlockFieldSchema {
+  enum_values?: string[]
+  fields?: {
+  [k: string]: ProposalBlockFieldSchema
+  }
+  items?: (ProposalBlockFieldSchema | null)
+  /**
+   * Primitive schema kind: `string`, `boolean`, `object`, or `array`.
+   */
+  type: string
+  [k: string]: any
+  }
+
+}
+export type ProposalBlocksOutput = ProposalBlocksOutputSchema.ProposalBlocksOutput;
 export namespace ProposalCreateInputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
 
@@ -4731,9 +5682,13 @@ export namespace ProposalCreateInputSchema {
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
   /**
-   * Markdown spec body.
+   * Spec body (markdown or MDX depending on `body_format`).
    */
   body?: string
+  /**
+   * Body encoding: `markdown` (default) or `mdx` (block-aware).
+   */
+  body_format?: string
   /**
    * Initial status: `triage`, `draft` (default), or `in_review`. Proposer-
    * role authors are always placed in `triage` regardless of this value.
@@ -4767,6 +5722,10 @@ export namespace ProposalCreateOutputSchema {
   author_user_id?: string
   body?: string
   /**
+   * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format?: string
+  /**
    * Build owner once graduated.
    */
   build_owner_user_id?: string
@@ -4782,6 +5741,10 @@ export namespace ProposalCreateOutputSchema {
    * Head revision number (sign-offs anchored earlier are stale).
    */
   latest_revision_seq?: number
+  /**
+   * Portable proposal.mdx representation (populated by `proposal_export`).
+   */
+  mdx?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -4830,6 +5793,80 @@ export namespace ProposalDeleteOutputSchema {
 
 }
 export type ProposalDeleteOutput = ProposalDeleteOutputSchema.ProposalDeleteOutput;
+export namespace ProposalExportInputSchema {
+  export interface ProposalExportInput {
+  /**
+   * Proposal UUID or short_id.
+   */
+  id: string
+  [k: string]: any
+  }
+
+}
+export type ProposalExportInput = ProposalExportInputSchema.ProposalExportInput;
+export namespace ProposalExportOutputSchema {
+  export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+
+  export interface ProposalExportOutput {
+  /**
+   * Structured acceptance criteria (`{criterion, met}` or plain string),
+   * same shape as tasks. `met` means "agreed during scoping".
+   */
+  acceptance_criteria?: AcceptanceCriterionItem[]
+  author_user_id?: string
+  body?: string
+  /**
+   * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format?: string
+  /**
+   * Build owner once graduated.
+   */
+  build_owner_user_id?: string
+  closed_at?: string
+  created_at?: string
+  error?: string
+  id?: string
+  /**
+   * Last proposal revision that the in-flight build has reconciled against.
+   */
+  last_reconciled_revision_seq?: number
+  /**
+   * Head revision number (sign-offs anchored earlier are stale).
+   */
+  latest_revision_seq?: number
+  /**
+   * Portable proposal.mdx representation (populated by `proposal_export`).
+   */
+  mdx?: string
+  /**
+   * True when the in-flight build is behind the latest proposal revision.
+   */
+  pending_reconcile?: boolean
+  short_id?: string
+  /**
+   * Lifecycle: draft | in_review | approved | building | done | rejected |
+   * archived | superseded.
+   */
+  status?: string
+  superseded_by?: string
+  title?: string
+  /**
+   * Count of unresolved feedback entries — drives the per-row badge in the
+   * proposals list. Only populated on `proposal_list`; `0` on show paths.
+   */
+  unresolved_feedback_count?: number
+  updated_at?: string
+  [k: string]: any
+  }
+  export interface AcceptanceCriterionStatus {
+  criterion: string
+  met?: boolean
+  [k: string]: any
+  }
+
+}
+export type ProposalExportOutput = ProposalExportOutputSchema.ProposalExportOutput;
 export namespace ProposalFeedbackAddInputSchema {
   export interface ProposalFeedbackAddInput {
   /**
@@ -4968,6 +6005,10 @@ export namespace ProposalGraduateOutputSchema {
   author_user_id?: string
   body?: string
   /**
+   * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format?: string
+  /**
    * Build owner once graduated.
    */
   build_owner_user_id?: string
@@ -4983,6 +6024,10 @@ export namespace ProposalGraduateOutputSchema {
    * Head revision number (sign-offs anchored earlier are stale).
    */
   latest_revision_seq?: number
+  /**
+   * Portable proposal.mdx representation (populated by `proposal_export`).
+   */
+  mdx?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -5011,6 +6056,80 @@ export namespace ProposalGraduateOutputSchema {
 
 }
 export type ProposalGraduateOutput = ProposalGraduateOutputSchema.ProposalGraduateOutput;
+export namespace ProposalImportInputSchema {
+  export interface ProposalImportInput {
+  /**
+   * Full portable proposal.mdx content, including optional YAML frontmatter.
+   */
+  mdx: string
+  [k: string]: any
+  }
+
+}
+export type ProposalImportInput = ProposalImportInputSchema.ProposalImportInput;
+export namespace ProposalImportOutputSchema {
+  export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+
+  export interface ProposalImportOutput {
+  /**
+   * Structured acceptance criteria (`{criterion, met}` or plain string),
+   * same shape as tasks. `met` means "agreed during scoping".
+   */
+  acceptance_criteria?: AcceptanceCriterionItem[]
+  author_user_id?: string
+  body?: string
+  /**
+   * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format?: string
+  /**
+   * Build owner once graduated.
+   */
+  build_owner_user_id?: string
+  closed_at?: string
+  created_at?: string
+  error?: string
+  id?: string
+  /**
+   * Last proposal revision that the in-flight build has reconciled against.
+   */
+  last_reconciled_revision_seq?: number
+  /**
+   * Head revision number (sign-offs anchored earlier are stale).
+   */
+  latest_revision_seq?: number
+  /**
+   * Portable proposal.mdx representation (populated by `proposal_export`).
+   */
+  mdx?: string
+  /**
+   * True when the in-flight build is behind the latest proposal revision.
+   */
+  pending_reconcile?: boolean
+  short_id?: string
+  /**
+   * Lifecycle: draft | in_review | approved | building | done | rejected |
+   * archived | superseded.
+   */
+  status?: string
+  superseded_by?: string
+  title?: string
+  /**
+   * Count of unresolved feedback entries — drives the per-row badge in the
+   * proposals list. Only populated on `proposal_list`; `0` on show paths.
+   */
+  unresolved_feedback_count?: number
+  updated_at?: string
+  [k: string]: any
+  }
+  export interface AcceptanceCriterionStatus {
+  criterion: string
+  met?: boolean
+  [k: string]: any
+  }
+
+}
+export type ProposalImportOutput = ProposalImportOutputSchema.ProposalImportOutput;
 export namespace ProposalListInputSchema {
   export interface ProposalListInput {
   /**
@@ -5057,6 +6176,10 @@ export namespace ProposalListOutputSchema {
   acceptance_criteria: AcceptanceCriterionItem[]
   author_user_id?: string
   body: string
+  /**
+   * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format: string
   /**
    * Build owner once graduated.
    */
@@ -5227,6 +6350,10 @@ export namespace ProposalShowOutputSchema {
   epics?: ProposalEpicModel[]
   error?: string
   feedback?: ProposalFeedbackModel[]
+  /**
+   * Memory notes linked to this proposal's graduated epics/tasks.
+   */
+  memory_refs?: ProposalMemoryRefModel[]
   proposal?: (ProposalModel | null)
   revisions?: ProposalRevisionModel[]
   signoffs?: ProposalSignoffModel[]
@@ -5279,6 +6406,23 @@ export namespace ProposalShowOutputSchema {
   updated_at: string
   [k: string]: any
   }
+  /**
+   * A memory note linked to a proposal via its graduated epics/tasks.
+   */
+  export interface ProposalMemoryRefModel {
+  note_type: string
+  permalink: string
+  /**
+   * The entity the note is attached to: `"epic"` or `"task"`.
+   */
+  source_entity_type: string
+  /**
+   * Short ID of the epic or task that links the note.
+   */
+  source_short_id: string
+  title: string
+  [k: string]: any
+  }
   export interface ProposalModel {
   /**
    * Structured acceptance criteria (`{criterion, met}` or plain string),
@@ -5287,6 +6431,10 @@ export namespace ProposalShowOutputSchema {
   acceptance_criteria: AcceptanceCriterionItem[]
   author_user_id?: string
   body: string
+  /**
+   * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format: string
   /**
    * Build owner once graduated.
    */
@@ -5330,6 +6478,10 @@ export namespace ProposalShowOutputSchema {
   export interface ProposalRevisionModel {
   acceptance_criteria: AcceptanceCriterionItem[]
   body: string
+  /**
+   * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format: string
   created_at: string
   edited_by_user_id?: string
   /**
@@ -5409,6 +6561,10 @@ export namespace ProposalSignoffOutputSchema {
   author_user_id?: string
   body?: string
   /**
+   * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format?: string
+  /**
    * Build owner once graduated.
    */
   build_owner_user_id?: string
@@ -5424,6 +6580,10 @@ export namespace ProposalSignoffOutputSchema {
    * Head revision number (sign-offs anchored earlier are stale).
    */
   latest_revision_seq?: number
+  /**
+   * Portable proposal.mdx representation (populated by `proposal_export`).
+   */
+  mdx?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -5479,6 +6639,10 @@ export namespace ProposalSignoffClearOutputSchema {
   author_user_id?: string
   body?: string
   /**
+   * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format?: string
+  /**
    * Build owner once graduated.
    */
   build_owner_user_id?: string
@@ -5494,6 +6658,10 @@ export namespace ProposalSignoffClearOutputSchema {
    * Head revision number (sign-offs anchored earlier are stale).
    */
   latest_revision_seq?: number
+  /**
+   * Portable proposal.mdx representation (populated by `proposal_export`).
+   */
+  mdx?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -5591,6 +6759,10 @@ export namespace ProposalUpdateInputSchema {
   acceptance_criteria?: AcceptanceCriterionItem[]
   body?: string
   /**
+   * Body encoding: `markdown` (default) or `mdx` (block-aware).
+   */
+  body_format?: string
+  /**
    * Proposal UUID or short_id.
    */
   id: string
@@ -5625,6 +6797,10 @@ export namespace ProposalUpdateOutputSchema {
   author_user_id?: string
   body?: string
   /**
+   * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format?: string
+  /**
    * Build owner once graduated.
    */
   build_owner_user_id?: string
@@ -5640,6 +6816,10 @@ export namespace ProposalUpdateOutputSchema {
    * Head revision number (sign-offs anchored earlier are stale).
    */
   latest_revision_seq?: number
+  /**
+   * Portable proposal.mdx representation (populated by `proposal_export`).
+   */
+  mdx?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -6098,6 +7278,15 @@ export namespace ServicePresetListOutputSchema {
   [k: string]: any
   }
   export interface ServicePresetDto {
+  /**
+   * System (apt) package providing this service's CLI client, auto-installed
+   * into images that attach the preset. `null` = none.
+   */
+  client_package?: string
+  /**
+   * Comma-separated list of env-var names the connection string is exported
+   * under (e.g. `DATABASE_URL,TEST_POSTGRES_URL`).
+   */
   conn_env_var: string
   id: string
   image: string
@@ -7004,7 +8193,8 @@ export namespace TaskTransitionInputSchema {
    */
   project: string
   /**
-   * Required for: task_review_reject, task_review_reject_conflict,
+   * Required for:
+   * task_review_reject, task_review_reject_conflict,
    * pr_changes_requested,
    * reopen, release, release_task_review, force_close.
    */
@@ -7142,6 +8332,7 @@ export namespace UserSettingsGetOutputSchema {
    */
   auto_approve_prs: boolean
   error?: string
+  lanes: ModelLanesPayload
   /**
    * This user's per-model concurrency caps (`{ "provider/model": cap }`).
    * The sole admission control at dispatch; empty ⇒ default 1 per model.
@@ -7149,17 +8340,31 @@ export namespace UserSettingsGetOutputSchema {
   max_sessions: {
   [k: string]: number
   }
-  /**
-   * This user's ordered model selection (highest priority first), full
-   * `provider/model` ids. Empty when the user has no explicit selection
-   * (callers then fall back to the global deployment model list).
-   */
-  models: string[]
   ok: boolean
   /**
    * `users.id` of the signed-in caller (echoed so the UI can sanity-check identity).
    */
   user_id?: string
+  [k: string]: any
+  }
+  /**
+   * This user's per-ROLE ordered model lanes (each highest priority first),
+   * full `provider/model` ids. All-empty when the user has no explicit
+   * selection (callers then fall back to the global deployment model list).
+   */
+  export interface ModelLanesPayload {
+  /**
+   * worker
+   */
+  implement?: string[]
+  /**
+   * planner, architect, chat
+   */
+  plan?: string[]
+  /**
+   * reviewer
+   */
+  review?: string[]
   [k: string]: any
   }
 
@@ -7172,6 +8377,14 @@ export namespace UserSettingsSetInputSchema {
    */
   auto_approve_prs?: boolean
   /**
+   * Per-ROLE ordered model lanes for THIS user (each highest priority first),
+   * as full `provider/model` ids: `plan` (planner/architect/chat),
+   * `implement` (worker), `review` (reviewer). Each id must be a model on a
+   * provider this user has connected. Pass all-empty lanes to clear the
+   * selection (→ global fallback). Omit to keep the current value.
+   */
+  lanes?: (ModelLanesPayload | null)
+  /**
    * Per-model concurrency caps for THIS user (`{ "provider/model": cap }`).
    * How many sessions of each model may run concurrently for this user — the
    * sole admission control (no global ceiling). Pass `{}` to clear (→ default
@@ -7181,17 +8394,31 @@ export namespace UserSettingsSetInputSchema {
   [k: string]: number
   }
   /**
-   * Ordered model selection for THIS user (highest priority first), as full
-   * `provider/model` ids. Each must be a model on a provider this user has
-   * connected. Pass `[]` to clear the selection (→ global fallback). Omit to
-   * keep the current value.
-   */
-  models?: string[]
-  /**
    * Admin-only: act on behalf of this user id (e.g. another user to
    * configure). Non-admins must omit it.
    */
   target_user_id?: string
+  [k: string]: any
+  }
+  /**
+   * Per-user, per-ROLE ordered model selection over the wire. Each lane is an
+   * ordered fallback list (highest priority first) of full `provider/model` ids.
+   * A task's base role maps to one lane: `plan` (planner/architect/chat),
+   * `implement` (worker), `review` (reviewer).
+   */
+  export interface ModelLanesPayload {
+  /**
+   * worker
+   */
+  implement?: string[]
+  /**
+   * planner, architect, chat
+   */
+  plan?: string[]
+  /**
+   * reviewer
+   */
+  review?: string[]
   [k: string]: any
   }
 
@@ -7203,23 +8430,44 @@ export namespace UserSettingsSetOutputSchema {
   auto_approve_prs?: boolean
   error?: string
   /**
+   * The resulting per-role model lanes after the patch.
+   */
+  lanes?: (ModelLanesPayload | null)
+  /**
    * The resulting per-model concurrency caps after the patch.
    */
   max_sessions?: {
   [k: string]: number
   }
-  /**
-   * The resulting model selection after the patch.
-   */
-  models?: string[]
   ok: boolean
+  [k: string]: any
+  }
+  /**
+   * Per-user, per-ROLE ordered model selection over the wire. Each lane is an
+   * ordered fallback list (highest priority first) of full `provider/model` ids.
+   * A task's base role maps to one lane: `plan` (planner/architect/chat),
+   * `implement` (worker), `review` (reviewer).
+   */
+  export interface ModelLanesPayload {
+  /**
+   * worker
+   */
+  implement?: string[]
+  /**
+   * planner, architect, chat
+   */
+  plan?: string[]
+  /**
+   * reviewer
+   */
+  review?: string[]
   [k: string]: any
   }
 
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_blocks" | "proposal_create" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -7284,6 +8532,7 @@ export interface McpToolMap {
   "memory_read": { input: MemoryReadInput; output: MemoryReadOutput };
   "memory_recent": { input: MemoryRecentInput; output: MemoryRecentOutput };
   "memory_repair_embeddings": { input: MemoryRepairEmbeddingsInput; output: MemoryRepairEmbeddingsOutput };
+  "memory_run_enrichment": { input: MemoryRunEnrichmentInput; output: MemoryRunEnrichmentOutput };
   "memory_search": { input: MemorySearchInput; output: MemorySearchOutput };
   "memory_task_refs": { input: MemoryTaskRefsInput; output: MemoryTaskRefsOutput };
   "memory_write": { input: MemoryWriteInput; output: MemoryWriteOutput };
@@ -7302,11 +8551,14 @@ export interface McpToolMap {
   "project_remove": { input: ProjectRemoveInput; output: ProjectRemoveOutput };
   "project_set_image": { input: ProjectSetImageInput; output: ProjectSetImageOutput };
   "proposal_add_target": { input: ProposalAddTargetInput; output: ProposalAddTargetOutput };
+  "proposal_blocks": { input: ProposalBlocksInput; output: ProposalBlocksOutput };
   "proposal_create": { input: ProposalCreateInput; output: ProposalCreateOutput };
   "proposal_delete": { input: ProposalDeleteInput; output: ProposalDeleteOutput };
+  "proposal_export": { input: ProposalExportInput; output: ProposalExportOutput };
   "proposal_feedback_add": { input: ProposalFeedbackAddInput; output: ProposalFeedbackAddOutput };
   "proposal_feedback_resolve": { input: ProposalFeedbackResolveInput; output: ProposalFeedbackResolveOutput };
   "proposal_graduate": { input: ProposalGraduateInput; output: ProposalGraduateOutput };
+  "proposal_import": { input: ProposalImportInput; output: ProposalImportOutput };
   "proposal_list": { input: ProposalListInput; output: ProposalListOutput };
   "proposal_reconcile_obsolete_epic": { input: ProposalReconcileObsoleteEpicInput; output: ProposalReconcileObsoleteEpicOutput };
   "proposal_remove_target": { input: ProposalRemoveTargetInput; output: ProposalRemoveTargetOutput };

@@ -1,4 +1,5 @@
 import { callMcpTool } from "@/api/mcpClient";
+import { type ModelLanes, parseLanes } from "@/api/userSettings";
 import type {
   ProviderModelsConnectedOutputSchema,
   ProviderConnectedOutputSchema,
@@ -24,11 +25,25 @@ export type CatalogProvider = ProviderCatalogOutputSchema.ProviderCatalogItem;
 export type ConnectedProvider = ProviderConnectedOutputSchema.ProviderCatalogItem;
 export type UserModel = ProviderModelsConnectedOutputSchema.ProviderModelOutput;
 
+/**
+ * Sentinel `targetId` meaning "the signed-in caller themselves". The server's
+ * `target_user_id` arg is admin-only (see `resolve_effective_user`), so a
+ * non-admin configuring their OWN settings must omit it entirely. Components
+ * pass this sentinel; the helpers below translate it to an empty arg set while
+ * still keying react-query caches distinctly from any admin-targeted user.
+ */
+export const SELF_TARGET = "__self__";
+
+/** Build the `{ target_user_id }` arg, omitting it for the self sentinel. */
+function targetArgs(targetId: string): { target_user_id?: string } {
+  return targetId === SELF_TARGET ? {} : { target_user_id: targetId };
+}
+
 /** Full provider catalog (static; not target-scoped, but accepts it harmlessly). */
 export async function fetchUserCatalog(
   targetUserId: string,
 ): Promise<CatalogProvider[]> {
-  const response = await callMcpTool("provider_catalog", { target_user_id: targetUserId });
+  const response = await callMcpTool("provider_catalog", targetArgs(targetUserId));
   return response.providers;
 }
 
@@ -36,7 +51,7 @@ export async function fetchUserCatalog(
 export async function fetchUserConnectedProviders(
   targetUserId: string,
 ): Promise<ConnectedProvider[]> {
-  const response = await callMcpTool("provider_connected", { target_user_id: targetUserId });
+  const response = await callMcpTool("provider_connected", targetArgs(targetUserId));
   return response.providers;
 }
 
@@ -44,9 +59,7 @@ export async function fetchUserConnectedProviders(
 export async function fetchUserConnectedModels(
   targetUserId: string,
 ): Promise<UserModel[]> {
-  const response = await callMcpTool("provider_models_connected", {
-    target_user_id: targetUserId,
-  });
+  const response = await callMcpTool("provider_models_connected", targetArgs(targetUserId));
   const seen = new Set<string>();
   const models: UserModel[] = [];
   for (const model of response.models) {
@@ -58,10 +71,10 @@ export async function fetchUserConnectedModels(
   return models;
 }
 
-/** The target user's ordered model selection plus per-model caps. */
+/** The target user's per-role model lanes plus per-model caps. */
 export interface UserModelSelection {
-  /** Full `"provider/model"` ids, high → low priority. */
-  models: string[];
+  /** Per-role lanes (`plan`/`implement`/`review`), each high → low priority. */
+  lanes: ModelLanes;
   /** Per-model concurrency caps keyed by full `"provider/model"` id. */
   maxSessions: Record<string, number>;
 }
@@ -70,36 +83,36 @@ function parseMaxSessions(raw: unknown): Record<string, number> {
   return raw && typeof raw === "object" ? (raw as Record<string, number>) : {};
 }
 
-/** The target user's ordered model selection (high → low priority) + caps. */
+/** The target user's per-role model lanes + caps. */
 export async function fetchUserModelSelection(
   targetUserId: string,
 ): Promise<UserModelSelection> {
-  const response = await callMcpTool("user_settings_get", { target_user_id: targetUserId });
+  const response = await callMcpTool("user_settings_get", targetArgs(targetUserId));
   if (response.ok === false) {
     throw new Error(response.error ?? "Failed to load user settings");
   }
   return {
-    models: Array.isArray(response.models) ? response.models : [],
+    lanes: parseLanes(response.lanes),
     maxSessions: parseMaxSessions(response.max_sessions),
   };
 }
 
-/** Persist the target user's ordered model selection and per-model caps. */
+/** Persist the target user's per-role model lanes and per-model caps. */
 export async function saveUserModelSelection(
   targetUserId: string,
-  models: string[],
+  lanes: ModelLanes,
   maxSessions: Record<string, number>,
 ): Promise<UserModelSelection> {
   const response = await callMcpTool("user_settings_set", {
-    target_user_id: targetUserId,
-    models,
+    ...targetArgs(targetUserId),
+    lanes,
     max_sessions: maxSessions,
   });
   if (!response.ok) {
     throw new Error(response.error ?? "Failed to save user models");
   }
   return {
-    models: Array.isArray(response.models) ? response.models : models,
+    lanes: parseLanes(response.lanes),
     maxSessions: parseMaxSessions(response.max_sessions),
   };
 }

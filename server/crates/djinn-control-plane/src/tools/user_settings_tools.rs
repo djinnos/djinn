@@ -12,7 +12,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::acting_user;
+use djinn_core::models::ModelLanes;
 use djinn_db::UserSettingsRepository;
+
+/// Per-user, per-ROLE ordered model selection over the wire. Each lane is an
+/// ordered fallback list (highest priority first) of full `provider/model` ids.
+/// A task's base role maps to one lane: `plan` (planner/architect/chat),
+/// `implement` (worker), `review` (reviewer).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ModelLanesPayload {
+    /// planner, architect, chat
+    #[serde(default)]
+    pub plan: Vec<String>,
+    /// worker
+    #[serde(default)]
+    pub implement: Vec<String>,
+    /// reviewer
+    #[serde(default)]
+    pub review: Vec<String>,
+}
+
+impl From<ModelLanes> for ModelLanesPayload {
+    fn from(l: ModelLanes) -> Self {
+        Self {
+            plan: l.plan,
+            implement: l.implement,
+            review: l.review,
+        }
+    }
+}
+
+impl From<ModelLanesPayload> for ModelLanes {
+    fn from(p: ModelLanesPayload) -> Self {
+        Self {
+            plan: p.plan,
+            implement: p.implement,
+            review: p.review,
+        }
+    }
+}
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 pub struct UserSettingsGetParams {
@@ -35,10 +73,10 @@ pub struct UserSettingsGetResponse {
     /// toggle applies; background-agent tasks (`created_by_user_id IS NULL`)
     /// are never auto-approved.
     pub auto_approve_prs: bool,
-    /// This user's ordered model selection (highest priority first), full
-    /// `provider/model` ids. Empty when the user has no explicit selection
-    /// (callers then fall back to the global deployment model list).
-    pub models: Vec<String>,
+    /// This user's per-ROLE ordered model lanes (each highest priority first),
+    /// full `provider/model` ids. All-empty when the user has no explicit
+    /// selection (callers then fall back to the global deployment model list).
+    pub lanes: ModelLanesPayload,
     /// This user's per-model concurrency caps (`{ "provider/model": cap }`).
     /// The sole admission control at dispatch; empty ⇒ default 1 per model.
     #[schemars(with = "std::collections::HashMap<String, i64>")]
@@ -50,11 +88,12 @@ pub struct UserSettingsGetResponse {
 pub struct UserSettingsSetParams {
     /// Enable or disable auto-approve. Omit to keep the current value.
     pub auto_approve_prs: Option<bool>,
-    /// Ordered model selection for THIS user (highest priority first), as full
-    /// `provider/model` ids. Each must be a model on a provider this user has
-    /// connected. Pass `[]` to clear the selection (→ global fallback). Omit to
-    /// keep the current value.
-    pub models: Option<Vec<String>>,
+    /// Per-ROLE ordered model lanes for THIS user (each highest priority first),
+    /// as full `provider/model` ids: `plan` (planner/architect/chat),
+    /// `implement` (worker), `review` (reviewer). Each id must be a model on a
+    /// provider this user has connected. Pass all-empty lanes to clear the
+    /// selection (→ global fallback). Omit to keep the current value.
+    pub lanes: Option<ModelLanesPayload>,
     /// Per-model concurrency caps for THIS user (`{ "provider/model": cap }`).
     /// How many sessions of each model may run concurrently for this user — the
     /// sole admission control (no global ceiling). Pass `{}` to clear (→ default
@@ -72,8 +111,8 @@ pub struct UserSettingsSetResponse {
     pub ok: bool,
     pub applied: bool,
     pub auto_approve_prs: Option<bool>,
-    /// The resulting model selection after the patch.
-    pub models: Option<Vec<String>>,
+    /// The resulting per-role model lanes after the patch.
+    pub lanes: Option<ModelLanesPayload>,
     /// The resulting per-model concurrency caps after the patch.
     #[schemars(with = "Option<std::collections::HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
@@ -105,7 +144,7 @@ impl DjinnMcpServer {
                         ok: false,
                         user_id: None,
                         auto_approve_prs: false,
-                        models: Vec::new(),
+                        lanes: ModelLanesPayload::default(),
                         max_sessions: HashMap::new(),
                         error: Some(missing_session()),
                     });
@@ -115,7 +154,7 @@ impl DjinnMcpServer {
                         ok: false,
                         user_id: None,
                         auto_approve_prs: false,
-                        models: Vec::new(),
+                        lanes: ModelLanesPayload::default(),
                         max_sessions: HashMap::new(),
                         error: Some(e),
                     });
@@ -127,7 +166,7 @@ impl DjinnMcpServer {
                 ok: true,
                 user_id: Some(user_id),
                 auto_approve_prs: s.auto_approve_prs,
-                models: s.models.unwrap_or_default(),
+                lanes: s.lanes.unwrap_or_default().into(),
                 max_sessions: s.max_sessions.unwrap_or_default(),
                 error: None,
             }),
@@ -135,7 +174,7 @@ impl DjinnMcpServer {
                 ok: false,
                 user_id: Some(user_id),
                 auto_approve_prs: false,
-                models: Vec::new(),
+                lanes: ModelLanesPayload::default(),
                 max_sessions: HashMap::new(),
                 error: Some(e.to_string()),
             }),
@@ -161,7 +200,7 @@ impl DjinnMcpServer {
                         ok: false,
                         applied: false,
                         auto_approve_prs: None,
-                        models: None,
+                        lanes: None,
                         max_sessions: None,
                         error: Some(missing_session()),
                     });
@@ -171,7 +210,7 @@ impl DjinnMcpServer {
                         ok: false,
                         applied: false,
                         auto_approve_prs: None,
-                        models: None,
+                        lanes: None,
                         max_sessions: None,
                         error: Some(e),
                     });
@@ -184,7 +223,7 @@ impl DjinnMcpServer {
                 ok: false,
                 applied: false,
                 auto_approve_prs: None,
-                models: None,
+                lanes: None,
                 max_sessions: None,
                 error: Some(msg),
             })
@@ -192,18 +231,20 @@ impl DjinnMcpServer {
 
         let mut applied = false;
 
-        // Per-user model selection: validate every id against THIS user's
-        // connected providers before persisting, so a user can't select a
-        // model on a provider they haven't connected.
-        if let Some(models) = p.models.as_ref() {
+        // Per-user model lanes: validate every id (union across lanes) against
+        // THIS user's connected providers before persisting, so a user can't
+        // select a model on a provider they haven't connected.
+        if let Some(lanes_payload) = p.lanes.as_ref() {
+            let lanes: ModelLanes = lanes_payload.clone().into();
+            let all = lanes.all_models();
             if let Err(e) = self
                 .state
-                .validate_models_for_user(models, Some(&user_id))
+                .validate_models_for_user(&all, Some(&user_id))
                 .await
             {
                 return err(e);
             }
-            if let Err(e) = repo.upsert_models(&user_id, models).await {
+            if let Err(e) = repo.upsert_lanes(&user_id, &lanes).await {
                 return err(e.to_string());
             }
             applied = true;
@@ -229,7 +270,7 @@ impl DjinnMcpServer {
 
         // A changed model selection or cap can make more work dispatchable now,
         // so kick a dispatch pass. No-op for auto-approve-only patches.
-        if p.models.is_some() || p.max_sessions.is_some() {
+        if p.lanes.is_some() || p.max_sessions.is_some() {
             self.state.apply_user_model_change().await;
         }
 
@@ -238,7 +279,7 @@ impl DjinnMcpServer {
                 ok: true,
                 applied,
                 auto_approve_prs: Some(s.auto_approve_prs),
-                models: Some(s.models.unwrap_or_default()),
+                lanes: Some(s.lanes.unwrap_or_default().into()),
                 max_sessions: Some(s.max_sessions.unwrap_or_default()),
                 error: None,
             }),

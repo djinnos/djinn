@@ -4,13 +4,17 @@ import { InlineError } from '@/components/InlineError';
 import { AgentConfig } from '@/components/AgentConfig';
 import { CodexSignInCard } from '@/components/CodexSignInCard';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { ModelSection } from '@/components/userConfig/ModelSection';
+import { SELF_TARGET } from '@/api/userConfig';
 import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
 import { useUserSettings } from '@/hooks/settings/useUserSettings';
 import { useServerHealth } from '@/hooks/useServerHealth';
 import { cn } from '@/lib/utils';
 
-function ModelsTab() {
+/** Connections tab — provider auth only (connect / disconnect). No model picking. */
+function ConnectionsTab() {
   const {
     configuredProviders,
     loading,
@@ -19,8 +23,6 @@ function ModelsTab() {
     removeProvider,
     isSelfServeProvider,
   } = useProviders();
-
-  const agentConfig = useAgentConfig();
 
   if (loading) {
     return <div className="rounded-lg border border-border bg-card p-6">Loading providers...</div>;
@@ -40,78 +42,70 @@ function ModelsTab() {
   const codexRevokedReason = openaiProvider?.revoked_reason;
 
   return (
-    <div className="flex flex-col gap-6 flex-1 min-h-0">
-      <AgentConfig {...agentConfig} />
+    <div className="flex flex-col gap-3">
+      <div>
+        <h2 className="text-xl font-bold text-foreground">ChatGPT / Codex</h2>
+        <p className="text-sm text-muted-foreground">
+          Sign in with your ChatGPT subscription. All other providers (Anthropic, OpenAI API,
+          Google, Azure, AWS, Vertex AI) are provisioned by your operator via Helm values —
+          they show up automatically once configured.
+        </p>
+      </div>
 
-      <div className="border-t border-border" />
+      {/* Always render: shows the sign-in CTA when disconnected, and the
+          connected state (with a Remove/Disconnect button) when connected. */}
+      <CodexSignInCard
+        alreadyConnected={codexConnected}
+        revokedReason={codexRevokedReason}
+        onConnected={() => void loadData()}
+      />
 
-      <div className="flex flex-col gap-3">
-        <div>
-          <h2 className="text-xl font-bold text-foreground">ChatGPT / Codex</h2>
-          <p className="text-sm text-muted-foreground">
-            Sign in with your ChatGPT subscription. All other providers (Anthropic, OpenAI API,
-            Google, Azure, AWS, Vertex AI) are provisioned by your operator via Helm values —
-            they show up automatically once configured.
-          </p>
-        </div>
-
-        {/* Always render: shows the sign-in CTA when disconnected, and the
-            connected state (with a Remove/Disconnect button) when connected —
-            previously gated on `!codexConnected`, so once connected there was
-            no way to disconnect from this tab. */}
-        <CodexSignInCard
-          alreadyConnected={codexConnected}
-          revokedReason={codexRevokedReason}
-          onConnected={() => void loadData()}
-        />
-
-        <div className="rounded-lg border border-border bg-card px-4 py-3">
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="text-sm font-medium text-muted-foreground shrink-0">Connected:</span>
-            {configuredProviders.length === 0 ? (
-              <EmptyConnectedMessage />
-            ) : (
-              configuredProviders.map((provider) => {
-                const removable = isSelfServeProvider(provider.id);
-                return (
-                  <span
-                    key={provider.id}
-                    className="flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-sm"
-                    title={
-                      removable
-                        ? undefined
-                        : 'Provisioned via deployment (Helm). Ask your operator to unset the key.'
-                    }
-                  >
-                    {provider.name}
-                    {removable ? (
-                      <ConfirmButton
-                        title="Remove provider"
-                        description={`Sign out of "${provider.name}" and delete the stored tokens?`}
-                        confirmLabel="Remove"
-                        onConfirm={() => removeProvider(provider.id)}
-                        size="sm"
-                        variant="ghost"
-                      >
-                        <HugeiconsIcon
-                          icon={Delete02Icon}
-                          size={13}
-                          className="text-destructive"
-                        />
-                      </ConfirmButton>
-                    ) : (
+      <div className="rounded-lg border border-border bg-card px-4 py-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-sm font-medium text-muted-foreground shrink-0">Connected:</span>
+          {configuredProviders.length === 0 ? (
+            <EmptyConnectedMessage />
+          ) : (
+            configuredProviders.map((provider) => {
+              const removable = isSelfServeProvider(provider.id);
+              return (
+                <span
+                  key={provider.id}
+                  className="flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-sm"
+                  title={
+                    removable
+                      ? undefined
+                      : 'Provisioned via deployment (Helm). Ask your operator to unset the key.'
+                  }
+                >
+                  {provider.name}
+                  {removable ? (
+                    <ConfirmButton
+                      title="Remove provider"
+                      description={`Sign out of "${provider.name}" and delete the stored tokens?`}
+                      confirmLabel="Remove"
+                      onConfirm={() => removeProvider(provider.id)}
+                      size="sm"
+                      variant="ghost"
+                    >
                       <HugeiconsIcon
-                        icon={LockIcon}
+                        icon={Delete02Icon}
                         size={13}
-                        className="text-muted-foreground"
-                        aria-label="Provisioned via deployment"
+                        className="text-destructive"
                       />
-                    )}
-                  </span>
-                );
-              })
-            )}
-          </div>
+                    </ConfirmButton>
+                  ) : (
+                    <HugeiconsIcon
+                      icon={LockIcon}
+                      size={13}
+                      className="text-muted-foreground"
+                      aria-label="Provisioned via deployment"
+                    />
+                  )}
+                </span>
+              );
+            })
+          )}
         </div>
       </div>
     </div>
@@ -126,7 +120,24 @@ function EmptyConnectedMessage() {
   );
 }
 
-function AccountPreferences() {
+/** Model Roles tab — per-user, per-role model lanes + the per-role agent config. */
+function ModelRolesTab() {
+  const agentConfig = useAgentConfig();
+
+  return (
+    <div className="flex flex-col gap-6">
+      {/* Per-user, per-ROLE model lanes for the signed-in caller (self mode). */}
+      <ModelSection targetId={SELF_TARGET} />
+
+      <div className="border-t border-border" />
+
+      <AgentConfig {...agentConfig} />
+    </div>
+  );
+}
+
+/** Preferences tab — account-level toggles (auto-approve PRs). */
+function PreferencesTab() {
   const { settings, loading, saving, error, setAutoApprovePrs } = useUserSettings();
 
   const showSignIn = !loading && !settings && error?.toLowerCase().includes('sign in');
@@ -196,12 +207,24 @@ export function SettingsPage() {
   return (
     <div className="flex h-full flex-col overflow-hidden p-6">
       {isConnected ? (
-        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-6">
-          <div className="flex flex-col gap-6">
-            <ModelsTab />
-            <AccountPreferences />
+        <Tabs defaultValue="connections" className="min-h-0 flex-1">
+          <TabsList>
+            <TabsTrigger value="connections">Connections</TabsTrigger>
+            <TabsTrigger value="model-roles">Model Roles</TabsTrigger>
+            <TabsTrigger value="preferences">Preferences</TabsTrigger>
+          </TabsList>
+          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pt-4 pb-6">
+            <TabsContent value="connections">
+              <ConnectionsTab />
+            </TabsContent>
+            <TabsContent value="model-roles">
+              <ModelRolesTab />
+            </TabsContent>
+            <TabsContent value="preferences">
+              <PreferencesTab />
+            </TabsContent>
           </div>
-        </div>
+        </Tabs>
       ) : (
         <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-6 text-center">
           <p className="text-sm text-muted-foreground">

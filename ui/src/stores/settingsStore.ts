@@ -9,6 +9,8 @@ import {
 import {
   fetchUserSettings,
   patchUserSettings,
+  lanesUnion,
+  type ModelLanes,
 } from '@/api/userSettings';
 import { queryClient } from '@/lib/queryClient';
 import { USER_SETTINGS_QUERY_KEY } from '@/api/queryOptions';
@@ -83,7 +85,9 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
       // the same selection without a second fetch.
       queryClient.setQueryData(USER_SETTINGS_QUERY_KEY, userSettings);
       set({
-        models: buildEntries(userSettings.models, userSettings.maxSessions),
+        // This legacy flat editor (used only by the first-run onboarding sheet
+        // — Slice 4) edits a single list; surface the union across role lanes.
+        models: buildEntries(lanesUnion(userSettings.lanes), userSettings.maxSessions),
         isLoading: false,
         hasUnsavedChanges: false,
       });
@@ -170,7 +174,15 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
       for (const m of models) {
         maxSessions[combineModelId(m.provider, m.model)] = m.max_concurrent;
       }
-      const next = await patchUserSettings({ models: modelIds, maxSessions });
+      // This flat editor has no per-role notion (per-role lanes are edited in
+      // Settings → Model Roles). Cut-over: seed the same list into all three
+      // lanes so this editor stays a valid view of the user's selection.
+      const lanes: ModelLanes = {
+        plan: modelIds,
+        implement: modelIds,
+        review: modelIds,
+      };
+      const next = await patchUserSettings({ lanes, maxSessions });
       queryClient.setQueryData(USER_SETTINGS_QUERY_KEY, next);
       set({ isSaving: false, hasUnsavedChanges: false });
       return true;

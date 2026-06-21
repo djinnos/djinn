@@ -961,6 +961,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn user_model_priority_keeps_openai_via_codex_merge() {
         use crate::catalog::CatalogService;
+        use djinn_core::models::ModelLanes;
         use djinn_db::UserSettingsRepository;
 
         let db = Database::open_in_memory().unwrap();
@@ -973,18 +974,23 @@ mod tests {
             .await
             .unwrap();
         UserSettingsRepository::new(db.clone())
-            .upsert_models(&uid, &["openai/gpt-5.5".to_string()])
+            .upsert_lanes(
+                &uid,
+                &ModelLanes::from_flat(vec!["openai/gpt-5.5".to_string()]),
+            )
             .await
             .unwrap();
 
-        // ── replicate resolve_user_model_priority ──
+        // ── replicate resolve_user_model_priority (implement lane = worker) ──
         let models = UserSettingsRepository::new(db.clone())
             .get(&uid)
             .await
             .unwrap()
             .unwrap()
-            .models
-            .unwrap();
+            .lanes
+            .unwrap()
+            .for_role("worker")
+            .to_vec();
         let creds = repo.list_for_user(Some(&uid)).await.unwrap();
         let connected = CatalogService::new().connected_provider_ids(&creds);
         let result: Vec<String> = models

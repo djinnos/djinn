@@ -28,7 +28,11 @@ vi.mock("@/api/userConfig", async (importOriginal) => {
       } as UserModel,
     ]),
     fetchUserModelSelection: vi.fn(async () => ({
-      models: ["openai/gpt-5"],
+      lanes: {
+        plan: ["openai/gpt-5"],
+        implement: [],
+        review: [],
+      },
       maxSessions: { "openai/gpt-5": 3 },
     })),
     saveUserModelSelection: vi.fn(),
@@ -41,13 +45,17 @@ describe("ModelSection", () => {
     expect(stripProviderPrefix("custom-model")).toBe("custom-model");
   });
 
-  it("smoke-renders selected user model settings", async () => {
+  it("smoke-renders per-role model lanes", async () => {
     render(<ModelSection targetId="target-user" />);
 
-    expect(screen.getByRole("heading", { name: "Models" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Model roles" })).toBeInTheDocument();
+    // The model selected for the `plan` lane renders with its provider + cap.
     expect(await screen.findByText("GPT-5")).toBeInTheDocument();
     expect(screen.getByText("OpenAI")).toBeInTheDocument();
     expect(screen.getByDisplayValue("3")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add model" })).toBeInTheDocument();
+    // Each lane exposes its own Add model trigger.
+    expect(
+      screen.getAllByRole("button", { name: "Add model" }).length,
+    ).toBeGreaterThanOrEqual(3);
   });
 });

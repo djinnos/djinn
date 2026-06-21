@@ -153,13 +153,19 @@ impl CoordinatorActor {
         false
     }
 
+    /// The creator's per-user model selection for the lane matching `base_role`
+    /// (plan / implement / review), filtered to providers they still have
+    /// connected. `base_role` selects the lane: planner/architect/chat → plan,
+    /// worker → implement, reviewer → review, lead/unknown → plan.
     pub(in crate::actors::coordinator) async fn resolve_user_model_priority(
         &self,
         created_by_user_id: Option<&str>,
+        base_role: &str,
     ) -> Vec<String> {
         #[cfg(test)]
         {
             let _ = created_by_user_id;
+            let _ = base_role;
             #[allow(clippy::needless_return)]
             return Vec::new();
         }
@@ -171,7 +177,10 @@ impl CoordinatorActor {
             };
             let us_repo = djinn_db::UserSettingsRepository::new(self.db.clone());
             let models = match us_repo.get(uid).await {
-                Ok(Some(s)) => s.models.unwrap_or_default(),
+                Ok(Some(s)) => s
+                    .lanes
+                    .map(|l| l.for_role(base_role).to_vec())
+                    .unwrap_or_default(),
                 _ => return Vec::new(),
             };
             if models.is_empty() {

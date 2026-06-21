@@ -1,12 +1,57 @@
 import { callMcpTool } from "@/api/mcpClient";
 
+/**
+ * Per-user, per-ROLE ordered model selection ("lanes"). Each lane is an ordered
+ * fallback list (priority high → low) of full `"provider/model"` ids. A task's
+ * base role maps to one lane: `plan` (planner/architect/chat), `implement`
+ * (worker), `review` (reviewer).
+ */
+export interface ModelLanes {
+  plan: string[];
+  implement: string[];
+  review: string[];
+}
+
+/** The three lane keys, in display order. */
+export const MODEL_LANE_KEYS = ["plan", "implement", "review"] as const;
+export type ModelLaneKey = (typeof MODEL_LANE_KEYS)[number];
+
+export function emptyLanes(): ModelLanes {
+  return { plan: [], implement: [], review: [] };
+}
+
+/**
+ * Distinct union of all model ids across every lane (order: plan, implement,
+ * review; duplicates dropped). Used where a single flat per-user selection is
+ * still meaningful — e.g. the chat model picker and the onboarding gate.
+ */
+export function lanesUnion(lanes: ModelLanes): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const key of MODEL_LANE_KEYS) {
+    for (const id of lanes[key]) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        out.push(id);
+      }
+    }
+  }
+  return out;
+}
+
+/** Normalise a raw, possibly-partial lanes object into a complete `ModelLanes`. */
+export function parseLanes(raw: Partial<ModelLanes> | null | undefined): ModelLanes {
+  return {
+    plan: Array.isArray(raw?.plan) ? raw.plan : [],
+    implement: Array.isArray(raw?.implement) ? raw.implement : [],
+    review: Array.isArray(raw?.review) ? raw.review : [],
+  };
+}
+
 export interface UserSettings {
   autoApprovePrs: boolean;
-  /**
-   * The user's ordered model id list (priority high → low). Full
-   * `"provider/model"` ids, e.g. `"openai/gpt-5.5"`. `[]` when unset.
-   */
-  models: string[];
+  /** Per-role model lanes (priority high → low per lane). */
+  lanes: ModelLanes;
   /**
    * Per-user per-model concurrency caps, keyed by full `"provider/model"` id.
    * `{}` when unset; consumers default missing entries to 1.
@@ -18,7 +63,7 @@ interface RawGet {
   ok?: boolean;
   user_id?: string | null;
   auto_approve_prs?: boolean;
-  models?: string[] | null;
+  lanes?: Partial<ModelLanes> | null;
   max_sessions?: Record<string, number> | null;
   error?: string | null;
 }
@@ -27,7 +72,7 @@ interface RawSet {
   ok?: boolean;
   applied?: boolean;
   auto_approve_prs?: boolean | null;
-  models?: string[] | null;
+  lanes?: Partial<ModelLanes> | null;
   max_sessions?: Record<string, number> | null;
   error?: string | null;
 }
@@ -43,15 +88,15 @@ export async function fetchUserSettings(): Promise<UserSettings> {
   }
   return {
     autoApprovePrs: Boolean(resp?.auto_approve_prs),
-    models: Array.isArray(resp?.models) ? resp.models : [],
+    lanes: parseLanes(resp?.lanes),
     maxSessions: parseMaxSessions(resp?.max_sessions),
   };
 }
 
 export async function patchUserSettings(patch: {
   autoApprovePrs?: boolean;
-  /** Full `"provider/model"` ids in priority order. Omit to keep current. */
-  models?: string[];
+  /** Per-role model lanes (priority order per lane). Omit to keep current. */
+  lanes?: ModelLanes;
   /** Per-model caps keyed by full `"provider/model"` id. Omit to keep current. */
   maxSessions?: Record<string, number>;
 }): Promise<UserSettings> {
@@ -59,8 +104,8 @@ export async function patchUserSettings(patch: {
   if (patch.autoApprovePrs !== undefined) {
     args.auto_approve_prs = patch.autoApprovePrs;
   }
-  if (patch.models !== undefined) {
-    args.models = patch.models;
+  if (patch.lanes !== undefined) {
+    args.lanes = patch.lanes;
   }
   if (patch.maxSessions !== undefined) {
     args.max_sessions = patch.maxSessions;
@@ -71,7 +116,7 @@ export async function patchUserSettings(patch: {
   }
   return {
     autoApprovePrs: Boolean(resp?.auto_approve_prs),
-    models: Array.isArray(resp?.models) ? resp.models : [],
+    lanes: parseLanes(resp?.lanes),
     maxSessions: parseMaxSessions(resp?.max_sessions),
   };
 }

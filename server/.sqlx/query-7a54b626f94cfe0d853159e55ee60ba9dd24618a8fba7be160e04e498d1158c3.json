@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT user_id, auto_approve_prs AS \"auto_approve_prs!: bool\",\n                      models, max_sessions, created_at, updated_at\n               FROM user_settings WHERE user_id = $1",
+  "query": "SELECT user_id, auto_approve_prs AS \"auto_approve_prs!: bool\",\n                      model_lanes, max_sessions, created_at, updated_at\n               FROM user_settings WHERE user_id = $1",
   "describe": {
     "columns": [
       {
@@ -15,7 +15,7 @@
       },
       {
         "ordinal": 2,
-        "name": "models",
+        "name": "model_lanes",
         "type_info": "Text"
       },
       {
@@ -48,5 +48,5 @@
       false
     ]
   },
-  "hash": "fcb67a47ba04277f436ef0e7d769d4dddcf5d19013692e1b86d090ca3ed3ad25"
+  "hash": "7a54b626f94cfe0d853159e55ee60ba9dd24618a8fba7be160e04e498d1158c3"
 }

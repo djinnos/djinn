@@ -12,10 +12,11 @@ export const useModelGateStore = create<ModelGateState>((set) => ({
 
   refresh: async () => {
     try {
-      // The model list is now per-user: gate onboarding on whether THIS user
-      // has selected at least one model.
+      // The model list is now per-user and per-role: gate onboarding on whether
+      // THIS user has selected at least one model in ANY role lane.
       const settings = await fetchUserSettings();
-      set({ hasModels: settings.models.length > 0 });
+      const { plan, implement, review } = settings.lanes;
+      set({ hasModels: plan.length + implement.length + review.length > 0 });
     } catch {
       // On error leave the gate open so we don't block the user indefinitely
       set({ hasModels: true });

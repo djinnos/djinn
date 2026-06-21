@@ -261,9 +261,11 @@ pub async fn resolve_memory_provider_for_user(
     let mut model_candidates = Vec::new();
     if let Some(uid) = user_id
         && let Some(user_settings) = UserSettingsRepository::new(db.clone()).get(uid).await?
-        && let Some(models) = user_settings.models
+        && let Some(lanes) = user_settings.lanes
     {
-        model_candidates.extend(models);
+        // Memory enrichment is not role-scoped; any model the user selected in
+        // any lane is a fair candidate (union, dedup, lane order).
+        model_candidates.extend(lanes.all_models());
     }
     model_candidates.extend(settings.models_or_default());
     if model_candidates.is_empty() {
@@ -1270,7 +1272,10 @@ mod tests {
             .await
             .unwrap();
         UserSettingsRepository::new(db.clone())
-            .upsert_models(&user.id, &["openai/gpt-4.1-mini".to_string()])
+            .upsert_lanes(
+                &user.id,
+                &djinn_core::models::ModelLanes::from_flat(vec!["openai/gpt-4.1-mini".to_string()]),
+            )
             .await
             .unwrap();
         credentials
@@ -1310,7 +1315,10 @@ mod tests {
             .await
             .unwrap();
         UserSettingsRepository::new(db.clone())
-            .upsert_models(&user.id, &["openai/gpt-4.1-mini".to_string()])
+            .upsert_lanes(
+                &user.id,
+                &djinn_core::models::ModelLanes::from_flat(vec!["openai/gpt-4.1-mini".to_string()]),
+            )
             .await
             .unwrap();
         credentials
@@ -1425,7 +1433,10 @@ mod tests {
             .await
             .unwrap();
         UserSettingsRepository::new(db.clone())
-            .upsert_models(&user.id, &["openai/gpt-4.1-mini".to_string()])
+            .upsert_lanes(
+                &user.id,
+                &djinn_core::models::ModelLanes::from_flat(vec!["openai/gpt-4.1-mini".to_string()]),
+            )
             .await
             .unwrap();
         credentials
