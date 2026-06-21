@@ -93,7 +93,7 @@ pub use repositories::{
     },
     proposal::{
         ProposalCreateInput, ProposalFeedbackCreateInput, ProposalListQuery, ProposalListResult,
-        ProposalRepository, ProposalUpdateInput,
+        ProposalMemoryRef, ProposalRepository, ProposalUpdateInput,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     service::{ServicePreset, ServicePresetRepository},
