@@ -860,6 +860,7 @@ async fn housekeeping_repair_broken_wikilinks_skips_ambiguous_matches() {
             limit: 3,
             semantic_scores: None,
             edge_kinds: None,
+            entity_types: None,
         })
         .await
         .unwrap();

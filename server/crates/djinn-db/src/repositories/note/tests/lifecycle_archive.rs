@@ -386,6 +386,7 @@ async fn archive_sweep_archived_notes_are_hidden_from_retrieval_but_listable_by_
             limit: 20,
             semantic_scores: None,
             edge_kinds: None,
+            entity_types: None,
         })
         .await
         .unwrap();

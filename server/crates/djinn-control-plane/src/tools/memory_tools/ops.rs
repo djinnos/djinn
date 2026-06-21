@@ -193,6 +193,7 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
                 limit: 1,
                 semantic_scores: None,
                 edge_kinds: None,
+                entity_types: None,
             })
             .await
         {
@@ -283,6 +284,7 @@ pub async fn memory_search(
             limit,
             semantic_scores,
             edge_kinds: p.edge_kinds.as_deref(),
+            entity_types: None,
         })
         .await
     {
