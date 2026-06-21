@@ -49,6 +49,7 @@ const JIT_PITFALL_OUTCOMES: [&str; 7] = [
 const STALE_PR_REAPED_TOTAL: &str = "djinn_stale_pr_reaped_total";
 const STALE_BRANCH_REAPED_TOTAL: &str = "djinn_stale_branch_reaped_total";
 const STALE_PR_SKIPPED_TOTAL: &str = "djinn_stale_pr_skipped_total";
+const ORPHAN_WORKER_SESSIONS_REAPED_TOTAL: &str = "djinn_orphan_worker_sessions_reaped_total";
 
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
@@ -239,6 +240,15 @@ pub mod stale_sweep {
     /// Increment the stale-PR skipped counter with a reason label.
     pub fn increment_pr_skipped(reason: &'static str) {
         metrics::counter!(super::STALE_PR_SKIPPED_TOTAL, "reason" => reason).increment(1);
+    }
+
+    /// Increment the orphan-worker-session reaped counter.
+    ///
+    /// An orphan worker session is a session whose `status` is `running` but
+    /// whose backing task has been closed (or deleted). The periodic sweep
+    /// detects and interrupts these sessions.
+    pub fn increment_orphan_session_reaped() {
+        metrics::counter!(super::ORPHAN_WORKER_SESSIONS_REAPED_TOTAL).increment(1);
     }
 }
 
