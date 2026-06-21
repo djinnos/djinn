@@ -175,6 +175,13 @@ describe("codeGraphStore", () => {
       expect(useCodeGraphStore.getState().focusAnchorId).toBeNull();
     });
 
+    it("stores and clears server impact samples for DOI focus", () => {
+      useCodeGraphStore.getState().setDoiImpact(["a", "b", "a"]);
+      expect(useCodeGraphStore.getState().doiImpactIds.size).toBe(2);
+      useCodeGraphStore.getState().clearDoiImpact();
+      expect(useCodeGraphStore.getState().doiImpactIds.size).toBe(0);
+    });
+
     it("sets the focus direction", () => {
       useCodeGraphStore.getState().setFocusDirection("dependencies");
       expect(useCodeGraphStore.getState().focusDirection).toBe("dependencies");

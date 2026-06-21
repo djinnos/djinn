@@ -11,10 +11,9 @@
  *
  *   1. Header        — name, kind, file_path:start-end
  *   2. Method meta   — visibility / async / params / return type
- *   3. "Show blast radius" CTA (kicks off `code_graph impact` and
- *      writes the symbol uids back into the highlight store)
- *   4. Incoming bucketed by EdgeCategory
- *   5. Outgoing bucketed by EdgeCategory
+ *   3. Focus status and direction controls for the unified DOI model
+ *   4. Dependencies (outgoing, excluding containment) bucketed by EdgeCategory
+ *   5. Dependents/Impact (incoming, excluding containment) bucketed by EdgeCategory
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -24,7 +23,6 @@ import {
   Cancel01Icon,
   CodeIcon,
   RefreshIcon,
-  Wifi02Icon,
 } from "@hugeicons/core-free-icons";
 
 import {
@@ -37,7 +35,10 @@ import {
   type RelatedSymbol,
   type SymbolContext,
 } from "@/api/codeGraph";
-import { useCodeGraphStore } from "@/stores/codeGraphStore";
+import {
+  useCodeGraphStore,
+  type FocusDirection,
+} from "@/stores/codeGraphStore";
 import { cn } from "@/lib/utils";
 
 interface SymbolDetailPanelProps {
@@ -92,19 +93,20 @@ export function SymbolDetailPanel({
 }: SymbolDetailPanelProps) {
   const selectionId = useCodeGraphStore((s) => s.selectionId);
   const setSelection = useCodeGraphStore((s) => s.setSelection);
-  const setToolHighlight = useCodeGraphStore((s) => s.setToolHighlight);
-  const clearToolHighlight = useCodeGraphStore((s) => s.clearToolHighlight);
-  const setBlastRadiusFrontier = useCodeGraphStore(
-    (s) => s.setBlastRadiusFrontier,
-  );
-  const clearBlastRadiusFrontier = useCodeGraphStore(
-    (s) => s.clearBlastRadiusFrontier,
-  );
+  const focusAnchorId = useCodeGraphStore((s) => s.focusAnchorId);
+  const focusDirection = useCodeGraphStore((s) => s.focusDirection);
+  const setFocusAnchor = useCodeGraphStore((s) => s.setFocusAnchor);
+  const setFocusDirection = useCodeGraphStore((s) => s.setFocusDirection);
+  const setDoiImpact = useCodeGraphStore((s) => s.setDoiImpact);
+  const clearDoiImpact = useCodeGraphStore((s) => s.clearDoiImpact);
 
   const [fetchState, setFetchState] = useState<FetchState>(
     injectedContext ? { status: "ready", context: injectedContext } : { status: "idle" },
   );
-  const [impactBusy, setImpactBusy] = useState(false);
+  const [impactState, setImpactState] = useState<{
+    status: "idle" | "loading" | "ready" | "error";
+    count?: number;
+  }>({ status: "idle" });
 
   // ── Fetch context whenever the selection changes ──────────────────────
   useEffect(() => {
@@ -147,35 +149,62 @@ export function SymbolDetailPanel({
     };
   }, [projectId, selectionId, injectedContext, onFetchError]);
 
+  const activeAnchorId = focusAnchorId ?? selectionId;
+
+  useEffect(() => {
+    if (injectedContext) {
+      clearDoiImpact();
+      setImpactState({ status: "idle" });
+      return;
+    }
+    if (
+      !activeAnchorId ||
+      (focusDirection !== "dependents" && focusDirection !== "both")
+    ) {
+      clearDoiImpact();
+      setImpactState({ status: "idle" });
+      return;
+    }
+
+    let cancelled = false;
+    setImpactState({ status: "loading" });
+    (async () => {
+      try {
+        const raw = await fetchImpact(projectId, activeAnchorId, {
+          direction: "dependents",
+          group_by: "file",
+        });
+        const groups = parseFileGroups(raw);
+        const ids = new Set<string>([activeAnchorId]);
+        for (const group of groups) {
+          for (const key of group.sample_keys) ids.add(key);
+        }
+        if (cancelled) return;
+        setDoiImpact(ids);
+        setImpactState({ status: "ready", count: Math.max(0, ids.size - 1) });
+      } catch (err) {
+        if (cancelled) return;
+        clearDoiImpact();
+        setImpactState({ status: "error" });
+        onFetchError?.(err instanceof Error ? err.message : String(err));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeAnchorId,
+    clearDoiImpact,
+    focusDirection,
+    injectedContext,
+    onFetchError,
+    projectId,
+    setDoiImpact,
+  ]);
+
   const handleClose = () => {
     setSelection(null);
-    clearToolHighlight();
-    clearBlastRadiusFrontier();
-  };
-
-  const handleShowBlastRadius = async () => {
-    if (!selectionId || impactBusy) return;
-    setImpactBusy(true);
-    try {
-      // Default depth is fine for the visual highlight; the chat tool
-      // can still call `impact max_depth=N` for a fuller view.
-      const raw = await fetchImpact(projectId, selectionId, {
-        group_by: "file",
-      });
-      const groups = parseFileGroups(raw);
-      // Collect every sample symbol uid — enough to light up the
-      // affected clusters without overwhelming the canvas. The
-      // server already truncates per-file samples for us.
-      const ids = new Set<string>();
-      for (const g of groups) for (const k of g.sample_keys) ids.add(k);
-      setToolHighlight(ids);
-      setBlastRadiusFrontier(ids);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onFetchError?.(msg);
-    } finally {
-      setImpactBusy(false);
-    }
   };
 
   if (!selectionId) {
@@ -203,8 +232,12 @@ export function SymbolDetailPanel({
       <div className="min-h-0 flex-1 overflow-y-auto">
         <PanelBody
           state={fetchState}
-          onShowBlastRadius={handleShowBlastRadius}
-          impactBusy={impactBusy}
+          selectionId={selectionId}
+          focusAnchorId={focusAnchorId}
+          focusDirection={focusDirection}
+          impactState={impactState}
+          onSetFocusAnchor={setFocusAnchor}
+          onSetFocusDirection={setFocusDirection}
         />
       </div>
     </aside>
@@ -213,11 +246,26 @@ export function SymbolDetailPanel({
 
 interface PanelBodyProps {
   state: FetchState;
-  onShowBlastRadius: () => void;
-  impactBusy: boolean;
+  selectionId: string;
+  focusAnchorId: string | null;
+  focusDirection: FocusDirection;
+  impactState: {
+    status: "idle" | "loading" | "ready" | "error";
+    count?: number;
+  };
+  onSetFocusAnchor: (id: string | null) => void;
+  onSetFocusDirection: (direction: FocusDirection) => void;
 }
 
-function PanelBody({ state, onShowBlastRadius, impactBusy }: PanelBodyProps) {
+function PanelBody({
+  state,
+  selectionId,
+  focusAnchorId,
+  focusDirection,
+  impactState,
+  onSetFocusAnchor,
+  onSetFocusDirection,
+}: PanelBodyProps) {
   if (state.status === "loading") {
     return (
       <div className="flex flex-col items-center justify-center gap-3 px-4 py-12 text-sm text-muted-foreground">
@@ -255,23 +303,124 @@ function PanelBody({ state, onShowBlastRadius, impactBusy }: PanelBodyProps) {
         endLine={symbol.end_line}
       />
       {symbol.method_metadata && <MethodMetaBlock meta={symbol.method_metadata} />}
-      <button
-        type="button"
-        onClick={onShowBlastRadius}
-        disabled={impactBusy}
-        className={cn(
-          "flex w-full items-center justify-center gap-2 rounded-md border border-border/60 bg-background px-3 py-2 text-xs font-medium transition-colors",
-          "hover:bg-accent/50 disabled:opacity-50",
-        )}
-      >
-        <HugeiconsIcon icon={Wifi02Icon} className="h-4 w-4" />
-        {impactBusy ? "Computing blast radius…" : "Show blast radius"}
-      </button>
-      <RelatedSection title="Incoming" buckets={incoming} />
-      <RelatedSection title="Outgoing" buckets={outgoing} />
+      <FocusStatus
+        selectionId={selectionId}
+        focusAnchorId={focusAnchorId}
+        direction={focusDirection}
+        impactState={impactState}
+        onSetFocusAnchor={onSetFocusAnchor}
+        onSetFocusDirection={onSetFocusDirection}
+      />
+      <RelatedSection
+        title="Dependents/Impact"
+        buckets={withoutContainment(incoming)}
+      />
+      <RelatedSection title="Dependencies" buckets={withoutContainment(outgoing)} />
     </div>
   );
 }
+
+function withoutContainment(
+  buckets: Partial<Record<EdgeCategory, RelatedSymbol[]>>,
+): Partial<Record<EdgeCategory, RelatedSymbol[]>> {
+  const filtered = { ...buckets };
+  delete filtered.contains;
+  return filtered;
+}
+
+interface FocusStatusProps {
+  selectionId: string;
+  focusAnchorId: string | null;
+  direction: FocusDirection;
+  impactState: {
+    status: "idle" | "loading" | "ready" | "error";
+    count?: number;
+  };
+  onSetFocusAnchor: (id: string | null) => void;
+  onSetFocusDirection: (direction: FocusDirection) => void;
+}
+
+function FocusStatus({
+  selectionId,
+  focusAnchorId,
+  direction,
+  impactState,
+  onSetFocusAnchor,
+  onSetFocusDirection,
+}: FocusStatusProps) {
+  const anchoredHere = focusAnchorId === selectionId;
+  const activeAnchor = focusAnchorId ?? selectionId;
+  const impactText = (() => {
+    if (direction === "dependencies") return "Using local dependency edges.";
+    if (impactState.status === "loading") return "Loading impact samples…";
+    if (impactState.status === "error") return "Impact samples unavailable.";
+    if (impactState.status === "ready") {
+      return `${impactState.count ?? 0} sampled dependent${impactState.count === 1 ? "" : "s"} merged into DOI focus.`;
+    }
+    return "Impact samples load when Dependents/Impact is active.";
+  })();
+
+  return (
+    <section className="space-y-2 rounded-md border border-border/40 bg-muted/20 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+            DOI focus
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Anchor: {focusAnchorId ? "pinned" : "selected symbol"} · {impactText}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => onSetFocusAnchor(anchoredHere ? null : selectionId)}
+          className="rounded-md border border-border/60 px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
+        >
+          {anchoredHere ? "Unpin" : focusAnchorId ? "Pin here" : "Pin focus"}
+        </button>
+      </div>
+      <div className="flex rounded-md border border-border/60 bg-background/60 p-0.5">
+        {FOCUS_DIRECTION_OPTIONS.map(({ id, label, title }) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => onSetFocusDirection(id)}
+            title={title}
+            className={cn(
+              "flex-1 rounded px-2 py-1 text-[11px] font-medium transition-colors",
+              direction === id
+                ? "bg-accent text-accent-foreground"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <p className="text-[10px] text-muted-foreground/70">
+        Active anchor: {truncatePathLeft(activeAnchor, 42)}
+      </p>
+    </section>
+  );
+}
+
+const FOCUS_DIRECTION_OPTIONS: Array<{
+  id: FocusDirection;
+  label: string;
+  title: string;
+}> = [
+  {
+    id: "dependencies",
+    label: "Dependencies",
+    title: "Downstream: what this symbol uses",
+  },
+  {
+    id: "dependents",
+    label: "Dependents/Impact",
+    title: "Upstream: what uses this symbol",
+  },
+  { id: "both", label: "Both", title: "Show both dependency directions" },
+];
 
 interface SymbolHeaderProps {
   name: string;

@@ -8,12 +8,12 @@
  *   - `cycles minSize=N`             → highlight every member of every cycle
  *   - `ranked sort_by=… limit=K`     → highlight the top-K ranked nodes
  *   - `path from=A to=B`             → highlight every hop along the path
- *   - `impact target=S max_depth=N`  → open ImpactFlowModal + highlight set
+ *   - `impact target=S max_depth=N`  → open ImpactFlowModal + DOI focus set
  *
- * All four flow through the existing typed wrappers in `@/api/codeGraph`,
- * pipe their result into `setToolHighlight` from the `codeGraphStore`, and
- * (for impact) reuse PR D4's `ImpactFlowModal`. No new backend ops; this is
- * purely a UX composition.
+ * All four flow through the existing typed wrappers in `@/api/codeGraph`.
+ * Graph queries pipe into `setToolHighlight`; impact feeds the unified DOI
+ * focus model and reuses PR D4's `ImpactFlowModal`. No new backend ops; this
+ * is purely a UX composition.
  *
  * Sibling — not replacement — of `QueryPalette` (D3). The palette is fuzzy
  * symbol search; the FAB is structured-graph-op dispatch.
@@ -139,6 +139,10 @@ export function QueryFAB({
   const clearBlastRadiusFrontier = useCodeGraphStore(
     (s) => s.clearBlastRadiusFrontier,
   );
+  const setDoiImpact = useCodeGraphStore((s) => s.setDoiImpact);
+  const clearDoiImpact = useCodeGraphStore((s) => s.clearDoiImpact);
+  const setFocusAnchor = useCodeGraphStore((s) => s.setFocusAnchor);
+  const setFocusDirection = useCodeGraphStore((s) => s.setFocusDirection);
 
   const updateForm = useCallback(
     <K extends keyof FormState>(key: K, value: FormState[K]) => {
@@ -299,15 +303,11 @@ export function QueryFAB({
       }
       const maxDepth = parseIntOr(form.maxDepth, 3);
       const raw = await fetchImpact(projectId, target, {
-        // `fetchImpact` only types `limit | group_by | min_confidence`, so
-        // we slip max_depth via the generic `callCodeGraph` shape — but
-        // since `fetchImpact` is a Pick<>, we instead piggyback on the
-        // server-side default and keep maxDepth advisory in the message.
+        direction: "dependents",
       });
       const detailed = parseImpactDetailed(raw);
       if (!detailed) {
-        setToolHighlight(new Set());
-        clearBlastRadiusFrontier();
+        clearDoiImpact();
         setStatus({
           kind: "ok",
           action: "impact",
@@ -317,8 +317,11 @@ export function QueryFAB({
       }
       const ids = new Set<string>([detailed.key]);
       for (const e of detailed.entries) ids.add(e.key);
-      setToolHighlight(ids);
-      setBlastRadiusFrontier(ids);
+      clearToolHighlight();
+      clearBlastRadiusFrontier();
+      setFocusAnchor(detailed.key);
+      setFocusDirection("dependents");
+      setDoiImpact(ids);
 
       const modalPayload: ImpactDetailedResult = {
         key: detailed.key,
@@ -345,9 +348,12 @@ export function QueryFAB({
     form.maxDepth,
     form.target,
     projectId,
-    setToolHighlight,
-    setBlastRadiusFrontier,
+    clearDoiImpact,
+    clearToolHighlight,
     clearBlastRadiusFrontier,
+    setDoiImpact,
+    setFocusAnchor,
+    setFocusDirection,
   ]);
 
   const runActive = useCallback(() => {
