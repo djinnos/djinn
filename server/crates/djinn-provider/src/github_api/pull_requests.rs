@@ -145,6 +145,49 @@ impl GitHubApiClient {
         })
     }
 
+    /// List open pull requests whose base branch matches `base`.
+    pub async fn list_pulls_by_base(
+        &self,
+        owner: &str,
+        repo: &str,
+        base: &str,
+    ) -> Result<Vec<PullRequest>> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls?state=open&base={}",
+            self.base_url, owner, repo, base
+        );
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("list_pulls_by_base failed ({}): {}", status, body));
+        }
+        Ok(resp.json().await.map_err(|e| {
+            GitHubApiError::transport(
+                "list_pulls_by_base",
+                format!("/repos/{owner}/{repo}/pulls"),
+                e.to_string(),
+            )
+        })?)
+    }
+
     /// List pull requests whose head branch matches `head`, filtering by state.
     pub async fn list_pulls_by_head_with_state(
         &self,
@@ -190,6 +233,110 @@ impl GitHubApiClient {
                 format!("/repos/{owner}/{repo}/pulls"),
                 e.to_string(),
             )
+        })?)
+    }
+
+    /// Close an open pull request by setting its state to `"closed"`.
+    ///
+    /// Inverse of [`Self::reopen_pull_request`]. Used by the periodic
+    /// reconciliation sweep and the inline cleanup hook to close stale PRs
+    /// whose backing task has been closed or superseded.
+    pub async fn close_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) -> Result<PullRequest> {
+        let path = format!("/repos/{owner}/{repo}/pulls/{pull_number}");
+        let url = format!("{}{}", self.base_url, path);
+        let body = serde_json::json!({ "state": "closed" });
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let body = body.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .patch(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(github_pr_write_error(
+                "PATCH",
+                &path,
+                Some(status),
+                &body,
+                "close_pull_request",
+            )
+            .into());
+        }
+        Ok(resp.json().await.map_err(|e| {
+            GitHubApiError::transport("close_pull_request", path.clone(), e.to_string())
+        })?)
+    }
+
+    /// Create a comment on a pull request via the Issues API.
+    ///
+    /// GitHub treats PR comments as issue comments; the endpoint is
+    /// `POST /repos/{owner}/{repo}/issues/{pull_number}/comments`.
+    /// Used to leave an audit-trail comment when a PR is closed by the
+    /// reconciliation sweep or inline cleanup hook.
+    pub async fn create_pr_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+        body: &str,
+    ) -> Result<serde_json::Value> {
+        let path = format!("/repos/{owner}/{repo}/issues/{pull_number}/comments");
+        let url = format!("{}{}", self.base_url, path);
+        let request_body = serde_json::json!({ "body": body });
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let request_body = request_body.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .post(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .json(&request_body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let response_body = resp.text().await.unwrap_or_default();
+            return Err(github_pr_write_error(
+                "POST",
+                &path,
+                Some(status),
+                &response_body,
+                "create_pr_comment",
+            )
+            .into());
+        }
+        Ok(resp.json().await.map_err(|e| {
+            GitHubApiError::transport("create_pr_comment", path.clone(), e.to_string())
         })?)
     }
 
