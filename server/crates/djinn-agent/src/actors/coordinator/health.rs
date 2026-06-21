@@ -32,6 +32,13 @@ const CARGO_TARGET_RUNS_ROOT: &str = djinn_supervisor::CARGO_TARGET_RUNS_ROOT;
 const OUTPUT_STASH_GC_DEFAULT_RETENTION_DAYS: u64 = 30;
 const OUTPUT_STASH_GC_RETENTION_ENV: &str = "DJINN_OUTPUT_STASH_GC_RETENTION_DAYS";
 
+/// Minimum elapsed time (in seconds) after a task is closed before a still-
+/// `running` session on that task is considered an orphan. The grace period
+/// avoids racing with inline session teardown that fires during the task-close
+/// transition. Five minutes comfortably exceeds the normal close → interrupt
+/// round-trip.
+const ORPHAN_SESSION_GRACE_SECS: i64 = 5 * 60;
+
 // ─── Stale-resource sweep ────────────────────────────────────────────────────
 
 pub(super) async fn sweep_stale_resources(
@@ -40,6 +47,7 @@ pub(super) async fn sweep_stale_resources(
 ) {
     reap_stale_task_runs(db).await;
     reap_orphaned_taskrun_jobs(db, app_state, "periodic").await;
+    sweep_orphan_worker_sessions(db).await;
     sweep_orphaned_cargo_target_run_dirs(db, app_state.cargo_target_runs_root.as_deref()).await;
     sweep_durable_output_stash(db).await;
     sweep_cargo_health().await;
@@ -530,6 +538,168 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Ag
         dry_run = stats.dry_run,
         "CoordinatorActor: stale PR/branch reconciliation sweep completed"
     );
+}
+
+// ─── Orphan worker-session detection ─────────────────────────────────────────
+
+/// Detect worker sessions that are still `running` but whose backing task has
+/// been closed (or deleted) and interrupt them. This acts as a lightweight
+/// detection and logging backstop — it does NOT duplicate the full
+/// zombie-session reaper logic. The zombie reaper in
+/// [`session_recovery::reap_zombie_sessions`] handles the general stall case;
+/// this sweep catches the specific scenario where a task was closed but the
+/// session was never interrupted by the inline close path.
+///
+/// Called from [`sweep_stale_resources`] on every periodic tick after the
+/// stale-task-run reaping.
+async fn sweep_orphan_worker_sessions(db: &djinn_db::Database) {
+    // (session_id, task_id, started_at, task_status, task_closed_at)
+    #[allow(clippy::type_complexity)]
+    type OrphanSessionRow = (
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+
+    // Find running sessions whose backing task is closed (or missing).
+    //
+    // We use a LEFT JOIN so that sessions whose task_id no longer exists in
+    // the `tasks` table are also detected. The grace-period filter is applied
+    // at the Rust level (not SQL) so we can reuse `parse_iso_elapsed` with
+    // the same ISO-8601 parsing the rest of the codebase uses.
+    let rows: Vec<OrphanSessionRow> = match sqlx::query_as(
+        r#"SELECT
+                 s.id          AS "id!",
+                 s.task_id     AS "task_id?",
+                 s.started_at  AS "started_at!",
+                 t.status      AS "task_status?",
+                 t.closed_at   AS "task_closed_at?"
+               FROM sessions s
+               LEFT JOIN tasks t ON t.id = s.task_id
+               WHERE s.status = 'running'
+                 AND s.task_id IS NOT NULL
+                 AND (t.id IS NULL
+                      OR t.status IN ('closed', 'force_closed',
+                                      'parked_permanently', 'parked_for_review'))"#,
+    )
+    .fetch_all(db.pool())
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "CoordinatorActor: orphan worker-session sweep query failed"
+            );
+            return;
+        }
+    };
+
+    if rows.is_empty() {
+        return;
+    }
+
+    let now = time::OffsetDateTime::now_utc();
+    let mut reaped = 0usize;
+
+    for (session_id, task_id, started_at, task_status, task_closed_at) in &rows {
+        // Grace-period check: only reap sessions that have been running past
+        // the task's close timestamp by at least ORPHAN_SESSION_GRACE_SECS.
+        // This avoids racing with inline session teardown that fires during
+        // the task-close transition.
+        if let Some(closed_at) = task_closed_at {
+            if let Some(elapsed_since_close) = parse_iso_elapsed_with(closed_at, now) {
+                if elapsed_since_close < ORPHAN_SESSION_GRACE_SECS as u64 {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        task_id = ?task_id,
+                        closed_at = %closed_at,
+                        elapsed_since_task_close = elapsed_since_close,
+                        "CoordinatorActor: skipping orphan session within grace period"
+                    );
+                    continue;
+                }
+            } else {
+                // Couldn't parse closed_at — skip rather than act on bad data.
+                continue;
+            }
+        }
+
+        let elapsed_since_task_close = task_closed_at
+            .as_deref()
+            .and_then(|ts| parse_iso_elapsed_with(ts, now));
+
+        tracing::warn!(
+            session_id = %session_id,
+            task_id = ?task_id,
+            started_at = %started_at,
+            task_status = ?task_status,
+            elapsed_since_task_close = ?elapsed_since_task_close,
+            "CoordinatorActor: orphan worker session detected (task closed/missing)"
+        );
+
+        // Interrupt the session via direct SQL. We don't go through the
+        // full SessionRepository::update path because we don't have an
+        // EventBus reference here and the token counts are unknown (the
+        // session was never properly finalized).
+        let result = sqlx::query(
+            r#"UPDATE sessions
+               SET status = 'interrupted',
+                   ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE id = $1 AND status = 'running'"#,
+        )
+        .bind(session_id.as_str())
+        .execute(db.pool())
+        .await;
+
+        match result {
+            Ok(res) if res.rows_affected() > 0 => {
+                reaped += 1;
+                djinn_telemetry::stale_sweep::increment_orphan_session_reaped();
+                tracing::info!(
+                    session_id = %session_id,
+                    task_id = ?task_id,
+                    "CoordinatorActor: interrupted orphan worker session"
+                );
+            }
+            Ok(_) => {
+                // Session was already interrupted or completed between our
+                // SELECT and UPDATE — benign race, nothing to do.
+                tracing::debug!(
+                    session_id = %session_id,
+                    "CoordinatorActor: orphan session already finalized; skip"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    task_id = ?task_id,
+                    error = %e,
+                    "CoordinatorActor: failed to interrupt orphan worker session"
+                );
+            }
+        }
+    }
+
+    if reaped > 0 {
+        tracing::warn!(
+            reaped = reaped,
+            scanned = rows.len(),
+            "CoordinatorActor: orphan worker-session sweep completed"
+        );
+    }
+}
+
+/// Parse an ISO-8601 timestamp and return seconds elapsed since it, relative
+/// to a pre-computed `now` timestamp. Returns `None` if the input cannot be
+/// parsed.
+fn parse_iso_elapsed_with(ts: &str, now: time::OffsetDateTime) -> Option<u64> {
+    use time::format_description::well_known::Iso8601;
+    let parsed = time::OffsetDateTime::parse(ts, &Iso8601::DEFAULT).ok()?;
+    let elapsed = (now - parsed).whole_seconds();
+    Some(if elapsed < 0 { 0 } else { elapsed as u64 })
 }
 
 // ─── Durable output-stash GC ────────────────────────────────────────────────
