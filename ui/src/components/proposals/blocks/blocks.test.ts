@@ -25,6 +25,7 @@ export const CANONICAL_V1_TAGS = [
   "ApiEndpoint",
   "Decisions",
   "FileTree",
+  "Diff",
   "QuestionForm",
 ] as const;
 
@@ -40,7 +41,7 @@ const CANONICAL_MDX = (await import("./__fixtures__/canonicalProposal.mdx?raw"))
 // ------------------------------------------------------------------------------
 
 describe("canonical tag set parity", () => {
-  it("PROPOSAL_BLOCK_REGISTRY contains exactly the eight canonical v1 tags", () => {
+  it("PROPOSAL_BLOCK_REGISTRY contains exactly the canonical v1 tags", () => {
     const registryTags = Object.values(PROPOSAL_BLOCK_REGISTRY).map(
       (def) => def.tag,
     );
@@ -74,7 +75,7 @@ describe("canonical tag set parity", () => {
 // ------------------------------------------------------------------------------
 
 describe("canonical proposal.mdx round-trip", () => {
-  it("parses all eight v1 block types from the canonical fixture", () => {
+  it("parses all canonical v1 block types from the canonical fixture", () => {
     const segments = parseMdxBody(CANONICAL_MDX);
     const blockSegments = segments.filter((s) => s.kind === "block");
     const extractedTags = blockSegments.map((s) => s.tag);
@@ -97,7 +98,7 @@ describe("canonical proposal.mdx round-trip", () => {
     }
   });
 
-  it("asserts parsed tag, block id, and registry mapping consistency for all eight v1 types", () => {
+  it("asserts parsed tag, block id, and registry mapping consistency for all v1 types", () => {
     const segments = parseMdxBody(CANONICAL_MDX);
     const blockSegments = segments.filter((s) => s.kind === "block");
 
@@ -170,6 +171,15 @@ describe("canonical proposal.mdx round-trip", () => {
     expect(fileTree!.attributes.root).toBe("src");
     expect(fileTree!.content).toContain("main.rs");
     expect(getProposalBlockDefinitionByTag("FileTree")!.type).toBe("file-tree");
+
+    // Diff
+    const diff = byTag.get("Diff");
+    expect(diff).toBeDefined();
+    expect(diff!.id).toBe("add-fn");
+    expect(diff!.attributes.filename).toBe("src/add.ts");
+    expect(diff!.attributes.lang).toBe("ts");
+    expect(diff!.content).toContain("@@");
+    expect(getProposalBlockDefinitionByTag("Diff")!.type).toBe("diff");
 
     // QuestionForm
     const questionForm = byTag.get("QuestionForm");

@@ -448,7 +448,7 @@ fn main() {}
     }
 
     #[test]
-    fn mdx_body_valid_all_eight_canonical_blocks() {
+    fn mdx_body_valid_all_canonical_blocks() {
         // This is the Rust-side counterpart to the canonical proposal.mdx fixture
         // used by the UI test suite. It proves that backend validation accepts
         // every v1 block type when they appear together in a single MDX body.
@@ -483,6 +483,15 @@ We chose JWT over session cookies.
   src/
     main.rs
 </FileTree>
+
+<Diff id="add-fn" filename="src/add.ts" lang="ts">
+@@ -1,3 +1,4 @@
+ export function add(a: number, b: number) {
+-  return a + b;
++  const sum = a + b;
++  return sum;
+ }
+</Diff>
 
 <QuestionForm id="open-questions" title="Open Questions">
 Should we use Redis or Memcached?

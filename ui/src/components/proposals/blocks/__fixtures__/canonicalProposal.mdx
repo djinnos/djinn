@@ -42,6 +42,15 @@ We chose JWT over session cookies for stateless auth.
   tests/
 </FileTree>
 
+<Diff id="add-fn" filename="src/add.ts" lang="ts">
+@@ -1,3 +1,4 @@
+ export function add(a: number, b: number) {
+-  return a + b;
++  const sum = a + b;
++  return sum;
+ }
+</Diff>
+
 <QuestionForm id="open-questions" title="Open Questions">
 Should we use Redis or Memcached for caching?
 </QuestionForm>

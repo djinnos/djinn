@@ -123,6 +123,14 @@ export const PROPOSAL_BLOCK_REGISTRY = {
       },
     },
   },
+  diff: {
+    type: "diff",
+    tag: "Diff",
+    fields: {
+      filename: { type: "string" },
+      lang: { type: "string" },
+    },
+  },
   "question-form": {
     type: "question-form",
     tag: "QuestionForm",

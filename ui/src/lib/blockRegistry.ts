@@ -7,6 +7,7 @@ import {
   DataModelBlock,
   DecisionsBlock,
   Diagram,
+  DiffBlock,
   FileTreeBlock,
   QuestionFormBlock,
   RichText,
@@ -32,6 +33,7 @@ const BLOCK_COMPONENTS: Record<ProposalBlockType, ComponentType<BlockProps>> = {
   "api-endpoint": ApiEndpointBlock,
   decisions: DecisionsBlock,
   "file-tree": FileTreeBlock,
+  diff: DiffBlock,
   "question-form": QuestionFormBlock,
 };
 
@@ -43,6 +45,7 @@ const BLOCK_DISPLAY_NAMES: Record<ProposalBlockType, string> = {
   "api-endpoint": "API Endpoint",
   decisions: "Decisions",
   "file-tree": "File Tree",
+  diff: "Diff",
   "question-form": "Open Questions",
 };
 

@@ -7,6 +7,7 @@ export { QuestionFormBlock } from "./QuestionFormBlock";
 export { RichText } from "./RichText";
 export { Diagram } from "./Diagram";
 export { AnnotatedCode } from "./AnnotatedCode";
+export { DiffBlock } from "./DiffBlock";
 export { BlockRenderer } from "./BlockRenderer";
 export type { BlockRendererProps } from "./BlockRenderer";
 export { parseMdxBody, isPascalCaseTag, extractBlockTags } from "./parseMdxBody";
