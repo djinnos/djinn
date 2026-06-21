@@ -22,6 +22,7 @@ pub enum BlockType {
     ApiEndpoint,
     Decisions,
     FileTree,
+    Diff,
     QuestionForm,
 }
 
@@ -36,6 +37,7 @@ impl BlockType {
             BlockType::ApiEndpoint => "api-endpoint",
             BlockType::Decisions => "decisions",
             BlockType::FileTree => "file-tree",
+            BlockType::Diff => "diff",
             BlockType::QuestionForm => "question-form",
         }
     }
@@ -50,6 +52,7 @@ impl BlockType {
             BlockType::ApiEndpoint => "ApiEndpoint",
             BlockType::Decisions => "Decisions",
             BlockType::FileTree => "FileTree",
+            BlockType::Diff => "Diff",
             BlockType::QuestionForm => "QuestionForm",
         }
     }
@@ -144,6 +147,10 @@ pub struct ProposalBlockDefinition {
     pub block_type: &'static str,
     /// MDX component tag, e.g. `AnnotatedCode`.
     pub tag: &'static str,
+    /// Optional authoring guidance for the LLM: how to encode this block's
+    /// children/attributes. Absent for blocks whose shape is self-evident.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<&'static str>,
     /// Field schema keyed by field name.
     pub fields: BTreeMap<&'static str, ProposalBlockFieldSchema>,
 }
@@ -237,6 +244,21 @@ fn block(
     ProposalBlockDefinition {
         block_type,
         tag,
+        description: None,
+        fields,
+    }
+}
+
+fn block_with_description(
+    block_type: &'static str,
+    tag: &'static str,
+    description: &'static str,
+    fields: BTreeMap<&'static str, ProposalBlockFieldSchema>,
+) -> ProposalBlockDefinition {
+    ProposalBlockDefinition {
+        block_type,
+        tag,
+        description: Some(description),
         fields,
     }
 }
@@ -346,6 +368,29 @@ pub static PROPOSAL_BLOCK_REGISTRY: LazyLock<BTreeMap<&'static str, ProposalBloc
                                 ("kind", enum_string_field(vec!["file", "dir"])),
                             ]))),
                         ),
+                    ]),
+                ),
+            ),
+            (
+                "diff",
+                block_with_description(
+                    "diff",
+                    "Diff",
+                    "A before/after code diff. The block CHILDREN are a git-style \
+                     unified diff: optional `diff --git`/`---`/`+++`/`@@ -old,+new @@` \
+                     headers, then body lines each prefixed with `+` (added line), \
+                     `-` (removed line), or a single leading space (unchanged context \
+                     line). Old and new line numbers are reconstructed from the `@@` \
+                     hunk headers. Set the optional `filename` attribute to the file \
+                     path (shown in the header) and the optional `lang` attribute to a \
+                     language hint (e.g. `ts`, `rust`). Example: \
+                     `<Diff id=\"x\" filename=\"src/add.ts\" lang=\"ts\">\\n@@ -1,2 +1,2 @@\\n \
+                     const a = 1;\\n-const b = 2;\\n+const b = 3;\\n</Diff>`. If the \
+                     children are not a valid unified diff the renderer falls back to a \
+                     plain code block, so always emit real `+`/`-`/` ` prefixed lines.",
+                    fields(vec![
+                        ("filename", string_field()),
+                        ("lang", string_field()),
                     ]),
                 ),
             ),
@@ -574,7 +619,7 @@ mod tests {
     #[test]
     fn registry_contains_v1_blocks() {
         let registry = proposal_block_registry();
-        assert_eq!(registry.len(), 8);
+        assert_eq!(registry.len(), 9);
         assert_eq!(registry["rich-text"].tag, "RichText");
         assert_eq!(registry["diagram"].tag, "Diagram");
         assert_eq!(registry["annotated-code"].tag, "AnnotatedCode");
@@ -582,7 +627,15 @@ mod tests {
         assert_eq!(registry["api-endpoint"].tag, "ApiEndpoint");
         assert_eq!(registry["decisions"].tag, "Decisions");
         assert_eq!(registry["file-tree"].tag, "FileTree");
+        assert_eq!(registry["diff"].tag, "Diff");
         assert_eq!(registry["question-form"].tag, "QuestionForm");
+        // The diff block ships authoring guidance for the LLM.
+        assert!(
+            registry["diff"]
+                .description
+                .is_some_and(|d| d.contains("unified diff")),
+            "diff block must advertise unified-diff authoring guidance"
+        );
     }
 
     #[test]
@@ -595,6 +648,7 @@ mod tests {
             BlockType::ApiEndpoint,
             BlockType::Decisions,
             BlockType::FileTree,
+            BlockType::Diff,
             BlockType::QuestionForm,
         ];
         for bt in types {
@@ -606,7 +660,7 @@ mod tests {
     #[test]
     fn block_registry_new_has_all_definitions() {
         let reg = BlockRegistry::new();
-        assert_eq!(reg.definitions().len(), 8);
+        assert_eq!(reg.definitions().len(), 9);
         assert!(reg.definition_for_tag("RichText").is_some());
         assert!(reg.definition_for_tag("UnknownTag").is_none());
         assert!(reg.tags().contains("RichText"));
@@ -626,6 +680,7 @@ mod tests {
             "ApiEndpoint",
             "Decisions",
             "FileTree",
+            "Diff",
             "QuestionForm",
         ]
         .into_iter()

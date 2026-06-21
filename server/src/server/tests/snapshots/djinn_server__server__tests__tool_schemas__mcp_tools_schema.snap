@@ -11360,6 +11360,11 @@ expression: signatures
       "$defs": {
         "ProposalBlockDefinition": {
           "properties": {
+            "description": {
+              "description": "Optional authoring guidance for the LLM: how to encode this block's\nchildren/attributes. Absent for blocks whose shape is self-evident.",
+              "nullable": true,
+              "type": "string"
+            },
             "fields": {
               "additionalProperties": {
                 "$ref": "#/$defs/ProposalBlockFieldSchema"
