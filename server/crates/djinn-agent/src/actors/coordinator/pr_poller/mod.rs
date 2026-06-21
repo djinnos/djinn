@@ -57,6 +57,15 @@ const PR_CI_CYCLE_EVENT: &str = "pr_ci_cycle";
 /// pointless.
 const PR_CI_FAILURE_THRESHOLD: u32 = 3;
 
+/// Maximum consecutive identical CI-failure fingerprints before escalating to
+/// the Planner. Lower than PR_CI_FAILURE_THRESHOLD (3) so content-aware
+/// escalation fires first, giving the Planner a chance to intervene before
+/// the blind cycle-count force-close kicks in.
+const SAME_CI_SIGNATURE_THRESHOLD: u32 = 2;
+
+/// Activity log event type for per-fingerprint tracking markers.
+const SAME_CI_SIGNATURE_EVENT: &str = "same_ci_signature";
+
 /// Minimum minutes a task must have been in `needs_task_review` with a red PR
 /// and an unchanged head SHA before the review-stuck trigger fires. Prevents
 /// escalating a PR that is mid-CI or has a pending check-run.
