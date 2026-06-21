@@ -10,6 +10,12 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/lib/utils";
 
 import { BlockMarkdown, BlockShell } from "./BlockShell";
+import {
+  ACCENT_BADGE,
+  httpMethodColor,
+  paramLocationColor,
+  statusCodeColor,
+} from "./blockBadgeColors";
 import type { BlockProps } from "./types";
 import {
   classifyStatus,
@@ -21,8 +27,6 @@ import {
   type ApiMethod,
   type ApiParam,
   type ApiResponse,
-  type ParamLocation,
-  type StatusClass,
 } from "./apiEndpoint";
 
 /**
@@ -71,7 +75,12 @@ export function ApiEndpointBlock({ attributes, children }: BlockProps) {
         <span className="truncate font-mono text-foreground">{path}</span>
       ) : null}
       {deprecated && (
-        <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+        <span
+          className={cn(
+            "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+            ACCENT_BADGE.amber,
+          )}
+        >
           Deprecated
         </span>
       )}
@@ -158,17 +167,6 @@ export function ApiEndpointBlock({ attributes, children }: BlockProps) {
 
 /* ── Method pill ────────────────────────────────────────────────────────────── */
 
-/** Per-verb pill palette. Dark-only theme. */
-const METHOD_STYLE: Record<ApiMethod, string> = {
-  GET: "bg-emerald-500/15 text-emerald-300",
-  POST: "bg-blue-500/15 text-blue-300",
-  PUT: "bg-amber-500/15 text-amber-300",
-  PATCH: "bg-violet-500/15 text-violet-300",
-  DELETE: "bg-red-500/15 text-red-300",
-  HEAD: "bg-slate-500/15 text-slate-300",
-  OPTIONS: "bg-slate-500/15 text-slate-300",
-};
-
 function MethodPill({
   method,
   raw,
@@ -182,7 +180,7 @@ function MethodPill({
     <span
       className={cn(
         "shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] font-bold tracking-wide",
-        method ? METHOD_STYLE[method] : "bg-slate-500/15 text-slate-300",
+        httpMethodColor(method),
       )}
     >
       {label}
@@ -191,14 +189,6 @@ function MethodPill({
 }
 
 /* ── Parameters section ─────────────────────────────────────────────────────── */
-
-/** IN-location pill palette: path violet / query blue / header amber / body emerald. */
-const LOCATION_STYLE: Record<ParamLocation, string> = {
-  path: "bg-violet-500/15 text-violet-300",
-  query: "bg-blue-500/15 text-blue-300",
-  header: "bg-amber-500/15 text-amber-300",
-  body: "bg-emerald-500/15 text-emerald-300",
-};
 
 function ParamsSection({ params }: { params: ApiParam[] }) {
   return (
@@ -225,7 +215,7 @@ function ParamRow({ param }: { param: ApiParam }) {
         <span
           className={cn(
             "rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none",
-            LOCATION_STYLE[param.in],
+            paramLocationColor(param.in),
           )}
         >
           {param.in}
@@ -237,12 +227,22 @@ function ParamRow({ param }: { param: ApiParam }) {
         </span>
       )}
       {param.required === true && (
-        <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none text-red-300">
+        <span
+          className={cn(
+            "rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none",
+            ACCENT_BADGE.red,
+          )}
+        >
           required
         </span>
       )}
       {param.required === false && (
-        <span className="rounded bg-slate-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none text-slate-300">
+        <span
+          className={cn(
+            "rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none",
+            ACCENT_BADGE.slate,
+          )}
+        >
           optional
         </span>
       )}
@@ -256,14 +256,6 @@ function ParamRow({ param }: { param: ApiParam }) {
 }
 
 /* ── Responses section ──────────────────────────────────────────────────────── */
-
-/** Status-code pill palette: 2xx emerald / 4xx amber / 5xx red / other slate. */
-const STATUS_STYLE: Record<StatusClass, string> = {
-  success: "bg-emerald-500/15 text-emerald-300",
-  info: "bg-slate-500/15 text-slate-300",
-  warn: "bg-amber-500/15 text-amber-300",
-  error: "bg-red-500/15 text-red-300",
-};
 
 function ResponsesSection({ responses }: { responses: ApiResponse[] }) {
   return (
@@ -286,7 +278,7 @@ function ResponseRow({ response }: { response: ApiResponse }) {
         <span
           className={cn(
             "rounded px-1.5 py-0.5 font-mono text-[11px] font-bold leading-none",
-            STATUS_STYLE[cls],
+            statusCodeColor(cls),
           )}
         >
           {response.status}
