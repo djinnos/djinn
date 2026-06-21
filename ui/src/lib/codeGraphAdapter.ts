@@ -302,50 +302,6 @@ export function prettifyLabel(raw: string): string {
 // ── Mass scaling ────────────────────────────────────────────────────────────
 
 /**
- * Bounded visual scale for collapsed community nodes based on their
- * `member_count`. Communities aggregate many symbol-level nodes into one
- * blob, so they should read larger than any individual symbol — but the
- * scale must stay bounded so a 50k-member community doesn't swallow the
- * canvas.
- *
- * Uses `log10(member_count + 1)` mapped into `[COMMUNITY_MIN_SIZE,
- * COMMUNITY_MAX_SIZE]`. The +1 makes a 1-member community sit at the
- * floor, and the log curve keeps a 10k-member community only ~4× the
- * floor rather than 10k× it.
- */
-export const COMMUNITY_MIN_SIZE = 12;
-export const COMMUNITY_MAX_SIZE = 60;
-const LOG10_MAX_MEMBER = Math.log10(10_000 + 1);
-
-export function communityNodeSize(memberCount: number | undefined): number {
-  const count =
-    typeof memberCount === "number" &&
-    Number.isFinite(memberCount) &&
-    memberCount > 0
-      ? memberCount
-      : 1;
-  const t = Math.min(Math.log10(count + 1) / LOG10_MAX_MEMBER, 1);
-  return COMMUNITY_MIN_SIZE + t * (COMMUNITY_MAX_SIZE - COMMUNITY_MIN_SIZE);
-}
-
-/**
- * Bounded FA2 mass for collapsed community nodes. Communities act as
- * heavy gravity wells (heavier than folders) so the collapsed graph
- * spreads apart and the inter-community edges stay legible. Scaled with
- * a bounded log curve so mass stays proportional to the visual size.
- */
-export function communityNodeMass(memberCount: number | undefined): number {
-  const size = communityNodeSize(memberCount);
-  // Map the [12, 60] size band onto a [40, 120] mass band so communities
-  // outweigh folders (15) and project roots (50) without exploding FA2.
-  const min = 40;
-  const max = 120;
-  const t =
-    (size - COMMUNITY_MIN_SIZE) / (COMMUNITY_MAX_SIZE - COMMUNITY_MIN_SIZE);
-  return min + t * (max - min);
-}
-
-/**
  * Heavy structural masses act as gravity wells in FA2 — folders blast
  * apart and pull their files with them, producing the cluster spread
  * GitNexus relies on. Scaled with node count so 12k-node monorepos
@@ -354,9 +310,6 @@ export function communityNodeMass(memberCount: number | undefined): number {
 export function massForNode(node: SnapshotNode, nodeCount: number = 0): number {
   const baseMultiplier = nodeCount > 5000 ? 2 : nodeCount > 1000 ? 1.5 : 1;
 
-  if (node.kind === "community") {
-    return communityNodeMass(node.member_count);
-  }
   if (node.kind === "folder") {
     if (node.symbol_kind === "project" || /project/i.test(node.label)) {
       return 50 * baseMultiplier;
@@ -452,6 +405,103 @@ export function colorForCommunity(communityId: string): string {
   return COMMUNITY_COLORS[fnv1a(communityId) % COMMUNITY_COLORS.length];
 }
 
+// ── Community hull metadata ────────────────────────────────────────────────
+
+/**
+ * Graph-level attribute name under which `buildGraphFromSnapshot` stores the
+ * derived `CommunityHull[]`. The canvas reads this to draw background hull
+ * regions behind member nodes — communities are no longer clickable graph
+ * nodes (see [[n2a1-roadmap]] wave 1 task 2).
+ */
+export const COMMUNITY_HULLS_ATTRIBUTE = "communityHulls";
+
+/**
+ * Deterministic descriptor for a background community hull. Communities are
+ * rendered as non-clickable background regions behind their member nodes,
+ * not as selectable graph nodes.
+ *
+ * - `id` — the stable `community_id` (server sha256-of-members hash) so the
+ *   hull identity survives snapshot re-renders.
+ * - `label` — the server-supplied label from a legacy `kind: "community"`
+ *   snapshot entry, or the id itself when no legacy entry exists.
+ * - `keywords` — topical keywords from a legacy community entry, when present.
+ * - `color` — the same `colorForCommunity` hue used for member symbols so the
+ *   hull background and the member dots read as one cluster.
+ * - `memberCount` — server-reported member count from a legacy community entry
+ *   when present, otherwise the count of visible nodes carrying this
+ *   `community_id`.
+ * - `seed` — deterministic hash of the id, usable by the canvas as a PRNG
+ *   seed for hull bounds / opacity jitter without a separate RNG.
+ */
+export interface CommunityHull {
+  id: string;
+  label: string;
+  keywords: string[] | undefined;
+  color: string;
+  memberCount: number;
+  seed: number;
+}
+
+/**
+ * Derive community hull metadata from a snapshot payload.
+ *
+ * Visible file/folder/symbol nodes with a `community_id` contribute one hull
+ * per distinct community id. Legacy `kind: "community"` snapshot entries
+ * (which the adapter no longer turns into visible nodes) contribute their
+ * label, keywords, and server-reported `member_count` when available so the
+ * hull carries richer information than the member count alone.
+ *
+ * The hull color is always {@link colorForCommunity} so member symbols and the
+ * hull background share the same hue.
+ */
+export function deriveCommunityHulls(
+  snapshot: SnapshotPayload,
+): CommunityHull[] {
+  const visibleMembers = new Map<
+    string,
+    { ids: Set<string>; legacy?: SnapshotNode }
+  >();
+
+  for (const node of snapshot.nodes) {
+    if (node.kind === "community") {
+      // Legacy community node: fold its metadata into the hull for this id.
+      const cid = node.community_id ?? node.id;
+      const entry = visibleMembers.get(cid);
+      if (entry) {
+        // Prefer the first legacy entry encountered; do not overwrite.
+        if (!entry.legacy) entry.legacy = node;
+      } else {
+        visibleMembers.set(cid, { ids: new Set(), legacy: node });
+      }
+      continue;
+    }
+    if (!node.community_id) continue;
+    const cid = node.community_id;
+    const entry = visibleMembers.get(cid);
+    if (entry) {
+      entry.ids.add(node.id);
+    } else {
+      visibleMembers.set(cid, { ids: new Set(node.id) });
+    }
+  }
+
+  const hulls: CommunityHull[] = [];
+  for (const [cid, entry] of visibleMembers) {
+    const legacy = entry.legacy;
+    hulls.push({
+      id: cid,
+      label: legacy?.label ?? cid,
+      keywords: legacy ? normalizeKeywords(legacy.keywords) : undefined,
+      color: colorForCommunity(cid),
+      memberCount: legacy?.member_count ?? entry.ids.size,
+      seed: fnv1a(cid),
+    });
+  }
+
+  hulls.sort((a, b) => a.id.localeCompare(b.id, "en"));
+  return hulls;
+}
+
 export function colorForWorkspace(workspace: string): string {
   return WORKSPACE_COLORS[fnv1a(workspace) % WORKSPACE_COLORS.length];
 }
@@ -509,7 +559,6 @@ export function colorForNode(node: SnapshotNode): string {
   }
   return SYMBOL_FALLBACK;
 }
-
 
 // ── Edge styling ────────────────────────────────────────────────────────────
 
@@ -601,9 +650,18 @@ export function hasPrecomputedCoordinates(snapshot: SnapshotPayload): boolean {
  * Convert a snapshot payload into a graphology `Graph` configured for
  * Sigma + ForceAtlas2.
  *
+ * Communities are no longer added as visible graph nodes. Snapshot entries
+ * with `kind: "community"` are skipped during node creation and their
+ * metadata (label, keywords, member count) is folded into background
+ * {@link CommunityHull} descriptors stored under the
+ * {@link COMMUNITY_HULLS_ATTRIBUTE} graph attribute. Visible symbol/file
+ * nodes that carry a `community_id` also contribute a hull so the canvas can
+ * always draw a background region per community even without a legacy
+ * community snapshot entry.
+ *
  * Layout seeding strategy:
- *  - **Precomputed**: when every node carries a finite `x`/`y` (see
- *    `hasPrecomputedCoordinates`), positions are used verbatim, the
+ *  - **Precomputed**: when every *visible* node carries a finite `x`/`y`
+ *    (see `hasPrecomputedCoordinates`), positions are used verbatim, the
  *    golden-angle / cluster / BFS seed path is skipped, and the graph is
  *    flagged with `precomputedLayout: true` so `useSigmaGraph` can skip
  *    the FA2 supervisor. The server computes the layout once during warm
@@ -623,20 +681,43 @@ export function buildGraphFromSnapshot(
   const dropMemberOf = options.dropMemberOf ?? false;
   const graph = new Graph({ multi: true, type: "directed" });
 
-  const nodes = snapshot.nodes;
+  // Communities are background hull metadata, not visible graph nodes.
+  // Legacy `kind: "community"` entries are filtered out of the node set
+  // here; their label/keywords/member_count are preserved via hull
+  // derivation below. This keeps the adapter wire-compatible — the
+  // server may still ship `kind: "community"` entries in old snapshots —
+  // while ensuring no community node ever becomes a clickable Sigma node.
+  const visibleNodes = snapshot.nodes.filter(
+    (n) => n.kind !== "community",
+  );
+
+  // Derive hull metadata from visible members + legacy community entries
+  // and stash it on the graph so the canvas can render background regions.
+  const hulls = deriveCommunityHulls(snapshot);
+  if (hulls.length > 0) {
+    graph.setAttribute(COMMUNITY_HULLS_ATTRIBUTE, hulls);
+  }
+
+  const nodes = visibleNodes;
   const nodeCount = nodes.length;
   const ranks = nodes.map((n) => n.pagerank);
   const maxRank = ranks.length > 0 ? Math.max(...ranks, 0.000_001) : 1;
 
-  // Precomputed branch — when every node ships a finite (x, y), the
-  // server has already done the warm-time layout work and FA2 has
+  // Precomputed branch — when every *visible* node ships a finite (x, y),
+  // the server has already done the warm-time layout work and FA2 has
   // nothing to converge on. Use the coordinates verbatim, mark the
   // graph so `useSigmaGraph` can skip the FA2 supervisor, and exit
   // before the structural / golden-angle / community / random seed
   // branch below. The seed path is intentionally untouched for the
   // fallback case so existing 4xx / 5xx / pre-warm snapshots render
   // exactly as before.
-  if (nodeCount > 0 && hasPrecomputedCoordinates(snapshot)) {
+  //
+  // Only visible (non-community) nodes are checked for coordinates:
+  // legacy community entries have no positions and are invisible anyway.
+  if (
+    nodeCount > 0 &&
+    hasPrecomputedCoordinates({ ...snapshot, nodes: visibleNodes })
+  ) {
     for (const node of nodes) {
       // hasPrecomputedCoordinates proved node.x / node.y are finite
       // numbers, so the non-null assertions are safe at runtime.
@@ -659,7 +740,10 @@ export function buildGraphFromSnapshot(
   // Deterministic layout branch: delegate to the pure layout module.
   // Seed with computeForceLayout so the adapter stays jitter-free;
   // the FA2 supervisor in useSigmaGraph runs on top.
-  const layoutPositions = computeForceLayout(snapshot);
+  const layoutPositions = computeForceLayout({
+    ...snapshot,
+    nodes: visibleNodes,
+  });
   for (const node of nodes) {
     const pos = layoutPositions.get(node.id) ?? { x: 0, y: 0 };
     addNode(graph, node, pos, maxRank, nodeCount);
@@ -731,15 +815,9 @@ function addNode(
     node.workspace && node.workspace_context === true
       ? `${node.label} · ${node.workspace}`
       : node.label;
-  const keywordSubtitle = communityKeywordSubtitle(node);
-  const label = keywordSubtitle
-    ? `${primaryLabel}\n${keywordSubtitle}`
-    : primaryLabel;
   graph.addNode(node.id, {
-    label,
+    label: primaryLabel,
     baseLabel: node.label,
-    subtitle: keywordSubtitle,
-    keywords: keywordSubtitle ? normalizeKeywords(node.keywords) : undefined,
     x: pos.x,
     y: pos.y,
     size,
@@ -750,8 +828,6 @@ function addNode(
     pagerank: node.pagerank,
     filePath: node.file_path,
     communityId: node.community_id,
-    memberCount: node.member_count,
-    internalEdgeCount: node.internal_edge_count,
     workspaceKind: node.workspace_kind,
     workspace: node.workspace,
     workspaceColor,
@@ -773,29 +849,16 @@ function addNode(
   });
 }
 
-function communityKeywordSubtitle(node: SnapshotNode): string | undefined {
-  if (node.kind !== "community") return undefined;
-  return normalizeKeywords(node.keywords)?.join(", ");
-}
-
 /**
  * Visual size with a hierarchy floor: structural nodes stay readable
  * even on huge graphs, symbols shrink toward 2px so they don't drown
  * the canvas. Pagerank then tilts within the per-kind band.
- *
- * Community nodes bypass the per-kind / density / pagerank path: their
- * size is driven purely by the bounded member-count scale
- * (`communityNodeSize`) so a collapsed graph reads as a handful of
- * legible blobs rather than uniformly tiny dots.
  */
 function scaledNodeSize(
   node: SnapshotNode,
   pagerankNormalized: number,
   nodeCount: number,
 ): number {
-  if (node.kind === "community") {
-    return communityNodeSize(node.member_count);
-  }
   const base = baseNodeSize(node);
   const scaled = densityScale(base, nodeCount);
   return scaled + pagerankNormalized * Math.max(scaled * 0.6, 1.5);
@@ -847,7 +910,7 @@ function densityScale(base: number, nodeCount: number): number {
   return base;
 }
 
-// ── Community expand / collapse (semantic zoom) ───────────────────────────
+// ── Double-click helper ───────────────────────────────────────────────────
 
 /**
  * Maximum inter-click interval (ms) for two `clickNode` events to count
@@ -884,169 +947,4 @@ export function isDoubleClick(
   if (!prev) return false;
   if (prev.nodeId !== nodeId) return false;
   return now - prev.at <= interval;
-}
-
-/**
- * Build a snapshot with a community replaced by its member symbol nodes.
- *
- * The caller supplies:
- *   - `communitySnapshot`: the community-level snapshot (collapsed view)
- *     that the canvas is currently rendering.
- *   - `symbolSnapshot`: a symbol-level snapshot for the same project.
- *   - `communityId`: the stable `community_id` of the community to expand.
- *
- * The helper:
- *   1. Removes the community node identified by `communityId`.
- *   2. Adds every symbol node from `symbolSnapshot` whose `community_id`
- *      matches `communityId`.
- *   3. Adds all symbol-level edges whose *both* endpoints are member
- *      nodes of the expanded community (intra-community edges).
- *   4. Preserves aggregated inter-community edges from the community
- *      snapshot for all *other* communities. Edges touching the expanded
- *      community node are dropped (the individual members now carry
- *      those relationships, but exact member↔community edge mapping is
- *      not available without a server community-scope parameter, so this
- *      is the documented best-effort behavior).
- *
- * Edges whose endpoints are no longer present after the splice are
- * dropped, exactly as `buildGraphFromSnapshot` does.
- */
-export function expandCommunityInSnapshot(
-  communitySnapshot: SnapshotPayload,
-  symbolSnapshot: SnapshotPayload,
-  communityId: string,
-): SnapshotPayload {
-  const communityNode = findCommunityNode(communitySnapshot, communityId);
-  const communityNodeId = communityNode ? communityNode.id : communityId;
-
-  const members = symbolSnapshot.nodes.filter(
-    (n) => n.community_id === communityId,
-  );
-  const memberIds = new Set(members.map((n) => n.id));
-
-  const otherCommunities = communitySnapshot.nodes.filter(
-    (n) => n.id !== communityNodeId,
-  );
-
-  // Intra-community edges: both endpoints are members of the expanded community.
-  const memberEdges = symbolSnapshot.edges.filter(
-    (e) => memberIds.has(e.from) && memberIds.has(e.to),
-  );
-
-  // Inter-community edges for the *other* (still-collapsed) communities.
-  // Edges touching the expanded community node are dropped — the individual
-  // members now represent that community, but there's no server mapping
-  // from an aggregated edge back to specific member endpoints.
-  const otherCommunityEdges = communitySnapshot.edges.filter(
-    (e) => e.from !== communityNodeId && e.to !== communityNodeId,
-  );
-
-  const nodes = [...otherCommunities, ...members];
-  const edges = [...otherCommunityEdges, ...memberEdges];
-
-  return {
-    ...communitySnapshot,
-    nodes,
-    edges,
-    total_nodes: nodes.length,
-    total_edges: edges.length,
-  };
-}
-
-/**
- * Build a snapshot with an expanded community collapsed back into its
- * community node. Restores the original community node and the aggregated
- * inter-community edges from the community-level snapshot.
- *
- * The caller supplies:
- *   - `communitySnapshot`: the community-level snapshot (collapsed view).
- *   - `expandedSnapshot`: the currently-rendered snapshot (community view
- *     with one community expanded into members).
- *   - `communityId`: the stable `community_id` of the community to collapse.
- *
- * The helper:
- *   1. Removes every symbol node whose `community_id` matches `communityId`.
- *   2. Re-inserts the original community node from `communitySnapshot`.
- *   3. Restores the aggregated inter-community edges from
- *      `communitySnapshot` (both edges between other communities and
- *      edges touching the restored community node).
- *   4. Drops symbol-level intra-community edges for the collapsed
- *      community (they're now aggregated inside the restored node).
- *
- * Other still-expanded communities in `expandedSnapshot` are preserved
- * so collapsing one community doesn't collapse siblings the user has
- * also expanded.
- */
-export function collapseCommunityInSnapshot(
-  communitySnapshot: SnapshotPayload,
-  expandedSnapshot: SnapshotPayload,
-  communityId: string,
-): SnapshotPayload {
-  const communityNode = findCommunityNode(communitySnapshot, communityId);
-  const nodeId = communityNode ? communityNode.id : communityId;
-
-  // Remove symbol members of the community being collapsed, and the
-  // expanded community node id if it somehow lingers.
-  const remainingNodes = expandedSnapshot.nodes.filter(
-    (n) => n.community_id !== communityId && n.id !== nodeId,
-  );
-
-  // Re-insert the original community node.
-  const nodes = communityNode
-    ? [...remainingNodes, communityNode]
-    : remainingNodes;
-  const nodeIdSet = new Set(nodes.map((n) => n.id));
-
-  // Restore aggregated inter-community edges from the community snapshot
-  // that are valid for the current node set.
-  const restoredEdges = communitySnapshot.edges.filter(
-    (e) => nodeIdSet.has(e.from) && nodeIdSet.has(e.to),
-  );
-
-  // Keep symbol-level edges for *other* still-expanded communities:
-  // drop edges touching any member of the collapsed community.
-  const memberIds = new Set(
-    expandedSnapshot.nodes
-      .filter((n) => n.community_id === communityId)
-      .map((n) => n.id),
-  );
-  const otherExpandedEdges = expandedSnapshot.edges.filter(
-    (e) => !memberIds.has(e.from) && !memberIds.has(e.to),
-  );
-
-  // Merge: restored community edges take precedence; add symbol edges
-  // for other expanded communities that aren't already represented.
-  const seen = new Set(
-    restoredEdges.map((e) => `${e.from}\u0000${e.to}\u0000${e.kind}`),
-  );
-  const edges = [...restoredEdges];
-  for (const e of otherExpandedEdges) {
-    const key = `${e.from}\u0000${e.to}\u0000${e.kind}`;
-    if (seen.has(key)) continue;
-    if (!nodeIdSet.has(e.from) || !nodeIdSet.has(e.to)) continue;
-    seen.add(key);
-    edges.push(e);
-  }
-
-  return {
-    ...communitySnapshot,
-    nodes,
-    edges,
-    total_nodes: nodes.length,
-    total_edges: edges.length,
-  };
-}
-
-/**
- * Find the community node in a community-level snapshot whose stable
- * `community_id` matches `communityId`. Returns the node (or `undefined`
- * when no community node carries that id).
- */
-function findCommunityNode(
-  snapshot: SnapshotPayload,
-  communityId: string,
-): SnapshotNode | undefined {
-  return snapshot.nodes.find(
-    (n) => n.kind === "community" && n.community_id === communityId,
-  );
 }
