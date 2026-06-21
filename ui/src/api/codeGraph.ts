@@ -257,7 +257,7 @@ export function fetchNeighbors(
 export function fetchImpact(
   project: string,
   key: string,
-  args: Pick<CodeGraphArgs, "limit" | "group_by" | "min_confidence"> = {},
+  args: Pick<CodeGraphArgs, "limit" | "group_by" | "min_confidence" | "direction"> = {},
 ) {
   return callCodeGraph(project, "impact", { key, ...args });
 }
