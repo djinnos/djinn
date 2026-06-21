@@ -80,7 +80,7 @@ use cargo_target_seed::{
     teardown_run_dir, warm_base_dir,
 };
 use clap::{Parser, Subcommand};
-use djinn_agent::context::AgentContext;
+use djinn_agent::context::{AgentContext, ReconciliationSweepConfig};
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
@@ -1840,6 +1840,7 @@ fn build_worker_agent_context(
         // retrying past the "project is required when multiple projects
         // are configured" error from helpers::resolve_project_id_for_agent_tools.
         default_project_id: Some(project_id),
+        reconciliation_sweep: ReconciliationSweepConfig::default(),
     }
 }
 
