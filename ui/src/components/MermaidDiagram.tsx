@@ -39,15 +39,27 @@ import { normalizeMermaidSource } from "@/components/proposals/blocks/mermaidNor
 // Initialize Mermaid exactly once at module load. `startOnLoad: false` keeps
 // it from auto-walking the DOM (we control rendering explicitly), and
 // `securityLevel: "strict"` blocks `<script>`/`<iframe>`/click handlers in
-// rendered output. The default `theme` follows our app's light/dark token
-// scheme well enough for now.
+// rendered output.
+//
+// `htmlLabels: false` is load-bearing: by default Mermaid renders flowchart
+// node labels as HTML inside a `<foreignObject>`. We sanitize the rendered SVG
+// with DOMPurify's *SVG* profile (below), which strips `<foreignObject>` and
+// its embedded HTML — leaving visibly empty node boxes. Forcing native SVG
+// `<text>` labels means the label markup survives the SVG-profile sanitize.
+//
+// `theme: "dark"` matches the app's dark-only palette so the diagram doesn't
+// render as a bright card on a dark page.
 let mermaidInitialized = false;
 function initMermaid() {
   if (mermaidInitialized) return;
   mermaid.initialize({
     startOnLoad: false,
     securityLevel: "strict",
-    theme: "default",
+    theme: "dark",
+    // Render labels as native SVG <text>, not <foreignObject> HTML, so the
+    // SVG-profile DOMPurify pass below can't strip them.
+    htmlLabels: false,
+    flowchart: { htmlLabels: false },
     // Defer fontFamily to the page CSS so we don't pull a Mermaid-specific
     // font into our font stack.
     fontFamily: "inherit",
