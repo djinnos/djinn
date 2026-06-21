@@ -302,7 +302,7 @@ pub async fn memory_search(
             limit,
             semantic_scores,
             edge_kinds: p.edge_kinds.as_deref(),
-            entity_types: None,
+            entity_types: p.entity_types.as_deref(),
         })
         .await
     {
@@ -321,6 +321,7 @@ pub async fn memory_search(
                         folder: r.folder,
                         note_type: r.note_type,
                         snippet: r.snippet,
+                        entity: r.entity,
                         score: r.score,
                     })
                     .collect(),
@@ -377,6 +378,7 @@ pub async fn memory_build_context(
                 related_l0: vec![],
                 supersedes: vec![],
                 contradicts: vec![],
+                proposals: vec![],
                 error: Some(error),
             };
         }
@@ -405,6 +407,7 @@ pub async fn memory_build_context(
             related_l0: vec![],
             supersedes: vec![],
             contradicts: vec![],
+            proposals: vec![],
             error: None,
         };
     }
@@ -427,6 +430,7 @@ pub async fn memory_build_context(
             related_l0: response.related_l0,
             supersedes: response.supersedes,
             contradicts: response.contradicts,
+            proposals: response.proposals,
             error: None,
         },
         Err(e) => MemoryBuildContextResponse {
@@ -435,6 +439,7 @@ pub async fn memory_build_context(
             related_l0: vec![],
             supersedes: vec![],
             contradicts: vec![],
+            proposals: vec![],
             error: Some(format!("build_context failed: {e}")),
         },
     }

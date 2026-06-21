@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 510
 expression: signatures
 ---
 [
@@ -6317,6 +6318,46 @@ expression: signatures
           ],
           "type": "object"
         },
+        "ProposalOverview": {
+          "description": "Compact proposal overview for `memory_build_context` responses.\n\n**Progressive disclosure:** this overview ships `title` + `acceptance_criteria`\nso the planner can decide whether to fetch the full body via `proposal_show`.\nThe full proposal body (markdown/MDX) is intentionally excluded from the\noverview to keep prompt context lean — call `proposal_show(short_id)` for\nthe complete spec.",
+          "properties": {
+            "acceptance_criteria": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "body_format": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "score": {
+              "format": "double",
+              "nullable": true,
+              "type": "number"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "body_format",
+            "acceptance_criteria",
+            "status"
+          ],
+          "type": "object"
+        },
         "SupersedesAnnotation": {
           "description": "Annotation that a candidate note is superseded by another note.",
           "properties": {
@@ -6351,6 +6392,13 @@ expression: signatures
         "primary": {
           "items": {
             "$ref": "#/$defs/MemoryNoteView"
+          },
+          "type": "array"
+        },
+        "proposals": {
+          "description": "Proposals reachable from the seed note: same project via `proposal_targets`,\nOR whose graduated epics/tasks have memory_refs that touch the seed's task chain,\nranked by lexical relevance to the seed's title + body.",
+          "items": {
+            "$ref": "#/$defs/ProposalOverview"
           },
           "type": "array"
         },
@@ -8299,6 +8347,14 @@ expression: signatures
           "nullable": true,
           "type": "array"
         },
+        "entity_types": {
+          "description": "Optional entity-type filter for unified search.\n\n* Omit or `None` — return both notes and proposals (default).\n* `[\"note\"]` — notes-only.\n* `[\"proposal\"]` — proposals-only.\n* `[]` (empty) — treated as \"no entities\"; returns empty result.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
         "folder": {
           "nullable": true,
           "type": "string"
@@ -8330,6 +8386,11 @@ expression: signatures
       "$defs": {
         "MemorySearchResultItem": {
           "properties": {
+            "entity": {
+              "default": "note",
+              "description": "`\"note\"` | `\"proposal\"` — discriminates unified search results.",
+              "type": "string"
+            },
             "folder": {
               "type": "string"
             },

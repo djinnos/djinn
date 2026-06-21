@@ -41,6 +41,7 @@ pub(super) async fn call_memory_search(
                 note_type: p.note_type,
                 limit: p.limit,
                 edge_kinds: None,
+                entity_types: None,
             },
             task_id.as_deref(),
         )

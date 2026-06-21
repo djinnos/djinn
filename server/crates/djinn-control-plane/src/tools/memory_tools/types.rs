@@ -80,6 +80,13 @@ pub struct SearchParams {
     /// When provided, only edges whose `kind` matches one of these values
     /// participate in spreading activation. Omit to use all edge kinds.
     pub edge_kinds: Option<Vec<String>>,
+    /// Optional entity-type filter for unified search.
+    ///
+    /// * Omit or `None` — return both notes and proposals (default).
+    /// * `["note"]` — notes-only.
+    /// * `["proposal"]` — proposals-only.
+    /// * `[]` (empty) — treated as "no entities"; returns empty result.
+    pub entity_types: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -430,6 +437,9 @@ pub struct MemorySearchResultItem {
     pub folder: String,
     pub note_type: String,
     pub snippet: String,
+    /// `"note"` | `"proposal"` — discriminates unified search results.
+    #[serde(default = "default_note_entity_type")]
+    pub entity: String,
     /// RRF fusion score (higher = more relevant). Defaults to 0.0 for backward compat.
     #[serde(default)]
     pub score: f64,
@@ -501,6 +511,11 @@ pub struct MemoryBuildContextResponse {
     /// Notes in the context set that have a contradicting relationship.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contradicts: Vec<djinn_memory::ContradictsAnnotation>,
+    /// Proposals reachable from the seed note: same project via `proposal_targets`,
+    /// OR whose graduated epics/tasks have memory_refs that touch the seed's task chain,
+    /// ranked by lexical relevance to the seed's title + body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<djinn_memory::ProposalOverview>,
     pub error: Option<String>,
 }
 

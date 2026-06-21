@@ -1,12 +1,13 @@
 ---
 source: crates/djinn-agent/src/prompts/tests.rs
+assertion_line: 730
 expression: section
 ---
 - `task_show(id)` — Show details of a work item including recent activity and blockers.
 - `task_list(issue_type?, label?, limit?, offset?, parent?, priority?, sort?, status?, text?)` — List tasks with optional filters and pagination.
 - `task_activity_list(id, actor_role?, event_type?, limit?)` — Query a task's activity log with optional filters. Returns comments, status transitions, and other events. Use to inspect Lead guidance, reviewer feedback, or history.
 - `memory_read(identifier)` — Read a note by permalink or title.
-- `memory_search(query, edge_kinds?, folder?, limit?, task_id?, type?)` — Search notes in project memory.
+- `memory_search(query, edge_kinds?, entity_types?, folder?, limit?, task_id?, type?)` — Search notes and proposals in project memory. Returns a unified result set interleaved by relevance.
 - `memory_list(depth?, folder?, status?, type?)` — List notes in project memory. Returns compact summaries without full content.
 - `shell(command, timeout_ms?)` — Execute shell commands in the task worktree. Commands always run from the worktree root.
 - `read(file_path, limit?, offset?, project?)` — Read a file with line numbers and pagination. Rejects binary files. Pass `project` (UUID or owner/repo slug) to read a file from ANOTHER registered repo — served read-only from its default branch (no checkout); omit it to read your task worktree.
@@ -37,7 +38,7 @@ expression: section
 *** End Patch
 
 Rules: ' ' prefix = context (must match file), '-' = delete, '+' = add. The @@ line text is searched in the file to locate each chunk. Multiple @@ chunks per file are allowed. Files being updated or deleted must be read first.
-- `memory_build_context(edge_kinds?, limit?, min_confidence?, query?, task_id?)` — Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.
+- `memory_build_context(edge_kinds?, limit?, min_confidence?, query?, task_id?)` — Build a curated memory context pack for a task or query by combining note retrieval and ranking. Relevant proposals are surfaced alongside notes so a planner/worker sees the motivating proposal.
 - `memory_write(content, title, type, status?, tags?)` — Create a new memory note. Memory notes live in Dolt — this is the canonical way to author them; do not attempt filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief [singleton], roadmap [singleton]). Use [[wikilinks]] in content to connect notes.
 - `memory_edit(content, identifier, operation, find_text?, section?, type?)` — Edit an existing memory note in-place. Memory notes live in Dolt — this is the canonical way to amend them; do not attempt filesystem writes. Operations: "append" (add to end), "prepend" (add after frontmatter), "find_replace" (exact text replacement, requires find_text), "replace_section" (replace content under a markdown heading, requires section).
 - `request_lead(id, reason, suggested_breakdown?)` — Request Lead intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the Lead queue. Your session will effectively end after this call.

@@ -2972,10 +2972,24 @@ export namespace MemoryBuildContextInputSchema {
 export type MemoryBuildContextInput = MemoryBuildContextInputSchema.MemoryBuildContextInput;
 export namespace MemoryBuildContextOutputSchema {
   export interface MemoryBuildContextOutput {
+  /**
+   * Notes in the context set that have a contradicting relationship.
+   */
+  contradicts?: ContradictsAnnotation[]
   error?: string
   primary: MemoryNoteView[]
+  /**
+   * Proposals reachable from the seed note: same project via `proposal_targets`,
+   * OR whose graduated epics/tasks have memory_refs that touch the seed's task chain,
+   * ranked by lexical relevance to the seed's title + body.
+   */
+  proposals?: ProposalOverview[]
   related_l0: NoteAbstract[]
   related_l1: NoteOverview[]
+  /**
+   * Notes in the context set that are superseded by another note in the set.
+   */
+  supersedes?: SupersedesAnnotation[]
   [k: string]: any
   }
   export interface MemoryNoteView {
@@ -3028,6 +3042,42 @@ export namespace MemoryBuildContextOutputSchema {
    */
   superseded?: boolean
   title: string
+  [k: string]: any
+  }
+  /**
+   * Compact proposal overview for `memory_build_context` responses.
+   *
+   * Progressive disclosure: this overview ships `title` + `acceptance_criteria`
+   * so the planner can decide whether to fetch the full body via `proposal_show`.
+   */
+  export interface ProposalOverview {
+  acceptance_criteria: string[]
+  body_format: string
+  id: string
+  score?: number
+  short_id: string
+  status: string
+  title: string
+  [k: string]: any
+  }
+  /**
+   * Annotation that a candidate note is superseded by another note.
+   */
+  export interface SupersedesAnnotation {
+  candidate_permalink: string
+  candidate_title: string
+  superseder_permalink: string
+  superseder_title: string
+  [k: string]: any
+  }
+  /**
+   * Annotation that two notes in the context set contradict each other.
+   */
+  export interface ContradictsAnnotation {
+  a_permalink: string
+  a_title: string
+  b_permalink: string
+  b_title: string
   [k: string]: any
   }
 
@@ -3590,6 +3640,15 @@ export namespace MemorySearchInputSchema {
    * participate in spreading activation. Omit to use all edge kinds.
    */
   edge_kinds?: string[] | null
+  /**
+   * Optional entity-type filter for unified search.
+   *
+   * * Omit or `None` — return both notes and proposals (default).
+   * * `["note"]` — notes-only.
+   * * `["proposal"]` — proposals-only.
+   * * `[]` (empty) — treated as "no entities"; returns empty result.
+   */
+  entity_types?: string[] | null
   folder?: string
   limit?: number
   project: string
@@ -3607,6 +3666,10 @@ export namespace MemorySearchOutputSchema {
   [k: string]: any
   }
   export interface MemorySearchResultItem {
+  /**
+   * `"note"` | `"proposal"` — discriminates unified search results.
+   */
+  entity?: string
   folder: string
   id: string
   note_type: string
