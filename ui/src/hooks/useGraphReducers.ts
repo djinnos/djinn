@@ -10,11 +10,9 @@
  *   1. Subscribe to every relevant store slice.
  *   2. Lazily compute `selectionNeighbors` (1-hop set) when
  *      `selectionId` changes.
- *   3. Lazily compute `depthReachable` when either `selectionId` or
- *      `depthFilter` changes.
- *   4. Drive a `requestAnimationFrame` loop only while the blast-
+ *   3. Drive a `requestAnimationFrame` loop only while the blast-
  *      radius set is non-empty — otherwise we don't burn CPU.
- *   5. Emit reducer fns whose closure reads `viewRef`, so Sigma sees
+ *   4. Emit reducer fns whose closure reads `viewRef`, so Sigma sees
  *      a fresh view on every frame without forcing re-mounts.
  *
  * Sigma also needs a hint to repaint when the store mutates — we
@@ -28,7 +26,6 @@ import type Graph from "graphology";
 
 import {
   EMPTY_HIGHLIGHT_VIEW,
-  bfsReachable,
   computeComplexityThresholds,
   edgeReducer as edgeReducerImpl,
   nodeReducer as nodeReducerImpl,
@@ -40,10 +37,7 @@ import {
   type MinimalGraph,
 } from "@/lib/codeGraphReducers";
 import { computePagerankPercentiles } from "@/lib/codeGraphLabels";
-import {
-  DEFAULT_DEPTH,
-  useCodeGraphStore,
-} from "@/stores/codeGraphStore";
+import { useCodeGraphStore } from "@/stores/codeGraphStore";
 import type { SigmaInstanceHandle, SigmaReducerHooks } from "./useSigmaGraph";
 
 /**
@@ -102,7 +96,6 @@ export function useGraphReducers(
   const nodeKindFilters = useCodeGraphStore((s) => s.nodeKindFilters);
   const symbolKindFilters = useCodeGraphStore((s) => s.symbolKindFilters);
   const hideTests = useCodeGraphStore((s) => s.hideTests);
-  const depthFilter = useCodeGraphStore((s) => s.depthFilter);
   const colorMode = useCodeGraphStore((s) => s.colorMode);
 
   // ── Lazy 1-hop neighbor set (memoized) ─────────────────────────────────
@@ -156,16 +149,10 @@ export function useGraphReducers(
     return computePagerankPercentiles(graph);
   }, [graph]);
 
-  // ── Lazy depth-N BFS frontier (memoized) ───────────────────────────────
-  const depthReachable = useMemo<ReadonlySet<string> | null>(() => {
-    // Default depth = "no filtering". Skipping the BFS entirely is
-    // both an optimization and a correctness check: when no node is
-    // selected we can't define "reachable from where", so depth
-    // filtering is a no-op.
-    if (!graph || !selectionId) return null;
-    if (depthFilter >= DEFAULT_DEPTH) return null;
-    return bfsReachable(asMinimalGraph(graph), selectionId, depthFilter);
-  }, [graph, selectionId, depthFilter]);
+  // Depth filtering was removed in favor of the DOI focus model. The
+  // reducer field remains inert until the downstream DOI ranking task
+  // replaces it with focus-scored context/dimming data.
+  const depthReachable: ReadonlySet<string> | null = null;
 
   // ── Build the live HighlightView (mutable ref, read on each frame) ────
   // Sigma reads `viewRef.current` from inside its rAF render loop —
@@ -213,7 +200,6 @@ export function useGraphReducers(
     nodeKindFilters,
     symbolKindFilters,
     hideTests,
-    depthReachable,
     colorMode,
     complexityThresholds,
     complexityHaloIds,

@@ -34,9 +34,8 @@ export type Attributes = Record<string, unknown>;
 
 /**
  * Pre-computed view of the highlight store the reducers consume on
- * every Sigma frame. Caller derives `selectionNeighbors` /
- * `depthReachable` upstream (lazy BFS) so the reducer itself is O(1)
- * per node.
+ * every Sigma frame. Caller derives `selectionNeighbors` upstream so the
+ * reducer itself is O(1) per node.
  */
 export interface HighlightView {
   selectionId: string | null;
@@ -54,8 +53,8 @@ export interface HighlightView {
   /** v10: when true, hide every node marked `isTest` (test files/symbols). */
   hideTests: boolean;
   /**
-   * Set of node ids reachable within `depthFilter` hops from the
-   * selection. `null` means "depth filter disabled" (render every node).
+   * Legacy hide-gate slot kept inert while downstream DOI ranking replaces
+   * hop-count depth filtering. `null` means "no store-level hide gate".
    */
   depthReachable: ReadonlySet<string> | null;
   /** Pulse phase ∈ [0, 1] driving the blast-radius color cycle. */
