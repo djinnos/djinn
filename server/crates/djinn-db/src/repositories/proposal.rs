@@ -8,7 +8,10 @@ use djinn_core::models::{
 
 use crate::database::Database;
 use crate::repositories::note::NoteRepository;
+use crate::repositories::note::{LexicalSearchBackend, sanitize_postgres_tsquery};
 use crate::{Error, Result};
+
+use djinn_memory::ProposalSearchResult;
 
 // Global proposals layer (Phase 0). A `proposal` is project-independent; it
 // targets projects via `proposal_targets` (editable M:N) and carries unified
@@ -1424,6 +1427,140 @@ impl ProposalRepository {
             "short_id collision after 16 retries".into(),
         ))
     }
+
+    /// Full-text search across proposals using the `search_vector` tsvector
+    /// column (Postgres) or a LIKE fallback (SQLite).
+    ///
+    /// Returns proposals ranked by BM25/ts_rank, filtered to exclude archived
+    /// and rejected proposals. Each result includes an HTML snippet with
+    /// `<b>...</b>` highlights around matched terms.
+    pub async fn search_proposals(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ProposalSearchResult>> {
+        self.db.ensure_initialized().await?;
+
+        let backend = match self.db.backend_capabilities().lexical_search {
+            crate::database::NoteSearchBackend::SqliteFts5 => LexicalSearchBackend::SqliteFts5,
+            crate::database::NoteSearchBackend::PostgresTsvector => {
+                LexicalSearchBackend::PostgresTsvector
+            }
+        };
+
+        match backend {
+            LexicalSearchBackend::PostgresTsvector => {
+                self.search_proposals_postgres(query, limit).await
+            }
+            LexicalSearchBackend::SqliteFts5 => self.search_proposals_sqlite(query, limit).await,
+        }
+    }
+
+    /// Postgres path: tsvector GIN index with ts_rank + ts_headline.
+    async fn search_proposals_postgres(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ProposalSearchResult>> {
+        let sanitized = match sanitize_postgres_tsquery(query) {
+            Some(q) => q,
+            None => return Ok(vec![]),
+        };
+
+        // NOTE: dynamic SQL (backend-specific FTS query) — compile-time check not possible
+        let sql = r#"SELECT id, short_id, title, status,
+                ts_headline('english', body, to_tsquery('english', $1),
+                            'StartSel=<b>, StopSel=</b>, MaxFragments=2, MaxWords=40, MinWords=20')
+                    AS snippet,
+                ts_rank(search_vector, to_tsquery('english', $1))::float8 AS score
+             FROM proposals
+             WHERE search_vector @@ to_tsquery('english', $1)
+               AND status NOT IN ('archived', 'rejected')
+             ORDER BY score DESC, id ASC
+             LIMIT $2"#;
+
+        let rows =
+            sqlx::query_as::<sqlx::Postgres, (String, String, String, String, String, f64)>(sql)
+                .bind(&sanitized)
+                .bind(limit as i64)
+                .fetch_all(self.db.pool())
+                .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, short_id, title, status, snippet, score)| ProposalSearchResult {
+                    id,
+                    short_id,
+                    title,
+                    status,
+                    snippet,
+                    score,
+                },
+            )
+            .collect())
+    }
+
+    /// SQLite fallback: LIKE queries against title + body + acceptance_criteria.
+    async fn search_proposals_sqlite(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ProposalSearchResult>> {
+        let tokens: Vec<&str> = query
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|t| !t.is_empty())
+            .take(12)
+            .collect();
+
+        if tokens.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Build LIKE conditions — each token must appear somewhere in the
+        // concatenated searchable text.
+        let mut conditions = Vec::new();
+        for i in 0..tokens.len() {
+            conditions.push(format!("(title || ' ' || body || ' ' || COALESCE(acceptance_criteria::text, '')) ILIKE ${}", i + 3));
+        }
+        let where_clause = conditions.join(" AND ");
+
+        let sql = format!(
+            r#"SELECT id, short_id, title, status,
+                    substr(body, 1, 200) AS snippet,
+                    1.0 AS score
+             FROM proposals
+             WHERE {}
+               AND status NOT IN ('archived', 'rejected')
+             ORDER BY updated_at DESC
+             LIMIT $2"#,
+            where_clause
+        );
+
+        let mut q =
+            sqlx::query_as::<sqlx::Postgres, (String, String, String, String, String, f64)>(&sql);
+        for token in &tokens {
+            let pattern = format!("%{}%", token);
+            q = q.bind(pattern);
+        }
+        q = q.bind(limit as i64);
+
+        let rows = q.fetch_all(self.db.pool()).await?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, short_id, title, status, snippet, score)| ProposalSearchResult {
+                    id,
+                    short_id,
+                    title,
+                    status,
+                    snippet,
+                    score,
+                },
+            )
+            .collect())
+    }
 }
 
 // ── Short ID helpers ─────────────────────────────────────────────────────────
@@ -2731,6 +2868,87 @@ mod tests {
                 .unwrap()
                 .build_breakdown_task_id
                 .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn search_proposals_returns_matching_proposal_with_nonzero_score() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        // Create a proposal with a unique sentinel word in its body.
+        let sentinel = format!("xyzzy{}searchtest", uuid::Uuid::now_v7().as_simple());
+        let p = repo
+            .create(ProposalCreateInput {
+                title: "Search Target Proposal",
+                body: &format!(
+                    "This proposal describes a {} integration pattern for the platform.",
+                    sentinel
+                ),
+                acceptance_criteria: Some(r#"[{"criterion":"works","met":false}]"#),
+                status: Some("draft"),
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let results = repo.search_proposals(&sentinel, 10).await.unwrap();
+
+        assert!(
+            !results.is_empty(),
+            "search_proposals should return at least one result for a unique sentinel word"
+        );
+        let hit = results
+            .iter()
+            .find(|r| r.short_id == p.short_id)
+            .expect("the created proposal should appear in search results");
+        assert!(
+            hit.score > 0.0,
+            "the ts_rank score for an exact match should be positive"
+        );
+        assert!(
+            !hit.snippet.is_empty(),
+            "the snippet should not be empty for a matching proposal"
+        );
+        assert_eq!(hit.title, "Search Target Proposal");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn search_proposals_excludes_archived_and_rejected() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let sentinel = format!("zyxxy{}excludetest", uuid::Uuid::now_v7().as_simple());
+        let p = repo
+            .create(ProposalCreateInput {
+                title: "Excluded Proposal",
+                body: &format!("Body with {} keyword.", sentinel),
+                acceptance_criteria: None,
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Verify it appears when active (draft).
+        let results = repo.search_proposals(&sentinel, 10).await.unwrap();
+        assert!(results.iter().any(|r| r.short_id == p.short_id));
+
+        // Archive it.
+        repo.update(
+            &p.id,
+            ProposalUpdateInput {
+                title: "Excluded Proposal",
+                body: &format!("Body with {} keyword.", sentinel),
+                acceptance_criteria: "[]",
+                status: "archived",
+                superseded_by: None,
+                body_format: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let results = repo.search_proposals(&sentinel, 10).await.unwrap();
+        assert!(
+            !results.iter().any(|r| r.short_id == p.short_id),
+            "archived proposals should not appear in search results"
         );
     }
 }
