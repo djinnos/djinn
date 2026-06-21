@@ -38,7 +38,7 @@ impl CoordinatorActor {
     /// Shared handler for a "CI checks failed on PR" event, used by both the
     /// `pr_draft` and `pr_review` polling paths.
     ///
-    /// Fixes the infinite CI-failure rework loop by gating the rework on four
+    /// Fixes the infinite CI-failure rework loop by gating the rework on five
     /// things, in order:
     ///
     /// 1. **Blocking-only filter.** The failed check-runs are intersected with
@@ -59,12 +59,19 @@ impl CoordinatorActor {
     ///    than the blind cycle-count threshold. The counter resets when the
     ///    fingerprint changes (different failures = progress).
     ///
-    /// 3. **Diff-empty short-circuit.** If the PR head has no commits ahead of
+    /// 3. **Scope-inversion check.** The PR's actual changed files are fetched
+    ///    from GitHub and compared against the failing crates/files extracted
+    ///    from the CI failure sections. If CI fails on crates outside the PR's
+    ///    own diff, this is a decomposition error (too-narrow slice), not a worker
+    ///    bug. We route to the Planner for a RE-SLICE instead of re-dispatching
+    ///    the worker.
+    ///
+    /// 4. **Diff-empty short-circuit.** If the PR head has no commits ahead of
     ///    base on GitHub (`ahead_by == 0`), the previous worker iteration
     ///    produced no new diff — re-dispatching cannot change anything. We
     ///    escalate to the Planner and force-close instead of looping.
     ///
-    /// 4. **Cycle cap.** Each CI-failure rework records a `pr_ci_cycle` marker.
+    /// 5. **Cycle cap.** Each CI-failure rework records a `pr_ci_cycle` marker.
     ///    Past `PR_CI_FAILURE_THRESHOLD` we escalate to the Planner and
     ///    force-close rather than redispatch. Escalation is terminal — the
     ///    counter is never reset on the reopen that re-arms the loop.
@@ -231,7 +238,43 @@ impl CoordinatorActor {
             );
         }
 
-        // ── 3. Diff-empty short-circuit ───────────────────────────────────────
+        // ── 3. Scope-inversion check ────────────────────────────────────────────
+        // If CI is failing on crates/files that the PR never touched, this is a
+        // decomposition error (too-narrow slice), not a worker bug. Route to the
+        // Planner for a RE-SLICE instead of re-dispatching the worker.
+        let pr_files = match gh_client.get_pr_files(owner, repo, pull_number).await {
+            Ok(files) => files.iter().map(|f| f.filename.clone()).collect::<Vec<_>>(),
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    error = %e,
+                    "PR poller: failed to fetch PR files for scope-inversion check; skipping"
+                );
+                Vec::new() // empty → detect_scope_inversion returns None
+            }
+        };
+
+        if let Some(true) = detect_scope_inversion(&ci_failure_sections, &pr_files) {
+            let pr_crates = extract_crate_names(&pr_files);
+            let failing_crates = extract_crate_names_from_sections(&ci_failure_sections);
+            let reason = format!(
+                "PR #{pull_number} scope-inversion detected: CI is failing on crates/files \
+                 that are NOT in this PR's own diff (PR touches: {pr_crates}; CI fails on: \
+                 {failing_crates}). This is likely a decomposition error — the task was sliced \
+                 too narrowly. RE-SLICE: expand the task scope to include the missing crate(s), \
+                 or split into a separate task that covers the failing area.",
+                pr_crates = pr_crates.join(", "),
+                failing_crates = failing_crates.join(", "),
+            );
+            let sections_text = ci_failure_sections.join("\n");
+            self.route_planner_intervention(task, "worker", &reason, Some(&sections_text))
+                .await;
+            return true;
+        }
+        // If Some(false): normal worker bug, fall through to existing retry path.
+        // If None: inconclusive, fall through to existing retry path.
+
+        // ── 4. Diff-empty short-circuit ───────────────────────────────────────
         // If the head has no commits ahead of base, the last worker iteration
         // produced no new diff. Re-dispatching cannot change the outcome, so
         // escalate + force-close instead of looping on the same SHA.
@@ -272,7 +315,7 @@ impl CoordinatorActor {
             }
         }
 
-        // ── 4. Cycle cap ──────────────────────────────────────────────────────
+        // ── 5. Cycle cap ──────────────────────────────────────────────────────
         let prior_cycles = match task_repo
             .query_activity(ActivityQuery {
                 task_id: Some(task_id.to_owned()),
@@ -793,4 +836,123 @@ fn count_consecutive_identical(
         }
     }
     count
+}
+
+/// Determine whether a CI failure is a scope-inversion: the failing crates/files
+/// are OUTSIDE the PR's own git diff.
+///
+/// Returns:
+/// - `Some(true)` — scope inversion detected (CI fails on crates outside the PR diff)
+/// - `Some(false)` — CI fails on crates WITHIN the PR diff (normal worker bug)
+/// - `None` — inconclusive (can't attribute failures to specific files/crates,
+///   e.g. workspace-wide errors, no file path in failure sections)
+pub(in crate::actors::coordinator) fn detect_scope_inversion(
+    ci_failure_sections: &[String],
+    pr_files: &[String], // file paths from the PR diff
+) -> Option<bool> {
+    if pr_files.is_empty() {
+        return None;
+    }
+
+    // 1. Extract failing crate names from CI failure sections.
+    let failing_crates = extract_crate_names_from_sections(ci_failure_sections);
+    if failing_crates.is_empty() {
+        return None;
+    }
+
+    // 2. Extract crate names from PR diff files.
+    let pr_crates = extract_crate_names(pr_files);
+    if pr_crates.is_empty() {
+        return None;
+    }
+
+    // 3. Compare the sets:
+    //    - If ANY failing crate is NOT in the PR's crate set → Some(true)
+    //    - If ALL failing crates ARE in the PR's crate set → Some(false)
+    let pr_crate_set: std::collections::HashSet<&str> =
+        pr_crates.iter().map(|s| s.as_str()).collect();
+    let any_outside = failing_crates
+        .iter()
+        .any(|c| !pr_crate_set.contains(c.as_str()));
+
+    if any_outside { Some(true) } else { Some(false) }
+}
+
+/// Extract crate names from a list of file paths using a simple heuristic:
+/// - `server/crates/<crate-name>/src/...` → `<crate-name>`
+/// - `crates/<crate-name>/src/...` → `<crate-name>`
+/// - Paths without `crates/` return `None`.
+fn extract_crate_name(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    for i in 0..parts.len().saturating_sub(1) {
+        if parts[i] == "crates" {
+            return parts.get(i + 1).map(|s| s.to_string());
+        }
+    }
+    None
+}
+
+/// Extract crate names from a list of file paths, deduplicated and sorted.
+fn extract_crate_names(paths: &[String]) -> Vec<String> {
+    let mut crates: Vec<String> = paths.iter().filter_map(|p| extract_crate_name(p)).collect();
+    crates.sort();
+    crates.dedup();
+    crates
+}
+
+/// Extract crate names from CI failure sections by looking for file paths
+/// embedded in the failure text. We look for:
+/// - Rust compiler error locations: `--> path/to/file.rs:line:col`
+/// - File paths in "Failed step:" or "Failed job:" names that contain crate paths
+/// - Any path segment containing `crates/`
+fn extract_crate_names_from_sections(sections: &[String]) -> Vec<String> {
+    let mut crates = std::collections::HashSet::new();
+    for section in sections {
+        // Look for `--> path/to/file.rs:line:col` pattern (Rust compiler errors)
+        for line in section.lines() {
+            if let Some(arrow_idx) = line.find("-->") {
+                let after_arrow = &line[arrow_idx + 3..];
+                let trimmed = after_arrow.trim();
+                // Strip trailing `:line:col` if present
+                let path_part = if let Some(colon_idx) = trimmed.rfind(':') {
+                    let before_last_colon = &trimmed[..colon_idx];
+                    if before_last_colon.rfind(':').is_some() {
+                        // Likely `path:line:col` — extract the path part
+                        if let Some(prev_colon) = before_last_colon.rfind(':') {
+                            let candidate = &trimmed[..prev_colon];
+                            // Verify candidate looks like a path (contains '/')
+                            if candidate.contains('/') {
+                                candidate
+                            } else {
+                                trimmed
+                            }
+                        } else {
+                            trimmed
+                        }
+                    } else {
+                        trimmed
+                    }
+                } else {
+                    trimmed
+                };
+                if let Some(crate_name) = extract_crate_name(path_part) {
+                    crates.insert(crate_name);
+                }
+            }
+        }
+
+        // Also look for any `crates/<name>/` pattern in the text
+        if let Some(start) = section.find("crates/") {
+            let after = &section[start + 7..];
+            if let Some(end) = after.find('/') {
+                let crate_name = &after[..end];
+                if !crate_name.is_empty() {
+                    crates.insert(crate_name.to_string());
+                }
+            }
+        }
+    }
+    let mut result: Vec<String> = crates.into_iter().collect();
+    result.sort();
+    result
 }

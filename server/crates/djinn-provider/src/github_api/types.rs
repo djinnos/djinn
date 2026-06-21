@@ -100,7 +100,16 @@ pub(super) struct WorkflowRunsResponse {
     pub(super) workflow_runs: Vec<WorkflowRun>,
 }
 
-/// A single annotation attached to a check run (error/warning/notice).
+/// A file changed in a PR (subset of GitHub's PR file response).
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrFile {
+    pub sha: String,
+    pub filename: String,
+    pub status: String, // "added", "removed", "modified", "renamed"
+    pub additions: u32,
+    pub deletions: u32,
+    pub changes: u32,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckAnnotation {
     pub path: String,
