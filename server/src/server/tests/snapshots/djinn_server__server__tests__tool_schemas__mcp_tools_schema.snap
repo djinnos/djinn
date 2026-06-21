@@ -6243,6 +6243,46 @@ expression: signatures
           ],
           "type": "object"
         },
+        "MemoryProposalOverview": {
+          "description": "Compact proposal overview for `memory_build_context` responses.\n\n**Progressive disclosure:** this overview ships `title` +\n`acceptance_criteria` so the planner can decide whether to fetch the\nfull body via `proposal_show`. The full proposal body is intentionally\nexcluded to keep prompt context lean.",
+          "properties": {
+            "acceptance_criteria": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "body_format": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "score": {
+              "format": "double",
+              "nullable": true,
+              "type": "number"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "body_format",
+            "acceptance_criteria",
+            "status"
+          ],
+          "type": "object"
+        },
         "NoteAbstract": {
           "description": "L0 note abstract payload used in tiered context responses.",
           "properties": {
@@ -6351,6 +6391,13 @@ expression: signatures
         "primary": {
           "items": {
             "$ref": "#/$defs/MemoryNoteView"
+          },
+          "type": "array"
+        },
+        "proposals": {
+          "description": "Proposals relevant to the seed note, surfaced as related entities with\nprogressive disclosure (title + acceptance criteria as the overview;\ncall `proposal_show` for the full body).",
+          "items": {
+            "$ref": "#/$defs/MemoryProposalOverview"
           },
           "type": "array"
         },
@@ -8299,6 +8346,14 @@ expression: signatures
           "nullable": true,
           "type": "array"
         },
+        "entity_types": {
+          "description": "Optional list of entity types to include: \"note\", \"proposal\".\nOmit (or pass null) to include both. Pass [\"note\"] for notes-only,\n[\"proposal\"] for proposals-only. Pass [] to return no results.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
         "folder": {
           "nullable": true,
           "type": "string"
@@ -8329,7 +8384,13 @@ expression: signatures
     "output_schema": {
       "$defs": {
         "MemorySearchResultItem": {
+          "description": "A single unified search result row.\n\nEntity taxonomy: the `entity` field discriminates the row type.\nCurrent values are `\"note\"` (memory notes) and `\"proposal\"` (planning\nproposals). Future waves may add `\"task\"` or `\"epic\"`. Use the\n`entity_types` field on the `SearchParams` request to scope the result\nset to a subset of entity types.",
           "properties": {
+            "entity": {
+              "default": "note",
+              "description": "Discriminator: `\"note\"` (default for backward compat) or `\"proposal\"`.\nUse `entity_types` on the request to scope the result set.",
+              "type": "string"
+            },
             "folder": {
               "type": "string"
             },
