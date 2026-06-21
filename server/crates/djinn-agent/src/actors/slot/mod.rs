@@ -85,8 +85,8 @@ pub(crate) mod memory_enrichment;
 /// The trigger (`memory_run_enrichment` MCP tool) is intentionally a thin
 /// admin/operator surface — see `djinn-control-plane::tools::memory_tools::run_enrichment`.
 pub use memory_enrichment::{
-    EnrichmentClaim, EnrichmentEdge, EnrichmentEntity, EnrichmentReport, run_memory_enrichment,
-    run_memory_enrichment_with_db,
+    EnrichmentClaim, EnrichmentEdge, EnrichmentEdgeEndpointKind, EnrichmentEntity,
+    EnrichmentReport, run_memory_enrichment, run_memory_enrichment_with_db,
 };
 mod pool;
 pub(crate) mod reply_loop;
