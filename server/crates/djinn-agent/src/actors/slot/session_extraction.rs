@@ -496,6 +496,15 @@ pub(crate) async fn run_structural_extraction(
         autolink_memory_refs(&session_id, &signals.notes_written_permalinks, &app_state).await;
     }
 
+    // ── Emit proposal derived_from edges ──────────────────────────────────
+    emit_proposal_derived_from_edges(
+        &session_id,
+        &signals.notes_read_ids,
+        &signals.notes_written_permalinks,
+        &app_state,
+    )
+    .await;
+
     Some(signals.taxonomy)
 }
 
@@ -751,6 +760,204 @@ async fn autolink_memory_refs(session_id: &str, permalinks: &[String], app_state
                 "autolink_memory_refs: updated epic memory_refs"
             );
         }
+    }
+}
+
+/// Emit `derived_from` typed entity edges from a proposal to notes read or
+/// written during a session.
+///
+/// Walks the `session → task → epic → proposal` chain via `proposal_for_epic`.
+/// When the task's epic is linked to a proposal, records a
+/// `proposal → note, kind=derived_from` edge for every note in the session
+/// (both read and written) using the heterogeneous `memory_entity_associations`
+/// substrate.
+///
+/// Notes are resolved to DB IDs via the session's `project_id`. Both
+/// `notes_read` (identifiers from `memory_read`) and `notes_written`
+/// (permalinks from `memory_write`/`memory_edit`/`memory_move`) are included
+/// so the proposal captures the full provenance of its execution.
+///
+/// Best-effort: failures are logged and never block session extraction.
+async fn emit_proposal_derived_from_edges(
+    session_id: &str,
+    notes_read: &[String],
+    notes_written_permalinks: &[String],
+    app_state: &AgentContext,
+) {
+    if notes_read.is_empty() && notes_written_permalinks.is_empty() {
+        return;
+    }
+
+    // Load the session to find task_id and project_id.
+    let session_repo =
+        djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let session = match session_repo.get(session_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            tracing::debug!(
+                session_id = %session_id,
+                "emit_proposal_derived_from: session not found; skipping"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "emit_proposal_derived_from: failed to load session; skipping"
+            );
+            return;
+        }
+    };
+
+    let Some(task_id) = session.task_id.as_deref() else {
+        tracing::debug!(
+            session_id = %session_id,
+            "emit_proposal_derived_from: session has no task_id; skipping"
+        );
+        return;
+    };
+
+    let session_project_id = session.project_id.as_deref();
+
+    // Load the task to get epic_id.
+    let task_repo =
+        djinn_db::TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let task = match task_repo.get(task_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            tracing::debug!(
+                session_id = %session_id,
+                task_id = %task_id,
+                "emit_proposal_derived_from: task not found; skipping"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                task_id = %task_id,
+                error = %e,
+                "emit_proposal_derived_from: failed to load task; skipping"
+            );
+            return;
+        }
+    };
+
+    let Some(epic_id) = task.epic_id.as_deref() else {
+        tracing::debug!(
+            session_id = %session_id,
+            task_id = %task_id,
+            "emit_proposal_derived_from: task has no epic_id; skipping"
+        );
+        return;
+    };
+
+    // Look up the proposal linked to this epic.
+    let proposal_repo =
+        djinn_db::ProposalRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let proposal = match proposal_repo.proposal_for_epic(epic_id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            tracing::debug!(
+                session_id = %session_id,
+                epic_id = %epic_id,
+                "emit_proposal_derived_from: epic has no linked proposal; skipping"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                epic_id = %epic_id,
+                error = %e,
+                "emit_proposal_derived_from: failed to look up proposal for epic; skipping"
+            );
+            return;
+        }
+    };
+
+    let proposal_ref = djinn_db::MemoryEntityRef::proposal(&proposal.id);
+    let note_repo =
+        djinn_db::NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+
+    // Collect all note identifiers that need resolution. Written notes use
+    // permalinks (from tool results); read notes use identifiers (from tool
+    // inputs). Both are resolved the same way via `note_repo.resolve`.
+    let mut all_note_identifiers: Vec<&str> = Vec::new();
+    for id in notes_read {
+        all_note_identifiers.push(id.as_str());
+    }
+    for permalink in notes_written_permalinks {
+        // Avoid double-processing notes that were both read and written.
+        if !notes_read.contains(permalink) {
+            all_note_identifiers.push(permalink.as_str());
+        }
+    }
+
+    let mut edges_recorded: u32 = 0;
+    for identifier in &all_note_identifiers {
+        // We need a project_id to resolve the identifier. If the session has
+        // no project_id (e.g. chat sessions), skip resolution.
+        let Some(pid) = session_project_id else {
+            tracing::debug!(
+                session_id = %session_id,
+                identifier = %identifier,
+                "emit_proposal_derived_from: session has no project_id; skipping resolution"
+            );
+            break;
+        };
+
+        let note = match note_repo.resolve(pid, identifier).await {
+            Ok(Some(n)) => n,
+            Ok(None) => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    identifier = %identifier,
+                    "emit_proposal_derived_from: note did not resolve; skipping"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    identifier = %identifier,
+                    error = %e,
+                    "emit_proposal_derived_from: error resolving note"
+                );
+                continue;
+            }
+        };
+
+        let note_ref = djinn_db::MemoryEntityRef::note(&note.id);
+        if let Err(e) = note_repo
+            .upsert_typed_entity_association(
+                proposal_ref.clone(),
+                note_ref,
+                djinn_db::MemoryEntityKind::DerivedFrom,
+                0.8,
+            )
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                proposal_id = %proposal.id,
+                note_id = %note.id,
+                error = %e,
+                "emit_proposal_derived_from: failed to record derived_from edge"
+            );
+        } else {
+            edges_recorded += 1;
+        }
+    }
+
+    if edges_recorded > 0 {
+        tracing::debug!(
+            session_id = %session_id,
+            proposal_id = %proposal.id,
+            edges_recorded,
+            "emit_proposal_derived_from: recorded proposal derived_from edges"
+        );
     }
 }
 
