@@ -47,6 +47,7 @@ fn model_to_output(m: &Model) -> ProviderModelOutput {
     } else {
         format!("{}/{}", m.provider_id, m.id)
     };
+    let recommended = builtin::is_recommended_model(&m.provider_id, &m.id);
     ProviderModelOutput {
         id: full_id,
         provider_id: m.provider_id.clone(),
@@ -56,6 +57,7 @@ fn model_to_output(m: &Model) -> ProviderModelOutput {
         attachment: m.attachment,
         context_window: m.context_window,
         output_limit: m.output_limit,
+        recommended,
         pricing: ModelPricingOutput {
             input_per_million: m.pricing.input_per_million,
             output_per_million: m.pricing.output_per_million,
@@ -261,6 +263,12 @@ pub struct ProviderModelOutput {
     pub attachment: bool,
     pub context_window: i64,
     pub output_limit: i64,
+    /// Whether this is a curated flagship the UI should surface as
+    /// "recommended" (latest state-of-the-art model for its provider). Set from
+    /// the server-side flagship map (`builtin::is_recommended_model`); a provider
+    /// with no curated recommendation has this `false` on every model and the UI
+    /// falls back to showing all of them.
+    pub recommended: bool,
     pub pricing: ModelPricingOutput,
 }
 
@@ -815,6 +823,11 @@ impl DjinnMcpServer {
                                 .unwrap_or(&out.id)
                                 .to_string();
                             out.id = format!("{display_pid}/{rest}");
+                            // Recompute `recommended` under the parent namespace
+                            // so a merged child's flagship (e.g. a chatgpt_codex
+                            // model re-tagged to openai) is still marked.
+                            out.recommended =
+                                builtin::is_recommended_model(&out.provider_id, &out.id);
                         }
                         out
                     })

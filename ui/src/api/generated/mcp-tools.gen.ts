@@ -5779,6 +5779,11 @@ export namespace ProposalBlocksOutputSchema {
   }
   export interface ProposalBlockDefinition {
   /**
+   * Optional authoring guidance for the LLM: how to encode this block's
+   * children/attributes. Absent for blocks whose shape is self-evident.
+   */
+  description?: string
+  /**
    * Field schema keyed by field name.
    */
   fields: {
@@ -7170,6 +7175,14 @@ export namespace ProviderModelLookupOutputSchema {
   pricing: ModelPricingOutput
   provider_id: string
   reasoning: boolean
+  /**
+   * Whether this is a curated flagship the UI should surface as
+   * "recommended" (latest state-of-the-art model for its provider). Set from
+   * the server-side flagship map (`builtin::is_recommended_model`); a provider
+   * with no curated recommendation has this `false` on every model and the UI
+   * falls back to showing all of them.
+   */
+  recommended: boolean
   tool_call: boolean
   [k: string]: any
   }
@@ -7210,6 +7223,14 @@ export namespace ProviderModelsOutputSchema {
   pricing: ModelPricingOutput
   provider_id: string
   reasoning: boolean
+  /**
+   * Whether this is a curated flagship the UI should surface as
+   * "recommended" (latest state-of-the-art model for its provider). Set from
+   * the server-side flagship map (`builtin::is_recommended_model`); a provider
+   * with no curated recommendation has this `false` on every model and the UI
+   * falls back to showing all of them.
+   */
+  recommended: boolean
   tool_call: boolean
   [k: string]: any
   }
@@ -7250,6 +7271,14 @@ export namespace ProviderModelsConnectedOutputSchema {
   pricing: ModelPricingOutput
   provider_id: string
   reasoning: boolean
+  /**
+   * Whether this is a curated flagship the UI should surface as
+   * "recommended" (latest state-of-the-art model for its provider). Set from
+   * the server-side flagship map (`builtin::is_recommended_model`); a provider
+   * with no curated recommendation has this `false` on every model and the UI
+   * falls back to showing all of them.
+   */
+  recommended: boolean
   tool_call: boolean
   [k: string]: any
   }

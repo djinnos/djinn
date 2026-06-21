@@ -14,6 +14,7 @@ const availableModels: ProviderModel[] = [
     pricing: { input_per_million: 3, output_per_million: 15, cache_read_per_million: 0.3, cache_write_per_million: 3.75 },
     reasoning: false,
     tool_call: true,
+    recommended: false,
   },
   {
     id: "gpt-4o",
@@ -25,6 +26,7 @@ const availableModels: ProviderModel[] = [
     pricing: { input_per_million: 2.5, output_per_million: 10, cache_read_per_million: 1.25, cache_write_per_million: 0 },
     reasoning: false,
     tool_call: true,
+    recommended: false,
   },
   {
     id: "deepseek-coder",
@@ -36,6 +38,7 @@ const availableModels: ProviderModel[] = [
     pricing: { input_per_million: 0.14, output_per_million: 0.28, cache_read_per_million: 0, cache_write_per_million: 0 },
     reasoning: false,
     tool_call: true,
+    recommended: false,
   },
   {
     id: "gemini-2.5-pro",
@@ -47,6 +50,7 @@ const availableModels: ProviderModel[] = [
     pricing: { input_per_million: 1.25, output_per_million: 10, cache_read_per_million: 0, cache_write_per_million: 0 },
     reasoning: true,
     tool_call: true,
+    recommended: false,
   },
 ];
 

@@ -125,23 +125,57 @@ fn jurisdiction_str(j: Jurisdiction) -> &'static str {
     }
 }
 
-/// All subscription provider ids the catalog currently exposes, paired with
-/// their display name. This is the universe the admin allow/block table is
-/// drawn over — drawn from the live catalog so newly-surfaced models.dev
-/// subscriptions appear automatically.
+/// Canonical key used to collapse duplicate provider ids that name the same
+/// real subscription (e.g. the catalog carries both `github-copilot` and
+/// `githubcopilot` — same GitHub Copilot sub). Lowercased, separators stripped.
+fn canonical_sub_key(id: &str) -> String {
+    id.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The de-duplicated universe of **governable subscriptions** for the admin
+/// allow/block table: each supported subscription provider once, paired with a
+/// display name. Drawn from the live catalog (so newly-surfaced models.dev
+/// subscriptions appear automatically), plus the merged-child subscriptions the
+/// catalog hides (notably ChatGPT/Codex, which merges into `openai`). Duplicate
+/// ids for the same real sub (e.g. the two GitHub Copilot entries) collapse to a
+/// single row. Non-subscription API providers are never included.
+///
+/// Each entry is `(id, display_name)` where `id` is the stored/blocklist form.
 fn subscription_universe(server: &DjinnMcpServer) -> Vec<(String, String)> {
+    use std::collections::HashSet;
+
     let merged = builtin::merged_provider_ids();
-    let mut out: Vec<(String, String)> = server
-        .state
-        .catalog()
-        .list_providers()
-        .into_iter()
-        .filter(|p| !merged.contains(&p.id))
-        .filter(|p| builtin::is_subscription_provider(&p.id))
-        .map(|p| (p.id.clone(), p.name.clone()))
-        .collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<(String, String)> = Vec::new();
+
+    // 1. Merged-child subscriptions the catalog hides (e.g. chatgpt_codex →
+    //    openai). These are governable in their own right even though their
+    //    models surface under the parent namespace, so they must appear here.
+    for bp in builtin::BUILTIN_PROVIDERS {
+        if bp.merge_into.is_some() && builtin::is_subscription_provider(bp.id) {
+            let key = canonical_sub_key(bp.id);
+            if seen.insert(key) {
+                out.push((bp.id.to_string(), bp.display_name.to_string()));
+            }
+        }
+    }
+
+    // 2. Subscriptions the catalog exposes directly (skip hidden merged parents'
+    //    children already added above, and collapse alias duplicates).
+    for p in server.state.catalog().list_providers() {
+        if merged.contains(&p.id) || !builtin::is_subscription_provider(&p.id) {
+            continue;
+        }
+        let key = canonical_sub_key(&p.id);
+        if seen.insert(key) {
+            out.push((p.id.clone(), p.name.clone()));
+        }
+    }
+
     out.sort_by(|a, b| a.0.cmp(&b.0));
-    out.dedup_by(|a, b| a.0 == b.0);
     out
 }
 

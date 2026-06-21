@@ -523,6 +523,36 @@ pub fn is_subscription_provider(provider_id: &str) -> bool {
     classify_provider(provider_id).is_subscription()
 }
 
+/// Resolve the **governable subscription identity** a `(provider_id, model_id)`
+/// reference belongs to, if any.
+///
+/// This bridges the one case where a subscription's models are surfaced under a
+/// *different* provider namespace than the subscription's own id: the ChatGPT/
+/// Codex OAuth subscription (`chatgpt_codex`) merges into `openai`, so its models
+/// are namespaced `openai/...-codex` everywhere a member sees them. A plain
+/// `openai` BYO **API key** is NOT a subscription and must stay ungoverned, so we
+/// can't just treat all of `openai` as the codex sub — we key off the `codex`
+/// model marker (the same marker [`MODEL_SOURCE_MAP`] uses to source the codex
+/// model list from openai).
+///
+/// Returns (lowercased, matching the stored blocklist form):
+/// - `Some("chatgpt_codex")` for an `openai` model whose id marks it a Codex
+///   model (so org policy can block the Codex sub without touching plain openai).
+/// - `Some(provider_id)` when the provider itself is a subscription.
+/// - `None` for non-subscription providers (plain API keys), which are never
+///   governed by the org allow/block list.
+pub fn governable_subscription_for_model(provider_id: &str, model_id: &str) -> Option<String> {
+    // Codex models surface under the openai namespace; recognise them by the
+    // `codex` marker and attribute them to the chatgpt_codex subscription.
+    if canonical_id(provider_id) == "openai" && model_id.to_ascii_lowercase().contains("codex") {
+        return Some("chatgpt_codex".to_string());
+    }
+    if is_subscription_provider(provider_id) {
+        return Some(provider_id.to_ascii_lowercase());
+    }
+    None
+}
+
 /// Id-pattern rule for personal coding/token plans and consumer vendor subs
 /// that are **not** hand-registered as built-ins (models.dev-native only).
 ///
@@ -675,6 +705,93 @@ pub fn provider_jurisdiction(provider_id: &str) -> Jurisdiction {
     }
 
     Jurisdiction::Other
+}
+
+// ── Curated flagship / "recommended" model map ───────────────────────────────
+//
+// For each SUPPORTED provider, the latest state-of-the-art flagship model id(s).
+// This is the curated subset the UI marks "recommended" so members aren't shown
+// every historical variant (no GPT-5.2/5.3/5.4 when 5.5 exists, no o1/o3
+// clutter). A provider absent from this map has NO recommended model — the UI
+// falls back to showing all of its models.
+//
+// ──────────────────────────────────────────────────────────────────────────────
+// MAINTENANCE: when a provider ships a new flagship, update the one slice below
+// (it is a single-line edit per provider). Model ids are the **bare** ids as
+// they appear in the provider's own catalog list (NOT `provider/` prefixed) —
+// matching is done on (provider_id, bare model id). For merged children whose
+// models are re-namespaced to a parent (e.g. `chatgpt_codex` → `openai`), list
+// the ids under the CHILD's own id; the lookup also resolves the parent-
+// namespaced form so the recommendation survives re-tagging.
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// (provider_id, &[flagship bare model ids])
+const RECOMMENDED_MODELS: &[(&str, &[&str])] = &[
+    // Single-vendor subs / first-party APIs → the one current flagship (+ its
+    // codex/coding variant where the vendor ships a distinct one).
+    //
+    // OpenAI (BYO API key): current GPT-5.5 family flagship + the latest Codex.
+    ("openai", &["gpt-5.5", "gpt-5.3-codex"]),
+    // ChatGPT/Codex subscription: the same Codex flagship, under the child id.
+    ("chatgpt_codex", &["gpt-5.3-codex"]),
+    // Anthropic: current Claude Opus flagship.
+    ("anthropic", &["claude-opus-4-8"]),
+    // MiniMax coding plan: current MiniMax flagship.
+    ("minimax-coding-plan", &["MiniMax-M3"]),
+    // Kimi for Coding: current Kimi K2.7 Code flagship.
+    ("kimi-for-coding", &["k2p7"]),
+    // Z.AI / Zhipu coding plan: current GLM flagship.
+    ("zai-coding-plan", &["glm-5.2"]),
+    // Xiaomi MiMo token plan (SGP region variant we hand-register): MiMo flagship.
+    ("xiaomi-token-plan-sgp", &["mimo-v2.5-pro"]),
+    // Multi-model gateways expose many third-party models → a SMALL curated set
+    // of the current top models, not a single flagship.
+    //
+    // OpenCode Zen: top Anthropic/OpenAI/Google flagships it proxies.
+    (
+        "opencode",
+        &["claude-opus-4-8", "gpt-5.5", "gemini-3.1-pro"],
+    ),
+    // Fireworks AI: top open-weight flagships it serves (bare ids are slash
+    // paths in the live catalog).
+    (
+        "fireworks-ai",
+        &[
+            "accounts/fireworks/models/glm-5p2",
+            "accounts/fireworks/models/minimax-m3",
+            "accounts/fireworks/models/kimi-k2p7-code",
+        ],
+    ),
+];
+
+/// Curated flagship / "recommended" model ids for `provider_id` — the latest
+/// state-of-the-art model(s) the UI surfaces as recommended. Empty slice when
+/// the provider has no curated recommendation (UI shows all its models).
+///
+/// See [`RECOMMENDED_MODELS`] for the (1-line-per-provider) curated map.
+pub fn recommended_model_ids(provider_id: &str) -> &'static [&'static str] {
+    RECOMMENDED_MODELS
+        .iter()
+        .find(|(id, _)| *id == provider_id)
+        .map(|(_, ids)| *ids)
+        .unwrap_or(&[])
+}
+
+/// Whether `(provider_id, model_id)` is a curated flagship the UI marks
+/// "recommended". Accepts either a bare model id or a `provider/...`-qualified
+/// id, and tolerates merged-child re-namespacing: a model re-tagged to a parent
+/// provider (e.g. a `chatgpt_codex` model surfaced under `openai`) still matches
+/// the recommendation registered under the parent. Matching is case-sensitive
+/// on the model id (catalog ids are canonical).
+pub fn is_recommended_model(provider_id: &str, model_id: &str) -> bool {
+    // Strip a leading `provider_id/` qualifier if present, keeping the rest of
+    // the (possibly multi-segment) model id intact.
+    let bare = model_id
+        .strip_prefix(&format!("{provider_id}/"))
+        .unwrap_or(model_id);
+    recommended_model_ids(provider_id)
+        .iter()
+        .any(|id| *id == bare || *id == model_id)
 }
 
 /// Strip non-alphanumeric chars and lowercase for fuzzy ID matching.
@@ -837,6 +954,94 @@ mod tests {
         assert_eq!(
             provider_jurisdiction("acme-token-plan-sgp"),
             Jurisdiction::Other
+        );
+    }
+
+    #[test]
+    fn recommended_map_picks_current_flagships_not_clutter() {
+        // OpenAI: the GPT-5.5 flagship + latest codex are recommended; older
+        // GPT-5.x variants and o-series are not.
+        assert!(is_recommended_model("openai", "gpt-5.5"));
+        assert!(is_recommended_model("openai", "gpt-5.3-codex"));
+        assert!(is_recommended_model("openai", "openai/gpt-5.5")); // qualified form
+        assert!(!is_recommended_model("openai", "gpt-5.4"));
+        assert!(!is_recommended_model("openai", "gpt-5.2"));
+        assert!(!is_recommended_model("openai", "o3"));
+        assert!(!is_recommended_model("openai", "gpt-4o"));
+
+        // Single-vendor subs → one flagship each.
+        assert!(is_recommended_model("minimax-coding-plan", "MiniMax-M3"));
+        assert!(!is_recommended_model("minimax-coding-plan", "MiniMax-M2"));
+        assert!(is_recommended_model("kimi-for-coding", "k2p7"));
+        assert!(!is_recommended_model("kimi-for-coding", "k2p5"));
+        assert!(is_recommended_model("zai-coding-plan", "glm-5.2"));
+        assert!(!is_recommended_model("zai-coding-plan", "glm-4.7"));
+        assert!(is_recommended_model(
+            "xiaomi-token-plan-sgp",
+            "mimo-v2.5-pro"
+        ));
+        assert!(is_recommended_model("anthropic", "claude-opus-4-8"));
+
+        // Codex child id resolves its own flagship, and the parent-namespaced
+        // form (after re-tagging) still matches the openai recommendation.
+        assert!(is_recommended_model("chatgpt_codex", "gpt-5.3-codex"));
+
+        // Multi-model gateway → a small curated set, not one and not all.
+        let oc = recommended_model_ids("opencode");
+        assert!(
+            oc.len() > 1 && oc.len() <= 4,
+            "opencode set should be small"
+        );
+        assert!(is_recommended_model("opencode", "gpt-5.5"));
+        assert!(!is_recommended_model("opencode", "claude-3-5-haiku"));
+        assert!(is_recommended_model(
+            "fireworks-ai",
+            "accounts/fireworks/models/glm-5p2"
+        ));
+        assert!(is_recommended_model(
+            "fireworks-ai",
+            "fireworks-ai/accounts/fireworks/models/minimax-m3"
+        ));
+
+        // Unmapped provider ⇒ nothing recommended (UI shows all).
+        assert!(recommended_model_ids("aws_bedrock").is_empty());
+        assert!(!is_recommended_model("aws_bedrock", "anything"));
+    }
+
+    #[test]
+    fn codex_is_a_governable_us_subscription() {
+        // chatgpt_codex itself is a subscription, hosted in the US.
+        assert!(is_subscription_provider("chatgpt_codex"));
+        assert_eq!(provider_jurisdiction("chatgpt_codex"), Jurisdiction::Us);
+
+        // A codex model surfaced under the openai namespace is attributed to the
+        // chatgpt_codex subscription (so org policy can block it)…
+        assert_eq!(
+            governable_subscription_for_model("openai", "openai/gpt-5.3-codex").as_deref(),
+            Some("chatgpt_codex")
+        );
+        assert_eq!(
+            governable_subscription_for_model("openai", "gpt-5.5-codex").as_deref(),
+            Some("chatgpt_codex")
+        );
+        // …while a plain openai API-key model stays UNGOVERNED.
+        assert_eq!(
+            governable_subscription_for_model("openai", "openai/gpt-5.5"),
+            None
+        );
+        // A genuine subscription provider maps to its own (lowercased) id.
+        assert_eq!(
+            governable_subscription_for_model(
+                "minimax-coding-plan",
+                "minimax-coding-plan/MiniMax-M3"
+            )
+            .as_deref(),
+            Some("minimax-coding-plan")
+        );
+        // Non-subscription providers are never governable.
+        assert_eq!(
+            governable_subscription_for_model("anthropic", "anthropic/x"),
+            None
         );
     }
 

@@ -14348,6 +14348,10 @@ expression: signatures
             "reasoning": {
               "type": "boolean"
             },
+            "recommended": {
+              "description": "Whether this is a curated flagship the UI should surface as\n\"recommended\" (latest state-of-the-art model for its provider). Set from\nthe server-side flagship map (`builtin::is_recommended_model`); a provider\nwith no curated recommendation has this `false` on every model and the UI\nfalls back to showing all of them.",
+              "type": "boolean"
+            },
             "tool_call": {
               "type": "boolean"
             }
@@ -14361,6 +14365,7 @@ expression: signatures
             "attachment",
             "context_window",
             "output_limit",
+            "recommended",
             "pricing"
           ],
           "type": "object"
@@ -14527,6 +14532,10 @@ expression: signatures
             "reasoning": {
               "type": "boolean"
             },
+            "recommended": {
+              "description": "Whether this is a curated flagship the UI should surface as\n\"recommended\" (latest state-of-the-art model for its provider). Set from\nthe server-side flagship map (`builtin::is_recommended_model`); a provider\nwith no curated recommendation has this `false` on every model and the UI\nfalls back to showing all of them.",
+              "type": "boolean"
+            },
             "tool_call": {
               "type": "boolean"
             }
@@ -14540,6 +14549,7 @@ expression: signatures
             "attachment",
             "context_window",
             "output_limit",
+            "recommended",
             "pricing"
           ],
           "type": "object"
@@ -14647,6 +14657,10 @@ expression: signatures
             "reasoning": {
               "type": "boolean"
             },
+            "recommended": {
+              "description": "Whether this is a curated flagship the UI should surface as\n\"recommended\" (latest state-of-the-art model for its provider). Set from\nthe server-side flagship map (`builtin::is_recommended_model`); a provider\nwith no curated recommendation has this `false` on every model and the UI\nfalls back to showing all of them.",
+              "type": "boolean"
+            },
             "tool_call": {
               "type": "boolean"
             }
@@ -14660,6 +14674,7 @@ expression: signatures
             "attachment",
             "context_window",
             "output_limit",
+            "recommended",
             "pricing"
           ],
           "type": "object"
