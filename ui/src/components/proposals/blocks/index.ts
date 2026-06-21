@@ -8,6 +8,38 @@ export { RichText } from "./RichText";
 export { Diagram } from "./Diagram";
 export { AnnotatedCode } from "./AnnotatedCode";
 export { DiffBlock } from "./DiffBlock";
+
+// Reusable line-anchored annotation engine (pure parsing + React rail UI). The
+// `annotated-code` block consumes it; `diff` and future blocks can adopt it.
+export {
+  parseLineRange,
+  parseAnnotationsAttr,
+  coerceAnnotation,
+  resolveAnnotations,
+  buildLineMarkerMap,
+  rangeLabel,
+  hasResolvedAnnotations,
+} from "./annotations";
+export type {
+  RawAnnotation,
+  LineRange,
+  ResolvedAnnotation,
+} from "./annotations";
+export {
+  AnnotationGutterMarker,
+  AnnotationCard,
+  AnnotationHiddenStack,
+  AnnotationHoverCard,
+} from "./annotationRail";
+export {
+  useAnnotationHover,
+  anchorFromElements,
+  resolveAnnotationHoverCardPosition,
+} from "./annotationRail.helpers";
+export type {
+  AnnotationAnchor,
+  AnnotationSide,
+} from "./annotationRail.helpers";
 export { BlockRenderer } from "./BlockRenderer";
 export type { BlockRendererProps } from "./BlockRenderer";
 export { parseMdxBody, isPascalCaseTag, extractBlockTags } from "./parseMdxBody";
