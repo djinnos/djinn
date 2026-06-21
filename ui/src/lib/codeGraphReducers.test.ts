@@ -7,10 +7,13 @@ import {
   HEATMAP_COLOR_MID,
   HEATMAP_COLOR_NULL,
   HEATMAP_COLOR_TOP,
+  TRAVERSAL_CONTAINMENT_EDGE_KINDS,
   applyComplexityHeatmap,
   colorForComplexity,
   computeComplexityThresholds,
   edgeReducer,
+  isTraversalContainmentEdge,
+  type EdgeKindAwareGraph,
   isViewEmpty,
   nodeReducer,
   oneHopNeighborhood,
@@ -863,6 +866,44 @@ describe("edgeReducer", () => {
     expect(cross.size).toBeGreaterThan(normal.size as number);
     expect(cross.zIndex).toBeGreaterThan(normal.zIndex as number);
   });
+
+  it("hides containment edges even when the filter tries to enable them", () => {
+    const v = viewWith({
+      edgeKindFilters: { ContainsDefinition: true },
+    });
+    const out = edgeReducer(
+      "a",
+      "b",
+      { kind: "ContainsDefinition", size: 1 },
+      v,
+    );
+    expect(out.hidden).toBe(true);
+  });
+
+  it("hides all three containment edge kinds", () => {
+    for (const kind of [
+      "ContainsDefinition",
+      "DeclaredInFile",
+      "MemberOf",
+    ]) {
+      const out = edgeReducer("a", "b", { kind, size: 1 }, EMPTY_HIGHLIGHT_VIEW);
+      expect(out.hidden).toBe(true);
+    }
+  });
+
+  it("hides containment edges even inside an active selection highlight", () => {
+    const v = viewWith({
+      selectionId: "a",
+      selectionNeighbors: new Set(["a", "b"]),
+    });
+    const out = edgeReducer(
+      "a",
+      "b",
+      { kind: "ContainsDefinition", size: 1 },
+      v,
+    );
+    expect(out.hidden).toBe(true);
+  });
 });
 
 describe("oneHopNeighborhood", () => {
@@ -885,6 +926,38 @@ describe("oneHopNeighborhood", () => {
     const ns = oneHopNeighborhood(g, "a");
     expect(ns.has("b")).toBe(true);
     expect(ns.has("c")).toBe(true);
+  });
+
+  it("excludes containment edges from traversal when the graph is edge-kind-aware", () => {
+    // Build a graph where 'a' is connected to 'b' via SymbolReference
+    // and to 'file' via ContainsDefinition. The containment edge should
+    // be skipped so the 1-hop set does not include 'file'.
+    const g: EdgeKindAwareGraph = {
+      hasNode: (id) => id === "a" || id === "b" || id === "file",
+      neighbors: (id) => (id === "a" ? ["b", "file"] : id === "b" ? ["a"] : ["a"]),
+      edgeKind: (source, target) => {
+        const pair = [source, target].sort().join("|");
+        if (pair === "a|b") return "SymbolReference";
+        if (pair === "a|file") return "ContainsDefinition";
+        return null;
+      },
+    };
+    const ns = oneHopNeighborhood(g, "a");
+    expect(ns.has("a")).toBe(true);
+    expect(ns.has("b")).toBe(true);
+    expect(ns.has("file")).toBe(false);
+  });
+
+  it("excludes all three containment kinds from traversal", () => {
+    for (const kind of TRAVERSAL_CONTAINMENT_EDGE_KINDS) {
+      const g: EdgeKindAwareGraph = {
+        hasNode: (id) => id === "a" || id === "b",
+        neighbors: (id) => (id === "a" ? ["b"] : ["a"]),
+        edgeKind: () => kind,
+      };
+      const ns = oneHopNeighborhood(g, "a");
+      expect(ns.has("b")).toBe(false);
+    }
   });
 });
 

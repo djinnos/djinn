@@ -16,6 +16,7 @@ import {
   MIN_DOI_REVEAL_COUNT,
   NODE_KINDS,
   SYMBOL_KIND_FILTERS,
+  isContainmentEdgeKind,
   useCodeGraphStore,
   type ColorMode,
   type FocusDirection,
@@ -146,7 +147,7 @@ export function GraphToolbar({
           </FilterGroup>
 
           <FilterGroup label="Edges">
-            {EDGE_KINDS.map((kind) => {
+            {EDGE_KINDS.filter((kind) => !isContainmentEdgeKind(kind)).map((kind) => {
               const active = edgeKindFilters[kind] ?? true;
               return (
                 <Chip

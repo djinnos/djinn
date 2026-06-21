@@ -83,4 +83,19 @@ describe("GraphToolbar", () => {
     render(<GraphToolbar />);
     expect(screen.queryByTestId("node-filter-community")).not.toBeInTheDocument();
   });
+
+  it("does not render containment edge filter chips", () => {
+    render(<GraphToolbar />);
+    // Containment edges are structural nesting metadata, never drawn.
+    // No toolbar chip should exist to re-enable them.
+    expect(
+      screen.queryByTestId("edge-filter-ContainsDefinition"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("edge-filter-DeclaredInFile"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("edge-filter-MemberOf"),
+    ).not.toBeInTheDocument();
+  });
 });

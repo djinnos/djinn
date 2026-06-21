@@ -358,7 +358,7 @@ mod tests {
 
     use super::*;
     use crate::actors::coordinator::{
-        AutoMergeTracker, BackgroundWorkTracker, DEFAULT_MODEL_ID, STUCK_INTERVAL,
+        AutoMergeTracker, BackgroundWorkTracker, DEFAULT_MODEL_ID, PrCleanupConfig, STUCK_INTERVAL,
         SharedCoordinatorState,
     };
     use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
@@ -481,6 +481,7 @@ mod tests {
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,
+            pr_cleanup_config: PrCleanupConfig::default(),
             dispatched: 0,
             recovered: 0,
         }
