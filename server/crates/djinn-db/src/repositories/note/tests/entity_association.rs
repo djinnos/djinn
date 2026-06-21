@@ -710,6 +710,182 @@ async fn list_filters_by_min_weight_and_limit() {
     assert_no_proposal_body_in_notes(&db, std::slice::from_ref(&pivot)).await;
 }
 
+// ── Proposal derived_from edges: proposal→epic→task→notes fixture ────────────
+//
+// Exercises the repository-backed path that session extraction uses when a
+// task belonging to an epic linked to a proposal writes or reads notes.
+// Mirrors the flow: proposal_graduate → link_epic → task under epic →
+// session extraction records `derived_from` edges from proposal to notes.
+
+use crate::TaskRepository;
+use crate::repositories::epic::{EpicCreateInput, EpicRepository};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proposal_derived_from_edges_via_epic_task_notes_fixture() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+    let proposal_repo = ProposalRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let epic_repo = EpicRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+
+    // 1. Create a proposal (simulates an approved proposal being graduated).
+    let proposal_id = make_proposal(&proposal_repo, "Test proposal").await;
+
+    // 2. Create an epic in the project.
+    let epic = epic_repo
+        .create_for_project(
+            &project.id,
+            EpicCreateInput {
+                title: "Build feature X",
+                description: "desc",
+                emoji: "🚀",
+                color: "#ff0000",
+                owner: "test-user",
+                memory_refs: None,
+                status: None,
+                auto_breakdown: Some(false),
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // 3. Link the proposal to the epic (proposal_graduate path).
+    proposal_repo
+        .link_epic(&proposal_id, &epic.id, &project.id)
+        .await
+        .unwrap();
+
+    // 4. Create a task under the epic.
+    let task = task_repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Implement feature",
+            "Do the work",
+            "Design doc",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(task.epic_id.as_deref(), Some(epic.id.as_str()));
+
+    // 5. Create notes that the session read and wrote.
+    let read_note_id = make_note(&note_repo, &project, "ADR read during planning").await;
+    let written_note_id = make_note(&note_repo, &project, "Case note written by task").await;
+
+    // 6. Simulate session extraction: record derived_from edges from the
+    //    proposal to both the read and written notes.
+    //
+    //    This mirrors what `emit_proposal_derived_from_edges` does:
+    //    resolve the proposal via proposal_for_epic, then for each note
+    //    call upsert_typed_entity_association.
+    let resolved_proposal = proposal_repo
+        .proposal_for_epic(&epic.id)
+        .await
+        .unwrap()
+        .expect("proposal_for_epic should return the linked proposal");
+    assert_eq!(resolved_proposal.id, proposal_id);
+
+    let proposal_ref = MemoryEntityRef::proposal(&proposal_id);
+
+    // Record edge: proposal → read note (derived_from)
+    note_repo
+        .upsert_typed_entity_association(
+            proposal_ref.clone(),
+            MemoryEntityRef::note(&read_note_id),
+            MemoryEntityKind::DerivedFrom,
+            0.8,
+        )
+        .await
+        .unwrap();
+
+    // Record edge: proposal → written note (derived_from)
+    note_repo
+        .upsert_typed_entity_association(
+            proposal_ref.clone(),
+            MemoryEntityRef::note(&written_note_id),
+            MemoryEntityKind::DerivedFrom,
+            0.8,
+        )
+        .await
+        .unwrap();
+
+    // 7. Assert: the proposal has two derived_from edges.
+    let proposal_edges = note_repo
+        .list_typed_entity_associations_for(MemoryEntityRef::proposal(&proposal_id), 0.0, 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        proposal_edges.len(),
+        2,
+        "proposal should have two derived_from edges (one per note)"
+    );
+    for edge in &proposal_edges {
+        assert_eq!(edge.source.entity_type, MemoryEntityType::Proposal);
+        assert_eq!(edge.source.id, proposal_id);
+        assert_eq!(edge.target.entity_type, MemoryEntityType::Note);
+        assert_eq!(edge.kind, MemoryEntityKind::DerivedFrom);
+        assert!((edge.weight - 0.8).abs() < 1e-12);
+    }
+    let target_ids: Vec<&str> = proposal_edges
+        .iter()
+        .map(|e| e.target.id.as_str())
+        .collect();
+    assert!(
+        target_ids.contains(&read_note_id.as_str()),
+        "read note should be among the proposal's derived_from targets"
+    );
+    assert!(
+        target_ids.contains(&written_note_id.as_str()),
+        "written note should be among the proposal's derived_from targets"
+    );
+
+    // 8. Assert: each note also sees the edge from the other direction.
+    let from_read_note = note_repo
+        .list_typed_entity_associations_for(MemoryEntityRef::note(&read_note_id), 0.0, 100)
+        .await
+        .unwrap();
+    assert_eq!(from_read_note.len(), 1);
+    assert_eq!(from_read_note[0].source.id, proposal_id);
+    assert_eq!(from_read_note[0].kind, MemoryEntityKind::DerivedFrom);
+
+    let from_written_note = note_repo
+        .list_typed_entity_associations_for(MemoryEntityRef::note(&written_note_id), 0.0, 100)
+        .await
+        .unwrap();
+    assert_eq!(from_written_note.len(), 1);
+    assert_eq!(from_written_note[0].source.id, proposal_id);
+    assert_eq!(from_written_note[0].kind, MemoryEntityKind::DerivedFrom);
+
+    // 9. Confirm no proposal body leaked into `notes`.
+    assert_no_proposal_body_in_notes(&db, &[proposal_id.clone()]).await;
+
+    // 10. Confirm existing task/epic memory_refs autolink behavior is
+    //     unchanged: the note_associations (F5) substrate still works
+    //     independently for co-access.
+    note_repo
+        .upsert_association(&read_note_id, &written_note_id, 1)
+        .await
+        .unwrap();
+    let co_access = note_repo
+        .get_associations_for_note(&read_note_id)
+        .await
+        .unwrap();
+    assert!(
+        !co_access.is_empty(),
+        "co-access association should still work alongside entity edges"
+    );
+}
+
 // ── Helper: convert MemoryEntityKind → NoteAssociationKind for legacy path ─
 //
 // The legacy `note_associations` substrate exposes
