@@ -11,7 +11,7 @@ use super::{
     MemoryBrokenLinksResponse, MemoryBuildContextResponse, MemoryExtractedAuditResponse,
     MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse, MemoryOrphansResponse,
     MemorySearchResponse, MemorySearchResultItem, OrphansParams, ReadParams, ResolvedMention,
-    SearchParams, note_to_view, parse_task_ref_item, parse_proposal_ref_item,
+    SearchParams, note_to_view, parse_proposal_ref_item, parse_task_ref_item,
 };
 
 fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
