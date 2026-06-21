@@ -1427,8 +1427,6 @@ impl CoordinatorActor {
         )
     }
 
-
-
     /// Handle the end of a planner session by re-evaluating the epic its
     /// task was attached to.  Non-planner sessions and task-less sessions
     /// are ignored.
