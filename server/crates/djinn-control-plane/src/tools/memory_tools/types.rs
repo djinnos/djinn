@@ -328,6 +328,14 @@ pub struct MemoryExtractedAuditResponse {
     pub error: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ResolvedMention {
+    pub short_id: String,
+    pub entity_type: String,
+    pub title: String,
+    pub permalink: String,
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryNoteResponse {
     pub id: Option<String>,
@@ -345,6 +353,9 @@ pub struct MemoryNoteResponse {
     pub updated_at: Option<String>,
     pub last_accessed: Option<String>,
     pub deduplicated: bool,
+    /// Short_id mentions found in note body, resolved to entities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_mentions: Vec<ResolvedMention>,
     pub error: Option<String>,
 }
 
@@ -584,6 +595,7 @@ impl MemoryNoteResponse {
             updated_at: Some(note.updated_at.clone()),
             last_accessed: Some(note.last_accessed.clone()),
             deduplicated,
+            resolved_mentions: vec![],
             error: None,
         }
     }
@@ -605,6 +617,7 @@ impl MemoryNoteResponse {
             updated_at: None,
             last_accessed: None,
             deduplicated: false,
+            resolved_mentions: vec![],
             error: Some(error),
         }
     }
