@@ -22,6 +22,7 @@ import {
   SYMBOL_KIND_FILTERS,
   useCodeGraphStore,
   type ColorMode,
+  type LensId,
   type SemanticZoomMode,
 } from "@/stores/codeGraphStore";
 import { cn } from "@/lib/utils";
@@ -94,6 +95,8 @@ export function GraphToolbar({
   const setSemanticZoomMode = useCodeGraphStore(
     (s) => s.setSemanticZoomMode,
   );
+  const activeLens = useCodeGraphStore((s) => s.activeLens);
+  const applyLens = useCodeGraphStore((s) => s.applyLens);
 
   const handleDepthChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -110,56 +113,65 @@ export function GraphToolbar({
         className,
       )}
     >
-      <FilterGroup label="Nodes">
-        {NODE_KINDS.map((kind) => {
-          const active = nodeKindFilters[kind] ?? true;
-          return (
-            <Chip
-              key={kind}
-              active={active}
-              onClick={() => toggleNodeKind(kind)}
-              testId={`node-filter-${kind}`}
-              title={kind}
-            >
-              {NODE_KIND_LABEL[kind] ?? kind}
-            </Chip>
-          );
-        })}
-      </FilterGroup>
+      <LensSelector activeLens={activeLens} onChange={applyLens} />
 
-      <FilterGroup label="Symbols">
-        {SYMBOL_KIND_FILTERS.map((kind) => {
-          const active = symbolKindFilters[kind] ?? true;
-          return (
-            <Chip
-              key={kind}
-              active={active}
-              onClick={() => toggleSymbolKind(kind)}
-              testId={`symbol-filter-${kind}`}
-              title={kind}
-            >
-              {SYMBOL_KIND_LABEL[kind] ?? kind}
-            </Chip>
-          );
-        })}
-      </FilterGroup>
+      <details className="group">
+        <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-300">
+          Advanced
+        </summary>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-2">
+          <FilterGroup label="Nodes">
+            {NODE_KINDS.map((kind) => {
+              const active = nodeKindFilters[kind] ?? true;
+              return (
+                <Chip
+                  key={kind}
+                  active={active}
+                  onClick={() => toggleNodeKind(kind)}
+                  testId={`node-filter-${kind}`}
+                  title={kind}
+                >
+                  {NODE_KIND_LABEL[kind] ?? kind}
+                </Chip>
+              );
+            })}
+          </FilterGroup>
 
-      <FilterGroup label="Edges">
-        {EDGE_KINDS.map((kind) => {
-          const active = edgeKindFilters[kind] ?? true;
-          return (
-            <Chip
-              key={kind}
-              active={active}
-              onClick={() => toggleEdgeKind(kind)}
-              testId={`edge-filter-${kind}`}
-              title={kind}
-            >
-              {EDGE_LABEL[kind] ?? kind}
-            </Chip>
-          );
-        })}
-      </FilterGroup>
+          <FilterGroup label="Symbols">
+            {SYMBOL_KIND_FILTERS.map((kind) => {
+              const active = symbolKindFilters[kind] ?? true;
+              return (
+                <Chip
+                  key={kind}
+                  active={active}
+                  onClick={() => toggleSymbolKind(kind)}
+                  testId={`symbol-filter-${kind}`}
+                  title={kind}
+                >
+                  {SYMBOL_KIND_LABEL[kind] ?? kind}
+                </Chip>
+              );
+            })}
+          </FilterGroup>
+
+          <FilterGroup label="Edges">
+            {EDGE_KINDS.map((kind) => {
+              const active = edgeKindFilters[kind] ?? true;
+              return (
+                <Chip
+                  key={kind}
+                  active={active}
+                  onClick={() => toggleEdgeKind(kind)}
+                  testId={`edge-filter-${kind}`}
+                  title={kind}
+                >
+                  {EDGE_LABEL[kind] ?? kind}
+                </Chip>
+              );
+            })}
+          </FilterGroup>
+        </div>
+      </details>
 
       <FilterGroup label="Tests">
         <Chip
@@ -214,6 +226,85 @@ export function GraphToolbar({
         </span>
       </div>
     </div>
+  );
+}
+
+const LENS_OPTIONS: { id: LensId; label: string }[] = [
+  { id: "architecture", label: "Architecture" },
+  { id: "calls", label: "Calls" },
+  { id: "types", label: "Types" },
+  { id: "dataflow", label: "Data flow" },
+];
+
+interface LensSelectorProps {
+  activeLens: LensId | null;
+  onChange: (lensId: LensId) => void;
+}
+
+/**
+ * Segmented control for intent lenses. Each button applies a complete
+ * filter preset; the active button highlights the currently-applied
+ * lens. When the user manually toggles a filter (activeLens becomes
+ * null), no button is highlighted.
+ */
+function LensSelector({ activeLens, onChange }: LensSelectorProps) {
+  return (
+    <div className="flex items-center gap-1.5" data-testid="lens-selector">
+      <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+        Lens
+      </span>
+      <div
+        role="radiogroup"
+        aria-label="Intent lens"
+        className="flex items-center rounded-md border border-zinc-800 bg-[#0a0a10]/40 p-0.5"
+      >
+        {LENS_OPTIONS.map(({ id, label }) => (
+          <LensButton
+            key={id}
+            active={activeLens === id}
+            onClick={() => onChange(id)}
+            testId={`lens-${id}`}
+            label={label}
+            tooltip={`Apply ${label} lens`}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface LensButtonProps {
+  active: boolean;
+  onClick: () => void;
+  testId: string;
+  label: string;
+  tooltip: string;
+}
+
+function LensButton({
+  active,
+  onClick,
+  testId,
+  label,
+  tooltip,
+}: LensButtonProps) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      data-testid={testId}
+      onClick={onClick}
+      title={tooltip}
+      className={cn(
+        "rounded px-2 py-0.5 text-[11px] font-medium transition-colors",
+        active
+          ? "bg-zinc-800/80 text-zinc-100"
+          : "text-zinc-400 hover:text-zinc-200",
+      )}
+    >
+      {label}
+    </button>
   );
 }
 
