@@ -3,10 +3,12 @@ use super::*;
 
 #[tool_router(router = memory_search_router, vis = "pub(super)")]
 impl DjinnMcpServer {
-    /// Search notes using FTS5 full-text search with BM25 ranking. Returns compact
-    /// results with snippets. Optionally filter graph traversal by edge kinds.
+    /// Search notes (and proposals) using FTS full-text search with BM25
+    /// ranking. Returns unified results with snippets and an `entity`
+    /// discriminator (`"note"` or `"proposal"`). Optionally filter graph
+    /// traversal by edge kinds, or scope to a subset of entity types.
     #[tool(
-        description = "Search notes using FTS5 full-text search with BM25 ranking. Returns compact results with snippets. The optional edge_kinds parameter filters which association edge kinds participate in graph proximity scoring during retrieval."
+        description = "Unified memory search across notes and proposals with BM25 ranking. Returns compact results with snippets. Each result carries an `entity` field (\"note\" or \"proposal\"). The optional `entity_types` parameter scopes results (omit/null = both, [\"note\"] = notes-only, [\"proposal\"] = proposals-only, [] = no results). The optional edge_kinds parameter filters which association edge kinds participate in graph proximity scoring during retrieval."
     )]
     pub async fn memory_search(
         &self,
@@ -73,9 +75,9 @@ impl DjinnMcpServer {
     /// Build context from a seed note with progressive disclosure and token budget
     /// awareness. Returns full content for primary notes, overview for direct (L1)
     /// linked notes, abstract for discovered (L0) related notes, plus supersedes
-    /// and contradicts annotations. Optionally filter graph traversal by edge kinds.
+    /// and contradicts annotations. Relevant proposals surface as related entities.
     #[tool(
-        description = "Build context from a seed note with progressive disclosure. Returns full content for primary notes, overview for direct linked notes, abstract for discovered related notes, plus supersedes/contradicts annotations. Seed notes are never dropped by budget constraints. The optional edge_kinds parameter filters which association edge kinds participate in graph proximity scoring."
+        description = "Build context from a seed note with progressive disclosure. Returns full content for primary notes, overview for direct linked notes, abstract for discovered related notes, plus supersedes/contradicts annotations. Relevant proposals surface as related entities (title + acceptance criteria as the overview; call proposal_show for the full body). Seed notes are never dropped by budget constraints. The optional edge_kinds parameter filters which association edge kinds participate in graph proximity scoring."
     )]
     pub async fn memory_build_context(
         &self,

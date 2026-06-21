@@ -40,6 +40,7 @@ pub(super) async fn call_memory_search(
                 folder: p.folder,
                 note_type: p.note_type,
                 limit: p.limit,
+                entity_types: None,
                 edge_kinds: None,
             },
             task_id.as_deref(),
