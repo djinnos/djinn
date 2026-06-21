@@ -3,6 +3,7 @@ import {
   COMMUNITY_COLORS,
   COMMUNITY_MAX_SIZE,
   COMMUNITY_MIN_SIZE,
+  CONTAINMENT_EDGE_KINDS,
   DOUBLE_CLICK_INTERVAL_MS,
   PRECOMPUTED_LAYOUT_ATTRIBUTE,
   WORKSPACE_COLORS,
@@ -17,6 +18,7 @@ import {
   expandCommunityInSnapshot,
   filterSnapshotForWorkspace,
   hasPrecomputedCoordinates,
+  isContainmentEdgeKind,
   isDoubleClick,
   massForNode,
   parseSnapshotResponse,
@@ -628,10 +630,17 @@ describe("hasPrecomputedCoordinates", () => {
 });
 
 describe("buildGraphFromSnapshot", () => {
-  it("emits one graphology node per snapshot node and one edge per snapshot edge", () => {
+  it("emits one graphology node per snapshot node, excluding containment edges", () => {
     const graph = buildGraphFromSnapshot(fixtureSnapshot);
     expect(graph.order).toBe(fixtureSnapshot.nodes.length);
-    expect(graph.size).toBe(fixtureSnapshot.edges.length);
+    // ContainsDefinition / DeclaredInFile / MemberOf are containment
+    // edges — they are never rendered as Sigma edges. The fixture has
+    // 2 ContainsDefinition edges + 1 SymbolReference edge, so only the
+    // SymbolReference survives.
+    const nonContainmentEdges = fixtureSnapshot.edges.filter(
+      (e) => !isContainmentEdgeKind(e.kind),
+    ).length;
+    expect(graph.size).toBe(nonContainmentEdges);
   });
 
   it("attaches per-type mass, kind, and pagerank to each node", () => {
@@ -871,8 +880,37 @@ describe("buildGraphFromSnapshot", () => {
   });
 
   it("keeps intra-workspace edges less prominent than cross-workspace edges", () => {
-    const withWorkspace: SnapshotPayload = {
+    // Add a non-containment edge (Reads) so the test has a valid rendered
+    // intra-workspace edge to compare. ContainsDefinition is excluded
+    // from rendered edges as containment nesting metadata.
+    const baseEdges = [
+      ...fixtureSnapshot.edges,
+      {
+        from: "symbol:scip-rust . . . main()",
+        to: "symbol:scip-rust . . . User#",
+        kind: "Reads",
+        confidence: 0.8,
+      },
+    ];
+    // Intra-workspace: both symbols in workspace "app".
+    const intraSnapshot: SnapshotPayload = {
       ...fixtureSnapshot,
+      edges: baseEdges,
+      nodes: fixtureSnapshot.nodes.map((n) => {
+        if (
+          n.id === "file:src/main.rs" ||
+          n.id === "symbol:scip-rust . . . main()" ||
+          n.id === "symbol:scip-rust . . . User#"
+        ) {
+          return { ...n, workspace: "app" };
+        }
+        return n;
+      }),
+    };
+    // Cross-workspace: main() in "app", User# in "domain".
+    const crossSnapshot: SnapshotPayload = {
+      ...fixtureSnapshot,
+      edges: baseEdges,
       nodes: fixtureSnapshot.nodes.map((n) => {
         if (n.id === "file:src/main.rs" || n.id === "symbol:scip-rust . . . main()") {
           return { ...n, workspace: "app" };
@@ -883,23 +921,29 @@ describe("buildGraphFromSnapshot", () => {
         return n;
       }),
     };
-    const graph = buildGraphFromSnapshot(withWorkspace);
-    const intraEdge = graph.edges().find(
-      (edge) =>
-        graph.source(edge) === "file:src/main.rs" &&
-        graph.target(edge) === "symbol:scip-rust . . . main()",
-    );
-    const crossEdge = graph.edges().find(
-      (edge) =>
-        graph.source(edge) === "symbol:scip-rust . . . main()" &&
-        graph.target(edge) === "symbol:scip-rust . . . User#",
-    );
+    const intraGraph = buildGraphFromSnapshot(intraSnapshot);
+    const crossGraph = buildGraphFromSnapshot(crossSnapshot);
+    const findReadsEdge = (g: ReturnType<typeof buildGraphFromSnapshot>) =>
+      g.edges().find(
+        (edge) =>
+          g.getEdgeAttribute(edge, "kind") === "Reads" &&
+          g.source(edge) === "symbol:scip-rust . . . main()" &&
+          g.target(edge) === "symbol:scip-rust . . . User#",
+      );
+    const intraEdge = findReadsEdge(intraGraph);
+    const crossEdge = findReadsEdge(crossGraph);
     expect(intraEdge).toBeDefined();
     expect(crossEdge).toBeDefined();
-    expect(graph.getEdgeAttribute(intraEdge!, "isCrossWorkspace")).toBe(false);
-    expect(graph.getEdgeAttribute(crossEdge!, "isCrossWorkspace")).toBe(true);
-    expect(graph.getEdgeAttribute(crossEdge!, "size") as number).toBeGreaterThan(
-      graph.getEdgeAttribute(intraEdge!, "size") as number,
+    expect(
+      intraGraph.getEdgeAttribute(intraEdge!, "isCrossWorkspace"),
+    ).toBe(false);
+    expect(
+      crossGraph.getEdgeAttribute(crossEdge!, "isCrossWorkspace"),
+    ).toBe(true);
+    expect(
+      crossGraph.getEdgeAttribute(crossEdge!, "size") as number,
+    ).toBeGreaterThan(
+      intraGraph.getEdgeAttribute(intraEdge!, "size") as number,
     );
   });
 
@@ -960,7 +1004,12 @@ describe("buildGraphFromSnapshot", () => {
       ],
     };
     const graph = buildGraphFromSnapshot(withLoop);
-    expect(graph.size).toBe(fixtureSnapshot.edges.length);
+    // Only non-containment, non-self-loop edges survive. The loop is a
+    // FileReference (non-containment) but gets dropped by dropSelfLoops.
+    const expected = fixtureSnapshot.edges.filter(
+      (e) => !isContainmentEdgeKind(e.kind),
+    ).length;
+    expect(graph.size).toBe(expected);
   });
 
   it("drops edges whose endpoints aren't in the node set", () => {
@@ -977,38 +1026,82 @@ describe("buildGraphFromSnapshot", () => {
       ],
     };
     const graph = buildGraphFromSnapshot(withDangling);
-    expect(graph.size).toBe(fixtureSnapshot.edges.length);
+    // Only non-containment edges with valid endpoints survive.
+    const expected = fixtureSnapshot.edges.filter(
+      (e) => !isContainmentEdgeKind(e.kind),
+    ).length;
+    expect(graph.size).toBe(expected);
   });
 
   it("paints edges with the per-kind color", () => {
     const graph = buildGraphFromSnapshot(fixtureSnapshot);
-    const containsEdges = graph
+    // The fixture's only rendered edge is a SymbolReference.
+    const symbolRefEdges = graph
       .edges()
       .filter(
-        (e) => graph.getEdgeAttribute(e, "kind") === "ContainsDefinition",
+        (e) => graph.getEdgeAttribute(e, "kind") === "SymbolReference",
       );
-    for (const e of containsEdges) {
-      expect(graph.getEdgeAttribute(e, "color")).toBe("#2d5a3d");
+    expect(symbolRefEdges.length).toBeGreaterThan(0);
+    for (const e of symbolRefEdges) {
+      expect(graph.getEdgeAttribute(e, "color")).toBe("#7c3aed");
     }
   });
 
-  it("can drop MemberOf edges via option", () => {
-    const withMember: SnapshotPayload = {
+  it("excludes all containment edge kinds from rendered graph edges", () => {
+    const withContainment: SnapshotPayload = {
       ...fixtureSnapshot,
       edges: [
         ...fixtureSnapshot.edges,
+        // Add one of each containment kind so the test exercises all three.
         {
           from: "symbol:scip-rust . . . User#",
           to: "file:src/user.rs",
           kind: "MemberOf",
           confidence: 1.0,
         },
+        {
+          from: "file:src/user.rs",
+          to: "symbol:scip-rust . . . User#",
+          kind: "DeclaredInFile",
+          confidence: 1.0,
+        },
       ],
     };
-    const noDrop = buildGraphFromSnapshot(withMember);
-    expect(noDrop.size).toBe(withMember.edges.length);
-    const dropped = buildGraphFromSnapshot(withMember, { dropMemberOf: true });
-    expect(dropped.size).toBe(fixtureSnapshot.edges.length);
+    const graph = buildGraphFromSnapshot(withContainment);
+    // Every rendered edge must be a non-containment kind.
+    for (const e of graph.edges()) {
+      const kind = graph.getEdgeAttribute(e, "kind") as string;
+      expect(isContainmentEdgeKind(kind)).toBe(false);
+    }
+    // The only surviving edge is the fixture's SymbolReference.
+    const expected = withContainment.edges.filter(
+      (e) => !isContainmentEdgeKind(e.kind),
+    ).length;
+    expect(graph.size).toBe(expected);
+    expect(graph.size).toBe(1);
+  });
+
+  it("converts containment edges into nesting metadata on nodes", () => {
+    const graph = buildGraphFromSnapshot(fixtureSnapshot);
+    // ContainsDefinition: file:src/main.rs → symbol:main()
+    expect(
+      graph.getNodeAttribute("symbol:scip-rust . . . main()", "parentId"),
+    ).toBe("file:src/main.rs");
+    // ContainsDefinition: file:src/user.rs → symbol:User#
+    expect(
+      graph.getNodeAttribute("symbol:scip-rust . . . User#", "parentId"),
+    ).toBe("file:src/user.rs");
+    // The parent file carries its children in childIds.
+    const mainChildren = graph.getNodeAttribute(
+      "file:src/main.rs",
+      "childIds",
+    ) as string[] | undefined;
+    expect(mainChildren).toContain("symbol:scip-rust . . . main()");
+    const userChildren = graph.getNodeAttribute(
+      "file:src/user.rs",
+      "childIds",
+    ) as string[] | undefined;
+    expect(userChildren).toContain("symbol:scip-rust . . . User#");
   });
 
   // ── Precomputed-coordinate path (server-shipped layout) ───────────────────
@@ -1092,7 +1185,11 @@ describe("buildGraphFromSnapshot", () => {
   it("still wires up edges when using the precomputed-coordinate path", () => {
     const graph = buildGraphFromSnapshot(withServerCoords());
     expect(graph.order).toBe(fixtureSnapshot.nodes.length);
-    expect(graph.size).toBe(fixtureSnapshot.edges.length);
+    // Containment edges are excluded even on the precomputed path.
+    const expected = fixtureSnapshot.edges.filter(
+      (e) => !isContainmentEdgeKind(e.kind),
+    ).length;
+    expect(graph.size).toBe(expected);
   });
 
   it("treats (0, 0) as a valid precomputed position rather than falling back", () => {
@@ -1529,6 +1626,23 @@ describe("edgeStyleFor", () => {
   it("returns a neutral fallback for unknown kinds", () => {
     const fallback = edgeStyleFor("MysteryKind");
     expect(fallback.color).toBe("#4a4a5a");
+  });
+});
+
+describe("containment edge kinds", () => {
+  it("CONTAINMENT_EDGE_KINDS includes ContainsDefinition, DeclaredInFile, and MemberOf", () => {
+    expect(CONTAINMENT_EDGE_KINDS.has("ContainsDefinition")).toBe(true);
+    expect(CONTAINMENT_EDGE_KINDS.has("DeclaredInFile")).toBe(true);
+    expect(CONTAINMENT_EDGE_KINDS.has("MemberOf")).toBe(true);
+  });
+
+  it("isContainmentEdgeKind returns true only for containment kinds", () => {
+    expect(isContainmentEdgeKind("ContainsDefinition")).toBe(true);
+    expect(isContainmentEdgeKind("DeclaredInFile")).toBe(true);
+    expect(isContainmentEdgeKind("MemberOf")).toBe(true);
+    expect(isContainmentEdgeKind("SymbolReference")).toBe(false);
+    expect(isContainmentEdgeKind("Reads")).toBe(false);
+    expect(isContainmentEdgeKind("Extends")).toBe(false);
   });
 });
 
