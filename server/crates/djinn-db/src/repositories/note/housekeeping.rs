@@ -205,6 +205,7 @@ impl NoteRepository {
                 limit: 5,
                 semantic_scores: None,
                 edge_kinds: None,
+                entity_types: None,
             })
             .await?
             .into_iter()

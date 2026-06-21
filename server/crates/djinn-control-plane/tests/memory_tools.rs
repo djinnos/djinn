@@ -1195,6 +1195,90 @@ async fn memory_read_surfaces_tasks_and_proposals_for_note_under_graduated_propo
 }
 
 #[tokio::test]
+async fn memory_read_regression_resolved_mentions_still_works() {
+    let harness = McpTestHarness::new().await;
+    let fixture = build_graduated_proposal_fixture(&harness).await;
+
+    // The proposal's short_id is non-hex (guaranteed by the fixture helper).
+    // Write a note whose body contains the proposal short_id as dead prose.
+    // Use a fresh project so the note body mention resolution is clean.
+    let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
+    let project = project_row.slug();
+    let note = harness
+        .call_tool(
+            "memory_write",
+            json!({
+                "project": project,
+                "title": "Note Mentioning Proposal",
+                "content": format!("This pitfall relates to proposal {} which covers the design.", fixture.proposal_short_id),
+                "type": "pitfall",
+            }),
+        )
+        .await
+        .expect("memory_write should dispatch");
+    assert!(
+        note.get("error").is_none() || note["error"].is_null(),
+        "memory_write returned error: {note}"
+    );
+
+    // memory_read should resolve the short_id mention.
+    let read = harness
+        .call_tool(
+            "memory_read",
+            json!({"project": project, "identifier": note["permalink"]}),
+        )
+        .await
+        .expect("memory_read should dispatch");
+    assert!(
+        read.get("error").is_none() || read["error"].is_null(),
+        "memory_read returned error: {read}"
+    );
+
+    let mentions = read
+        .get("resolved_mentions")
+        .and_then(|v| v.as_array())
+        .expect("resolved_mentions should be an array");
+    assert!(
+        !mentions.is_empty(),
+        "resolved_mentions should be non-empty — the note body contains a valid short_id"
+    );
+
+    // Find the mention matching our proposal short_id.
+    let proposal_mention = mentions
+        .iter()
+        .find(|m| m.get("short_id").and_then(|v| v.as_str()) == Some(&fixture.proposal_short_id))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected resolved mention for short_id {} in: {mentions:?}",
+                fixture.proposal_short_id
+            )
+        });
+
+    assert_eq!(
+        proposal_mention["entity_type"].as_str().unwrap(),
+        "proposal",
+        "entity_type should be 'proposal'"
+    );
+    assert!(
+        proposal_mention
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "title should be non-empty"
+    );
+    // permalink should be the proposal's UUID id.
+    assert!(
+        proposal_mention
+            .get("permalink")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "permalink should be non-empty"
+    );
+}
+
+#[tokio::test]
 async fn memory_read_regression_memory_task_refs_behavior_unchanged() {
     let harness = McpTestHarness::new().await;
     let fixture = build_graduated_proposal_fixture(&harness).await;
@@ -1384,18 +1468,22 @@ async fn no_regression_memory_refs_autolink() {
 
 #[tokio::test]
 async fn no_regression_memory_search_ranking_notes_only() {
-    // Regression guard: memory_search currently returns only notes. The Wave 1
-    // feature adds proposals to memory_task_refs and proposal_show but must NOT
-    // change memory_search results. This test verifies that:
-    // (a) memory_search with no entity_types filter returns the same notes as
-    //     before, and
-    // (b) every result is a note (has a permalink, note_type, folder — note
-    //     fields that proposals do not have).
+    // Regression guard: memory_search returns notes ranked correctly.
+    //
+    // Wave 2 changed the default entity_types from notes-only to "both" —
+    // proposals are now interleaved in search results when entity_types is
+    // unset.  This test verifies that:
+    // (a) the two notes are still found in the result set, and
+    // (b) notes retain their expected fields (note_type, folder, permalink).
+    //
+    // Proposals MAY appear alongside notes in the default (unfiltered)
+    // result set — that is by design.  The test does not assert their
+    // absence.
     let harness = McpTestHarness::new().await;
     let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
     let project = project_row.slug();
 
-    // Create a proposal (should NOT appear in memory_search).
+    // Create a proposal (may appear in default memory_search results).
     let proposal = harness
         .call_tool(
             "proposal_create",
@@ -1432,24 +1520,31 @@ async fn no_regression_memory_search_ranking_notes_only() {
     let results = searched["results"]
         .as_array()
         .expect("results should be an array");
-    assert!(results.len() >= 2, "should find both notes: {results:?}");
 
-    // Every result must be a note (not a proposal). Notes have note_type and
-    // folder fields; proposals do not appear here.
-    for r in results {
+    // At least the two notes should be present (proposals may also appear).
+    let note_results: Vec<_> = results
+        .iter()
+        .filter(|r| {
+            r.get("note_type")
+                .and_then(|v| v.as_str())
+                .is_some_and(|nt| nt != "proposal")
+        })
+        .collect();
+    assert!(
+        note_results.len() >= 2,
+        "should find at least 2 notes (got {}): {results:?}",
+        note_results.len()
+    );
+
+    // Every note result must carry the expected note fields.
+    for r in &note_results {
         assert!(
             r.get("note_type").is_some(),
-            "every result should have note_type (it's a note): {r:?}"
+            "every note result should have note_type: {r:?}"
         );
         assert!(
             r.get("folder").is_some(),
-            "every result should have folder (it's a note): {r:?}"
-        );
-        // The result should NOT match the proposal title.
-        assert_ne!(
-            r.get("title").and_then(|v| v.as_str()),
-            Some("Search Excluded Proposal"),
-            "proposals must not appear in memory_search results"
+            "every note result should have folder: {r:?}"
         );
     }
 }

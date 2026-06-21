@@ -98,6 +98,18 @@ pub struct NoteSearchParams<'a> {
     /// When `Some`, only edges whose `kind` matches participate in spreading
     /// activation. `None` means all kinds.
     pub edge_kinds: Option<&'a [String]>,
+    /// Optional entity-type filter for unified search.
+    ///
+    /// * `None` — return both notes and proposals (the default for every
+    ///   existing call site that does not set this field).
+    /// * `Some(["note"])` — notes-only.
+    /// * `Some(["proposal"])` — proposals-only.
+    /// * `Some([])` (empty slice) — treated as "no entities"; returns an
+    ///   empty result immediately.
+    /// * `Some(["unknown"])` or any value not matching `"note"` or
+    ///   `"proposal"` — treated as "no matching entities"; returns an
+    ///   empty result.
+    pub entity_types: Option<&'a [String]>,
 }
 
 // ── SQL constant ─────────────────────────────────────────────────────────────

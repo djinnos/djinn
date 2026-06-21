@@ -3,7 +3,8 @@ use wiremock::matchers::{header, method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::github_api::{
-    CheckRunsResponse, CreatePrParams, GitHubApiClient, GitHubApiError, MergeMethod, PrState,
+    CheckRunsResponse, CreatePrParams, GitHubApiClient, GitHubApiError, MergeMethod, PrFile,
+    PrState,
 };
 
 use super::seed_installation_token;
@@ -1324,4 +1325,76 @@ async fn resolve_review_thread_propagates_graphql_error() {
         .await
         .expect_err("GraphQL error should propagate");
     assert!(err.to_string().contains("GraphQL error"), "got: {err}");
+}
+
+// ── get_pr_files tests ───────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_pr_files_parses_response() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"/repos/djinnos/server/pulls/42/files"))
+        .and(header("Authorization", "Bearer ghs_test_install"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "sha": "abc123",
+                "filename": "server/crates/djinn-agent/src/foo.rs",
+                "status": "modified",
+                "additions": 10,
+                "deletions": 2,
+                "changes": 12
+            },
+            {
+                "sha": "def456",
+                "filename": "server/crates/djinn-db/src/bar.rs",
+                "status": "added",
+                "additions": 50,
+                "deletions": 0,
+                "changes": 50
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let files: Vec<PrFile> = client
+        .get_pr_files("djinnos", "server", 42)
+        .await
+        .expect("get_pr_files should succeed");
+
+    assert_eq!(files.len(), 2, "should parse two files");
+    assert_eq!(files[0].filename, "server/crates/djinn-agent/src/foo.rs");
+    assert_eq!(files[0].status, "modified");
+    assert_eq!(files[0].additions, 10);
+    assert_eq!(files[0].deletions, 2);
+    assert_eq!(files[0].changes, 12);
+    assert_eq!(files[1].filename, "server/crates/djinn-db/src/bar.rs");
+    assert_eq!(files[1].status, "added");
+    assert_eq!(files[1].additions, 50);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_pr_files_returns_empty_for_no_changes() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"/repos/djinnos/server/pulls/99/files"))
+        .and(header("Authorization", "Bearer ghs_test_install"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let files: Vec<PrFile> = client
+        .get_pr_files("djinnos", "server", 99)
+        .await
+        .expect("get_pr_files should succeed for empty response");
+
+    assert!(
+        files.is_empty(),
+        "a PR with no changes returns an empty vec"
+    );
 }

@@ -767,6 +767,7 @@ mod tests {
                         limit: 3,
                         semantic_scores: None,
                         edge_kinds: None,
+                        entity_types: None,
                     })
                     .await
                     .unwrap();

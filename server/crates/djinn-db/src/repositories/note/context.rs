@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use djinn_memory::{
     BuildContextResponse, ContradictsAnnotation, Note, NoteAbstract, NoteOverview,
-    SupersedesAnnotation,
+    ProposalOverview, SupersedesAnnotation,
 };
 
 use crate::error::DbResult as Result;
@@ -11,6 +11,7 @@ use crate::repositories::note::{
     LexicalSearchMode, build_lexical_search_plan, executable_lexical_search_sql,
     normalize_lexical_score,
 };
+use crate::repositories::proposal::ProposalRepository;
 
 use super::NoteRepository;
 
@@ -61,6 +62,7 @@ impl NoteRepository {
                 related_l0: vec![],
                 supersedes: vec![],
                 contradicts: vec![],
+                proposals: vec![],
             });
         };
         if seed.status != djinn_memory::note_status::ACTIVE {
@@ -70,6 +72,7 @@ impl NoteRepository {
                 related_l0: vec![],
                 supersedes: vec![],
                 contradicts: vec![],
+                proposals: vec![],
             });
         }
 
@@ -178,13 +181,148 @@ impl NoteRepository {
             .await?;
         let contradicts_annotations = self.contradicts_annotations(&final_context_ids).await?;
 
+        // ── relevant proposals for seed ──────────────────────────────────────
+        let proposals = self
+            .find_relevant_proposals(project_id, &seed)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("relevant-proposals-for-seed query failed (skipping): {e}");
+                vec![]
+            });
+
         Ok(BuildContextResponse {
             primary: vec![seed],
             related_l1: pruned_l1,
             related_l0: pruned_l0,
             supersedes: supersedes_annotations,
             contradicts: contradicts_annotations,
+            proposals,
         })
+    }
+
+    /// Find proposals relevant to a seed note for `build_context`.
+    ///
+    /// Two complementary paths, deduplicated by `proposal_id` with the higher
+    /// score kept:
+    ///
+    /// 1. **Epic-derived**: proposals whose graduated epics contain tasks with
+    ///    `memory_refs` that reference the seed's permalink.
+    /// 2. **Title-body match**: proposals targeting the current project whose
+    ///    `title` or `body` lexically matches the seed's title or content
+    ///    (ILIKE/plainto_tsquery — "planner sees motivating proposal", not
+    ///    exhaustive relevance).
+    ///
+    /// Capped at 3 results.
+    async fn find_relevant_proposals(
+        &self,
+        project_id: &str,
+        seed: &Note,
+    ) -> Result<Vec<ProposalOverview>> {
+        let proposal_repo = ProposalRepository::new(self.db.clone(), self.events.clone());
+
+        let mut scored: HashMap<String, (f64, djinn_core::models::Proposal)> = HashMap::new();
+
+        // ── Path 1: epic-derived via proposal_refs (walks proposal_epics → tasks → memory_refs) ──
+        if let Ok(refs) = self.proposal_refs(&seed.permalink).await {
+            for val in refs {
+                if let (Some(id), Some(short_id)) = (
+                    val.get("id").and_then(|v| v.as_str()),
+                    val.get("short_id").and_then(|v| v.as_str()),
+                ) {
+                    if let Ok(Some(proposal)) = proposal_repo.get(id).await {
+                        scored.entry(id.to_string()).or_insert((0.5, proposal));
+                    }
+                    // Avoid unused warning
+                    let _ = short_id;
+                }
+            }
+        }
+
+        // ── Path 2: title/body match via proposal_targets for this project ──
+        let probe_text = format!(
+            "{} {}",
+            seed.title,
+            seed.content.chars().take(200).collect::<String>()
+        );
+        let probe_tokens: Vec<&str> = probe_text
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|t| t.len() >= 3)
+            .take(8)
+            .collect();
+
+        if !probe_tokens.is_empty() {
+            // Build ILIKE conditions: any token appearing in the concatenated
+            // proposal searchable text qualifies.  Using OR (not AND) because
+            // the goal is "planner sees motivating proposal", not exhaustive
+            // relevance — one matching keyword is enough.
+            let mut conditions = Vec::new();
+            for (i, _token) in probe_tokens.iter().enumerate() {
+                conditions.push(format!(
+                    "(p.title || ' ' || p.body || ' ' || COALESCE(p.acceptance_criteria::text, '')) ILIKE ${}",
+                    i + 2
+                ));
+            }
+            let where_clause = conditions.join(" OR ");
+
+            // NOTE: dynamic SQL (ILIKE conditions built from seed tokens) —
+            // compile-time check not possible.
+            let sql = format!(
+                r#"SELECT p.id, p.short_id, p.title, p.body, p.body_format,
+                          p.acceptance_criteria::text AS acceptance_criteria,
+                          p.status, p.author_user_id, p.superseded_by,
+                          p.created_at, p.updated_at, p.closed_at,
+                          p.latest_revision_seq, p.last_reconciled_revision_seq,
+                          p.pending_reconcile, p.build_owner_user_id,
+                          p.build_frozen, p.build_breakdown_task_id
+                   FROM proposals p
+                   JOIN proposal_targets pt ON pt.proposal_id = p.id
+                   WHERE pt.project_id = $1
+                     AND p.status NOT IN ('archived', 'rejected')
+                     AND ({})
+                   LIMIT 5"#,
+                where_clause
+            );
+
+            let mut q = sqlx::query_as::<sqlx::Postgres, djinn_core::models::Proposal>(&sql)
+                .bind(project_id);
+            for token in &probe_tokens {
+                q = q.bind(format!("%{}%", token));
+            }
+
+            if let Ok(rows) = q.fetch_all(self.db.pool()).await {
+                for proposal in rows {
+                    let entry = scored.entry(proposal.id.clone()).or_insert((0.3, proposal));
+                    // Path 2 base score is 0.3; if already present from path 1
+                    // (score 0.5), keep the higher.
+                    if entry.0 < 0.3 {
+                        entry.0 = 0.3;
+                    }
+                }
+            }
+        }
+
+        // Sort by score descending, cap at 3.
+        let mut ranked: Vec<(f64, djinn_core::models::Proposal)> = scored.into_values().collect();
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+        ranked.truncate(3);
+
+        // Convert to ProposalOverview.
+        Ok(ranked
+            .into_iter()
+            .map(|(score, p)| {
+                let acceptance_criteria =
+                    djinn_core::models::parse_json_array(&p.acceptance_criteria);
+                ProposalOverview {
+                    id: p.id,
+                    short_id: p.short_id,
+                    title: p.title,
+                    body_format: p.body_format,
+                    acceptance_criteria,
+                    status: p.status,
+                    score: Some(score),
+                }
+            })
+            .collect())
     }
 
     /// Build `SupersedesAnnotation` entries for notes in the context set.
@@ -1146,6 +1284,113 @@ mod tests {
             }),
             "expected contradictor annotation in build_context response: {:?}",
             result.contradicts
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_context_surfaces_relevant_proposal_for_seed_with_matching_proposal_targets() {
+        use crate::repositories::proposal::{ProposalCreateInput, ProposalRepository};
+
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel::<djinn_core::events::DjinnEventEnvelope>(16);
+        let bus = {
+            let tx = tx.clone();
+            EventBus::new(move |event| {
+                let _ = tx.send(event);
+            })
+        };
+
+        db.ensure_initialized().await.unwrap();
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create("test-project", "test", "test-project")
+            .await
+            .unwrap();
+        let project_id = project.id.clone();
+        let repo = NoteRepository::new(db.clone(), bus);
+        let _tmp = tmp;
+
+        // Create a seed note with distinctive content.
+        let seed = repo
+            .create(
+                &project_id,
+                "Widget Refactor Plan",
+                "refactor the widget_zqk module to support streaming output and batched writes",
+                "adr",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        // Create a proposal with overlapping body text.
+        let proposal_repo =
+            ProposalRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let proposal = proposal_repo
+            .create(ProposalCreateInput {
+                title: "Widget Refactor Proposal",
+                body: "The widget_zqk module needs streaming output support and batched writes for performance",
+                acceptance_criteria: Some(r#"["streaming output works", "batched writes reduce latency"]"#),
+                status: Some("approved"),
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Wire the proposal to this project via proposal_targets so the
+        // title-body match path can find it.
+        sqlx::query(
+            "INSERT INTO proposal_targets (proposal_id, project_id, role) VALUES ($1, $2, 'primary')",
+        )
+        .bind(&proposal.id)
+        .bind(&project_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let result = repo
+            .build_context(
+                &project_id,
+                &seed.permalink,
+                Some(8192),
+                None,
+                20,
+                Some(0.0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !result.proposals.is_empty(),
+            "build_context should surface relevant proposals, got empty: seed={:?}",
+            seed.permalink,
+        );
+        let found = result
+            .proposals
+            .iter()
+            .find(|p| p.short_id == proposal.short_id);
+        assert!(
+            found.is_some(),
+            "expected proposal {} (short_id={}) in build_context proposals: {:?}",
+            proposal.id,
+            proposal.short_id,
+            result.proposals,
+        );
+        let overview = found.unwrap();
+        assert_eq!(overview.title, "Widget Refactor Proposal");
+        assert_eq!(overview.body_format, "markdown");
+        assert_eq!(overview.status, "approved");
+        assert_eq!(
+            overview.acceptance_criteria,
+            vec![
+                "streaming output works".to_string(),
+                "batched writes reduce latency".to_string()
+            ]
+        );
+        assert!(
+            overview.score.is_some(),
+            "proposal overview should carry a score"
         );
     }
 }

@@ -2,7 +2,8 @@ use super::*;
 use crate::database::NoteSearchBackend as DatabaseNoteSearchBackend;
 use crate::repositories::note::embeddings::embedding_branch_filter_sql;
 use crate::repositories::note::rrf::rrf_fuse;
-use djinn_memory::{ContradictionCandidate, TypeRisk};
+use crate::repositories::proposal::ProposalRepository;
+use djinn_memory::{ContradictionCandidate, MemorySearchEntityRow, ProposalSearchResult, TypeRisk};
 
 fn merge_candidate_ids(lists: &[&[(String, f64)]]) -> Vec<String> {
     let mut ids = Vec::new();
@@ -231,7 +232,11 @@ impl NoteRepository {
     /// `query` is a natural-language search string. It is sanitized into safe
     /// FTS5 syntax before execution.
     /// Results are ordered by relevance (best match first).
-    pub async fn search(&self, params: NoteSearchParams<'_>) -> Result<Vec<NoteSearchResult>> {
+    ///
+    /// When `entity_types` is `None` or contains `"proposal"`, proposal rows
+    /// from `ProposalRepository::search_proposals` are merged into the result
+    /// set. Proposal search errors are logged and silently skipped (best-effort).
+    pub async fn search(&self, params: NoteSearchParams<'_>) -> Result<Vec<MemorySearchEntityRow>> {
         self.db.ensure_initialized().await?;
 
         let NoteSearchParams {
@@ -243,11 +248,75 @@ impl NoteRepository {
             limit,
             semantic_scores,
             edge_kinds,
+            entity_types,
         } = params;
 
+        // ── entity_types gate ────────────────────────────────────────────────
+        let wants_notes = entity_types
+            .map(|ets| ets.iter().any(|e| e == "note"))
+            .unwrap_or(true);
+        let wants_proposals = entity_types
+            .map(|ets| ets.iter().any(|e| e == "proposal"))
+            .unwrap_or(true);
+
+        // Some([]) → no entities requested → empty result.
+        if entity_types.is_some_and(|ets| ets.is_empty()) {
+            return Ok(vec![]);
+        }
+        // Some with values but none matching "note" or "proposal" → empty.
+        if !wants_notes && !wants_proposals {
+            return Ok(vec![]);
+        }
+
+        // ── note-side RRF pipeline ──────────────────────────────────────────
+        let note_results: Vec<NoteSearchResult> = if wants_notes {
+            self.search_notes_inner(
+                project_id,
+                query,
+                task_id,
+                folder,
+                note_type,
+                limit as i64,
+                semantic_scores,
+                edge_kinds,
+            )
+            .await?
+        } else {
+            vec![]
+        };
+
+        // ── proposal-side FTS ───────────────────────────────────────────────
+        let proposal_results: Vec<ProposalSearchResult> = if wants_proposals {
+            match self.search_proposals_inner(query, limit).await {
+                Ok(results) => results,
+                Err(e) => {
+                    tracing::warn!("proposal search failed (falling back to notes-only): {e}");
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        };
+
+        Ok(merge_search_results(note_results, proposal_results, limit))
+    }
+
+    /// Internal note-only search: the original RRF pipeline logic, returning
+    /// `NoteSearchResult` rows. Called by `search` when `wants_notes` is true.
+    #[allow(clippy::too_many_arguments)]
+    async fn search_notes_inner(
+        &self,
+        project_id: &str,
+        query: &str,
+        task_id: Option<&str>,
+        folder: Option<&str>,
+        note_type: Option<&str>,
+        limit: i64,
+        semantic_scores: Option<Vec<(String, f64)>>,
+        edge_kinds: Option<&[String]>,
+    ) -> Result<Vec<NoteSearchResult>> {
         let folder = folder.unwrap_or("");
         let note_type = note_type.unwrap_or("");
-        let limit = limit as i64;
 
         let lexical_scores = self
             .ranked_lexical_scores(project_id, folder, note_type, query, limit)
@@ -328,6 +397,17 @@ impl NoteRepository {
                     )
             })
             .collect())
+    }
+
+    /// Delegate to `ProposalRepository::search_proposals`. Constructed
+    /// on-the-fly from the shared `Database` + `EventBus`.
+    async fn search_proposals_inner(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ProposalSearchResult>> {
+        let proposal_repo = ProposalRepository::new(self.db.clone(), self.events.clone());
+        proposal_repo.search_proposals(query, limit).await
     }
 
     pub async fn semantic_candidate_scores(
@@ -779,6 +859,22 @@ impl NoteRepository {
             })
             .collect())
     }
+}
+
+/// Merge note and proposal search results by descending score, truncating to
+/// `limit`. Notes and proposals are converted to `MemorySearchEntityRow` via
+/// their respective `From` impls.
+fn merge_search_results(
+    notes: Vec<NoteSearchResult>,
+    proposals: Vec<ProposalSearchResult>,
+    limit: usize,
+) -> Vec<MemorySearchEntityRow> {
+    let mut rows: Vec<MemorySearchEntityRow> = Vec::with_capacity(notes.len() + proposals.len());
+    rows.extend(notes.into_iter().map(MemorySearchEntityRow::from));
+    rows.extend(proposals.into_iter().map(MemorySearchEntityRow::from));
+    rows.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
+    rows.truncate(limit);
+    rows
 }
 
 #[cfg(test)]
