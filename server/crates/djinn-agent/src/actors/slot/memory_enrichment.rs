@@ -2196,7 +2196,7 @@ mod tests {
                 "entities": [],
                 "claims": [],
                 "edges": [
-                    {{"source_note_id": "{}", "target_note_id": "{}", "kind": "builds_on", "confidence": 0.8}}
+                    {{"source_note_id": "{}", "target_note_id": "{}", "kind": "builds_on", "confidence": 0.8, "evidence_quote": "n2 explicitly references n1"}}
                 ]
             }}"#,
             n1.id, n2.id
@@ -2421,7 +2421,7 @@ mod tests {
                 "entities": [{{"canonical_name": "my system", "aliases": []}}],
                 "claims": [{{"statement": "A makes a claim", "source_note_id": "{}", "evidence_quote": "a claim"}}],
                 "edges": [
-                    {{"source_note_id": "{}", "target_note_id": "{}", "kind": "builds_on", "confidence": 0.8}}
+                    {{"source_note_id": "{}", "target_note_id": "{}", "kind": "builds_on", "confidence": 0.8, "evidence_quote": "B builds on the system described in A"}}
                 ]
             }}"#,
             n1.id, n2.id, n1.id
