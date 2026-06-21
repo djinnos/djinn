@@ -57,6 +57,11 @@ const INLINE_CLEANUP_SKIP_REASONS: [&str; 7] = [
     "dry_run",
 ];
 
+// ─── Stale-PR/branch reconciliation sweep ────────────────────────────────
+const STALE_PR_REAPED_TOTAL: &str = "djinn_stale_pr_reaped_total";
+const STALE_BRANCH_REAPED_TOTAL: &str = "djinn_stale_branch_reaped_total";
+const STALE_PR_SKIPPED_TOTAL: &str = "djinn_stale_pr_skipped_total";
+
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
 /// Install the process-global Prometheus recorder.
@@ -245,6 +250,33 @@ pub mod cargo_cache {
             "step" => step.to_owned()
         )
         .set(count as f64);
+    }
+}
+
+pub mod stale_sweep {
+    /// Reason labels for the `djinn_stale_pr_skipped_total` counter.
+    pub const REASON_GRACE_PERIOD: &str = "grace_period";
+    pub const REASON_NOT_BOT: &str = "not_bot";
+    pub const REASON_IN_MERGE_QUEUE: &str = "in_merge_queue";
+    pub const REASON_ENABLED_FALSE: &str = "disabled";
+    pub const REASON_TASK_OPEN: &str = "task_open";
+    pub const REASON_PR_MERGED: &str = "pr_merged";
+    pub const REASON_NO_INSTALLATION: &str = "no_installation";
+    pub const REASON_API_ERROR: &str = "api_error";
+
+    /// Increment the stale-PR reaped counter (a PR was closed by the sweep).
+    pub fn increment_pr_reaped() {
+        metrics::counter!(super::STALE_PR_REAPED_TOTAL).increment(1);
+    }
+
+    /// Increment the stale-branch reaped counter (a remote branch was deleted by the sweep).
+    pub fn increment_branch_reaped() {
+        metrics::counter!(super::STALE_BRANCH_REAPED_TOTAL).increment(1);
+    }
+
+    /// Increment the stale-PR skipped counter with a reason label.
+    pub fn increment_pr_skipped(reason: &'static str) {
+        metrics::counter!(super::STALE_PR_SKIPPED_TOTAL, "reason" => reason).increment(1);
     }
 }
 

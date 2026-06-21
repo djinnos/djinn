@@ -13,9 +13,10 @@
  *
  *   1. Selection (focal node + 1-hop neighbors highlighted, rest dim)
  *   2. AI citations          (citationIds — D5 will populate)
- *   3. Tool-call results     (toolHighlightIds — e.g. impact BFS)
- *   4. Blast-radius animation (CSS pulse via per-frame color modulation)
- *   5. Hover tooltip
+ *   3. DOI focus/context    (anchor + direction + DOI/impact samples)
+ *   4. Tool-call results     (toolHighlightIds — non-DOI query overlays)
+ *   5. Transient pulse       (path trace/animation only)
+ *   6. Hover tooltip
  *
  * "When nothing is highlighted, render normally (don't dim everything)"
  * — that rule lives in `pickHighlightMode`: if every layer is empty,
@@ -24,6 +25,19 @@
  */
 
 import { shouldLabelAtZoom } from "./codeGraphLabels";
+
+/**
+ * Containment edge kinds that must never participate in traversal or
+ * highlight expansion. Mirrors `CONTAINMENT_EDGE_KINDS` in
+ * `codeGraphAdapter.ts` but duplicated here so the reducers module
+ * stays free of the adapter dependency (reducers are pure / testable
+ * without graphology). The two sets must stay in sync.
+ */
+export const TRAVERSAL_CONTAINMENT_EDGE_KINDS = new Set([
+  "ContainsDefinition",
+  "DeclaredInFile",
+  "MemberOf",
+]);
 
 /**
  * Mirror of graphology's `Attributes` shape — graphology-types isn't
@@ -61,7 +75,7 @@ export interface HighlightView {
   doiContextIds: ReadonlySet<string>;
   /** Optional score map for future legends/tooltips; unused by hot paths. */
   doiScores: ReadonlyMap<string, number>;
-  /** Pulse phase ∈ [0, 1] driving the blast-radius color cycle. */
+  /** Pulse phase ∈ [0, 1] driving transient path-trace color cycles. */
   pulsePhase: number;
   /**
    * Iter 30: active color mode. `"topology"` keeps the existing
@@ -188,7 +202,7 @@ function attrEdgeKind(attrs: Attributes): string | null {
 
 /**
  * Linear-interpolate between two `#rrggbb` hex colors. Used for the
- * blast-radius pulse so the animation cycles smoothly without us
+ * path-trace pulse so the animation cycles smoothly without us
  * needing a separate CSS keyframe. `t` clamped to [0, 1].
  */
 function lerpHex(from: string, to: string, t: number): string {
@@ -609,8 +623,16 @@ export function edgeReducer(
   attrs: Attributes,
   view: HighlightView,
 ): Attributes {
-  // Edge-kind toggle. Default true for unknown kinds.
+  // Containment edges are never drawn. Even though the adapter excludes
+  // them at build time, this guard ensures any containment edge that
+  // slips through (legacy graph, direct Sigma mutation) is hidden
+  // regardless of the store filter state.
   const edgeKind = attrEdgeKind(attrs);
+  if (edgeKind !== null && isTraversalContainmentEdge(edgeKind)) {
+    return { ...attrs, hidden: true };
+  }
+
+  // Edge-kind toggle. Default true for unknown kinds.
   if (edgeKind !== null) {
     const enabled = view.edgeKindFilters[edgeKind];
     if (enabled === false) return { ...attrs, hidden: true };
@@ -678,6 +700,38 @@ export interface MinimalGraph {
   neighbors(id: string): string[];
 }
 
+/**
+ * Extended minimal graph that can inspect edge kinds so traversal
+ * helpers (1-hop neighborhood) can skip containment edges. The
+ * `edgeKind` function returns the relationship kind for the edge
+ * between two adjacent nodes, or `null` when the edge is missing or
+ * carries no kind.
+ */
+export interface EdgeKindAwareGraph extends MinimalGraph {
+  /**
+   * Return the edge kind between `source` and `target` (in either
+   * direction), or `null` if no edge connects them.
+   */
+  edgeKind(source: string, target: string): string | null;
+}
+
+/** True when `kind` is a containment edge excluded from traversal. */
+export function isTraversalContainmentEdge(kind: string | null): boolean {
+  return kind !== null && TRAVERSAL_CONTAINMENT_EDGE_KINDS.has(kind);
+}
+
+/**
+ * Compute the 1-hop neighborhood of `nodeId` (inclusive of `nodeId`
+ * itself). Walks both incoming and outgoing edges so the visual
+ * "neighborhood" highlight is undirected — that matches user mental
+ * model better than a strict outbound walk.
+ *
+ * When `graph` implements {@link EdgeKindAwareGraph}, containment edges
+ * (`ContainsDefinition`, `DeclaredInFile`, `MemberOf`) are excluded
+ * so the selection frontier does not expand through structural
+ * nesting. Plain {@link MinimalGraph} callers get the legacy
+ * unfiltered behavior.
+ */
 export function oneHopNeighborhood(
   graph: MinimalGraph,
   nodeId: string,
@@ -685,6 +739,14 @@ export function oneHopNeighborhood(
   const out = new Set<string>();
   if (!graph.hasNode(nodeId)) return out;
   out.add(nodeId);
-  for (const n of graph.neighbors(nodeId)) out.add(n);
+  const hasEdgeKind =
+    typeof (graph as Partial<EdgeKindAwareGraph>).edgeKind === "function";
+  for (const n of graph.neighbors(nodeId)) {
+    if (hasEdgeKind) {
+      const kind = (graph as EdgeKindAwareGraph).edgeKind(nodeId, n);
+      if (isTraversalContainmentEdge(kind)) continue;
+    }
+    out.add(n);
+  }
   return out;
 }

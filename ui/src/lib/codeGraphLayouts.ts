@@ -32,6 +32,7 @@ const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 const HIERARCHY_KINDS = new Set([
   "ContainsDefinition",
   "DeclaredInFile",
+  "MemberOf",
   "FileReference",
 ]);
 
@@ -56,7 +57,12 @@ export function computeForceLayout(
   snapshot: LayoutInput,
   options: ForceLayoutOptions = {},
 ): Map<string, LayoutPosition> {
-  const { nodes, edges, projectId } = normalizeLayoutInput(snapshot);
+  const { nodes: allNodes, edges, projectId } = normalizeLayoutInput(snapshot);
+  // Communities are background hulls, not positioned layout nodes.
+  // Filter them out so they never receive seed positions — the adapter
+  // also strips them before calling this function, but the layout must
+  // be defensive in case it's called directly with a raw snapshot.
+  const nodes = allNodes.filter((node) => node.kind !== "community");
   const nodeCount = nodes.length;
   const structuralSpread =
     options.structuralSpread ?? Math.sqrt(Math.max(nodeCount, 1)) * 40;
@@ -76,8 +82,7 @@ export function computeForceLayout(
   for (const children of parentToChildren.values()) children.sort(compareIds);
 
   const structuralNodes = nodes.filter(
-    (node) =>
-      node.kind === "folder" || node.kind === "file" || node.kind === "community",
+    (node) => node.kind === "folder" || node.kind === "file",
   );
   const structuralCount = Math.max(structuralNodes.length, 1);
 
@@ -243,7 +248,15 @@ function hierarchyParents(
   for (const edge of edges) {
     if (!HIERARCHY_KINDS.has(edge.kind)) continue;
     if (!nodeMap.has(edge.from) || !nodeMap.has(edge.to)) continue;
-    if (!childToParent.has(edge.to)) childToParent.set(edge.to, edge.from);
+    const parent =
+      edge.kind === "ContainsDefinition" || edge.kind === "FileReference"
+        ? edge.from
+        : edge.to;
+    const child =
+      edge.kind === "ContainsDefinition" || edge.kind === "FileReference"
+        ? edge.to
+        : edge.from;
+    if (!childToParent.has(child)) childToParent.set(child, parent);
   }
   return childToParent;
 }

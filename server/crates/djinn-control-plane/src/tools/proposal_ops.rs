@@ -261,8 +261,35 @@ pub struct ProposalShowResponse {
     pub signoffs: Option<Vec<ProposalSignoffModel>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub epics: Option<Vec<ProposalEpicModel>>,
+    /// Memory notes linked to this proposal's graduated epics/tasks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_refs: Vec<ProposalMemoryRefModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// A memory note linked to a proposal via its graduated epics/tasks.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalMemoryRefModel {
+    pub permalink: String,
+    pub title: String,
+    pub note_type: String,
+    /// The entity the note is attached to: `"epic"` or `"task"`.
+    pub source_entity_type: String,
+    /// Short ID of the epic or task that links the note.
+    pub source_short_id: String,
+}
+
+impl From<djinn_db::ProposalMemoryRef> for ProposalMemoryRefModel {
+    fn from(r: djinn_db::ProposalMemoryRef) -> Self {
+        Self {
+            permalink: r.permalink,
+            title: r.title,
+            note_type: r.note_type,
+            source_entity_type: r.source_entity_type,
+            source_short_id: r.source_short_id,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]

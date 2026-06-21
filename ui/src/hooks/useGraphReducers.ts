@@ -10,8 +10,8 @@
  *   1. Subscribe to every relevant store slice.
  *   2. Lazily compute `selectionNeighbors` (1-hop set) when
  *      `selectionId` changes.
- *   3. Drive a `requestAnimationFrame` loop only while the blast-
- *      radius set is non-empty — otherwise we don't burn CPU.
+ *   3. Drive a `requestAnimationFrame` loop only while a transient
+ *      pulse set is non-empty — otherwise we don't burn CPU.
  *   4. Emit reducer fns whose closure reads `viewRef`, so Sigma sees
  *      a fresh view on every frame without forcing re-mounts.
  *
@@ -31,10 +31,11 @@ import {
   nodeReducer as nodeReducerImpl,
   oneHopNeighborhood,
   topComplexityIds,
+  isTraversalContainmentEdge,
   type Attributes,
   type ComplexityThresholds,
+  type EdgeKindAwareGraph,
   type HighlightView,
-  type MinimalGraph,
 } from "@/lib/codeGraphReducers";
 import { computePagerankPercentiles } from "@/lib/codeGraphLabels";
 import {
@@ -45,11 +46,6 @@ import {
 import type { SigmaInstanceHandle, SigmaReducerHooks } from "./useSigmaGraph";
 
 const DOI_DISTANCE_LAMBDA = 0.18;
-const DOI_STRUCTURAL_EDGE_KINDS = new Set([
-  "ContainsDefinition",
-  "DeclaredInFile",
-  "MemberOf",
-]);
 
 interface DoiFocusResult {
   focusIds: ReadonlySet<string>;
@@ -66,11 +62,6 @@ const EMPTY_DOI_FOCUS: DoiFocusResult = {
 function normalizeEdgeKind(attrs: Attributes | undefined): string | null {
   const raw = attrs?.kind ?? attrs?.edgeKind;
   return typeof raw === "string" ? raw : null;
-}
-
-function isStructuralEdge(attrs: Attributes | undefined): boolean {
-  const kind = normalizeEdgeKind(attrs);
-  return kind !== null && DOI_STRUCTURAL_EDGE_KINDS.has(kind);
 }
 
 function edgeIdsForDirection(
@@ -146,7 +137,7 @@ export function computeDoiFocus(
       } catch {
         attrs = undefined;
       }
-      if (isStructuralEdge(attrs)) continue;
+      if (isTraversalContainmentEdge(normalizeEdgeKind(attrs))) continue;
       const next = nextNodeForDirection(graph, edgeId, nodeId, focusDirection);
       if (next === null || distances.has(next) || !graph.hasNode(next)) continue;
       distances.set(next, distance + 1);
@@ -184,11 +175,13 @@ export function computeDoiFocus(
 }
 
 /**
- * Wrap a graphology `Graph` so it satisfies the `MinimalGraph`
+ * Wrap a graphology `Graph` so it satisfies the `EdgeKindAwareGraph`
  * interface the neighborhood helpers expect — Sigma's graph carries directed
- * edges, but the highlight neighborhood walks both directions.
+ * edges, but the highlight neighborhood walks both directions. The
+ * `edgeKind` reader lets `oneHopNeighborhood` skip containment edges
+ * so the selection frontier does not expand through structural nesting.
  */
-function asMinimalGraph(graph: Graph): MinimalGraph {
+function asMinimalGraph(graph: Graph): EdgeKindAwareGraph {
   return {
     hasNode: (id) => graph.hasNode(id),
     neighbors: (id) => {
@@ -199,6 +192,19 @@ function asMinimalGraph(graph: Graph): MinimalGraph {
         return graph.neighbors(id);
       } catch {
         return [];
+      }
+    },
+    edgeKind: (source, target) => {
+      try {
+        // graphology's `.edge()` returns the first edge between two
+        // nodes in either direction on a directed graph. We read the
+        // `kind` attribute from it.
+        const edge = graph.edge(source, target);
+        if (!edge) return null;
+        const kind = graph.getEdgeAttribute(edge, "kind");
+        return typeof kind === "string" ? kind : null;
+      } catch {
+        return null;
       }
     },
   };
@@ -234,6 +240,7 @@ export function useGraphReducers(
   const citationIds = useCodeGraphStore((s) => s.citationIds);
   const toolHighlightIds = useCodeGraphStore((s) => s.toolHighlightIds);
   const blastRadiusFrontier = useCodeGraphStore((s) => s.blastRadiusFrontier);
+  const doiImpactIds = useCodeGraphStore((s) => s.doiImpactIds);
   const hoverId = useCodeGraphStore((s) => s.hoverId);
   const edgeKindFilters = useCodeGraphStore((s) => s.edgeKindFilters);
   const nodeKindFilters = useCodeGraphStore((s) => s.nodeKindFilters);
@@ -298,7 +305,7 @@ export function useGraphReducers(
   // Directional DOI focus model: compute graph distance from the anchor using
   // dependency direction semantics, combine it with PageRank percentile
   // importance, and hand reducers precomputed O(1) membership sets.
-  const doiFocus = useMemo<DoiFocusResult>(() => {
+  const topologyDoiFocus = useMemo<DoiFocusResult>(() => {
     return computeDoiFocus(
       graph,
       focusAnchorId,
@@ -307,6 +314,22 @@ export function useGraphReducers(
       doiRevealCount,
     );
   }, [graph, focusAnchorId, focusDirection, pagerankPercentile, doiRevealCount]);
+
+  const doiFocus = useMemo<DoiFocusResult>(() => {
+    if (doiImpactIds.size === 0) return topologyDoiFocus;
+    const focusIds = new Set(topologyDoiFocus.focusIds);
+    const contextIds = new Set(topologyDoiFocus.contextIds);
+    for (const id of doiImpactIds) {
+      if (!id || !graph?.hasNode(id)) continue;
+      focusIds.add(id);
+      contextIds.delete(id);
+    }
+    return {
+      focusIds,
+      contextIds,
+      scores: topologyDoiFocus.scores,
+    };
+  }, [doiImpactIds, graph, topologyDoiFocus]);
 
   // ── Build the live HighlightView (mutable ref, read on each frame) ────
   // Sigma reads `viewRef.current` from inside its rAF render loop —
@@ -351,6 +374,7 @@ export function useGraphReducers(
     citationIds,
     toolHighlightIds,
     blastRadiusFrontier,
+    doiImpactIds,
     hoverId,
     edgeKindFilters,
     nodeKindFilters,
