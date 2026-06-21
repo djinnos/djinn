@@ -1158,7 +1158,10 @@ async fn memory_read_surfaces_tasks_and_proposals_for_note_under_graduated_propo
 
     // Call memory_read for this note.
     let resp = harness
-        .call_tool("memory_read", json!({"identifier": permalink}))
+        .call_tool(
+            "memory_read",
+            json!({"project": &fixture.project_slug, "identifier": permalink}),
+        )
         .await
         .expect("memory_read should dispatch");
     assert!(
