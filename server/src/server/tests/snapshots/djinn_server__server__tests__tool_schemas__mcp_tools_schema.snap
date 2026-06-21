@@ -5919,7 +5919,7 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "identifier": {
-          "description": "Note ID or permalink (e.g. \"decisions/my-adr\").",
+          "description": "Note ID or permalink (e.g. \"decisions/my-adr\"). Also accepts a\nproposal ID or short_id (e.g. \"abc1\"); the tool resolves the\nidentifier to the correct entity type (note or proposal)\nautomatically.",
           "type": "string"
         },
         "limit": {
@@ -5953,9 +5953,28 @@ expression: signatures
               "format": "int64",
               "type": "integer"
             },
+            "entity_id": {
+              "default": "",
+              "description": "Stable identifier of the associated entity (note id or proposal id).\nDefaults to empty string for responses populated through legacy\nnote-only fields.",
+              "type": "string"
+            },
+            "entity_permalink": {
+              "default": "",
+              "description": "Permalink/short_id of the associated entity (note permalink or\nproposal short_id). Defaults to empty string for responses populated\nthrough legacy note-only fields.",
+              "type": "string"
+            },
+            "entity_title": {
+              "description": "Human-readable title of the associated entity.",
+              "type": "string"
+            },
+            "entity_type": {
+              "default": "note",
+              "description": "Entity type of the associated target: \"note\" or \"proposal\".\nDefaults to \"note\" for backward compatibility with older responses\nthat only ever returned note associations.",
+              "type": "string"
+            },
             "kind": {
               "default": "",
-              "description": "Association edge kind as stored on `note_associations.kind` (e.g. `\"co_access\"`).\nToday the only value written is `\"co_access\"`; future wave-1 graph-typed edges\n(builds_on / contradicts / supersedes / exemplifies) will widen the value set\n— see Epic 2chl. `#[serde(default)]` keeps older clients deserialising cleanly\nuntil they adopt the new field.",
+              "description": "Association edge kind as stored on `note_associations.kind`\n(e.g. `\"co_access\"`) or `memory_entity_associations.kind` (e.g.\n`\"builds_on\"`, `\"derived_from\"`). `#[serde(default)]` keeps older\nclients deserialising cleanly until they adopt the new field.",
               "type": "string"
             },
             "last_co_access": {
@@ -5992,6 +6011,11 @@ expression: signatures
         },
         "error": {
           "nullable": true,
+          "type": "string"
+        },
+        "seed_entity_type": {
+          "default": "note",
+          "description": "The entity type that the seed `identifier` resolved to: \"note\" or\n\"proposal\". Useful for callers that pass an opaque identifier and\nneed to know whether the seed was a note or a proposal.",
           "type": "string"
         }
       },

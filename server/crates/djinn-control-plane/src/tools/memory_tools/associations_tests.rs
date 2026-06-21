@@ -231,4 +231,203 @@ mod tests {
         assert_eq!(resp.associations[0].note_permalink, strong.permalink);
         assert!(resp.associations[0].weight >= 0.5);
     }
+
+    // ── Note ↔ Proposal heterogeneous association tests ───────────────────────
+    //
+    // These tests exercise the Wave 3 extension: `memory_associations` can
+    // start from a note or a proposal and traverse typed entity edges from
+    // the `memory_entity_associations` substrate (qb9o) in addition to the
+    // legacy note↔note associations.
+
+    use djinn_db::{MemoryEntityKind, MemoryEntityRef, ProposalRepository};
+
+    async fn make_proposal(repo: &ProposalRepository, title: &str) -> djinn_core::models::Proposal {
+        repo.create(djinn_db::ProposalCreateInput {
+            title,
+            body: "",
+            acceptance_criteria: None,
+            status: None,
+            body_format: None,
+        })
+        .await
+        .unwrap()
+    }
+
+    /// A note seed reaches a linked proposal through a typed
+    /// `derived_from` edge written on the heterogeneous substrate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn note_seed_reaches_linked_proposal() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+        let proposal_repo =
+            ProposalRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let note = make_note(&repo, &project, &tmp, "Source Note").await;
+        let proposal = make_proposal(&proposal_repo, "Linked Proposal").await;
+
+        // Write a proposal → note derived_from edge.
+        repo.upsert_typed_entity_association(
+            MemoryEntityRef::proposal(&proposal.id),
+            MemoryEntityRef::note(&note.id),
+            MemoryEntityKind::DerivedFrom,
+            0.9,
+        )
+        .await
+        .unwrap();
+
+        let state = test_mcp_state(db, &tx);
+        let server = DjinnMcpServer::new(state);
+
+        let resp = call_associations(&server, &project.slug(), &note.permalink, None, None).await;
+
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        // The seed resolved to a note.
+        assert_eq!(resp.seed_entity_type, "note");
+        // Exactly one association: the linked proposal.
+        assert_eq!(resp.associations.len(), 1, "expected the linked proposal");
+        let entry = &resp.associations[0];
+        assert_eq!(entry.entity_type, "proposal");
+        assert_eq!(entry.entity_id, proposal.id);
+        assert_eq!(entry.entity_title, "Linked Proposal");
+        assert_eq!(entry.entity_permalink, proposal.short_id);
+        assert_eq!(entry.kind, "derived_from");
+        assert!((entry.weight - 0.9).abs() < 1e-12);
+    }
+
+    /// A proposal seed reaches its `derived_from` note through a typed
+    /// edge traversed in the reverse direction.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_seed_reaches_derived_from_note() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+        let proposal_repo =
+            ProposalRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let note = make_note(&repo, &project, &tmp, "Origin Note").await;
+        let proposal = make_proposal(&proposal_repo, "Derived Proposal").await;
+
+        // Write a proposal → note derived_from edge.
+        repo.upsert_typed_entity_association(
+            MemoryEntityRef::proposal(&proposal.id),
+            MemoryEntityRef::note(&note.id),
+            MemoryEntityKind::DerivedFrom,
+            0.75,
+        )
+        .await
+        .unwrap();
+
+        let state = test_mcp_state(db, &tx);
+        let server = DjinnMcpServer::new(state);
+
+        // Query from the proposal side using its short_id as identifier.
+        let resp =
+            call_associations(&server, &project.slug(), &proposal.short_id, None, None).await;
+
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        // The seed resolved to a proposal.
+        assert_eq!(resp.seed_entity_type, "proposal");
+        // Exactly one association: the derived_from note.
+        assert_eq!(resp.associations.len(), 1, "expected the derived_from note");
+        let entry = &resp.associations[0];
+        assert_eq!(entry.entity_type, "note");
+        assert_eq!(entry.entity_permalink, note.permalink);
+        assert_eq!(entry.entity_title, "Origin Note");
+        assert_eq!(entry.kind, "derived_from");
+        assert!((entry.weight - 0.75).abs() < 1e-12);
+        // Legacy note fields are also populated for backward compat.
+        assert_eq!(entry.note_permalink, note.permalink);
+        assert_eq!(entry.note_title, "Origin Note");
+    }
+
+    /// A note seed that has BOTH a legacy co_access note association and a
+    /// typed proposal edge returns both. The legacy note-only fields on the
+    /// note association entry are preserved for backward compatibility.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn note_seed_returns_both_legacy_and_typed_associations() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+        let proposal_repo =
+            ProposalRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let seed = make_note(&repo, &project, &tmp, "Seed Note").await;
+        let other_note = make_note(&repo, &project, &tmp, "Other Note").await;
+        let proposal = make_proposal(&proposal_repo, "Related Proposal").await;
+
+        // Legacy co_access edge (note↔note).
+        repo.upsert_association(&seed.id, &other_note.id, 1)
+            .await
+            .unwrap();
+        // Typed proposal edge (proposal → note builds_on).
+        repo.upsert_typed_entity_association(
+            MemoryEntityRef::proposal(&proposal.id),
+            MemoryEntityRef::note(&seed.id),
+            MemoryEntityKind::BuildsOn,
+            0.8,
+        )
+        .await
+        .unwrap();
+
+        let state = test_mcp_state(db, &tx);
+        let server = DjinnMcpServer::new(state);
+
+        let resp = call_associations(&server, &project.slug(), &seed.permalink, None, None).await;
+
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        assert_eq!(resp.associations.len(), 2, "expected both associations");
+
+        // Find the note and proposal entries.
+        let note_entry = resp
+            .associations
+            .iter()
+            .find(|a| a.entity_type == "note")
+            .expect("expected a note association entry");
+        let proposal_entry = resp
+            .associations
+            .iter()
+            .find(|a| a.entity_type == "proposal")
+            .expect("expected a proposal association entry");
+
+        // The legacy note entry has backward-compatible fields populated.
+        assert_eq!(note_entry.note_permalink, other_note.permalink);
+        assert_eq!(note_entry.note_title, "Other Note");
+        assert_eq!(note_entry.entity_permalink, other_note.permalink);
+
+        // The typed proposal entry has proposal metadata.
+        assert_eq!(proposal_entry.entity_id, proposal.id);
+        assert_eq!(proposal_entry.entity_permalink, proposal.short_id);
+        assert_eq!(proposal_entry.kind, "builds_on");
+    }
+
+    /// A proposal seed with no associations returns an empty array and
+    /// resolves as a proposal seed type.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_seed_with_no_associations_returns_empty() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let proposal_repo =
+            ProposalRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let proposal = make_proposal(&proposal_repo, "Lonely Proposal").await;
+
+        let state = test_mcp_state(db, &tx);
+        let server = DjinnMcpServer::new(state);
+
+        let resp =
+            call_associations(&server, &project.slug(), &proposal.short_id, None, None).await;
+
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        assert_eq!(resp.seed_entity_type, "proposal");
+        assert_eq!(resp.associations.len(), 0);
+    }
 }
