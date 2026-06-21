@@ -217,18 +217,6 @@ pub(super) struct CoordinatorActor {
     pub(super) recovered: u64,
 }
 
-/// Terminal-close cleanup flavor for PR/branch cleanup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(in crate::actors::coordinator) enum CloseKind {
-    /// Task closed without merging its associated PR; close the bot PR before
-    /// deleting the task branch when guardrails allow it.
-    NonMerge,
-    /// Task closed because its associated PR merged; only delete the head branch
-    /// as an idempotent backstop.
-    Merge,
-}
-
 #[cfg(test)]
 mod rehydration_tests {
     use super::*;
