@@ -110,6 +110,14 @@ pub struct UserSettings {
     /// migration 32). Caps are per-model, shared across lanes.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub max_sessions: Option<HashMap<String, u32>>,
+    /// Cross-model ("Thorough") review. When `true` (the default), a task
+    /// dispatched to the reviewer role prefers a model id different from the one
+    /// that implemented the task — the reviewer walks its review-lane fallback
+    /// list and takes the first id that differs from the implementer's. A
+    /// degenerate single-model selection silently falls back to same-model.
+    /// Persisted as a NOT-NULL boolean column (`user_settings.diverse_review`,
+    /// migration 78, default TRUE).
+    pub diverse_review: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -124,6 +132,9 @@ impl UserSettings {
             auto_approve_prs: false,
             lanes: None,
             max_sessions: None,
+            // Cross-model review is on by default (DB column default TRUE), so a
+            // never-written user gets the same behavior as a migrated row.
+            diverse_review: true,
             created_at: String::new(),
             updated_at: String::new(),
         }

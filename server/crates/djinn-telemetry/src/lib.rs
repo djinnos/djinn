@@ -9,6 +9,7 @@ pub const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 const DISPATCH_ATTEMPTS_TOTAL: &str = "djinn_dispatch_attempts_total";
 const DISPATCH_LAST_SUCCESS_TIMESTAMP: &str = "djinn_dispatch_last_success_timestamp";
 const DISPATCH_COOLDOWNS_ACTIVE: &str = "djinn_dispatch_cooldowns_active";
+const CROSS_MODEL_REVIEW_TOTAL: &str = "djinn_cross_model_review_total";
 const INFLIGHT_LEDGER_SIZE: &str = "djinn_inflight_ledger_size";
 const USER_CAP_UTILIZATION: &str = "djinn_user_cap_utilization";
 const SLOT_POOL: &str = "djinn_slot_pool";
@@ -638,6 +639,17 @@ pub mod dispatch {
     /// need to hold any application lock across an await to emit telemetry.
     pub fn increment_attempt(outcome: &'static str) {
         metrics::counter!(super::DISPATCH_ATTEMPTS_TOTAL, "outcome" => outcome).increment(1);
+    }
+
+    /// Cross-model ("Thorough") review outcome at reviewer dispatch.
+    ///
+    /// `result = "different"` when the reviewer was steered to a model id
+    /// distinct from the implementer's; `result = "same_fallback"` when the
+    /// review-lane list collapsed to the implementer's model id and dispatch
+    /// proceeded same-model. Only emitted when the creator has `diverse_review`
+    /// enabled and an implementer model id was known.
+    pub fn record_cross_model_review(result: &'static str) {
+        metrics::counter!(super::CROSS_MODEL_REVIEW_TOTAL, "result" => result).increment(1);
     }
 
     pub fn record_last_success_now() {

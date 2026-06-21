@@ -77,6 +77,11 @@ export interface UserModelSelection {
   lanes: ModelLanes;
   /** Per-model concurrency caps keyed by full `"provider/model"` id. */
   maxSessions: Record<string, number>;
+  /**
+   * Cross-model ("Thorough") review toggle. When true (the default), the
+   * reviewer prefers a model id different from the implementer's.
+   */
+  diverseReview: boolean;
 }
 
 function parseMaxSessions(raw: unknown): Record<string, number> {
@@ -94,19 +99,26 @@ export async function fetchUserModelSelection(
   return {
     lanes: parseLanes(response.lanes),
     maxSessions: parseMaxSessions(response.max_sessions),
+    diverseReview: response.diverse_review !== false,
   };
 }
 
-/** Persist the target user's per-role model lanes and per-model caps. */
+/**
+ * Persist the target user's per-role model lanes, per-model caps, and the
+ * cross-model review toggle. `diverseReview` is optional — omit it to leave the
+ * server value untouched (e.g. a lanes-only save).
+ */
 export async function saveUserModelSelection(
   targetUserId: string,
   lanes: ModelLanes,
   maxSessions: Record<string, number>,
+  diverseReview?: boolean,
 ): Promise<UserModelSelection> {
   const response = await callMcpTool("user_settings_set", {
     ...targetArgs(targetUserId),
     lanes,
     max_sessions: maxSessions,
+    ...(diverseReview === undefined ? {} : { diverse_review: diverseReview }),
   });
   if (!response.ok) {
     throw new Error(response.error ?? "Failed to save user models");
@@ -114,6 +126,7 @@ export async function saveUserModelSelection(
   return {
     lanes: parseLanes(response.lanes),
     maxSessions: parseMaxSessions(response.max_sessions),
+    diverseReview: response.diverse_review !== false,
   };
 }
 

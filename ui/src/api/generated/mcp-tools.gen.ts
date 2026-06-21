@@ -8331,6 +8331,13 @@ export namespace UserSettingsGetOutputSchema {
    * are never auto-approved.
    */
   auto_approve_prs: boolean
+  /**
+   * Cross-model ("Thorough") review. When true (the default), a task
+   * dispatched to the reviewer role prefers a model id different from the one
+   * that implemented it. A degenerate single-model selection falls back to
+   * same-model review.
+   */
+  diverse_review: boolean
   error?: string
   lanes: ModelLanesPayload
   /**
@@ -8376,6 +8383,12 @@ export namespace UserSettingsSetInputSchema {
    * Enable or disable auto-approve. Omit to keep the current value.
    */
   auto_approve_prs?: boolean
+  /**
+   * Enable or disable cross-model ("Thorough") review for THIS user. When on
+   * (the default), the reviewer prefers a model id different from the
+   * implementer's. Omit to keep the current value.
+   */
+  diverse_review?: boolean
   /**
    * Per-ROLE ordered model lanes for THIS user (each highest priority first),
    * as full `provider/model` ids: `plan` (planner/architect/chat),
@@ -8428,6 +8441,10 @@ export namespace UserSettingsSetOutputSchema {
   export interface UserSettingsSetOutput {
   applied: boolean
   auto_approve_prs?: boolean
+  /**
+   * The resulting cross-model review toggle after the patch.
+   */
+  diverse_review?: boolean
   error?: string
   /**
    * The resulting per-role model lanes after the patch.
