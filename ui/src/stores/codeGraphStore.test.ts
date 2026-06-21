@@ -47,12 +47,12 @@ describe("codeGraphStore", () => {
       }
     });
 
-    it("starts with architecture lens defaults (community off, symbol on)", () => {
+    it("starts with architecture lens defaults (folder/file/symbol on)", () => {
       const filters = useCodeGraphStore.getState().nodeKindFilters;
       expect(filters.folder).toBe(true);
       expect(filters.file).toBe(true);
       expect(filters.symbol).toBe(true);
-      expect(filters.community).toBe(false);
+      expect(filters.community).toBeUndefined();
     });
 
     it("starts with all symbol kinds hidden (architecture lens)", () => {
@@ -245,62 +245,6 @@ describe("codeGraphStore", () => {
     });
   });
 
-  describe("semanticZoomMode", () => {
-    it("defaults to auto", () => {
-      expect(useCodeGraphStore.getState().semanticZoomMode).toBe("auto");
-    });
-
-    it("setSemanticZoomMode updates the mode", () => {
-      useCodeGraphStore.getState().setSemanticZoomMode("symbol");
-      expect(useCodeGraphStore.getState().semanticZoomMode).toBe("symbol");
-      useCodeGraphStore.getState().setSemanticZoomMode("community");
-      expect(useCodeGraphStore.getState().semanticZoomMode).toBe("community");
-      useCodeGraphStore.getState().setSemanticZoomMode("auto");
-      expect(useCodeGraphStore.getState().semanticZoomMode).toBe("auto");
-    });
-  });
-
-  describe("expandedCommunityIds", () => {
-    it("defaults to an empty set", () => {
-      expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(0);
-    });
-
-    it("expandCommunity adds a stable community_id", () => {
-      useCodeGraphStore.getState().expandCommunity("auth");
-      expect(
-        useCodeGraphStore.getState().expandedCommunityIds.has("auth"),
-      ).toBe(true);
-    });
-
-    it("expandCommunity is idempotent", () => {
-      useCodeGraphStore.getState().expandCommunity("auth");
-      useCodeGraphStore.getState().expandCommunity("auth");
-      expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(1);
-    });
-
-    it("collapseCommunity removes a community_id", () => {
-      useCodeGraphStore.getState().expandCommunity("auth");
-      useCodeGraphStore.getState().collapseCommunity("auth");
-      expect(
-        useCodeGraphStore.getState().expandedCommunityIds.has("auth"),
-      ).toBe(false);
-    });
-
-    it("collapseCommunity is idempotent when not expanded", () => {
-      useCodeGraphStore.getState().collapseCommunity("auth");
-      expect(
-        useCodeGraphStore.getState().expandedCommunityIds.has("auth"),
-      ).toBe(false);
-    });
-
-    it("clearExpandedCommunities empties the set", () => {
-      useCodeGraphStore.getState().expandCommunity("auth");
-      useCodeGraphStore.getState().expandCommunity("api");
-      useCodeGraphStore.getState().clearExpandedCommunities();
-      expect(useCodeGraphStore.getState().expandedCommunityIds.size).toBe(0);
-    });
-  });
-
   describe("intent lenses", () => {
     it("defaults to architecture lens", () => {
       expect(useCodeGraphStore.getState().activeLens).toBe("architecture");
@@ -382,7 +326,6 @@ describe("codeGraphStore", () => {
       s.setFocusAnchor("foo");
       s.setFocusDirection("dependencies");
       s.setDoiRevealCount(MIN_DOI_REVEAL_COUNT);
-      s.expandCommunity("auth");
 
       useCodeGraphStore.getState().reset();
       const after = useCodeGraphStore.getState();
@@ -400,8 +343,6 @@ describe("codeGraphStore", () => {
       expect(after.activeLens).toBe("architecture");
       expect(after.colorMode).toBe("topology");
       expect(after.complexityAvailable).toBe(false);
-      expect(after.semanticZoomMode).toBe("auto");
-      expect(after.expandedCommunityIds.size).toBe(0);
       expect(after.selectedWorkspaceSlug).toBe("api");
     });
   });

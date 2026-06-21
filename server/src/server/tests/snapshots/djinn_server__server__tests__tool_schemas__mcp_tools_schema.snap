@@ -12409,6 +12409,36 @@ expression: signatures
           ],
           "type": "object"
         },
+        "ProposalMemoryRefModel": {
+          "description": "A memory note linked to a proposal via its graduated epics/tasks.",
+          "properties": {
+            "note_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "source_entity_type": {
+              "description": "The entity the note is attached to: `\"epic\"` or `\"task\"`.",
+              "type": "string"
+            },
+            "source_short_id": {
+              "description": "Short ID of the epic or task that links the note.",
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "permalink",
+            "title",
+            "note_type",
+            "source_entity_type",
+            "source_short_id"
+          ],
+          "type": "object"
+        },
         "ProposalModel": {
           "properties": {
             "acceptance_criteria": {
@@ -12639,6 +12669,13 @@ expression: signatures
             "$ref": "#/$defs/ProposalFeedbackModel"
           },
           "nullable": true,
+          "type": "array"
+        },
+        "memory_refs": {
+          "description": "Memory notes linked to this proposal's graduated epics/tasks.",
+          "items": {
+            "$ref": "#/$defs/ProposalMemoryRefModel"
+          },
           "type": "array"
         },
         "proposal": {
