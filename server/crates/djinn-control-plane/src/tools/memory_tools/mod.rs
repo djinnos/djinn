@@ -39,6 +39,8 @@ mod associations_tests;
 #[cfg(test)]
 mod build_context_tests;
 #[cfg(test)]
+mod entity_types_tests;
+#[cfg(test)]
 mod ops_tests;
 #[cfg(test)]
 mod run_enrichment_tests;

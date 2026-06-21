@@ -10,8 +10,9 @@ use super::{
     BrokenLinksParams, BuildContextParams, ExtractedAuditParams, HealthParams, ListParams,
     MemoryBrokenLinksResponse, MemoryBuildContextResponse, MemoryExtractedAuditResponse,
     MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse, MemoryOrphansResponse,
-    MemorySearchResponse, MemorySearchResultItem, OrphansParams, ReadParams, ResolvedMention,
-    SearchParams, note_to_view, parse_proposal_ref_item, parse_task_ref_item,
+    MemoryProposalOverview, MemorySearchResponse, MemorySearchResultItem, OrphansParams,
+    ReadParams, ResolvedMention, SearchParams, note_to_view, parse_proposal_ref_item,
+    parse_task_ref_item,
 };
 
 fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
@@ -307,8 +308,14 @@ pub async fn memory_search(
         .await
     {
         Ok(results) => {
-            let retrieved_note_ids: Vec<String> =
-                results.iter().map(|result| result.id.clone()).collect();
+            // Record access metrics only for note rows — proposals do not
+            // have access metrics today (spec non-goal: do not duplicate
+            // them as notes).
+            let retrieved_note_ids: Vec<String> = results
+                .iter()
+                .filter(|r| r.entity == "note")
+                .map(|result| result.id.clone())
+                .collect();
             record_retrieved_notes(server, &repo, &retrieved_note_ids).await;
 
             MemorySearchResponse {
@@ -430,7 +437,19 @@ pub async fn memory_build_context(
             related_l0: response.related_l0,
             supersedes: response.supersedes,
             contradicts: response.contradicts,
-            proposals: response.proposals,
+            proposals: response
+                .proposals
+                .into_iter()
+                .map(|p| MemoryProposalOverview {
+                    id: p.id,
+                    short_id: p.short_id,
+                    title: p.title,
+                    body_format: p.body_format,
+                    acceptance_criteria: p.acceptance_criteria,
+                    status: p.status,
+                    score: p.score,
+                })
+                .collect(),
             error: None,
         },
         Err(e) => MemoryBuildContextResponse {
