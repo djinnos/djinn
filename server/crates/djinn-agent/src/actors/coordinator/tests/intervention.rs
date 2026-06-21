@@ -1361,7 +1361,9 @@ async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
         .find(|c| c.payload.contains("**PR CI Escalation**"))
         .expect("escalate_ci_failure_and_close must log a PR CI Escalation comment");
     assert!(
-        escalation_comment.payload.contains("**CI Failure Details:**"),
+        escalation_comment
+            .payload
+            .contains("**CI Failure Details:**"),
         "visibility comment must include CI Failure Details header; got: {}",
         escalation_comment.payload
     );
@@ -1371,7 +1373,9 @@ async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
         escalation_comment.payload
     );
     assert!(
-        escalation_comment.payload.contains("**Failed job:** build (failure)"),
+        escalation_comment
+            .payload
+            .contains("**Failed job:** build (failure)"),
         "visibility comment must include failed-job section; got: {}",
         escalation_comment.payload
     );
@@ -1444,7 +1448,9 @@ async fn escalate_ci_failure_with_empty_sections_omits_details() {
         .find(|c| c.payload.contains("**PR CI Escalation**"))
         .expect("PR CI Escalation comment must still be logged");
     assert!(
-        !escalation_comment.payload.contains("**CI Failure Details:**"),
+        !escalation_comment
+            .payload
+            .contains("**CI Failure Details:**"),
         "visibility comment must NOT include CI Failure Details when sections are empty; got: {}",
         escalation_comment.payload
     );
@@ -1458,7 +1464,9 @@ async fn escalate_ci_failure_with_empty_sections_omits_details() {
         "PLANNER_ESCALATION comment must be logged"
     );
     assert!(
-        !planner_comments[0].payload.contains("**CI Failure Details:**"),
+        !planner_comments[0]
+            .payload
+            .contains("**CI Failure Details:**"),
         "escalation reason must NOT include CI Failure Details when sections are empty; got: {}",
         planner_comments[0].payload
     );
@@ -1518,7 +1526,9 @@ async fn route_planner_intervention_appends_ci_failure_sections() {
         planner_comment.payload
     );
     assert!(
-        planner_comment.payload.contains("**Failed job:** test (failure)"),
+        planner_comment
+            .payload
+            .contains("**Failed job:** test (failure)"),
         "escalation reason must include failed-job section; got: {}",
         planner_comment.payload
     );
@@ -1564,7 +1574,9 @@ async fn route_planner_intervention_with_none_sections_preserves_reason() {
         "PLANNER_ESCALATION comment must be logged"
     );
     assert!(
-        !planner_comments[0].payload.contains("**CI Failure Details:**"),
+        !planner_comments[0]
+            .payload
+            .contains("**CI Failure Details:**"),
         "escalation reason must NOT include CI Failure Details when sections are None; got: {}",
         planner_comments[0].payload
     );

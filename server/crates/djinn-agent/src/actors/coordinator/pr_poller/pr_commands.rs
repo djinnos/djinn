@@ -362,6 +362,7 @@ impl CoordinatorActor {
         )
         .await;
         self.pr_status_cache.remove(task_id);
+        self.review_stuck_sha_first_seen.remove(task_id);
         self.merge_fail_count.remove(task_id);
         self.delegated_to_github.remove(task_id);
     }
