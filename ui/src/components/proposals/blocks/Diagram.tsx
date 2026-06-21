@@ -1,7 +1,9 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useMemo } from "react";
+import DOMPurify from "dompurify";
 
 import type { BlockProps } from "./types";
 import { BlockShell } from "./BlockShell";
+import { DiagramFallback } from "./DiagramFallback";
 
 // Mermaid is a large dependency; load it only when a mermaid diagram renders.
 const MermaidDiagram = lazy(() =>
@@ -13,19 +15,25 @@ const MermaidDiagram = lazy(() =>
 /**
  * Diagram — renders based on the `type` attribute:
  *   - `mermaid` (default): rendered to an actual SVG via the shared
- *     `MermaidDiagram` component (sandboxed + DOMPurify'd),
- *   - `svg`: inlined as-is,
+ *     `MermaidDiagram` component (arrow-normalized + DOMPurify'd, with a
+ *     graceful copy-source fallback on parse failure),
+ *   - `svg`: inlined after DOMPurify sanitization (defends against stored XSS),
  *   - anything else (e.g. `plantuml`, for which we have no client renderer):
- *     falls back to the raw source in a code block.
+ *     routed to the same graceful copy-source fallback instead of dumping raw.
  */
 export function Diagram({ attributes, children }: BlockProps) {
   const diagramType = attributes.type ?? "mermaid";
   const content = typeof children === "string" ? children.trim() : "";
 
-  const rawSource = (
-    <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs">
-      <code>{content}</code>
-    </pre>
+  // Sanitize author/agent SVG before inlining — the source may carry
+  // `<script>`/`onload=`/`javascript:` payloads. DOMPurify's SVG profile keeps
+  // the drawing intact while stripping active markup.
+  const sanitizedSvg = useMemo(
+    () =>
+      DOMPurify.sanitize(content, {
+        USE_PROFILES: { svg: true, svgFilters: true, html: true },
+      }),
+    [content],
   );
 
   return (
@@ -47,10 +55,16 @@ export function Diagram({ attributes, children }: BlockProps) {
       ) : diagramType === "svg" ? (
         <div
           className="overflow-x-auto"
-          dangerouslySetInnerHTML={{ __html: content }}
+          // Content is DOMPurify-sanitized above before injection.
+          dangerouslySetInnerHTML={{ __html: sanitizedSvg }}
         />
       ) : (
-        rawSource
+        // No client renderer for this type (e.g. plantuml): show the source with
+        // a copy button rather than a raw dump.
+        <DiagramFallback
+          source={content}
+          message={`No renderer for "${diagramType}" diagrams — showing source.`}
+        />
       )}
     </BlockShell>
   );

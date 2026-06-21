@@ -11,7 +11,11 @@
  *     so we never inline-eval untrusted source,
  *   - renders into a sanitized container (DOMPurify) so even a `securityLevel`
  *     regression can't smuggle script tags through,
- *   - falls back to a `<pre>` block with the raw source on render error.
+ *   - normalizes unicode arrow/dash glyphs to Mermaid's ASCII edge operators
+ *     before render (LLM-authored sources frequently use `→`/`⟶`/`—`),
+ *   - on render failure falls back to a graceful surface: the raw source in a
+ *     styled `<pre>` with a copy-source button plus a calm one-line message,
+ *     never the raw developer exception and never a blank block.
  *
  * The component is wrapped in `React.memo` so identical `source` strings
  * don't re-trigger Mermaid's heavy SVG generation when parents re-render.
@@ -21,6 +25,7 @@ import {
   memo,
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -28,6 +33,8 @@ import mermaid from "mermaid";
 import DOMPurify from "dompurify";
 
 import { cn } from "@/lib/utils";
+import { DiagramFallback } from "@/components/proposals/blocks/DiagramFallback";
+import { normalizeMermaidSource } from "@/components/proposals/blocks/mermaidNormalize";
 
 // Initialize Mermaid exactly once at module load. `startOnLoad: false` keeps
 // it from auto-walking the DOM (we control rendering explicitly), and
@@ -70,6 +77,13 @@ function MermaidDiagramImpl({ source, className }: MermaidDiagramProps) {
   const [state, setState] = useState<RenderState>({ status: "idle" });
   const containerRef = useRef<HTMLDivElement | null>(null);
 
+  // Rewrite unicode arrow/dash glyphs to ASCII edge operators before render.
+  // Conservative: only structural (outside-label) glyphs change.
+  const normalizedSource = useMemo(
+    () => normalizeMermaidSource(source),
+    [source],
+  );
+
   useEffect(() => {
     let cancelled = false;
     initMermaid();
@@ -77,7 +91,7 @@ function MermaidDiagramImpl({ source, className }: MermaidDiagramProps) {
 
     (async () => {
       try {
-        const { svg } = await mermaid.render(renderId, source);
+        const { svg } = await mermaid.render(renderId, normalizedSource);
         if (cancelled) return;
         // Belt-and-braces: even with `securityLevel: "strict"`, sanitize the
         // SVG before injecting. DOMPurify's default profile preserves SVG
@@ -98,23 +112,17 @@ function MermaidDiagramImpl({ source, className }: MermaidDiagramProps) {
     return () => {
       cancelled = true;
     };
-  }, [source, renderId]);
+  }, [normalizedSource, renderId]);
 
   if (state.status === "error") {
+    // Never dump the raw parser exception or blank the block: show the original
+    // source with a copy button and a calm one-line reason.
     return (
-      <div
-        className={cn(
-          "rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs",
-          className,
-        )}
-        data-testid="mermaid-error"
-      >
-        <p className="mb-2 font-medium text-destructive">
-          Mermaid render failed: {state.error}
-        </p>
-        <pre className="overflow-auto whitespace-pre-wrap font-mono text-[11px] text-muted-foreground">
-          {source}
-        </pre>
+      <div className={className} data-testid="mermaid-error">
+        <DiagramFallback
+          source={source}
+          message={`Could not render diagram: ${state.error}`}
+        />
       </div>
     );
   }
