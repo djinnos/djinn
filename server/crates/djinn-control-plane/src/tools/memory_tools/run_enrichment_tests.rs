@@ -81,9 +81,11 @@ impl MemoryEnrichmentOps for SlowEnrichmentBridge {
                 ..EnrichmentEdge::default()
             }],
             notes_processed: 5,
+            proposals_processed: 0,
             batches_sent: 1,
             entity_merges: 0,
             edges_dropped_wikilink_dup: 0,
+            edges_dropped_unsupported_endpoint: 0,
             warnings: vec![],
         })
     }

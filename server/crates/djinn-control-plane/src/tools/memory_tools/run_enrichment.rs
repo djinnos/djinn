@@ -11,6 +11,18 @@
 // `djinn_agent::actors::slot::memory_enrichment`); the trigger logs a
 // high-level `INFO` line on entry so operators can correlate admin-tool
 // invocations with the pass's own telemetry.
+//
+// Proposal-aware (Wave 3 / rbsi): the pass walks every project note AND
+// every proposal that targets the project, batches them through the
+// configured LLM, and persists typed implicit edges with first-class
+// proposal endpoints — note↔note edges land on the F5 `note_associations`
+// substrate; note↔proposal and proposal↔proposal edges land on the qb9o
+// heterogeneous `memory_entity_associations` substrate so proposals
+// participate in the same association graph as notes without being
+// duplicated as note rows. Edges without an evidence quote, with an
+// unknown kind, or referencing entities outside the batch are dropped with
+// warnings — the pass never panics. All persistence remains best-effort
+// and non-blocking.
 
 use rmcp::{Json, handler::server::wrapper::Parameters, tool, tool_router};
 
@@ -23,13 +35,23 @@ use crate::tools::memory_tools::{MemoryRunEnrichmentResponse, RunEnrichmentParam
 impl DjinnMcpServer {
     /// Trigger the best-effort LLM memory enrichment pass for a project.
     ///
-    /// The pass walks every note in the project, batches them through the
-    /// configured LLM provider, and persists claim / entity nodes plus
-    /// typed implicit edges (`builds_on` / `contradicts` / `supersedes` /
-    /// `exemplifies`) into the widened `note_associations` substrate. All
-    /// persistence is best-effort: provider or parse failures are returned
-    /// in `report.warnings` rather than propagated as blocking errors, so
-    /// retrieval and the memory-graph UI never gate on this pass.
+    /// The pass walks every project note AND every proposal that targets the
+    /// project, batches them through the configured LLM provider, and
+    /// persists claim / entity nodes plus typed implicit edges
+    /// (`builds_on` / `contradicts` / `supersedes` / `exemplifies` /
+    /// `derived_from`). Note↔note edges land on the F5 `note_associations`
+    /// substrate; note↔proposal and proposal↔proposal edges land on the
+    /// heterogeneous `memory_entity_associations` substrate so proposals
+    /// are first-class graph entities without duplicating their bodies
+    /// into `notes`.
+    ///
+    /// All persistence is best-effort: provider or parse failures are
+    /// returned in `report.warnings` rather than propagated as blocking
+    /// errors, so retrieval and the memory-graph UI never gate on this
+    /// pass. Edges with malformed endpoints (proposal id not in the
+    /// batch, unknown kind, missing evidence quote, or self-edges) are
+    /// dropped with a `report.warnings` entry and counted in
+    /// `report.edges_dropped_unsupported_endpoint` — they never panic.
     ///
     /// Defaults to synchronous execution (`background=false`). Set
     /// `background=true` to fire-and-forget the pass on a tokio task; the
@@ -42,7 +64,7 @@ impl DjinnMcpServer {
     /// `run_enrichment_tests::memory_graph_concurrent_with_enrichment_does_not_block`
     /// regression asserts this contract.
     #[tool(
-        description = "Run the best-effort LLM memory enrichment pass for a project. Persists claim/entity nodes and typed implicit edges (builds_on / contradicts / supersedes / exemplifies) through the widened note_associations substrate. All persistence is best-effort: provider or parse failures are surfaced as warnings, never as blocking errors. Set background=true to fire-and-forget on a tokio task; the response then returns immediately with status=queued. Concurrency: the pass yields cooperatively so memory_graph stays responsive while enrichment runs."
+        description = "Run the best-effort LLM memory enrichment pass for a project. The pass walks every project note AND every proposal that targets the project, batches them through the configured LLM, and persists claim / entity nodes plus typed implicit edges (builds_on / contradicts / supersedes / exemplifies / derived_from). Note↔note edges land on the F5 note_associations substrate; note↔proposal and proposal↔proposal edges land on the heterogeneous memory_entity_associations substrate so proposals participate in the same association graph as notes without being duplicated as note rows. All persistence is best-effort and non-blocking: provider or parse failures and malformed edges are surfaced as warnings on report.warnings (and counted in report.edges_dropped_unsupported_endpoint when an endpoint is malformed) rather than propagated as blocking errors. Set background=true to fire-and-forget on a tokio task; the response then returns immediately with status=queued. Concurrency: the pass yields cooperatively so memory_graph stays responsive while enrichment runs."
     )]
     pub async fn memory_run_enrichment(
         &self,
@@ -173,6 +195,7 @@ async fn run_enrichment_inner(
             claims = r.claims.len(),
             edges = r.edges.len(),
             notes_processed = r.notes_processed,
+            proposals_processed = r.proposals_processed,
             batches_sent = r.batches_sent,
             warnings = r.warnings.len(),
             "memory_run_enrichment: enrichment pass finished"

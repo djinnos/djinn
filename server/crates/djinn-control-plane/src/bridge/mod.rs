@@ -38,8 +38,8 @@ pub use self::graph_query_data::{
 };
 pub use self::lsp_bridge::{LspOps, LspWarning};
 pub use self::memory_enrichment_bridge::{
-    EnrichmentClaim, EnrichmentEdge, EnrichmentEntity, EnrichmentReport, EnrichmentStatus,
-    MemoryEnrichmentOps,
+    EnrichmentClaim, EnrichmentEdge, EnrichmentEdgeEndpointKind, EnrichmentEntity,
+    EnrichmentReport, EnrichmentStatus, MemoryEnrichmentOps,
 };
 pub use self::runtime_bridge::{RuntimeDispatchError, RuntimeOps, TaskrunJobRef};
 pub use self::slot_pool_bridge::{ModelPoolStatus, PoolStatus, RunningTaskInfo, SlotPoolOps};

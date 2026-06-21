@@ -12,7 +12,8 @@
 
 use async_trait::async_trait;
 use djinn_control_plane::bridge::{
-    EnrichmentClaim, EnrichmentEdge, EnrichmentEntity, EnrichmentReport, MemoryEnrichmentOps,
+    EnrichmentClaim, EnrichmentEdge, EnrichmentEdgeEndpointKind, EnrichmentEntity,
+    EnrichmentReport, MemoryEnrichmentOps,
 };
 
 /// Adapter that delegates `MemoryEnrichmentOps::run_enrichment` to the
@@ -57,9 +58,11 @@ fn convert_report(input: djinn_agent::actors::slot::EnrichmentReport) -> Enrichm
         edges: input.edges.into_iter().map(convert_edge).collect(),
         warnings: input.warnings,
         notes_processed: input.notes_processed as i64,
+        proposals_processed: input.proposals_processed as i64,
         batches_sent: input.batches_sent as i64,
         entity_merges: input.entity_merges as i64,
         edges_dropped_wikilink_dup: input.edges_dropped_wikilink_dup as i64,
+        edges_dropped_unsupported_endpoint: input.edges_dropped_unsupported_endpoint as i64,
     }
 }
 
@@ -82,8 +85,25 @@ fn convert_edge(e: djinn_agent::actors::slot::EnrichmentEdge) -> EnrichmentEdge 
     EnrichmentEdge {
         source_note_id: e.source_note_id,
         target_note_id: e.target_note_id,
+        source_proposal_id: e.source_proposal_id,
+        target_proposal_id: e.target_proposal_id,
+        source_kind: e.source_kind.map(convert_endpoint_kind),
+        target_kind: e.target_kind.map(convert_endpoint_kind),
         kind: e.kind,
         confidence: e.confidence,
         evidence_quote: e.evidence_quote,
+    }
+}
+
+fn convert_endpoint_kind(
+    k: djinn_agent::actors::slot::EnrichmentEdgeEndpointKind,
+) -> EnrichmentEdgeEndpointKind {
+    match k {
+        djinn_agent::actors::slot::EnrichmentEdgeEndpointKind::Note => {
+            EnrichmentEdgeEndpointKind::Note
+        }
+        djinn_agent::actors::slot::EnrichmentEdgeEndpointKind::Proposal => {
+            EnrichmentEdgeEndpointKind::Proposal
+        }
     }
 }
