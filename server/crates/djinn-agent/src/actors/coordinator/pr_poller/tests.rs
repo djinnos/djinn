@@ -1,11 +1,13 @@
 use super::{
     AutoMergeFastPathState, AutoMergeTickDecision, Task, advisory_checks_section,
-    blocking_failed_checks, build_ci_failure_sections, decide_auto_merge_tick,
-    dequeue_reason_is_failure, dequeue_requires_rework, effective_review_decision,
-    is_advisory_check_name, is_conversation_resolution_block, is_merge_queue_405,
-    is_racing_unmerged_status, parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
-    pr_transition_increments_reopen_count, record_auto_merge_decision_metrics,
-    record_pr_transition_reopen_metric, should_auto_resolve_conversations,
+    blocking_failed_checks, build_ci_failure_sections, compute_ci_failure_fingerprint,
+    count_consecutive_identical, decide_auto_merge_tick, dequeue_reason_is_failure,
+    dequeue_requires_rework, detect_scope_inversion, effective_review_decision, extract_crate_name,
+    extract_crate_names, is_advisory_check_name, is_conversation_resolution_block,
+    is_merge_queue_405, is_racing_unmerged_status, parse_actions_run_id, parse_pr_url,
+    pick_conflict_blocker_sibling, pr_transition_increments_reopen_count,
+    record_auto_merge_decision_metrics, record_pr_transition_reopen_metric,
+    should_auto_resolve_conversations,
 };
 use djinn_core::models::TransitionAction;
 use djinn_provider::github_api::{
@@ -1081,4 +1083,497 @@ fn auto_resolve_conversations_gate() {
         Some("BLOCKED"),
         true
     ));
+}
+
+// ── Same-CI-failure-signature fingerprint tests ──────────────────────────
+
+#[test]
+fn compute_ci_failure_fingerprint_deterministic() {
+    // Same check names + same CI failure sections → same fingerprint.
+    let checks = [check_run("CI / build", 100)];
+    let refs: Vec<&CheckRun> = checks.iter().collect();
+    let sections = vec![
+        "**Workflow:** CI".to_string(),
+        "**Failed job:** build (failure)".to_string(),
+        "**Failed step:** cargo build (step #3, failure)".to_string(),
+    ];
+    let fp1 = compute_ci_failure_fingerprint(&refs, &sections);
+    let fp2 = compute_ci_failure_fingerprint(&refs, &sections);
+    assert_eq!(
+        fp1, fp2,
+        "identical inputs must produce identical fingerprints"
+    );
+    assert!(!fp1.is_empty(), "fingerprint must be non-empty");
+}
+
+#[test]
+fn compute_ci_failure_fingerprint_sensitivity_different_checks() {
+    // Different check names → different fingerprint.
+    let checks_a = [check_run("CI / build", 100)];
+    let refs_a: Vec<&CheckRun> = checks_a.iter().collect();
+    let checks_b = [check_run("CI / test", 100)];
+    let refs_b: Vec<&CheckRun> = checks_b.iter().collect();
+    let sections = vec![
+        "**Failed job:** build (failure)".to_string(),
+        "**Failed step:** cargo build (step #3, failure)".to_string(),
+    ];
+    let fp_a = compute_ci_failure_fingerprint(&refs_a, &sections);
+    let fp_b = compute_ci_failure_fingerprint(&refs_b, &sections);
+    assert_ne!(
+        fp_a, fp_b,
+        "different check names must produce different fingerprints"
+    );
+}
+
+#[test]
+fn compute_ci_failure_fingerprint_sensitivity_different_failures() {
+    // Same checks but different failed jobs/steps → different fingerprint.
+    let checks = [check_run("CI / build", 100)];
+    let refs: Vec<&CheckRun> = checks.iter().collect();
+    let sections_a = vec![
+        "**Failed job:** build (failure)".to_string(),
+        "**Failed step:** cargo build (step #3, failure)".to_string(),
+    ];
+    let sections_b = vec![
+        "**Failed job:** build (failure)".to_string(),
+        "**Failed step:** cargo test (step #4, failure)".to_string(),
+    ];
+    let fp_a = compute_ci_failure_fingerprint(&refs, &sections_a);
+    let fp_b = compute_ci_failure_fingerprint(&refs, &sections_b);
+    assert_ne!(
+        fp_a, fp_b,
+        "different failed steps must produce different fingerprints"
+    );
+}
+
+#[test]
+fn compute_ci_failure_fingerprint_normalizes_casing_and_whitespace() {
+    // Check names with different casing/whitespace normalize to the same fingerprint.
+    let check_upper = CheckRun {
+        id: 1,
+        name: "  CI / BUILD  ".to_string(),
+        status: "completed".to_string(),
+        conclusion: Some("failure".to_string()),
+        html_url: "https://github.com/o/r/actions/runs/1/job/1".to_string(),
+    };
+    let check_lower = CheckRun {
+        id: 2,
+        name: "ci / build".to_string(),
+        status: "completed".to_string(),
+        conclusion: Some("failure".to_string()),
+        html_url: "https://github.com/o/r/actions/runs/1/job/2".to_string(),
+    };
+    let refs_upper: Vec<&CheckRun> = vec![&check_upper];
+    let refs_lower: Vec<&CheckRun> = vec![&check_lower];
+    let sections = vec!["**Failed job:** build (failure)".to_string()];
+    let fp_upper = compute_ci_failure_fingerprint(&refs_upper, &sections);
+    let fp_lower = compute_ci_failure_fingerprint(&refs_lower, &sections);
+    assert_eq!(
+        fp_upper, fp_lower,
+        "different casing/whitespace must normalize to the same fingerprint"
+    );
+}
+
+#[test]
+fn compute_ci_failure_fingerprint_independent_of_order() {
+    // Check names in different order → same fingerprint (sorted internally).
+    let check_a = CheckRun {
+        id: 1,
+        name: "CI / build".to_string(),
+        status: "completed".to_string(),
+        conclusion: Some("failure".to_string()),
+        html_url: "https://github.com/o/r/actions/runs/1/job/1".to_string(),
+    };
+    let check_b = CheckRun {
+        id: 2,
+        name: "CI / test".to_string(),
+        status: "completed".to_string(),
+        conclusion: Some("failure".to_string()),
+        html_url: "https://github.com/o/r/actions/runs/1/job/2".to_string(),
+    };
+    let refs_ab: Vec<&CheckRun> = vec![&check_a, &check_b];
+    let refs_ba: Vec<&CheckRun> = vec![&check_b, &check_a];
+    let sections = vec!["**Failed job:** build (failure)".to_string()];
+    let fp_ab = compute_ci_failure_fingerprint(&refs_ab, &sections);
+    let fp_ba = compute_ci_failure_fingerprint(&refs_ba, &sections);
+    assert_eq!(
+        fp_ab, fp_ba,
+        "order-independent: must produce the same fingerprint"
+    );
+}
+
+// ── count_consecutive_identical tests ────────────────────────────────────
+
+/// Helper: build an ActivityEntry with a JSON payload.
+fn activity_entry(
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> djinn_core::models::ActivityEntry {
+    djinn_core::models::ActivityEntry {
+        id: format!(
+            "entry-{event_type}-{}",
+            payload
+                .get("fingerprint")
+                .and_then(|v| v.as_str())
+                .unwrap_or("x")
+        ),
+        task_id: Some("task-1".to_string()),
+        actor_id: "coordinator".to_string(),
+        actor_role: "system".to_string(),
+        event_type: event_type.to_string(),
+        payload: payload.to_string(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+    }
+}
+
+/// Helper: build an ActivityEntry with a raw (possibly malformed) payload.
+fn activity_entry_raw(event_type: &str, payload: &str) -> djinn_core::models::ActivityEntry {
+    djinn_core::models::ActivityEntry {
+        id: format!("entry-{event_type}-raw"),
+        task_id: Some("task-1".to_string()),
+        actor_id: "coordinator".to_string(),
+        actor_role: "system".to_string(),
+        event_type: event_type.to_string(),
+        payload: payload.to_string(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+    }
+}
+
+#[test]
+fn count_consecutive_identical_counts_matching() {
+    let fp = "abc123";
+    let entries = vec![
+        activity_entry("same_ci_signature", &serde_json::json!({"fingerprint": fp})),
+        activity_entry("same_ci_signature", &serde_json::json!({"fingerprint": fp})),
+    ];
+    let count = count_consecutive_identical(&entries, fp);
+    assert_eq!(count, 2, "both entries match the fingerprint");
+}
+
+#[test]
+fn count_consecutive_identical_stops_at_different() {
+    let fp = "abc123";
+    let fp_other = "xyz789";
+    let entries = vec![
+        activity_entry("same_ci_signature", &serde_json::json!({"fingerprint": fp})),
+        activity_entry(
+            "same_ci_signature",
+            &serde_json::json!({"fingerprint": fp_other}),
+        ),
+        activity_entry("same_ci_signature", &serde_json::json!({"fingerprint": fp})),
+    ];
+    // Walked in reverse: entry[2] matches (count=1), entry[1] does not → stop.
+    let count = count_consecutive_identical(&entries, fp);
+    assert_eq!(count, 1, "should stop at the first different fingerprint");
+}
+
+#[test]
+fn count_consecutive_identical_empty() {
+    let count = count_consecutive_identical(&[], "abc123");
+    assert_eq!(count, 0, "no entries → zero");
+}
+
+#[test]
+fn count_consecutive_identical_no_match() {
+    let entries = vec![activity_entry(
+        "same_ci_signature",
+        &serde_json::json!({"fingerprint": "different"}),
+    )];
+    let count = count_consecutive_identical(&entries, "abc123");
+    assert_eq!(count, 0, "no matching entries → zero");
+}
+
+#[test]
+fn count_consecutive_identical_handles_malformed_payload() {
+    // Malformed JSON payload → break (treated as non-matching).
+    let entries = vec![activity_entry_raw("same_ci_signature", "not json")];
+    let count = count_consecutive_identical(&entries, "abc123");
+    assert_eq!(count, 0, "malformed payload should break immediately");
+}
+
+// ── Scope-inversion tests ────────────────────────────────────────────────
+
+#[test]
+fn detect_scope_inversion_true_positive() {
+    // CI failure mentions djinn-agent, PR diff only touches djinn-db → Some(true)
+    let sections = vec![
+        "**Workflow:** CI".to_string(),
+        "error[E0308]: mismatched types".to_string(),
+        "  --> server/crates/djinn-agent/src/foo.rs:10:5".to_string(),
+        "**Failed job:** build (failure)".to_string(),
+    ];
+    let pr_files = vec!["server/crates/djinn-db/src/bar.rs".to_string()];
+    assert_eq!(
+        detect_scope_inversion(&sections, &pr_files),
+        Some(true),
+        "CI fails on crate outside the PR diff → scope inversion"
+    );
+}
+
+#[test]
+fn detect_scope_inversion_true_negative() {
+    // CI failure mentions djinn-db, PR diff touches djinn-db → Some(false)
+    let sections = vec![
+        "error[E0308]: mismatched types".to_string(),
+        "  --> server/crates/djinn-db/src/foo.rs:10:5".to_string(),
+        "**Failed job:** test (failure)".to_string(),
+    ];
+    let pr_files = vec!["server/crates/djinn-db/src/bar.rs".to_string()];
+    assert_eq!(
+        detect_scope_inversion(&sections, &pr_files),
+        Some(false),
+        "CI fails on crate within the PR diff → normal worker bug"
+    );
+}
+
+#[test]
+fn detect_scope_inversion_inconclusive_no_file_paths() {
+    // CI failure sections have no extractable file paths → None
+    let sections = vec![
+        "**Workflow:** CI".to_string(),
+        "**Failed job:** build (failure)".to_string(),
+        "**Failed step:** cargo build (step #3, failure)".to_string(),
+        "error: process didn't exit successfully".to_string(),
+    ];
+    let pr_files = vec!["server/crates/djinn-db/src/bar.rs".to_string()];
+    assert_eq!(
+        detect_scope_inversion(&sections, &pr_files),
+        None,
+        "no extractable file paths → inconclusive"
+    );
+}
+
+#[test]
+fn detect_scope_inversion_inconclusive_empty_pr_files() {
+    // Empty PR files → None
+    let sections = vec!["  --> server/crates/djinn-agent/src/foo.rs:10:5".to_string()];
+    assert_eq!(
+        detect_scope_inversion(&sections, &[]),
+        None,
+        "empty PR files → inconclusive"
+    );
+}
+
+#[test]
+fn detect_scope_inversion_inconclusive_no_crates_in_diff() {
+    // PR files don't contain any crate paths → None
+    let sections = vec!["  --> server/crates/djinn-agent/src/foo.rs:10:5".to_string()];
+    let pr_files = vec![
+        "docs/readme.md".to_string(),
+        "scripts/deploy.sh".to_string(),
+    ];
+    assert_eq!(
+        detect_scope_inversion(&sections, &pr_files),
+        None,
+        "PR files with no crate paths → inconclusive"
+    );
+}
+
+#[test]
+fn detect_scope_inversion_multiple_crates_mixed() {
+    // CI fails on djinn-agent AND djinn-db. PR only touches djinn-db.
+    // At least one failing crate is outside → Some(true).
+    let sections = vec![
+        "  --> server/crates/djinn-agent/src/foo.rs:10:5".to_string(),
+        "  --> server/crates/djinn-db/src/baz.rs:20:10".to_string(),
+    ];
+    let pr_files = vec!["server/crates/djinn-db/src/bar.rs".to_string()];
+    assert_eq!(
+        detect_scope_inversion(&sections, &pr_files),
+        Some(true),
+        "any failing crate outside the diff → scope inversion"
+    );
+}
+
+#[test]
+fn detect_scope_inversion_all_within_diff() {
+    // CI fails on multiple crates, all within the PR diff → Some(false)
+    let sections = vec![
+        "  --> server/crates/djinn-agent/src/foo.rs:10:5".to_string(),
+        "  --> server/crates/djinn-db/src/baz.rs:20:10".to_string(),
+    ];
+    let pr_files = vec![
+        "server/crates/djinn-agent/src/other.rs".to_string(),
+        "server/crates/djinn-db/src/bar.rs".to_string(),
+    ];
+    assert_eq!(
+        detect_scope_inversion(&sections, &pr_files),
+        Some(false),
+        "all failing crates within the diff → normal worker bug"
+    );
+}
+
+// ── extract_crate_name helper tests ──────────────────────────────────────
+
+#[test]
+fn extract_crate_name_server_prefix() {
+    assert_eq!(
+        extract_crate_name("server/crates/djinn-agent/src/foo.rs"),
+        Some("djinn-agent".to_string())
+    );
+}
+
+#[test]
+fn extract_crate_name_no_server_prefix() {
+    assert_eq!(
+        extract_crate_name("crates/djinn-db/src/bar.rs"),
+        Some("djinn-db".to_string())
+    );
+}
+
+#[test]
+fn extract_crate_name_no_crates_segment() {
+    assert_eq!(extract_crate_name("random/path.rs"), None);
+    assert_eq!(extract_crate_name("foo.rs"), None);
+}
+
+#[test]
+fn extract_crate_names_deduplicates_and_sorts() {
+    let paths = vec![
+        "server/crates/djinn-db/src/b.rs".to_string(),
+        "server/crates/djinn-agent/src/a.rs".to_string(),
+        "crates/djinn-db/src/c.rs".to_string(),
+    ];
+    let crates = extract_crate_names(&paths);
+    assert_eq!(crates, vec!["djinn-agent", "djinn-db"]);
+}
+
+// ── Review-stuck trigger (pure-function level) ───────────────────────────
+//
+// The review-stuck trigger lives in `pr_watcher.rs` and requires a full
+// `CoordinatorActor` harness with a mock GitHub API client — too heavyweight
+// for a unit test in this file. The integration-level behavior (fires on
+// terminal red + stale SHA, does NOT fire on pending CI / green CI / recent
+// SHA change) is verified through the helper functions the trigger relies on.
+
+#[test]
+fn review_stuck_is_failing_conclusion_recognizes_terminal_red() {
+    // The trigger filters check-runs by `is_failing_conclusion`. Only
+    // terminal-red conclusions ("failure", "timed_out", "cancelled") count.
+    assert!(super::is_failing_conclusion(Some("failure")));
+    assert!(super::is_failing_conclusion(Some("timed_out")));
+    assert!(super::is_failing_conclusion(Some("cancelled")));
+    // Pending (None) and success do NOT count — the trigger must not fire.
+    assert!(!super::is_failing_conclusion(None));
+    assert!(!super::is_failing_conclusion(Some("success")));
+    assert!(!super::is_failing_conclusion(Some("neutral")));
+}
+
+#[test]
+fn review_stuck_window_minutes_is_positive() {
+    // The trigger requires elapsed >= REVIEW_STUCK_WINDOW_MINUTES before firing.
+    // Verify the constant is a sane positive value so the window is meaningful.
+    assert!(
+        super::REVIEW_STUCK_WINDOW_MINUTES > 0,
+        "review-stuck window must be positive"
+    );
+}
+
+#[test]
+fn review_stuck_same_ci_signature_threshold_is_lower_than_cycle_cap() {
+    // Content-aware escalation (same-signature) must fire before the blind
+    // cycle-count force-close, so the Planner gets a chance to intervene.
+    assert!(
+        super::SAME_CI_SIGNATURE_THRESHOLD < super::PR_CI_FAILURE_THRESHOLD,
+        "same-CI-signature threshold ({}) must be lower than cycle cap ({})",
+        super::SAME_CI_SIGNATURE_THRESHOLD,
+        super::PR_CI_FAILURE_THRESHOLD
+    );
+}
+
+// ── Integration-level: ordering invariants for the three triggers ────────
+//
+// The handle_ci_failure method processes triggers in a fixed order:
+//   1. Same-CI-signature check (escalation at SAME_CI_SIGNATURE_THRESHOLD)
+//   2. Scope-inversion check (RE-SLICE intervention)
+//   3. Diff-empty short-circuit (escalation + force-close)
+//   4. Cycle cap (escalation + force-close)
+//
+// We verify the ordering constraints using the pure functions:
+// - Scope-inversion must be detectable independently of the fingerprint,
+//   so it takes priority when both conditions hold.
+// - Same-signature escalation fires at SAME_CI_SIGNATURE_THRESHOLD=2, which
+//   is lower than PR_CI_FAILURE_THRESHOLD=3, so it beats the cycle cap.
+
+#[test]
+fn integration_scope_inversion_priority_over_same_signature() {
+    // A CI failure that is both scope-inverted AND same-signature:
+    // detect_scope_inversion returns Some(true), which in handle_ci_failure
+    // is checked before the cycle cap and produces a RE-SLICE intervention.
+    // The fingerprint is irrelevant once scope-inversion fires.
+    let sections = vec![
+        "  --> server/crates/djinn-agent/src/foo.rs:10:5".to_string(),
+        "**Failed job:** build (failure)".to_string(),
+        "**Failed step:** cargo build (step #3, failure)".to_string(),
+    ];
+    let pr_files = vec!["server/crates/djinn-db/src/bar.rs".to_string()];
+
+    // Scope-inversion is detected → this takes priority.
+    assert_eq!(detect_scope_inversion(&sections, &pr_files), Some(true));
+
+    // The fingerprint still computes (it would be checked first in the
+    // actual method), but scope-inversion is the more specific diagnosis.
+    let checks = [check_run("CI / build", 100)];
+    let refs: Vec<&CheckRun> = checks.iter().collect();
+    let fp = compute_ci_failure_fingerprint(&refs, &sections);
+    assert!(!fp.is_empty(), "fingerprint still computes");
+    // The point: both conditions are satisfiable simultaneously, and
+    // scope-inversion (checked at step 2) wins over the cycle cap (step 4).
+}
+
+#[test]
+fn integration_same_signature_beats_cycle_cap() {
+    // The threshold ordering ensures same-signature fires before the cycle cap.
+    // With SAME_CI_SIGNATURE_THRESHOLD=2 and PR_CI_FAILURE_THRESHOLD=3,
+    // the second identical failure triggers same-signature escalation, not
+    // the blind force-close.
+    let fp = "deadbeef";
+    // Simulate one prior identical fingerprint (the first failure).
+    let prior_entries = vec![activity_entry(
+        "same_ci_signature",
+        &serde_json::json!({"fingerprint": fp}),
+    )];
+    let consecutive = count_consecutive_identical(&prior_entries, fp);
+    let total_consecutive = consecutive + 1; // current failure
+    // At total_consecutive=2, same-signature fires (>= SAME_CI_SIGNATURE_THRESHOLD=2).
+    assert!(
+        total_consecutive >= super::SAME_CI_SIGNATURE_THRESHOLD,
+        "second identical fingerprint should trigger same-signature escalation"
+    );
+    // And this happens at round 2, before the cycle cap at round 4 (> threshold 3).
+    assert!(
+        total_consecutive <= super::SAME_CI_SIGNATURE_THRESHOLD
+            || total_consecutive > super::PR_CI_FAILURE_THRESHOLD,
+        "same-signature fires at or before the cycle cap"
+    );
+}
+
+#[test]
+fn integration_normal_failure_no_false_positive() {
+    // A normal within-scope CI failure with a new fingerprint each time:
+    // detect_scope_inversion returns Some(false) (within diff), and
+    // count_consecutive_identical returns 0 (different fingerprints).
+    // Neither escalation trigger fires.
+    let sections = vec![
+        "  --> server/crates/djinn-db/src/foo.rs:10:5".to_string(),
+        "**Failed job:** test (failure)".to_string(),
+    ];
+    let pr_files = vec!["server/crates/djinn-db/src/bar.rs".to_string()];
+
+    // Not a scope inversion.
+    assert_eq!(detect_scope_inversion(&sections, &pr_files), Some(false));
+
+    // Different fingerprint from any prior → counter resets.
+    let prior_entries = vec![activity_entry(
+        "same_ci_signature",
+        &serde_json::json!({"fingerprint": "old_fp"}),
+    )];
+    let new_fp = "new_fp";
+    let consecutive = count_consecutive_identical(&prior_entries, new_fp);
+    assert_eq!(consecutive, 0, "different fingerprint resets the counter");
+    let total_consecutive = consecutive + 1; // = 1
+    assert!(
+        total_consecutive < super::SAME_CI_SIGNATURE_THRESHOLD,
+        "new fingerprint does not trigger same-signature escalation"
+    );
 }

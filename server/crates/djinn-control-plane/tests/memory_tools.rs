@@ -1195,6 +1195,90 @@ async fn memory_read_surfaces_tasks_and_proposals_for_note_under_graduated_propo
 }
 
 #[tokio::test]
+async fn memory_read_regression_resolved_mentions_still_works() {
+    let harness = McpTestHarness::new().await;
+    let fixture = build_graduated_proposal_fixture(&harness).await;
+
+    // The proposal's short_id is non-hex (guaranteed by the fixture helper).
+    // Write a note whose body contains the proposal short_id as dead prose.
+    // Use a fresh project so the note body mention resolution is clean.
+    let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
+    let project = project_row.slug();
+    let note = harness
+        .call_tool(
+            "memory_write",
+            json!({
+                "project": project,
+                "title": "Note Mentioning Proposal",
+                "content": format!("This pitfall relates to proposal {} which covers the design.", fixture.proposal_short_id),
+                "type": "pitfall",
+            }),
+        )
+        .await
+        .expect("memory_write should dispatch");
+    assert!(
+        note.get("error").is_none() || note["error"].is_null(),
+        "memory_write returned error: {note}"
+    );
+
+    // memory_read should resolve the short_id mention.
+    let read = harness
+        .call_tool(
+            "memory_read",
+            json!({"project": project, "identifier": note["permalink"]}),
+        )
+        .await
+        .expect("memory_read should dispatch");
+    assert!(
+        read.get("error").is_none() || read["error"].is_null(),
+        "memory_read returned error: {read}"
+    );
+
+    let mentions = read
+        .get("resolved_mentions")
+        .and_then(|v| v.as_array())
+        .expect("resolved_mentions should be an array");
+    assert!(
+        !mentions.is_empty(),
+        "resolved_mentions should be non-empty — the note body contains a valid short_id"
+    );
+
+    // Find the mention matching our proposal short_id.
+    let proposal_mention = mentions
+        .iter()
+        .find(|m| m.get("short_id").and_then(|v| v.as_str()) == Some(&fixture.proposal_short_id))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected resolved mention for short_id {} in: {mentions:?}",
+                fixture.proposal_short_id
+            )
+        });
+
+    assert_eq!(
+        proposal_mention["entity_type"].as_str().unwrap(),
+        "proposal",
+        "entity_type should be 'proposal'"
+    );
+    assert!(
+        proposal_mention
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "title should be non-empty"
+    );
+    // permalink should be the proposal's UUID id.
+    assert!(
+        proposal_mention
+            .get("permalink")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "permalink should be non-empty"
+    );
+}
+
+#[tokio::test]
 async fn memory_read_regression_memory_task_refs_behavior_unchanged() {
     let harness = McpTestHarness::new().await;
     let fixture = build_graduated_proposal_fixture(&harness).await;
