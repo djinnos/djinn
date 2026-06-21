@@ -18,8 +18,6 @@
 import Graph from "graphology";
 import {
   computeForceLayout,
-  computeSequentialLayout,
-  computeRadialLayout,
 } from "@/lib/codeGraphLayouts";
 
 export type SnapshotNodeKind = "file" | "folder" | "symbol" | "community";
@@ -565,8 +563,6 @@ export interface BuildGraphOptions {
   dropSelfLoops?: boolean;
   /** Drop `MemberOf` edges (scaffolding). Default `false`. */
   dropMemberOf?: boolean;
-  /** Layout mode to apply. Default `"force"`. */
-  layoutMode?: "force" | "sequential" | "radial";
 }
 
 /**
@@ -625,7 +621,6 @@ export function buildGraphFromSnapshot(
 ): Graph {
   const dropSelfLoops = options.dropSelfLoops ?? true;
   const dropMemberOf = options.dropMemberOf ?? false;
-  const layoutMode = options.layoutMode ?? "force";
   const graph = new Graph({ multi: true, type: "directed" });
 
   const nodes = snapshot.nodes;
@@ -662,14 +657,9 @@ export function buildGraphFromSnapshot(
   }
 
   // Deterministic layout branch: delegate to the pure layout module.
-  // For force mode we still seed with computeForceLayout so the adapter
-  // stays jitter-free; the FA2 supervisor in useSigmaGraph runs on top.
-  const layoutPositions =
-    layoutMode === "sequential"
-      ? computeSequentialLayout(snapshot)
-      : layoutMode === "radial"
-        ? computeRadialLayout(snapshot, null)
-        : computeForceLayout(snapshot);
+  // Seed with computeForceLayout so the adapter stays jitter-free;
+  // the FA2 supervisor in useSigmaGraph runs on top.
+  const layoutPositions = computeForceLayout(snapshot);
   for (const node of nodes) {
     const pos = layoutPositions.get(node.id) ?? { x: 0, y: 0 };
     addNode(graph, node, pos, maxRank, nodeCount);
@@ -683,12 +673,6 @@ export function buildGraphFromSnapshot(
     dropSelfLoops,
     dropMemberOf,
   });
-
-  // Non-force modes are deterministic — flag the graph so useSigmaGraph
-  // skips the FA2 supervisor and noverlap pass.
-  if (layoutMode !== "force") {
-    graph.setAttribute(PRECOMPUTED_LAYOUT_ATTRIBUTE, true);
-  }
 
   return graph;
 }

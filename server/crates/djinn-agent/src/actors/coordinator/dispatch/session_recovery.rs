@@ -109,30 +109,33 @@ impl CoordinatorActor {
             // Query the activity tracker for idle time.  If the task has no
             // activity entry (e.g. session predates this feature, or reply loop
             // never started) fall back to wall-clock elapsed from started_at.
-            let (idle, activity_tracked, token_count, turn_count) =
-                match self.pool.session_for_task(task_id).await {
-                    Ok(Some(info)) => (
-                        info.idle_seconds,
-                        info.activity_tracked,
-                        info.token_count,
-                        info.turn_count,
-                    ),
-                    _ => {
-                        // Fallback: parse ISO-8601 started_at from the DB and compute
-                        // elapsed seconds.  The column stores datetime strings like
-                        // "2026-03-27 13:52:47" or "2026-03-27T13:52:47.231Z".
-                        let Some(elapsed) = parse_iso_elapsed(&session.started_at) else {
-                            tracing::warn!(
-                                task_id = %task_id,
-                                started_at = %session.started_at,
-                                "CoordinatorActor: cannot parse started_at for stall check, skipping"
-                            );
-                            continue;
-                        };
-                        // No host activity entry → still on the first LLM call.
-                        (elapsed, false, 0, 0)
-                    }
-                };
+            let (idle, activity_tracked, token_count, turn_count) = match self
+                .pool
+                .session_for_task(task_id)
+                .await
+            {
+                Ok(Some(info)) => (
+                    info.idle_seconds,
+                    info.activity_tracked,
+                    info.token_count,
+                    info.turn_count,
+                ),
+                _ => {
+                    // Fallback: parse ISO-8601 started_at from the DB and compute
+                    // elapsed seconds.  The column stores datetime strings like
+                    // "2026-03-27 13:52:47" or "2026-03-27T13:52:47.231Z".
+                    let Some(elapsed) = parse_iso_elapsed(&session.started_at) else {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            started_at = %session.started_at,
+                            "CoordinatorActor: cannot parse started_at for stall check, skipping"
+                        );
+                        continue;
+                    };
+                    // No host activity entry → still on the first LLM call.
+                    (elapsed, false, 0, 0)
+                }
+            };
 
             // Pick the threshold that fires first. A session that has never
             // shown a sign of life (no host ActivityTracker entry) is
@@ -229,11 +232,19 @@ impl CoordinatorActor {
                 // Route through loop-guard planner intervention (NOT a stall kill).
                 let intervention_reason = format!(
                     "Session exceeded {} ceiling ({}). Routing to Planner intervention to decide how to unstick the task.",
-                    if token_count > SESSION_TOKEN_CEILING { "token" } else { "turn" },
+                    if token_count > SESSION_TOKEN_CEILING {
+                        "token"
+                    } else {
+                        "turn"
+                    },
                     reason
                 );
-                self.route_loop_guard_planner_intervention(task_id, "coordinator", &intervention_reason)
-                    .await;
+                self.route_loop_guard_planner_intervention(
+                    task_id,
+                    "coordinator",
+                    &intervention_reason,
+                )
+                .await;
 
                 tracing::warn!(
                     task_id = %task_id,

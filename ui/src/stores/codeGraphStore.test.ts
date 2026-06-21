@@ -2,23 +2,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_DEPTH,
-  DEFAULT_LAYOUT_MODE,
   EDGE_KINDS,
   MAX_DEPTH,
   MIN_DEPTH,
   useCodeGraphStore,
 } from "./codeGraphStore";
 
-const assertLayoutModeTypeSafety = () => {
-  // @ts-expect-error layout mode only accepts the supported algorithms.
-  useCodeGraphStore.getState().setLayoutMode("grid");
-};
-void assertLayoutModeTypeSafety;
-
 describe("codeGraphStore", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
-    useCodeGraphStore.setState({ layoutMode: DEFAULT_LAYOUT_MODE });
     useCodeGraphStore.getState().reset();
   });
 
@@ -75,10 +67,6 @@ describe("codeGraphStore", () => {
 
     it("starts with no selected workspace", () => {
       expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
-    });
-
-    it("starts with the default force layout mode", () => {
-      expect(useCodeGraphStore.getState().layoutMode).toBe("force");
     });
   });
 
@@ -221,26 +209,6 @@ describe("codeGraphStore", () => {
     });
   });
 
-  describe("layoutMode", () => {
-    it("setLayoutMode updates state and persists to sessionStorage", () => {
-      useCodeGraphStore.getState().setLayoutMode("radial");
-
-      expect(useCodeGraphStore.getState().layoutMode).toBe("radial");
-      expect(window.sessionStorage.getItem("codegraph.layoutMode")).toBe(
-        "radial",
-      );
-    });
-
-    it("hydrates a fresh store from a valid sessionStorage value", async () => {
-      window.sessionStorage.setItem("codegraph.layoutMode", "sequential");
-      vi.resetModules();
-
-      const { useCodeGraphStore: freshStore } = await import("./codeGraphStore");
-
-      expect(freshStore.getState().layoutMode).toBe("sequential");
-    });
-  });
-
   describe("selectedWorkspaceSlug", () => {
     it("sets and clears the selected workspace slug", () => {
       useCodeGraphStore.getState().setSelectedWorkspaceSlug("api");
@@ -262,24 +230,6 @@ describe("codeGraphStore", () => {
       expect(useCodeGraphStore.getState().semanticZoomMode).toBe("community");
       useCodeGraphStore.getState().setSemanticZoomMode("auto");
       expect(useCodeGraphStore.getState().semanticZoomMode).toBe("auto");
-    });
-  });
-
-  describe("layoutMode", () => {
-    it("defaults to force", () => {
-      expect(useCodeGraphStore.getState().layoutMode).toBe("force");
-    });
-
-    it("setLayoutMode updates and persists the mode", () => {
-      useCodeGraphStore.getState().setLayoutMode("sequential");
-      expect(useCodeGraphStore.getState().layoutMode).toBe("sequential");
-      expect(sessionStorage.getItem("codegraph.layoutMode")).toBe("sequential");
-      useCodeGraphStore.getState().setLayoutMode("radial");
-      expect(useCodeGraphStore.getState().layoutMode).toBe("radial");
-      expect(sessionStorage.getItem("codegraph.layoutMode")).toBe("radial");
-      useCodeGraphStore.getState().setLayoutMode("force");
-      expect(useCodeGraphStore.getState().layoutMode).toBe("force");
-      expect(sessionStorage.getItem("codegraph.layoutMode")).toBe("force");
     });
   });
 
@@ -333,10 +283,8 @@ describe("codeGraphStore", () => {
       s.setToolHighlight(["b"]);
       s.setBlastRadiusFrontier(["c"]);
       s.setHover("foo");
-      s.setLayoutMode("radial");
       s.toggleEdgeKind("Implements");
       s.setDepthFilter(1);
-      s.setLayoutMode("radial");
       s.expandCommunity("auth");
 
       useCodeGraphStore.getState().reset();
@@ -351,7 +299,6 @@ describe("codeGraphStore", () => {
       expect(after.edgeKindFilters.Reads).toBe(false);
       expect(after.edgeKindFilters.FileReference).toBe(false);
       expect(after.colorMode).toBe("topology");
-      expect(after.layoutMode).toBe("radial");
       expect(after.complexityAvailable).toBe(false);
       expect(after.semanticZoomMode).toBe("auto");
       expect(after.expandedCommunityIds.size).toBe(0);

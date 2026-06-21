@@ -39,7 +39,11 @@ use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runti
 /// these families an exhausted empty-turn streak is a THROTTLE (account over
 /// quota), not a broken model — see [`empty_turn_terminal_error`].
 fn is_codex_openai_family(model_id: &str) -> bool {
-    let provider = model_id.split('/').next().unwrap_or("").to_ascii_lowercase();
+    let provider = model_id
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     matches!(provider.as_str(), "openai" | "chatgpt_codex")
 }
 
@@ -1365,7 +1369,8 @@ mod tests {
         // it returned a plain `anyhow!` string → downcast failed → `None` → the
         // breaker was never fed and the dead model was re-selected forever.
         for kind in ["no-event", "assistant"] {
-            let err = empty_turn_terminal_error(kind, 2, "kimi-for-coding/k2p7", "diag".to_string());
+            let err =
+                empty_turn_terminal_error(kind, 2, "kimi-for-coding/k2p7", "diag".to_string());
             let typed = err
                 .downcast_ref::<ProviderError>()
                 .expect("terminal empty-turn error must carry a typed ProviderError source");
@@ -1393,7 +1398,11 @@ mod tests {
         // routes to the `Throttle` arm (clean failover, no breaker escalation),
         // NOT `ProviderInternal{500}` (which would miscount a throttle as a
         // broken provider and escalate the auto-disable cooldown).
-        for model_id in ["openai/gpt-5.5", "chatgpt_codex/codex-mini", "OpenAI/Gpt-5.5"] {
+        for model_id in [
+            "openai/gpt-5.5",
+            "chatgpt_codex/codex-mini",
+            "OpenAI/Gpt-5.5",
+        ] {
             for kind in ["no-event", "assistant"] {
                 let err = empty_turn_terminal_error(kind, 2, model_id, "diag".to_string());
                 let typed = err

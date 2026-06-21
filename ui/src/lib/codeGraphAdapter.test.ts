@@ -1127,14 +1127,12 @@ describe("buildGraphFromSnapshot", () => {
     }
   });
 
-  it("produces identical positions across calls for all layout modes (determinism)", () => {
-    for (const mode of ["force", "sequential", "radial"] as const) {
-      const graph1 = buildGraphFromSnapshot(fixtureSnapshot, { layoutMode: mode });
-      const graph2 = buildGraphFromSnapshot(fixtureSnapshot, { layoutMode: mode });
-      for (const id of graph1.nodes()) {
-        expect(graph1.getNodeAttribute(id, "x")).toBe(graph2.getNodeAttribute(id, "x"));
-        expect(graph1.getNodeAttribute(id, "y")).toBe(graph2.getNodeAttribute(id, "y"));
-      }
+  it("produces identical positions across calls (determinism)", () => {
+    const graph1 = buildGraphFromSnapshot(fixtureSnapshot);
+    const graph2 = buildGraphFromSnapshot(fixtureSnapshot);
+    for (const id of graph1.nodes()) {
+      expect(graph1.getNodeAttribute(id, "x")).toBe(graph2.getNodeAttribute(id, "x"));
+      expect(graph1.getNodeAttribute(id, "y")).toBe(graph2.getNodeAttribute(id, "y"));
     }
   });
 });
