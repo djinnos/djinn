@@ -612,6 +612,7 @@ impl NoteRepository {
                 limit: 1,
                 semantic_scores: None,
                 edge_kinds: None,
+                entity_types: None,
             })
             .await?;
         if let Some(r) = results.into_iter().next() {

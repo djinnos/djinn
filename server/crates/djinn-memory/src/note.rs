@@ -1,6 +1,59 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Unified search result spanning notes and proposals.
+///
+/// Returned by `NoteRepository::search` when `entity_types` is `None` (both) or
+/// `Some(["proposal"])`, interleaved with note rows by descending RRF score.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemorySearchEntityRow {
+    /// `"note"` | `"proposal"` — discriminated by this field.
+    pub entity: String,
+    /// Note or proposal id (same column, different tables).
+    pub id: String,
+    pub title: String,
+    /// Folder for notes; empty for proposals.
+    pub folder: String,
+    /// Note type for notes; `"proposal"` for proposals.
+    pub note_type: String,
+    /// For notes: permalink. For proposals: short_id.
+    pub permalink: String,
+    /// HTML snippet with `<b>...</b>` highlights (or empty when no lexical match).
+    pub snippet: String,
+    /// RRF fusion score.
+    pub score: f64,
+}
+
+impl From<NoteSearchResult> for MemorySearchEntityRow {
+    fn from(r: NoteSearchResult) -> Self {
+        Self {
+            entity: "note".to_string(),
+            id: r.id,
+            title: r.title,
+            folder: r.folder,
+            note_type: r.note_type,
+            permalink: r.permalink,
+            snippet: r.snippet,
+            score: r.score,
+        }
+    }
+}
+
+impl From<crate::ProposalSearchResult> for MemorySearchEntityRow {
+    fn from(r: crate::ProposalSearchResult) -> Self {
+        Self {
+            entity: "proposal".to_string(),
+            id: r.id,
+            title: r.title,
+            folder: String::new(),
+            note_type: "proposal".to_string(),
+            permalink: r.short_id,
+            snippet: r.snippet,
+            score: r.score,
+        }
+    }
+}
+
 /// Shared note lifecycle vocabulary used by the schema, repository, and tool
 /// surfaces. Keep this as one status field rather than parallel booleans.
 pub mod note_status {
@@ -334,6 +387,29 @@ pub struct BuildContextResponse {
     /// Notes in the context set that have a contradicting relationship.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contradicts: Vec<ContradictsAnnotation>,
+    /// Proposals reachable from the seed note: same project via `proposal_targets`,
+    /// OR whose graduated epics/tasks have memory_refs that touch the seed's task chain,
+    /// ranked by lexical relevance to the seed's title + body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<ProposalOverview>,
+}
+
+/// Compact proposal overview for `memory_build_context` responses.
+///
+/// **Progressive disclosure:** this overview ships `title` + `acceptance_criteria`
+/// so the planner can decide whether to fetch the full body via `proposal_show`.
+/// The full proposal body (markdown/MDX) is intentionally excluded from the
+/// overview to keep prompt context lean — call `proposal_show(short_id)` for
+/// the complete spec.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ProposalOverview {
+    pub id: String,
+    pub short_id: String,
+    pub title: String,
+    pub body_format: String,
+    pub acceptance_criteria: Vec<String>,
+    pub status: String,
+    pub score: Option<f64>,
 }
 
 /// Result of a filesystem-to-index reconciliation pass.
