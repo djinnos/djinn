@@ -10,6 +10,8 @@ use djinn_provider::github_api::{GitHubApiClient, PrMergeQueueState, PullRequest
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use super::*;
+
 const DEFAULT_GRACE_PERIOD_SECS: u64 = 600;
 
 /// GitHub operations needed by PR/branch cleanup guardrails.
@@ -115,6 +117,12 @@ pub(crate) enum BranchCleanupOutcome {
     Skipped,
     DryRunWouldDelete,
     Deleted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::actors::coordinator) enum CloseKind {
+    Merge,
+    NonMerge,
 }
 
 /// Shared cleanup guardrail policy for inline cleanup and periodic sweeps.
@@ -351,4 +359,201 @@ fn normalize_branch_name(branch: &str) -> &str {
         .strip_prefix("refs/heads/")
         .or_else(|| branch.strip_prefix("heads/"))
         .unwrap_or(branch)
+}
+
+impl CoordinatorActor {
+    pub(in crate::actors::coordinator) async fn cleanup_pr_and_branch_on_close(
+        &self,
+        task: &Task,
+        close_kind: CloseKind,
+    ) {
+        let Some(pr_url) = task
+            .pr_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        else {
+            return;
+        };
+        let Some((owner, repo, pull_number)) = parse_pr_url(pr_url) else {
+            tracing::warn!(
+                task_id = %task.short_id,
+                pr_url,
+                "inline PR cleanup: skipping cleanup for unparseable PR URL"
+            );
+            return;
+        };
+
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let project_repo = djinn_db::ProjectRepository::new(self.db.clone(), event_bus.clone());
+        let Some(github) = resolve_installation_client(&project_repo, &task.project_id).await
+        else {
+            tracing::info!(
+                task_id = %task.short_id,
+                project_id = %task.project_id,
+                "inline PR cleanup: skipping cleanup because no GitHub installation client is available"
+            );
+            return;
+        };
+
+        let config = PrCleanupPolicyConfig::new(owner.clone(), repo.clone());
+        let policy = PrCleanupPolicy::new(github, config);
+        let task_branch = format!("task/{}", task.short_id);
+
+        if close_kind == CloseKind::NonMerge {
+            match policy
+                .github
+                .get_pull_request(&owner, &repo, pull_number)
+                .await
+            {
+                Ok((pr, _checks)) => {
+                    if pr.state == PrState::Open {
+                        match policy.should_cleanup_pr(task, &pr).await {
+                            Ok(true) if policy.config().dry_run => {
+                                self.log_inline_cleanup_activity(
+                                    task,
+                                    serde_json::json!({
+                                        "kind": "non_merge",
+                                        "action": "dry_run_would_close_pr",
+                                        "pr_url": pr_url,
+                                        "pull_number": pull_number,
+                                    }),
+                                )
+                                .await;
+                            }
+                            Ok(true) => {
+                                let comment = format!(
+                                    "Djinn is closing this PR because task `{}` has been terminally closed without merging. The task branch will be cleaned up if no dependent PRs use it.",
+                                    task.short_id
+                                );
+                                if let Err(e) = policy
+                                    .github
+                                    .create_pr_comment(&owner, &repo, pull_number, &comment)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        task_id = %task.short_id,
+                                        pull_number,
+                                        error = %e,
+                                        "inline PR cleanup: failed to add PR close audit comment"
+                                    );
+                                }
+                                match policy
+                                    .github
+                                    .close_pull_request(&owner, &repo, pull_number)
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        tracing::info!(
+                                            task_id = %task.short_id,
+                                            pull_number,
+                                            "inline PR cleanup: closed PR for terminal non-merge task close"
+                                        );
+                                        self.log_inline_cleanup_activity(
+                                            task,
+                                            serde_json::json!({
+                                                "kind": "non_merge",
+                                                "action": "closed_pr",
+                                                "pr_url": pr_url,
+                                                "pull_number": pull_number,
+                                            }),
+                                        )
+                                        .await;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            task_id = %task.short_id,
+                                            pull_number,
+                                            error = %e,
+                                            "inline PR cleanup: failed to close PR"
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    task_id = %task.short_id,
+                                    pull_number,
+                                    error = %e,
+                                    "inline PR cleanup: PR cleanup guardrail check failed"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        owner = %owner,
+                        repo = %repo,
+                        pull_number,
+                        error = %e,
+                        "inline PR cleanup: failed to fetch PR before close cleanup"
+                    );
+                }
+            }
+        }
+
+        match policy.delete_branch_if_allowed(task, &task_branch).await {
+            Ok(BranchCleanupOutcome::Deleted) => {
+                self.log_inline_cleanup_activity(
+                    task,
+                    serde_json::json!({
+                        "kind": match close_kind {
+                            CloseKind::Merge => "merge",
+                            CloseKind::NonMerge => "non_merge",
+                        },
+                        "action": "deleted_branch",
+                        "branch": task_branch,
+                    }),
+                )
+                .await;
+            }
+            Ok(BranchCleanupOutcome::DryRunWouldDelete) => {
+                self.log_inline_cleanup_activity(
+                    task,
+                    serde_json::json!({
+                        "kind": match close_kind {
+                            CloseKind::Merge => "merge",
+                            CloseKind::NonMerge => "non_merge",
+                        },
+                        "action": "dry_run_would_delete_branch",
+                        "branch": task_branch,
+                    }),
+                )
+                .await;
+            }
+            Ok(BranchCleanupOutcome::Skipped) => {}
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    branch = %task_branch,
+                    error = %e,
+                    "inline PR cleanup: branch cleanup failed"
+                );
+            }
+        }
+    }
+
+    async fn log_inline_cleanup_activity(&self, task: &Task, payload: serde_json::Value) {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let task_repo = djinn_db::TaskRepository::new(self.db.clone(), event_bus);
+        if let Err(e) = task_repo
+            .log_activity(
+                Some(&task.id),
+                "system",
+                "coordinator",
+                "pr_branch_cleanup",
+                &payload.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "inline PR cleanup: failed to log cleanup activity"
+            );
+        }
+    }
 }
