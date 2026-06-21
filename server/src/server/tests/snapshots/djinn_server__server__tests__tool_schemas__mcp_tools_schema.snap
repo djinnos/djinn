@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 510
 expression: signatures
 ---
 [
@@ -16803,6 +16802,38 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "ModelLanesPayload": {
+          "description": "Per-user, per-ROLE ordered model selection over the wire. Each lane is an\nordered fallback list (highest priority first) of full `provider/model` ids.\nA task's base role maps to one lane: `plan` (planner/architect/chat),\n`implement` (worker), `review` (reviewer).",
+          "properties": {
+            "implement": {
+              "default": [],
+              "description": "worker",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "plan": {
+              "default": [],
+              "description": "planner, architect, chat",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "review": {
+              "default": [],
+              "description": "reviewer",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "auto_approve_prs": {
@@ -16813,6 +16844,10 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "lanes": {
+          "$ref": "#/$defs/ModelLanesPayload",
+          "description": "This user's per-ROLE ordered model lanes (each highest priority first),\nfull `provider/model` ids. All-empty when the user has no explicit\nselection (callers then fall back to the global deployment model list)."
+        },
         "max_sessions": {
           "additionalProperties": {
             "format": "int64",
@@ -16820,13 +16855,6 @@ expression: signatures
           },
           "description": "This user's per-model concurrency caps (`{ \"provider/model\": cap }`).\nThe sole admission control at dispatch; empty ⇒ default 1 per model.",
           "type": "object"
-        },
-        "models": {
-          "description": "This user's ordered model selection (highest priority first), full\n`provider/model` ids. Empty when the user has no explicit selection\n(callers then fall back to the global deployment model list).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
         },
         "ok": {
           "type": "boolean"
@@ -16840,7 +16868,7 @@ expression: signatures
       "required": [
         "ok",
         "auto_approve_prs",
-        "models",
+        "lanes",
         "max_sessions"
       ],
       "title": "UserSettingsGetResponse",
@@ -16855,12 +16883,56 @@ expression: signatures
     "open_world": false,
     "concurrent_safe": false,
     "input_schema": {
+      "$defs": {
+        "ModelLanesPayload": {
+          "description": "Per-user, per-ROLE ordered model selection over the wire. Each lane is an\nordered fallback list (highest priority first) of full `provider/model` ids.\nA task's base role maps to one lane: `plan` (planner/architect/chat),\n`implement` (worker), `review` (reviewer).",
+          "properties": {
+            "implement": {
+              "default": [],
+              "description": "worker",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "plan": {
+              "default": [],
+              "description": "planner, architect, chat",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "review": {
+              "default": [],
+              "description": "reviewer",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "auto_approve_prs": {
           "description": "Enable or disable auto-approve. Omit to keep the current value.",
           "nullable": true,
           "type": "boolean"
+        },
+        "lanes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelLanesPayload"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "Per-ROLE ordered model lanes for THIS user (each highest priority first),\nas full `provider/model` ids: `plan` (planner/architect/chat),\n`implement` (worker), `review` (reviewer). Each id must be a model on a\nprovider this user has connected. Pass all-empty lanes to clear the\nselection (→ global fallback). Omit to keep the current value."
         },
         "max_sessions": {
           "additionalProperties": {
@@ -16870,14 +16942,6 @@ expression: signatures
           "description": "Per-model concurrency caps for THIS user (`{ \"provider/model\": cap }`).\nHow many sessions of each model may run concurrently for this user — the\nsole admission control (no global ceiling). Pass `{}` to clear (→ default\n1 per model). Omit to keep the current value.",
           "nullable": true,
           "type": "object"
-        },
-        "models": {
-          "description": "Ordered model selection for THIS user (highest priority first), as full\n`provider/model` ids. Each must be a model on a provider this user has\nconnected. Pass `[]` to clear the selection (→ global fallback). Omit to\nkeep the current value.",
-          "items": {
-            "type": "string"
-          },
-          "nullable": true,
-          "type": "array"
         },
         "target_user_id": {
           "default": null,
@@ -16890,6 +16954,38 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "ModelLanesPayload": {
+          "description": "Per-user, per-ROLE ordered model selection over the wire. Each lane is an\nordered fallback list (highest priority first) of full `provider/model` ids.\nA task's base role maps to one lane: `plan` (planner/architect/chat),\n`implement` (worker), `review` (reviewer).",
+          "properties": {
+            "implement": {
+              "default": [],
+              "description": "worker",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "plan": {
+              "default": [],
+              "description": "planner, architect, chat",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "review": {
+              "default": [],
+              "description": "reviewer",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "applied": {
@@ -16903,6 +16999,18 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "lanes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelLanesPayload"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "The resulting per-role model lanes after the patch."
+        },
         "max_sessions": {
           "additionalProperties": {
             "format": "int64",
@@ -16911,14 +17019,6 @@ expression: signatures
           "description": "The resulting per-model concurrency caps after the patch.",
           "nullable": true,
           "type": "object"
-        },
-        "models": {
-          "description": "The resulting model selection after the patch.",
-          "items": {
-            "type": "string"
-          },
-          "nullable": true,
-          "type": "array"
         },
         "ok": {
           "type": "boolean"

@@ -27,6 +27,12 @@ import {
   fetchUserModelSelection,
   saveUserModelSelection,
 } from "@/api/userConfig";
+import {
+  MODEL_LANE_KEYS,
+  type ModelLaneKey,
+  type ModelLanes,
+  emptyLanes,
+} from "@/api/userSettings";
 import { showToast } from "@/lib/toast";
 
 import { userConfigKeys } from "./userConfigKeys";
@@ -38,6 +44,19 @@ export function stripProviderPrefix(modelId: string): string {
   return slash >= 0 ? modelId.slice(slash + 1) : modelId;
 }
 
+/** Human-friendly labels + helper copy for each per-role lane. */
+const LANE_META: Record<ModelLaneKey, { title: string; roles: string }> = {
+  plan: { title: "Plan", roles: "Planner, Architect, Chat" },
+  implement: { title: "Implement", roles: "Worker" },
+  review: { title: "Review", roles: "Reviewer" },
+};
+
+/**
+ * Per-user, per-ROLE model lanes editor. Each lane (plan / implement / review)
+ * is an ordered fallback list with the shared Reorder drag UI + per-model
+ * `Sessions` cap. Caps are per-model and shared across lanes. One Save persists
+ * all three lanes + the union of caps.
+ */
 export function ModelSection({ targetId }: { targetId: string }) {
   const queryClient = useQueryClient();
 
@@ -50,14 +69,13 @@ export function ModelSection({ targetId }: { targetId: string }) {
     queryFn: () => fetchUserModelSelection(targetId),
   });
 
-  // Local working copy of the ordered selection + per-model caps; seeded from
-  // the server and kept isolated from the current-user settings store. We sync
-  // from the server value during render (the React-recommended "adjust state
-  // while rendering" pattern — https://react.dev/reference/react/useState#
-  // storing-information-from-previous-renders) instead of an effect: when the
-  // admin has unsaved edits (`dirty`) we hold onto their working copy until
+  // Local working copy of the per-lane ordered selection + per-model caps,
+  // seeded from the server and kept isolated from the current-user settings
+  // store. We sync from the server value during render (the React-recommended
+  // "adjust state while rendering" pattern) instead of an effect: when the
+  // editor has unsaved edits (`dirty`) we hold onto the working copy until
   // they save, otherwise we mirror whatever the server last returned.
-  const [order, setOrder] = useState<string[]>([]);
+  const [lanes, setLanes] = useState<ModelLanes>(emptyLanes);
   const [caps, setCaps] = useState<Record<string, number>>({});
   const [dirty, setDirty] = useState(false);
   const [lastServer, setLastServer] = useState<typeof selection.data>(undefined);
@@ -65,7 +83,7 @@ export function ModelSection({ targetId }: { targetId: string }) {
   if (selection.data && selection.data !== lastServer) {
     setLastServer(selection.data);
     if (!dirty) {
-      setOrder(selection.data.models);
+      setLanes(selection.data.lanes);
       setCaps(selection.data.maxSessions);
     }
   }
@@ -76,42 +94,48 @@ export function ModelSection({ targetId }: { targetId: string }) {
     return map;
   }, [connectedModels.data]);
 
-  const availableToAdd = useMemo(
-    () => (connectedModels.data ?? []).filter((model) => !order.includes(model.id)),
-    [connectedModels.data, order],
-  );
+  // Distinct union of every model id selected across all three lanes.
+  const allSelected = useMemo(() => {
+    const set = new Set<string>();
+    for (const key of MODEL_LANE_KEYS) for (const id of lanes[key]) set.add(id);
+    return set;
+  }, [lanes]);
 
   const saveMutation = useMutation({
     mutationFn: () => {
-      // Only persist caps for models still in the list, defaulting to 1.
+      // Only persist caps for models still selected in some lane, default 1.
       const maxSessions: Record<string, number> = {};
-      for (const id of order) maxSessions[id] = caps[id] ?? 1;
-      return saveUserModelSelection(targetId, order, maxSessions);
+      for (const id of allSelected) maxSessions[id] = caps[id] ?? 1;
+      return saveUserModelSelection(targetId, lanes, maxSessions);
     },
     onSuccess: (saved) => {
-      setOrder(saved.models);
+      setLanes(saved.lanes);
       setCaps(saved.maxSessions);
       setDirty(false);
       queryClient.setQueryData(userConfigKeys.modelSelection(targetId), saved);
-      showToast.success("Model selection saved");
+      showToast.success("Model roles saved");
     },
     onError: (error) => {
-      showToast.error("Could not save models", {
+      showToast.error("Could not save model roles", {
         description: error instanceof Error ? error.message : "Unknown error",
       });
     },
   });
 
-  const addModel = (model: UserModel) => {
-    setOrder((prev) => (prev.includes(model.id) ? prev : [...prev, model.id]));
+  const addModel = (lane: ModelLaneKey, model: UserModel) => {
+    setLanes((prev) =>
+      prev[lane].includes(model.id)
+        ? prev
+        : { ...prev, [lane]: [...prev[lane], model.id] },
+    );
     setDirty(true);
   };
-  const removeModel = (id: string) => {
-    setOrder((prev) => prev.filter((modelId) => modelId !== id));
+  const removeModel = (lane: ModelLaneKey, id: string) => {
+    setLanes((prev) => ({ ...prev, [lane]: prev[lane].filter((m) => m !== id) }));
     setDirty(true);
   };
-  const handleReorder = (next: string[]) => {
-    setOrder(next);
+  const reorderLane = (lane: ModelLaneKey, next: string[]) => {
+    setLanes((prev) => ({ ...prev, [lane]: next }));
     setDirty(true);
   };
   const updateCap = (id: string, value: number) => {
@@ -123,30 +147,26 @@ export function ModelSection({ targetId }: { targetId: string }) {
   const loadError = connectedModels.error ?? selection.error;
 
   return (
-    <section className="flex flex-col gap-3">
+    <section className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="text-base font-semibold text-foreground">Models</h3>
+          <h3 className="text-base font-semibold text-foreground">Model roles</h3>
           <p className="text-sm text-muted-foreground">
-            The user&apos;s model list, in priority (fallback) order — top
-            runs first.
+            Pick which models run for each role, in priority (fallback) order —
+            top runs first. Each lane maps to the agents below it.
           </p>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {!isLoading && (
-            <AddModelButton models={availableToAdd} onSelect={addModel} />
-          )}
-          {dirty && (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={saveMutation.isPending}
-              onClick={() => saveMutation.mutate()}
-            >
-              {saveMutation.isPending ? "Saving…" : "Save"}
-            </Button>
-          )}
-        </div>
+        {dirty && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            disabled={saveMutation.isPending}
+            onClick={() => saveMutation.mutate()}
+          >
+            {saveMutation.isPending ? "Saving…" : "Save"}
+          </Button>
+        )}
       </div>
 
       {loadError ? (
@@ -159,17 +179,74 @@ export function ModelSection({ targetId }: { targetId: string }) {
         />
       ) : isLoading ? (
         <div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>
-      ) : order.length === 0 ? (
+      ) : (connectedModels.data?.length ?? 0) === 0 ? (
         <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
-          {(connectedModels.data?.length ?? 0) === 0
-            ? "Connect a provider above to unlock models."
-            : "No models selected. Use Add model to pick the user's models."}
+          Connect a provider first to unlock models.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-5">
+          {MODEL_LANE_KEYS.map((lane) => (
+            <LaneEditor
+              key={lane}
+              lane={lane}
+              order={lanes[lane]}
+              modelsById={modelsById}
+              caps={caps}
+              availableToAdd={(connectedModels.data ?? []).filter(
+                (model) => !lanes[lane].includes(model.id),
+              )}
+              onAdd={(model) => addModel(lane, model)}
+              onRemove={(id) => removeModel(lane, id)}
+              onReorder={(next) => reorderLane(lane, next)}
+              onUpdateCap={updateCap}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function LaneEditor({
+  lane,
+  order,
+  modelsById,
+  caps,
+  availableToAdd,
+  onAdd,
+  onRemove,
+  onReorder,
+  onUpdateCap,
+}: {
+  lane: ModelLaneKey;
+  order: string[];
+  modelsById: Map<string, UserModel>;
+  caps: Record<string, number>;
+  availableToAdd: UserModel[];
+  onAdd: (model: UserModel) => void;
+  onRemove: (id: string) => void;
+  onReorder: (next: string[]) => void;
+  onUpdateCap: (id: string, value: number) => void;
+}) {
+  const meta = LANE_META[lane];
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border bg-card/40 p-4">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h4 className="text-sm font-semibold text-foreground">{meta.title}</h4>
+          <p className="text-xs text-muted-foreground/70">{meta.roles}</p>
+        </div>
+        <AddModelButton models={availableToAdd} onSelect={onAdd} />
+      </div>
+      {order.length === 0 ? (
+        <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
+          No models for this role. Add one — or it falls back to the deployment default.
         </div>
       ) : (
         <Reorder.Group
           axis="y"
           values={order}
-          onReorder={handleReorder}
+          onReorder={onReorder}
           className="space-y-2"
           layoutScroll
         >
@@ -179,13 +256,13 @@ export function ModelSection({ targetId }: { targetId: string }) {
               modelId={modelId}
               model={modelsById.get(modelId)}
               maxConcurrent={caps[modelId] ?? 1}
-              onUpdateCap={(value) => updateCap(modelId, value)}
-              onRemove={() => removeModel(modelId)}
+              onUpdateCap={(value) => onUpdateCap(modelId, value)}
+              onRemove={() => onRemove(modelId)}
             />
           ))}
         </Reorder.Group>
       )}
-    </section>
+    </div>
   );
 }
 

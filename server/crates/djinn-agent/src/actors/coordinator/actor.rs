@@ -1408,7 +1408,7 @@ impl CoordinatorActor {
             // the same rejected acceptance criterion forever instead of
             // escalating to a Planner that can decompose/rescope/close them.
             if selected.is_empty() {
-                return self.resolve_user_model_priority(user_id).await;
+                return self.resolve_user_model_priority(user_id, _role).await;
             }
             selected
         }

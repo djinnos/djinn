@@ -1199,7 +1199,9 @@ impl CoordinatorActor {
             // Final fallback list, precedence: creator's per-user selection →
             // project default-role preference → role base. All scoped to the
             // creator, so selection and runtime resolution stay consistent.
-            let user_model_ids = self.resolve_user_model_priority(creator.as_deref()).await;
+            let user_model_ids = self
+                .resolve_user_model_priority(creator.as_deref(), role)
+                .await;
             let model_preference_ids = self
                 .resolve_role_model_preference(&task.project_id, role, creator.as_deref())
                 .await;
@@ -1756,7 +1758,10 @@ mod inflight_ledger_tests {
 
         let settings = djinn_db::UserSettingsRepository::new(db.clone());
         settings
-            .upsert_models(&user_id, &[WND1_STABLE_MODEL_ID.to_owned()])
+            .upsert_lanes(
+                &user_id,
+                &djinn_core::models::ModelLanes::from_flat(vec![WND1_STABLE_MODEL_ID.to_owned()]),
+            )
             .await
             .expect("configure wnd1 fixture selected model");
 
@@ -2619,7 +2624,10 @@ mod inflight_ledger_tests {
 
         let settings = djinn_db::UserSettingsRepository::new(db.clone());
         settings
-            .upsert_models(&user_id, &[WND1_STABLE_MODEL_ID.to_owned()])
+            .upsert_lanes(
+                &user_id,
+                &djinn_core::models::ModelLanes::from_flat(vec![WND1_STABLE_MODEL_ID.to_owned()]),
+            )
             .await
             .expect("configure mixed-role fixture selected model");
         // cap = 2

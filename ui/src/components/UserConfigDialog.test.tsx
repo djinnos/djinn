@@ -132,11 +132,11 @@ function mockSuccessfulLoads() {
   vi.mocked(fetchUserConnectedProviders).mockResolvedValue(connectedProviders);
   vi.mocked(fetchUserConnectedModels).mockResolvedValue(connectedModels);
   vi.mocked(fetchUserModelSelection).mockResolvedValue({
-    models: ["openai/gpt-5"],
+    lanes: { plan: ["openai/gpt-5"], implement: [], review: [] },
     maxSessions: { "openai/gpt-5": 3 },
   });
   vi.mocked(saveUserModelSelection).mockResolvedValue({
-    models: ["openai/gpt-5"],
+    lanes: { plan: ["openai/gpt-5"], implement: [], review: [] },
     maxSessions: { "openai/gpt-5": 3 },
   });
   vi.mocked(setUserCredential).mockResolvedValue(undefined);
@@ -175,11 +175,12 @@ describe("UserConfigDialog", () => {
     expect(screen.getByText(/Stored encrypted and owned by this user/i)).toBeInTheDocument();
 
     expect(await screen.findByText("GPT-5")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Models" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Model roles" })).toBeInTheDocument();
     expect(screen.getAllByText("OpenAI")).not.toHaveLength(0);
     expect(screen.getByText("Sessions:")).toBeInTheDocument();
     expect(screen.getByDisplayValue("3")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /add model/i })).toBeInTheDocument();
+    // One Add model trigger per lane (plan / implement / review).
+    expect(screen.getAllByRole("button", { name: /add model/i })).not.toHaveLength(0);
 
     expect(fetchUserCatalog).toHaveBeenCalledWith(targetUser.id);
     expect(fetchUserConnectedProviders).toHaveBeenCalledWith(targetUser.id);
@@ -260,7 +261,7 @@ describe("UserConfigDialog", () => {
     expect(screen.getByText("Providers")).toBeInTheDocument();
     expect(screen.getByText("Connect with an API key")).toBeInTheDocument();
 
-    const modelsSection = screen.getByRole("heading", { name: "Models" }).closest("section");
+    const modelsSection = screen.getByRole("heading", { name: "Model roles" }).closest("section");
     expect(modelsSection).not.toBeNull();
     expect(within(modelsSection as HTMLElement).getByText("Failed to load user settings")).toBeInTheDocument();
   });

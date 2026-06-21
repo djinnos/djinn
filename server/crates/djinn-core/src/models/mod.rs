@@ -29,7 +29,7 @@ pub use task::{
     TransitionApply, compute_transition, compute_transition_for_issue_type,
 };
 pub use task_run::{TaskRunRecord, TaskRunStatus, TaskRunTrigger};
-pub use user_settings::UserSettings;
+pub use user_settings::{ModelLane, ModelLanes, UserSettings};
 
 /// Parse a JSON array string (e.g. '["a","b"]') into a `Vec<String>`.
 /// Returns an empty vec on any parse failure.

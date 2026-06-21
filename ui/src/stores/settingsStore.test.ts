@@ -8,10 +8,16 @@ vi.mock('@/api/settings', async () => {
   };
 });
 
-vi.mock('@/api/userSettings', () => ({
-  fetchUserSettings: vi.fn(),
-  patchUserSettings: vi.fn(),
-}));
+vi.mock('@/api/userSettings', async () => {
+  const actual = await vi.importActual<typeof import('@/api/userSettings')>(
+    '@/api/userSettings',
+  );
+  return {
+    ...actual,
+    fetchUserSettings: vi.fn(),
+    patchUserSettings: vi.fn(),
+  };
+});
 
 import { useSettingsStore } from './settingsStore';
 import { fetchProviderModels } from '@/api/settings';
@@ -41,7 +47,7 @@ describe('settingsStore', () => {
   it('loads per-user models with per-user caps', async () => {
     vi.mocked(fetchUserSettings).mockResolvedValue({
       autoApprovePrs: false,
-      models: ['p1/m1'],
+      lanes: { plan: ['p1/m1'], implement: [], review: [] },
       maxSessions: { 'p1/m1': 3 },
     });
     await useSettingsStore.getState().loadSettings();
@@ -83,12 +89,13 @@ describe('settingsStore', () => {
     useSettingsStore.getState().addModel({ model: 'm1', provider: 'p1' });
     vi.mocked(patchUserSettings).mockResolvedValue({
       autoApprovePrs: false,
-      models: ['p1/m1'],
+      lanes: { plan: ['p1/m1'], implement: ['p1/m1'], review: ['p1/m1'] },
       maxSessions: { 'p1/m1': 1 },
     });
     await useSettingsStore.getState().saveSettings();
+    // The flat onboarding editor seeds the same list into all three lanes.
     expect(patchUserSettings).toHaveBeenCalledWith({
-      models: ['p1/m1'],
+      lanes: { plan: ['p1/m1'], implement: ['p1/m1'], review: ['p1/m1'] },
       maxSessions: { 'p1/m1': 1 },
     });
   });
@@ -98,12 +105,12 @@ describe('settingsStore', () => {
     useSettingsStore.getState().updateMaxSessions(0, 4);
     vi.mocked(patchUserSettings).mockResolvedValue({
       autoApprovePrs: false,
-      models: ['p1/m1'],
+      lanes: { plan: ['p1/m1'], implement: ['p1/m1'], review: ['p1/m1'] },
       maxSessions: { 'p1/m1': 4 },
     });
     await useSettingsStore.getState().saveSettings();
     expect(patchUserSettings).toHaveBeenCalledWith({
-      models: ['p1/m1'],
+      lanes: { plan: ['p1/m1'], implement: ['p1/m1'], review: ['p1/m1'] },
       maxSessions: { 'p1/m1': 4 },
     });
   });
