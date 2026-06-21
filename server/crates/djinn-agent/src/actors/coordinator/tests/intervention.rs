@@ -1310,3 +1310,280 @@ async fn second_strike_parks_task_after_prior_intervention() {
         "second strike must not create another planner review task"
     );
 }
+
+// ── CI-enriched planner escalation regression tests ──────────────────────
+//
+// These tests verify that CI failure sections are properly threaded through
+// escalation paths — the core wiring added by epic nnij.
+
+/// `escalate_ci_failure_and_close` includes CI failure sections in both the
+/// visibility comment and the escalation reason passed to
+/// `dispatch_planner_escalation`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let reason = "PR #42 stuck: required checks (build) failed across 5 rounds.";
+    let sections = vec![
+        "**Workflow:** CI".to_string(),
+        "**Failed job:** build (failure)".to_string(),
+        "**Failed step:** Run tests (step #3, failure)".to_string(),
+        "Job URL: https://github.com/owner/repo/actions/runs/123/jobs/456".to_string(),
+    ];
+    let pr_url = "https://github.com/owner/repo/pull/42";
+
+    actor
+        .escalate_ci_failure_and_close(&task, pr_url, reason, &sections)
+        .await;
+
+    // The visibility comment must contain "**CI Failure Details:**" and each
+    // section line so humans / the Planner see the real CI context.
+    let comments = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("comment".to_string()),
+            actor_role: None,
+            project_id: None,
+            from_time: None,
+            to_time: None,
+            limit: 100,
+            offset: 0,
+        })
+        .await
+        .unwrap();
+
+    let escalation_comment = comments
+        .iter()
+        .find(|c| c.payload.contains("**PR CI Escalation**"))
+        .expect("escalate_ci_failure_and_close must log a PR CI Escalation comment");
+    assert!(
+        escalation_comment
+            .payload
+            .contains("**CI Failure Details:**"),
+        "visibility comment must include CI Failure Details header; got: {}",
+        escalation_comment.payload
+    );
+    assert!(
+        escalation_comment.payload.contains("**Workflow:** CI"),
+        "visibility comment must include workflow section; got: {}",
+        escalation_comment.payload
+    );
+    assert!(
+        escalation_comment
+            .payload
+            .contains("**Failed job:** build (failure)"),
+        "visibility comment must include failed-job section; got: {}",
+        escalation_comment.payload
+    );
+    assert!(
+        escalation_comment
+            .payload
+            .contains("Job URL: https://github.com/owner/repo/actions/runs/123/jobs/456"),
+        "visibility comment must include job URL section; got: {}",
+        escalation_comment.payload
+    );
+
+    // The escalation reason passed to dispatch_planner_escalation also
+    // includes the sections (visible via the PLANNER_ESCALATION comment that
+    // dispatch_planner_escalation logs on the source task).
+    let planner_comments: Vec<_> = comments
+        .iter()
+        .filter(|c| c.payload.contains("PLANNER_ESCALATION"))
+        .collect();
+    assert!(
+        !planner_comments.is_empty(),
+        "PLANNER_ESCALATION comment must be logged"
+    );
+    let planner_comment = &planner_comments[0];
+    assert!(
+        planner_comment.payload.contains("**CI Failure Details:**"),
+        "escalation reason must include CI Failure Details header; got: {}",
+        planner_comment.payload
+    );
+    assert!(
+        planner_comment.payload.contains("**Workflow:** CI"),
+        "escalation reason must include workflow section; got: {}",
+        planner_comment.payload
+    );
+}
+
+/// `escalate_ci_failure_and_close` with empty sections omits the CI Failure
+/// Details block from both the visibility comment and the escalation reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn escalate_ci_failure_with_empty_sections_omits_details() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let reason = "PR #42 stuck: required checks (build) failed.";
+    let sections: Vec<String> = vec![];
+    let pr_url = "https://github.com/owner/repo/pull/42";
+
+    actor
+        .escalate_ci_failure_and_close(&task, pr_url, reason, &sections)
+        .await;
+
+    let comments = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("comment".to_string()),
+            actor_role: None,
+            project_id: None,
+            from_time: None,
+            to_time: None,
+            limit: 100,
+            offset: 0,
+        })
+        .await
+        .unwrap();
+
+    let escalation_comment = comments
+        .iter()
+        .find(|c| c.payload.contains("**PR CI Escalation**"))
+        .expect("PR CI Escalation comment must still be logged");
+    assert!(
+        !escalation_comment
+            .payload
+            .contains("**CI Failure Details:**"),
+        "visibility comment must NOT include CI Failure Details when sections are empty; got: {}",
+        escalation_comment.payload
+    );
+
+    let planner_comments: Vec<_> = comments
+        .iter()
+        .filter(|c| c.payload.contains("PLANNER_ESCALATION"))
+        .collect();
+    assert!(
+        !planner_comments.is_empty(),
+        "PLANNER_ESCALATION comment must be logged"
+    );
+    assert!(
+        !planner_comments[0]
+            .payload
+            .contains("**CI Failure Details:**"),
+        "escalation reason must NOT include CI Failure Details when sections are empty; got: {}",
+        planner_comments[0].payload
+    );
+}
+
+/// `route_planner_intervention` appends CI failure sections to the escalation
+/// reason when `ci_failure_sections` is `Some(...)`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn route_planner_intervention_appends_ci_failure_sections() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let reason = "Internal review loop exceeded threshold.";
+    let sections = "**Workflow:** CI\n**Failed job:** test (failure)";
+
+    let handled = actor
+        .route_planner_intervention(&task, "worker", reason, Some(sections))
+        .await;
+    assert!(handled, "route_planner_intervention must handle the task");
+
+    // The PLANNER_ESCALATION comment logged by dispatch_planner_escalation
+    // should contain the CI failure sections in the reason.
+    let comments = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("comment".to_string()),
+            actor_role: None,
+            project_id: None,
+            from_time: None,
+            to_time: None,
+            limit: 100,
+            offset: 0,
+        })
+        .await
+        .unwrap();
+
+    let planner_comments: Vec<_> = comments
+        .iter()
+        .filter(|c| c.payload.contains("PLANNER_ESCALATION"))
+        .collect();
+    assert!(
+        !planner_comments.is_empty(),
+        "PLANNER_ESCALATION comment must be logged"
+    );
+    let planner_comment = &planner_comments[0];
+    assert!(
+        planner_comment.payload.contains("**CI Failure Details:**"),
+        "escalation reason must include CI Failure Details header when sections provided; got: {}",
+        planner_comment.payload
+    );
+    assert!(
+        planner_comment.payload.contains("**Workflow:** CI"),
+        "escalation reason must include workflow section; got: {}",
+        planner_comment.payload
+    );
+    assert!(
+        planner_comment
+            .payload
+            .contains("**Failed job:** test (failure)"),
+        "escalation reason must include failed-job section; got: {}",
+        planner_comment.payload
+    );
+}
+
+/// `route_planner_intervention` passes the original reason unchanged when
+/// `ci_failure_sections` is `None`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn route_planner_intervention_with_none_sections_preserves_reason() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let reason = "Internal review loop exceeded threshold.";
+
+    let handled = actor
+        .route_planner_intervention(&task, "worker", reason, None)
+        .await;
+    assert!(handled, "route_planner_intervention must handle the task");
+
+    let comments = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("comment".to_string()),
+            actor_role: None,
+            project_id: None,
+            from_time: None,
+            to_time: None,
+            limit: 100,
+            offset: 0,
+        })
+        .await
+        .unwrap();
+
+    let planner_comments: Vec<_> = comments
+        .iter()
+        .filter(|c| c.payload.contains("PLANNER_ESCALATION"))
+        .collect();
+    assert!(
+        !planner_comments.is_empty(),
+        "PLANNER_ESCALATION comment must be logged"
+    );
+    assert!(
+        !planner_comments[0]
+            .payload
+            .contains("**CI Failure Details:**"),
+        "escalation reason must NOT include CI Failure Details when sections are None; got: {}",
+        planner_comments[0].payload
+    );
+    // The original reason should appear verbatim in the escalation.
+    assert!(
+        planner_comments[0].payload.contains(reason),
+        "escalation reason must contain the original reason text; got: {}",
+        planner_comments[0].payload
+    );
+}

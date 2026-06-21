@@ -151,6 +151,10 @@ pub(super) struct CoordinatorActor {
     /// yet and the poller incorrectly concludes CI has passed.
     // Restart-safe-to-lose: draft-first-seen timestamps only throttle ready-to-merge notifier behavior and rebuild naturally on the next poll.
     pub(super) pr_draft_first_seen: HashMap<String, StdInstant>,
+    /// Restart-safe-to-lose: task_id → (head SHA, first instant observed with
+    /// terminal red blocking CI while parked in `needs_task_review`). Losing it
+    /// delays, rather than accelerates, the review-stuck planner intervention.
+    pub(super) review_stuck_sha_first_seen: HashMap<String, (String, StdInstant)>,
     /// Restart-safe-to-lose: consecutive merge failure count per task. A restart
     /// resets the recheck threshold, which is safe because the next poll observes
     /// GitHub's current PR/CI state.
@@ -215,18 +219,6 @@ pub(super) struct CoordinatorActor {
     // Metrics
     pub(super) dispatched: u64,
     pub(super) recovered: u64,
-}
-
-/// Terminal-close cleanup flavor for PR/branch cleanup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(in crate::actors::coordinator) enum CloseKind {
-    /// Task closed without merging its associated PR; close the bot PR before
-    /// deleting the task branch when guardrails allow it.
-    NonMerge,
-    /// Task closed because its associated PR merged; only delete the head branch
-    /// as an idempotent backstop.
-    Merge,
 }
 
 #[cfg(test)]
@@ -407,6 +399,7 @@ impl CoordinatorActor {
             escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),
             pr_draft_first_seen: HashMap::new(),
+            review_stuck_sha_first_seen: HashMap::new(),
             merge_fail_count: HashMap::new(),
             auto_approve_attempted: HashMap::new(),
             delegated_to_github: HashMap::new(),

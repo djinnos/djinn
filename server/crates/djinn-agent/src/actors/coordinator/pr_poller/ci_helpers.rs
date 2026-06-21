@@ -349,6 +349,7 @@ impl CoordinatorActor {
             .await;
         self.pr_status_cache.remove(&task.id);
         self.pr_draft_first_seen.remove(&task.id);
+        self.review_stuck_sha_first_seen.remove(&task.id);
         self.merge_fail_count.remove(&task.id);
         self.delegated_to_github.remove(&task.id);
         self.conversations_resolved.remove(&task.id);
