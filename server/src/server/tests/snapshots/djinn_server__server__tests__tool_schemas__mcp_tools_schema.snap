@@ -8132,7 +8132,7 @@ expression: signatures
           "type": "object"
         },
         "EnrichmentEdge": {
-          "description": "Typed implicit edge between two notes (`builds_on` / `contradicts` /\n`supersedes` / `exemplifies` / `derived_from`).",
+          "description": "Typed implicit edge between two memory entities.\n\nNote↔note edges populate `source_note_id` / `target_note_id`; note↔proposal\nand proposal↔proposal edges populate `source_proposal_id` /\n`target_proposal_id` and leave the note-id fields empty. `source_kind` /\n`target_kind` are `None` (i.e. default to `Note`) for the legacy note↔note\npath; they are explicit otherwise. Kinds: `builds_on` / `contradicts` /\n`supersedes` / `exemplifies` / `derived_from` (provenance only).",
           "properties": {
             "confidence": {
               "description": "Confidence in [0.0, 1.0].",
@@ -8147,20 +8147,68 @@ expression: signatures
             "kind": {
               "type": "string"
             },
+            "source_kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EnrichmentEdgeEndpointKind"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null,
+              "description": "Source endpoint kind tag. `None` defaults to `Note`."
+            },
             "source_note_id": {
+              "default": "",
+              "description": "Source note id (note↔note substrate). Empty when the source is a proposal.",
               "type": "string"
             },
+            "source_proposal_id": {
+              "default": null,
+              "description": "Source proposal id (heterogeneous note↔proposal / proposal↔proposal substrate).",
+              "nullable": true,
+              "type": "string"
+            },
+            "target_kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EnrichmentEdgeEndpointKind"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null,
+              "description": "Target endpoint kind tag. `None` defaults to `Note`."
+            },
             "target_note_id": {
+              "default": "",
+              "description": "Target note id (note↔note substrate). Empty when the target is a proposal.",
+              "type": "string"
+            },
+            "target_proposal_id": {
+              "default": null,
+              "description": "Target proposal id (heterogeneous note↔proposal / proposal↔proposal substrate).",
+              "nullable": true,
               "type": "string"
             }
           },
           "required": [
-            "source_note_id",
-            "target_note_id",
             "kind",
             "confidence"
           ],
           "type": "object"
+        },
+        "EnrichmentEdgeEndpointKind": {
+          "description": "Endpoint kind tag for a typed enrichment edge.\n\nNote↔note edges use `Note` on both sides; note↔proposal and\nproposal↔proposal edges use `Proposal` on the heterogeneous substrate\n(memory_entity_associations).",
+          "enum": [
+            "note",
+            "proposal"
+          ],
+          "type": "string"
         },
         "EnrichmentEntity": {
           "description": "Entity node extracted by the enrichment pass — recurring system or concept\n(\"dispatch gate\", \"circuit breaker\", \"slot actor\").",
@@ -8202,6 +8250,12 @@ expression: signatures
               },
               "type": "array"
             },
+            "edges_dropped_unsupported_endpoint": {
+              "default": 0,
+              "description": "Number of candidate edges dropped because they had an unsupported\nendpoint (proposal id not in batch, unknown kind, malformed pairing,\nor no evidence quote). The pass never panics on these — they're\nsurfaced as warnings on the report.",
+              "format": "int64",
+              "type": "integer"
+            },
             "edges_dropped_wikilink_dup": {
               "format": "int64",
               "type": "integer"
@@ -8224,6 +8278,12 @@ expression: signatures
             },
             "project_id": {
               "type": "string"
+            },
+            "proposals_processed": {
+              "default": 0,
+              "description": "Number of source proposals processed (Wave 3 / rbsi). May be `0` when\nthe project has no proposals or when proposal loading failed\n(best-effort).",
+              "format": "int64",
+              "type": "integer"
             },
             "warnings": {
               "default": [],
