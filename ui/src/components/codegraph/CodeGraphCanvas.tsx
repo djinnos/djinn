@@ -52,14 +52,13 @@ type FetchState =
     };
 
 /**
- * Auto-semantic-zoom threshold. When `semanticZoomMode === "auto"`, the
- * canvas starts with a symbol-level fetch; if the snapshot reports
- * `truncated === true`, `total_nodes >= LARGE_GRAPH_THRESHOLD`, or
- * `total_nodes > nodeCap`, it refetches the same project at
- * `level="community"` so the user sees a handful of legible blobs
- * instead of a truncated 10k-node graph. The value sits just below the
- * server's default cap (10,000) so the collapse happens precisely when
- * the user would otherwise hit the cap.
+ * Auto-semantic-zoom threshold. The canvas starts with a symbol-level
+ * fetch; if the snapshot reports `truncated === true`,
+ * `total_nodes >= LARGE_GRAPH_THRESHOLD`, or `total_nodes > nodeCap`, it
+ * refetches the same project at `level="community"` so the user sees a
+ * handful of legible blobs instead of a truncated 10k-node graph. The
+ * value sits just below the server's default cap (10,000) so the collapse
+ * happens precisely when the user would otherwise hit the cap.
  */
 export const LARGE_GRAPH_THRESHOLD = 8_000;
 
@@ -114,7 +113,6 @@ export function CodeGraphCanvas({
   const selectedWorkspaceSlug = useCodeGraphStore(
     (s) => s.selectedWorkspaceSlug,
   );
-  const semanticZoomMode = useCodeGraphStore((s) => s.semanticZoomMode);
   const expandedCommunityIds = useCodeGraphStore((s) => s.expandedCommunityIds);
   const expandCommunity = useCodeGraphStore((s) => s.expandCommunity);
   const collapseCommunity = useCodeGraphStore((s) => s.collapseCommunity);
@@ -156,14 +154,7 @@ export function CodeGraphCanvas({
     setState({ status: "loading" });
     setGraphReady(false);
 
-    // Pick the *initial* fetch level from the toolbar mode.
-    //   - "community" → always start at community level
-    //   - "symbol"    → always start at symbol level
-    //   - "auto"      → start at symbol level, then conditionally
-    //                   refetch at community level when the snapshot
-    //                   is truncated or over the large-graph threshold.
-    const initialLevel: SnapshotLevel =
-      semanticZoomMode === "community" ? "community" : "symbol";
+    const initialLevel: SnapshotLevel = "symbol";
 
     // Note: the cached symbol snapshot is intentionally NOT invalidated
     // here. Expansion state (expandedCommunityIds in the store) must
@@ -188,27 +179,6 @@ export function CodeGraphCanvas({
         }
         let level = initialLevel;
 
-        // Auto mode: if the symbol snapshot was truncated / capped,
-        // refetch at community level so the user sees legible blobs
-        // rather than an incomplete 10k-node graph. Only symbol-starts
-        // can fall back; forced modes never change level.
-        if (
-          semanticZoomMode === "auto" &&
-          level === "symbol" &&
-          shouldFallbackToCommunity(snapshot, nodeCap)
-        ) {
-          const communityRaw = await fetchSnapshot(
-            projectId,
-            nodeCap,
-            "community",
-          );
-          if (cancelled) return;
-          const communitySnapshot = parseSnapshotResponse(communityRaw);
-          if (communitySnapshot) {
-            snapshot = communitySnapshot;
-            level = "community";
-          }
-        }
 
         if (cancelled) return;
         setState({ status: "ready", snapshot, level });
@@ -226,7 +196,7 @@ export function CodeGraphCanvas({
     return () => {
       cancelled = true;
     };
-  }, [projectId, nodeCap, reloadKey, semanticZoomMode, setGraphReady]);
+  }, [projectId, nodeCap, reloadKey, setGraphReady]);
 
   const effectiveLevel: SnapshotLevel =
     state.status === "ready" ? state.level : "symbol";

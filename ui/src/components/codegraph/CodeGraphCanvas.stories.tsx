@@ -25,10 +25,7 @@ import {
   type ColorMode,
   type HighlightView,
 } from "@/lib/codeGraphReducers";
-import {
-  useCodeGraphStore,
-  type SemanticZoomMode,
-} from "@/stores/codeGraphStore";
+import { useCodeGraphStore } from "@/stores/codeGraphStore";
 
 interface StubNode {
   id: string;
@@ -251,8 +248,6 @@ interface StoryShellProps {
   blastRadiusFrontier?: string[];
   /** Iter 30: pin the canvas into a specific color mode for the story. */
   colorMode?: ColorMode;
-  /** Semantic zoom mode override for the toolbar story. */
-  semanticZoomMode?: SemanticZoomMode;
   workspaceFixture?: boolean;
 }
 
@@ -263,7 +258,6 @@ function StoryShell({
   toolHighlightIds = [],
   blastRadiusFrontier = [],
   colorMode = "topology",
-  semanticZoomMode = "auto",
   workspaceFixture = false,
 }: StoryShellProps) {
   // Mirror the inputs into the global store so the toolbar reflects
@@ -273,9 +267,6 @@ function StoryShell({
   const setToolHighlight = useCodeGraphStore((s) => s.setToolHighlight);
   const setBlastRadius = useCodeGraphStore((s) => s.setBlastRadiusFrontier);
   const setColorMode = useCodeGraphStore((s) => s.setColorMode);
-  const setSemanticZoomMode = useCodeGraphStore(
-    (s) => s.setSemanticZoomMode,
-  );
   const setComplexityAvailable = useCodeGraphStore(
     (s) => s.setComplexityAvailable,
   );
@@ -286,7 +277,6 @@ function StoryShell({
     setBlastRadius(blastRadiusFrontier);
     setComplexityAvailable(true);
     setColorMode(colorMode);
-    setSemanticZoomMode(semanticZoomMode);
     return () => {
       useCodeGraphStore.getState().reset();
     };
@@ -296,13 +286,11 @@ function StoryShell({
     toolHighlightIds,
     blastRadiusFrontier,
     colorMode,
-    semanticZoomMode,
     setSelection,
     setCitations,
     setToolHighlight,
     setBlastRadius,
     setColorMode,
-    setSemanticZoomMode,
     setComplexityAvailable,
   ]);
 
@@ -428,18 +416,6 @@ export const TopologyWithRefactorHalo: Story = {
 export const WorkspacesAndCrossWorkspaceEdge: Story = {
   args: {
     workspaceFixture: true,
-  },
-};
-
-/**
- * Semantic zoom toolbar: the segmented control lets the user force
- * `community` (collapsed blobs) instead of the default `auto`. Reviewers
- * can toggle between all three modes (Auto/Symbol/Community) to verify
- * the store updates correctly.
- */
-export const SemanticZoomCommunity: Story = {
-  args: {
-    semanticZoomMode: "community",
   },
 };
 
