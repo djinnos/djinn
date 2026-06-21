@@ -7,11 +7,13 @@
  *
  *   selection           → user-clicked focal node (1-hop highlight)
  *   citationIds         → AI chat citations
- *   toolHighlightIds    → tool-call results (e.g. blast-radius BFS)
+ *   toolHighlightIds    → tool-call results (non-DOI query overlays)
  *   blastRadiusFrontier → animation-only set; separate from
- *                         `toolHighlightIds` so impact "fan-out" can
+ *                         `toolHighlightIds` so path/query fan-out can
  *                         ripple while the static highlight remains
  *                         visible underneath.
+ *   doiImpactIds        → server-sampled impact ids merged into the
+ *                         DOI focus/context set for dependents traversal.
  *   hoverId             → hover tooltip target (transient)
  *
  * Filters live alongside because they're peer concerns of the same
@@ -45,23 +47,6 @@ export const EDGE_KINDS = [
 ] as const;
 
 export type EdgeKind = (typeof EDGE_KINDS)[number];
-
-/**
- * Edges that ship OFF. The default view shows only the *semantic spine*
- * (Implements, Extends, Defines, TypeDefines, EntryPointOf, Writes,
- * StepInProcess) — everything else is firehose noise on a 12k-node repo
- * (FileReference alone is ~33% of edges, Contains/Declared are
- * inverse duplicates of each other at ~23% each, Reads is per-query
- * useful but globally meaningless). User toggles on demand.
- */
-const NOISY_EDGE_KINDS: ReadonlySet<string> = new Set([
-  "ContainsDefinition",
-  "DeclaredInFile",
-  "FileReference",
-  "SymbolReference",
-  "Reads",
-  "MemberOf",
-]);
 
 /**
  * Top-level snapshot node-kind filter. `kind` is the wire-level
@@ -98,16 +83,121 @@ export const SYMBOL_KIND_FILTERS = [
 ] as const;
 export type SymbolKindFilter = (typeof SYMBOL_KIND_FILTERS)[number];
 
-/** Symbol kinds hidden by default — clutter without analytical value. */
-const NOISY_SYMBOL_KINDS: ReadonlySet<string> = new Set([
-  "variable",
-  "const",
-  "static",
-  "property",
-  "import",
-  "field",
-  "other",
-]);
+/**
+ * Intent lenses — named filter presets that swap the entire
+ * node/symbol/edge filter set in one action. Each lens maps a
+ * concrete analytical intent to the filter combination that serves it.
+ *
+ * - **Architecture** (default) — structural skeleton: folders, files,
+ *   symbols visible, but no symbol sub-kinds and only the semantic
+ *   spine edges.
+ * - **Calls** — call-graph view: only functions/methods/constructors,
+ *   only Defines and SymbolReference edges.
+ * - **Types** — type hierarchy: only type-defining symbols (class,
+ *   struct, interface, trait, enum, impl, type), only type-related
+ *   edges.
+ * - **Data flow** — reads/writes: only functions and methods, only
+ *   Reads/Writes/Defines edges.
+ */
+export type LensId = "architecture" | "calls" | "types" | "dataflow";
+
+export const LENS_PRESETS: Record<
+  LensId,
+  {
+    nodeKindFilters: Record<string, boolean>;
+    symbolKindFilters: Record<string, boolean>;
+    edgeKindFilters: Record<string, boolean>;
+  }
+> = {
+  architecture: {
+    nodeKindFilters: {
+      folder: true,
+      file: true,
+      symbol: true,
+      community: false,
+    },
+    symbolKindFilters: Object.fromEntries(
+      SYMBOL_KIND_FILTERS.map((k) => [k, false]),
+    ),
+    edgeKindFilters: {
+      ContainsDefinition: false,
+      DeclaredInFile: false,
+      FileReference: false,
+      SymbolReference: false,
+      Reads: false,
+      Writes: true,
+      Extends: true,
+      Implements: true,
+      TypeDefines: true,
+      Defines: true,
+      EntryPointOf: true,
+      MemberOf: false,
+      StepInProcess: true,
+    },
+  },
+  calls: {
+    nodeKindFilters: {
+      folder: false,
+      file: false,
+      symbol: true,
+      community: false,
+    },
+    symbolKindFilters: Object.fromEntries(
+      SYMBOL_KIND_FILTERS.map((k) => [
+        k,
+        k === "function" || k === "method" || k === "constructor",
+      ]),
+    ),
+    edgeKindFilters: Object.fromEntries(
+      EDGE_KINDS.map((k) => [k, k === "Defines" || k === "SymbolReference"]),
+    ),
+  },
+  types: {
+    nodeKindFilters: {
+      folder: false,
+      file: false,
+      symbol: true,
+      community: false,
+    },
+    symbolKindFilters: Object.fromEntries(
+      SYMBOL_KIND_FILTERS.map((k) => [
+        k,
+        [
+          "class",
+          "struct",
+          "interface",
+          "trait",
+          "enum",
+          "impl",
+          "type",
+        ].includes(k),
+      ]),
+    ),
+    edgeKindFilters: Object.fromEntries(
+      EDGE_KINDS.map((k) => [
+        k,
+        ["Extends", "Implements", "TypeDefines", "Defines"].includes(k),
+      ]),
+    ),
+  },
+  dataflow: {
+    nodeKindFilters: {
+      folder: false,
+      file: false,
+      symbol: true,
+      community: false,
+    },
+    symbolKindFilters: Object.fromEntries(
+      SYMBOL_KIND_FILTERS.map((k) => [
+        k,
+        k === "function" || k === "method",
+      ]),
+    ),
+    edgeKindFilters: Object.fromEntries(
+      EDGE_KINDS.map((k) => [k, ["Reads", "Writes", "Defines"].includes(k)]),
+    ),
+  },
+};
 
 export type FocusDirection = "dependencies" | "dependents" | "both";
 export const DEFAULT_FOCUS_DIRECTION: FocusDirection = "both";
@@ -146,6 +236,8 @@ export interface CodeGraphHighlightState {
   citationIds: Set<string>;
   toolHighlightIds: Set<string>;
   blastRadiusFrontier: Set<string>;
+  /** Server-sampled impact ids folded into the unified DOI focus model. */
+  doiImpactIds: Set<string>;
   hoverId: string | null;
   edgeKindFilters: Record<string, boolean>;
   nodeKindFilters: Record<string, boolean>;
@@ -190,6 +282,12 @@ export interface CodeGraphHighlightState {
    */
   expandedCommunityIds: Set<string>;
   selectedWorkspaceSlug: string | null;
+  /**
+   * Active intent lens. `null` means the user has manually toggled
+   * individual filters (Advanced mode). Applying a lens replaces all
+   * three filter maps from the preset.
+   */
+  activeLens: LensId | null;
 }
 
 export interface CodeGraphHighlightActions {
@@ -200,6 +298,9 @@ export interface CodeGraphHighlightActions {
   clearToolHighlight: () => void;
   setBlastRadiusFrontier: (ids: Iterable<string>) => void;
   clearBlastRadiusFrontier: () => void;
+  /** Merge server impact samples into the DOI focus/context render path. */
+  setDoiImpact: (ids: Iterable<string>) => void;
+  clearDoiImpact: () => void;
   setHover: (id: string | null) => void;
   toggleEdgeKind: (kind: string) => void;
   setEdgeKindEnabled: (kind: string, enabled: boolean) => void;
@@ -236,23 +337,9 @@ export interface CodeGraphHighlightActions {
   /** Clear all expanded communities (called on project change). */
   clearExpandedCommunities: () => void;
   setSelectedWorkspaceSlug: (slug: string | null) => void;
+  /** Apply an intent lens, replacing all three filter maps from the preset. */
+  applyLens: (lensId: LensId) => void;
   reset: () => void;
-}
-
-function defaultEdgeKindFilters(): Record<string, boolean> {
-  return Object.fromEntries(
-    EDGE_KINDS.map((k) => [k, !NOISY_EDGE_KINDS.has(k)]),
-  );
-}
-
-function defaultNodeKindFilters(): Record<string, boolean> {
-  return Object.fromEntries(NODE_KINDS.map((k) => [k, true]));
-}
-
-function defaultSymbolKindFilters(): Record<string, boolean> {
-  return Object.fromEntries(
-    SYMBOL_KIND_FILTERS.map((k) => [k, !NOISY_SYMBOL_KINDS.has(k)]),
-  );
 }
 
 const INITIAL_STATE: CodeGraphHighlightState = {
@@ -260,10 +347,11 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   citationIds: new Set(),
   toolHighlightIds: new Set(),
   blastRadiusFrontier: new Set(),
+  doiImpactIds: new Set(),
   hoverId: null,
-  edgeKindFilters: defaultEdgeKindFilters(),
-  nodeKindFilters: defaultNodeKindFilters(),
-  symbolKindFilters: defaultSymbolKindFilters(),
+  edgeKindFilters: { ...LENS_PRESETS.architecture.edgeKindFilters },
+  nodeKindFilters: { ...LENS_PRESETS.architecture.nodeKindFilters },
+  symbolKindFilters: { ...LENS_PRESETS.architecture.symbolKindFilters },
   hideTests: false,
   focusAnchorId: null,
   focusDirection: DEFAULT_FOCUS_DIRECTION,
@@ -274,6 +362,7 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   semanticZoomMode: DEFAULT_SEMANTIC_ZOOM_MODE,
   expandedCommunityIds: new Set<string>(),
   selectedWorkspaceSlug: null,
+  activeLens: "architecture",
 };
 
 export const useCodeGraphStore = create<
@@ -309,6 +398,14 @@ export const useCodeGraphStore = create<
     set({ blastRadiusFrontier: new Set() });
   },
 
+  setDoiImpact: (ids) => {
+    set({ doiImpactIds: new Set(ids) });
+  },
+
+  clearDoiImpact: () => {
+    set({ doiImpactIds: new Set() });
+  },
+
   setHover: (id) => {
     set({ hoverId: id });
   },
@@ -319,6 +416,7 @@ export const useCodeGraphStore = create<
         ...state.edgeKindFilters,
         [kind]: !(state.edgeKindFilters[kind] ?? true),
       },
+      activeLens: null,
     }));
   },
 
@@ -334,6 +432,7 @@ export const useCodeGraphStore = create<
         ...state.nodeKindFilters,
         [kind]: !(state.nodeKindFilters[kind] ?? true),
       },
+      activeLens: null,
     }));
   },
 
@@ -343,6 +442,7 @@ export const useCodeGraphStore = create<
         ...state.symbolKindFilters,
         [kind]: !(state.symbolKindFilters[kind] ?? true),
       },
+      activeLens: null,
     }));
   },
 
@@ -402,6 +502,16 @@ export const useCodeGraphStore = create<
     set({ semanticZoomMode: mode });
   },
 
+  applyLens: (lensId) => {
+    const preset = LENS_PRESETS[lensId];
+    set({
+      nodeKindFilters: { ...preset.nodeKindFilters },
+      symbolKindFilters: { ...preset.symbolKindFilters },
+      edgeKindFilters: { ...preset.edgeKindFilters },
+      activeLens: lensId,
+    });
+  },
+
   expandCommunity: (communityId) => {
     if (!communityId) return;
     set((state) => {
@@ -436,9 +546,11 @@ export const useCodeGraphStore = create<
       citationIds: new Set(),
       toolHighlightIds: new Set(),
       blastRadiusFrontier: new Set(),
-      edgeKindFilters: defaultEdgeKindFilters(),
-      nodeKindFilters: defaultNodeKindFilters(),
-      symbolKindFilters: defaultSymbolKindFilters(),
+      doiImpactIds: new Set(),
+      edgeKindFilters: { ...LENS_PRESETS.architecture.edgeKindFilters },
+      nodeKindFilters: { ...LENS_PRESETS.architecture.nodeKindFilters },
+      symbolKindFilters: { ...LENS_PRESETS.architecture.symbolKindFilters },
+      activeLens: "architecture",
       colorMode: DEFAULT_COLOR_MODE,
       complexityAvailable: false,
       graphReady: false,
@@ -465,6 +577,9 @@ export const selectToolHighlightIds = (
 export const selectBlastRadiusFrontier = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
 ) => s.blastRadiusFrontier;
+export const selectDoiImpactIds = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.doiImpactIds;
 export const selectEdgeKindFilters = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
 ) => s.edgeKindFilters;
@@ -477,6 +592,9 @@ export const selectSymbolKindFilters = (
 export const selectFocusAnchorId = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
 ) => s.focusAnchorId;
+export const selectActiveLens = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.activeLens;
 export const selectFocusDirection = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
 ) => s.focusDirection;

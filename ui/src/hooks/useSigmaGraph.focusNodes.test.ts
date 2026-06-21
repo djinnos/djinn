@@ -81,7 +81,10 @@ vi.mock("graphology-layout-noverlap", () => ({
   },
 }));
 
-import type { SigmaInstanceHandle, UseSigmaGraphResult } from "@/hooks/useSigmaGraph";
+import type {
+  SigmaInstanceHandle,
+  UseSigmaGraphResult,
+} from "@/hooks/useSigmaGraph";
 import { useSigmaGraph } from "@/hooks/useSigmaGraph";
 
 function makeGraph(): Graph {
@@ -101,7 +104,6 @@ function mountHarness(graph: Graph): {
   const resultRef: { current: UseSigmaGraphResult | null } = { current: null };
   const containerRef = createRef<HTMLDivElement>();
   function CapturingHarness() {
-    // eslint-disable-next-line react-hooks/immutability -- test harness captures the latest hook snapshot.
     resultRef.current = useSigmaGraph(containerRef, graph);
     return createElement("div", { ref: containerRef });
   }
@@ -144,7 +146,7 @@ describe("useSigmaGraph focus helpers", () => {
     vi.useRealTimers();
   });
 
-  it("focusNode centers the camera on an existing node at the fixed ratio", () => {
+  it("focusNode uses the default duration when no custom duration is provided", () => {
     const { handle, animate } = mountedHandle();
 
     handle.focusNode("a");
@@ -153,6 +155,18 @@ describe("useSigmaGraph focus helpers", () => {
     expect(animate).toHaveBeenCalledWith(
       { x: 2, y: 4, ratio: 0.5 },
       { duration: 400 },
+    );
+  });
+
+  it("focusNode uses the custom duration when durationMs is provided", () => {
+    const { handle, animate } = mountedHandle();
+
+    handle.focusNode("a", 150);
+
+    expect(animate).toHaveBeenCalledTimes(1);
+    expect(animate).toHaveBeenCalledWith(
+      { x: 2, y: 4, ratio: 0.5 },
+      { duration: 150 },
     );
   });
 

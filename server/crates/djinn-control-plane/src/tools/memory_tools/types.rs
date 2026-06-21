@@ -454,11 +454,21 @@ pub struct MemoryBuildContextResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryTaskRefsResponse {
     pub tasks: Vec<MemoryTaskRefItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<MemoryProposalRefItem>,
     pub error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryTaskRefItem {
+    pub id: String,
+    pub short_id: String,
+    pub title: String,
+    pub status: String,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MemoryProposalRefItem {
     pub id: String,
     pub short_id: String,
     pub title: String,
