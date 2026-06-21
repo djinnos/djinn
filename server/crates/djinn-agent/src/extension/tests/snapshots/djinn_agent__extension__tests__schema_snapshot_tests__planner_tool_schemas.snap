@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
+assertion_line: 839
 expression: tool_schemas_planner()
 ---
 [
@@ -123,7 +124,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "memory_search",
-    "description": "Search notes in project memory.",
+    "description": "Search notes and proposals in project memory. Returns a unified result set interleaved by relevance.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -152,6 +153,13 @@ expression: tool_schemas_planner()
             "type": "string"
           },
           "description": "Optional list of edge kinds to include in graph traversal scoring. When provided, only edges whose kind matches one of these values participate in spreading activation. Omit to use all edge kinds."
+        },
+        "entity_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional entity-type filter. Omit to return both notes and proposals (default). [\"note\"] for notes-only. [\"proposal\"] for proposals-only."
         }
       }
     },
@@ -1183,7 +1191,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "memory_build_context",
-    "description": "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.",
+    "description": "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Relevant proposals are surfaced alongside notes so a planner/worker sees the motivating proposal.",
     "inputSchema": {
       "type": "object",
       "properties": {

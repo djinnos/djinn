@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 510
 expression: signatures
 ---
 [
@@ -8388,7 +8389,7 @@ expression: signatures
           "properties": {
             "entity": {
               "default": "note",
-              "description": "Discriminator: `\"note\"` (default for backward compat) or `\"proposal\"`.\nUse `entity_types` on the request to scope the result set.",
+              "description": "`\"note\"` | `\"proposal\"` — discriminates unified search results.",
               "type": "string"
             },
             "folder": {

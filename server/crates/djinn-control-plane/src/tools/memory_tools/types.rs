@@ -441,13 +441,12 @@ pub struct MemorySearchResultItem {
     pub folder: String,
     pub note_type: String,
     pub snippet: String,
+    /// `"note"` | `"proposal"` — discriminates unified search results.
+    #[serde(default = "default_entity_note")]
+    pub entity: String,
     /// RRF fusion score (higher = more relevant). Defaults to 0.0 for backward compat.
     #[serde(default)]
     pub score: f64,
-    /// Discriminator: `"note"` (default for backward compat) or `"proposal"`.
-    /// Use `entity_types` on the request to scope the result set.
-    #[serde(default = "default_entity_note")]
-    pub entity: String,
 }
 
 /// Default value for `MemorySearchResultItem.entity`: `"note"`.
