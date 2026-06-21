@@ -809,6 +809,7 @@ impl CoordinatorActor {
             mirror: self.mirror.clone(),
             rpc_registry: self.rpc_registry.clone(),
             default_project_id: None,
+            reconciliation_sweep: crate::context::ReconciliationSweepConfig::from_env(),
         }
     }
 

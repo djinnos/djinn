@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use djinn_agent::actors::slot::{
     ModelSlotConfig, SlotFactory, SlotHandle, SlotPoolConfig, SlotPoolHandle,
 };
-use djinn_agent::context::{ActivityTracker, AgentContext};
+use djinn_agent::context::{ActivityTracker, AgentContext, ReconciliationSweepConfig};
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
@@ -446,6 +446,7 @@ impl RealPoolKillHarness {
             mirror: None,
             rpc_registry: None,
             default_project_id: None,
+            reconciliation_sweep: ReconciliationSweepConfig::default(),
         };
 
         let (signal_tx, signal_rx) = mpsc::unbounded_channel();

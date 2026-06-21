@@ -178,6 +178,13 @@ struct StalePrSweepStats {
 /// Called from [`sweep_stale_resources`] on every periodic tick after the
 /// local branch prune.
 async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::AgentContext) {
+    let sweep_config = &app_state.reconciliation_sweep;
+
+    if !sweep_config.enabled {
+        tracing::debug!("CoordinatorActor: reconciliation sweep disabled; skipping stale PR sweep");
+        return;
+    }
+
     let project_repo = ProjectRepository::new(db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(db.clone(), app_state.event_bus.clone());
 
@@ -189,7 +196,10 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Ag
         }
     };
 
-    let mut stats = StalePrSweepStats::default();
+    let mut stats = StalePrSweepStats {
+        dry_run: sweep_config.dry_run,
+        ..StalePrSweepStats::default()
+    };
 
     for project in &projects {
         stats.projects_scanned += 1;
@@ -245,8 +255,12 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Ag
             }
         };
 
-        // Build the PrCleanupPolicy for guardrail checks.
+        // Build the PrCleanupPolicy for guardrail checks, using the
+        // reconciliation sweep config for enabled/dry_run/grace_period.
         let cleanup_config = super::pr_poller::pr_cleanup::PrCleanupPolicyConfig {
+            enabled: sweep_config.enabled,
+            dry_run: sweep_config.dry_run,
+            grace_period: sweep_config.grace_period,
             owner: project.github_owner.clone(),
             repo: project.github_repo.clone(),
             ..Default::default()

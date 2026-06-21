@@ -964,6 +964,7 @@ impl AppState {
             // tool arg. Only the K8s worker (one-project-per-Pod) sets
             // this in build_worker_agent_context.
             default_project_id: None,
+            reconciliation_sweep: djinn_agent::context::ReconciliationSweepConfig::from_env(),
         }
     }
 
