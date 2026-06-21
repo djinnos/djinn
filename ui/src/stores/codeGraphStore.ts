@@ -7,11 +7,13 @@
  *
  *   selection           → user-clicked focal node (1-hop highlight)
  *   citationIds         → AI chat citations
- *   toolHighlightIds    → tool-call results (e.g. blast-radius BFS)
+ *   toolHighlightIds    → tool-call results (non-DOI query overlays)
  *   blastRadiusFrontier → animation-only set; separate from
- *                         `toolHighlightIds` so impact "fan-out" can
+ *                         `toolHighlightIds` so path/query fan-out can
  *                         ripple while the static highlight remains
  *                         visible underneath.
+ *   doiImpactIds        → server-sampled impact ids merged into the
+ *                         DOI focus/context set for dependents traversal.
  *   hoverId             → hover tooltip target (transient)
  *
  * Filters live alongside because they're peer concerns of the same
@@ -217,6 +219,8 @@ export interface CodeGraphHighlightState {
   citationIds: Set<string>;
   toolHighlightIds: Set<string>;
   blastRadiusFrontier: Set<string>;
+  /** Server-sampled impact ids folded into the unified DOI focus model. */
+  doiImpactIds: Set<string>;
   hoverId: string | null;
   edgeKindFilters: Record<string, boolean>;
   nodeKindFilters: Record<string, boolean>;
@@ -264,6 +268,9 @@ export interface CodeGraphHighlightActions {
   clearToolHighlight: () => void;
   setBlastRadiusFrontier: (ids: Iterable<string>) => void;
   clearBlastRadiusFrontier: () => void;
+  /** Merge server impact samples into the DOI focus/context render path. */
+  setDoiImpact: (ids: Iterable<string>) => void;
+  clearDoiImpact: () => void;
   setHover: (id: string | null) => void;
   toggleEdgeKind: (kind: string) => void;
   setEdgeKindEnabled: (kind: string, enabled: boolean) => void;
@@ -296,6 +303,7 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   citationIds: new Set(),
   toolHighlightIds: new Set(),
   blastRadiusFrontier: new Set(),
+  doiImpactIds: new Set(),
   hoverId: null,
   edgeKindFilters: { ...LENS_PRESETS.architecture.edgeKindFilters },
   nodeKindFilters: { ...LENS_PRESETS.architecture.nodeKindFilters },
@@ -342,6 +350,14 @@ export const useCodeGraphStore = create<
 
   clearBlastRadiusFrontier: () => {
     set({ blastRadiusFrontier: new Set() });
+  },
+
+  setDoiImpact: (ids) => {
+    set({ doiImpactIds: new Set(ids) });
+  },
+
+  clearDoiImpact: () => {
+    set({ doiImpactIds: new Set() });
   },
 
   setHover: (id) => {
@@ -453,6 +469,7 @@ export const useCodeGraphStore = create<
       citationIds: new Set(),
       toolHighlightIds: new Set(),
       blastRadiusFrontier: new Set(),
+      doiImpactIds: new Set(),
       edgeKindFilters: { ...LENS_PRESETS.architecture.edgeKindFilters },
       nodeKindFilters: { ...LENS_PRESETS.architecture.nodeKindFilters },
       symbolKindFilters: { ...LENS_PRESETS.architecture.symbolKindFilters },
@@ -481,6 +498,9 @@ export const selectToolHighlightIds = (
 export const selectBlastRadiusFrontier = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
 ) => s.blastRadiusFrontier;
+export const selectDoiImpactIds = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.doiImpactIds;
 export const selectEdgeKindFilters = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
 ) => s.edgeKindFilters;

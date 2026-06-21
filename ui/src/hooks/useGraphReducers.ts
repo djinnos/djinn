@@ -10,8 +10,8 @@
  *   1. Subscribe to every relevant store slice.
  *   2. Lazily compute `selectionNeighbors` (1-hop set) when
  *      `selectionId` changes.
- *   3. Drive a `requestAnimationFrame` loop only while the blast-
- *      radius set is non-empty — otherwise we don't burn CPU.
+ *   3. Drive a `requestAnimationFrame` loop only while a transient
+ *      pulse set is non-empty — otherwise we don't burn CPU.
  *   4. Emit reducer fns whose closure reads `viewRef`, so Sigma sees
  *      a fresh view on every frame without forcing re-mounts.
  *
@@ -234,6 +234,7 @@ export function useGraphReducers(
   const citationIds = useCodeGraphStore((s) => s.citationIds);
   const toolHighlightIds = useCodeGraphStore((s) => s.toolHighlightIds);
   const blastRadiusFrontier = useCodeGraphStore((s) => s.blastRadiusFrontier);
+  const doiImpactIds = useCodeGraphStore((s) => s.doiImpactIds);
   const hoverId = useCodeGraphStore((s) => s.hoverId);
   const edgeKindFilters = useCodeGraphStore((s) => s.edgeKindFilters);
   const nodeKindFilters = useCodeGraphStore((s) => s.nodeKindFilters);
@@ -298,7 +299,7 @@ export function useGraphReducers(
   // Directional DOI focus model: compute graph distance from the anchor using
   // dependency direction semantics, combine it with PageRank percentile
   // importance, and hand reducers precomputed O(1) membership sets.
-  const doiFocus = useMemo<DoiFocusResult>(() => {
+  const topologyDoiFocus = useMemo<DoiFocusResult>(() => {
     return computeDoiFocus(
       graph,
       focusAnchorId,
@@ -307,6 +308,22 @@ export function useGraphReducers(
       doiRevealCount,
     );
   }, [graph, focusAnchorId, focusDirection, pagerankPercentile, doiRevealCount]);
+
+  const doiFocus = useMemo<DoiFocusResult>(() => {
+    if (doiImpactIds.size === 0) return topologyDoiFocus;
+    const focusIds = new Set(topologyDoiFocus.focusIds);
+    const contextIds = new Set(topologyDoiFocus.contextIds);
+    for (const id of doiImpactIds) {
+      if (!id || !graph?.hasNode(id)) continue;
+      focusIds.add(id);
+      contextIds.delete(id);
+    }
+    return {
+      focusIds,
+      contextIds,
+      scores: topologyDoiFocus.scores,
+    };
+  }, [doiImpactIds, graph, topologyDoiFocus]);
 
   // ── Build the live HighlightView (mutable ref, read on each frame) ────
   // Sigma reads `viewRef.current` from inside its rAF render loop —
@@ -351,6 +368,7 @@ export function useGraphReducers(
     citationIds,
     toolHighlightIds,
     blastRadiusFrontier,
+    doiImpactIds,
     hoverId,
     edgeKindFilters,
     nodeKindFilters,
