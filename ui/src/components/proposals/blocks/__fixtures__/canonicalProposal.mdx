@@ -51,6 +51,23 @@ We chose JWT over session cookies for stateless auth.
  }
 </Diff>
 
+<Callout id="perf-note" tone="warning">
+This runs on the hot path — keep allocations out of the loop.
+</Callout>
+
+<Table id="tradeoffs">
+| Option    | Latency | Notes              |
+| --------- | ------- | ------------------ |
+| Redis     | low     | extra ops surface  |
+| Memcached | low     | no persistence     |
+</Table>
+
+<Checklist id="acceptance">
+- [x] Schema migration written
+- [ ] Backfill job verified
+- [ ] Docs updated — link the runbook
+</Checklist>
+
 <QuestionForm id="open-questions" title="Open Questions">
 Should we use Redis or Memcached for caching?
 </QuestionForm>

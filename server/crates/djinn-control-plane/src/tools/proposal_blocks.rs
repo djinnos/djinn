@@ -23,6 +23,9 @@ pub enum BlockType {
     Decisions,
     FileTree,
     Diff,
+    Callout,
+    Table,
+    Checklist,
     QuestionForm,
 }
 
@@ -38,6 +41,9 @@ impl BlockType {
             BlockType::Decisions => "decisions",
             BlockType::FileTree => "file-tree",
             BlockType::Diff => "diff",
+            BlockType::Callout => "callout",
+            BlockType::Table => "table",
+            BlockType::Checklist => "checklist",
             BlockType::QuestionForm => "question-form",
         }
     }
@@ -53,6 +59,9 @@ impl BlockType {
             BlockType::Decisions => "Decisions",
             BlockType::FileTree => "FileTree",
             BlockType::Diff => "Diff",
+            BlockType::Callout => "Callout",
+            BlockType::Table => "Table",
+            BlockType::Checklist => "Checklist",
             BlockType::QuestionForm => "QuestionForm",
         }
     }
@@ -395,6 +404,60 @@ pub static PROPOSAL_BLOCK_REGISTRY: LazyLock<BTreeMap<&'static str, ProposalBloc
                 ),
             ),
             (
+                "callout",
+                block_with_description(
+                    "callout",
+                    "Callout",
+                    "An emphasized admonition card with a `tone` and a markdown \
+                     body. Set the optional `tone` attribute to one of `info` \
+                     (default), `decision`, `risk`, `warning`, or `success`; it \
+                     drives the card's color and icon. The block CHILDREN are the \
+                     markdown body. Use it to flag a risk, a decision, or an \
+                     important note so it stands out from surrounding prose. \
+                     Example: `<Callout id=\"x\" tone=\"warning\">\\nThis runs on \
+                     the hot path.\\n</Callout>`.",
+                    fields(vec![(
+                        "tone",
+                        enum_string_field(vec![
+                            "info", "decision", "risk", "warning", "success",
+                        ]),
+                    )]),
+                ),
+            ),
+            (
+                "table",
+                block_with_description(
+                    "table",
+                    "Table",
+                    "A clean styled data table. The block CHILDREN are a \
+                     GitHub-flavoured markdown table: a header row, a `| --- | \
+                     --- |` separator row, then one body row per line, each \
+                     pipe-delimited (`| cell | cell |`). Cells may contain inline \
+                     markdown. The renderer falls back to a plain markdown block \
+                     if the children are not a valid pipe table, so always emit \
+                     real `|`-delimited rows. Example: `<Table id=\"x\">\\n| Name | \
+                     Type |\\n| --- | --- |\\n| id | uuid |\\n</Table>`.",
+                    fields(vec![]),
+                ),
+            ),
+            (
+                "checklist",
+                block_with_description(
+                    "checklist",
+                    "Checklist",
+                    "A read-only checklist of items with their authored \
+                     done-state. The block CHILDREN are GitHub task-list lines: \
+                     `- [x] done item` (checked) or `- [ ] todo item` \
+                     (unchecked); plain `- item` bullets render unchecked. Add an \
+                     optional trailing note after ` — ` (em-dash) or two spaces. \
+                     The boxes are NOT toggleable by viewers — they reflect the \
+                     authored state only. Use it for acceptance criteria or \
+                     done-criteria. Example: `<Checklist id=\"x\">\\n- [x] Schema \
+                     written\\n- [ ] Docs updated — link the runbook\\n</Checklist>`.",
+                    fields(vec![]),
+                ),
+            ),
+            (
                 "question-form",
                 block(
                     "question-form",
@@ -619,7 +682,7 @@ mod tests {
     #[test]
     fn registry_contains_v1_blocks() {
         let registry = proposal_block_registry();
-        assert_eq!(registry.len(), 9);
+        assert_eq!(registry.len(), 12);
         assert_eq!(registry["rich-text"].tag, "RichText");
         assert_eq!(registry["diagram"].tag, "Diagram");
         assert_eq!(registry["annotated-code"].tag, "AnnotatedCode");
@@ -628,6 +691,9 @@ mod tests {
         assert_eq!(registry["decisions"].tag, "Decisions");
         assert_eq!(registry["file-tree"].tag, "FileTree");
         assert_eq!(registry["diff"].tag, "Diff");
+        assert_eq!(registry["callout"].tag, "Callout");
+        assert_eq!(registry["table"].tag, "Table");
+        assert_eq!(registry["checklist"].tag, "Checklist");
         assert_eq!(registry["question-form"].tag, "QuestionForm");
         // The diff block ships authoring guidance for the LLM.
         assert!(
@@ -649,6 +715,9 @@ mod tests {
             BlockType::Decisions,
             BlockType::FileTree,
             BlockType::Diff,
+            BlockType::Callout,
+            BlockType::Table,
+            BlockType::Checklist,
             BlockType::QuestionForm,
         ];
         for bt in types {
@@ -660,7 +729,7 @@ mod tests {
     #[test]
     fn block_registry_new_has_all_definitions() {
         let reg = BlockRegistry::new();
-        assert_eq!(reg.definitions().len(), 9);
+        assert_eq!(reg.definitions().len(), 12);
         assert!(reg.definition_for_tag("RichText").is_some());
         assert!(reg.definition_for_tag("UnknownTag").is_none());
         assert!(reg.tags().contains("RichText"));
@@ -681,6 +750,9 @@ mod tests {
             "Decisions",
             "FileTree",
             "Diff",
+            "Callout",
+            "Table",
+            "Checklist",
             "QuestionForm",
         ]
         .into_iter()
