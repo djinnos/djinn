@@ -1149,6 +1149,99 @@ async fn memory_task_refs_returns_proposals_through_epics() {
 }
 
 #[tokio::test]
+async fn memory_read_surfaces_tasks_and_proposals_for_note_under_graduated_proposal() {
+    let harness = McpTestHarness::new().await;
+    let fixture = build_graduated_proposal_fixture(&harness).await;
+
+    // Use the shared note permalink, which is attached to both an epic and a task under the graduated proposal.
+    let permalink = &fixture.shared_note_permalink;
+
+    // Call memory_read for this note.
+    let resp = harness
+        .call_tool(
+            "memory_read",
+            json!({"project": &fixture.project_slug, "identifier": permalink}),
+        )
+        .await
+        .expect("memory_read should dispatch");
+    assert!(
+        resp.get("error").is_none() || resp["error"].is_null(),
+        "memory_read returned error: {resp}"
+    );
+
+    // Assert tasks array is non-empty.
+    let tasks = resp["tasks"].as_array().expect("tasks should be an array");
+    assert!(
+        !tasks.is_empty(),
+        "memory_read should surface tasks referencing this note"
+    );
+
+    // Assert proposals array is non-empty and contains the graduated proposal.
+    let proposals = resp["proposals"]
+        .as_array()
+        .expect("proposals should be an array");
+    assert!(
+        !proposals.is_empty(),
+        "memory_read should surface proposals reachable through tasks/epics"
+    );
+    let found = proposals
+        .iter()
+        .any(|p| p["short_id"].as_str() == Some(&fixture.proposal_short_id));
+    assert!(
+        found,
+        "graduated proposal {} should appear in memory_read proposals",
+        fixture.proposal_short_id
+    );
+}
+
+#[tokio::test]
+async fn memory_read_regression_memory_task_refs_behavior_unchanged() {
+    let harness = McpTestHarness::new().await;
+    let fixture = build_graduated_proposal_fixture(&harness).await;
+
+    // Query memory_task_refs for the shared note using the same permalink as the new memory_read test.
+    let refs = harness
+        .call_tool(
+            "memory_task_refs",
+            json!({"project": &fixture.project_slug, "permalink": &fixture.shared_note_permalink}),
+        )
+        .await
+        .expect("memory_task_refs should dispatch");
+    assert!(
+        refs.get("error").is_none() || refs["error"].is_null(),
+        "memory_task_refs returned error: {refs}"
+    );
+
+    // Tasks array should be non-empty.
+    let tasks = refs
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .expect("tasks should be an array");
+    assert!(
+        !tasks.is_empty(),
+        "memory_task_refs should still return tasks referencing the note"
+    );
+
+    // Proposals array should contain the graduated proposal.
+    let proposals = refs
+        .get("proposals")
+        .and_then(|v| v.as_array())
+        .expect("proposals should be an array");
+    assert!(
+        !proposals.is_empty(),
+        "memory_task_refs should still return proposals reachable through tasks/epics"
+    );
+    let found = proposals
+        .iter()
+        .any(|p| p.get("id").and_then(|v| v.as_str()) == Some(&fixture.proposal_id));
+    assert!(
+        found,
+        "graduated proposal {} should still appear in memory_task_refs proposals",
+        fixture.proposal_id
+    );
+}
+
+#[tokio::test]
 async fn memory_read_resolves_short_id_mentions() {
     let harness = McpTestHarness::new().await;
     let fixture = build_graduated_proposal_fixture(&harness).await;
