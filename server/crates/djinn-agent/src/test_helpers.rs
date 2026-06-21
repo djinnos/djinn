@@ -86,6 +86,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
         mirror: None,
         rpc_registry: None,
         default_project_id: None,
+        reconciliation_sweep: crate::context::ReconciliationSweepConfig::default(),
     }
 }
 

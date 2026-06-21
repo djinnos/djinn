@@ -770,3 +770,634 @@ async fn mcp_memory_associations_returns_kind_field() {
         entry["kind"]
     );
 }
+
+// ── Wave 1: proposal ↔ memory linkage integration tests ─────────────────────
+
+/// Helper: returns `true` when every char in `s` is a hex digit (0-9 or a-f).
+/// Such short_ids are filtered out by `extract_short_id_candidates` and would
+/// make the resolved-mention test unreliable, so we retry until non-hex.
+fn is_hex_only(s: &str) -> bool {
+    s.chars()
+        .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+/// Create a proposal whose 4-char short_id is guaranteed to contain at least
+/// one non-hex character (so the short_id mention regex picks it up).
+async fn create_proposal_with_non_hex_short_id(harness: &McpTestHarness) -> String {
+    for _ in 0..32 {
+        let created = harness
+            .call_tool(
+                "proposal_create",
+                json!({"title": "Linkage test proposal", "body": "test body"}),
+            )
+            .await
+            .expect("proposal_create should dispatch");
+        assert!(
+            created.get("error").is_none(),
+            "proposal_create returned error: {created}"
+        );
+        let short_id = created
+            .get("short_id")
+            .and_then(|v| v.as_str())
+            .expect("proposal short_id");
+        if !is_hex_only(short_id) {
+            return created
+                .get("id")
+                .and_then(|v| v.as_str())
+                .expect("proposal id")
+                .to_string();
+        }
+    }
+    panic!("could not generate a non-hex short_id after 32 attempts");
+}
+
+/// Build a graduated-proposal fixture: 1 proposal with 2 graduated epics,
+/// each epic carrying memory_refs, and tasks under those epics with their
+/// own memory_refs. Returns the proposal id plus the three notes' permalinks.
+struct GraduatedProposalFixture {
+    project_slug: String,
+    proposal_id: String,
+    proposal_short_id: String,
+    epic_note_permalink: String,
+    task_note_permalink: String,
+    shared_note_permalink: String,
+}
+
+async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> GraduatedProposalFixture {
+    let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
+    let project = project_row.slug();
+
+    // Three notes: one on an epic, one on a task, one shared across both.
+    let epic_note = harness
+        .call_tool(
+            "memory_write",
+            json!({"project": project, "title": "Epic Ref Note", "content": "epic level note", "type": "adr"}),
+        )
+        .await
+        .expect("memory_write epic_note should dispatch");
+    let epic_note_permalink = epic_note["permalink"]
+        .as_str()
+        .expect("epic note permalink")
+        .to_string();
+
+    let task_note = harness
+        .call_tool(
+            "memory_write",
+            json!({"project": project, "title": "Task Ref Note", "content": "task level note", "type": "pitfall"}),
+        )
+        .await
+        .expect("memory_write task_note should dispatch");
+    let task_note_permalink = task_note["permalink"]
+        .as_str()
+        .expect("task note permalink")
+        .to_string();
+
+    let shared_note = harness
+        .call_tool(
+            "memory_write",
+            json!({"project": project, "title": "Shared Ref Note", "content": "shared across epic and task", "type": "reference"}),
+        )
+        .await
+        .expect("memory_write shared_note should dispatch");
+    let shared_note_permalink = shared_note["permalink"]
+        .as_str()
+        .expect("shared note permalink")
+        .to_string();
+
+    // Create a proposal.
+    let proposal_id = create_proposal_with_non_hex_short_id(harness).await;
+
+    // Get the proposal short_id for downstream assertion.
+    let shown_proposal = harness
+        .call_tool("proposal_show", json!({"id": &proposal_id}))
+        .await
+        .expect("proposal_show should dispatch");
+    let proposal_short_id = shown_proposal["proposal"]["short_id"]
+        .as_str()
+        .expect("proposal short_id")
+        .to_string();
+
+    // Create two epics linked to the proposal via `proposal_id`.
+    // Epic 1 carries epic_note + shared_note in its memory_refs.
+    let epic_one = harness
+        .call_tool(
+            "epic_create",
+            json!({
+                "project": project,
+                "title": "Graduated Epic One",
+                "description": "first graduated epic",
+                "memory_refs": [epic_note_permalink, shared_note_permalink],
+                "proposal_id": &proposal_id,
+            }),
+        )
+        .await
+        .expect("epic_create one should dispatch");
+    assert!(
+        epic_one.get("error").is_none(),
+        "epic_create returned error: {epic_one}"
+    );
+    let epic_one_id = epic_one["id"].as_str().expect("epic one id").to_string();
+
+    // Epic 2 has no epic-level memory_refs (just a task-level one below).
+    let epic_two = harness
+        .call_tool(
+            "epic_create",
+            json!({
+                "project": project,
+                "title": "Graduated Epic Two",
+                "description": "second graduated epic",
+                "proposal_id": &proposal_id,
+            }),
+        )
+        .await
+        .expect("epic_create two should dispatch");
+    assert!(
+        epic_two.get("error").is_none(),
+        "epic_create returned error: {epic_two}"
+    );
+    let epic_two_id = epic_two["id"].as_str().expect("epic two id").to_string();
+
+    // Task under epic 1: carries task_note + shared_note (shared also on the epic → dedup check).
+    let task_one = harness
+        .call_tool(
+            "task_create",
+            json!({
+                "project": project,
+                "epic_id": &epic_one_id,
+                "title": "Task with memory refs",
+                "issue_type": "task",
+                "priority": 2,
+                "status": "open",
+                "memory_refs": [task_note_permalink, shared_note_permalink],
+                "acceptance_criteria": ["task has memory refs"],
+            }),
+        )
+        .await
+        .expect("task_create one should dispatch");
+    assert!(
+        task_one.get("error").is_none(),
+        "task_create returned error: {task_one}"
+    );
+
+    // Task under epic 2: references the task_note independently.
+    let _task_two = harness
+        .call_tool(
+            "task_create",
+            json!({
+                "project": project,
+                "epic_id": &epic_two_id,
+                "title": "Second task with memory refs",
+                "issue_type": "task",
+                "priority": 2,
+                "status": "open",
+                "memory_refs": [task_note_permalink],
+                "acceptance_criteria": ["task has memory refs"],
+            }),
+        )
+        .await
+        .expect("task_create two should dispatch");
+
+    GraduatedProposalFixture {
+        project_slug: project,
+        proposal_id,
+        proposal_short_id,
+        epic_note_permalink,
+        task_note_permalink,
+        shared_note_permalink,
+    }
+}
+
+#[tokio::test]
+async fn proposal_show_includes_memory_refs_from_graduated_epics() {
+    let harness = McpTestHarness::new().await;
+    let fixture = build_graduated_proposal_fixture(&harness).await;
+
+    let shown = harness
+        .call_tool("proposal_show", json!({"id": &fixture.proposal_id}))
+        .await
+        .expect("proposal_show should dispatch");
+    assert!(
+        shown.get("error").is_none(),
+        "proposal_show returned error: {shown}"
+    );
+
+    let memory_refs = shown
+        .get("memory_refs")
+        .and_then(|v| v.as_array())
+        .expect("memory_refs should be present and an array");
+    assert!(
+        !memory_refs.is_empty(),
+        "memory_refs should be non-empty for a graduated proposal fixture"
+    );
+
+    // Collect permalinks for assertions.
+    let permalinks: Vec<String> = memory_refs
+        .iter()
+        .filter_map(|r| {
+            r.get("permalink")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .collect();
+
+    // All three expected notes should appear.
+    assert!(
+        permalinks.contains(&fixture.epic_note_permalink),
+        "epic note should be in memory_refs: {permalinks:?}"
+    );
+    assert!(
+        permalinks.contains(&fixture.task_note_permalink),
+        "task note should be in memory_refs: {permalinks:?}"
+    );
+    assert!(
+        permalinks.contains(&fixture.shared_note_permalink),
+        "shared note should be in memory_refs: {permalinks:?}"
+    );
+
+    // No duplicate permalinks (dedup invariant).
+    let unique: std::collections::HashSet<&str> = permalinks.iter().map(|s| s.as_str()).collect();
+    assert_eq!(
+        unique.len(),
+        permalinks.len(),
+        "no duplicate permalinks in memory_refs: {permalinks:?}"
+    );
+
+    // source_entity_type must be "epic" or "task".
+    for r in memory_refs {
+        let entity_type = r
+            .get("source_entity_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            entity_type == "epic" || entity_type == "task",
+            "source_entity_type should be 'epic' or 'task', got {entity_type}"
+        );
+        // Each ref should have all required fields populated.
+        assert!(
+            r.get("title")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            "source title should be non-empty"
+        );
+        assert!(
+            r.get("note_type")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            "note_type should be non-empty"
+        );
+        assert!(
+            r.get("source_short_id")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            "source_short_id should be non-empty"
+        );
+    }
+
+    // Verify the epic-level note has source_entity_type "epic".
+    let epic_note_ref = memory_refs
+        .iter()
+        .find(|r| r.get("permalink").and_then(|v| v.as_str()) == Some(&fixture.epic_note_permalink))
+        .expect("epic note ref should exist");
+    assert_eq!(
+        epic_note_ref["source_entity_type"], "epic",
+        "epic note should have source_entity_type 'epic'"
+    );
+
+    // Verify source_short_id is present and 4 chars.
+    let source_short_id = epic_note_ref["source_short_id"]
+        .as_str()
+        .expect("source_short_id string");
+    assert_eq!(
+        source_short_id.len(),
+        4,
+        "source_short_id should be a 4-char base36 id"
+    );
+}
+
+#[tokio::test]
+async fn memory_task_refs_returns_proposals_through_epics() {
+    let harness = McpTestHarness::new().await;
+    let fixture = build_graduated_proposal_fixture(&harness).await;
+
+    // Query memory_task_refs for the task-level note.
+    // This note is attached to tasks under both graduated epics → the proposal
+    // should be reachable.
+    let refs = harness
+        .call_tool(
+            "memory_task_refs",
+            json!({"project": &fixture.project_slug, "permalink": &fixture.task_note_permalink}),
+        )
+        .await
+        .expect("memory_task_refs should dispatch");
+    assert!(
+        refs.get("error").is_none() || refs["error"].is_null(),
+        "memory_task_refs returned error: {refs}"
+    );
+
+    // Tasks array should be non-empty.
+    let tasks = refs
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .expect("tasks should be an array");
+    assert!(
+        !tasks.is_empty(),
+        "tasks should be non-empty for the task note: {tasks:?}"
+    );
+
+    // Proposals array should contain the graduated proposal.
+    let proposals = refs
+        .get("proposals")
+        .and_then(|v| v.as_array())
+        .expect("proposals should be an array");
+    assert!(
+        !proposals.is_empty(),
+        "proposals should be non-empty: the note's task belongs to a graduated proposal"
+    );
+
+    let found_proposal = proposals
+        .iter()
+        .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(&fixture.proposal_id))
+        .unwrap_or_else(|| {
+            panic!(
+                "graduated proposal {} not found in proposals: {proposals:?}",
+                fixture.proposal_id
+            )
+        });
+
+    // Assert the proposal has the correct short_id, title, and status.
+    assert_eq!(
+        found_proposal["short_id"].as_str().unwrap(),
+        fixture.proposal_short_id,
+        "proposal short_id should match"
+    );
+    assert_eq!(
+        found_proposal["title"].as_str().unwrap(),
+        "Linkage test proposal",
+        "proposal title should match"
+    );
+    assert!(
+        found_proposal
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "proposal status should be non-empty"
+    );
+}
+
+#[tokio::test]
+async fn memory_read_resolves_short_id_mentions() {
+    let harness = McpTestHarness::new().await;
+    let fixture = build_graduated_proposal_fixture(&harness).await;
+
+    // The proposal's short_id is non-hex (guaranteed by the fixture helper).
+    // Write a note whose body contains the proposal short_id as dead prose.
+    // Use a fresh project so the note body mention resolution is clean.
+    let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
+    let project = project_row.slug();
+    let note = harness
+        .call_tool(
+            "memory_write",
+            json!({
+                "project": project,
+                "title": "Note Mentioning Proposal",
+                "content": format!("This pitfall relates to proposal {} which covers the design.", fixture.proposal_short_id),
+                "type": "pitfall",
+            }),
+        )
+        .await
+        .expect("memory_write should dispatch");
+    assert!(
+        note.get("error").is_none() || note["error"].is_null(),
+        "memory_write returned error: {note}"
+    );
+
+    // memory_read should resolve the short_id mention.
+    let read = harness
+        .call_tool(
+            "memory_read",
+            json!({"project": project, "identifier": note["permalink"]}),
+        )
+        .await
+        .expect("memory_read should dispatch");
+    assert!(
+        read.get("error").is_none() || read["error"].is_null(),
+        "memory_read returned error: {read}"
+    );
+
+    let mentions = read
+        .get("resolved_mentions")
+        .and_then(|v| v.as_array())
+        .expect("resolved_mentions should be an array");
+    assert!(
+        !mentions.is_empty(),
+        "resolved_mentions should be non-empty — the note body contains a valid short_id"
+    );
+
+    // Find the mention matching our proposal short_id.
+    let proposal_mention = mentions
+        .iter()
+        .find(|m| m.get("short_id").and_then(|v| v.as_str()) == Some(&fixture.proposal_short_id))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected resolved mention for short_id {} in: {mentions:?}",
+                fixture.proposal_short_id
+            )
+        });
+
+    assert_eq!(
+        proposal_mention["entity_type"].as_str().unwrap(),
+        "proposal",
+        "entity_type should be 'proposal'"
+    );
+    assert!(
+        proposal_mention
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "title should be non-empty"
+    );
+    // permalink should be the proposal's UUID id.
+    assert!(
+        proposal_mention
+            .get("permalink")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "permalink should be non-empty"
+    );
+}
+
+#[tokio::test]
+async fn no_regression_memory_refs_autolink() {
+    // Regression guard: the existing task↔note memory_refs autolink behavior
+    // (memory_task_refs returns tasks whose memory_refs contain the permalink)
+    // must still work. This duplicates the core assertion of
+    // `mcp_memory_task_refs_returns_tasks_for_permalink` but with a fresh
+    // fixture, so a future change that breaks the autolink path fails here too.
+    let harness = McpTestHarness::new().await;
+    let db = harness.db();
+    let (project_row, _dir) = common::create_test_project_with_dir(db).await;
+    let epic = common::create_test_epic(db, &project_row.id).await;
+    let project = project_row.slug();
+
+    let note = harness
+        .call_tool(
+            "memory_write",
+            json!({"project": project, "title": "Autolink Note", "content": "autolink seed", "type": "reference"}),
+        )
+        .await
+        .expect("memory_write should dispatch");
+
+    let task = harness
+        .call_tool(
+            "task_create",
+            json!({
+                "project": project,
+                "epic_id": epic.id,
+                "title": "Autolink Task",
+                "issue_type": "task",
+                "priority": 2,
+                "status": "open",
+                "memory_refs": [note["permalink"]],
+                "acceptance_criteria": ["note attached"],
+            }),
+        )
+        .await
+        .expect("task_create should dispatch");
+    assert!(task.get("error").is_none(), "task_create error: {task}");
+
+    let refs = harness
+        .call_tool(
+            "memory_task_refs",
+            json!({"project": project, "permalink": note["permalink"]}),
+        )
+        .await
+        .expect("memory_task_refs should dispatch");
+    assert!(refs.get("error").is_none() || refs["error"].is_null());
+
+    let tasks = refs["tasks"].as_array().unwrap();
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t["id"] == task["id"] && t["title"] == "Autolink Task"),
+        "autolink should still find the task referencing the note: {tasks:?}"
+    );
+}
+
+#[tokio::test]
+async fn no_regression_memory_search_ranking_notes_only() {
+    // Regression guard: memory_search currently returns only notes. The Wave 1
+    // feature adds proposals to memory_task_refs and proposal_show but must NOT
+    // change memory_search results. This test verifies that:
+    // (a) memory_search with no entity_types filter returns the same notes as
+    //     before, and
+    // (b) every result is a note (has a permalink, note_type, folder — note
+    //     fields that proposals do not have).
+    let harness = McpTestHarness::new().await;
+    let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
+    let project = project_row.slug();
+
+    // Create a proposal (should NOT appear in memory_search).
+    let proposal = harness
+        .call_tool(
+            "proposal_create",
+            json!({"title": "Search Excluded Proposal", "body": "rust rust rust"}),
+        )
+        .await
+        .expect("proposal_create should dispatch");
+    let _proposal_id = proposal["id"].as_str().expect("proposal id").to_string();
+
+    // Create notes that should be searchable.
+    harness
+        .call_tool(
+            "memory_write",
+            json!({"project": project, "title": "Rust Note One", "content": "rust memory test", "type": "reference"}),
+        )
+        .await
+        .expect("memory_write one should dispatch");
+    harness
+        .call_tool(
+            "memory_write",
+            json!({"project": project, "title": "Rust Note Two", "content": "another rust note", "type": "adr"}),
+        )
+        .await
+        .expect("memory_write two should dispatch");
+
+    let searched = harness
+        .call_tool(
+            "memory_search",
+            json!({"project": project, "query": "rust", "limit": 10}),
+        )
+        .await
+        .expect("memory_search should dispatch");
+
+    let results = searched["results"]
+        .as_array()
+        .expect("results should be an array");
+    assert!(results.len() >= 2, "should find both notes: {results:?}");
+
+    // Every result must be a note (not a proposal). Notes have note_type and
+    // folder fields; proposals do not appear here.
+    for r in results {
+        assert!(
+            r.get("note_type").is_some(),
+            "every result should have note_type (it's a note): {r:?}"
+        );
+        assert!(
+            r.get("folder").is_some(),
+            "every result should have folder (it's a note): {r:?}"
+        );
+        // The result should NOT match the proposal title.
+        assert_ne!(
+            r.get("title").and_then(|v| v.as_str()),
+            Some("Search Excluded Proposal"),
+            "proposals must not appear in memory_search results"
+        );
+    }
+}
+
+#[tokio::test]
+async fn orphan_note_count_unchanged_by_proposal_memory_refs() {
+    // Invariant: calling proposal_show must not create any new standalone note
+    // files. The feature is read-only — it walks existing memory_refs but does
+    // not write notes. The orphan-note count should be identical before and
+    // after proposal_show.
+    let harness = McpTestHarness::new().await;
+    let fixture = build_graduated_proposal_fixture(&harness).await;
+    let (project_row, _dir) = common::create_test_project_with_dir(harness.db()).await;
+    let project = project_row.slug();
+
+    // Record orphan count before.
+    let health_before = harness
+        .call_tool("memory_health", json!({"project": project}))
+        .await
+        .expect("memory_health before should dispatch");
+    let orphans_before = health_before["orphan_note_count"]
+        .as_i64()
+        .expect("orphan_note_count should be an integer");
+
+    // Call proposal_show — this walks memory_refs but must not create notes.
+    let _ = harness
+        .call_tool("proposal_show", json!({"id": &fixture.proposal_id}))
+        .await
+        .expect("proposal_show should dispatch");
+
+    // Record orphan count after.
+    let health_after = harness
+        .call_tool("memory_health", json!({"project": project}))
+        .await
+        .expect("memory_health after should dispatch");
+    let orphans_after = health_after["orphan_note_count"]
+        .as_i64()
+        .expect("orphan_note_count should be an integer");
+
+    assert_eq!(
+        orphans_before, orphans_after,
+        "orphan_note_count must not change after proposal_show (read-only feature, no new notes created)"
+    );
+}

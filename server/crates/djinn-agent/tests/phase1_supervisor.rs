@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use djinn_agent::context::AgentContext;
+use djinn_agent::context::{AgentContext, ReconciliationSweepConfig};
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
@@ -94,6 +94,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         mirror: None,
         rpc_registry: None,
         default_project_id: None,
+        reconciliation_sweep: ReconciliationSweepConfig::default(),
     }
 }
 

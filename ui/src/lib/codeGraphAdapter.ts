@@ -16,9 +16,7 @@
  */
 
 import Graph from "graphology";
-import {
-  computeForceLayout,
-} from "@/lib/codeGraphLayouts";
+import { computeForceLayout } from "@/lib/codeGraphLayouts";
 
 export type SnapshotNodeKind = "file" | "folder" | "symbol" | "community";
 
@@ -193,8 +191,7 @@ export function parseSnapshotResponse(value: unknown): SnapshotPayload | null {
             kind === "symbol"
               ? (rawSymbolKind ?? "other")
               : (rawSymbolKind ?? undefined),
-          file_path:
-            typeof n.file_path === "string" ? n.file_path : undefined,
+          file_path: typeof n.file_path === "string" ? n.file_path : undefined,
           pagerank: Number(n.pagerank ?? 0),
           community_id:
             typeof n.community_id === "string" ? n.community_id : undefined,
@@ -219,10 +216,8 @@ export function parseSnapshotResponse(value: unknown): SnapshotPayload | null {
               ? n.cognitive
               : undefined,
           is_test: n.is_test === true,
-          x:
-            typeof n.x === "number" && Number.isFinite(n.x) ? n.x : undefined,
-          y:
-            typeof n.y === "number" && Number.isFinite(n.y) ? n.y : undefined,
+          x: typeof n.x === "number" && Number.isFinite(n.x) ? n.x : undefined,
+          y: typeof n.y === "number" && Number.isFinite(n.y) ? n.y : undefined,
         };
       })
       .filter((n) => n.id.length > 0),
@@ -292,9 +287,7 @@ export function prettifyLabel(raw: string): string {
   const stripped = raw.replace(/`/g, "");
   const tokens = stripped.split(/\s+/);
   const descriptor = tokens[tokens.length - 1] ?? raw;
-  const tail = descriptor
-    .replace(/\(\)\.$/, "()")
-    .replace(/[#.[\]]+$/, "");
+  const tail = descriptor.replace(/\(\)\.$/, "()").replace(/[#.[\]]+$/, "");
   const segments = tail.split("/").filter((s) => s.length > 0);
   return segments.length > 0 ? segments[segments.length - 1] : raw;
 }
@@ -430,6 +423,9 @@ export const COMMUNITY_HULLS_ATTRIBUTE = "communityHulls";
  * - `memberCount` — server-reported member count from a legacy community entry
  *   when present, otherwise the count of visible nodes carrying this
  *   `community_id`.
+ * - `memberIds` — visible graph node ids carrying this `community_id`, used by
+ *   the canvas to derive a screen-space hull from member positions without
+ *   turning the community itself into a selectable Sigma node.
  * - `seed` — deterministic hash of the id, usable by the canvas as a PRNG
  *   seed for hull bounds / opacity jitter without a separate RNG.
  */
@@ -439,6 +435,7 @@ export interface CommunityHull {
   keywords: string[] | undefined;
   color: string;
   memberCount: number;
+  memberIds: string[];
   seed: number;
 }
 
@@ -481,7 +478,7 @@ export function deriveCommunityHulls(
     if (entry) {
       entry.ids.add(node.id);
     } else {
-      visibleMembers.set(cid, { ids: new Set(node.id) });
+      visibleMembers.set(cid, { ids: new Set([node.id]) });
     }
   }
 
@@ -494,6 +491,7 @@ export function deriveCommunityHulls(
       keywords: legacy ? normalizeKeywords(legacy.keywords) : undefined,
       color: colorForCommunity(cid),
       memberCount: legacy?.member_count ?? entry.ids.size,
+      memberIds: Array.from(entry.ids).sort((a, b) => a.localeCompare(b, "en")),
       seed: fnv1a(cid),
     });
   }
@@ -719,9 +717,7 @@ export function buildGraphFromSnapshot(
   // derivation below. This keeps the adapter wire-compatible — the
   // server may still ship `kind: "community"` entries in old snapshots —
   // while ensuring no community node ever becomes a clickable Sigma node.
-  const visibleNodes = snapshot.nodes.filter(
-    (n) => n.kind !== "community",
-  );
+  const visibleNodes = snapshot.nodes.filter((n) => n.kind !== "community");
 
   // Derive hull metadata from visible members + legacy community entries
   // and stash it on the graph so the canvas can render background regions.
@@ -753,13 +749,7 @@ export function buildGraphFromSnapshot(
     for (const node of nodes) {
       // hasPrecomputedCoordinates proved node.x / node.y are finite
       // numbers, so the non-null assertions are safe at runtime.
-      addNode(
-        graph,
-        node,
-        { x: node.x!, y: node.y! },
-        maxRank,
-        nodeCount,
-      );
+      addNode(graph, node, { x: node.x!, y: node.y! }, maxRank, nodeCount);
     }
     addEdgesFromSnapshot(graph, snapshot, nodeCount, {
       dropSelfLoops,
@@ -818,7 +808,9 @@ function addEdgesFromSnapshot(
     const sourceWorkspace = nodeMap.get(edge.from)?.workspace;
     const targetWorkspace = nodeMap.get(edge.to)?.workspace;
     const isCrossWorkspace =
-      !!sourceWorkspace && !!targetWorkspace && sourceWorkspace !== targetWorkspace;
+      !!sourceWorkspace &&
+      !!targetWorkspace &&
+      sourceWorkspace !== targetWorkspace;
     const crossWorkspaceColor = isCrossWorkspace ? "#facc15" : undefined;
     graph.addEdge(edge.from, edge.to, {
       kind: edge.kind,
@@ -828,7 +820,11 @@ function addEdgesFromSnapshot(
       targetWorkspace,
       isCrossWorkspace,
       crossWorkspace: isCrossWorkspace,
-      size: baseSize * style.sizeMultiplier * confidenceFactor * (isCrossWorkspace ? 2.4 : 1),
+      size:
+        baseSize *
+        style.sizeMultiplier *
+        confidenceFactor *
+        (isCrossWorkspace ? 2.4 : 1),
       color: crossWorkspaceColor ?? style.color,
       type: "curved",
       curvature: (isCrossWorkspace ? 0.28 : 0.12) + 0.04,
@@ -888,7 +884,9 @@ function addNode(
   if (graph.hasNode(node.id)) return;
   const normalized = node.pagerank / maxRank;
   const size = scaledNodeSize(node, normalized, nodeCount);
-  const workspaceColor = node.workspace ? colorForWorkspace(node.workspace) : undefined;
+  const workspaceColor = node.workspace
+    ? colorForWorkspace(node.workspace)
+    : undefined;
   const primaryLabel =
     node.workspace && node.workspace_context === true
       ? `${node.label} · ${node.workspace}`
@@ -911,7 +909,11 @@ function addNode(
     workspaceColor,
     workspaceBadge: node.workspace ? workspaceBadge(node.workspace) : undefined,
     borderColor: workspaceColor,
-    borderSize: workspaceColor ? (node.workspace_context === true ? 1 : 1.5) : undefined,
+    borderSize: workspaceColor
+      ? node.workspace_context === true
+        ? 1
+        : 1.5
+      : undefined,
     haloed: workspaceColor ? true : undefined,
     isWorkspaceContext: node.workspace_context === true,
     /**
@@ -986,6 +988,123 @@ function densityScale(base: number, nodeCount: number): number {
   if (nodeCount > 5000) return Math.max(2, base * 0.65);
   if (nodeCount > 1000) return Math.max(2.5, base * 0.8);
   return base;
+}
+
+// ── LOD tiers (continuous semantic zoom) ──────────────────────────────────
+
+/**
+ * Three LOD tiers driven by Sigma camera zoom ratio (continuous, no
+ * mode toggle). Each tier controls which node kinds are visible and
+ * what detail level is rendered:
+ *
+ *   far  — structural skeleton: crates / folders / files + community
+ *          hull backgrounds. All symbol nodes hidden.
+ *   mid  — structural + top-level symbols (class, struct, interface,
+ *          trait, enum). Low-priority symbols hidden.
+ *   close — everything visible including members, labels, and details.
+ *
+ * Transitions between tiers are approximately 200ms (the canvas
+ * applies a CSS transition on the Sigma container; the discrete
+ * tier change itself is instant but the camera zoom animation that
+ * triggers it typically lasts 200–400ms).
+ */
+export type LodTier = "far" | "mid" | "close";
+
+/**
+ * Sigma camera ratio thresholds for LOD tier boundaries.
+ *
+ * Sigma's `getCamera().ratio` semantics:
+ *   - ratio > 1 → zoomed out (far view)
+ *   - ratio = 1 → fit-to-view
+ *   - ratio < 1 → zoomed in (close view)
+ */
+export const LOD_FAR_RATIO = 2.0;
+export const LOD_MID_RATIO = 0.4;
+
+/**
+ * Derive the LOD tier from the current Sigma camera zoom ratio.
+ * Pure, stateless, O(1) — called on every `afterRender` frame.
+ */
+export function lodTierForZoom(cameraRatio: number): LodTier {
+  if (!Number.isFinite(cameraRatio)) return "close";
+  if (cameraRatio >= LOD_FAR_RATIO) return "far";
+  if (cameraRatio >= LOD_MID_RATIO) return "mid";
+  return "close";
+}
+
+/**
+ * Symbol kinds considered "low-priority" at mid LOD — they are hidden
+ * when the camera is between mid and far thresholds so the canvas
+ * stays legible. At close LOD they become visible again.
+ */
+const MID_TIER_HIDDEN_SYMBOL_KINDS = new Set([
+  "variable",
+  "const",
+  "static",
+  "property",
+  "field",
+  "import",
+  "other",
+]);
+
+/**
+ * Should a symbol node with the given `symbol_kind` be visible at
+ * the mid LOD tier? Returns `true` for structural / top-level symbols
+ * (class, struct, interface, trait, enum, function, method,
+ * constructor, impl, type) and `false` for low-priority symbols.
+ */
+export function isSymbolVisibleAtMidTier(
+  symbolKind: string | undefined,
+): boolean {
+  if (!symbolKind) return true;
+  return !MID_TIER_HIDDEN_SYMBOL_KINDS.has(symbolKind);
+}
+
+// ── Viewport culling ──────────────────────────────────────────────────────
+
+/**
+ * Viewport rectangle in graph-coordinate space. Computed from the
+ * Sigma camera state + container dimensions on every `afterRender`
+ * frame. Used by the nodeReducer for viewport culling on large
+ * graphs (>~8000 nodes).
+ */
+export interface ViewportBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+/**
+ * Node-count threshold above which viewport culling activates.
+ * Below this, all nodes are considered in-viewport (no culling).
+ */
+export const VIEWPORT_CULLING_THRESHOLD = 8_000;
+
+/**
+ * Margin (in graph-coordinate units) added around the viewport
+ * bounds for culling. Nodes within this margin are kept visible
+ * even if they're just outside the viewport, so pan/scroll feels
+ * smooth without popping.
+ */
+export const VIEWPORT_CULLING_MARGIN = 200;
+
+/**
+ * Check whether a node at (x, y) falls inside the viewport bounds
+ * (with margin). Returns `true` if the node should be visible.
+ */
+export function isInViewport(
+  x: number,
+  y: number,
+  bounds: ViewportBounds,
+): boolean {
+  const m = VIEWPORT_CULLING_MARGIN;
+  return (
+    x >= bounds.minX - m &&
+    x <= bounds.maxX + m &&
+    y >= bounds.minY - m &&
+    y <= bounds.maxY + m
+  );
 }
 
 // ── Double-click helper ───────────────────────────────────────────────────
