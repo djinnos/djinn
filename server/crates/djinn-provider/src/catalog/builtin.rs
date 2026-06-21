@@ -7,7 +7,35 @@
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
+
 use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities};
+
+/// Whether a provider's credential is a personal **subscription** (a consumer
+/// coding/token plan or vendor consumer sub) or a fungible **API key**.
+///
+/// This distinction is load-bearing: subscription credentials are tied to a
+/// single person's plan and sharing one across users violates the provider's
+/// ToS (and risks an account ban). Subscriptions are therefore enforced to be
+/// per-user-only and can never be stored as an org-shared fallback. API keys
+/// retain the org-shared capability.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialClass {
+    /// A fungible, billable API key (Anthropic, OpenAI API key, Bedrock, …).
+    /// May be stored org-shared.
+    ApiKey,
+    /// A personal coding/token plan or consumer vendor subscription. Must be
+    /// stored private to the owning user; never org-shared.
+    Subscription,
+}
+
+impl CredentialClass {
+    /// True for personal-subscription credentials (must be per-user-only).
+    pub fn is_subscription(self) -> bool {
+        matches!(self, CredentialClass::Subscription)
+    }
+}
 
 /// How a builtin provider's API-key auth header is shaped.
 ///
@@ -93,6 +121,10 @@ pub struct BuiltinProvider {
     pub streaming: bool,
     /// Default `max_tokens` to send in requests (Anthropic requires one).
     pub max_tokens_default: Option<u32>,
+    /// Whether this provider's credential is a personal subscription or a
+    /// fungible API key. Set explicitly per entry — drives per-user-only
+    /// enforcement in the credential-set path.
+    pub credential_class: CredentialClass,
 }
 
 impl BuiltinProvider {
@@ -104,6 +136,11 @@ impl BuiltinProvider {
     /// Build this provider's [`AuthMethod`] from the given API key.
     pub fn auth_method(&self, api_key: String) -> AuthMethod {
         self.auth_shape.to_auth_method(api_key)
+    }
+
+    /// Whether this provider's credential is a personal subscription.
+    pub fn is_subscription(&self) -> bool {
+        self.credential_class.is_subscription()
     }
 
     /// Build this provider's [`ProviderCapabilities`].
@@ -163,6 +200,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Header("x-api-key"),
         streaming: true,
         max_tokens_default: Some(64_000),
+        credential_class: CredentialClass::ApiKey,
     },
     BuiltinProvider {
         id: "openai",
@@ -176,6 +214,10 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Bearer,
         streaming: true,
         max_tokens_default: None,
+        // The bare OpenAI API key is a fungible billable key. The personal
+        // ChatGPT/Codex OAuth path is the separate `chatgpt_codex` entry below
+        // (a subscription), which merges into `openai` in the catalog.
+        credential_class: CredentialClass::ApiKey,
     },
     BuiltinProvider {
         id: "google",
@@ -189,6 +231,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Header("x-goog-api-key"),
         streaming: true,
         max_tokens_default: None,
+        credential_class: CredentialClass::ApiKey,
     },
     // OpenAI-compatible. Already present in models.dev (`fireworks-ai`) with the
     // right `api` base_url + model list; listed here only so the env-var
@@ -206,6 +249,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Bearer,
         streaming: true,
         max_tokens_default: None,
+        credential_class: CredentialClass::ApiKey,
     },
     // Anthropic-compatible. Already present in models.dev (`minimax-coding-plan`)
     // with the right `api` base_url (https://api.minimax.io/anthropic/v1) + model
@@ -224,6 +268,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Bearer,
         streaming: true,
         max_tokens_default: Some(64_000),
+        credential_class: CredentialClass::Subscription,
     },
     // OpenAI-compatible. Models.dev-native (`xiaomi-token-plan-sgp`, "Xiaomi MiMo
     // Token Plan (SGP)") with api `https://token-plan-sgp.xiaomimimo.com/v1` (npm
@@ -245,6 +290,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Bearer,
         streaming: true,
         max_tokens_default: None,
+        credential_class: CredentialClass::Subscription,
     },
     // Anthropic-compatible. Models.dev-native (`kimi-for-coding`, "Kimi for
     // Coding") with api `https://api.kimi.com/coding/v1` (npm @ai-sdk/anthropic) +
@@ -266,6 +312,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Bearer,
         streaming: true,
         max_tokens_default: Some(64_000),
+        credential_class: CredentialClass::Subscription,
     },
     // OpenAI-compatible. Present in models.dev (`opencode`, "OpenCode Zen") with
     // base_url https://opencode.ai/zen/v1 + model list (including the rotating
@@ -285,6 +332,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Bearer,
         streaming: true,
         max_tokens_default: None,
+        credential_class: CredentialClass::Subscription,
     },
     // OpenAI-compatible. Present in models.dev (`zai-coding-plan`, "Z.AI Coding
     // Plan") with base_url https://api.z.ai/api/coding/paas/v4 + GLM model list;
@@ -302,6 +350,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Bearer,
         streaming: true,
         max_tokens_default: None,
+        credential_class: CredentialClass::Subscription,
     },
     // OAuth-only provider whose capabilities are folded into "openai" in the
     // catalog.  Internally still a distinct provider for dispatch & models.
@@ -317,6 +366,8 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Bearer,
         streaming: true,
         max_tokens_default: None,
+        // Personal ChatGPT/Codex OAuth subscription — never org-shareable.
+        credential_class: CredentialClass::Subscription,
     },
     BuiltinProvider {
         id: "githubcopilot",
@@ -330,6 +381,8 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Bearer,
         streaming: true,
         max_tokens_default: None,
+        // Personal GitHub Copilot OAuth subscription — never org-shareable.
+        credential_class: CredentialClass::Subscription,
     },
     BuiltinProvider {
         id: "github_app",
@@ -343,6 +396,8 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Bearer,
         streaming: true,
         max_tokens_default: None,
+        // GitHub App is auth-only infra (not a personal model subscription).
+        credential_class: CredentialClass::ApiKey,
     },
     BuiltinProvider {
         id: "gcp_vertex_ai",
@@ -356,6 +411,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Bearer,
         streaming: true,
         max_tokens_default: None,
+        credential_class: CredentialClass::ApiKey,
     },
     BuiltinProvider {
         id: "aws_bedrock",
@@ -369,6 +425,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Bearer,
         streaming: true,
         max_tokens_default: None,
+        credential_class: CredentialClass::ApiKey,
     },
     BuiltinProvider {
         id: "azure_openai",
@@ -382,6 +439,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         auth_shape: AuthShape::Bearer,
         streaming: true,
         max_tokens_default: None,
+        credential_class: CredentialClass::ApiKey,
     },
 ];
 
@@ -432,6 +490,80 @@ pub fn is_builtin_provider(provider_id: &str) -> bool {
 /// Auth-only providers should be excluded from model provider catalogs.
 pub fn is_auth_only_provider(provider_id: &str) -> bool {
     find_builtin_provider(provider_id).is_some_and(|p| p.auth_only)
+}
+
+/// Classify a provider id as a personal [`CredentialClass::Subscription`] or a
+/// fungible [`CredentialClass::ApiKey`].
+///
+/// Resolution order:
+/// 1. If the id maps to a built-in provider, use its explicit
+///    [`BuiltinProvider::credential_class`] (the authoritative source — we set
+///    it per-entry rather than guess).
+/// 2. Otherwise (models.dev-native providers Djinn doesn't hand-register, e.g.
+///    the regional `xiaomi-token-plan-*`, `alibaba-*-plan`, `tencent-*-plan`
+///    variants), fall back to an id-pattern rule so personal coding/token
+///    plans surfaced live from the catalog are still treated as subscriptions.
+///
+/// Anything not matched is an API key — the safe default for the long tail of
+/// generic OpenAI-compatible providers.
+pub fn classify_provider(provider_id: &str) -> CredentialClass {
+    if let Some(p) = find_builtin_provider(provider_id) {
+        return p.credential_class;
+    }
+    if is_subscription_id(provider_id) {
+        CredentialClass::Subscription
+    } else {
+        CredentialClass::ApiKey
+    }
+}
+
+/// True when `provider_id` is a personal subscription. Convenience wrapper over
+/// [`classify_provider`].
+pub fn is_subscription_provider(provider_id: &str) -> bool {
+    classify_provider(provider_id).is_subscription()
+}
+
+/// Id-pattern rule for personal coding/token plans and consumer vendor subs
+/// that are **not** hand-registered as built-ins (models.dev-native only).
+///
+/// This is the fallback arm of [`classify_provider`]; hand-registered builtins
+/// carry an explicit class and never reach here.
+fn is_subscription_id(provider_id: &str) -> bool {
+    let id = provider_id.to_ascii_lowercase();
+
+    // Coding/token-plan suffixes used across vendors' consumer plans.
+    if id.contains("-coding-plan") || id.contains("-token-plan") || id.contains("-for-coding") {
+        return true;
+    }
+
+    // Known consumer-subscription vendor prefixes / exact ids. Regional and
+    // plan-tier variants (e.g. `xiaomi-token-plan-cn`, `zhipuai-coding-plan`)
+    // are covered either here or by the suffix rule above.
+    const SUBSCRIPTION_PREFIXES: &[&str] = &[
+        "xiaomi",
+        "moonshotai",
+        "alibaba",
+        "tencent",
+        "stepfun",
+        "kuae-cloud",
+        "umans-ai",
+    ];
+    if SUBSCRIPTION_PREFIXES
+        .iter()
+        .any(|prefix| id.starts_with(prefix))
+    {
+        return true;
+    }
+
+    const SUBSCRIPTION_IDS: &[&str] = &[
+        "zai",
+        "zhipuai",
+        "kimi-for-coding",
+        "minimax-coding-plan",
+        "opencode",
+        "opencode-go",
+    ];
+    SUBSCRIPTION_IDS.iter().any(|exact| id == *exact)
 }
 
 /// Strip non-alphanumeric chars and lowercase for fuzzy ID matching.
@@ -486,4 +618,85 @@ pub fn is_oauth_key_present(oauth_keys: &[String], credential_key_names: &HashSe
         // not stored tokens, so this key is intentionally not recognised.
         _ => false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_subscriptions_classified_explicitly() {
+        for id in [
+            "minimax-coding-plan",
+            "xiaomi-token-plan-sgp",
+            "kimi-for-coding",
+            "opencode",
+            "zai-coding-plan",
+            "chatgpt_codex",
+            "githubcopilot",
+        ] {
+            assert!(
+                is_subscription_provider(id),
+                "{id} should classify as a subscription"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_api_keys_classified_explicitly() {
+        for id in [
+            "anthropic",
+            "openai",
+            "google",
+            "fireworks-ai",
+            "aws_bedrock",
+            "azure_openai",
+            "gcp_vertex_ai",
+            "github_app",
+        ] {
+            assert!(
+                !is_subscription_provider(id),
+                "{id} should classify as an api_key"
+            );
+        }
+    }
+
+    #[test]
+    fn models_dev_native_subscriptions_via_id_fallback() {
+        // Not hand-registered as builtins — must match the id-pattern rule.
+        for id in [
+            "xiaomi-token-plan-cn",
+            "xiaomi-token-plan-ams",
+            "zhipuai-coding-plan",
+            "alibaba-qwen-coding-plan",
+            "tencent-hunyuan-coding-plan",
+            "stepfun-ai",
+            "kuae-cloud-coding-plan",
+            "umans-ai-coding-plan",
+            "moonshotai-coding-plan",
+            "zai",
+            "zhipuai",
+            "opencode-go",
+        ] {
+            assert!(
+                is_subscription_provider(id),
+                "{id} should classify as a subscription via the id fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_long_tail_defaults_to_api_key() {
+        for id in [
+            "deepseek",
+            "some-random-openai-compatible",
+            "groq",
+            "mistral",
+        ] {
+            assert!(
+                !is_subscription_provider(id),
+                "{id} should default to api_key"
+            );
+        }
+    }
 }

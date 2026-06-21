@@ -111,6 +111,30 @@ impl DjinnMcpServer {
             });
         }
 
+        // Personal subscriptions (coding/token plans, ChatGPT/Codex OAuth, and
+        // consumer vendor subs) are tied to one person's plan. Sharing a single
+        // subscription across users violates the provider's ToS and risks an
+        // account ban, so subscriptions are per-user-only: reject any attempt to
+        // store one as the org-shared (`owner_user_id = NULL`) fallback. API-key
+        // providers keep the org-shared capability.
+        let is_subscription =
+            djinn_provider::catalog::builtin::is_subscription_provider(&input.provider_id);
+        if is_subscription && input.org_shared {
+            return Json(CredentialSetResponse {
+                ok: false,
+                success: false,
+                id: String::new(),
+                key_name: input.key_name,
+                error: Some(format!(
+                    "provider '{}' is a personal subscription and cannot be stored \
+                     org-shared: subscriptions are tied to one user's plan (sharing \
+                     them across users violates the provider's terms of service). \
+                     Connect it per-user instead (org_shared = false).",
+                    input.provider_id
+                )),
+            });
+        }
+
         let repo = CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
 
         // `org_shared` is the explicit admin path: write an org-shared
@@ -118,6 +142,10 @@ impl DjinnMcpServer {
         // Otherwise `set()` stamps the credential private to the acting user
         // (read from `SESSION_USER_ID`); with no user context this also yields
         // an org-shared credential (local/single-user dev).
+        //
+        // Subscriptions additionally must never fall through to an org-shared
+        // (`owner_user_id = NULL`) write even when no user context resolves, so
+        // they always take the user-stamped branch below.
         let result = if input.org_shared {
             repo.set_with_owner(&input.provider_id, &input.key_name, &input.api_key, None)
                 .await
@@ -142,6 +170,23 @@ impl DjinnMcpServer {
                     });
                 }
             };
+            // A subscription with no resolvable user would land as an org-shared
+            // (`owner_user_id = NULL`) row — the exact ToS-violating state we're
+            // closing. Refuse rather than silently downgrade to a shared write.
+            if is_subscription && effective.is_none() {
+                return Json(CredentialSetResponse {
+                    ok: false,
+                    success: false,
+                    id: String::new(),
+                    key_name: input.key_name,
+                    error: Some(format!(
+                        "provider '{}' is a personal subscription and requires an \
+                         authenticated user to own the credential; no acting user \
+                         could be resolved.",
+                        input.provider_id
+                    )),
+                });
+            }
             repo.set_with_owner(
                 &input.provider_id,
                 &input.key_name,
