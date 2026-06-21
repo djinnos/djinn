@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// (`lead` is a human role with no model; dispatch fallbacks treat it as
 /// `plan`.) Persisted as a single JSON-object TEXT column
-/// (`user_settings.model_lanes`, migration 76). An all-empty `ModelLanes`
+/// (`user_settings.model_lanes`, migration 77). An all-empty `ModelLanes`
 /// reads back as `None` on `UserSettings.lanes` → global fallback.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelLanes {
@@ -100,7 +100,7 @@ pub struct UserSettings {
     /// Per-user, per-ROLE ordered model selection ("lanes"). `None` = no
     /// explicit selection → callers fall back to the global deployment model
     /// list. Persisted as a JSON-object TEXT column (`user_settings.model_lanes`,
-    /// migration 76).
+    /// migration 77).
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub lanes: Option<ModelLanes>,
     /// Per-user, per-model concurrency caps (`{ "provider/model": cap }`). The
