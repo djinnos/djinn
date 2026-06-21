@@ -11,7 +11,7 @@ use super::{
     MemoryBrokenLinksResponse, MemoryBuildContextResponse, MemoryExtractedAuditResponse,
     MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse, MemoryOrphansResponse,
     MemorySearchResponse, MemorySearchResultItem, OrphansParams, ReadParams, ResolvedMention,
-    SearchParams, note_to_view,
+    SearchParams, note_to_view, parse_task_ref_item, parse_proposal_ref_item,
 };
 
 fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
@@ -218,6 +218,24 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
     server.record_memory_read(&note.id).await;
 
     let mut response = MemoryNoteResponse::from_note(&note);
+
+    // Surface task refs and reachable proposals for this note
+    if let Some(ref permalink) = response.permalink {
+        response.tasks = repo
+            .task_refs(permalink)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(parse_task_ref_item)
+            .collect();
+        response.proposals = repo
+            .proposal_refs(permalink)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(parse_proposal_ref_item)
+            .collect();
+    }
 
     // Resolve short_id mentions in note body
     if let Some(ref content) = response.content {

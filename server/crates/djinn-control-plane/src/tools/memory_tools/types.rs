@@ -392,6 +392,12 @@ pub struct MemoryNoteResponse {
     /// Short_id mentions found in note body, resolved to entities.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolved_mentions: Vec<ResolvedMention>,
+    /// Tasks whose memory_refs contain this note's permalink.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<MemoryTaskRefItem>,
+    /// Proposals reachable through this note's tasks/epics (via proposal_epics).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<MemoryProposalRefItem>,
     pub error: Option<String>,
 }
 
@@ -632,6 +638,8 @@ impl MemoryNoteResponse {
             last_accessed: Some(note.last_accessed.clone()),
             deduplicated,
             resolved_mentions: vec![],
+            tasks: vec![],
+            proposals: vec![],
             error: None,
         }
     }
@@ -654,6 +662,8 @@ impl MemoryNoteResponse {
             last_accessed: None,
             deduplicated: false,
             resolved_mentions: vec![],
+            tasks: vec![],
+            proposals: vec![],
             error: Some(error),
         }
     }
