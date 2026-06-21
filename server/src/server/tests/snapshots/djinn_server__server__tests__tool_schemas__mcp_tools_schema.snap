@@ -6603,6 +6603,52 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "MemoryProposalRefItem": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "status"
+          ],
+          "type": "object"
+        },
+        "MemoryTaskRefItem": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "status"
+          ],
+          "type": "object"
+        },
         "ResolvedMention": {
           "properties": {
             "entity_type": {
@@ -6672,6 +6718,13 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "proposals": {
+          "description": "Proposals reachable through this note's tasks/epics (via proposal_epics).",
+          "items": {
+            "$ref": "#/$defs/MemoryProposalRefItem"
+          },
+          "type": "array"
+        },
         "resolved_mentions": {
           "description": "Short_id mentions found in note body, resolved to entities.",
           "items": {
@@ -6692,6 +6745,13 @@ expression: signatures
             "type": "string"
           },
           "nullable": true,
+          "type": "array"
+        },
+        "tasks": {
+          "description": "Tasks whose memory_refs contain this note's permalink.",
+          "items": {
+            "$ref": "#/$defs/MemoryTaskRefItem"
+          },
           "type": "array"
         },
         "title": {
@@ -7355,6 +7415,52 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "MemoryProposalRefItem": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "status"
+          ],
+          "type": "object"
+        },
+        "MemoryTaskRefItem": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "status"
+          ],
+          "type": "object"
+        },
         "ResolvedMention": {
           "properties": {
             "entity_type": {
@@ -7424,6 +7530,13 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "proposals": {
+          "description": "Proposals reachable through this note's tasks/epics (via proposal_epics).",
+          "items": {
+            "$ref": "#/$defs/MemoryProposalRefItem"
+          },
+          "type": "array"
+        },
         "resolved_mentions": {
           "description": "Short_id mentions found in note body, resolved to entities.",
           "items": {
@@ -7444,6 +7557,13 @@ expression: signatures
             "type": "string"
           },
           "nullable": true,
+          "type": "array"
+        },
+        "tasks": {
+          "description": "Tasks whose memory_refs contain this note's permalink.",
+          "items": {
+            "$ref": "#/$defs/MemoryTaskRefItem"
+          },
           "type": "array"
         },
         "title": {
@@ -7564,6 +7684,52 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "MemoryProposalRefItem": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "status"
+          ],
+          "type": "object"
+        },
+        "MemoryTaskRefItem": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "status"
+          ],
+          "type": "object"
+        },
         "ResolvedMention": {
           "properties": {
             "entity_type": {
@@ -7633,6 +7799,13 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "proposals": {
+          "description": "Proposals reachable through this note's tasks/epics (via proposal_epics).",
+          "items": {
+            "$ref": "#/$defs/MemoryProposalRefItem"
+          },
+          "type": "array"
+        },
         "resolved_mentions": {
           "description": "Short_id mentions found in note body, resolved to entities.",
           "items": {
@@ -7653,6 +7826,13 @@ expression: signatures
             "type": "string"
           },
           "nullable": true,
+          "type": "array"
+        },
+        "tasks": {
+          "description": "Tasks whose memory_refs contain this note's permalink.",
+          "items": {
+            "$ref": "#/$defs/MemoryTaskRefItem"
+          },
           "type": "array"
         },
         "title": {
@@ -8343,6 +8523,52 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "MemoryProposalRefItem": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "status"
+          ],
+          "type": "object"
+        },
+        "MemoryTaskRefItem": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "status"
+          ],
+          "type": "object"
+        },
         "ResolvedMention": {
           "properties": {
             "entity_type": {
@@ -8412,6 +8638,13 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "proposals": {
+          "description": "Proposals reachable through this note's tasks/epics (via proposal_epics).",
+          "items": {
+            "$ref": "#/$defs/MemoryProposalRefItem"
+          },
+          "type": "array"
+        },
         "resolved_mentions": {
           "description": "Short_id mentions found in note body, resolved to entities.",
           "items": {
@@ -8432,6 +8665,13 @@ expression: signatures
             "type": "string"
           },
           "nullable": true,
+          "type": "array"
+        },
+        "tasks": {
+          "description": "Tasks whose memory_refs contain this note's permalink.",
+          "items": {
+            "$ref": "#/$defs/MemoryTaskRefItem"
+          },
           "type": "array"
         },
         "title": {
