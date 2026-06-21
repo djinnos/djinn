@@ -815,7 +815,7 @@ pub(in crate::actors::coordinator) fn compute_ci_failure_fingerprint(
 /// Walk activity entries in reverse chronological order and count how many
 /// consecutive entries have a fingerprint matching `current_fp`.
 /// Stops at the first different fingerprint.
-fn count_consecutive_identical(
+pub(in crate::actors::coordinator) fn count_consecutive_identical(
     entries: &[djinn_core::models::ActivityEntry],
     current_fp: &str,
 ) -> u32 {
@@ -882,7 +882,7 @@ pub(in crate::actors::coordinator) fn detect_scope_inversion(
 /// - `server/crates/<crate-name>/src/...` → `<crate-name>`
 /// - `crates/<crate-name>/src/...` → `<crate-name>`
 /// - Paths without `crates/` return `None`.
-fn extract_crate_name(path: &str) -> Option<String> {
+pub(in crate::actors::coordinator) fn extract_crate_name(path: &str) -> Option<String> {
     let parts: Vec<&str> = path.split('/').collect();
     for i in 0..parts.len().saturating_sub(1) {
         if parts[i] == "crates" {
@@ -893,7 +893,7 @@ fn extract_crate_name(path: &str) -> Option<String> {
 }
 
 /// Extract crate names from a list of file paths, deduplicated and sorted.
-fn extract_crate_names(paths: &[String]) -> Vec<String> {
+pub(in crate::actors::coordinator) fn extract_crate_names(paths: &[String]) -> Vec<String> {
     let mut crates: Vec<String> = paths.iter().filter_map(|p| extract_crate_name(p)).collect();
     crates.sort();
     crates.dedup();
@@ -905,7 +905,9 @@ fn extract_crate_names(paths: &[String]) -> Vec<String> {
 /// - Rust compiler error locations: `--> path/to/file.rs:line:col`
 /// - File paths in "Failed step:" or "Failed job:" names that contain crate paths
 /// - Any path segment containing `crates/`
-fn extract_crate_names_from_sections(sections: &[String]) -> Vec<String> {
+pub(in crate::actors::coordinator) fn extract_crate_names_from_sections(
+    sections: &[String],
+) -> Vec<String> {
     let mut crates = std::collections::HashSet::new();
     for section in sections {
         // Look for `--> path/to/file.rs:line:col` pattern (Rust compiler errors)

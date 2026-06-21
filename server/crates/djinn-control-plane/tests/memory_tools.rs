@@ -1158,10 +1158,7 @@ async fn memory_read_surfaces_tasks_and_proposals_for_note_under_graduated_propo
 
     // Call memory_read for this note.
     let resp = harness
-        .call_tool(
-            "memory_read",
-            json!({"identifier": permalink}),
-        )
+        .call_tool("memory_read", json!({"identifier": permalink}))
         .await
         .expect("memory_read should dispatch");
     assert!(
@@ -1170,9 +1167,7 @@ async fn memory_read_surfaces_tasks_and_proposals_for_note_under_graduated_propo
     );
 
     // Assert tasks array is non-empty.
-    let tasks = resp["tasks"]
-        .as_array()
-        .expect("tasks should be an array");
+    let tasks = resp["tasks"].as_array().expect("tasks should be an array");
     assert!(
         !tasks.is_empty(),
         "memory_read should surface tasks referencing this note"
@@ -1186,9 +1181,9 @@ async fn memory_read_surfaces_tasks_and_proposals_for_note_under_graduated_propo
         !proposals.is_empty(),
         "memory_read should surface proposals reachable through tasks/epics"
     );
-    let found = proposals.iter().any(|p| {
-        p["short_id"].as_str() == Some(&fixture.proposal_short_id)
-    });
+    let found = proposals
+        .iter()
+        .any(|p| p["short_id"].as_str() == Some(&fixture.proposal_short_id));
     assert!(
         found,
         "graduated proposal {} should appear in memory_read proposals",
@@ -1317,9 +1312,9 @@ async fn memory_read_regression_memory_task_refs_behavior_unchanged() {
         !proposals.is_empty(),
         "memory_task_refs should still return proposals reachable through tasks/epics"
     );
-    let found = proposals.iter().any(|p| {
-        p.get("id").and_then(|v| v.as_str()) == Some(&fixture.proposal_id)
-    });
+    let found = proposals
+        .iter()
+        .any(|p| p.get("id").and_then(|v| v.as_str()) == Some(&fixture.proposal_id));
     assert!(
         found,
         "graduated proposal {} should still appear in memory_task_refs proposals",
