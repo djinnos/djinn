@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CONTAINMENT_EDGE_KINDS,
   DEFAULT_DOI_REVEAL_COUNT,
   DEFAULT_FOCUS_DIRECTION,
   EDGE_KINDS,
@@ -164,6 +165,23 @@ describe("codeGraphStore", () => {
       expect(useCodeGraphStore.getState().edgeKindFilters.Writes).toBe(false);
       useCodeGraphStore.getState().setEdgeKindEnabled("Writes", true);
       expect(useCodeGraphStore.getState().edgeKindFilters.Writes).toBe(true);
+    });
+
+    it("toggleEdgeKind is a no-op for containment edge kinds", () => {
+      for (const kind of CONTAINMENT_EDGE_KINDS) {
+        useCodeGraphStore.getState().toggleEdgeKind(kind);
+        // The filter map may not even have an entry, but toggling
+        // must NOT create or flip one to true.
+        const val = useCodeGraphStore.getState().edgeKindFilters[kind];
+        expect(val).toBeFalsy();
+      }
+    });
+
+    it("setEdgeKindEnabled is a no-op for containment edge kinds", () => {
+      for (const kind of CONTAINMENT_EDGE_KINDS) {
+        useCodeGraphStore.getState().setEdgeKindEnabled(kind, true);
+        expect(useCodeGraphStore.getState().edgeKindFilters[kind]).toBeFalsy();
+      }
     });
   });
 

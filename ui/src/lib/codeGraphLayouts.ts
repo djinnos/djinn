@@ -32,6 +32,7 @@ const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 const HIERARCHY_KINDS = new Set([
   "ContainsDefinition",
   "DeclaredInFile",
+  "MemberOf",
   "FileReference",
 ]);
 
@@ -247,7 +248,15 @@ function hierarchyParents(
   for (const edge of edges) {
     if (!HIERARCHY_KINDS.has(edge.kind)) continue;
     if (!nodeMap.has(edge.from) || !nodeMap.has(edge.to)) continue;
-    if (!childToParent.has(edge.to)) childToParent.set(edge.to, edge.from);
+    const parent =
+      edge.kind === "ContainsDefinition" || edge.kind === "FileReference"
+        ? edge.from
+        : edge.to;
+    const child =
+      edge.kind === "ContainsDefinition" || edge.kind === "FileReference"
+        ? edge.to
+        : edge.from;
+    if (!childToParent.has(child)) childToParent.set(child, parent);
   }
   return childToParent;
 }
