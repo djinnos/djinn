@@ -131,7 +131,7 @@ impl CoordinatorActor {
                     sha = %current_sha,
                     "PR poller: CI failed but branch is diff-empty vs base — escalating + force-closing"
                 );
-                self.escalate_ci_failure_and_close(task, pr_url, &reason)
+                self.escalate_ci_failure_and_close(task, pr_url, &reason, &[])
                     .await;
                 return true;
             }
@@ -191,7 +191,7 @@ impl CoordinatorActor {
                 threshold = PR_CI_FAILURE_THRESHOLD,
                 "PR poller: CI-failure rework threshold exceeded — escalating + force-closing"
             );
-            self.escalate_ci_failure_and_close(task, pr_url, &reason)
+            self.escalate_ci_failure_and_close(task, pr_url, &reason, &[])
                 .await;
             return true;
         }
@@ -265,10 +265,19 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
         pr_url: &str,
         reason: &str,
+        ci_failure_sections: &[String],
     ) {
         let task_repo = self.task_repo();
 
-        let comment_body = format!("**PR CI Escalation**: {reason}\n\nPR: {pr_url}");
+        let sections_text = if ci_failure_sections.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\n**CI Failure Details:**\n{}",
+                ci_failure_sections.join("\n")
+            )
+        };
+        let comment_body = format!("**PR CI Escalation**: {reason}{sections_text}\n\nPR: {pr_url}");
         let comment_payload = serde_json::json!({ "body": comment_body }).to_string();
         if let Err(e) = task_repo
             .log_activity(
@@ -289,7 +298,15 @@ impl CoordinatorActor {
 
         // Escalate to the Planner (ADR-051 §8 escalation ceiling) before
         // force-closing, so a human / Planner sees why the task gave up.
-        self.dispatch_planner_escalation(&task.id, reason, &task.project_id)
+        let enriched_reason = if ci_failure_sections.is_empty() {
+            reason.to_string()
+        } else {
+            format!(
+                "{reason}\n\n**CI Failure Details:**\n{}",
+                ci_failure_sections.join("\n")
+            )
+        };
+        self.dispatch_planner_escalation(&task.id, &enriched_reason, &task.project_id)
             .await;
 
         self.apply_pr_transition(&task.id, TransitionAction::ForceClose, Some(reason))

@@ -350,7 +350,7 @@ impl CoordinatorActor {
              already-done.",
             task.reopen_count
         );
-        self.route_planner_intervention(task, "worker", &reason)
+        self.route_planner_intervention(task, "worker", &reason, None)
             .await
     }
 
@@ -395,7 +395,8 @@ impl CoordinatorActor {
              already sufficient or the task is moot/duplicate.",
             task.status, task.reopen_count
         );
-        self.route_planner_intervention(task, role, &reason).await
+        self.route_planner_intervention(task, role, &reason, None)
+            .await
     }
 
     /// Trigger C: a worker/reviewer run completed degenerate because the
@@ -432,7 +433,8 @@ impl CoordinatorActor {
             }
         };
 
-        self.route_planner_intervention(&task, role, reason).await
+        self.route_planner_intervention(&task, role, reason, None)
+            .await
     }
 
     /// Shared intervention router behind triggers A and B: second-strike
@@ -450,6 +452,7 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
         role: &'static str,
         reason: &str,
+        ci_failure_sections: Option<&str>,
     ) -> bool {
         // Second strike (terminal): the Planner has ALREADY intervened on this
         // task at least `MAX_PLANNER_INTERVENTIONS` time(s) and it has STILL
@@ -565,7 +568,13 @@ impl CoordinatorActor {
         )
         .await;
 
-        self.dispatch_planner_escalation(&task.id, reason, &task.project_id)
+        let enriched_reason = match ci_failure_sections {
+            Some(sections) if !sections.is_empty() => {
+                format!("{reason}\n\n**CI Failure Details:**\n{sections}")
+            }
+            _ => reason.to_string(),
+        };
+        self.dispatch_planner_escalation(&task.id, &enriched_reason, &task.project_id)
             .await;
         true
     }
