@@ -124,6 +124,8 @@ pub struct PullRequest {
     pub number: u64,
     pub title: String,
     pub state: PrState,
+    #[serde(default)]
+    pub user: Option<GitHubUser>,
     pub merged: Option<bool>,
     /// The SHA of the merge commit on the base branch once the PR is merged.
     /// GitHub populates this with the real landed commit when `merged == true`

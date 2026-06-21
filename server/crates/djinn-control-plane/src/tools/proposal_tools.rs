@@ -668,6 +668,10 @@ impl DjinnMcpServer {
             Ok(e) => e,
             Err(e) => return Json(err_show(e)),
         };
+        let memory_refs = match repo.memory_refs_for_proposal(&proposal.id).await {
+            Ok(refs) => refs.into_iter().map(Into::into).collect(),
+            Err(e) => return Json(err_show(e.to_string())),
+        };
         Json(ProposalShowResponse {
             proposal: Some(ProposalModel::from(&proposal)),
             targets: Some(targets),
@@ -675,6 +679,7 @@ impl DjinnMcpServer {
             revisions: Some(revisions),
             signoffs: Some(signoffs),
             epics: Some(epics),
+            memory_refs,
             error: None,
         })
     }
@@ -1733,6 +1738,7 @@ fn err_show(error: impl Into<String>) -> ProposalShowResponse {
         revisions: None,
         signoffs: None,
         epics: None,
+        memory_refs: vec![],
         error: Some(error.into()),
     }
 }

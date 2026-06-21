@@ -13,9 +13,10 @@
  *
  *   1. Selection (focal node + 1-hop neighbors highlighted, rest dim)
  *   2. AI citations          (citationIds — D5 will populate)
- *   3. Tool-call results     (toolHighlightIds — e.g. impact BFS)
- *   4. Blast-radius animation (CSS pulse via per-frame color modulation)
- *   5. Hover tooltip
+ *   3. DOI focus/context    (anchor + direction + DOI/impact samples)
+ *   4. Tool-call results     (toolHighlightIds — non-DOI query overlays)
+ *   5. Transient pulse       (path trace/animation only)
+ *   6. Hover tooltip
  *
  * "When nothing is highlighted, render normally (don't dim everything)"
  * — that rule lives in `pickHighlightMode`: if every layer is empty,
@@ -61,7 +62,7 @@ export interface HighlightView {
   doiContextIds: ReadonlySet<string>;
   /** Optional score map for future legends/tooltips; unused by hot paths. */
   doiScores: ReadonlyMap<string, number>;
-  /** Pulse phase ∈ [0, 1] driving the blast-radius color cycle. */
+  /** Pulse phase ∈ [0, 1] driving transient path-trace color cycles. */
   pulsePhase: number;
   /**
    * Iter 30: active color mode. `"topology"` keeps the existing
@@ -188,7 +189,7 @@ function attrEdgeKind(attrs: Attributes): string | null {
 
 /**
  * Linear-interpolate between two `#rrggbb` hex colors. Used for the
- * blast-radius pulse so the animation cycles smoothly without us
+ * path-trace pulse so the animation cycles smoothly without us
  * needing a separate CSS keyframe. `t` clamped to [0, 1].
  */
 function lerpHex(from: string, to: string, t: number): string {
