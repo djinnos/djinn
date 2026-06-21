@@ -44,6 +44,18 @@ const JIT_PITFALL_OUTCOMES: [&str; 7] = [
     "empty",
     "error",
 ];
+const INLINE_PR_CLOSED_TOTAL: &str = "djinn_inline_pr_closed_total";
+const INLINE_BRANCH_DELETED_TOTAL: &str = "djinn_inline_branch_deleted_total";
+const INLINE_CLEANUP_SKIPPED_TOTAL: &str = "djinn_inline_cleanup_skipped_total";
+const INLINE_CLEANUP_SKIP_REASONS: [&str; 7] = [
+    "merge_queue",
+    "grace_period",
+    "bot_author",
+    "base_of_pr",
+    "protected_branch",
+    "config_disabled",
+    "dry_run",
+];
 
 // ─── Stale-PR/branch reconciliation sweep ────────────────────────────────
 const STALE_PR_REAPED_TOTAL: &str = "djinn_stale_pr_reaped_total";
@@ -132,6 +144,32 @@ pub mod pr_poller {
     /// Increment merge failures that fall through to PR-poller reopen handling.
     pub fn increment_merge_failure() {
         metrics::counter!(super::MERGE_FAILURES_TOTAL).increment(1);
+    }
+}
+
+pub mod inline_cleanup {
+    /// Stable skip-reason labels for the inline cleanup skipped counter.
+    pub const REASON_MERGE_QUEUE: &str = "merge_queue";
+    pub const REASON_GRACE_PERIOD: &str = "grace_period";
+    pub const REASON_BOT_AUTHOR: &str = "bot_author";
+    pub const REASON_BASE_OF_PR: &str = "base_of_pr";
+    pub const REASON_PROTECTED_BRANCH: &str = "protected_branch";
+    pub const REASON_CONFIG_DISABLED: &str = "config_disabled";
+    pub const REASON_DRY_RUN: &str = "dry_run";
+
+    /// Increment the inline PR-closed counter when a PR is successfully closed.
+    pub fn increment_pr_closed() {
+        metrics::counter!(super::INLINE_PR_CLOSED_TOTAL).increment(1);
+    }
+
+    /// Increment the inline branch-deleted counter when a branch is successfully deleted.
+    pub fn increment_branch_deleted() {
+        metrics::counter!(super::INLINE_BRANCH_DELETED_TOTAL).increment(1);
+    }
+
+    /// Increment the inline cleanup skipped counter for one of the stable reason labels.
+    pub fn increment_skipped(reason: &'static str) {
+        metrics::counter!(super::INLINE_CLEANUP_SKIPPED_TOTAL, "reason" => reason).increment(1);
     }
 }
 
@@ -483,6 +521,23 @@ fn register_metrics() {
         "PR merge failures that fall back to task reopen/rework."
     );
     metrics::counter!(MERGE_FAILURES_TOTAL).absolute(0);
+    metrics::describe_counter!(
+        INLINE_PR_CLOSED_TOTAL,
+        "Inline PR/branch cleanup: PRs closed by the terminal-close hook."
+    );
+    metrics::counter!(INLINE_PR_CLOSED_TOTAL).absolute(0);
+    metrics::describe_counter!(
+        INLINE_BRANCH_DELETED_TOTAL,
+        "Inline PR/branch cleanup: branches deleted by the terminal-close hook."
+    );
+    metrics::counter!(INLINE_BRANCH_DELETED_TOTAL).absolute(0);
+    metrics::describe_counter!(
+        INLINE_CLEANUP_SKIPPED_TOTAL,
+        "Inline PR/branch cleanup: cleanup actions skipped, partitioned by reason."
+    );
+    for reason in INLINE_CLEANUP_SKIP_REASONS {
+        metrics::counter!(INLINE_CLEANUP_SKIPPED_TOTAL, "reason" => reason).absolute(0);
+    }
     for state in SLOT_POOL_STATES {
         metrics::gauge!(SLOT_POOL, "state" => state, "model" => "").set(0.0);
     }
@@ -830,6 +885,9 @@ mod tests {
         assert_sync_unit(|| {
             cargo_warm_step::set_workspace_path("project-sync", "/workspace/x/server");
         });
+        assert_sync_unit(inline_cleanup::increment_pr_closed);
+        assert_sync_unit(inline_cleanup::increment_branch_deleted);
+        assert_sync_unit(|| inline_cleanup::increment_skipped(inline_cleanup::REASON_DRY_RUN));
     }
 
     #[test]
