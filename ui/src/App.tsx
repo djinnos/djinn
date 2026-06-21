@@ -24,9 +24,9 @@ import { useEffect, useRef } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useProviderGateStore } from "@/stores/providerGateStore";
-import { ProviderOnboarding } from "@/components/ProviderOnboarding";
 import { useModelGateStore } from "@/stores/modelGateStore";
-import { ModelOnboarding } from "@/components/ModelOnboarding";
+import { FirstRunOnboarding } from "@/components/onboarding/FirstRunOnboarding";
+import { isFirstRunDismissed } from "@/components/onboarding/firstRun";
 import { useProjectGateStore } from "@/stores/projectGateStore";
 import { RepositoryOnboarding } from "@/components/RepositoryOnboarding";
 import { useDispatchPauseHydration } from "@/hooks/useDispatchPauseHydration";
@@ -104,6 +104,7 @@ function MainLayout() {
 
 function AuthenticatedApp() {
   const { status } = useServerHealth();
+  const userId = useAuthUser()?.id ?? null;
   const { hasProvider, refresh: refreshGate } = useProviderGateStore();
   const { hasModels, refresh: refreshModelGate } = useModelGateStore();
   const { hasProject, refresh: refreshProjectGate } = useProjectGateStore();
@@ -129,12 +130,22 @@ function AuthenticatedApp() {
     return <MainLayout />;
   }
 
-  if (hasProvider === false) {
-    return <ProviderOnboarding />;
-  }
-
-  if (hasModels === false) {
-    return <ModelOnboarding />;
+  // First-run model-setup sheet (slice 4 of p8py): a single sequential flow
+  // (connect a subscription → pick a working style → done) shown when this user
+  // has no connected provider and/or no model lanes. Replaces the old separate
+  // provider + model onboarding gates. A client-side dismissal (localStorage,
+  // keyed by user id) suppresses it for someone who skipped without finishing.
+  const needsModelSetup = hasProvider === false || hasModels === false;
+  if (needsModelSetup && !isFirstRunDismissed(userId)) {
+    return (
+      <FirstRunOnboarding
+        userId={userId}
+        onFinished={() => {
+          void refreshGate();
+          void refreshModelGate();
+        }}
+      />
+    );
   }
 
   if (hasProject === false) {

@@ -11,8 +11,8 @@ import { useProjectGateStore } from '@/stores/projectGateStore';
 
 /**
  * Onboarding gate rendered when no repository has been added to the
- * deployment yet. Mirrors `ProviderOnboarding` / `ModelOnboarding`: Djinn
- * glow logo + a single primary action that opens the GitHub repo picker.
+ * deployment yet. Mirrors the first-run model-setup sheet: Djinn glow
+ * logo + a single primary action that opens the GitHub repo picker.
  */
 export function RepositoryOnboarding() {
   const { refresh } = useProjectGateStore();
