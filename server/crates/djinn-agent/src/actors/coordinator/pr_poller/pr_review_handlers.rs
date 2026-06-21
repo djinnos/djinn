@@ -1,4 +1,5 @@
 use super::*;
+use crate::actors::coordinator::pr_poller::pr_cleanup::CloseKind;
 
 impl CoordinatorActor {
     pub(in crate::actors::coordinator) async fn attach_pr_review_feedback(
@@ -394,22 +395,32 @@ impl CoordinatorActor {
             };
             djinn_telemetry::pr_poller::set_tracked(tracked);
         }
-        // Branch hygiene: once the task is closed (merged or force-closed via
-        // any pr_poller path), delete the task branch on both the local mirror
-        // and the GitHub remote.  Without this, stale `task/<short_id>` refs
-        // pile up on every mirror clone and on GitHub.  Best-effort.
         if matches!(
             cleanup_action,
             TransitionAction::PrMerge | TransitionAction::ForceClose
         ) {
-            let event_bus = crate::events::event_bus_for(&self.events_tx);
-            crate::task_merge::cleanup_task_branches_post_close(
-                task_id,
-                &self.db,
-                &event_bus,
-                self.mirror.as_deref(),
-            )
-            .await;
+            match task_repo.get(task_id).await {
+                Ok(Some(task)) => {
+                    let close_kind = match cleanup_action {
+                        TransitionAction::PrMerge => CloseKind::Merge,
+                        _ => CloseKind::NonMerge,
+                    };
+                    self.cleanup_pr_and_branch_on_close(&task, close_kind).await;
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        task_id,
+                        "PR poller: task disappeared before inline PR cleanup"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id,
+                        error = %e,
+                        "PR poller: failed to reload task for inline PR cleanup"
+                    );
+                }
+            }
         }
     }
 

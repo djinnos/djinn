@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::actors::coordinator::pr_poller::pr_cleanup::CloseKind;
 #[cfg(test)]
 use djinn_core::models::TaskStatus;
 use djinn_core::models::TransitionAction;
@@ -69,7 +70,7 @@ impl CoordinatorActor {
                     issue_type = %task.issue_type,
                     "CoordinatorActor: simple-lifecycle task approved — closing directly"
                 );
-                if let Err(e) = repo
+                match repo
                     .transition(
                         &task.id,
                         TransitionAction::Close,
@@ -80,11 +81,17 @@ impl CoordinatorActor {
                     )
                     .await
                 {
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        error = %e,
-                        "CoordinatorActor: failed to close simple-lifecycle approved task"
-                    );
+                    Ok(_) => {
+                        self.cleanup_pr_and_branch_on_close(&task, CloseKind::NonMerge)
+                            .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            error = %e,
+                            "CoordinatorActor: failed to close simple-lifecycle approved task"
+                        );
+                    }
                 }
                 continue;
             }

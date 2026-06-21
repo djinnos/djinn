@@ -39,6 +39,11 @@ import {
 } from "@/lib/codeGraphReducers";
 import { computePagerankPercentiles } from "@/lib/codeGraphLabels";
 import {
+  lodTierForZoom,
+  VIEWPORT_CULLING_THRESHOLD,
+  type ViewportBounds,
+} from "@/lib/codeGraphAdapter";
+import {
   DEFAULT_DOI_REVEAL_COUNT,
   useCodeGraphStore,
   type FocusDirection,
@@ -139,7 +144,8 @@ export function computeDoiFocus(
       }
       if (isTraversalContainmentEdge(normalizeEdgeKind(attrs))) continue;
       const next = nextNodeForDirection(graph, edgeId, nodeId, focusDirection);
-      if (next === null || distances.has(next) || !graph.hasNode(next)) continue;
+      if (next === null || distances.has(next) || !graph.hasNode(next))
+        continue;
       distances.set(next, distance + 1);
       queue.push(next);
     }
@@ -250,6 +256,7 @@ export function useGraphReducers(
   const focusAnchorId = useCodeGraphStore((s) => s.focusAnchorId);
   const focusDirection = useCodeGraphStore((s) => s.focusDirection);
   const doiRevealCount = useCodeGraphStore((s) => s.doiRevealCount);
+  const expandedRegions = useCodeGraphStore((s) => s.expandedRegions);
 
   // ── Lazy 1-hop neighbor set (memoized) ─────────────────────────────────
   const selectionNeighbors = useMemo<ReadonlySet<string>>(() => {
@@ -285,8 +292,7 @@ export function useGraphReducers(
       const cog = graph.getNodeAttribute(id, "cognitive");
       pairs.push({
         id,
-        cognitive:
-          typeof cog === "number" && Number.isFinite(cog) ? cog : null,
+        cognitive: typeof cog === "number" && Number.isFinite(cog) ? cog : null,
       });
     }
     return topComplexityIds(pairs, TOP_COMPLEXITY_HALO_N);
@@ -313,7 +319,13 @@ export function useGraphReducers(
       pagerankPercentile,
       doiRevealCount,
     );
-  }, [graph, focusAnchorId, focusDirection, pagerankPercentile, doiRevealCount]);
+  }, [
+    graph,
+    focusAnchorId,
+    focusDirection,
+    pagerankPercentile,
+    doiRevealCount,
+  ]);
 
   const doiFocus = useMemo<DoiFocusResult>(() => {
     if (doiImpactIds.size === 0) return topologyDoiFocus;
@@ -365,6 +377,13 @@ export function useGraphReducers(
       // orthogonal: the store-mirror effect owns graph-derived
       // fields, the camera effect owns the lens.
       cameraRatio: viewRef.current.cameraRatio,
+      // Continuous semantic LOD tier — preserved across store
+      // re-syncs (the `afterRender` effect updates it).
+      lodTier: viewRef.current.lodTier,
+      // Viewport bounds — preserved across store re-syncs.
+      viewportBounds: viewRef.current.viewportBounds,
+      // Click-to-expand regions from the store.
+      expandedRegions,
     };
     sigma?.refresh();
   }, [
@@ -388,6 +407,7 @@ export function useGraphReducers(
     complexityThresholds,
     complexityHaloIds,
     pagerankPercentile,
+    expandedRegions,
   ]);
 
   // ── Pulse phase (animated only when blast frontier is non-empty) ──────
@@ -420,13 +440,36 @@ export function useGraphReducers(
   // changes — Sigma already knows to repaint via its own internal
   // camera state, the `refresh()` here is for the
   // `nodeReducer` re-running the percentile gate.
+  //
+  // Also computes LOD tier and viewport bounds from the camera state
+  // for continuous semantic zoom and viewport culling.
+  const nodeCountRef = useRef(0);
+  useEffect(() => {
+    nodeCountRef.current = graph?.order ?? 0;
+  }, [graph]);
+
   useEffect(() => {
     if (!sigma) return;
     const off = sigma.on("afterRender", () => {
       try {
         const ratio = sigma.getCameraRatio();
-        if (ratio !== viewRef.current.cameraRatio) {
-          viewRef.current = { ...viewRef.current, cameraRatio: ratio };
+        const lodTier = lodTierForZoom(ratio);
+        // Viewport culling only activates for large graphs.
+        const viewportBounds: ViewportBounds | null =
+          nodeCountRef.current >= VIEWPORT_CULLING_THRESHOLD
+            ? sigma.getViewportBounds()
+            : null;
+        if (
+          ratio !== viewRef.current.cameraRatio ||
+          lodTier !== viewRef.current.lodTier ||
+          viewportBounds !== viewRef.current.viewportBounds
+        ) {
+          viewRef.current = {
+            ...viewRef.current,
+            cameraRatio: ratio,
+            lodTier,
+            viewportBounds,
+          };
           sigma.refresh();
         }
       } catch {
@@ -434,7 +477,7 @@ export function useGraphReducers(
       }
     });
     return off;
-  }, [sigma]);
+  }, [sigma, graph]);
 
   // ── Stable reducer pair — closures read `viewRef` so the latest
   //    slice always wins without us re-creating the fns on every render.
