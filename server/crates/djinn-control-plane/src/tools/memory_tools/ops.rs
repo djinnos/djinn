@@ -1,7 +1,7 @@
 use djinn_db::NoteSearchParams;
 use djinn_db::{
     NoteRepository, ProjectRepository, normalize_virtual_note_path,
-    permalink_from_virtual_note_path,
+    permalink_from_virtual_note_path, resolve_short_ids,
 };
 
 use crate::server::DjinnMcpServer;
@@ -10,8 +10,8 @@ use super::{
     BrokenLinksParams, BuildContextParams, ExtractedAuditParams, HealthParams, ListParams,
     MemoryBrokenLinksResponse, MemoryBuildContextResponse, MemoryExtractedAuditResponse,
     MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse, MemoryOrphansResponse,
-    MemorySearchResponse, MemorySearchResultItem, OrphansParams, ReadParams, SearchParams,
-    note_to_view,
+    MemorySearchResponse, MemorySearchResultItem, OrphansParams, ReadParams, ResolvedMention,
+    SearchParams, note_to_view,
 };
 
 fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
@@ -110,6 +110,59 @@ pub async fn resolve_project_id(server: &DjinnMcpServer, project: &str) -> Resul
         .ok_or_else(|| format!("project not found: {project}"))
 }
 
+/// Scan `content` for 4-char alphanumeric short_id patterns and resolve them
+/// against proposals, epics, and tasks. Filters out common false positives
+/// (inline code, URLs, hex-like strings).
+fn extract_short_id_candidates(content: &str) -> Vec<String> {
+    let re = regex::Regex::new(r#"[a-z0-9]{4}"#).expect("short_id regex should compile");
+    let mut candidates = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for mat in re.find_iter(content) {
+        let candidate = mat.as_str();
+
+        // Skip if inside backtick code (inline or fenced)
+        // Simple heuristic: count backticks before this position on the same line
+        let line_start = content[..mat.start()]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let line = &content[line_start..mat.start()];
+        let backticks = line.matches('`').count();
+        if backticks % 2 == 1 {
+            continue;
+        }
+
+        // Skip if part of a URL (preceded by http:// or https:// or similar)
+        let before = &content[..mat.start()];
+        if before
+            .rfind("http://")
+            .map(|i| i + 7 > line_start)
+            .unwrap_or(false)
+            || before
+                .rfind("https://")
+                .map(|i| i + 8 > line_start)
+                .unwrap_or(false)
+        {
+            continue;
+        }
+
+        // Skip pure hex-like strings (all digits or a-f only, common in commit hashes/UUIDs)
+        let is_hex = candidate
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
+        if is_hex {
+            continue;
+        }
+
+        if seen.insert(candidate.to_string()) {
+            candidates.push(candidate.to_string());
+        }
+    }
+
+    candidates
+}
+
 pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteResponse {
     let project_id = match resolve_project_id(server, &p.project).await {
         Ok(id) => id,
@@ -164,7 +217,27 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
     }
     server.record_memory_read(&note.id).await;
 
-    MemoryNoteResponse::from_note(&note)
+    let mut response = MemoryNoteResponse::from_note(&note);
+
+    // Resolve short_id mentions in note body
+    if let Some(ref content) = response.content {
+        let candidates = extract_short_id_candidates(content);
+        if !candidates.is_empty()
+            && let Ok(entities) = resolve_short_ids(server.state.db(), &candidates).await
+        {
+            response.resolved_mentions = entities
+                .into_iter()
+                .map(|e| ResolvedMention {
+                    short_id: e.short_id,
+                    entity_type: e.entity_type,
+                    title: e.title,
+                    permalink: e.permalink,
+                })
+                .collect();
+        }
+    }
+
+    response
 }
 
 pub async fn memory_search(
