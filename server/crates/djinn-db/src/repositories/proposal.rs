@@ -1100,6 +1100,27 @@ impl ProposalRepository {
         }
     }
 
+    /// The proposal whose graduation/breakdown Planner task is `task_id`, if any.
+    ///
+    /// Initial proposal-decomposition sessions run on the proposal's
+    /// `build_breakdown_task_id` before any child epic exists, so they cannot be
+    /// reached through [`Self::proposal_for_epic`]. This reverse lookup lets
+    /// session extraction attach planner-read provenance notes to the proposal
+    /// as soon as that local task/session data is available.
+    pub async fn proposal_for_breakdown_task(&self, task_id: &str) -> Result<Option<Proposal>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query_as::<_, (String,)>(
+            "SELECT id FROM proposals WHERE build_breakdown_task_id = $1 LIMIT 1",
+        )
+        .bind(task_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        match row {
+            Some((id,)) => self.get(&id).await,
+            None => Ok(None),
+        }
+    }
+
     /// `true` when the proposal has graduated at least one epic AND every
     /// graduated epic is closed. `false` for a proposal with no graduated
     /// epics (nothing has been built yet, so there is nothing to complete).
