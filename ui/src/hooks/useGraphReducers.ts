@@ -37,12 +37,155 @@ import {
   type MinimalGraph,
 } from "@/lib/codeGraphReducers";
 import { computePagerankPercentiles } from "@/lib/codeGraphLabels";
-import { useCodeGraphStore } from "@/stores/codeGraphStore";
+import {
+  DEFAULT_DOI_REVEAL_COUNT,
+  useCodeGraphStore,
+  type FocusDirection,
+} from "@/stores/codeGraphStore";
 import type { SigmaInstanceHandle, SigmaReducerHooks } from "./useSigmaGraph";
+
+const DOI_DISTANCE_LAMBDA = 0.18;
+const DOI_STRUCTURAL_EDGE_KINDS = new Set([
+  "ContainsDefinition",
+  "DeclaredInFile",
+  "MemberOf",
+]);
+
+interface DoiFocusResult {
+  focusIds: ReadonlySet<string>;
+  contextIds: ReadonlySet<string>;
+  scores: ReadonlyMap<string, number>;
+}
+
+const EMPTY_DOI_FOCUS: DoiFocusResult = {
+  focusIds: new Set<string>(),
+  contextIds: new Set<string>(),
+  scores: new Map<string, number>(),
+};
+
+function normalizeEdgeKind(attrs: Attributes | undefined): string | null {
+  const raw = attrs?.kind ?? attrs?.edgeKind;
+  return typeof raw === "string" ? raw : null;
+}
+
+function isStructuralEdge(attrs: Attributes | undefined): boolean {
+  const kind = normalizeEdgeKind(attrs);
+  return kind !== null && DOI_STRUCTURAL_EDGE_KINDS.has(kind);
+}
+
+function edgeIdsForDirection(
+  graph: Graph,
+  nodeId: string,
+  direction: FocusDirection,
+): string[] {
+  const g = graph as unknown as {
+    outboundEdges?: (node: string) => string[];
+    inboundEdges?: (node: string) => string[];
+    outEdges?: (node: string) => string[];
+    inEdges?: (node: string) => string[];
+    edges?: (node?: string) => string[];
+  };
+  const out = new Set<string>();
+  try {
+    if (direction === "dependencies" || direction === "both") {
+      const edges = (g.outboundEdges ?? g.outEdges)?.call(graph, nodeId) ?? [];
+      for (const edge of edges) out.add(edge);
+    }
+    if (direction === "dependents" || direction === "both") {
+      const edges = (g.inboundEdges ?? g.inEdges)?.call(graph, nodeId) ?? [];
+      for (const edge of edges) out.add(edge);
+    }
+    if (out.size === 0 && direction === "both" && g.edges) {
+      for (const edge of g.edges.call(graph, nodeId)) out.add(edge);
+    }
+  } catch {
+    return [];
+  }
+  return Array.from(out);
+}
+
+function nextNodeForDirection(
+  graph: Graph,
+  edgeId: string,
+  nodeId: string,
+  direction: FocusDirection,
+): string | null {
+  try {
+    const source = graph.source(edgeId);
+    const target = graph.target(edgeId);
+    if (direction === "dependencies") return source === nodeId ? target : null;
+    if (direction === "dependents") return target === nodeId ? source : null;
+    if (source === nodeId) return target;
+    if (target === nodeId) return source;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function computeDoiFocus(
+  graph: Graph | null,
+  focusAnchorId: string | null,
+  focusDirection: FocusDirection,
+  pagerankPercentile: ReadonlyMap<string, number>,
+  revealCount: number,
+): DoiFocusResult {
+  if (!graph || !focusAnchorId || !graph.hasNode(focusAnchorId)) {
+    return EMPTY_DOI_FOCUS;
+  }
+
+  const distances = new Map<string, number>([[focusAnchorId, 0]]);
+  const queue: string[] = [focusAnchorId];
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const nodeId = queue[cursor];
+    const distance = distances.get(nodeId) ?? 0;
+    for (const edgeId of edgeIdsForDirection(graph, nodeId, focusDirection)) {
+      let attrs: Attributes | undefined;
+      try {
+        attrs = graph.getEdgeAttributes(edgeId) as Attributes;
+      } catch {
+        attrs = undefined;
+      }
+      if (isStructuralEdge(attrs)) continue;
+      const next = nextNodeForDirection(graph, edgeId, nodeId, focusDirection);
+      if (next === null || distances.has(next) || !graph.hasNode(next)) continue;
+      distances.set(next, distance + 1);
+      queue.push(next);
+    }
+  }
+
+  const scored = Array.from(distances.entries()).map(([id, distance]) => ({
+    id,
+    distance,
+    score: (pagerankPercentile.get(id) ?? 0) - DOI_DISTANCE_LAMBDA * distance,
+  }));
+  scored.sort(
+    (a, b) =>
+      b.score - a.score || a.distance - b.distance || a.id.localeCompare(b.id),
+  );
+
+  const limit = Number.isFinite(revealCount)
+    ? Math.max(1, Math.round(revealCount))
+    : DEFAULT_DOI_REVEAL_COUNT;
+  const focusIds = new Set<string>([focusAnchorId]);
+  for (const entry of scored) {
+    if (focusIds.size >= limit) break;
+    focusIds.add(entry.id);
+  }
+
+  const scores = new Map<string, number>();
+  const contextIds = new Set<string>();
+  for (const entry of scored) {
+    scores.set(entry.id, entry.score);
+    if (!focusIds.has(entry.id)) contextIds.add(entry.id);
+  }
+
+  return { focusIds, contextIds, scores };
+}
 
 /**
  * Wrap a graphology `Graph` so it satisfies the `MinimalGraph`
- * interface the BFS helpers expect — Sigma's graph carries directed
+ * interface the neighborhood helpers expect — Sigma's graph carries directed
  * edges, but the highlight neighborhood walks both directions.
  */
 function asMinimalGraph(graph: Graph): MinimalGraph {
@@ -97,6 +240,9 @@ export function useGraphReducers(
   const symbolKindFilters = useCodeGraphStore((s) => s.symbolKindFilters);
   const hideTests = useCodeGraphStore((s) => s.hideTests);
   const colorMode = useCodeGraphStore((s) => s.colorMode);
+  const focusAnchorId = useCodeGraphStore((s) => s.focusAnchorId);
+  const focusDirection = useCodeGraphStore((s) => s.focusDirection);
+  const doiRevealCount = useCodeGraphStore((s) => s.doiRevealCount);
 
   // ── Lazy 1-hop neighbor set (memoized) ─────────────────────────────────
   const selectionNeighbors = useMemo<ReadonlySet<string>>(() => {
@@ -149,10 +295,18 @@ export function useGraphReducers(
     return computePagerankPercentiles(graph);
   }, [graph]);
 
-  // Depth filtering was removed in favor of the DOI focus model. The
-  // reducer field remains inert until the downstream DOI ranking task
-  // replaces it with focus-scored context/dimming data.
-  const depthReachable: ReadonlySet<string> | null = null;
+  // Directional DOI focus model: compute graph distance from the anchor using
+  // dependency direction semantics, combine it with PageRank percentile
+  // importance, and hand reducers precomputed O(1) membership sets.
+  const doiFocus = useMemo<DoiFocusResult>(() => {
+    return computeDoiFocus(
+      graph,
+      focusAnchorId,
+      focusDirection,
+      pagerankPercentile,
+      doiRevealCount,
+    );
+  }, [graph, focusAnchorId, focusDirection, pagerankPercentile, doiRevealCount]);
 
   // ── Build the live HighlightView (mutable ref, read on each frame) ────
   // Sigma reads `viewRef.current` from inside its rAF render loop —
@@ -172,7 +326,9 @@ export function useGraphReducers(
       nodeKindFilters,
       symbolKindFilters,
       hideTests,
-      depthReachable,
+      doiFocusIds: doiFocus.focusIds,
+      doiContextIds: doiFocus.contextIds,
+      doiScores: doiFocus.scores,
       // Preserve the latest animated phase so we don't snap to 0
       // every time a non-pulse slice changes.
       pulsePhase: viewRef.current.pulsePhase,
@@ -201,6 +357,10 @@ export function useGraphReducers(
     symbolKindFilters,
     hideTests,
     colorMode,
+    focusAnchorId,
+    focusDirection,
+    doiRevealCount,
+    doiFocus,
     complexityThresholds,
     complexityHaloIds,
     pagerankPercentile,
