@@ -59,7 +59,7 @@ impl NoteRepository {
             },
         );
 
-        let nodes = node_rows
+        let mut nodes = node_rows
             .into_iter()
             .map(|row| GraphNode {
                 is_orphan: orphans.contains(&row.id),
@@ -70,8 +70,9 @@ impl NoteRepository {
                 note_type: row.note_type,
                 folder: row.folder,
                 connection_count: row.connection_count,
+                entity_type: "note".to_string(),
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         let edges = edge_rows
             .into_iter()
@@ -104,15 +105,89 @@ impl NoteRepository {
         .fetch_all(self.db.pool())
         .await?;
 
-        let typed_edges = typed_edge_rows
+        let mut typed_edges = typed_edge_rows
             .into_iter()
             .map(|row| TypedEdge {
                 source_id: row.get("source_id"),
                 target_id: row.get("target_id"),
                 kind: row.get("kind"),
                 weight: row.get("weight"),
+                source_entity_type: "note".to_string(),
+                target_entity_type: "note".to_string(),
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        // ── Heterogeneous proposal nodes ──────────────────────────────────────
+        // Include proposals that target this project as graph nodes. Proposals
+        // do NOT have wikilink edges, but they participate in typed edges via
+        // the `memory_entity_associations` substrate.
+        let proposal_rows = sqlx::query(
+            r#"SELECT p.id, p.short_id, p.title, p.status
+               FROM proposals p
+               JOIN proposal_targets pt ON pt.proposal_id = p.id
+               WHERE pt.project_id = $1"#,
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        for row in proposal_rows {
+            let id: String = row.try_get("id")?;
+            let title: String = row.try_get("title")?;
+            let _status: String = row.try_get("status")?;
+            nodes.push(GraphNode {
+                id: id.clone(),
+                permalink: id.clone(),
+                title,
+                note_type: "proposal".to_string(),
+                folder: "proposals".to_string(),
+                connection_count: 0,
+                is_orphan: false,
+                broken_targets: vec![],
+                entity_type: "proposal".to_string(),
+            });
+        }
+
+        // ── Heterogeneous typed edges ─────────────────────────────────────────
+        // Pull typed edges from `memory_entity_associations` where at least one
+        // endpoint is a note in this project. This covers proposal↔note and
+        // proposal↔proposal edges that involve project notes.
+        let entity_typed_rows = sqlx::query(
+            r#"SELECT mea.source_entity_type, mea.source_id,
+                      mea.target_entity_type, mea.target_id,
+                      mea.kind, mea.weight
+               FROM memory_entity_associations mea
+               WHERE (
+                     (mea.source_entity_type = 'note'
+                      AND mea.source_id IN (SELECT id FROM notes WHERE project_id = $1))
+                  OR (mea.target_entity_type = 'note'
+                      AND mea.target_id IN (SELECT id FROM notes WHERE project_id = $1))
+                  OR (mea.source_entity_type = 'proposal'
+                      AND mea.source_id IN (
+                          SELECT p.id FROM proposals p
+                          JOIN proposal_targets pt ON pt.proposal_id = p.id
+                          WHERE pt.project_id = $1))
+                  OR (mea.target_entity_type = 'proposal'
+                      AND mea.target_id IN (
+                          SELECT p.id FROM proposals p
+                          JOIN proposal_targets pt ON pt.proposal_id = p.id
+                          WHERE pt.project_id = $1))
+                 )"#,
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        for row in entity_typed_rows {
+            typed_edges.push(TypedEdge {
+                source_id: row.try_get("source_id")?,
+                target_id: row.try_get("target_id")?,
+                kind: row.try_get("kind")?,
+                weight: row.try_get("weight")?,
+                source_entity_type: row.try_get("source_entity_type")?,
+                target_entity_type: row.try_get("target_entity_type")?,
+            });
+        }
 
         Ok(GraphResponse {
             nodes,

@@ -361,6 +361,15 @@ pub struct GraphNode {
     pub is_orphan: bool,
     #[serde(default)]
     pub broken_targets: Vec<String>,
+    /// Entity type discriminator: `"note"` for memory notes, `"proposal"` for
+    /// proposals. Defaults to `"note"` so existing clients that only expect
+    /// note nodes deserialize cleanly without changes.
+    #[serde(default = "default_note_entity_type")]
+    pub entity_type: String,
+}
+
+fn default_note_entity_type() -> String {
+    "note".to_string()
 }
 
 /// A resolved wikilink edge between two notes.
@@ -371,15 +380,13 @@ pub struct GraphEdge {
     pub raw_text: String,
 }
 
-/// A typed semantic edge between two notes (builds_on, contradicts, supersedes,
-/// exemplifies, derived_from). These are stored on `note_associations` with a
-/// `kind` value other than `co_access` and surfaced through the
-/// `memory_graph` tool as a separate layer from wikilink `GraphEdge`s so the
-/// UI can toggle/style them independently.
+/// A typed semantic edge between two memory entities (notes or proposals).
+/// Kind values mirror `note_associations.kind` and `memory_entity_associations.kind`
+/// (`builds_on`, `contradicts`, `supersedes`, `exemplifies`, `derived_from`).
 ///
-/// Note: the F5 `note_associations` substrate is undirected (canonical-pair
-/// ordering: `note_a_id < note_b_id`). Outbound direction for directional
-/// kinds (e.g. `supersedes`) is reconstructed at scoring/context time.
+/// The `source_entity_type` / `target_entity_type` fields let consumers know
+/// whether each endpoint is a `"note"` or a `"proposal"`. They default to
+/// `"note"` for backward compatibility with existing note-only graphs.
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TypedEdge {
@@ -387,6 +394,10 @@ pub struct TypedEdge {
     pub target_id: String,
     pub kind: String,
     pub weight: f64,
+    #[serde(default = "default_note_entity_type")]
+    pub source_entity_type: String,
+    #[serde(default = "default_note_entity_type")]
+    pub target_entity_type: String,
 }
 
 /// Full knowledge graph: all nodes and all resolved edges.
@@ -395,7 +406,8 @@ pub struct GraphResponse {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
     /// Typed semantic edges (builds_on, contradicts, supersedes, exemplifies,
-    /// derived_from) sourced from `note_associations` where `kind <> 'co_access'`.
+    /// derived_from) sourced from both `note_associations` and
+    /// `memory_entity_associations`.
     #[serde(default)]
     pub typed_edges: Vec<TypedEdge>,
 }
