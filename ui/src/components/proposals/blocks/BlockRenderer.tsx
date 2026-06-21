@@ -2,18 +2,12 @@ import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import type { Proposal, ProposalFeedback } from "@/api/types";
-import { FeedbackThread } from "@/pages/ProposalsPage";
 import { getBlockByTag } from "@/lib/blockRegistry";
 
 import { parseMdxBody } from "./parseMdxBody";
 
 export interface BlockRendererProps {
   body: string;
-  feedback?: ProposalFeedback[];
-  proposal: Proposal;
-  canEdit: boolean;
-  onChanged: () => void;
 }
 
 /**
@@ -21,32 +15,16 @@ export interface BlockRendererProps {
  * resolved through the block registry and rendered as React components;
  * everything else is rendered as GitHub-flavoured markdown.
  *
- * Each block component receives a wrapper `<div id={blockId}>` so that
- * browser anchors and feedback `target_section` references can scroll to
- * the correct location within the proposal.
+ * Each block is wrapped in a `<div id={blockId}>` so browser anchors and the
+ * deep-link highlight can scroll to a specific block. Feedback is a single
+ * proposal-level thread (see `FeedbackThread`), not a per-block rail, so blocks
+ * render full-width.
  */
-export function BlockRenderer({ body, feedback = [], proposal, canEdit, onChanged }: BlockRendererProps) {
+export function BlockRenderer({ body }: BlockRendererProps) {
   const segments = useMemo(() => parseMdxBody(body), [body]);
 
-  // Index feedback by target_section for O(1) lookup per block
-  const feedbackBySection = useMemo(() => {
-    if (!feedback?.length) return new Map<string, ProposalFeedback[]>();
-    const map = new Map<string, ProposalFeedback[]>();
-    for (const entry of feedback) {
-      if (entry.target_section) {
-        const list = map.get(entry.target_section);
-        if (list) {
-          list.push(entry);
-        } else {
-          map.set(entry.target_section, [entry]);
-        }
-      }
-    }
-    return map;
-  }, [feedback]);
-
   return (
-    <>
+    <div className="space-y-4">
       {segments.map((segment) => {
         if (segment.kind === "markdown") {
           return (
@@ -68,7 +46,7 @@ export function BlockRenderer({ body, feedback = [], proposal, canEdit, onChange
           return (
             <pre
               key={`unknown-${segment.index}`}
-              className="my-2 rounded border border-dashed border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100"
+              className="overflow-x-auto rounded border border-dashed border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100"
             >
               {`<${segment.tag} ...>${segment.content}</${segment.tag}>`}
             </pre>
@@ -76,35 +54,19 @@ export function BlockRenderer({ body, feedback = [], proposal, canEdit, onChange
         }
 
         const BlockComponent = def.component;
-        const blockFeedback = feedbackBySection.get(segment.id) ?? [];
 
         return (
           <div
             key={`block-${segment.id}-${segment.index}`}
             id={segment.id}
-            className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,22rem)]"
+            className="scroll-mt-4"
           >
-            <div className="min-w-0">
-              <BlockComponent
-                id={segment.id}
-                attributes={segment.attributes}
-                feedback={blockFeedback}
-              >
-                {segment.content}
-              </BlockComponent>
-            </div>
-            <aside className="min-w-0 rounded-lg border bg-muted/20 p-3">
-              <FeedbackThread
-                proposal={proposal}
-                feedback={feedback}
-                blockId={segment.id}
-                canEdit={canEdit}
-                onChanged={onChanged}
-              />
-            </aside>
+            <BlockComponent id={segment.id} attributes={segment.attributes}>
+              {segment.content}
+            </BlockComponent>
           </div>
         );
       })}
-    </>
+    </div>
   );
 }

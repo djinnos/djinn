@@ -293,8 +293,6 @@ pub struct ProposalFeedbackAddParams {
     /// Proposal UUID or short_id.
     pub proposal_id: String,
     pub body: String,
-    /// Optional pointer to the spec section this is about.
-    pub target_section: Option<String>,
     /// Parent feedback id for a threaded reply.
     pub parent_id: Option<String>,
     /// `user` (default) or `ai`.
@@ -970,7 +968,6 @@ impl DjinnMcpServer {
                 author_kind,
                 author_model: p.author_model.as_deref(),
                 body: &p.body,
-                target_section: p.target_section.as_deref(),
             })
             .await
         {
@@ -1604,7 +1601,6 @@ impl DjinnMcpServer {
                     author_kind: "ai",
                     author_model: Some("proposal-reconcile"),
                     body: &body,
-                    target_section: None,
                 })
                 .await;
             return Json(ProposalReconcileObsoleteEpicResponse {

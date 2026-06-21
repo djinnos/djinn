@@ -198,8 +198,6 @@ pub struct ProposalFeedbackModel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author_model: Option<String>,
     pub body: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_section: Option<String>,
     /// When set, the feedback is resolved (addressed or dismissed) and collapsed
     /// out of the active thread.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -224,7 +222,6 @@ impl From<&ProposalFeedback> for ProposalFeedbackModel {
             author_user_id: f.author_user_id.clone(),
             author_model: f.author_model.clone(),
             body: f.body.clone(),
-            target_section: f.target_section.clone(),
             resolved_at: f.resolved_at.clone(),
             resolved_revision_seq: f.resolved_revision_seq,
             resolved_by_user_id: f.resolved_by_user_id.clone(),
