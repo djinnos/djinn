@@ -1569,8 +1569,13 @@ describe("deriveCommunityHulls", () => {
     const alpha = hulls.find((h) => h.id === "alpha");
     // Two symbols in fixtureSnapshot carry community_id "alpha".
     expect(alpha?.memberCount).toBe(2);
-    // No legacy entry → label falls back to the id.
+    // No legacy entry → label falls back to the id, but the visible member ids
+    // are retained so the canvas can draw a non-clickable background hull.
     expect(alpha?.label).toBe("alpha");
+    expect(alpha?.memberIds.sort()).toEqual([
+      "symbol:scip-rust . . . User#",
+      "symbol:scip-rust . . . main()",
+    ]);
   });
 
   it("is deterministic across calls", () => {

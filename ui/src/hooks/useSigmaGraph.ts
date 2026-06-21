@@ -32,7 +32,9 @@ import Sigma from "sigma";
 
 import type { Attributes } from "@/lib/codeGraphReducers";
 import {
+  COMMUNITY_HULLS_ATTRIBUTE,
   PRECOMPUTED_LAYOUT_ATTRIBUTE,
+  type CommunityHull,
   type ViewportBounds,
 } from "@/lib/codeGraphAdapter";
 import EdgeCurveProgram from "@sigma/edge-curve";
@@ -83,6 +85,19 @@ export interface SigmaInstanceHandle {
   getViewportBounds: () =>
     | import("@/lib/codeGraphAdapter").ViewportBounds
     | null;
+  /** Project community hull member positions into viewport pixels. */
+  getCommunityHullRegions: () => CommunityHullRegion[];
+}
+
+export interface CommunityHullRegion {
+  id: string;
+  label: string;
+  color: string;
+  memberCount: number;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
 
 export interface UseSigmaGraphResult {
@@ -369,6 +384,66 @@ export function useSigmaGraph(
           };
         } catch {
           return null;
+        }
+      },
+      getCommunityHullRegions: (): CommunityHullRegion[] => {
+        try {
+          const hulls = graph.getAttribute(COMMUNITY_HULLS_ATTRIBUTE) as
+            | CommunityHull[]
+            | undefined;
+          if (!Array.isArray(hulls) || hulls.length === 0) return [];
+          const projector = (
+            sigmaInstance as unknown as {
+              graphToViewport?: (point: { x: number; y: number }) => {
+                x: number;
+                y: number;
+              };
+            }
+          ).graphToViewport?.bind(sigmaInstance);
+          const regions: CommunityHullRegion[] = [];
+
+          for (const hull of hulls) {
+            let minX = Infinity;
+            let minY = Infinity;
+            let maxX = -Infinity;
+            let maxY = -Infinity;
+            let count = 0;
+
+            for (const id of hull.memberIds ?? []) {
+              if (!graph.hasNode(id)) continue;
+              const attrs = graph.getNodeAttributes(id);
+              const x = Number(attrs.x);
+              const y = Number(attrs.y);
+              if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+              const p = projector ? projector({ x, y }) : { x, y };
+              if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+              minX = Math.min(minX, p.x);
+              minY = Math.min(minY, p.y);
+              maxX = Math.max(maxX, p.x);
+              maxY = Math.max(maxY, p.y);
+              count += 1;
+            }
+
+            if (count === 0) continue;
+            const pad = Math.max(
+              28,
+              Math.min(96, 18 + Math.log2(hull.memberCount + 1) * 8),
+            );
+            regions.push({
+              id: hull.id,
+              label: hull.label,
+              color: hull.color,
+              memberCount: hull.memberCount,
+              left: minX - pad,
+              top: minY - pad,
+              width: Math.max(48, maxX - minX + pad * 2),
+              height: Math.max(48, maxY - minY + pad * 2),
+            });
+          }
+
+          return regions.sort((a, b) => b.memberCount - a.memberCount);
+        } catch {
+          return [];
         }
       },
       focusNode: (id, durationMs) => {

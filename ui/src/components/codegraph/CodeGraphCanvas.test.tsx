@@ -23,9 +23,11 @@ import type { SnapshotPayload } from "@/lib/codeGraphAdapter";
 import {
   lodTierForZoom,
   isSymbolVisibleAtMidTier,
+  isInViewport,
   LOD_FAR_RATIO,
   LOD_MID_RATIO,
 } from "@/lib/codeGraphAdapter";
+import { EMPTY_HIGHLIGHT_VIEW, nodeReducer } from "@/lib/codeGraphReducers";
 
 // ── Mocks ─────────────────────────────────────────────────────────────────
 
@@ -209,6 +211,42 @@ describe("isSymbolVisibleAtMidTier", () => {
 
   it("returns true when symbol kind is undefined (structural node)", () => {
     expect(isSymbolVisibleAtMidTier(undefined)).toBe(true);
+  });
+});
+
+describe("viewport culling", () => {
+  it("classifies off-screen coordinates outside the padded viewport", () => {
+    const bounds = { minX: 0, minY: 0, maxX: 100, maxY: 100 };
+    expect(isInViewport(50, 50, bounds)).toBe(true);
+    expect(isInViewport(250, 50, bounds)).toBe(true); // within 200px margin
+    expect(isInViewport(350, 50, bounds)).toBe(false);
+  });
+
+  it("hides off-screen symbols for large-graph viewport culling", () => {
+    const out = nodeReducer(
+      "symbol-a",
+      { kind: "symbol", symbolKind: "function", x: 1_000, y: 1_000 },
+      {
+        ...EMPTY_HIGHLIGHT_VIEW,
+        lodTier: "close",
+        viewportBounds: { minX: 0, minY: 0, maxX: 100, maxY: 100 },
+      },
+    );
+    expect(out.hidden).toBe(true);
+  });
+
+  it("expanded regions bypass viewport culling for progressive reveal", () => {
+    const out = nodeReducer(
+      "symbol-a",
+      { kind: "symbol", symbolKind: "function", x: 1_000, y: 1_000 },
+      {
+        ...EMPTY_HIGHLIGHT_VIEW,
+        lodTier: "close",
+        viewportBounds: { minX: 0, minY: 0, maxX: 100, maxY: 100 },
+        expandedRegions: new Set(["symbol-a"]),
+      },
+    );
+    expect(out.hidden).toBeUndefined();
   });
 });
 

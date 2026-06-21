@@ -423,6 +423,9 @@ export const COMMUNITY_HULLS_ATTRIBUTE = "communityHulls";
  * - `memberCount` — server-reported member count from a legacy community entry
  *   when present, otherwise the count of visible nodes carrying this
  *   `community_id`.
+ * - `memberIds` — visible graph node ids carrying this `community_id`, used by
+ *   the canvas to derive a screen-space hull from member positions without
+ *   turning the community itself into a selectable Sigma node.
  * - `seed` — deterministic hash of the id, usable by the canvas as a PRNG
  *   seed for hull bounds / opacity jitter without a separate RNG.
  */
@@ -432,6 +435,7 @@ export interface CommunityHull {
   keywords: string[] | undefined;
   color: string;
   memberCount: number;
+  memberIds: string[];
   seed: number;
 }
 
@@ -487,6 +491,7 @@ export function deriveCommunityHulls(
       keywords: legacy ? normalizeKeywords(legacy.keywords) : undefined,
       color: colorForCommunity(cid),
       memberCount: legacy?.member_count ?? entry.ids.size,
+      memberIds: Array.from(entry.ids).sort((a, b) => a.localeCompare(b, "en")),
       seed: fnv1a(cid),
     });
   }
