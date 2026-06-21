@@ -44,6 +44,24 @@ const JIT_PITFALL_OUTCOMES: [&str; 7] = [
     "empty",
     "error",
 ];
+const INLINE_PR_CLOSED_TOTAL: &str = "djinn_inline_pr_closed_total";
+const INLINE_BRANCH_DELETED_TOTAL: &str = "djinn_inline_branch_deleted_total";
+const INLINE_CLEANUP_SKIPPED_TOTAL: &str = "djinn_inline_cleanup_skipped_total";
+const INLINE_CLEANUP_SKIP_REASONS: [&str; 7] = [
+    "merge_queue",
+    "grace_period",
+    "bot_author",
+    "base_of_pr",
+    "protected_branch",
+    "config_disabled",
+    "dry_run",
+];
+
+// ─── Stale-PR/branch reconciliation sweep ────────────────────────────────
+const STALE_PR_REAPED_TOTAL: &str = "djinn_stale_pr_reaped_total";
+const STALE_BRANCH_REAPED_TOTAL: &str = "djinn_stale_branch_reaped_total";
+const STALE_PR_SKIPPED_TOTAL: &str = "djinn_stale_pr_skipped_total";
+const ORPHAN_WORKER_SESSIONS_REAPED_TOTAL: &str = "djinn_orphan_worker_sessions_reaped_total";
 
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
@@ -129,6 +147,32 @@ pub mod pr_poller {
     }
 }
 
+pub mod inline_cleanup {
+    /// Stable skip-reason labels for the inline cleanup skipped counter.
+    pub const REASON_MERGE_QUEUE: &str = "merge_queue";
+    pub const REASON_GRACE_PERIOD: &str = "grace_period";
+    pub const REASON_BOT_AUTHOR: &str = "bot_author";
+    pub const REASON_BASE_OF_PR: &str = "base_of_pr";
+    pub const REASON_PROTECTED_BRANCH: &str = "protected_branch";
+    pub const REASON_CONFIG_DISABLED: &str = "config_disabled";
+    pub const REASON_DRY_RUN: &str = "dry_run";
+
+    /// Increment the inline PR-closed counter when a PR is successfully closed.
+    pub fn increment_pr_closed() {
+        metrics::counter!(super::INLINE_PR_CLOSED_TOTAL).increment(1);
+    }
+
+    /// Increment the inline branch-deleted counter when a branch is successfully deleted.
+    pub fn increment_branch_deleted() {
+        metrics::counter!(super::INLINE_BRANCH_DELETED_TOTAL).increment(1);
+    }
+
+    /// Increment the inline cleanup skipped counter for one of the stable reason labels.
+    pub fn increment_skipped(reason: &'static str) {
+        metrics::counter!(super::INLINE_CLEANUP_SKIPPED_TOTAL, "reason" => reason).increment(1);
+    }
+}
+
 pub mod doctor {
     pub const FINDINGS: &str = super::DOCTOR_FINDINGS;
     pub const RUN_DURATION_SECONDS: &str = super::DOCTOR_RUN_DURATION_SECONDS;
@@ -207,6 +251,42 @@ pub mod cargo_cache {
             "step" => step.to_owned()
         )
         .set(count as f64);
+    }
+}
+
+pub mod stale_sweep {
+    /// Reason labels for the `djinn_stale_pr_skipped_total` counter.
+    pub const REASON_GRACE_PERIOD: &str = "grace_period";
+    pub const REASON_NOT_BOT: &str = "not_bot";
+    pub const REASON_IN_MERGE_QUEUE: &str = "in_merge_queue";
+    pub const REASON_ENABLED_FALSE: &str = "disabled";
+    pub const REASON_TASK_OPEN: &str = "task_open";
+    pub const REASON_PR_MERGED: &str = "pr_merged";
+    pub const REASON_NO_INSTALLATION: &str = "no_installation";
+    pub const REASON_API_ERROR: &str = "api_error";
+
+    /// Increment the stale-PR reaped counter (a PR was closed by the sweep).
+    pub fn increment_pr_reaped() {
+        metrics::counter!(super::STALE_PR_REAPED_TOTAL).increment(1);
+    }
+
+    /// Increment the stale-branch reaped counter (a remote branch was deleted by the sweep).
+    pub fn increment_branch_reaped() {
+        metrics::counter!(super::STALE_BRANCH_REAPED_TOTAL).increment(1);
+    }
+
+    /// Increment the stale-PR skipped counter with a reason label.
+    pub fn increment_pr_skipped(reason: &'static str) {
+        metrics::counter!(super::STALE_PR_SKIPPED_TOTAL, "reason" => reason).increment(1);
+    }
+
+    /// Increment the orphan-worker-session reaped counter.
+    ///
+    /// An orphan worker session is a session whose `status` is `running` but
+    /// whose backing task has been closed (or deleted). The periodic sweep
+    /// detects and interrupts these sessions.
+    pub fn increment_orphan_session_reaped() {
+        metrics::counter!(super::ORPHAN_WORKER_SESSIONS_REAPED_TOTAL).increment(1);
     }
 }
 
@@ -441,6 +521,23 @@ fn register_metrics() {
         "PR merge failures that fall back to task reopen/rework."
     );
     metrics::counter!(MERGE_FAILURES_TOTAL).absolute(0);
+    metrics::describe_counter!(
+        INLINE_PR_CLOSED_TOTAL,
+        "Inline PR/branch cleanup: PRs closed by the terminal-close hook."
+    );
+    metrics::counter!(INLINE_PR_CLOSED_TOTAL).absolute(0);
+    metrics::describe_counter!(
+        INLINE_BRANCH_DELETED_TOTAL,
+        "Inline PR/branch cleanup: branches deleted by the terminal-close hook."
+    );
+    metrics::counter!(INLINE_BRANCH_DELETED_TOTAL).absolute(0);
+    metrics::describe_counter!(
+        INLINE_CLEANUP_SKIPPED_TOTAL,
+        "Inline PR/branch cleanup: cleanup actions skipped, partitioned by reason."
+    );
+    for reason in INLINE_CLEANUP_SKIP_REASONS {
+        metrics::counter!(INLINE_CLEANUP_SKIPPED_TOTAL, "reason" => reason).absolute(0);
+    }
     for state in SLOT_POOL_STATES {
         metrics::gauge!(SLOT_POOL, "state" => state, "model" => "").set(0.0);
     }
@@ -788,6 +885,9 @@ mod tests {
         assert_sync_unit(|| {
             cargo_warm_step::set_workspace_path("project-sync", "/workspace/x/server");
         });
+        assert_sync_unit(inline_cleanup::increment_pr_closed);
+        assert_sync_unit(inline_cleanup::increment_branch_deleted);
+        assert_sync_unit(|| inline_cleanup::increment_skipped(inline_cleanup::REASON_DRY_RUN));
     }
 
     #[test]

@@ -1,26 +1,25 @@
 import { describe, expect, it } from "vitest";
 import {
   COMMUNITY_COLORS,
-  COMMUNITY_MAX_SIZE,
-  COMMUNITY_MIN_SIZE,
+  COMMUNITY_HULLS_ATTRIBUTE,
+  CONTAINMENT_EDGE_KINDS,
   DOUBLE_CLICK_INTERVAL_MS,
   PRECOMPUTED_LAYOUT_ATTRIBUTE,
   WORKSPACE_COLORS,
   buildGraphFromSnapshot,
-  collapseCommunityInSnapshot,
   colorForCommunity,
   colorForNode,
   colorForWorkspace,
-  communityNodeMass,
-  communityNodeSize,
+  deriveCommunityHulls,
   edgeStyleFor,
-  expandCommunityInSnapshot,
   filterSnapshotForWorkspace,
   hasPrecomputedCoordinates,
+  isContainmentEdgeKind,
   isDoubleClick,
   massForNode,
   parseSnapshotResponse,
   prettifyLabel,
+  type CommunityHull,
   type SnapshotNode,
   type SnapshotPayload,
 } from "@/lib/codeGraphAdapter";
@@ -628,10 +627,17 @@ describe("hasPrecomputedCoordinates", () => {
 });
 
 describe("buildGraphFromSnapshot", () => {
-  it("emits one graphology node per snapshot node and one edge per snapshot edge", () => {
+  it("emits one graphology node per snapshot node, excluding containment edges", () => {
     const graph = buildGraphFromSnapshot(fixtureSnapshot);
     expect(graph.order).toBe(fixtureSnapshot.nodes.length);
-    expect(graph.size).toBe(fixtureSnapshot.edges.length);
+    // ContainsDefinition / DeclaredInFile / MemberOf are containment
+    // edges — they are never rendered as Sigma edges. The fixture has
+    // 2 ContainsDefinition edges + 1 SymbolReference edge, so only the
+    // SymbolReference survives.
+    const nonContainmentEdges = fixtureSnapshot.edges.filter(
+      (e) => !isContainmentEdgeKind(e.kind),
+    ).length;
+    expect(graph.size).toBe(nonContainmentEdges);
   });
 
   it("attaches per-type mass, kind, and pagerank to each node", () => {
@@ -790,7 +796,7 @@ describe("buildGraphFromSnapshot", () => {
     expect(graph.getNodeAttribute("web:fn", "label")).toBe("webFn · web");
   });
 
-  it("attaches keyword subtitles to community node labels", () => {
+  it("folds legacy community keywords into hull metadata, not node labels", () => {
     const communitySnapshot: SnapshotPayload = {
       ...fixtureSnapshot,
       total_nodes: 3,
@@ -821,20 +827,22 @@ describe("buildGraphFromSnapshot", () => {
       edges: [],
     };
     const graph = buildGraphFromSnapshot(communitySnapshot);
-    expect(graph.getNodeAttribute("community:auth", "label")).toBe(
-      "auth\ntokens, sessions",
-    );
-    expect(graph.getNodeAttribute("community:auth", "subtitle")).toBe(
-      "tokens, sessions",
-    );
-    expect(graph.getNodeAttribute("community:auth", "keywords")).toEqual([
-      "tokens",
-      "sessions",
-    ]);
-    expect(graph.getNodeAttribute("community:legacy", "label")).toBe("legacy");
-    expect(graph.getNodeAttribute("community:legacy", "subtitle")).toBeUndefined();
+    // Community entries are not visible nodes.
+    expect(graph.hasNode("community:auth")).toBe(false);
+    expect(graph.hasNode("community:legacy")).toBe(false);
+    // The file node is still present without a subtitle.
     expect(graph.getNodeAttribute("file:src/main.rs", "label")).toBe("main.rs");
     expect(graph.getNodeAttribute("file:src/main.rs", "subtitle")).toBeUndefined();
+    // Hull metadata carries the legacy label + keywords.
+    const hulls = graph.getAttribute(COMMUNITY_HULLS_ATTRIBUTE) as CommunityHull[];
+    const authHull = hulls.find((h) => h.id === "auth");
+    expect(authHull).toBeDefined();
+    expect(authHull?.label).toBe("auth");
+    expect(authHull?.keywords).toEqual(["tokens", "sessions"]);
+    const legacyHull = hulls.find((h) => h.id === "legacy");
+    expect(legacyHull).toBeDefined();
+    expect(legacyHull?.label).toBe("legacy");
+    expect(legacyHull?.keywords).toBeUndefined();
   });
 
   it("attaches endpoint workspace metadata to edges", () => {
@@ -871,8 +879,37 @@ describe("buildGraphFromSnapshot", () => {
   });
 
   it("keeps intra-workspace edges less prominent than cross-workspace edges", () => {
-    const withWorkspace: SnapshotPayload = {
+    // Add a non-containment edge (Reads) so the test has a valid rendered
+    // intra-workspace edge to compare. ContainsDefinition is excluded
+    // from rendered edges as containment nesting metadata.
+    const baseEdges = [
+      ...fixtureSnapshot.edges,
+      {
+        from: "symbol:scip-rust . . . main()",
+        to: "symbol:scip-rust . . . User#",
+        kind: "Reads",
+        confidence: 0.8,
+      },
+    ];
+    // Intra-workspace: both symbols in workspace "app".
+    const intraSnapshot: SnapshotPayload = {
       ...fixtureSnapshot,
+      edges: baseEdges,
+      nodes: fixtureSnapshot.nodes.map((n) => {
+        if (
+          n.id === "file:src/main.rs" ||
+          n.id === "symbol:scip-rust . . . main()" ||
+          n.id === "symbol:scip-rust . . . User#"
+        ) {
+          return { ...n, workspace: "app" };
+        }
+        return n;
+      }),
+    };
+    // Cross-workspace: main() in "app", User# in "domain".
+    const crossSnapshot: SnapshotPayload = {
+      ...fixtureSnapshot,
+      edges: baseEdges,
       nodes: fixtureSnapshot.nodes.map((n) => {
         if (n.id === "file:src/main.rs" || n.id === "symbol:scip-rust . . . main()") {
           return { ...n, workspace: "app" };
@@ -883,23 +920,29 @@ describe("buildGraphFromSnapshot", () => {
         return n;
       }),
     };
-    const graph = buildGraphFromSnapshot(withWorkspace);
-    const intraEdge = graph.edges().find(
-      (edge) =>
-        graph.source(edge) === "file:src/main.rs" &&
-        graph.target(edge) === "symbol:scip-rust . . . main()",
-    );
-    const crossEdge = graph.edges().find(
-      (edge) =>
-        graph.source(edge) === "symbol:scip-rust . . . main()" &&
-        graph.target(edge) === "symbol:scip-rust . . . User#",
-    );
+    const intraGraph = buildGraphFromSnapshot(intraSnapshot);
+    const crossGraph = buildGraphFromSnapshot(crossSnapshot);
+    const findReadsEdge = (g: ReturnType<typeof buildGraphFromSnapshot>) =>
+      g.edges().find(
+        (edge) =>
+          g.getEdgeAttribute(edge, "kind") === "Reads" &&
+          g.source(edge) === "symbol:scip-rust . . . main()" &&
+          g.target(edge) === "symbol:scip-rust . . . User#",
+      );
+    const intraEdge = findReadsEdge(intraGraph);
+    const crossEdge = findReadsEdge(crossGraph);
     expect(intraEdge).toBeDefined();
     expect(crossEdge).toBeDefined();
-    expect(graph.getEdgeAttribute(intraEdge!, "isCrossWorkspace")).toBe(false);
-    expect(graph.getEdgeAttribute(crossEdge!, "isCrossWorkspace")).toBe(true);
-    expect(graph.getEdgeAttribute(crossEdge!, "size") as number).toBeGreaterThan(
-      graph.getEdgeAttribute(intraEdge!, "size") as number,
+    expect(
+      intraGraph.getEdgeAttribute(intraEdge!, "isCrossWorkspace"),
+    ).toBe(false);
+    expect(
+      crossGraph.getEdgeAttribute(crossEdge!, "isCrossWorkspace"),
+    ).toBe(true);
+    expect(
+      crossGraph.getEdgeAttribute(crossEdge!, "size") as number,
+    ).toBeGreaterThan(
+      intraGraph.getEdgeAttribute(intraEdge!, "size") as number,
     );
   });
 
@@ -960,7 +1003,12 @@ describe("buildGraphFromSnapshot", () => {
       ],
     };
     const graph = buildGraphFromSnapshot(withLoop);
-    expect(graph.size).toBe(fixtureSnapshot.edges.length);
+    // Only non-containment, non-self-loop edges survive. The loop is a
+    // FileReference (non-containment) but gets dropped by dropSelfLoops.
+    const expected = fixtureSnapshot.edges.filter(
+      (e) => !isContainmentEdgeKind(e.kind),
+    ).length;
+    expect(graph.size).toBe(expected);
   });
 
   it("drops edges whose endpoints aren't in the node set", () => {
@@ -977,38 +1025,126 @@ describe("buildGraphFromSnapshot", () => {
       ],
     };
     const graph = buildGraphFromSnapshot(withDangling);
-    expect(graph.size).toBe(fixtureSnapshot.edges.length);
+    // Only non-containment edges with valid endpoints survive.
+    const expected = fixtureSnapshot.edges.filter(
+      (e) => !isContainmentEdgeKind(e.kind),
+    ).length;
+    expect(graph.size).toBe(expected);
   });
 
   it("paints edges with the per-kind color", () => {
     const graph = buildGraphFromSnapshot(fixtureSnapshot);
-    const containsEdges = graph
+    // The fixture's only rendered edge is a SymbolReference.
+    const symbolRefEdges = graph
       .edges()
       .filter(
-        (e) => graph.getEdgeAttribute(e, "kind") === "ContainsDefinition",
+        (e) => graph.getEdgeAttribute(e, "kind") === "SymbolReference",
       );
-    for (const e of containsEdges) {
-      expect(graph.getEdgeAttribute(e, "color")).toBe("#2d5a3d");
+    expect(symbolRefEdges.length).toBeGreaterThan(0);
+    for (const e of symbolRefEdges) {
+      expect(graph.getEdgeAttribute(e, "color")).toBe("#7c3aed");
     }
   });
 
-  it("can drop MemberOf edges via option", () => {
-    const withMember: SnapshotPayload = {
+  it("excludes all containment edge kinds from rendered graph edges", () => {
+    const withContainment: SnapshotPayload = {
       ...fixtureSnapshot,
       edges: [
         ...fixtureSnapshot.edges,
+        // Add one of each containment kind so the test exercises all three.
         {
           from: "symbol:scip-rust . . . User#",
           to: "file:src/user.rs",
           kind: "MemberOf",
           confidence: 1.0,
         },
+        {
+          from: "file:src/user.rs",
+          to: "symbol:scip-rust . . . User#",
+          kind: "DeclaredInFile",
+          confidence: 1.0,
+        },
       ],
     };
-    const noDrop = buildGraphFromSnapshot(withMember);
-    expect(noDrop.size).toBe(withMember.edges.length);
-    const dropped = buildGraphFromSnapshot(withMember, { dropMemberOf: true });
-    expect(dropped.size).toBe(fixtureSnapshot.edges.length);
+    const graph = buildGraphFromSnapshot(withContainment);
+    // Every rendered edge must be a non-containment kind.
+    for (const e of graph.edges()) {
+      const kind = graph.getEdgeAttribute(e, "kind") as string;
+      expect(isContainmentEdgeKind(kind)).toBe(false);
+    }
+    // The only surviving edge is the fixture's SymbolReference.
+    const expected = withContainment.edges.filter(
+      (e) => !isContainmentEdgeKind(e.kind),
+    ).length;
+    expect(graph.size).toBe(expected);
+    expect(graph.size).toBe(1);
+  });
+
+  it("converts containment edges into nesting metadata on nodes", () => {
+    const graph = buildGraphFromSnapshot(fixtureSnapshot);
+    // ContainsDefinition: file:src/main.rs → symbol:main()
+    expect(
+      graph.getNodeAttribute("symbol:scip-rust . . . main()", "parentId"),
+    ).toBe("file:src/main.rs");
+    // ContainsDefinition: file:src/user.rs → symbol:User#
+    expect(
+      graph.getNodeAttribute("symbol:scip-rust . . . User#", "parentId"),
+    ).toBe("file:src/user.rs");
+    // The parent file carries its children in childIds.
+    const mainChildren = graph.getNodeAttribute(
+      "file:src/main.rs",
+      "childIds",
+    ) as string[] | undefined;
+    expect(mainChildren).toContain("symbol:scip-rust . . . main()");
+    const userChildren = graph.getNodeAttribute(
+      "file:src/user.rs",
+      "childIds",
+    ) as string[] | undefined;
+    expect(userChildren).toContain("symbol:scip-rust . . . User#");
+  });
+
+  it("converts DeclaredInFile and MemberOf back-edges into parent nesting", () => {
+    const containmentSnapshot: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: [
+        ...fixtureSnapshot.nodes,
+        {
+          id: "symbol:scip-rust . . . User#name.",
+          kind: "symbol",
+          label: "name",
+          symbol_kind: "field",
+          file_path: "src/user.rs",
+          pagerank: 0.1,
+        },
+      ],
+      edges: [
+        {
+          from: "symbol:scip-rust . . . main()",
+          to: "file:src/main.rs",
+          kind: "DeclaredInFile",
+          confidence: 1,
+        },
+        {
+          from: "symbol:scip-rust . . . User#name.",
+          to: "symbol:scip-rust . . . User#",
+          kind: "MemberOf",
+          confidence: 1,
+        },
+      ],
+    };
+    const graph = buildGraphFromSnapshot(containmentSnapshot);
+    expect(
+      graph.getNodeAttribute("symbol:scip-rust . . . main()", "parentId"),
+    ).toBe("file:src/main.rs");
+    expect(
+      graph.getNodeAttribute("symbol:scip-rust . . . User#name.", "parentId"),
+    ).toBe("symbol:scip-rust . . . User#");
+    expect(
+      graph.getNodeAttribute("file:src/main.rs", "childIds"),
+    ).toContain("symbol:scip-rust . . . main()");
+    expect(
+      graph.getNodeAttribute("symbol:scip-rust . . . User#", "childIds"),
+    ).toContain("symbol:scip-rust . . . User#name.");
   });
 
   // ── Precomputed-coordinate path (server-shipped layout) ───────────────────
@@ -1092,7 +1228,11 @@ describe("buildGraphFromSnapshot", () => {
   it("still wires up edges when using the precomputed-coordinate path", () => {
     const graph = buildGraphFromSnapshot(withServerCoords());
     expect(graph.order).toBe(fixtureSnapshot.nodes.length);
-    expect(graph.size).toBe(fixtureSnapshot.edges.length);
+    // Containment edges are excluded even on the precomputed path.
+    const expected = fixtureSnapshot.edges.filter(
+      (e) => !isContainmentEdgeKind(e.kind),
+    ).length;
+    expect(graph.size).toBe(expected);
   });
 
   it("treats (0, 0) as a valid precomputed position rather than falling back", () => {
@@ -1286,7 +1426,7 @@ describe("colorForNode", () => {
   });
 });
 
-// ── Community node parsing & rendering (semantic zoom) ──────────────────────
+// ── Community hull derivation (background metadata, not nodes) ──────────────
 
 const communitySnapshot: SnapshotPayload = {
   project_id: "proj-test",
@@ -1343,81 +1483,6 @@ const communitySnapshot: SnapshotPayload = {
   ],
 };
 
-describe("communityNodeSize", () => {
-  it("returns near the minimum size for a 1-member community", () => {
-    // log10(1+1)=log10(2)≈0.3, so a 1-member community sits slightly
-    // above the floor but well within the lower quarter of the band.
-    expect(communityNodeSize(1)).toBeGreaterThanOrEqual(COMMUNITY_MIN_SIZE);
-    expect(communityNodeSize(1)).toBeLessThan(
-      COMMUNITY_MIN_SIZE + (COMMUNITY_MAX_SIZE - COMMUNITY_MIN_SIZE) * 0.25,
-    );
-  });
-
-  it("returns near the minimum size for undefined member count", () => {
-    expect(communityNodeSize(undefined)).toBeGreaterThanOrEqual(
-      COMMUNITY_MIN_SIZE,
-    );
-    expect(communityNodeSize(undefined)).toBeLessThan(
-      COMMUNITY_MIN_SIZE + (COMMUNITY_MAX_SIZE - COMMUNITY_MIN_SIZE) * 0.25,
-    );
-  });
-
-  it("grows monotonically with member count", () => {
-    const small = communityNodeSize(10);
-    const medium = communityNodeSize(100);
-    const large = communityNodeSize(1000);
-    expect(medium).toBeGreaterThan(small);
-    expect(large).toBeGreaterThan(medium);
-  });
-
-  it("stays bounded within [COMMUNITY_MIN_SIZE, COMMUNITY_MAX_SIZE]", () => {
-    expect(communityNodeSize(0)).toBeGreaterThanOrEqual(COMMUNITY_MIN_SIZE);
-    expect(communityNodeSize(1)).toBeGreaterThanOrEqual(COMMUNITY_MIN_SIZE);
-    expect(communityNodeSize(100)).toBeLessThanOrEqual(COMMUNITY_MAX_SIZE);
-    expect(communityNodeSize(10_000)).toBeLessThanOrEqual(COMMUNITY_MAX_SIZE);
-    expect(communityNodeSize(1_000_000)).toBeLessThanOrEqual(COMMUNITY_MAX_SIZE);
-  });
-});
-
-describe("communityNodeMass", () => {
-  it("is heavier than a folder (15) so collapsed blobs spread apart", () => {
-    expect(communityNodeMass(1)).toBeGreaterThan(15);
-  });
-
-  it("grows with member count but stays bounded", () => {
-    const small = communityNodeMass(10);
-    const large = communityNodeMass(10_000);
-    expect(large).toBeGreaterThan(small);
-    expect(large).toBeLessThanOrEqual(120);
-  });
-});
-
-describe("massForNode (community)", () => {
-  it("routes community nodes through the member-count mass scale", () => {
-    const node: SnapshotNode = {
-      id: "community:x",
-      kind: "community",
-      label: "x",
-      pagerank: 0,
-      member_count: 500,
-    };
-    expect(massForNode(node)).toBe(communityNodeMass(500));
-  });
-
-  it("community mass is independent of nodeCount multiplier", () => {
-    const node: SnapshotNode = {
-      id: "community:x",
-      kind: "community",
-      label: "x",
-      pagerank: 0,
-      member_count: 100,
-    };
-    // Unlike file/folder/symbol, community mass does not scale with
-    // nodeCount — the member_count already encodes the graph size.
-    expect(massForNode(node, 10)).toBe(massForNode(node, 50_000));
-  });
-});
-
 describe("colorForNode (community)", () => {
   it("colors community nodes by their stable community_id", () => {
     const node: SnapshotNode = {
@@ -1442,76 +1507,97 @@ describe("colorForNode (community)", () => {
   });
 });
 
-describe("buildGraphFromSnapshot (community)", () => {
-  it("emits one graphology node per community with stable attributes", () => {
-    const graph = buildGraphFromSnapshot(communitySnapshot);
-    expect(graph.order).toBe(3);
-
-    const auth = graph.getNodeAttributes("community:auth");
-    expect(auth.kind).toBe("community");
-    expect(auth.communityId).toBe("auth");
-    expect(auth.memberCount).toBe(120);
-    expect(auth.internalEdgeCount).toBe(340);
-    expect(auth.workspaceKind).toBe("single");
+describe("deriveCommunityHulls", () => {
+  it("derives one hull per legacy community snapshot entry", () => {
+    const hulls = deriveCommunityHulls(communitySnapshot);
+    expect(hulls).toHaveLength(3);
+    const ids = hulls.map((h) => h.id).sort();
+    expect(ids).toEqual(["api", "auth", "utils"]);
   });
 
-  it("renders community nodes visibly larger than symbol/file nodes", () => {
-    const graph = buildGraphFromSnapshot(communitySnapshot);
-    const communitySize = graph.getNodeAttribute("community:api", "size") as number;
-
-    // Build a comparable symbol-level snapshot to get a symbol size.
-    const symbolGraph = buildGraphFromSnapshot(fixtureSnapshot);
-    const symbolSize = symbolGraph.getNodeAttribute(
-      "symbol:scip-rust . . . User#",
-      "size",
-    ) as number;
-
-    expect(communitySize).toBeGreaterThan(symbolSize);
-  });
-
-  it("sizes community nodes by bounded member-count scale", () => {
-    const graph = buildGraphFromSnapshot(communitySnapshot);
-    const small = graph.getNodeAttribute("community:utils", "size") as number; // 8 members
-    const large = graph.getNodeAttribute("community:api", "size") as number; // 5000 members
-
-    expect(large).toBeGreaterThan(small);
-    // Both within the bounded band.
-    expect(small).toBeGreaterThanOrEqual(COMMUNITY_MIN_SIZE);
-    expect(large).toBeLessThanOrEqual(COMMUNITY_MAX_SIZE);
-  });
-
-  it("forwards community mass onto graphology node attributes", () => {
-    const graph = buildGraphFromSnapshot(communitySnapshot);
-    const mass = graph.getNodeAttribute("community:auth", "mass") as number;
-    expect(mass).toBe(communityNodeMass(120));
-  });
-
-  it("renders aggregated inter-community edges without dropping them", () => {
-    const graph = buildGraphFromSnapshot(communitySnapshot);
-    expect(graph.size).toBe(2);
-    const edge = graph
-      .edges()
-      .find(
-        (e) =>
-          graph.source(e) === "community:auth" &&
-          graph.target(e) === "community:api",
-      );
-    expect(edge).toBeDefined();
-  });
-
-  it("colors community nodes from the 12-hue palette", () => {
-    const graph = buildGraphFromSnapshot(communitySnapshot);
-    for (const id of graph.nodes()) {
-      const color = graph.getNodeAttribute(id, "color") as string;
-      expect(COMMUNITY_COLORS).toContain(color);
+  it("hull color matches colorForCommunity so members and hulls align", () => {
+    const hulls = deriveCommunityHulls(communitySnapshot);
+    for (const hull of hulls) {
+      expect(hull.color).toBe(colorForCommunity(hull.id));
+      expect(COMMUNITY_COLORS).toContain(hull.color);
     }
   });
 
-  it("preserves kind: 'community' on the graphology node (not coerced to symbol)", () => {
-    const graph = buildGraphFromSnapshot(communitySnapshot);
-    for (const id of graph.nodes()) {
-      expect(graph.getNodeAttribute(id, "kind")).toBe("community");
+  it("folds legacy label and member_count into hull metadata", () => {
+    const hulls = deriveCommunityHulls(communitySnapshot);
+    const auth = hulls.find((h) => h.id === "auth");
+    expect(auth?.label).toBe("auth");
+    expect(auth?.memberCount).toBe(120);
+    const api = hulls.find((h) => h.id === "api");
+    expect(api?.memberCount).toBe(5000);
+  });
+
+  it("falls back to member count when no legacy community entry exists", () => {
+    const snapshot: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: fixtureSnapshot.nodes.map((n) =>
+        n.kind === "symbol" ? { ...n, community_id: "alpha" } : n,
+      ),
+    };
+    const hulls = deriveCommunityHulls(snapshot);
+    const alpha = hulls.find((h) => h.id === "alpha");
+    // Two symbols in fixtureSnapshot carry community_id "alpha".
+    expect(alpha?.memberCount).toBe(2);
+    // No legacy entry → label falls back to the id.
+    expect(alpha?.label).toBe("alpha");
+  });
+
+  it("is deterministic across calls", () => {
+    const a = deriveCommunityHulls(communitySnapshot);
+    const b = deriveCommunityHulls(communitySnapshot);
+    expect(a).toEqual(b);
+  });
+
+  it("hull seed is a stable deterministic hash of the id", () => {
+    const hulls = deriveCommunityHulls(communitySnapshot);
+    for (const hull of hulls) {
+      expect(hull.seed).toBe(hull.seed); // deterministic
+      expect(Number.isFinite(hull.seed)).toBe(true);
     }
+    // Same id → same seed across calls.
+    const again = deriveCommunityHulls(communitySnapshot);
+    expect(again[0]?.seed).toBe(hulls[0]?.seed);
+  });
+
+  it("returns an empty array when no community nodes or member ids exist", () => {
+    expect(deriveCommunityHulls(fixtureSnapshot)).toEqual([]);
+  });
+});
+
+describe("buildGraphFromSnapshot (community hulls)", () => {
+  it("does not create visible graph nodes for community snapshot entries", () => {
+    const graph = buildGraphFromSnapshot(communitySnapshot);
+    expect(graph.order).toBe(0);
+    expect(graph.hasNode("community:auth")).toBe(false);
+    expect(graph.hasNode("community:api")).toBe(false);
+    expect(graph.hasNode("community:utils")).toBe(false);
+  });
+
+  it("stores derived hulls under the communityHulls graph attribute", () => {
+    const graph = buildGraphFromSnapshot(communitySnapshot);
+    const hulls = graph.getAttribute(COMMUNITY_HULLS_ATTRIBUTE) as
+      | CommunityHull[]
+      | undefined;
+    expect(hulls).toBeDefined();
+    expect(hulls).toHaveLength(3);
+    const ids = hulls.map((h) => h.id).sort();
+    expect(ids).toEqual(["api", "auth", "utils"]);
+  });
+
+  it("drops edges whose endpoints are community nodes (no longer in graph)", () => {
+    const graph = buildGraphFromSnapshot(communitySnapshot);
+    // All edges touch community node endpoints, so none survive.
+    expect(graph.size).toBe(0);
+  });
+
+  it("does not set the communityHulls attribute when no communities exist", () => {
+    const graph = buildGraphFromSnapshot(fixtureSnapshot);
+    expect(graph.getAttribute(COMMUNITY_HULLS_ATTRIBUTE)).toBeUndefined();
   });
 });
 
@@ -1532,145 +1618,22 @@ describe("edgeStyleFor", () => {
   });
 });
 
-// ── Community expand / collapse (semantic zoom) ─────────────────────────────
+describe("containment edge kinds", () => {
+  it("CONTAINMENT_EDGE_KINDS includes ContainsDefinition, DeclaredInFile, and MemberOf", () => {
+    expect(CONTAINMENT_EDGE_KINDS.has("ContainsDefinition")).toBe(true);
+    expect(CONTAINMENT_EDGE_KINDS.has("DeclaredInFile")).toBe(true);
+    expect(CONTAINMENT_EDGE_KINDS.has("MemberOf")).toBe(true);
+  });
 
-/**
- * Fixtures for expand/collapse: a community snapshot with 3 communities
- * and a symbol snapshot where symbols are tagged with matching
- * community_id values. The communities mirror the real server wire shape
- * (stable community_id + member_count), and symbols carry community_id
- * so the adapter can splice members.
- */
-const expandCommunitySnapshot: SnapshotPayload = {
-  project_id: "proj-expand",
-  git_head: "abc",
-  generated_at: "2026-06-17T00:00:00Z",
-  truncated: false,
-  total_nodes: 3,
-  total_edges: 2,
-  node_cap: 10_000,
-  nodes: [
-    {
-      id: "community:auth",
-      kind: "community",
-      label: "auth",
-      pagerank: 0.5,
-      community_id: "auth",
-      member_count: 2,
-      internal_edge_count: 1,
-    },
-    {
-      id: "community:api",
-      kind: "community",
-      label: "api",
-      pagerank: 0.3,
-      community_id: "api",
-      member_count: 2,
-      internal_edge_count: 1,
-    },
-    {
-      id: "community:utils",
-      kind: "community",
-      label: "utils",
-      pagerank: 0.2,
-      community_id: "utils",
-      member_count: 1,
-    },
-  ],
-  edges: [
-    {
-      from: "community:auth",
-      to: "community:api",
-      kind: "SymbolReference",
-      confidence: 0.8,
-    },
-    {
-      from: "community:api",
-      to: "community:utils",
-      kind: "FileReference",
-      confidence: 0.6,
-    },
-  ],
-};
-
-const expandSymbolSnapshot: SnapshotPayload = {
-  project_id: "proj-expand",
-  git_head: "abc",
-  generated_at: "2026-06-17T00:00:00Z",
-  truncated: false,
-  total_nodes: 5,
-  total_edges: 3,
-  node_cap: 10_000,
-  nodes: [
-    // auth members
-    {
-      id: "sym:login",
-      kind: "symbol",
-      label: "login",
-      symbol_kind: "function",
-      pagerank: 0.5,
-      community_id: "auth",
-    },
-    {
-      id: "sym:logout",
-      kind: "symbol",
-      label: "logout",
-      symbol_kind: "function",
-      pagerank: 0.4,
-      community_id: "auth",
-    },
-    // api members
-    {
-      id: "sym:getUser",
-      kind: "symbol",
-      label: "getUser",
-      symbol_kind: "function",
-      pagerank: 0.3,
-      community_id: "api",
-    },
-    {
-      id: "sym:createUser",
-      kind: "symbol",
-      label: "createUser",
-      symbol_kind: "function",
-      pagerank: 0.2,
-      community_id: "api",
-    },
-    // utils member
-    {
-      id: "sym:formatDate",
-      kind: "symbol",
-      label: "formatDate",
-      symbol_kind: "function",
-      pagerank: 0.1,
-      community_id: "utils",
-    },
-  ],
-  edges: [
-    // intra-auth edge
-    {
-      from: "sym:login",
-      to: "sym:logout",
-      kind: "SymbolReference",
-      confidence: 0.9,
-    },
-    // intra-api edge
-    {
-      from: "sym:getUser",
-      to: "sym:createUser",
-      kind: "SymbolReference",
-      confidence: 0.85,
-    },
-    // cross-community edge (auth → api) — should NOT appear in the
-    // expanded snapshot because it's not intra-community.
-    {
-      from: "sym:login",
-      to: "sym:getUser",
-      kind: "FileReference",
-      confidence: 0.5,
-    },
-  ],
-};
+  it("isContainmentEdgeKind returns true only for containment kinds", () => {
+    expect(isContainmentEdgeKind("ContainsDefinition")).toBe(true);
+    expect(isContainmentEdgeKind("DeclaredInFile")).toBe(true);
+    expect(isContainmentEdgeKind("MemberOf")).toBe(true);
+    expect(isContainmentEdgeKind("SymbolReference")).toBe(false);
+    expect(isContainmentEdgeKind("Reads")).toBe(false);
+    expect(isContainmentEdgeKind("Extends")).toBe(false);
+  });
+});
 
 describe("isDoubleClick", () => {
   it("returns false for the first click (no previous)", () => {
@@ -1705,232 +1668,5 @@ describe("isDoubleClick", () => {
     const prev = { nodeId: "node-a", at: 1000 };
     expect(isDoubleClick(prev, "node-a", 1050, 100)).toBe(true);
     expect(isDoubleClick(prev, "node-a", 1200, 100)).toBe(false);
-  });
-});
-
-describe("expandCommunityInSnapshot", () => {
-  it("replaces the community node with its member symbol nodes", () => {
-    const expanded = expandCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expandSymbolSnapshot,
-      "auth",
-    );
-
-    const ids = expanded.nodes.map((n) => n.id);
-    expect(ids).not.toContain("community:auth");
-    expect(ids).toContain("sym:login");
-    expect(ids).toContain("sym:logout");
-    // Other communities are preserved.
-    expect(ids).toContain("community:api");
-    expect(ids).toContain("community:utils");
-  });
-
-  it("adds intra-community edges for the expanded community", () => {
-    const expanded = expandCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expandSymbolSnapshot,
-      "auth",
-    );
-
-    const memberEdge = expanded.edges.find(
-      (e) => e.from === "sym:login" && e.to === "sym:logout",
-    );
-    expect(memberEdge).toBeDefined();
-  });
-
-  it("drops cross-community edges touching the expanded community node", () => {
-    const expanded = expandCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expandSymbolSnapshot,
-      "auth",
-    );
-
-    // The original auth→api aggregated edge touched the expanded node.
-    const authApiEdge = expanded.edges.find(
-      (e) =>
-        e.from === "community:auth" && e.to === "community:api",
-    );
-    expect(authApiEdge).toBeUndefined();
-    // Cross-community symbol edges (login→getUser) are NOT intra-community,
-    // so they don't appear either.
-    const crossSymbolEdge = expanded.edges.find(
-      (e) => e.from === "sym:login" && e.to === "sym:getUser",
-    );
-    expect(crossSymbolEdge).toBeUndefined();
-  });
-
-  it("preserves aggregated inter-community edges for other communities", () => {
-    const expanded = expandCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expandSymbolSnapshot,
-      "auth",
-    );
-
-    const apiUtilsEdge = expanded.edges.find(
-      (e) =>
-        e.from === "community:api" && e.to === "community:utils",
-    );
-    expect(apiUtilsEdge).toBeDefined();
-  });
-
-  it("updates total_nodes and total_edges counts", () => {
-    const expanded = expandCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expandSymbolSnapshot,
-      "auth",
-    );
-
-    // 3 communities - auth + 2 auth members = 4 nodes
-    expect(expanded.total_nodes).toBe(4);
-    expect(expanded.nodes.length).toBe(4);
-    // 1 api→utils preserved + 1 intra-auth edge = 2 edges
-    expect(expanded.total_edges).toBe(2);
-    expect(expanded.edges.length).toBe(2);
-  });
-
-  it("produces a buildable graphology graph", () => {
-    const expanded = expandCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expandSymbolSnapshot,
-      "auth",
-    );
-    const graph = buildGraphFromSnapshot(expanded);
-    expect(graph.hasNode("sym:login")).toBe(true);
-    expect(graph.hasNode("sym:logout")).toBe(true);
-    expect(graph.hasNode("community:api")).toBe(true);
-    expect(graph.hasNode("community:auth")).toBe(false);
-  });
-
-  it("expands a different community by its stable community_id", () => {
-    const expanded = expandCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expandSymbolSnapshot,
-      "api",
-    );
-
-    const ids = expanded.nodes.map((n) => n.id);
-    expect(ids).not.toContain("community:api");
-    expect(ids).toContain("sym:getUser");
-    expect(ids).toContain("sym:createUser");
-    // auth and utils are preserved.
-    expect(ids).toContain("community:auth");
-    expect(ids).toContain("community:utils");
-  });
-});
-
-describe("collapseCommunityInSnapshot", () => {
-  it("restores the community node and removes its members", () => {
-    const expanded = expandCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expandSymbolSnapshot,
-      "auth",
-    );
-    const collapsed = collapseCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expanded,
-      "auth",
-    );
-
-    const ids = collapsed.nodes.map((n) => n.id);
-    expect(ids).toContain("community:auth");
-    expect(ids).not.toContain("sym:login");
-    expect(ids).not.toContain("sym:logout");
-    // Other communities preserved.
-    expect(ids).toContain("community:api");
-    expect(ids).toContain("community:utils");
-  });
-
-  it("restores aggregated inter-community edges including the collapsed community", () => {
-    const expanded = expandCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expandSymbolSnapshot,
-      "auth",
-    );
-    const collapsed = collapseCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expanded,
-      "auth",
-    );
-
-    // The auth→api edge was dropped on expand; collapse restores it.
-    const authApiEdge = collapsed.edges.find(
-      (e) =>
-        e.from === "community:auth" && e.to === "community:api",
-    );
-    expect(authApiEdge).toBeDefined();
-    // The api→utils edge is also present.
-    const apiUtilsEdge = collapsed.edges.find(
-      (e) =>
-        e.from === "community:api" && e.to === "community:utils",
-    );
-    expect(apiUtilsEdge).toBeDefined();
-  });
-
-  it("drops intra-community symbol edges for the collapsed community", () => {
-    const expanded = expandCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expandSymbolSnapshot,
-      "auth",
-    );
-    const collapsed = collapseCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expanded,
-      "auth",
-    );
-
-    const memberEdge = collapsed.edges.find(
-      (e) => e.from === "sym:login" && e.to === "sym:logout",
-    );
-    expect(memberEdge).toBeUndefined();
-  });
-
-  it("round-trips expand then collapse back to the original node set", () => {
-    const expanded = expandCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expandSymbolSnapshot,
-      "auth",
-    );
-    const collapsed = collapseCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expanded,
-      "auth",
-    );
-
-    expect(collapsed.nodes.map((n) => n.id).sort()).toEqual(
-      expandCommunitySnapshot.nodes.map((n) => n.id).sort(),
-    );
-    expect(collapsed.edges.map((e) => `${e.from}→${e.to}`).sort()).toEqual(
-      expandCommunitySnapshot.edges
-        .map((e) => `${e.from}→${e.to}`)
-        .sort(),
-    );
-  });
-
-  it("preserves other expanded communities when collapsing one", () => {
-    // Expand auth, then expand api on top.
-    const step1 = expandCommunityInSnapshot(
-      expandCommunitySnapshot,
-      expandSymbolSnapshot,
-      "auth",
-    );
-    const step2 = expandCommunityInSnapshot(
-      step1,
-      expandSymbolSnapshot,
-      "api",
-    );
-
-    // Collapse only auth — api should stay expanded.
-    const collapsed = collapseCommunityInSnapshot(
-      expandCommunitySnapshot,
-      step2,
-      "auth",
-    );
-
-    const ids = collapsed.nodes.map((n) => n.id);
-    expect(ids).toContain("community:auth");
-    expect(ids).not.toContain("sym:login");
-    // api members should still be present.
-    expect(ids).toContain("sym:getUser");
-    expect(ids).toContain("sym:createUser");
   });
 });

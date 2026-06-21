@@ -1857,6 +1857,7 @@ mod inflight_ledger_tests {
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,
+            pr_cleanup_config: PrCleanupConfig::default(),
             dispatched: 0,
             recovered: 0,
         }

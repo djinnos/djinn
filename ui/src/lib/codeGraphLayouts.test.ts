@@ -160,14 +160,37 @@ describe("codeGraphLayouts", () => {
     );
   });
 
-  it("composes community-level snapshots as normal positioned nodes", () => {
+  it("does not treat community snapshot entries as positioned nodes", () => {
+    // Communities are background hulls, not structural layout nodes.
+    // A snapshot consisting entirely of community entries should produce
+    // an empty position map — the adapter filters community nodes before
+    // calling the layout, and the layout itself no longer treats
+    // `kind: "community"` as a structural node.
     const positions = computeForceLayout(communitySnapshot);
-    expect(positions.size).toBe(communitySnapshot.nodes.length);
-    for (const node of communitySnapshot.nodes) {
-      const position = positions.get(node.id);
-      expect(position).toBeDefined();
-      expect(Number.isFinite(position?.x)).toBe(true);
-      expect(Number.isFinite(position?.y)).toBe(true);
+    expect(positions.size).toBe(0);
+  });
+
+  it("lays out file/folder/symbol nodes but ignores community entries", () => {
+    const mixed: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: [
+        ...fixtureSnapshot.nodes,
+        {
+          id: "community:alpha",
+          kind: "community",
+          label: "alpha",
+          pagerank: 0.9,
+          community_id: "alpha",
+          member_count: 42,
+        },
+      ],
+    };
+    const positions = computeForceLayout(mixed);
+    // Community entries are not positioned.
+    expect(positions.get("community:alpha")).toBeUndefined();
+    // Visible nodes are still positioned.
+    for (const node of fixtureSnapshot.nodes) {
+      expect(positions.get(node.id)).toBeDefined();
     }
   });
 });

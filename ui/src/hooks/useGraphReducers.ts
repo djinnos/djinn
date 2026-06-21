@@ -31,10 +31,11 @@ import {
   nodeReducer as nodeReducerImpl,
   oneHopNeighborhood,
   topComplexityIds,
+  isTraversalContainmentEdge,
   type Attributes,
   type ComplexityThresholds,
+  type EdgeKindAwareGraph,
   type HighlightView,
-  type MinimalGraph,
 } from "@/lib/codeGraphReducers";
 import { computePagerankPercentiles } from "@/lib/codeGraphLabels";
 import {
@@ -45,11 +46,6 @@ import {
 import type { SigmaInstanceHandle, SigmaReducerHooks } from "./useSigmaGraph";
 
 const DOI_DISTANCE_LAMBDA = 0.18;
-const DOI_STRUCTURAL_EDGE_KINDS = new Set([
-  "ContainsDefinition",
-  "DeclaredInFile",
-  "MemberOf",
-]);
 
 interface DoiFocusResult {
   focusIds: ReadonlySet<string>;
@@ -66,11 +62,6 @@ const EMPTY_DOI_FOCUS: DoiFocusResult = {
 function normalizeEdgeKind(attrs: Attributes | undefined): string | null {
   const raw = attrs?.kind ?? attrs?.edgeKind;
   return typeof raw === "string" ? raw : null;
-}
-
-function isStructuralEdge(attrs: Attributes | undefined): boolean {
-  const kind = normalizeEdgeKind(attrs);
-  return kind !== null && DOI_STRUCTURAL_EDGE_KINDS.has(kind);
 }
 
 function edgeIdsForDirection(
@@ -146,7 +137,7 @@ export function computeDoiFocus(
       } catch {
         attrs = undefined;
       }
-      if (isStructuralEdge(attrs)) continue;
+      if (isTraversalContainmentEdge(normalizeEdgeKind(attrs))) continue;
       const next = nextNodeForDirection(graph, edgeId, nodeId, focusDirection);
       if (next === null || distances.has(next) || !graph.hasNode(next)) continue;
       distances.set(next, distance + 1);
@@ -184,11 +175,13 @@ export function computeDoiFocus(
 }
 
 /**
- * Wrap a graphology `Graph` so it satisfies the `MinimalGraph`
+ * Wrap a graphology `Graph` so it satisfies the `EdgeKindAwareGraph`
  * interface the neighborhood helpers expect — Sigma's graph carries directed
- * edges, but the highlight neighborhood walks both directions.
+ * edges, but the highlight neighborhood walks both directions. The
+ * `edgeKind` reader lets `oneHopNeighborhood` skip containment edges
+ * so the selection frontier does not expand through structural nesting.
  */
-function asMinimalGraph(graph: Graph): MinimalGraph {
+function asMinimalGraph(graph: Graph): EdgeKindAwareGraph {
   return {
     hasNode: (id) => graph.hasNode(id),
     neighbors: (id) => {
@@ -199,6 +192,19 @@ function asMinimalGraph(graph: Graph): MinimalGraph {
         return graph.neighbors(id);
       } catch {
         return [];
+      }
+    },
+    edgeKind: (source, target) => {
+      try {
+        // graphology's `.edge()` returns the first edge between two
+        // nodes in either direction on a directed graph. We read the
+        // `kind` attribute from it.
+        const edge = graph.edge(source, target);
+        if (!edge) return null;
+        const kind = graph.getEdgeAttribute(edge, "kind");
+        return typeof kind === "string" ? kind : null;
+      } catch {
+        return null;
       }
     },
   };

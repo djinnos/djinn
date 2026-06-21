@@ -6602,6 +6602,31 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "ResolvedMention": {
+          "properties": {
+            "entity_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "short_id",
+            "entity_type",
+            "title",
+            "permalink"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "content": {
@@ -6646,6 +6671,13 @@ expression: signatures
         "project_id": {
           "nullable": true,
           "type": "string"
+        },
+        "resolved_mentions": {
+          "description": "Short_id mentions found in note body, resolved to entities.",
+          "items": {
+            "$ref": "#/$defs/ResolvedMention"
+          },
+          "type": "array"
         },
         "retrieval_anchor": {
           "nullable": true,
@@ -7322,6 +7354,31 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "ResolvedMention": {
+          "properties": {
+            "entity_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "short_id",
+            "entity_type",
+            "title",
+            "permalink"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "content": {
@@ -7366,6 +7423,13 @@ expression: signatures
         "project_id": {
           "nullable": true,
           "type": "string"
+        },
+        "resolved_mentions": {
+          "description": "Short_id mentions found in note body, resolved to entities.",
+          "items": {
+            "$ref": "#/$defs/ResolvedMention"
+          },
+          "type": "array"
         },
         "retrieval_anchor": {
           "nullable": true,
@@ -7499,6 +7563,31 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "ResolvedMention": {
+          "properties": {
+            "entity_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "short_id",
+            "entity_type",
+            "title",
+            "permalink"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "content": {
@@ -7543,6 +7632,13 @@ expression: signatures
         "project_id": {
           "nullable": true,
           "type": "string"
+        },
+        "resolved_mentions": {
+          "description": "Short_id mentions found in note body, resolved to entities.",
+          "items": {
+            "$ref": "#/$defs/ResolvedMention"
+          },
+          "type": "array"
         },
         "retrieval_anchor": {
           "nullable": true,
@@ -8246,6 +8342,31 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "ResolvedMention": {
+          "properties": {
+            "entity_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "short_id",
+            "entity_type",
+            "title",
+            "permalink"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "content": {
@@ -8290,6 +8411,13 @@ expression: signatures
         "project_id": {
           "nullable": true,
           "type": "string"
+        },
+        "resolved_mentions": {
+          "description": "Short_id mentions found in note body, resolved to entities.",
+          "items": {
+            "$ref": "#/$defs/ResolvedMention"
+          },
+          "type": "array"
         },
         "retrieval_anchor": {
           "nullable": true,
