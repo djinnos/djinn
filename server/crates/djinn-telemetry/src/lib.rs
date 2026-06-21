@@ -1,5 +1,8 @@
 // Touch to advance main HEAD and trigger a warm job (verification warm-base
 // cargo cache validation, 2026-06-16). No behavior change.
+//
+// djinn:allow-oversize — flat registry of metric definitions; grows by one
+// const/helper per new metric. Just over the 50 KiB byte guard.
 use std::sync::OnceLock;
 
 use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandle};
