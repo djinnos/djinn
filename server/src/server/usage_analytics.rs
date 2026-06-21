@@ -53,6 +53,8 @@ struct UsageQuery {
     /// Model identifier filter.
     model: Option<String>,
     agent_type: Option<String>,
+    /// User identifier filter (session creator, falling back to task creator).
+    user_id: Option<String>,
 }
 
 /// Time-series bucket granularity. Repository rows are daily; week/month
@@ -173,6 +175,7 @@ fn previous_window_query(
         project_id: query.project_id.clone(),
         model_id: query.model_id.clone(),
         agent_type: query.agent_type.clone(),
+        user_id: query.user_id.clone(),
     })
 }
 
@@ -224,6 +227,7 @@ impl UsageQuery {
                 project_id: self.project_id.filter(|s| !s.is_empty()),
                 model_id: self.model.filter(|s| !s.is_empty()),
                 agent_type: self.agent_type.filter(|s| !s.is_empty()),
+                user_id: self.user_id.filter(|s| !s.is_empty()),
             },
             granularity,
         ))
@@ -244,6 +248,11 @@ struct UsageKpiDto {
     /// Pre-formatted display value (currency); empty string lets the UI fall
     /// back to compact-number formatting of `value`.
     formatted: String,
+    /// Optional qualifier shown under the value (e.g. that spend is an
+    /// estimate at API rates, and how many sessions were unpriced). `None`
+    /// when the card needs no caption.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caption: Option<String>,
 }
 
 /// A point in the multi-dimensional time series.  Carries the model / project /
@@ -408,18 +417,21 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
                 .total_cost_usd
                 .map(format_currency)
                 .unwrap_or_default(),
+            caption: Some(spend_caption(totals.unpriced_session_count)),
         },
         UsageKpiDto {
             label: "Tokens".to_string(),
             value: Some(tokens),
             delta_pct: pct_delta(tokens, prev_tokens),
             formatted: String::new(),
+            caption: None,
         },
         UsageKpiDto {
             label: "Sessions".to_string(),
             value: Some(totals.session_count as f64),
             delta_pct: pct_delta(totals.session_count as f64, previous.session_count as f64),
             formatted: String::new(),
+            caption: None,
         },
         UsageKpiDto {
             label: "Cache reads".to_string(),
@@ -429,8 +441,23 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
                 previous.cache_read_tokens as f64,
             ),
             formatted: String::new(),
+            caption: None,
         },
     ]
+}
+
+/// Caption for the Spend card. Spend is a notional figure at public API rates
+/// (usage on subscription / coding plans is billed separately), and unpriced
+/// sessions are excluded from the sum rather than counted as $0.
+fn spend_caption(unpriced_session_count: i64) -> String {
+    let mut caption = "Est. at public API rates".to_string();
+    if unpriced_session_count > 0 {
+        caption.push_str(&format!(
+            " · {unpriced_session_count} unpriced session{} excluded",
+            if unpriced_session_count == 1 { "" } else { "s" }
+        ));
+    }
+    caption
 }
 
 fn week_start(date: time::Date) -> Result<time::Date, (StatusCode, String)> {
@@ -674,6 +701,7 @@ mod tests {
             project_id: None,
             model: None,
             agent_type: None,
+            user_id: None,
         }
     }
 
@@ -779,11 +807,13 @@ mod tests {
             project_id: Some("proj-1".into()),
             model_id: Some("model-1".into()),
             agent_type: Some("worker".into()),
+            user_id: Some("user-1".into()),
         };
         let previous = previous_window_query(&query).unwrap();
         assert_eq!(previous.from, "2025-03-03");
         assert_eq!(previous.to, "2025-03-10");
         assert_eq!(previous.project_id.as_deref(), Some("proj-1"));
+        assert_eq!(previous.user_id.as_deref(), Some("user-1"));
     }
 
     #[test]
@@ -795,6 +825,7 @@ mod tests {
             cache_read_tokens: 50,
             cache_write_tokens: 5,
             total_cost_usd: Some(20.0),
+            unpriced_session_count: 0,
         };
         let previous = UsageTotals {
             session_count: 5,
@@ -803,6 +834,7 @@ mod tests {
             cache_read_tokens: 25,
             cache_write_tokens: 0,
             total_cost_usd: Some(10.0),
+            unpriced_session_count: 0,
         };
         let kpis = build_kpis(&totals, &previous);
         assert_eq!(kpis.len(), 4);
@@ -815,6 +847,8 @@ mod tests {
             "doubled spend = +100%"
         );
         assert!(spend.formatted.starts_with('$'));
+        // No unpriced sessions → caption is the bare estimate qualifier.
+        assert_eq!(spend.caption.as_deref(), Some("Est. at public API rates"));
 
         let tokens = &kpis[1];
         assert_eq!(tokens.value, Some(200.0));
@@ -834,6 +868,33 @@ mod tests {
         assert!(kpis[0].formatted.is_empty());
         // Previous window empty → token delta is null, not a divide-by-zero.
         assert!(kpis[1].delta_pct.is_none());
+    }
+
+    #[test]
+    fn spend_caption_notes_excluded_unpriced_sessions() {
+        assert_eq!(spend_caption(0), "Est. at public API rates");
+        assert_eq!(
+            spend_caption(1),
+            "Est. at public API rates · 1 unpriced session excluded"
+        );
+        assert_eq!(
+            spend_caption(5),
+            "Est. at public API rates · 5 unpriced sessions excluded"
+        );
+    }
+
+    #[test]
+    fn build_kpis_spend_caption_reports_unpriced_count() {
+        let totals = UsageTotals {
+            total_cost_usd: Some(12.5),
+            unpriced_session_count: 3,
+            ..UsageTotals::default()
+        };
+        let kpis = build_kpis(&totals, &UsageTotals::default());
+        assert_eq!(
+            kpis[0].caption.as_deref(),
+            Some("Est. at public API rates · 3 unpriced sessions excluded")
+        );
     }
 
     fn series_row(day: &str, model: &str, cost: Option<f64>) -> SeriesDetailRow {

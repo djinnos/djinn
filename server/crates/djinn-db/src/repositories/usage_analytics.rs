@@ -180,6 +180,10 @@ pub struct UsageAnalyticsQuery {
     pub model_id: Option<String>,
     /// Optional agent_type filter.
     pub agent_type: Option<String>,
+    /// Optional user filter. Matches the session's attributed user, preferring
+    /// the session creator and falling back to the task creator (same
+    /// attribution rule as the `by_user` breakdown).
+    pub user_id: Option<String>,
 }
 
 /// Overall totals across the entire queried date range (and matching filters).
@@ -190,9 +194,15 @@ pub struct UsageTotals {
     pub tokens_out: i64,
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
-    /// Aggregate cost in USD.  `None` when ANY matching session had no
-    /// pricing, preserving the "unpriced" signal.
+    /// Estimated spend in USD: the sum of `cost_usd` over the *priced* sessions
+    /// only (unpriced sessions are skipped, not treated as $0). This is a
+    /// notional figure at public API rates — usage on subscription/coding
+    /// plans is billed separately. `None` only when no matching session was
+    /// priced at all.
     pub total_cost_usd: Option<f64>,
+    /// Number of matching sessions whose `cost_usd` was NULL (unpriced model),
+    /// hence excluded from `total_cost_usd`. Lets the UI qualify the estimate.
+    pub unpriced_session_count: i64,
 }
 
 /// A single multi-dimensional time-series row: one day bucket for a particular
@@ -252,8 +262,10 @@ impl UsageAnalyticsRepository {
     // ── Shared filter construction ─────────────────────────────────────────
 
     /// Build the session-level WHERE conditions (date range + optional
-    /// project / model / agent filters) and their ordered bind values.  All
-    /// conditions reference `sessions s`, so this composes with any joins.
+    /// project / model / agent / user filters) and their ordered bind values.
+    /// Conditions reference `sessions s` and, for the user filter, `tasks t`;
+    /// every caller therefore joins `tasks t ON t.id = s.task_id` (a 1:1 join
+    /// that cannot inflate counts).
     fn session_filters(params: &UsageAnalyticsQuery) -> (Vec<String>, Vec<String>) {
         let mut conditions: Vec<String> = Vec::new();
         let mut binds: Vec<String> = Vec::new();
@@ -282,6 +294,16 @@ impl UsageAnalyticsRepository {
         if let Some(ref agent_type) = params.agent_type {
             conditions.push(format!("s.agent_type = ${idx}"));
             binds.push(agent_type.clone());
+            idx += 1;
+        }
+
+        if let Some(ref user_id) = params.user_id {
+            // Same attribution as the `by_user` breakdown: session creator,
+            // falling back to the task creator.
+            conditions.push(format!(
+                "COALESCE(s.created_by_user_id, t.created_by_user_id) = ${idx}"
+            ));
+            binds.push(user_id.clone());
         }
 
         (conditions, binds)
@@ -304,8 +326,14 @@ impl UsageAnalyticsRepository {
 
     // ── Totals ────────────────────────────────────────────────────────────
 
-    /// Window totals across all matching sessions (no dimension joins so an
-    /// epic mapped to multiple proposals cannot inflate the counts).
+    /// Window totals across all matching sessions. The `tasks t` join is 1:1
+    /// (`t.id = s.task_id`) so it cannot inflate counts; it exists only so the
+    /// optional user filter can fall back to the task creator.
+    ///
+    /// Spend is the priced subtotal — `SUM(s.cost_usd)` naturally skips
+    /// unpriced (NULL-cost) sessions — and `unpriced_session_count` reports
+    /// how many sessions were excluded, so the UI can show an honest estimate
+    /// instead of collapsing the whole total to "—".
     pub async fn totals(&self, params: &UsageAnalyticsQuery) -> Result<UsageTotals> {
         self.db.ensure_initialized().await?;
 
@@ -319,9 +347,11 @@ impl UsageAnalyticsRepository {
                 COALESCE(SUM(s.tokens_out)::bigint, 0)         AS tokens_out, \
                 COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS cache_read_tokens, \
                 COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS cache_write_tokens, \
-                CASE WHEN bool_or(s.cost_usd IS NULL) THEN NULL ELSE SUM(s.cost_usd) END \
-                                                               AS total_cost_usd \
-             FROM sessions s {where_clause}"
+                SUM(s.cost_usd)                                AS total_cost_usd, \
+                COUNT(*) FILTER (WHERE s.cost_usd IS NULL)     AS unpriced_session_count \
+             FROM sessions s \
+             LEFT JOIN tasks t ON t.id = s.task_id \
+             {where_clause}"
         );
 
         let query = Self::bind_all(sqlx::query(&sql), &binds);
@@ -334,6 +364,7 @@ impl UsageAnalyticsRepository {
             cache_read_tokens: row.get("cache_read_tokens"),
             cache_write_tokens: row.get("cache_write_tokens"),
             total_cost_usd: row.get("total_cost_usd"),
+            unpriced_session_count: row.get("unpriced_session_count"),
         })
     }
 
@@ -361,10 +392,10 @@ impl UsageAnalyticsRepository {
                 COALESCE(SUM(s.tokens_in)::bigint, 0)          AS tokens_in, \
                 COALESCE(SUM(s.tokens_out)::bigint, 0)         AS tokens_out, \
                 COUNT(DISTINCT s.task_id)                      AS task_count, \
-                CASE WHEN bool_or(s.cost_usd IS NULL) THEN NULL ELSE SUM(s.cost_usd) END \
-                                                               AS cost \
+                SUM(s.cost_usd)                                AS cost \
              FROM sessions s \
              LEFT JOIN projects p ON p.id = s.project_id \
+             LEFT JOIN tasks t ON t.id = s.task_id \
              {where_clause} \
              GROUP BY substring(s.started_at, 1, 10), s.model_id, \
                       COALESCE(s.project_id, ''), COALESCE(p.name, ''), s.agent_type \
@@ -423,7 +454,7 @@ impl UsageAnalyticsRepository {
                 SELECT \
                     entity_id, \
                     MAX(entity_name) AS entity_name, \
-                    CASE WHEN bool_or(cost_usd IS NULL) THEN NULL ELSE SUM(cost_usd) END AS cost, \
+                    SUM(cost_usd) AS cost, \
                     COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
                     COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out, \
                     COUNT(DISTINCT task_id) AS task_count \
@@ -527,6 +558,14 @@ impl UsageAnalyticsRepository {
         if let Some(ref model_id) = params.model_id {
             conditions.push(format!("s.model_id = ${idx}"));
             binds.push(model_id.clone());
+            idx += 1;
+        }
+
+        if let Some(ref user_id) = params.user_id {
+            conditions.push(format!(
+                "COALESCE(s.created_by_user_id, t.created_by_user_id) = ${idx}"
+            ));
+            binds.push(user_id.clone());
         }
 
         let from_clause = "FROM sessions s JOIN tasks t ON t.id = s.task_id".to_string();
@@ -552,7 +591,7 @@ impl UsageAnalyticsRepository {
                 SELECT \
                     model_id, \
                     COUNT(*) AS sessions, \
-                    CASE WHEN bool_or(cost_usd IS NULL) THEN NULL ELSE SUM(cost_usd) END AS spend_usd, \
+                    SUM(cost_usd) AS spend_usd, \
                     COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
                     COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out \
                 FROM filtered_sessions \
@@ -654,7 +693,7 @@ impl UsageAnalyticsRepository {
                 SELECT \
                     project_id, MAX(project_name) AS project_name, model_id, \
                     COUNT(*) AS sessions, \
-                    CASE WHEN bool_or(cost_usd IS NULL) THEN NULL ELSE SUM(cost_usd) END AS spend_usd, \
+                    SUM(cost_usd) AS spend_usd, \
                     COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
                     COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out, \
                     COUNT(DISTINCT task_id) AS task_count \
@@ -771,16 +810,24 @@ mod tests {
             project_id: Some("proj-1".into()),
             model_id: None,
             agent_type: Some("worker".into()),
+            user_id: Some("user-1".into()),
         };
         let (conditions, binds) = UsageAnalyticsRepository::session_filters(&q);
         assert_eq!(conditions[0], "s.started_at >= $1");
         assert_eq!(conditions[1], "s.started_at < $2");
         assert_eq!(binds[0], "2025-01-01");
         assert_eq!(binds[1], "2025-02-01");
-        // project_id present, model_id absent, agent_type present → 4 binds.
-        assert_eq!(binds.len(), 4);
+        // project_id present, model_id absent, agent_type + user present → 5 binds.
+        assert_eq!(binds.len(), 5);
         assert_eq!(binds[2], "proj-1");
         assert_eq!(binds[3], "worker");
+        assert_eq!(binds[4], "user-1");
+        // The user filter must reference the task-creator fallback so it can
+        // bind against the COALESCE attribution column.
+        assert!(
+            conditions.last().unwrap().contains("created_by_user_id"),
+            "user filter should use the COALESCE attribution column"
+        );
     }
 
     #[test]

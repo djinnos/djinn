@@ -31,6 +31,8 @@ export interface UsageAnalyticsFilters {
   model?: string;
   /** Filter to a specific agent base role / type. */
   agent_type?: string;
+  /** Filter to a specific user (session creator, falling back to task creator). */
+  user_id?: string;
 }
 
 // ── Response types ─────────────────────────────────────────────────────────
@@ -42,6 +44,8 @@ export interface UsageKpi {
   delta_pct: number | null;
   /** Formatted display value for the KPI card. */
   formatted: string;
+  /** Optional qualifier shown under the value (e.g. spend estimate basis). */
+  caption?: string | null;
 }
 
 export interface UsageTimeSeriesPoint {
@@ -155,6 +159,7 @@ export function buildUsageAnalyticsQueryString(filters: UsageAnalyticsFilters): 
   if (filters.project_id) params.set("project_id", filters.project_id);
   if (filters.model) params.set("model", filters.model);
   if (filters.agent_type) params.set("agent_type", filters.agent_type);
+  if (filters.user_id) params.set("user_id", filters.user_id);
 
   const qs = params.toString();
   return qs ? `?${qs}` : "";

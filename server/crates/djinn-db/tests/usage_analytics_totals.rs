@@ -28,6 +28,7 @@ fn effectiveness_params() -> UsageAnalyticsQuery {
         project_id: None,
         model_id: None,
         agent_type: None,
+        user_id: None,
     }
 }
 
@@ -222,6 +223,7 @@ async fn usage_totals_decodes_i64_from_sum() {
         project_id: None,
         model_id: None,
         agent_type: None,
+        user_id: None,
     };
 
     let totals = repo.totals(&params).await.expect("totals should succeed");
@@ -231,10 +233,10 @@ async fn usage_totals_decodes_i64_from_sum() {
     assert_eq!(totals.tokens_out, 5678);
     assert_eq!(totals.cache_read_tokens, 100);
     assert_eq!(totals.cache_write_tokens, 200);
-    // total_cost_usd should be Some(0.042) — no NULL sessions, so no NULL
-    // cost semantic applies.
+    // total_cost_usd should be Some(0.042) — the only session is priced.
     let cost = totals.total_cost_usd.expect("cost should be Some");
     assert!((cost - 0.042_f64).abs() < 1e-9, "cost mismatch: {cost}");
+    assert_eq!(totals.unpriced_session_count, 0);
 
     // Detailed series should have exactly one (day, model, project, agent) row.
     let series = repo
@@ -247,10 +249,11 @@ async fn usage_totals_decodes_i64_from_sum() {
     assert_eq!(series[0].tokens_out, 5678);
 }
 
-/// Verify NULL-cost semantics: when ANY matching session has NULL cost_usd,
-/// the aggregate total_cost_usd must be NULL (not $0).
+/// Verify priced-subtotal semantics: a mix of priced and unpriced sessions
+/// yields the sum over the *priced* sessions only (not NULL, not $0), and the
+/// unpriced sessions are counted separately so the UI can qualify the estimate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn usage_totals_null_cost_semantics_preserved() {
+async fn usage_totals_reports_priced_subtotal_and_unpriced_count() {
     let db = create_test_db();
     seed_session(&db).await;
     seed_unpriced_session(&db).await;
@@ -263,6 +266,7 @@ async fn usage_totals_null_cost_semantics_preserved() {
         project_id: None,
         model_id: None,
         agent_type: None,
+        user_id: None,
     };
 
     let totals = repo.totals(&params).await.expect("totals should succeed");
@@ -273,12 +277,45 @@ async fn usage_totals_null_cost_semantics_preserved() {
     assert_eq!(totals.tokens_out, 5678 + 888);
     assert_eq!(totals.cache_read_tokens, 100 + 50);
     assert_eq!(totals.cache_write_tokens, 200 + 75);
-    // Because one session has NULL cost_usd, total_cost_usd must be NULL.
+    // Spend is the priced subtotal (only the 0.042 session is priced); the
+    // unpriced session is excluded from the sum but counted.
+    let cost = totals
+        .total_cost_usd
+        .expect("priced subtotal should be Some when at least one session is priced");
+    assert!((cost - 0.042_f64).abs() < 1e-9, "cost mismatch: {cost}");
+    assert_eq!(
+        totals.unpriced_session_count, 1,
+        "exactly one unpriced session should be counted"
+    );
+}
+
+/// When *every* matching session is unpriced, the priced subtotal is NULL
+/// (nothing to sum) and all sessions are reported as unpriced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_totals_all_unpriced_yields_none_subtotal() {
+    let db = create_test_db();
+    seed_unpriced_session(&db).await;
+
+    let repo = UsageAnalyticsRepository::new(db);
+    let params = UsageAnalyticsQuery {
+        from: "2025-01-01".into(),
+        to: "2025-12-31".into(),
+        group_by: GroupDimension::Model,
+        project_id: None,
+        model_id: None,
+        agent_type: None,
+        user_id: None,
+    };
+
+    let totals = repo.totals(&params).await.expect("totals should succeed");
+
+    assert_eq!(totals.session_count, 1);
     assert!(
         totals.total_cost_usd.is_none(),
-        "expected NULL total_cost_usd when any session is unpriced, got {:?}",
+        "expected NULL subtotal when no session is priced, got {:?}",
         totals.total_cost_usd,
     );
+    assert_eq!(totals.unpriced_session_count, 1);
 }
 
 /// Verify the entity breakdown query also decodes correctly (same SUM→NUMERIC
@@ -296,6 +333,7 @@ async fn breakdown_decodes_i64_from_sum() {
         project_id: None,
         model_id: None,
         agent_type: None,
+        user_id: None,
     };
 
     let rows = repo

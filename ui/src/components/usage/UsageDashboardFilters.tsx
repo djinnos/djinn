@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
 import type {
   DateRangePreset,
   Granularity,
@@ -25,30 +26,34 @@ const ALL_VALUE = "__all__";
 /** Internal date-range mode that adds "custom" on top of the API presets. */
 const CUSTOM_VALUE = "custom";
 
-const DATE_PRESETS: { value: DateRangePreset; label: string }[] = [
+/** Option shape consumed by base-ui's `Select.items`, which makes
+ * `<SelectValue />` render the option's human label instead of the raw value
+ * (otherwise the trigger shows e.g. `__all__` / `30d` / `day`). */
+interface SelectItemOption {
+  value: string;
+  label: string;
+}
+
+const DATE_ITEMS: SelectItemOption[] = [
   { value: "7d", label: "Last 7 days" },
   { value: "30d", label: "Last 30 days" },
+  { value: CUSTOM_VALUE, label: "Custom range" },
 ];
 
-const GRANULARITIES: { value: Granularity; label: string }[] = [
+const GRANULARITIES: SelectItemOption[] = [
   { value: "day", label: "Daily" },
   { value: "week", label: "Weekly" },
   { value: "month", label: "Monthly" },
 ];
 
 /** Known agent base roles — mirrors `BaseRole` from `@/api/agents`. */
-const AGENT_TYPES: { value: string; label: string }[] = [
+const AGENT_TYPES: SelectItemOption[] = [
   { value: "worker", label: "Worker" },
   { value: "reviewer", label: "Reviewer" },
   { value: "lead", label: "Lead" },
   { value: "planner", label: "Planner" },
   { value: "architect", label: "Architect" },
 ];
-
-interface ProjectOption {
-  id: string;
-  name: string;
-}
 
 interface UsageDashboardFiltersBarProps {
   /** The canonical filter object shared by every dashboard tab. */
@@ -75,7 +80,7 @@ export function UsageDashboardFiltersBar({
   // ── Derive selector options from the analytics response metadata ──────────
   // Source projects from breakdown rows and matrix cells so options stay
   // populated even when one section is sparse.  Resilient to empty data.
-  const projectOptions = useMemo<ProjectOption[]>(() => {
+  const projectOptions = useMemo<SelectItemOption[]>(() => {
     const seen = new Map<string, string>();
     for (const row of data?.breakdowns.by_project ?? []) {
       if (row.id) seen.set(row.id, row.name || row.id);
@@ -85,14 +90,26 @@ export function UsageDashboardFiltersBar({
         seen.set(cell.project_id, cell.project_name || cell.project_id);
       }
     }
-    return Array.from(seen, ([id, name]) => ({ id, name }));
+    return Array.from(seen, ([value, label]) => ({ value, label }));
   }, [data]);
 
-  const modelOptions = useMemo<string[]>(() => {
+  const modelOptions = useMemo<SelectItemOption[]>(() => {
     const seen = new Set<string>();
     for (const m of data?.model_effectiveness ?? []) seen.add(m.model);
     for (const cell of data?.project_model_matrix ?? []) seen.add(cell.model);
-    return Array.from(seen).sort();
+    return Array.from(seen)
+      .sort()
+      .map((value) => ({ value, label: value }));
+  }, [data]);
+
+  // Users are sourced from the by_user breakdown — the only place the backend
+  // surfaces the user dimension. Falls back to the id when a name is missing.
+  const userOptions = useMemo<SelectItemOption[]>(() => {
+    const seen = new Map<string, string>();
+    for (const row of data?.breakdowns.by_user ?? []) {
+      if (row.id) seen.set(row.id, row.name || row.id);
+    }
+    return Array.from(seen, ([value, label]) => ({ value, label }));
   }, [data]);
 
   // ── Date range mode ───────────────────────────────────────────────────────
@@ -113,23 +130,13 @@ export function UsageDashboardFiltersBar({
     }
   };
 
-  // ── Single-select helpers ─────────────────────────────────────────────────
-  const selectValue = (v: string | undefined) => v ?? ALL_VALUE;
-
-  const handleSingleChange =
-    (field: "project_id" | "model" | "agent_type") => (value: string) => {
-      onChange({
-        ...filters,
-        [field]: value === ALL_VALUE ? undefined : value,
-      });
-    };
-
   return (
     <div className="flex flex-wrap items-end gap-3 rounded-lg border border-border bg-card px-4 py-3">
       {/* Date range preset / custom */}
       <div className="flex flex-col gap-1.5">
         <Label className="text-xs text-muted-foreground">Date range</Label>
         <Select
+          items={DATE_ITEMS}
           value={dateMode}
           onValueChange={(v) =>
             typeof v === "string" && handleDateModeChange(v)
@@ -139,12 +146,11 @@ export function UsageDashboardFiltersBar({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {DATE_PRESETS.map((p) => (
+            {DATE_ITEMS.map((p) => (
               <SelectItem key={p.value} value={p.value}>
                 {p.label}
               </SelectItem>
             ))}
-            <SelectItem value={CUSTOM_VALUE}>Custom range</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -189,17 +195,15 @@ export function UsageDashboardFiltersBar({
         </>
       )}
 
-      {/* Granularity */}
+      {/* Granularity — always has a value, so no "all" option. */}
       <div className="flex flex-col gap-1.5">
         <Label className="text-xs text-muted-foreground">Granularity</Label>
         <Select
-          value={selectValue(filters.granularity)}
+          items={GRANULARITIES}
+          value={filters.granularity ?? "day"}
           onValueChange={(v) => {
             if (typeof v === "string") {
-              onChange({
-                ...filters,
-                granularity: v === ALL_VALUE ? undefined : (v as Granularity),
-              });
+              onChange({ ...filters, granularity: v as Granularity });
             }
           }}
         >
@@ -216,80 +220,99 @@ export function UsageDashboardFiltersBar({
         </Select>
       </div>
 
-      {/* Project */}
-      <div className="flex flex-col gap-1.5">
-        <Label className="text-xs text-muted-foreground">Project</Label>
-        <Select
-          value={selectValue(filters.project_id)}
-          onValueChange={(v) =>
-            typeof v === "string" && handleSingleChange("project_id")(v)
-          }
-        >
-          <SelectTrigger
-            className="h-8 w-[160px] text-xs"
-            title="Project filter"
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL_VALUE}>All projects</SelectItem>
-            {projectOptions.map((p) => (
-              <SelectItem key={p.id} value={p.id}>
-                {p.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      <FilterSelect
+        label="Project"
+        allLabel="All projects"
+        title="Project filter"
+        width="w-[160px]"
+        options={projectOptions}
+        value={filters.project_id}
+        onSelect={(value) => onChange({ ...filters, project_id: value })}
+      />
 
-      {/* Model */}
-      <div className="flex flex-col gap-1.5">
-        <Label className="text-xs text-muted-foreground">Model</Label>
-        <Select
-          value={selectValue(filters.model)}
-          onValueChange={(v) =>
-            typeof v === "string" && handleSingleChange("model")(v)
-          }
-        >
-          <SelectTrigger className="h-8 w-[180px] text-xs" title="Model filter">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL_VALUE}>All models</SelectItem>
-            {modelOptions.map((m) => (
-              <SelectItem key={m} value={m}>
-                {m}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      <FilterSelect
+        label="Model"
+        allLabel="All models"
+        title="Model filter"
+        width="w-[180px]"
+        options={modelOptions}
+        value={filters.model}
+        onSelect={(value) => onChange({ ...filters, model: value })}
+      />
 
-      {/* Agent type */}
-      <div className="flex flex-col gap-1.5">
-        <Label className="text-xs text-muted-foreground">Agent type</Label>
-        <Select
-          value={selectValue(filters.agent_type)}
-          onValueChange={(v) =>
-            typeof v === "string" && handleSingleChange("agent_type")(v)
-          }
-        >
-          <SelectTrigger
-            className="h-8 w-[130px] text-xs"
-            title="Agent type filter"
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL_VALUE}>All types</SelectItem>
-            {AGENT_TYPES.map((a) => (
-              <SelectItem key={a.value} value={a.value}>
-                {a.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      <FilterSelect
+        label="User"
+        allLabel="All users"
+        title="User filter"
+        width="w-[160px]"
+        options={userOptions}
+        value={filters.user_id}
+        onSelect={(value) => onChange({ ...filters, user_id: value })}
+      />
+
+      <FilterSelect
+        label="Agent type"
+        allLabel="All types"
+        title="Agent type filter"
+        width="w-[130px]"
+        options={AGENT_TYPES}
+        value={filters.agent_type}
+        onSelect={(value) => onChange({ ...filters, agent_type: value })}
+      />
+    </div>
+  );
+}
+
+/**
+ * A single "all-or-one" filter dropdown. Prepends an "All …" sentinel option
+ * and passes `items` to the Select so the trigger renders the chosen option's
+ * label rather than the raw value (no stray `__all__` in the UI).
+ */
+function FilterSelect({
+  label,
+  allLabel,
+  title,
+  width,
+  options,
+  value,
+  onSelect,
+}: {
+  label: string;
+  allLabel: string;
+  title: string;
+  width: string;
+  options: SelectItemOption[];
+  /** Current filter value, or `undefined` when unset ("all"). */
+  value: string | undefined;
+  /** Receives the selected value, or `undefined` when "all" is chosen. */
+  onSelect: (value: string | undefined) => void;
+}) {
+  const items = useMemo<SelectItemOption[]>(
+    () => [{ value: ALL_VALUE, label: allLabel }, ...options],
+    [allLabel, options],
+  );
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label className="text-xs text-muted-foreground">{label}</Label>
+      <Select
+        items={items}
+        value={value ?? ALL_VALUE}
+        onValueChange={(v) =>
+          typeof v === "string" && onSelect(v === ALL_VALUE ? undefined : v)
+        }
+      >
+        <SelectTrigger className={cn("h-8 text-xs", width)} title={title}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {items.map((it) => (
+            <SelectItem key={it.value} value={it.value}>
+              {it.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   );
 }
