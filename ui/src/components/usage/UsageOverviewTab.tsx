@@ -109,6 +109,7 @@ export function UsageOverviewTab({
           <div className="flex items-center gap-2">
             <Label className="text-xs text-muted-foreground">Group by</Label>
             <Select
+              items={GROUPING_OPTIONS}
               value={grouping}
               onValueChange={(value) => {
                 if (isSpendGrouping(value)) setGrouping(value);
@@ -202,6 +203,14 @@ function KpiCard({ kpi }: { kpi: UsageKpi }) {
       <p className="mt-1 truncate text-2xl font-semibold tabular-nums tracking-tight text-foreground">
         {value}
       </p>
+      {kpi.caption && (
+        <p
+          className="mt-1 truncate text-[11px] text-muted-foreground"
+          title={kpi.caption}
+        >
+          {kpi.caption}
+        </p>
+      )}
       <div
         className={cn(
           "mt-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
