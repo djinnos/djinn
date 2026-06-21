@@ -1,0 +1,441 @@
+// Pure (React-free) helpers for the interactive file-tree block. These parse the
+// freeform tree text an author writes inside <FileTree>…</FileTree> into a flat
+// list of files (with a change status + note), then fold those flat slash-paths
+// into a nested folder tree. Kept in their own module so they are unit-testable
+// without pulling React in.
+//
+// djinn's MDX stores the tree as the block's *children text* (see the Rust
+// `validation.rs` fixture: `<FileTree root="src"> src/\n  main.rs </FileTree>`),
+// NOT as a structured `entries={…}` JSON prop. So the parser tolerates BOTH of
+// the two authoring styles seen in the wild:
+//
+//   1. Indented ASCII tree — folders end in `/` (or simply have children under a
+//      deeper indent), files sit beneath them:
+//        src/
+//          main.rs
+//          routes/
+//            git.ts (NEW)
+//
+//   2. One slash-path per line:
+//        src/main.rs
+//        src/routes/git.ts (MODIFIED)  -- why it changed
+//
+// A per-file change status is derived from an inline marker like `(NEW)`,
+// `(MODIFIED)`, `(DELETED)`, or `(RENAMED)`. A trailing note/description after
+// the path (e.g. `Cargo.toml (add [workspace.lints])` or `foo.ts — does X`) is
+// surfaced as a muted caption. Anything the parser can't make sense of yields an
+// empty file list, so the caller can fall back to the raw <pre>.
+
+/** The kind of change applied to a file, driving its single-letter badge. */
+export type FileChange = "added" | "modified" | "deleted" | "renamed";
+
+/** A single parsed file: its full slash path plus optional status + note. */
+export interface ParsedFile {
+  /** Full slash-delimited path, e.g. `src/routes/git.ts`. */
+  path: string;
+  /** Last path segment (file name). */
+  name: string;
+  change?: FileChange;
+  /** Trailing human note after the path, if any. */
+  note?: string;
+}
+
+/** A folder node in the derived nested tree. */
+export interface FolderNode {
+  kind: "folder";
+  /** Display name (may be a compacted `a/b/c` chain). */
+  name: string;
+  /** Full slash path of the folder — a stable key. */
+  path: string;
+  children: TreeNode[];
+}
+
+/** A file leaf in the derived nested tree. */
+export interface FileNode {
+  kind: "file";
+  name: string;
+  path: string;
+  change?: FileChange;
+  note?: string;
+}
+
+export type TreeNode = FolderNode | FileNode;
+
+/** Tally of changes across the tree, for the summary header. */
+export interface ChangeTally {
+  added: number;
+  modified: number;
+  deleted: number;
+  renamed: number;
+}
+
+/* ── Status + note parsing ─────────────────────────────────────────────────── */
+
+// Maps the words an author might use in an inline `(…)` marker to a status.
+const STATUS_WORDS: Record<string, FileChange> = {
+  new: "added",
+  added: "added",
+  add: "added",
+  create: "added",
+  created: "added",
+  a: "added",
+  modified: "modified",
+  modify: "modified",
+  changed: "modified",
+  change: "modified",
+  updated: "modified",
+  update: "modified",
+  edit: "modified",
+  edited: "modified",
+  m: "modified",
+  deleted: "deleted",
+  delete: "deleted",
+  removed: "deleted",
+  remove: "deleted",
+  del: "deleted",
+  d: "deleted",
+  renamed: "renamed",
+  rename: "renamed",
+  moved: "renamed",
+  move: "renamed",
+  r: "renamed",
+};
+
+/**
+ * Pull a leading `(STATUS)` marker out of a trailing-text fragment. Only a
+ * marker whose entire content is a recognised status word counts (so a genuine
+ * note like `(add [workspace.lints])` is left as a note, not eaten as a status).
+ */
+function extractStatusMarker(text: string): {
+  change?: FileChange;
+  rest: string;
+} {
+  const trimmed = text.trim();
+  const match = /^\(([A-Za-z]+)\)\s*([\s\S]*)$/.exec(trimmed);
+  if (match) {
+    const word = (match[1] ?? "").toLowerCase();
+    const change = STATUS_WORDS[word];
+    if (change) return { change, rest: (match[2] ?? "").trim() };
+  }
+  return { rest: trimmed };
+}
+
+/** Strip a leading note separator (dash/colon/hash) and unwrap a `(note)`. */
+function cleanNote(text: string): string | undefined {
+  let noteText = text.replace(/^[—–\-:#]+\s*/u, "").trim();
+  const wrapped = /^\(([\s\S]*)\)$/.exec(noteText);
+  if (wrapped) noteText = (wrapped[1] ?? "").trim();
+  return noteText || undefined;
+}
+
+/**
+ * Split one authored row (already de-indented) into its leading token (a path or
+ * segment), change status, and note. Returns null when the leading token doesn't
+ * look like a path/segment.
+ */
+function parseRow(raw: string): ParsedFile | null {
+  let rest = raw.trim();
+  if (!rest) return null;
+  // Strip ASCII tree-drawing glyphs / bullet markers, keeping path + trailing.
+  rest = rest.replace(/^[│|`'+*\s]*[├└][\s─-]*/u, "").trim();
+  rest = rest.replace(/^[│|]\s*/u, "").trim();
+  rest = rest.replace(/^[-*+]\s+/u, "").trim();
+  if (!rest) return null;
+
+  const firstSpace = rest.search(/\s/);
+  let path = rest;
+  let trailing = "";
+  if (firstSpace !== -1) {
+    path = rest.slice(0, firstSpace);
+    trailing = rest.slice(firstSpace + 1).trim();
+  }
+
+  // A trailing `:` on the path token introduces a note (`src/x.ts: helper`).
+  const colon = path.indexOf(":");
+  if (colon !== -1) {
+    const after = path.slice(colon + 1);
+    path = path.slice(0, colon);
+    trailing = after ? `${after} ${trailing}`.trim() : trailing;
+  }
+
+  // A path token must not contain angle brackets and must have real content.
+  if (!path || /[<>]/.test(path)) return null;
+
+  let change: FileChange | undefined;
+  let note: string | undefined;
+  if (trailing) {
+    const marker = extractStatusMarker(trailing);
+    change = marker.change;
+    note = cleanNote(marker.rest);
+  }
+
+  const isFolder = path.endsWith("/");
+  const cleanPath = path.replace(/\/+$/, "");
+  if (!cleanPath) return null;
+  // Reject tokens with no path-ish character at all (pure punctuation).
+  if (!/[A-Za-z0-9._]/.test(cleanPath)) return null;
+
+  // A bare folder row (e.g. `src/`) with no status/note carries no file — its
+  // descendants supply the folder structure via their own paths.
+  if (isFolder && !change && !note) return null;
+
+  const segments = cleanPath.split("/").filter(Boolean);
+  const name = segments[segments.length - 1] ?? cleanPath;
+  return { path: cleanPath, name, change, note };
+}
+
+/** Parse a single tree row's own SEGMENT name (not a full path) + status + note. */
+function parseRowSegment(raw: string): {
+  segment: string;
+  rawEndsWithSlash: boolean;
+  change?: FileChange;
+  note?: string;
+} | null {
+  let rest = raw.trim();
+  rest = rest.replace(/^[├└][\s─-]*/u, "").trim();
+  rest = rest.replace(/^[│|]\s*/u, "").trim();
+  rest = rest.replace(/^[-*+]\s+/u, "").trim();
+  if (!rest) return null;
+
+  const firstSpace = rest.search(/\s/);
+  let token = rest;
+  let trailing = "";
+  if (firstSpace !== -1) {
+    token = rest.slice(0, firstSpace);
+    trailing = rest.slice(firstSpace + 1).trim();
+  }
+  if (!token || /[<>]/.test(token)) return null;
+
+  const rawEndsWithSlash = token.endsWith("/");
+  const segment = token.replace(/\/+$/, "");
+  if (!segment || !/[A-Za-z0-9._]/.test(segment)) return null;
+
+  let change: FileChange | undefined;
+  let note: string | undefined;
+  if (trailing) {
+    const marker = extractStatusMarker(trailing);
+    change = marker.change;
+    note = cleanNote(marker.rest);
+  }
+
+  return { segment, rawEndsWithSlash, change, note };
+}
+
+/** Indentation width of a line; tabs count as 2 columns. */
+function indentWidth(line: string): number {
+  let width = 0;
+  for (const ch of line) {
+    if (ch === " ") width += 1;
+    else if (ch === "\t") width += 2;
+    else break;
+  }
+  return width;
+}
+
+/**
+ * Reconstruct full slash-paths from an indentation-based ASCII tree. Each row's
+ * indentation depth maps to a folder stack; a row ending in `/` (or one whose
+ * next row is more deeply indented) is a folder, others are files.
+ */
+function parseIndentedTree(lines: string[]): ParsedFile[] {
+  const rows = lines
+    .map((line) => ({ indent: indentWidth(line), text: line.trim() }))
+    .filter((r) => r.text.length > 0);
+  if (rows.length === 0) return [];
+
+  const hasIndent = rows.some((r) => r.indent > 0);
+  if (!hasIndent) return [];
+
+  const files: ParsedFile[] = [];
+  const stack: { indent: number; segment: string }[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!;
+    while (stack.length > 0 && stack[stack.length - 1]!.indent >= row.indent) {
+      stack.pop();
+    }
+
+    const parsed = parseRowSegment(row.text);
+    if (!parsed) continue;
+
+    // A single-token "segment" that itself contains slashes is a slash-path
+    // pasted into an indented tree; treat it as a full path from the stack root.
+    const next = rows[i + 1];
+    const isFolderByIndent = next ? next.indent > row.indent : false;
+    const isFolder = parsed.rawEndsWithSlash || isFolderByIndent;
+
+    const prefix = stack.map((s) => s.segment).join("/");
+    const fullPath = prefix
+      ? `${prefix}/${parsed.segment}`
+      : parsed.segment;
+
+    if (isFolder) {
+      stack.push({ indent: row.indent, segment: parsed.segment });
+      if (parsed.change || parsed.note) {
+        files.push({
+          path: fullPath,
+          name: parsed.segment.split("/").pop() ?? parsed.segment,
+          change: parsed.change,
+          note: parsed.note,
+        });
+      }
+    } else {
+      files.push({
+        path: fullPath,
+        name: parsed.segment.split("/").pop() ?? parsed.segment,
+        change: parsed.change,
+        note: parsed.note,
+      });
+    }
+  }
+
+  return files;
+}
+
+/**
+ * Parse the freeform <FileTree> body into a flat list of files. Tries the
+ * indentation-based ASCII-tree interpretation first (the legacy authoring
+ * style); if that yields nothing, falls back to treating each non-empty line as
+ * an independent slash-path. Returns `[]` for input it can't parse so the caller
+ * can fall back to a raw render.
+ */
+export function parseFileTreeBody(body: string): ParsedFile[] {
+  if (!body || !body.trim()) return [];
+  const lines = body.replace(/\r\n?/g, "\n").split("\n");
+
+  const indented = parseIndentedTree(lines);
+  if (indented.length > 0) return dedupe(indented);
+
+  const flat: ParsedFile[] = [];
+  for (const line of lines) {
+    const parsed = parseRow(line);
+    if (parsed) flat.push(parsed);
+  }
+  return dedupe(flat);
+}
+
+/** Drop duplicate paths, keeping the first (which preserves authored order). */
+function dedupe(files: ParsedFile[]): ParsedFile[] {
+  const seen = new Set<string>();
+  const out: ParsedFile[] = [];
+  for (const file of files) {
+    if (seen.has(file.path)) continue;
+    seen.add(file.path);
+    out.push(file);
+  }
+  return out;
+}
+
+/* ── Tree construction (flat paths → nested folders) ───────────────────────── */
+
+interface FolderBuild {
+  name: string;
+  path: string;
+  folders: Map<string, FolderBuild>;
+  files: FileNode[];
+  order: string[];
+}
+
+function makeFolder(name: string, path: string): FolderBuild {
+  return { name, path, folders: new Map(), files: [], order: [] };
+}
+
+/**
+ * Build a nested folder tree from flat files. Folders are derived purely from
+ * each path's slash segments; insertion order is preserved within a folder, with
+ * folders sorted before files at each level (conventional explorer ordering).
+ * Single-child folder chains are compacted into one `a/b/c` row.
+ */
+export function buildFileTree(files: ParsedFile[]): TreeNode[] {
+  const root = makeFolder("", "");
+
+  for (const file of files) {
+    const segments = file.path.split("/").filter(Boolean);
+    if (segments.length === 0) continue;
+    const fileName = segments[segments.length - 1]!;
+    const folderSegments = segments.slice(0, -1);
+
+    let cursor = root;
+    let prefix = "";
+    for (const segment of folderSegments) {
+      prefix = prefix ? `${prefix}/${segment}` : segment;
+      let next = cursor.folders.get(segment);
+      if (!next) {
+        next = makeFolder(segment, prefix);
+        cursor.folders.set(segment, next);
+        cursor.order.push(`d:${segment}`);
+      }
+      cursor = next;
+    }
+
+    cursor.files.push({
+      kind: "file",
+      name: fileName,
+      path: file.path,
+      change: file.change,
+      note: file.note,
+    });
+    cursor.order.push(`f:${cursor.files.length - 1}`);
+  }
+
+  const materialize = (folder: FolderBuild): TreeNode[] => {
+    const nodes: TreeNode[] = [];
+    for (const key of folder.order) {
+      if (key.startsWith("d:")) {
+        const child = folder.folders.get(key.slice(2));
+        if (!child) continue;
+        nodes.push({
+          kind: "folder",
+          name: child.name,
+          path: child.path,
+          children: materialize(child),
+        });
+      } else {
+        const file = folder.files[Number(key.slice(2))];
+        if (file) nodes.push(file);
+      }
+    }
+    return [
+      ...nodes.filter((node) => node.kind === "folder"),
+      ...nodes.filter((node) => node.kind === "file"),
+    ];
+  };
+
+  return compactTree(materialize(root));
+}
+
+/** Collapse single-child folder chains into one `a/b/c` row (explorer style). */
+function compactFolderNode(folder: FolderNode): FolderNode {
+  const names = [folder.name];
+  let path = folder.path;
+  let children = folder.children;
+
+  while (children.length === 1 && children[0]?.kind === "folder") {
+    const child = children[0];
+    names.push(child.name);
+    path = child.path;
+    children = child.children;
+  }
+
+  return {
+    kind: "folder",
+    name: names.join("/"),
+    path,
+    children: compactTree(children),
+  };
+}
+
+function compactTree(nodes: TreeNode[]): TreeNode[] {
+  return nodes.map((node) =>
+    node.kind === "folder" ? compactFolderNode(node) : node,
+  );
+}
+
+/** Tally the change kinds across a flat file list, for the summary header. */
+export function tallyChanges(files: ParsedFile[]): ChangeTally {
+  const tally: ChangeTally = { added: 0, modified: 0, deleted: 0, renamed: 0 };
+  for (const file of files) {
+    if (file.change) tally[file.change] += 1;
+  }
+  return tally;
+}
