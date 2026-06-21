@@ -267,7 +267,7 @@ function StoryShell({
   workspaceFixture = false,
 }: StoryShellProps) {
   // Mirror the inputs into the global store so the toolbar reflects
-  // the selection state correctly (depth-slider enable etc.).
+  // the selection state correctly for DOI focus controls.
   const setSelection = useCodeGraphStore((s) => s.setSelection);
   const setCitations = useCodeGraphStore((s) => s.setCitations);
   const setToolHighlight = useCodeGraphStore((s) => s.setToolHighlight);

@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  DEFAULT_DEPTH,
+  DEFAULT_DOI_REVEAL_COUNT,
+  DEFAULT_FOCUS_DIRECTION,
   DEFAULT_LAYOUT_MODE,
   EDGE_KINDS,
-  MAX_DEPTH,
-  MIN_DEPTH,
+  MAX_DOI_REVEAL_COUNT,
+  MIN_DOI_REVEAL_COUNT,
   useCodeGraphStore,
 } from "./codeGraphStore";
 
@@ -69,8 +70,11 @@ describe("codeGraphStore", () => {
       expect(filters.other).toBe(false);
     });
 
-    it("starts at the default (max) depth", () => {
-      expect(useCodeGraphStore.getState().depthFilter).toBe(DEFAULT_DEPTH);
+    it("starts with default DOI focus state", () => {
+      const state = useCodeGraphStore.getState();
+      expect(state.focusAnchorId).toBeNull();
+      expect(state.focusDirection).toBe(DEFAULT_FOCUS_DIRECTION);
+      expect(state.doiRevealCount).toBe(DEFAULT_DOI_REVEAL_COUNT);
     });
 
     it("starts with no selected workspace", () => {
@@ -171,22 +175,34 @@ describe("codeGraphStore", () => {
     });
   });
 
-  describe("setDepthFilter", () => {
-    it("clamps below MIN_DEPTH", () => {
-      useCodeGraphStore.getState().setDepthFilter(0);
-      expect(useCodeGraphStore.getState().depthFilter).toBe(MIN_DEPTH);
-      useCodeGraphStore.getState().setDepthFilter(-3);
-      expect(useCodeGraphStore.getState().depthFilter).toBe(MIN_DEPTH);
+  describe("DOI focus model", () => {
+    it("sets and clears an explicit focus anchor", () => {
+      useCodeGraphStore.getState().setFocusAnchor("symbol:foo");
+      expect(useCodeGraphStore.getState().focusAnchorId).toBe("symbol:foo");
+      useCodeGraphStore.getState().clearFocusAnchor();
+      expect(useCodeGraphStore.getState().focusAnchorId).toBeNull();
     });
 
-    it("clamps above MAX_DEPTH", () => {
-      useCodeGraphStore.getState().setDepthFilter(99);
-      expect(useCodeGraphStore.getState().depthFilter).toBe(MAX_DEPTH);
+    it("sets the focus direction", () => {
+      useCodeGraphStore.getState().setFocusDirection("dependencies");
+      expect(useCodeGraphStore.getState().focusDirection).toBe("dependencies");
+      useCodeGraphStore.getState().setFocusDirection("dependents");
+      expect(useCodeGraphStore.getState().focusDirection).toBe("dependents");
+      useCodeGraphStore.getState().setFocusDirection("both");
+      expect(useCodeGraphStore.getState().focusDirection).toBe("both");
     });
 
-    it("rounds non-integer input", () => {
-      useCodeGraphStore.getState().setDepthFilter(2.6);
-      expect(useCodeGraphStore.getState().depthFilter).toBe(3);
+    it("clamps and rounds the DOI reveal count", () => {
+      useCodeGraphStore.getState().setDoiRevealCount(0);
+      expect(useCodeGraphStore.getState().doiRevealCount).toBe(
+        MIN_DOI_REVEAL_COUNT,
+      );
+      useCodeGraphStore.getState().setDoiRevealCount(999);
+      expect(useCodeGraphStore.getState().doiRevealCount).toBe(
+        MAX_DOI_REVEAL_COUNT,
+      );
+      useCodeGraphStore.getState().setDoiRevealCount(42.6);
+      expect(useCodeGraphStore.getState().doiRevealCount).toBe(43);
     });
   });
 
@@ -335,7 +351,9 @@ describe("codeGraphStore", () => {
       s.setHover("foo");
       s.setLayoutMode("radial");
       s.toggleEdgeKind("Implements");
-      s.setDepthFilter(1);
+      s.setFocusAnchor("foo");
+      s.setFocusDirection("dependencies");
+      s.setDoiRevealCount(MIN_DOI_REVEAL_COUNT);
       s.setLayoutMode("radial");
       s.expandCommunity("auth");
 
@@ -346,7 +364,9 @@ describe("codeGraphStore", () => {
       expect(after.citationIds.size).toBe(0);
       expect(after.toolHighlightIds.size).toBe(0);
       expect(after.blastRadiusFrontier.size).toBe(0);
-      expect(after.depthFilter).toBe(DEFAULT_DEPTH);
+      expect(after.focusAnchorId).toBeNull();
+      expect(after.focusDirection).toBe(DEFAULT_FOCUS_DIRECTION);
+      expect(after.doiRevealCount).toBe(DEFAULT_DOI_REVEAL_COUNT);
       expect(after.edgeKindFilters.Implements).toBe(true);
       expect(after.edgeKindFilters.Reads).toBe(false);
       expect(after.edgeKindFilters.FileReference).toBe(false);
