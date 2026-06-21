@@ -221,6 +221,12 @@ export interface CodeGraphHighlightState {
   blastRadiusFrontier: Set<string>;
   /** Server-sampled impact ids folded into the unified DOI focus model. */
   doiImpactIds: Set<string>;
+  /**
+   * Internal canvas fallback state for collapsed community snapshots.
+   * This is not a user-facing node-kind filter; it only lets the canvas
+   * splice symbol members into legacy `kind: "community"` payloads.
+   */
+  expandedCommunityIds: Set<string>;
   hoverId: string | null;
   edgeKindFilters: Record<string, boolean>;
   nodeKindFilters: Record<string, boolean>;
@@ -271,6 +277,9 @@ export interface CodeGraphHighlightActions {
   /** Merge server impact samples into the DOI focus/context render path. */
   setDoiImpact: (ids: Iterable<string>) => void;
   clearDoiImpact: () => void;
+  expandCommunity: (communityId: string) => void;
+  collapseCommunity: (communityId: string) => void;
+  clearExpandedCommunities: () => void;
   setHover: (id: string | null) => void;
   toggleEdgeKind: (kind: string) => void;
   setEdgeKindEnabled: (kind: string, enabled: boolean) => void;
@@ -304,6 +313,7 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   toolHighlightIds: new Set(),
   blastRadiusFrontier: new Set(),
   doiImpactIds: new Set(),
+  expandedCommunityIds: new Set(),
   hoverId: null,
   edgeKindFilters: { ...LENS_PRESETS.architecture.edgeKindFilters },
   nodeKindFilters: { ...LENS_PRESETS.architecture.nodeKindFilters },
@@ -358,6 +368,26 @@ export const useCodeGraphStore = create<
 
   clearDoiImpact: () => {
     set({ doiImpactIds: new Set() });
+  },
+
+  expandCommunity: (communityId) => {
+    set((state) => ({
+      expandedCommunityIds: new Set(state.expandedCommunityIds).add(
+        communityId,
+      ),
+    }));
+  },
+
+  collapseCommunity: (communityId) => {
+    set((state) => {
+      const next = new Set(state.expandedCommunityIds);
+      next.delete(communityId);
+      return { expandedCommunityIds: next };
+    });
+  },
+
+  clearExpandedCommunities: () => {
+    set({ expandedCommunityIds: new Set() });
   },
 
   setHover: (id) => {
@@ -470,6 +500,7 @@ export const useCodeGraphStore = create<
       toolHighlightIds: new Set(),
       blastRadiusFrontier: new Set(),
       doiImpactIds: new Set(),
+      expandedCommunityIds: new Set(),
       edgeKindFilters: { ...LENS_PRESETS.architecture.edgeKindFilters },
       nodeKindFilters: { ...LENS_PRESETS.architecture.nodeKindFilters },
       symbolKindFilters: { ...LENS_PRESETS.architecture.symbolKindFilters },
