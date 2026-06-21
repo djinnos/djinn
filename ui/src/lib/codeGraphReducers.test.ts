@@ -8,7 +8,6 @@ import {
   HEATMAP_COLOR_NULL,
   HEATMAP_COLOR_TOP,
   applyComplexityHeatmap,
-  bfsReachable,
   colorForComplexity,
   computeComplexityThresholds,
   edgeReducer,
@@ -29,6 +28,7 @@ import {
   buildGraphFromSnapshot,
   type SnapshotPayload,
 } from "@/lib/codeGraphAdapter";
+import { computeDoiFocus } from "@/hooks/useGraphReducers";
 
 // Minimal `SnapshotPayload` with 4 nodes whose PageRank values span the
 // full [0, 1] percentile range. Mirrors the shape of
@@ -247,13 +247,28 @@ describe("nodeReducer", () => {
     expect(out.borderSize as number).toBeLessThan(2);
   });
 
-  it("hides nodes outside the depth frontier", () => {
+  it("dims nodes outside the DOI focus set instead of hiding them", () => {
     const v = viewWith({
-      selectionId: "a",
-      depthReachable: new Set(["a"]),
+      doiFocusIds: new Set(["a"]),
+      doiContextIds: new Set(["z"]),
     });
-    const out = nodeReducer("z", { color: "blue", size: 5 }, v);
-    expect(out.hidden).toBe(true);
+    const out = nodeReducer("z", { color: "blue", size: 5, label: "Z" }, v);
+    expect(out.hidden).toBeUndefined();
+    expect(out.color).toMatch(/rgba\(100/);
+    expect(out.label).toBeUndefined();
+    expect(out.highlighted).toBe(false);
+  });
+
+  it("keeps DOI focused nodes highlighted and readable", () => {
+    const v = viewWith({
+      doiFocusIds: new Set(["doi"]),
+      doiScores: new Map([["doi", 0.75]]),
+    });
+    const out = nodeReducer("doi", { color: "blue", size: 5, label: "DOI" }, v);
+    expect(out.hidden).toBeUndefined();
+    expect(out.label).toBe("DOI");
+    expect(out.highlighted).toBe(true);
+    expect(out.size as number).toBeGreaterThan(5);
   });
 
   it("paints the focal node orange and grows it", () => {
@@ -764,19 +779,38 @@ describe("edgeReducer", () => {
     expect(out.hidden).toBe(true);
   });
 
+  it("honors edgeKind aliases when filtering", () => {
+    const v = viewWith({ edgeKindFilters: { SymbolReference: false } });
+    const out = edgeReducer(
+      "a",
+      "b",
+      { edgeKind: "SymbolReference" },
+      v,
+    );
+    expect(out.hidden).toBe(true);
+  });
+
   it("treats unknown edge kinds as visible (no filter entry)", () => {
     const v = viewWith({ edgeKindFilters: {} });
     const out = edgeReducer("a", "b", { kind: "MysteryKind" }, v);
     expect(out.hidden).toBeUndefined();
   });
 
-  it("hides edges that cross the depth frontier", () => {
+  it("dims edges that cross outside the DOI focus set", () => {
     const v = viewWith({
-      selectionId: "a",
-      depthReachable: new Set(["a", "b"]),
+      doiFocusIds: new Set(["a", "b"]),
+      doiContextIds: new Set(["z"]),
     });
     const out = edgeReducer("a", "z", { kind: "Reads" }, v);
-    expect(out.hidden).toBe(true);
+    expect(out.hidden).toBeUndefined();
+    expect(out.color).toMatch(/rgba\(100/);
+  });
+
+  it("highlights edges whose endpoints are both in the DOI focus set", () => {
+    const v = viewWith({ doiFocusIds: new Set(["a", "b"]) });
+    const out = edgeReducer("a", "b", { kind: "Reads", size: 1 }, v);
+    expect(out.color).toMatch(/orange|rgba\(251/);
+    expect(out.size as number).toBeGreaterThan(1);
   });
 
   it("highlights edges incident on the selection 1-hop frontier", () => {
@@ -851,6 +885,54 @@ describe("oneHopNeighborhood", () => {
     const ns = oneHopNeighborhood(g, "a");
     expect(ns.has("b")).toBe(true);
     expect(ns.has("c")).toBe(true);
+  });
+});
+
+describe("computeDoiFocus", () => {
+  const graph = buildGraphFromSnapshot({
+    ...pagerankFixtureSnapshot,
+    nodes: [
+      { id: "a", kind: "symbol", label: "A", pagerank: 0.4 },
+      { id: "b", kind: "symbol", label: "B", pagerank: 0.9 },
+      { id: "c", kind: "symbol", label: "C", pagerank: 0.6 },
+      { id: "file:a.ts", kind: "file", label: "a.ts", pagerank: 1.0 },
+    ],
+    edges: [
+      { from: "a", to: "b", kind: "SymbolReference", confidence: 1 },
+      { from: "c", to: "a", kind: "Reads", confidence: 1 },
+      {
+        from: "file:a.ts",
+        to: "a",
+        kind: "ContainsDefinition",
+        confidence: 1,
+      },
+    ],
+  });
+  const pagerank = computePagerankPercentiles(graph);
+
+  it("walks dependencies downstream and excludes containment edges", () => {
+    const out = computeDoiFocus(graph, "a", "dependencies", pagerank, 10);
+    expect(out.focusIds.has("a")).toBe(true);
+    expect(out.focusIds.has("b")).toBe(true);
+    expect(out.focusIds.has("c")).toBe(false);
+    expect(out.focusIds.has("file:a.ts")).toBe(false);
+  });
+
+  it("walks dependents upstream", () => {
+    const out = computeDoiFocus(graph, "a", "dependents", pagerank, 10);
+    expect(out.focusIds.has("a")).toBe(true);
+    expect(out.focusIds.has("c")).toBe(true);
+    expect(out.focusIds.has("b")).toBe(false);
+  });
+
+  it("bounds the readable focus set and leaves lower DOI nodes as context", () => {
+    const out = computeDoiFocus(graph, "a", "both", pagerank, 2);
+    expect(out.focusIds.has("a")).toBe(true);
+    expect(out.focusIds.size).toBe(2);
+    expect(out.contextIds.size).toBeGreaterThan(0);
+    for (const id of out.contextIds) {
+      expect(out.focusIds.has(id)).toBe(false);
+    }
   });
 });
 
@@ -1066,38 +1148,5 @@ describe("nodeReducer with complexity heatmap", () => {
     };
     const out = nodeReducer("a", { color: "#dirhash", cognitive: 2 }, view);
     expect(out.color).toBe("#dirhash");
-  });
-});
-
-describe("bfsReachable", () => {
-  const g = makeGraph([
-    ["a", "b"],
-    ["b", "c"],
-    ["c", "d"],
-    ["d", "e"],
-  ]);
-
-  it("returns just the seed at depth 0", () => {
-    const r = bfsReachable(g, "a", 0);
-    expect(Array.from(r).sort()).toEqual(["a"]);
-  });
-
-  it("walks 1 hop at depth 1", () => {
-    const r = bfsReachable(g, "a", 1);
-    expect(Array.from(r).sort()).toEqual(["a", "b"]);
-  });
-
-  it("walks 3 hops at depth 3", () => {
-    const r = bfsReachable(g, "a", 3);
-    expect(Array.from(r).sort()).toEqual(["a", "b", "c", "d"]);
-  });
-
-  it("walks the entire connected component when depth >> diameter", () => {
-    const r = bfsReachable(g, "a", 100);
-    expect(Array.from(r).sort()).toEqual(["a", "b", "c", "d", "e"]);
-  });
-
-  it("returns empty set for unknown seed", () => {
-    expect(bfsReachable(g, "missing", 5).size).toBe(0);
   });
 });
