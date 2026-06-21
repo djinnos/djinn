@@ -12,8 +12,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::acting_user;
-use djinn_core::models::ModelLanes;
+use djinn_core::models::{ModelLanes, OrgAiPolicy};
 use djinn_db::UserSettingsRepository;
+
+/// The org-default lanes as a wire payload (all-empty when unset → global).
+fn org_default_lanes_payload(policy: &OrgAiPolicy) -> ModelLanesPayload {
+    ModelLanesPayload {
+        plan: policy.default_lanes.plan.clone(),
+        implement: policy.default_lanes.implement.clone(),
+        review: policy.default_lanes.review.clone(),
+    }
+}
 
 /// Per-user, per-ROLE ordered model selection over the wire. Each lane is an
 /// ordered fallback list (highest priority first) of full `provider/model` ids.
@@ -76,7 +85,12 @@ pub struct UserSettingsGetResponse {
     /// This user's per-ROLE ordered model lanes (each highest priority first),
     /// full `provider/model` ids. All-empty when the user has no explicit
     /// selection (callers then fall back to the global deployment model list).
+    /// When the org lane policy is `locked`, this echoes the org default
+    /// (member edits are ignored).
     pub lanes: ModelLanesPayload,
+    /// True when the org AI policy locks lane assignment: the member may not
+    /// edit lanes (UI disables the controls; the server rejects lane writes).
+    pub lane_locked: bool,
     /// This user's per-model concurrency caps (`{ "provider/model": cap }`).
     /// The sole admission control at dispatch; empty ⇒ default 1 per model.
     #[schemars(with = "std::collections::HashMap<String, i64>")]
@@ -156,6 +170,7 @@ impl DjinnMcpServer {
                         user_id: None,
                         auto_approve_prs: false,
                         lanes: ModelLanesPayload::default(),
+                        lane_locked: false,
                         max_sessions: HashMap::new(),
                         diverse_review: true,
                         error: Some(missing_session()),
@@ -167,6 +182,7 @@ impl DjinnMcpServer {
                         user_id: None,
                         auto_approve_prs: false,
                         lanes: ModelLanesPayload::default(),
+                        lane_locked: false,
                         max_sessions: HashMap::new(),
                         diverse_review: true,
                         error: Some(e),
@@ -175,20 +191,35 @@ impl DjinnMcpServer {
             };
         let repo = UserSettingsRepository::new(self.state.db().clone());
         match repo.get_or_default(&user_id).await {
-            Ok(s) => Json(UserSettingsGetResponse {
-                ok: true,
-                user_id: Some(user_id),
-                auto_approve_prs: s.auto_approve_prs,
-                lanes: s.lanes.unwrap_or_default().into(),
-                max_sessions: s.max_sessions.unwrap_or_default(),
-                diverse_review: s.diverse_review,
-                error: None,
-            }),
+            Ok(s) => {
+                // Org-default lane inheritance + lock: a member with no explicit
+                // lanes inherits the org default; under a `locked` policy the
+                // org default is authoritative regardless of any member value.
+                let policy = self.state.org_ai_policy().await;
+                let lane_locked = policy.lock_level.is_locked();
+                let lanes: ModelLanesPayload = match s.lanes {
+                    Some(l) if !lane_locked => l.into(),
+                    // No member lanes, or locked → org default (which may be
+                    // all-empty = global fallback).
+                    _ => org_default_lanes_payload(&policy),
+                };
+                Json(UserSettingsGetResponse {
+                    ok: true,
+                    user_id: Some(user_id),
+                    auto_approve_prs: s.auto_approve_prs,
+                    lanes,
+                    lane_locked,
+                    max_sessions: s.max_sessions.unwrap_or_default(),
+                    diverse_review: s.diverse_review,
+                    error: None,
+                })
+            }
             Err(e) => Json(UserSettingsGetResponse {
                 ok: false,
                 user_id: Some(user_id),
                 auto_approve_prs: false,
                 lanes: ModelLanesPayload::default(),
+                lane_locked: false,
                 max_sessions: HashMap::new(),
                 diverse_review: true,
                 error: Some(e.to_string()),
@@ -253,6 +284,14 @@ impl DjinnMcpServer {
         // THIS user's connected providers before persisting, so a user can't
         // select a model on a provider they haven't connected.
         if let Some(lanes_payload) = p.lanes.as_ref() {
+            // Org lane lock: under a `locked` policy the org default is
+            // authoritative and members may not edit their lanes. Reject the
+            // write rather than silently dropping it so the UI can surface why.
+            if self.state.org_ai_policy().await.lock_level.is_locked() {
+                return err("lane assignment is locked by your org's AI policy; \
+                     ask an admin to change it"
+                    .to_string());
+            }
             let lanes: ModelLanes = lanes_payload.clone().into();
             let all = lanes.all_models();
             if let Err(e) = self

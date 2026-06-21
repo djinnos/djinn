@@ -84,6 +84,7 @@ pub use repositories::{
         AuthorizationCode, McpAccessToken, NewAccessToken, NewAuthorizationCode, NewOAuthClient,
         OAuthClient, OAuthRepository,
     },
+    org_ai_policy::OrgAiPolicyRepository,
     org_config::{NewOrgConfig, OrgConfig, OrgConfigRepository},
     project::{
         DispatchImage, ProjectConfig, ProjectDispatchReadiness, ProjectImage, ProjectImageStatus,

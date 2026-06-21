@@ -8887,6 +8887,265 @@ expression: signatures
     }
   },
   {
+    "name": "org_policy_get",
+    "read_only": true,
+    "destructive": false,
+    "idempotent": true,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "title": "OrgPolicyGetParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "OrgDefaultLanesPayload": {
+          "description": "Org-default per-role lanes over the wire (mirrors the per-user lane shape).",
+          "properties": {
+            "implement": {
+              "default": [],
+              "description": "worker",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "plan": {
+              "default": [],
+              "description": "planner, architect, chat",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "review": {
+              "default": [],
+              "description": "reviewer",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "SubscriptionPolicyItem": {
+          "description": "One subscription provider as the admin policy surface sees it: its id,\ndisplay name, data-residency jurisdiction, and whether it is currently\nblocked. Lets the UI render the allow/block table grouped by jurisdiction\nwithout re-deriving the residency map client-side.",
+          "properties": {
+            "blocked": {
+              "description": "Whether this subscription is currently blocked org-wide.",
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            },
+            "jurisdiction": {
+              "description": "Data residency: `us`, `eu`, `cn`, or `other` (djinn-owned classification).",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "jurisdiction",
+            "blocked"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "blocked_subscriptions": {
+          "description": "The blocked subscription provider ids (subset of `subscriptions`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "default_lanes": {
+          "$ref": "#/$defs/OrgDefaultLanesPayload",
+          "description": "Org-default per-role lanes new members inherit when they have none."
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "lock_level": {
+          "description": "`flexible` (members may override) | `locked` (org assignment authoritative).",
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "subscriptions": {
+          "description": "Every known subscription provider with its jurisdiction + blocked flag.",
+          "items": {
+            "$ref": "#/$defs/SubscriptionPolicyItem"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "ok",
+        "subscriptions",
+        "blocked_subscriptions",
+        "default_lanes",
+        "lock_level"
+      ],
+      "title": "OrgPolicyGetResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "org_policy_set",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$defs": {
+        "OrgDefaultLanesPayload": {
+          "description": "Org-default per-role lanes over the wire (mirrors the per-user lane shape).",
+          "properties": {
+            "implement": {
+              "default": [],
+              "description": "worker",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "plan": {
+              "default": [],
+              "description": "planner, architect, chat",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "review": {
+              "default": [],
+              "description": "reviewer",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "blocked_subscriptions": {
+          "default": null,
+          "description": "Replacement set of blocked subscription provider ids. Only subscription\nproviders are honored; any non-subscription id is ignored. Omit to keep\nthe current value.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "default_lanes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrgDefaultLanesPayload"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "default": null,
+          "description": "Org-default per-role lanes new members inherit. Pass all-empty to clear.\nOmit to keep the current value."
+        },
+        "lock_level": {
+          "default": null,
+          "description": "Lane lock level: `flexible` or `locked`. Omit to keep the current value.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "OrgPolicySetParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "OrgDefaultLanesPayload": {
+          "description": "Org-default per-role lanes over the wire (mirrors the per-user lane shape).",
+          "properties": {
+            "implement": {
+              "default": [],
+              "description": "worker",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "plan": {
+              "default": [],
+              "description": "planner, architect, chat",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "review": {
+              "default": [],
+              "description": "reviewer",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "applied": {
+          "type": "boolean"
+        },
+        "blocked_subscriptions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "default_lanes": {
+          "$ref": "#/$defs/OrgDefaultLanesPayload"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "lock_level": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "applied",
+        "blocked_subscriptions",
+        "default_lanes",
+        "lock_level"
+      ],
+      "title": "OrgPolicySetResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "pr_review_context",
     "read_only": false,
     "destructive": true,
@@ -16836,9 +17095,13 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "lane_locked": {
+          "description": "True when the org AI policy locks lane assignment: the member may not\nedit lanes (UI disables the controls; the server rejects lane writes).",
+          "type": "boolean"
+        },
         "lanes": {
           "$ref": "#/$defs/ModelLanesPayload",
-          "description": "This user's per-ROLE ordered model lanes (each highest priority first),\nfull `provider/model` ids. All-empty when the user has no explicit\nselection (callers then fall back to the global deployment model list)."
+          "description": "This user's per-ROLE ordered model lanes (each highest priority first),\nfull `provider/model` ids. All-empty when the user has no explicit\nselection (callers then fall back to the global deployment model list).\nWhen the org lane policy is `locked`, this echoes the org default\n(member edits are ignored)."
         },
         "max_sessions": {
           "additionalProperties": {
@@ -16861,6 +17124,7 @@ expression: signatures
         "ok",
         "auto_approve_prs",
         "lanes",
+        "lane_locked",
         "max_sessions",
         "diverse_review"
       ],
