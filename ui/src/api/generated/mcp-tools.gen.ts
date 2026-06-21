@@ -5886,10 +5886,6 @@ export namespace ProposalFeedbackAddInputSchema {
    * Proposal UUID or short_id.
    */
   proposal_id: string
-  /**
-   * Optional pointer to the spec section this is about.
-   */
-  target_section?: string
   [k: string]: any
   }
 
@@ -5924,7 +5920,6 @@ export namespace ProposalFeedbackAddOutputSchema {
    * a spec change).
    */
   resolved_revision_seq?: number
-  target_section?: string
   updated_at: string
   [k: string]: any
   }
@@ -5976,7 +5971,6 @@ export namespace ProposalFeedbackResolveOutputSchema {
    * a spec change).
    */
   resolved_revision_seq?: number
-  target_section?: string
   updated_at: string
   [k: string]: any
   }
@@ -6409,7 +6403,6 @@ export namespace ProposalShowOutputSchema {
    * a spec change).
    */
   resolved_revision_seq?: number
-  target_section?: string
   updated_at: string
   [k: string]: any
   }

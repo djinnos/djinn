@@ -204,13 +204,8 @@ pub(super) async fn completions_handler_impl(
         ));
     }
     let proposal_system = match proposal_ref {
-        Some(p) => match build_proposal_address_prompt(
-            &state,
-            p,
-            req.feedback_id.as_deref(),
-            req.proposal_target_section.as_deref(),
-        )
-        .await
+        Some(p) => match build_proposal_address_prompt(&state, p, req.feedback_id.as_deref())
+            .await
         {
             Some(prompt) => Some(prompt),
             None => {
@@ -1015,7 +1010,6 @@ async fn build_proposal_address_prompt(
     state: &AppState,
     proposal_ref: &str,
     feedback_id: Option<&str>,
-    target_section: Option<&str>,
 ) -> Option<String> {
     let repo = ProposalRepository::new(state.db().clone(), state.event_bus());
     let proposal = repo.resolve(proposal_ref).await.ok().flatten()?;
@@ -1041,20 +1035,6 @@ async fn build_proposal_address_prompt(
         for c in &ac {
             ctx.push_str(&format!("- {c}\n"));
         }
-    }
-
-    let target_section = target_section.and_then(|s| {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    });
-    if let Some(section) = target_section {
-        ctx.push_str(&format!(
-            "\n## Current block target\n\nThis chat was opened from proposal block `{section}`. If you call `proposal_feedback_add` for new feedback about this block, set `target_section` to `{section}`.\n"
-        ));
     }
 
     let unresolved: Vec<_> = feedback

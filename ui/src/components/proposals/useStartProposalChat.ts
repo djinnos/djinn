@@ -23,12 +23,7 @@ export function useStartProposalChat() {
   const setActiveSession = useChatStore((s) => s.setActiveSession);
 
   return useCallback(
-    (
-      proposal: Proposal,
-      feedback?: ProposalFeedback,
-      feedbackAuthor?: string,
-      targetSection?: string,
-    ) => {
+    (proposal: Proposal, feedback?: ProposalFeedback, feedbackAuthor?: string) => {
       const sessionId = newSessionId();
       const now = Date.now();
       upsertSession({
@@ -43,7 +38,6 @@ export function useStartProposalChat() {
         proposalId: proposal.id,
         proposalShortId: proposal.short_id,
         proposalTitle: proposal.title,
-        targetSection,
         feedbackId: feedback?.id,
         feedbackAuthor,
         feedbackBody: feedback?.body,

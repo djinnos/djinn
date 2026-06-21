@@ -11834,11 +11834,6 @@ expression: signatures
         "proposal_id": {
           "description": "Proposal UUID or short_id.",
           "type": "string"
-        },
-        "target_section": {
-          "description": "Optional pointer to the spec section this is about.",
-          "nullable": true,
-          "type": "string"
         }
       },
       "required": [
@@ -11894,10 +11889,6 @@ expression: signatures
               "format": "int32",
               "nullable": true,
               "type": "integer"
-            },
-            "target_section": {
-              "nullable": true,
-              "type": "string"
             },
             "updated_at": {
               "type": "string"
@@ -12009,10 +12000,6 @@ expression: signatures
               "format": "int32",
               "nullable": true,
               "type": "integer"
-            },
-            "target_section": {
-              "nullable": true,
-              "type": "string"
             },
             "updated_at": {
               "type": "string"
@@ -12858,10 +12845,6 @@ expression: signatures
               "format": "int32",
               "nullable": true,
               "type": "integer"
-            },
-            "target_section": {
-              "nullable": true,
-              "type": "string"
             },
             "updated_at": {
               "type": "string"

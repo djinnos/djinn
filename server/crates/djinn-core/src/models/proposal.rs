@@ -124,8 +124,6 @@ pub struct ProposalFeedback {
     /// Model id when `author_kind == "ai"`.
     pub author_model: Option<String>,
     pub body: String,
-    /// Optional pointer to the part of the spec this entry is about.
-    pub target_section: Option<String>,
     /// When set, the feedback has been resolved (addressed or dismissed) and is
     /// collapsed out of the active thread. `None` while unresolved.
     pub resolved_at: Option<String>,

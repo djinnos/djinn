@@ -74,7 +74,6 @@ export interface SendChatMessageOptions {
    */
   proposalId?: string;
   feedbackId?: string;
-  proposalTargetSection?: string;
 }
 
 export async function sendChatMessage(
@@ -111,7 +110,6 @@ export async function sendChatMessage(
         model,
         proposal_id: options?.proposalId,
         feedback_id: options?.feedbackId,
-        proposal_target_section: options?.proposalTargetSection,
       }),
       signal: options?.signal,
     });

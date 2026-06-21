@@ -76,10 +76,6 @@ pub(super) struct ChatCompletionRequest {
     /// seeded context). Only meaningful alongside `proposal_id`.
     #[serde(default)]
     pub feedback_id: Option<String>,
-    /// Optional proposal block/section id this chat is centered on. When set,
-    /// feedback added from the chat should use it as `target_section`.
-    #[serde(default)]
-    pub proposal_target_section: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

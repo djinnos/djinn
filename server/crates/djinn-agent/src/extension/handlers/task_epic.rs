@@ -611,7 +611,6 @@ pub(crate) async fn call_proposal_reconcile_obsolete_epic(
                     "Reconcile blocked while retiring obsolete epic {} ({}): {reason}. Already-merged tasks: {merged_summary}. No epics were unlinked or closed; do not mark the proposal reconciled until this is resolved.",
                     epic.short_id, epic.title
                 ),
-                target_section: Some("reconcile"),
             })
             .await
             .map_err(|e| e.to_string())?;

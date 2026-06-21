@@ -280,7 +280,6 @@ export function ChatView() {
         // prompt + grants the proposal-editing tools on every turn.
         proposalId: activeScope?.proposalId,
         feedbackId: activeScope?.feedbackId,
-        proposalTargetSection: activeScope?.targetSection,
       }
     );
 

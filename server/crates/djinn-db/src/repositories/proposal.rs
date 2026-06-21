@@ -113,7 +113,6 @@ pub struct ProposalFeedbackCreateInput<'a> {
     pub author_kind: &'a str,
     pub author_model: Option<&'a str>,
     pub body: &'a str,
-    pub target_section: Option<&'a str>,
 }
 
 /// A Planner-authored acceptance-criteria spec amendment. Unlike
@@ -438,7 +437,7 @@ impl ProposalRepository {
         Ok(sqlx::query_as!(
             ProposalFeedback,
             r#"SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,
-                    body, target_section, resolved_at, resolved_revision_seq, resolved_by_user_id, created_at, updated_at
+                    body, resolved_at, resolved_revision_seq, resolved_by_user_id, created_at, updated_at
              FROM proposal_feedback WHERE proposal_id = $1 ORDER BY created_at"#,
             proposal_id
         )
@@ -451,7 +450,7 @@ impl ProposalRepository {
         Ok(sqlx::query_as!(
             ProposalFeedback,
             r#"SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,
-                    body, target_section, resolved_at, resolved_revision_seq, resolved_by_user_id, created_at, updated_at
+                    body, resolved_at, resolved_revision_seq, resolved_by_user_id, created_at, updated_at
              FROM proposal_feedback WHERE id = $1"#,
             feedback_id
         )
@@ -468,16 +467,15 @@ impl ProposalRepository {
         let author_user_id = djinn_core::auth_context::current_user_id();
         sqlx::query!(
             "INSERT INTO proposal_feedback
-                (id, proposal_id, parent_id, author_kind, author_user_id, author_model, body, target_section)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                (id, proposal_id, parent_id, author_kind, author_user_id, author_model, body)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
             id,
             input.proposal_id,
             input.parent_id,
             input.author_kind,
             author_user_id,
             input.author_model,
-            input.body,
-            input.target_section
+            input.body
         )
         .execute(self.db.pool())
         .await?;
@@ -1358,7 +1356,6 @@ impl ProposalRepository {
             author_kind: "ai",
             author_model: None,
             body: &body,
-            target_section: Some("acceptance_criteria"),
         })
         .await?;
 
@@ -1834,7 +1831,6 @@ mod tests {
                 author_kind: "user",
                 author_model: None,
                 body: "what about X?",
-                target_section: None,
             })
             .await
             .unwrap();
@@ -1848,7 +1844,6 @@ mod tests {
                 author_kind: "ai",
                 author_model: Some("claude-opus-4-8"),
                 body: "enforce in svc-invoice not the gateway",
-                target_section: Some("scope"),
             })
             .await
             .unwrap();
@@ -1912,7 +1907,6 @@ mod tests {
             author_kind: "user",
             author_model: None,
             body,
-            target_section: None,
         };
         let f1 = repo.add_feedback(mk("one")).await.unwrap();
         repo.add_feedback(mk("two")).await.unwrap();
@@ -2074,7 +2068,6 @@ mod tests {
                 author_kind: "user",
                 author_model: None,
                 body: "tweak the spec",
-                target_section: None,
             })
             .await
             .unwrap();
@@ -2302,7 +2295,6 @@ mod tests {
         assert_eq!(feedback.len(), 1);
         let audit = &feedback[0];
         assert_eq!(audit.author_kind, "ai");
-        assert_eq!(audit.target_section.as_deref(), Some("acceptance_criteria"));
         assert!(
             audit
                 .body
