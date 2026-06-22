@@ -71,6 +71,9 @@ jobs:
               - '.github/workflows/quality-gate.yml'
             ui:
               - 'ui/**'
+              # Re-run the UI gate when its own workflow changes, so edits to
+              # the build/test steps are exercised on the PR that makes them.
+              - '.github/workflows/quality-gate.yml'
 
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Cache Warming (main push only)                                 ║
@@ -501,6 +504,17 @@ jobs:
 
       - name: Tests
         run: pnpm test
+
+      # Run the real production bundler — the same `pnpm build` the release
+      # workflow runs. `tsc --noEmit` resolves types (often via hoisted /
+      # transitive paths) and the dev server resolves lazily, so both
+      # tolerate a dependency that's present-but-undeclared under pnpm's
+      # strict node_modules, plus loose vite alias prefix-matches. Only the
+      # production `vite build` enforces the real module graph. Without this
+      # step those failures slip through a green PR and only surface at tag
+      # time in release.yml (e.g. the elkjs alias and refractor regressions).
+      - name: Production build
+        run: pnpm build
 
   # ── Quality gate ────────────────────────────────────────────────────
   # If you change this job's name, also update the branch-protection rule
