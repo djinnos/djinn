@@ -5,12 +5,15 @@ import {
   getProposalBlockDefinitionByTag,
 } from "@/lib/proposalBlocks";
 
+import { BLOCK_COMPONENTS, BLOCK_DISPLAY_NAMES } from "@/lib/blockRegistry";
+
 import {
   extractBlockTags,
   isPascalCaseTag,
   parseMdxBody,
 } from "./parseMdxBody";
 import { extractProposalBlockIds } from "./blockRegistry";
+import { PROPOSAL_BLOCK_SPECS } from "./registry";
 
 // ------------------------------------------------------------------------------
 // Canonical v1 tag set — single source of truth for parity assertions.
@@ -75,6 +78,63 @@ describe("canonical tag set parity", () => {
         `${tag} is not in the canonical v1 tag set`,
       ).toBe(true);
     }
+  });
+});
+
+// ------------------------------------------------------------------------------
+// Single-source completeness: the three derived structures must agree.
+//
+// `defineBlock()` makes every block one spec; `PROPOSAL_BLOCK_REGISTRY`,
+// `BLOCK_COMPONENTS`, and `BLOCK_DISPLAY_NAMES` are all DERIVED from that single
+// source. This guard fails loudly if a future block is only half-registered
+// (e.g. a field schema with no component or display name).
+// ------------------------------------------------------------------------------
+
+describe("derived block structures completeness", () => {
+  const canonical = [...CANONICAL_V1_TAGS].sort();
+
+  it("PROPOSAL_BLOCK_REGISTRY tags === the 17 canonical tags", () => {
+    const tags = Object.values(PROPOSAL_BLOCK_REGISTRY).map((def) => def.tag);
+    expect(tags).toHaveLength(CANONICAL_V1_TAGS.length);
+    expect([...tags].sort()).toEqual(canonical);
+  });
+
+  it("BLOCK_COMPONENTS keys === the 17 canonical tags (each a component)", () => {
+    const tags = Object.keys(BLOCK_COMPONENTS);
+    expect(tags).toHaveLength(CANONICAL_V1_TAGS.length);
+    expect([...tags].sort()).toEqual(canonical);
+    for (const tag of tags) {
+      expect(BLOCK_COMPONENTS[tag], `${tag} must have a component`).toBeTruthy();
+    }
+  });
+
+  it("BLOCK_DISPLAY_NAMES keys === the 17 canonical tags (each a label)", () => {
+    const tags = Object.keys(BLOCK_DISPLAY_NAMES);
+    expect(tags).toHaveLength(CANONICAL_V1_TAGS.length);
+    expect([...tags].sort()).toEqual(canonical);
+    for (const tag of tags) {
+      expect(
+        typeof BLOCK_DISPLAY_NAMES[tag] === "string" &&
+          BLOCK_DISPLAY_NAMES[tag].length > 0,
+        `${tag} must have a non-empty display name`,
+      ).toBe(true);
+    }
+  });
+
+  it("all three derived structures share the exact same tag set", () => {
+    const registryTags = Object.values(PROPOSAL_BLOCK_REGISTRY)
+      .map((def) => def.tag)
+      .sort();
+    const componentTags = Object.keys(BLOCK_COMPONENTS).sort();
+    const displayNameTags = Object.keys(BLOCK_DISPLAY_NAMES).sort();
+    expect(componentTags).toEqual(registryTags);
+    expect(displayNameTags).toEqual(registryTags);
+  });
+
+  it("specs preserve canonical order with QuestionForm LAST", () => {
+    const specTags = PROPOSAL_BLOCK_SPECS.map((spec) => spec.tag);
+    expect(specTags).toEqual([...CANONICAL_V1_TAGS]);
+    expect(specTags[specTags.length - 1]).toBe("QuestionForm");
   });
 });
 
