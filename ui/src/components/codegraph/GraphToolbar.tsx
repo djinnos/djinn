@@ -97,6 +97,19 @@ export function GraphToolbar({
 
   const disabled = !graphReady;
 
+  // The complexity heatmap colors function/method nodes by cognitive
+  // percentile, so it's only meaningful when those nodes are visible. The
+  // Architecture lens hides every symbol kind, so the heatmap would paint
+  // nothing — gate the toggle on functions being visible, not just on the
+  // data existing.
+  const functionsVisible =
+    symbolKindFilters.function === true || symbolKindFilters.method === true;
+  const complexityDisabledReason = !complexityAvailable
+    ? "No complexity data — graph not yet warmed for languages in the walker"
+    : !functionsVisible
+      ? "Complexity colors functions — switch to the Calls lens to use it"
+      : undefined;
+
   return (
     <div
       data-testid="graph-toolbar"
@@ -184,7 +197,8 @@ export function GraphToolbar({
         <ColorModeToggle
           mode={colorMode}
           onChange={setColorMode}
-          disabled={!complexityAvailable}
+          disabled={complexityDisabledReason !== undefined}
+          disabledReason={complexityDisabledReason}
         />
         <FocusDirectionToggle
           direction={focusDirection}
@@ -484,11 +498,14 @@ interface ColorModeToggleProps {
   mode: ColorMode;
   onChange: (mode: ColorMode) => void;
   /**
-   * `true` when the current snapshot has zero function nodes carrying
-   * a `cognitive` value — the heatmap would be degenerate, so we
-   * disable the toggle and surface a tooltip explaining why.
+   * `true` when the complexity heatmap can't be used right now — either the
+   * snapshot has no function nodes carrying a `cognitive` value, or the
+   * active lens hides functions so the heatmap would paint nothing. We
+   * disable the Complexity button and surface `disabledReason` as a tooltip.
    */
   disabled: boolean;
+  /** Human-readable reason shown in the tooltip when `disabled`. */
+  disabledReason?: string;
 }
 
 /**
@@ -497,7 +514,12 @@ interface ColorModeToggleProps {
  * heatmap. Sized to fit the existing toolbar's vertical rhythm so it
  * sits alongside the DOI focus controls without breaking layout.
  */
-function ColorModeToggle({ mode, onChange, disabled }: ColorModeToggleProps) {
+function ColorModeToggle({
+  mode,
+  onChange,
+  disabled,
+  disabledReason,
+}: ColorModeToggleProps) {
   return (
     <div className="flex items-center gap-1.5" data-testid="color-mode-toggle">
       <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">
@@ -527,7 +549,8 @@ function ColorModeToggle({ mode, onChange, disabled }: ColorModeToggleProps) {
           label="Complexity"
           tooltip={
             disabled
-              ? "No complexity data — graph not yet warmed for languages in the walker"
+              ? (disabledReason ??
+                "No complexity data — graph not yet warmed for languages in the walker")
               : "Color nodes by cognitive-complexity percentile"
           }
         />

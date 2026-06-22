@@ -285,6 +285,24 @@ describe("codeGraphStore", () => {
       expect(useCodeGraphStore.getState().activeLens).toBe("types");
     });
 
+    it("applyLens snaps complexity color mode back to topology when the lens hides functions", () => {
+      // Calls shows functions → complexity stays engaged.
+      useCodeGraphStore.getState().applyLens("calls");
+      useCodeGraphStore.getState().setColorMode("complexity");
+      expect(useCodeGraphStore.getState().colorMode).toBe("complexity");
+
+      // Architecture hides every symbol kind → heatmap would paint nothing,
+      // so the mode snaps back to topology.
+      useCodeGraphStore.getState().applyLens("architecture");
+      expect(useCodeGraphStore.getState().colorMode).toBe("topology");
+    });
+
+    it("applyLens leaves topology color mode untouched", () => {
+      useCodeGraphStore.getState().setColorMode("topology");
+      useCodeGraphStore.getState().applyLens("architecture");
+      expect(useCodeGraphStore.getState().colorMode).toBe("topology");
+    });
+
     it("toggleEdgeKind sets activeLens to null", () => {
       useCodeGraphStore.getState().applyLens("calls");
       expect(useCodeGraphStore.getState().activeLens).toBe("calls");
