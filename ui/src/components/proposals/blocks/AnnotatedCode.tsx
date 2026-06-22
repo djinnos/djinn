@@ -195,7 +195,7 @@ export function AnnotatedCode({ attributes, children }: BlockProps) {
   const langChip = language !== "text" ? language : null;
 
   const rawCode = (
-    <pre className="overflow-x-auto px-4 py-4 font-mono text-xs text-foreground">
+    <pre className="overflow-x-auto overflow-y-hidden px-4 py-4 font-mono text-xs text-foreground">
       {content}
     </pre>
   );
@@ -271,8 +271,8 @@ export function AnnotatedCode({ attributes, children }: BlockProps) {
       <div ref={codeRef} className="relative">
         <div
           className={cn(
-            "annotated-code-surface relative overflow-x-auto",
-            collapsed && "max-h-[34rem] overflow-y-hidden",
+            "annotated-code-surface relative overflow-x-auto overflow-y-hidden",
+            collapsed && "max-h-[34rem]",
           )}
         >
           <Suspense fallback={rawCode}>

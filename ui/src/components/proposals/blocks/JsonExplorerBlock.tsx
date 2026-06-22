@@ -173,7 +173,7 @@ export function JsonTree({
 
       <div
         dir="ltr"
-        className="overflow-x-auto px-3 py-2 font-mono text-xs leading-relaxed text-foreground [unicode-bidi:isolate]"
+        className="overflow-x-auto overflow-y-hidden px-3 py-2 font-mono text-xs leading-relaxed text-foreground [unicode-bidi:isolate]"
       >
         {parsed.ok ? (
           <JsonNode
@@ -185,7 +185,7 @@ export function JsonTree({
           />
         ) : (
           <div className="space-y-1.5">
-            <pre className="overflow-x-auto whitespace-pre-wrap break-words">
+            <pre className="overflow-x-auto overflow-y-hidden whitespace-pre-wrap break-words">
               {code || "—"}
             </pre>
             <p className="text-[11px] text-amber-300">

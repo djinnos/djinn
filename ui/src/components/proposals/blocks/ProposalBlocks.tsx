@@ -70,7 +70,7 @@ export function ProposalBlocks({ body }: ProposalBlocksProps) {
             return (
               <pre
                 key={`unknown-${segment.index}`}
-                className="overflow-x-auto rounded border border-dashed border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100"
+                className="overflow-x-auto overflow-y-hidden rounded border border-dashed border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100"
               >
                 {`<${segment.tag} ...>${segment.content}</${segment.tag}>`}
               </pre>
