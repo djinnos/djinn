@@ -11,6 +11,14 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 
 import { Button } from "@/components/ui/button";
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from "@/components/ui/combobox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { InlineError } from "@/components/InlineError";
@@ -25,7 +33,6 @@ import {
 } from "@/api/userConfig";
 import { getServerBaseUrl } from "@/api/serverUrl";
 import { showToast } from "@/lib/toast";
-import { cn } from "@/lib/utils";
 
 import { userConfigKeys } from "./userConfigKeys";
 
@@ -151,6 +158,13 @@ export function ApiKeyConnectForm({
     () => catalog.filter((p) => p.env_vars.length > 0),
     [catalog],
   );
+  // base-ui's Combobox takes a flat `items` list + an id→label resolver so the
+  // trigger renders the chosen provider's name (not its raw id).
+  const keyProviderIds = useMemo(() => keyProviders.map((p) => p.id), [keyProviders]);
+  const providerLabel = useMemo(
+    () => new Map(keyProviders.map((p) => [p.id, p.name])),
+    [keyProviders],
+  );
 
   const selected = keyProviders.find((p) => p.id === providerId);
   const keyName = selected?.env_vars[0] ?? "";
@@ -193,27 +207,33 @@ export function ApiKeyConnectForm({
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
         <div className="flex flex-1 flex-col gap-1.5">
           <Label htmlFor="user-config-provider">Provider</Label>
-          <select
-            id="user-config-provider"
-            value={providerId}
+          <Combobox
+            items={keyProviderIds}
+            value={providerId || null}
+            onValueChange={(v) => setProviderId(typeof v === "string" ? v : "")}
+            itemToStringLabel={(id) => providerLabel.get(id) ?? id}
             disabled={catalogLoading || mutation.isPending}
-            onChange={(e) => setProviderId(e.target.value)}
-            className={cn(
-              "h-8 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none",
-              "focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
-              "disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30",
-            )}
           >
-            <option value="">
-              {catalogLoading ? "Loading providers…" : "Select a provider…"}
-            </option>
-            {keyProviders.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-                {connectedIds.has(p.id) ? " (connected)" : ""}
-              </option>
-            ))}
-          </select>
+            <ComboboxInput
+              id="user-config-provider"
+              showClear={Boolean(providerId)}
+              placeholder={catalogLoading ? "Loading providers…" : "Select a provider…"}
+              className="w-full"
+            />
+            <ComboboxContent>
+              <ComboboxList>
+                <ComboboxEmpty>No providers found</ComboboxEmpty>
+                {keyProviders.map((p) => (
+                  <ComboboxItem key={p.id} value={p.id}>
+                    <span className="truncate">{p.name}</span>
+                    {connectedIds.has(p.id) ? (
+                      <span className="ml-1.5 text-xs text-muted-foreground">connected</span>
+                    ) : null}
+                  </ComboboxItem>
+                ))}
+              </ComboboxList>
+            </ComboboxContent>
+          </Combobox>
         </div>
 
         <div className="flex flex-[2] flex-col gap-1.5">

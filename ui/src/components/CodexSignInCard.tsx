@@ -10,11 +10,15 @@ import {
 import { HugeiconsIcon } from '@hugeicons/react';
 
 import { Button } from '@/components/ui/button';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover';
 import { startProviderOAuth, removeProviderFull } from '@/api/server';
 import { showToast } from '@/lib/toast';
-import { cn } from '@/lib/utils';
 
-type CardPhase =
+type RowPhase =
   | { kind: 'idle' }
   | {
       kind: 'pending';
@@ -30,32 +34,34 @@ interface Props {
   /**
    * Caller-provided flag indicating that `chatgpt_codex` already has a live
    * token in the vault. When true — and the user hasn't started a new sign-in
-   * attempt — the card renders a compact "connected" state instead of the
-   * sign-in CTA.
+   * attempt — the row renders its compact "connected" state (Reconnect /
+   * Disconnect) instead of the sign-in CTA.
    */
   alreadyConnected?: boolean;
   /**
    * Set when the codex credential was rejected (a 401 during a run) and marked
-   * revoked server-side. Renders a "Disconnected — <reason>" banner above the
-   * reconnect CTA. Persisted server-side, so it shows on a fresh page load too.
+   * revoked server-side. Surfaces a "Disconnected — <reason>" hint on the row.
+   * Persisted server-side, so it shows on a fresh page load too.
    */
   revokedReason?: string;
-  /** Invoked after a successful sign-in so the parent can refresh state. */
+  /** Invoked after a successful sign-in/disconnect so the parent can refresh. */
   onConnected?: () => void;
-  className?: string;
 }
 
-export function CodexSignInCard({
-  alreadyConnected,
-  revokedReason,
-  onConnected,
-  className,
-}: Props) {
-  const [phase, setPhase] = useState<CardPhase>({ kind: 'idle' });
+/**
+ * ChatGPT / Codex as a compact subscription ROW (matching the other connected
+ * subscriptions) instead of a full-bleed card. The row carries the device-code
+ * sign-in when disconnected, and Reconnect + Disconnect when connected — the
+ * device-code flow + credential management live in an inline popover so the row
+ * itself stays one line.
+ */
+export function CodexSignInRow({ alreadyConnected, revokedReason, onConnected }: Props) {
+  const [phase, setPhase] = useState<RowPhase>({ kind: 'idle' });
   const [removing, setRemoving] = useState(false);
-  // Show the green "connected" panel when either the parent told us we're
-  // already connected (and the user hasn't interacted) or the flow just
-  // completed in this session.
+  const [open, setOpen] = useState(false);
+
+  // Show the connected state when either the parent told us we're already
+  // connected (and the user hasn't interacted) or the flow just completed.
   const showConnected =
     phase.kind === 'just_connected' || (phase.kind === 'idle' && alreadyConnected);
 
@@ -93,18 +99,17 @@ export function CodexSignInCard({
   };
 
   // Codex connects under the `openai` provider (merge_into), but its credential
-  // is stored as `chatgpt_codex`. The generic SettingsPage chip list gates
-  // removal on `openai` (not self-serve) so it never exposes a Remove here —
-  // disconnect the codex credential directly by its own provider id.
+  // is stored as `chatgpt_codex` — disconnect by that own provider id.
   const handleRemove = async () => {
     setRemoving(true);
     try {
       await removeProviderFull('chatgpt_codex');
       setPhase({ kind: 'idle' });
+      setOpen(false);
       showToast.success('ChatGPT disconnected', {
         description: 'You can sign in again to reconnect.',
       });
-      onConnected?.(); // let the parent reload provider/credential state
+      onConnected?.();
     } catch (error) {
       showToast.error('Could not disconnect', {
         description: error instanceof Error ? error.message : 'Unknown error',
@@ -123,128 +128,155 @@ export function CodexSignInCard({
     }
   };
 
-  return (
-    <div
-      className={cn(
-        'relative flex flex-col gap-4 rounded-2xl border border-primary/40 bg-gradient-to-br from-primary/[0.06] to-transparent p-7 h-full overflow-hidden',
-        className,
-      )}
-    >
-      <div className="pointer-events-none absolute -right-8 -top-8 h-28 w-28 rounded-full bg-primary/20 blur-3xl" />
-      <div className="pointer-events-none absolute -left-6 -bottom-6 h-20 w-20 rounded-full bg-primary/10 blur-3xl" />
+  const subtitle = showConnected
+    ? 'Connected · personal subscription'
+    : revokedReason
+      ? `Disconnected — ${revokedReason}`
+      : 'Sign in with a device code · no API key needed';
 
-      <div className="flex items-center gap-3">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/15">
-          <HugeiconsIcon icon={SparklesIcon} size={20} className="text-primary" />
-        </div>
-        <div>
-          <h3 className="text-base font-semibold text-foreground">ChatGPT / Codex</h3>
-          <p className="text-xs text-muted-foreground">Sign in with a device code</p>
+  return (
+    <li className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card px-4 py-3">
+      <div className="flex min-w-0 items-center gap-2.5">
+        {showConnected ? (
+          <HugeiconsIcon
+            icon={CheckmarkCircle04Icon}
+            size={16}
+            className="shrink-0 text-green-500"
+          />
+        ) : (
+          <HugeiconsIcon icon={SparklesIcon} size={16} className="shrink-0 text-primary" />
+        )}
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium text-foreground">ChatGPT / Codex</div>
+          <div
+            className={
+              'truncate text-xs ' +
+              (revokedReason && !showConnected ? 'text-destructive' : 'text-muted-foreground')
+            }
+          >
+            {subtitle}
+          </div>
         </div>
       </div>
 
-      {revokedReason && phase.kind === 'idle' && !showConnected && (
-        <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          <HugeiconsIcon icon={AlertCircleIcon} size={14} className="shrink-0 mt-0.5" />
-          <span>
-            <span className="font-semibold">Disconnected.</span> {revokedReason}
-          </span>
-        </div>
-      )}
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          if (!next && phase.kind !== 'pending') setPhase({ kind: 'idle' });
+        }}
+      >
+        {showConnected ? (
+          <PopoverTrigger render={<Button size="sm" variant="outline" />}>
+            Manage
+          </PopoverTrigger>
+        ) : (
+          <PopoverTrigger
+            render={<Button size="sm" />}
+            onClick={() => {
+              // Kick off the device-code flow as the popover opens.
+              if (phase.kind === 'idle') void handleConnect();
+            }}
+          >
+            Sign in
+          </PopoverTrigger>
+        )}
 
-      {phase.kind === 'idle' && !showConnected && (
-        <>
-          <p className="text-sm leading-relaxed text-muted-foreground flex-1">
-            Sign in with your ChatGPT Plus, Pro, or Team account. Works from any browser — no
-            local port-forwarding required.
-          </p>
-          <span className="inline-flex self-start rounded-full bg-green-500/15 px-3 py-1 text-xs font-medium text-green-400">
-            No API key needed
-          </span>
-          <Button size="lg" className="w-full text-sm" onClick={() => void handleConnect()}>
-            Continue with ChatGPT
-          </Button>
-        </>
-      )}
-
-      {phase.kind === 'pending' && (
-        <>
-          <div className="flex flex-col gap-3 flex-1">
-            <p className="text-sm leading-relaxed text-muted-foreground">
-              Open the sign-in page in your browser and enter this code:
-            </p>
-            <div className="flex items-center gap-2">
-              <code className="flex-1 rounded-lg border border-border bg-card px-4 py-3 text-center text-2xl font-mono font-semibold tracking-widest text-foreground">
-                {phase.userCode}
-              </code>
-              <Button
-                type="button"
-                variant="outline"
-                size="lg"
-                onClick={() => void handleCopyCode(phase.userCode)}
-                aria-label="Copy code"
-              >
-                <HugeiconsIcon icon={Copy01Icon} size={18} />
-              </Button>
+        <PopoverContent className="w-80">
+          <div className="flex flex-col gap-3">
+            <div>
+              <div className="text-sm font-semibold text-foreground">ChatGPT / Codex</div>
+              <p className="text-xs text-muted-foreground">
+                Sign in with your ChatGPT Plus, Pro, or Team account from any browser — no
+                local port-forwarding required.
+              </p>
             </div>
-            <p className="flex items-center gap-2 text-xs text-muted-foreground">
-              <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin shrink-0" />
-              Waiting for you to complete sign-in
-              {phase.expiresInSecs ? ` (expires in ${Math.floor(phase.expiresInSecs / 60)} min)` : ''}…
-            </p>
+
+            {phase.kind === 'pending' && (
+              <div className="flex flex-col gap-2">
+                <p className="text-xs text-muted-foreground">
+                  Open the sign-in page and enter this code:
+                </p>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 rounded-lg border border-border bg-card px-3 py-2 text-center text-lg font-mono font-semibold tracking-widest text-foreground">
+                    {phase.userCode}
+                  </code>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={() => void handleCopyCode(phase.userCode)}
+                    aria-label="Copy code"
+                  >
+                    <HugeiconsIcon icon={Copy01Icon} size={16} />
+                  </Button>
+                </div>
+                <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <HugeiconsIcon icon={Loading02Icon} size={14} className="shrink-0 animate-spin" />
+                  Waiting for sign-in
+                  {phase.expiresInSecs
+                    ? ` (expires in ${Math.floor(phase.expiresInSecs / 60)} min)`
+                    : ''}
+                  …
+                </p>
+                <a
+                  href={phase.verificationUriComplete}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90"
+                >
+                  Open sign-in page
+                  <HugeiconsIcon icon={LinkForwardIcon} size={16} />
+                </a>
+              </div>
+            )}
+
+            {phase.kind === 'error' && (
+              <>
+                <p className="flex items-start gap-2 text-xs text-destructive">
+                  <HugeiconsIcon icon={AlertCircleIcon} size={14} className="mt-0.5 shrink-0" />
+                  <span>{phase.message}</span>
+                </p>
+                <Button size="sm" className="w-full" onClick={() => void handleConnect()}>
+                  Try again
+                </Button>
+              </>
+            )}
+
+            {phase.kind !== 'pending' && phase.kind !== 'error' && !showConnected && (
+              <Button size="sm" className="w-full" onClick={() => void handleConnect()}>
+                Continue with ChatGPT
+              </Button>
+            )}
+
+            {showConnected && (
+              <div className="flex flex-col gap-2">
+                <span className="inline-flex w-fit items-center gap-1.5 rounded-full bg-green-500/15 px-3 py-1 text-xs font-medium text-green-400">
+                  <HugeiconsIcon icon={CheckmarkCircle04Icon} size={14} />
+                  Connected
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="w-full"
+                  onClick={() => void handleConnect()}
+                >
+                  Reconnect
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={removing}
+                  className="w-full text-destructive hover:text-destructive"
+                  onClick={() => void handleRemove()}
+                >
+                  {removing ? 'Removing…' : 'Remove / Disconnect'}
+                </Button>
+              </div>
+            )}
           </div>
-          <a
-            href={phase.verificationUriComplete}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground shadow hover:bg-primary/90 transition-colors"
-          >
-            Open sign-in page
-            <HugeiconsIcon icon={LinkForwardIcon} size={16} />
-          </a>
-        </>
-      )}
-
-      {showConnected && (
-        <>
-          <p className="text-sm leading-relaxed text-muted-foreground flex-1">
-            Your ChatGPT account is signed in. Djinn keeps your tokens refreshed automatically.
-          </p>
-          <span className="inline-flex self-start items-center gap-1.5 rounded-full bg-green-500/15 px-3 py-1 text-xs font-medium text-green-400">
-            <HugeiconsIcon icon={CheckmarkCircle04Icon} size={14} />
-            Connected
-          </span>
-          <Button
-            variant="outline"
-            size="lg"
-            className="w-full text-sm"
-            onClick={() => void handleConnect()}
-          >
-            Reconnect
-          </Button>
-          <Button
-            variant="ghost"
-            size="lg"
-            disabled={removing}
-            className="w-full text-sm text-destructive hover:text-destructive"
-            onClick={() => void handleRemove()}
-          >
-            {removing ? 'Removing…' : 'Remove / Disconnect'}
-          </Button>
-        </>
-      )}
-
-      {phase.kind === 'error' && (
-        <>
-          <p className="flex items-start gap-2 text-sm text-destructive">
-            <HugeiconsIcon icon={AlertCircleIcon} size={16} className="shrink-0 mt-0.5" />
-            <span>{phase.message}</span>
-          </p>
-          <Button size="lg" className="w-full text-sm" onClick={() => void handleConnect()}>
-            Try again
-          </Button>
-        </>
-      )}
-    </div>
+        </PopoverContent>
+      </Popover>
+    </li>
   );
 }
