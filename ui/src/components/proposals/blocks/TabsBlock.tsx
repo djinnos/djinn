@@ -1,6 +1,5 @@
 import { useId, useRef, useState } from "react";
 import { LayoutTable01Icon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
 
 import { cn } from "@/lib/utils";
 
@@ -75,15 +74,11 @@ export function TabsBlock({ attributes, children }: BlockProps) {
     }
   };
 
+  // De-chromed: no card. Just an underlined tab strip sitting on a hairline,
+  // with the panel content flowing straight into the document below it.
   return (
-    <div className="overflow-hidden rounded-lg border bg-card">
-      <div className="flex items-center gap-2 border-b bg-muted/30 px-2">
-        <HugeiconsIcon
-          icon={LayoutTable01Icon}
-          size={15}
-          className="ml-1 shrink-0 text-muted-foreground"
-          aria-hidden
-        />
+    <div>
+      <div className="flex items-center gap-2 border-b border-border/70">
         <div
           role="tablist"
           aria-label="Tabs"
@@ -106,7 +101,7 @@ export function TabsBlock({ attributes, children }: BlockProps) {
                 onClick={() => setActive(index)}
                 onKeyDown={(event) => onKeyDown(event, index)}
                 className={cn(
-                  "-mb-px shrink-0 whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium transition-colors",
+                  "-mb-px shrink-0 whitespace-nowrap border-b-2 px-3 pb-2.5 pt-0.5 text-sm font-medium transition-colors",
                   selected
                     ? "border-violet-400 text-violet-300"
                     : "border-transparent text-muted-foreground hover:text-foreground",
@@ -125,7 +120,7 @@ export function TabsBlock({ attributes, children }: BlockProps) {
           id={`${baseId}-panel-${index}`}
           aria-labelledby={`${baseId}-tab-${index}`}
           hidden={index !== activeIndex}
-          className="p-4"
+          className="pt-4"
         >
           {index === activeIndex ? <ProposalBlocks body={tab.body} /> : null}
         </div>

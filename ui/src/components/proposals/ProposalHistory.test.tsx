@@ -156,9 +156,9 @@ describe("ProposalHistory", () => {
             body_format: "mdx",
             body: [
               "Initial contract.",
-              '<DataModel id="users">',
+              '<ApiEndpoint id="users">',
               "User { id: uuid }",
-              "</DataModel>",
+              "</ApiEndpoint>",
               '<QuestionForm id="open-questions">',
               "- Is email required?",
               "</QuestionForm>",
@@ -168,9 +168,9 @@ describe("ProposalHistory", () => {
             body_format: "mdx",
             body: [
               "Initial contract.",
-              '<DataModel id="users">',
+              '<ApiEndpoint id="users">',
               "User { id: uuid, email: string }",
-              "</DataModel>",
+              "</ApiEndpoint>",
               '<QuestionForm id="open-questions">',
               "- Is email required?",
               "- Who owns retention?",
@@ -186,19 +186,19 @@ describe("ProposalHistory", () => {
     expect(screen.getAllByText("spec_revision")).toHaveLength(2);
     expect(screen.getAllByText("MDX")).toHaveLength(2);
     expect(
-      screen.getAllByText(/MDX blocks: DataModel, QuestionForm/).length,
+      screen.getAllByText(/MDX blocks: ApiEndpoint, QuestionForm/).length,
     ).toBeGreaterThan(0);
     expect(screen.getByTitle("2026-06-02T00:00:00Z")).toBeInTheDocument();
     expect(screen.queryByText("- Who owns retention?")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /rev 2/ }));
 
-    expect(screen.getByText('<DataModel id="users">')).toBeInTheDocument();
+    expect(screen.getByText('<ApiEndpoint id="users">')).toBeInTheDocument();
     expect(
       screen.getByText("User { id: uuid, email: string }"),
     ).toBeInTheDocument();
     expect(screen.getByText("- Who owns retention?")).toBeInTheDocument();
-    expect(container.querySelector("DataModel")).toBeNull();
+    expect(container.querySelector("ApiEndpoint")).toBeNull();
     expect(container.querySelector("QuestionForm")).toBeNull();
     await waitFor(() =>
       expect(screen.getAllByText("Pat Manager").length).toBeGreaterThan(0),

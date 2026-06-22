@@ -11,7 +11,6 @@ import { HugeiconsIcon } from "@hugeicons/react";
 
 import { cn } from "@/lib/utils";
 
-import { BlockShell } from "./BlockShell";
 import type { BlockProps } from "./types";
 import {
   JSON_EXPLORER_DEFAULT_COLLAPSED_DEPTH,
@@ -46,16 +45,10 @@ export function JsonExplorerBlock({ attributes, children }: BlockProps) {
   const content = typeof children === "string" ? children : "";
   const title = attributes.title?.trim() || undefined;
 
-  return (
-    <BlockShell
-      label="JSON"
-      accent="text-teal-400"
-      flush
-      meta={title ? <span className="truncate font-mono">{title}</span> : null}
-    >
-      <JsonTree code={content} className="rounded-none border-0" />
-    </BlockShell>
-  );
+  // De-chromed: no outer "JSON" card. The interactive tree carries its own
+  // compact toolbar (label + expand/collapse + copy), so it reads as a data
+  // viewer embedded in the document rather than a card-in-a-card.
+  return <JsonTree code={content} label={title ?? "JSON"} />;
 }
 
 /* ── Type-color tokens ──────────────────────────────────────────────────────── */

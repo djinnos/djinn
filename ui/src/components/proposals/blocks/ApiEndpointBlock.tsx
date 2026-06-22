@@ -8,7 +8,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 
 import { cn } from "@/lib/utils";
 
-import { BlockMarkdown, BlockShell } from "./BlockShell";
+import { BlockMarkdown, BlockSection } from "./BlockShell";
 import { JsonTree } from "./JsonExplorerBlock";
 import {
   ACCENT_BADGE,
@@ -95,24 +95,35 @@ export function ApiEndpointBlock({ attributes, children }: BlockProps) {
     </span>
   );
 
+  // De-chromed: the colored METHOD + mono path line is the block's own header —
+  // it reads as a labelled endpoint in the document, no grey "API ENDPOINT" card
+  // around it.
+  const headerRow = (
+    <div className="flex items-center gap-2 text-sm font-medium">{header}</div>
+  );
+
   // No structured content — keep the method/path header and render the raw
   // children markdown so an oddly-authored endpoint is never blanked.
   if (!structured) {
     return (
-      <BlockShell label="API Endpoint" accent="text-green-400" meta={header}>
-        <BlockMarkdown>{children}</BlockMarkdown>
-      </BlockShell>
+      <BlockSection>
+        {headerRow}
+        <div className="mt-2">
+          <BlockMarkdown>{children}</BlockMarkdown>
+        </div>
+      </BlockSection>
     );
   }
 
   return (
-    <BlockShell label="API Endpoint" accent="text-green-400" flush meta={header}>
-      <div className="flex flex-col">
+    <BlockSection>
+      {headerRow}
+      <div className="mt-1.5 flex flex-col">
         <button
           type="button"
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
-          className="flex items-center gap-1.5 px-4 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/40"
+          className="flex items-center gap-1.5 rounded py-1 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
         >
           <HugeiconsIcon
             icon={open ? ArrowDown01Icon : ArrowRight01Icon}
@@ -139,7 +150,7 @@ export function ApiEndpointBlock({ attributes, children }: BlockProps) {
         </button>
 
         {open && (
-          <div className="flex flex-col gap-4 px-4 pb-4">
+          <div className="flex flex-col gap-4 pt-2">
             {parsed.description && (
               <BlockMarkdown>{parsed.description}</BlockMarkdown>
             )}
@@ -161,7 +172,7 @@ export function ApiEndpointBlock({ attributes, children }: BlockProps) {
           </div>
         )}
       </div>
-    </BlockShell>
+    </BlockSection>
   );
 }
 

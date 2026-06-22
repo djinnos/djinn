@@ -20,10 +20,6 @@
     "tag": "Columns"
   },
   {
-    "type": "data-model",
-    "tag": "DataModel"
-  },
-  {
     "type": "decisions",
     "tag": "Decisions"
   },
@@ -40,16 +36,8 @@
     "tag": "FileTree"
   },
   {
-    "type": "html",
-    "tag": "Html"
-  },
-  {
     "type": "json-explorer",
     "tag": "JsonExplorer"
-  },
-  {
-    "type": "openapi-spec",
-    "tag": "OpenApi"
   },
   {
     "type": "question-form",

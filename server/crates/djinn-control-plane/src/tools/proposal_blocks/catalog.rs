@@ -33,17 +33,6 @@ define_blocks! {
             ]))))),
         },
 
-    DataModel => "data-model", "DataModel",
-        fields {
-            "name" => string,
-            "fields" => (nested(array_field(object_field(fields(vec![
-                ("name", string_field()),
-                ("type", string_field()),
-                ("optional", super::macros::boolean_field()),
-                ("description", string_field()),
-            ]))))),
-        },
-
     ApiEndpoint => "api-endpoint", "ApiEndpoint",
         fields {
             "method" => string,
@@ -160,41 +149,6 @@ define_blocks! {
                 \"id\": \"abc\",\\n  \"active\": true\\n}\\n</JsonExplorer>`.",
         fields {},
 
-    Html => "html", "Html",
-        desc = "Author/agent-supplied HTML rendered SAFELY. The block \
-                CHILDREN are the HTML document/fragment; it is sanitized \
-                (DOMPurify, stripping scripts, `on*=` handlers, and \
-                `javascript:` URLs) and rendered inside a fully sandboxed \
-                iframe (`sandbox=\"\"`, restrictive CSP, no scripts, no \
-                same-origin). Use it for rich static formatted markup or \
-                inline SVG that the other blocks can't express. It is NOT a \
-                scripting surface — `<script>`, event handlers, and \
-                `javascript:`/`data:text/html` URLs are rejected at \
-                validation time and stripped at render. Example: \
-                `<Html id=\"x\">\\n<div style=\\\"padding:8px\\\"><strong>Hi\
-                </strong></div>\\n</Html>`.",
-        fields {},
-
-    OpenApiSpec => "openapi-spec", "OpenApi",
-        desc = "A whole-document OpenAPI 3.x (or Swagger 2) API reference, \
-                rendered Redoc / Swagger-UI style. The block CHILDREN are a \
-                complete OpenAPI document as JSON (an `openapi`/`swagger` \
-                version, an `info` block, and a `paths` object; optional \
-                `tags`, `servers`, and `components`). The renderer \
-                `JSON.parse`s the children, resolves internal \
-                `$ref`s (e.g. `#/components/schemas/User`, cycle-guarded), \
-                groups operations by `tags` (operations with no tag fall into \
-                a `default` group), and renders each operation as a \
-                collapsible row: a colored METHOD pill + path + summary that \
-                expands to its parameters, request body, and per-status \
-                responses, with example bodies derived from the JSON schemas. \
-                It is read-only. YAML is NOT supported in v1 — emit JSON (a \
-                YAML or non-OpenAPI body falls back to a raw JSON render). \
-                Example: `<OpenApi id=\"x\">\\n{\\n  \"openapi\": \"3.0.0\",\\n  \
-                \"info\": { \"title\": \"My API\", \"version\": \"1.0.0\" },\\n  \
-                \"paths\": {}\\n}\\n</OpenApi>`.",
-        fields {},
-
     Tabs => "tabs", "Tabs",
         desc = "A tabbed container: one tab strip whose active panel \
                 recursively renders its own proposal-MDX body. The block is \
@@ -222,7 +176,7 @@ define_blocks! {
                 `columns={[{ \"body\": \"...mdx...\" }, { \"body\": \"...mdx...\" }]}`. \
                 Each entry has a `body` (a normal proposal-MDX string — the \
                 SAME grammar as the top-level proposal body, so it may itself \
-                contain blocks like `<DataModel .../>` and inline **markdown**). \
+                contain blocks like `<ApiEndpoint .../>` and inline **markdown**). \
                 Each column body is parsed and rendered recursively (nesting is \
                 depth-capped). Author the JSON with proper escaping (newlines \
                 as `\\n`, quotes as `\\\"`). If the attribute is missing or not \

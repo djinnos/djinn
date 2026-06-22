@@ -13,7 +13,7 @@
 //
 // We deliberately compose the MDX *JSX* micromark/mdast extensions only — NOT
 // the flow/text expression extension. Proposal block children routinely contain
-// bare `{ ... }` (raw JSON in JsonExplorer / OpenApi blocks, braces in code).
+// bare `{ ... }` (raw JSON in JsonExplorer blocks, braces in code).
 // With expression parsing enabled those would be parsed as MDX `{expression}`
 // nodes and throw "Could not parse expression with acorn". Block children are
 // opaque markdown that each block component re-parses itself, so we want the

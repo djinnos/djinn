@@ -1,7 +1,6 @@
 import { useMemo } from "react";
 
 import { ZoomPanSurface } from "@/components/ZoomPanSurface";
-import { BlockShell } from "./BlockShell";
 import { SandboxedHtmlFrame } from "./SandboxedHtmlFrame";
 import {
   buildWireframeSrcDoc,
@@ -22,7 +21,7 @@ import type { BlockProps } from "./types";
  * its `surface` preset width and sits inside a `ZoomPanSurface` so the reviewer
  * can zoom/pan/fullscreen a dense mockup.
  *
- * Like `HtmlBlock`, it is NOT a scripting surface — scripts, event handlers, and
+ * It is NOT a scripting surface — scripts, event handlers, and
  * `javascript:` URLs are stripped at three layers (server validation, DOMPurify,
  * iframe sandbox).
  *
@@ -41,31 +40,32 @@ export function WireframeBlock({ children, attributes }: BlockProps) {
     [rawHtml, surface],
   );
 
+  // De-chromed: no outer "WIREFRAME" grey card. The mockup's own device frame
+  // (browser / mobile / panel chrome from the srcdoc) IS the intended container,
+  // so the surface sits straight in the document.
   return (
-    <BlockShell label="Wireframe" accent="text-violet-400">
-      <ZoomPanSurface
-        allowFullscreen
-        framedContent
-        testIdPrefix="wireframe"
-        fullscreenTitle="Wireframe"
-      >
-        <SandboxedHtmlFrame
-          html={rawHtml}
-          srcDoc={srcDoc}
-          title="Wireframe mockup"
-          // Fixed surface-preset width (centered); the surface min-height is the
-          // floor so a short screen still reads as that surface. The iframe is
-          // opaque-origin so it can't self-size — a max-height caps very tall
-          // mockups and the inner srcdoc scrolls.
-          className="mx-auto block max-h-[60vh] rounded-md border bg-background"
-          style={{
-            width: preset.width,
-            maxWidth: "100%",
-            height: preset.minHeight,
-          }}
-        />
-      </ZoomPanSurface>
-    </BlockShell>
+    <ZoomPanSurface
+      allowFullscreen
+      framedContent
+      testIdPrefix="wireframe"
+      fullscreenTitle="Wireframe"
+    >
+      <SandboxedHtmlFrame
+        html={rawHtml}
+        srcDoc={srcDoc}
+        title="Wireframe mockup"
+        // Fixed surface-preset width (centered); the surface min-height is the
+        // floor so a short screen still reads as that surface. The iframe is
+        // opaque-origin so it can't self-size — a max-height caps very tall
+        // mockups and the inner srcdoc scrolls.
+        className="mx-auto block max-h-[60vh] rounded-md border bg-background"
+        style={{
+          width: preset.width,
+          maxWidth: "100%",
+          height: preset.minHeight,
+        }}
+      />
+    </ZoomPanSurface>
   );
 }
 

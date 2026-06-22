@@ -1,7 +1,6 @@
 import { lazy, Suspense } from "react";
 
 import type { BlockProps } from "./types";
-import { BlockShell } from "./BlockShell";
 import { DiagramFallback } from "./DiagramFallback";
 import { SandboxedHtmlFrame } from "./SandboxedHtmlFrame";
 
@@ -27,12 +26,11 @@ export function Diagram({ attributes, children }: BlockProps) {
   const diagramType = attributes.type ?? "mermaid";
   const content = typeof children === "string" ? children.trim() : "";
 
+  // De-chromed: a diagram should just BE there — no grey card, no "DIAGRAM"
+  // header bar. It reads as a figure inside the document, the same way an image
+  // or a heading-anchored section would.
   return (
-    <BlockShell
-      label="Diagram"
-      accent="text-teal-400"
-      meta={<span className="font-mono">{diagramType}</span>}
-    >
+    <figure className="my-1">
       {diagramType === "mermaid" ? (
         <Suspense
           fallback={
@@ -56,6 +54,6 @@ export function Diagram({ attributes, children }: BlockProps) {
           message={`No renderer for "${diagramType}" diagrams — showing source.`}
         />
       )}
-    </BlockShell>
+    </figure>
   );
 }

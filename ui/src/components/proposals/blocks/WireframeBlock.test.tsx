@@ -66,13 +66,14 @@ describe("WireframeBlock", () => {
     expect(srcdoc).not.toContain("alert(1)");
   });
 
-  it("exposes zoom/pan controls and the block shell label", () => {
+  it("exposes zoom/pan controls (de-chromed: no shell label)", () => {
     render(
       <WireframeBlock id="w5" attributes={{ surface: "desktop" }}>
         {"<p>body</p>"}
       </WireframeBlock>,
     );
-    expect(screen.getByText("Wireframe")).toBeInTheDocument();
+    // No "Wireframe" header/eyebrow — the mockup's own device frame is the chrome.
+    expect(screen.queryByText("Wireframe")).not.toBeInTheDocument();
     expect(screen.getByTestId("wireframe-controls")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Zoom in" }),

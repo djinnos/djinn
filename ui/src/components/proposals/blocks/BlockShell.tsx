@@ -59,6 +59,70 @@ export function BlockShell({
   );
 }
 
+export interface BlockSectionProps {
+  /**
+   * Optional quiet eyebrow label (e.g. "Decisions", "Files"). Pure typography —
+   * small uppercase accent text, NO bar / border / background. Omit it entirely
+   * for blocks that read as themselves (a diagram, an embed) and need no orienting
+   * label.
+   */
+  label?: string;
+  /** Tailwind text-color class for the eyebrow label. */
+  accent?: string;
+  /** Optional right-aligned metadata (count, language, root…). */
+  meta?: ReactNode;
+  className?: string;
+  children: ReactNode;
+}
+
+/**
+ * De-chromed presentation for structured blocks that should read as native
+ * document content rather than a boxed card. This is the deliberate counterpart
+ * to {@link BlockShell}: no border, no grey surface, no header bar — just an
+ * OPTIONAL quiet eyebrow label + the content flowing straight into the spec, the
+ * same way a markdown heading + paragraph would.
+ *
+ * Code-like surfaces (code, diff) keep {@link BlockShell}'s frame because code
+ * genuinely wants a container; everything else (diagram, files, decisions, open
+ * questions, data model, api, …) uses this so the spec reads like one intentional
+ * document instead of a stack of grey blocks.
+ */
+export function BlockSection({
+  label,
+  accent,
+  meta,
+  className,
+  children,
+}: BlockSectionProps) {
+  const hasHeader = Boolean(label || meta);
+  return (
+    <section className={cn(className)}>
+      {hasHeader ? (
+        <div className="mb-2 flex items-baseline justify-between gap-3">
+          {label ? (
+            <span
+              className={cn(
+                "text-[11px] font-semibold uppercase tracking-wider",
+                accent ?? "text-muted-foreground",
+              )}
+            >
+              {label}
+            </span>
+          ) : (
+            <span />
+          )}
+          {meta ? (
+            <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+              {meta}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {children}
+    </section>
+  );
+}
+
 /**
  * Render a block's children as GitHub-flavoured markdown when it's a string,
  * or pass through pre-rendered nodes. Keeps the `prose` styling identical

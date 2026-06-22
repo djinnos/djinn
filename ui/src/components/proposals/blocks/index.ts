@@ -1,5 +1,4 @@
 export type { BlockProps } from "./types";
-export { DataModelBlock } from "./DataModelBlock";
 export { ApiEndpointBlock } from "./ApiEndpointBlock";
 export { DecisionsBlock } from "./DecisionsBlock";
 export { FileTreeBlock } from "./FileTreeBlock";
@@ -11,10 +10,8 @@ export { DiffBlock } from "./DiffBlock";
 export { CalloutBlock } from "./CalloutBlock";
 export { ChecklistBlock } from "./ChecklistBlock";
 export { JsonExplorerBlock, JsonTree } from "./JsonExplorerBlock";
-export { OpenApiSpecBlock } from "./OpenApiSpecBlock";
 export { TabsBlock } from "./TabsBlock";
 export { ColumnsBlock } from "./ColumnsBlock";
-export { HtmlBlock } from "./HtmlBlock";
 export { WireframeBlock } from "./WireframeBlock";
 export { SandboxedHtmlFrame } from "./SandboxedHtmlFrame";
 export {

@@ -117,6 +117,37 @@ function extractStatusToken(row: string): { change?: FileChange; rest: string } 
   return { rest: row };
 }
 
+/**
+ * Status tokens safe to detect when they TRAIL the path (`planner.rs ~`,
+ * `skills.rs +`). Deliberately excludes `-` and `>`, which collide with the
+ * dash note-separator and quote markers — those stay LEADING-only.
+ */
+const TRAILING_STATUS_TOKENS: Record<string, FileChange> = {
+  "+": "added",
+  "~": "modified",
+  "−": "deleted", // U+2212 MINUS SIGN.
+};
+
+/**
+ * Recover a status token that the author placed AFTER the path instead of
+ * before it. Only applied when the row carried no leading token, and only for
+ * the unambiguous glyphs ({@link TRAILING_STATUS_TOKENS}). The token may stand
+ * alone (`foo.rs ~`) or precede the real note (`foo.rs + new helper`). Returns
+ * the trailing text unchanged when it isn't a recognized status.
+ */
+function extractTrailingStatus(trailing: string): {
+  change?: FileChange;
+  rest: string;
+} {
+  const text = trailing.trim();
+  if (!text) return { rest: trailing };
+  const change = TRAILING_STATUS_TOKENS[text[0] ?? ""];
+  if (change && (text.length === 1 || /\s/.test(text[1] ?? ""))) {
+    return { change, rest: text.slice(1).trim() };
+  }
+  return { rest: trailing };
+}
+
 /** Strip a leading note separator (dash/colon/hash) and unwrap a `(note)`. */
 function cleanNote(text: string): string | undefined {
   let noteText = text.replace(/^[—–\-:#]+\s*/u, "").trim();
@@ -141,7 +172,7 @@ function parseRow(raw: string): ParsedFile | null {
   // Resolve a DECLARED leading status token (`+ ~ - >`) BEFORE any bullet
   // stripping, so the token wins the collision with `+`/`-` list bullets.
   const status = extractStatusToken(rest);
-  const change = status.change;
+  let change = status.change;
   rest = status.rest;
   // Only the `*` glyph remains a plain bullet now (`+`/`-` are status tokens).
   rest = rest.replace(/^\*\s+/u, "").trim();
@@ -165,6 +196,15 @@ function parseRow(raw: string): ParsedFile | null {
 
   // A path token must not contain angle brackets and must have real content.
   if (!path || /[<>]/.test(path)) return null;
+
+  // No leading token? Some authors put the status AFTER the path (`foo.rs ~`).
+  if (!change && trailing) {
+    const tail = extractTrailingStatus(trailing);
+    if (tail.change) {
+      change = tail.change;
+      trailing = tail.rest;
+    }
+  }
 
   const note: string | undefined = trailing ? cleanNote(trailing) : undefined;
 
@@ -197,7 +237,7 @@ function parseRowSegment(raw: string): {
 
   // DECLARED status token wins over `+`/`-` bullets; resolve it first.
   const status = extractStatusToken(rest);
-  const change = status.change;
+  let change = status.change;
   rest = status.rest;
   rest = rest.replace(/^\*\s+/u, "").trim();
   if (!rest) return null;
@@ -214,6 +254,15 @@ function parseRowSegment(raw: string): {
   const rawEndsWithSlash = token.endsWith("/");
   const segment = token.replace(/\/+$/, "");
   if (!segment || !/[A-Za-z0-9._]/.test(segment)) return null;
+
+  // No leading token? Recover a trailing status (`planner.rs ~`).
+  if (!change && trailing) {
+    const tail = extractTrailingStatus(trailing);
+    if (tail.change) {
+      change = tail.change;
+      trailing = tail.rest;
+    }
+  }
 
   const note: string | undefined = trailing ? cleanNote(trailing) : undefined;
 

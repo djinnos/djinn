@@ -157,6 +157,51 @@ describe("parseFileTreeBody", () => {
     ]);
   });
 
+  it("recovers a TRAILING status token (`foo.rs ~`) when there is no leading one", () => {
+    // Some authors put the status after the path; the unambiguous glyphs
+    // (`+ ~ −`) are recovered from the trailing text.
+    const files = parseFileTreeBody(
+      ["src/added.ts +", "src/changed.ts ~", "src/gone.ts −"].join("\n"),
+    );
+    expect(files.map((f) => f.path)).toEqual([
+      "src/added.ts",
+      "src/changed.ts",
+      "src/gone.ts",
+    ]);
+    expect(files.map((f) => f.change)).toEqual([
+      "added",
+      "modified",
+      "deleted",
+    ]);
+    expect(files.every((f) => f.note === undefined)).toBe(true);
+  });
+
+  it("recovers a trailing token inside an indented tree, with a following note", () => {
+    const body = [
+      "src/",
+      "  planner.rs ~",
+      "  native_skills.rs + brand new role",
+    ].join("\n");
+    const files = parseFileTreeBody(body);
+    expect(files).toEqual([
+      { path: "src/planner.rs", name: "planner.rs", change: "modified", note: undefined },
+      {
+        path: "src/native_skills.rs",
+        name: "native_skills.rs",
+        change: "added",
+        note: "brand new role",
+      },
+    ]);
+  });
+
+  it("does NOT treat a trailing `-`/`>` as a status (note-separator collision)", () => {
+    // `-` collides with the dash note-separator and `>` with quote markers, so
+    // they stay leading-only — a trailing one is just note text.
+    const files = parseFileTreeBody("src/a.ts - helper\nsrc/b.ts > old");
+    expect(files.every((f) => f.change === undefined)).toBe(true);
+    expect(files[0]).toMatchObject({ path: "src/a.ts", note: "helper" });
+  });
+
   it("extracts a trailing note as a caption alongside a declared token", () => {
     const files = parseFileTreeBody(
       "Cargo.toml — add [workspace.lints]\n~ src/x.rs wire the new route",

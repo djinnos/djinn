@@ -90,9 +90,9 @@ describe("ProposalDiff", () => {
             body_format: "mdx",
             body: [
               "Plan the data contract.",
-              '<DataModel id="users">',
+              '<ApiEndpoint id="users">',
               "User { id: uuid }",
-              "</DataModel>",
+              "</ApiEndpoint>",
               '<QuestionForm id="open-questions">',
               "- Should user IDs be public?",
               "</QuestionForm>",
@@ -102,9 +102,9 @@ describe("ProposalDiff", () => {
             body_format: "mdx",
             body: [
               "Plan the data contract.",
-              '<DataModel id="users">',
+              '<ApiEndpoint id="users">',
               "User { id: uuid, email: string }",
-              "</DataModel>",
+              "</ApiEndpoint>",
               '<QuestionForm id="open-questions">',
               "- Should user IDs be public?",
               "- Who owns PII deletion?",
@@ -120,13 +120,13 @@ describe("ProposalDiff", () => {
     await user.click(screen.getByRole("button", { name: "Show diff" }));
 
     expect(screen.getByText("## Body (mdx)")).toBeInTheDocument();
-    expect(screen.getByText('<DataModel id="users">')).toBeInTheDocument();
+    expect(screen.getByText('<ApiEndpoint id="users">')).toBeInTheDocument();
     expect(screen.getByText("User { id: uuid }")).toBeInTheDocument();
     expect(
       screen.getByText("User { id: uuid, email: string }"),
     ).toBeInTheDocument();
     expect(screen.getByText("- Who owns PII deletion?")).toBeInTheDocument();
-    expect(container.querySelector("DataModel")).toBeNull();
+    expect(container.querySelector("ApiEndpoint")).toBeNull();
     expect(container.querySelector("QuestionForm")).toBeNull();
   });
 

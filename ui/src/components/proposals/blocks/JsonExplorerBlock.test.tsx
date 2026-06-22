@@ -10,8 +10,9 @@ describe("JsonExplorerBlock", () => {
         {'{ "id": "abc", "active": true, "tags": ["a", "b"] }'}
       </JsonExplorerBlock>,
     );
-    // Header label (shell + tree toolbar both say JSON) + title.
-    expect(screen.getAllByText("JSON").length).toBeGreaterThanOrEqual(1);
+    // De-chromed: no outer "JSON" shell label — the tree's own toolbar carries
+    // the title instead.
+    expect(screen.queryByText("JSON")).not.toBeInTheDocument();
     expect(screen.getByText("Sample")).toBeInTheDocument();
     // Keys render (quoted).
     expect(screen.getByText('"id"')).toBeInTheDocument();

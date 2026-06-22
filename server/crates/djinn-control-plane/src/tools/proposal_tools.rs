@@ -2033,9 +2033,9 @@ mod export_tests {
     async fn proposal_export_canonical_fixture_body_is_byte_identical() {
         // A canonical-fixture-derived MDX body containing the trickier blocks:
         // a `>` inside an attribute value, bare-brace JSON children
-        // (JsonExplorer / OpenApi), and a nested same-tag child. The exported
-        // body must be byte-equal to the stored body AND the structural
-        // round-trip equality check inside `proposal_export` must pass.
+        // (JsonExplorer), and a nested same-tag child. The exported body must be
+        // byte-equal to the stored body AND the structural round-trip equality
+        // check inside `proposal_export` must pass.
         let (server, db) = test_server().await;
         let body = r#"# Canonical Proposal
 
@@ -2054,14 +2054,6 @@ Returns active users.
   "labels": ["alpha", "beta"]
 }
 </JsonExplorer>
-
-<OpenApi id="petstore-api">
-{
-  "openapi": "3.0.0",
-  "info": { "title": "Petstore", "version": "1.0.0" },
-  "paths": { "/pets": { "get": { "responses": { "200": {} } } } }
-}
-</OpenApi>
 
 <Callout id="outer" tone="warning">
 before
