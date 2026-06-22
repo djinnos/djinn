@@ -502,6 +502,23 @@ const PRICING_REFERENCE_MAP: &[(&str, &str)] = &[
     ("xiaomi-token-plan-ams", "xiaomi"),
 ];
 
+/// Explicit per-model pricing aliases for plan models whose id has **no**
+/// canonical match in the base provider's catalog, so [`PRICING_REFERENCE_MAP`]
+/// alone can't price them.
+///
+/// Kimi for Coding ships coding ids (`k2p7`, `k2p5`) that don't appear in
+/// moonshotai's pay-as-you-go list (which uses `kimi-k2-thinking`, `kimi-k2.5`,
+/// …). They're the same Kimi-K2 family billed at the standard K2 rate, so we
+/// point them at `moonshotai/kimi-k2-thinking` ($0.6 in / $2.5 out / $0.15
+/// cache). The second tuple field is the **canonical** plan-model id (see
+/// [`canonical_model_id`]).
+///
+/// (plan_provider_id, canonical_plan_model_id, base_provider_id, base_model_id)
+const PRICING_MODEL_ALIAS: &[(&str, &str, &str, &str)] = &[
+    ("kimi-for-coding", "k2p7", "moonshotai", "kimi-k2-thinking"),
+    ("kimi-for-coding", "k2p5", "moonshotai", "kimi-k2-thinking"),
+];
+
 /// Strip non-alphanumeric chars and lowercase so plan/base model ids match
 /// across cosmetic spelling differences (`MiniMax-M2.5` ↔ `minimax-m2.5`).
 fn canonical_model_id(id: &str) -> String {
@@ -512,24 +529,47 @@ fn canonical_model_id(id: &str) -> String {
 }
 
 /// Borrow pay-as-you-go pricing into flat-rate plan providers' zero-priced
-/// models (see [`PRICING_REFERENCE_MAP`]). Mutates `models_idx` in place. Only
-/// fills a plan model whose own pricing is all-zero, and only from a base model
-/// that is itself priced — existing pricing is never overwritten.
+/// models. Mutates `models_idx` in place. Only fills a plan model whose own
+/// pricing is all-zero, and only from a base model that is itself priced —
+/// existing pricing is never overwritten.
+///
+/// Two sources feed the per-plan canonical-id → pricing lookup: the base
+/// provider's whole priced model list ([`PRICING_REFERENCE_MAP`]) and explicit
+/// per-model aliases for ids that don't canonically match ([`PRICING_MODEL_ALIAS`]).
 fn enrich_plan_pricing(models_idx: &mut HashMap<String, Vec<Model>>) {
+    // Phase 1: resolve every plan's canonical-id → Pricing lookup while only
+    // borrowing `models_idx` immutably (so phase 2 can take a mutable borrow).
+    let mut plan_lookups: HashMap<&str, HashMap<String, Pricing>> = HashMap::new();
+
     for (plan_id, base_id) in PRICING_REFERENCE_MAP {
-        // Index the base provider's priced models by canonical id.
-        let Some(base_models) = models_idx.get(*base_id) else {
-            continue;
-        };
-        let base_pricing: HashMap<String, Pricing> = base_models
-            .iter()
-            .filter(|m| has_nonzero_pricing(&m.pricing))
-            .map(|m| (canonical_model_id(&m.id), m.pricing.clone()))
-            .collect();
-        if base_pricing.is_empty() {
+        if let Some(base_models) = models_idx.get(*base_id) {
+            let entry = plan_lookups.entry(*plan_id).or_default();
+            for m in base_models {
+                if has_nonzero_pricing(&m.pricing) {
+                    entry.insert(canonical_model_id(&m.id), m.pricing.clone());
+                }
+            }
+        }
+    }
+
+    for (plan_id, plan_model_canon, base_id, base_model) in PRICING_MODEL_ALIAS {
+        let pricing = models_idx
+            .get(*base_id)
+            .and_then(|ms| ms.iter().find(|m| m.id == *base_model))
+            .map(|m| m.pricing.clone());
+        if let Some(pricing) = pricing.filter(has_nonzero_pricing) {
+            plan_lookups
+                .entry(*plan_id)
+                .or_default()
+                .insert((*plan_model_canon).to_string(), pricing);
+        }
+    }
+
+    // Phase 2: fill any zero-priced plan model that has a lookup hit.
+    for (plan_id, lookup) in &plan_lookups {
+        if lookup.is_empty() {
             continue;
         }
-
         let Some(plan_models) = models_idx.get_mut(*plan_id) else {
             continue;
         };
@@ -537,7 +577,7 @@ fn enrich_plan_pricing(models_idx: &mut HashMap<String, Vec<Model>>) {
             if has_nonzero_pricing(&m.pricing) {
                 continue;
             }
-            if let Some(pricing) = base_pricing.get(&canonical_model_id(&m.id)) {
+            if let Some(pricing) = lookup.get(&canonical_model_id(&m.id)) {
                 m.pricing = pricing.clone();
             }
         }
@@ -824,6 +864,56 @@ mod tests {
             already.pricing.input_per_million, base.input_per_million,
             "existing pricing must never be overwritten"
         );
+    }
+
+    #[test]
+    fn enrich_plan_pricing_applies_explicit_model_alias() {
+        // kimi-for-coding ships `k2p7`/`k2p5`, which don't canonically match any
+        // moonshotai id — they must be priced via PRICING_MODEL_ALIAS instead.
+        let kimi_rate = Pricing {
+            input_per_million: 0.6,
+            output_per_million: 2.5,
+            cache_read_per_million: 0.15,
+            cache_write_per_million: 0.0,
+        };
+        let mk = |provider: &str, id: &str, pricing: Pricing| Model {
+            id: id.to_string(),
+            provider_id: provider.to_string(),
+            name: id.to_string(),
+            tool_call: true,
+            reasoning: true,
+            attachment: false,
+            context_window: 0,
+            output_limit: 0,
+            pricing,
+        };
+
+        let mut idx: HashMap<String, Vec<Model>> = HashMap::new();
+        idx.insert(
+            "moonshotai".to_string(),
+            vec![mk("moonshotai", "kimi-k2-thinking", kimi_rate.clone())],
+        );
+        idx.insert(
+            "kimi-for-coding".to_string(),
+            vec![
+                mk("kimi-for-coding", "k2p7", Pricing::default()),
+                mk("kimi-for-coding", "k2p5", Pricing::default()),
+            ],
+        );
+
+        enrich_plan_pricing(&mut idx);
+
+        for id in ["k2p7", "k2p5"] {
+            let m = idx["kimi-for-coding"]
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap();
+            assert!(
+                has_nonzero_pricing(&m.pricing),
+                "{id} should be priced via the explicit kimi alias"
+            );
+            assert_eq!(m.pricing.output_per_million, 2.5);
+        }
     }
 
     #[test]

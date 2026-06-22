@@ -156,7 +156,7 @@ function BreakdownTable({ config }: { config: BreakdownConfig }) {
                         <MetricText value={formatPercent(row.success_rate)} />
                         <MetricText value={formatAverageReopens(row.avg_reopens)} />
                         <MetricText value={formatInteger(row.task_count)} />
-                        <MetricText value={formatCompactNumber(row.tokens_in + row.tokens_out)} detail={`${formatCompactNumber(row.tokens_in)} in · ${formatCompactNumber(row.tokens_out)} out`} />
+                        <MetricText value={formatCompactNumber(row.tokens_in + row.tokens_out)} detail={`${formatCompactNumber(row.tokens_in)} in · ${formatCompactNumber(row.tokens_cached ?? 0)} cached · ${formatCompactNumber(row.tokens_out)} out`} />
                       </div>
                       {hasDetail && (
                         <CollapsibleContent>

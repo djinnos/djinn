@@ -73,7 +73,9 @@ describe("UsageProjectModelMatrixTab", () => {
             model: "model-b",
             cost_per_task: 0,
             total_cost: 0,
-            total_tokens: 0,
+            // Zero *cost* but non-zero tokens: still rendered (only zero-token
+            // rows/columns are hidden — see the dedicated test below).
+            total_tokens: 500,
           }),
         ])}
       />,
@@ -84,5 +86,19 @@ describe("UsageProjectModelMatrixTab", () => {
     expect(screen.getByText("No priced cost/task")).toBeInTheDocument();
     expect(screen.getByText("Tokens 1.2K")).toBeInTheDocument();
     expect(screen.getAllByText("$0.00").length).toBeGreaterThan(0);
+  });
+
+  it("hides blank-project rows and zero-token model columns", () => {
+    const matrix = buildProjectModelMatrix([
+      // Real usage.
+      matrixCell({ project_id: "project-a", model: "model-a", total_tokens: 1000 }),
+      // Blank project (chat/system) — must not appear as a row.
+      matrixCell({ project_id: "", project_name: "", model: "model-a", total_tokens: 50 }),
+      // Model that never recorded a token — must not appear as a column.
+      matrixCell({ project_id: "project-a", model: "model-zero", total_tokens: 0 }),
+    ]);
+
+    expect(matrix.projects.map((p) => p.id)).toEqual(["project-a"]);
+    expect(matrix.models).toEqual(["model-a"]);
   });
 });

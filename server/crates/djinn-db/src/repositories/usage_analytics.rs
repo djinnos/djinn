@@ -41,6 +41,8 @@ pub struct ModelEffectivenessRow {
     pub spend_usd: Option<f64>,
     pub tokens_in: i64,
     pub tokens_out: i64,
+    /// Cache-read (cached input) tokens — priced separately from fresh input.
+    pub cache_read_tokens: i64,
     /// Shared-credit completed-task count: number of distinct completed tasks
     /// that had at least one worker session using this model.
     pub shared_credit_completed_task_count: i64,
@@ -75,6 +77,8 @@ pub struct ProjectModelMatrixRow {
     pub spend_usd: Option<f64>,
     pub tokens_in: i64,
     pub tokens_out: i64,
+    /// Cache-read (cached input) tokens — priced separately from fresh input.
+    pub cache_read_tokens: i64,
     /// Distinct tasks touched by this cell's sessions.
     pub task_count: i64,
     /// Fraction of closed tasks that completed successfully (0.0–1.0).
@@ -221,6 +225,8 @@ pub struct SeriesDetailRow {
     pub session_count: i64,
     pub tokens_in: i64,
     pub tokens_out: i64,
+    /// Cache-read (cached input) tokens — priced separately from fresh input.
+    pub cache_read_tokens: i64,
     /// Distinct tasks touched in this bucket.
     pub task_count: i64,
     /// Aggregate cost in USD.  `None` when any session in the bucket was
@@ -240,6 +246,8 @@ pub struct EntityBreakdownRow {
     pub cost: Option<f64>,
     pub tokens_in: i64,
     pub tokens_out: i64,
+    /// Cache-read (cached input) tokens — priced separately from fresh input.
+    pub cache_read_tokens: i64,
     /// Distinct tasks attributed to this entity.
     pub task_count: i64,
     /// Fraction of closed tasks that completed successfully (0.0–1.0).
@@ -391,6 +399,7 @@ impl UsageAnalyticsRepository {
                 COUNT(*)                                       AS session_count, \
                 COALESCE(SUM(s.tokens_in)::bigint, 0)          AS tokens_in, \
                 COALESCE(SUM(s.tokens_out)::bigint, 0)         AS tokens_out, \
+                COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS cache_read_tokens, \
                 COUNT(DISTINCT s.task_id)                      AS task_count, \
                 SUM(s.cost_usd)                                AS cost \
              FROM sessions s \
@@ -416,6 +425,7 @@ impl UsageAnalyticsRepository {
                 session_count: r.get("session_count"),
                 tokens_in: r.get("tokens_in"),
                 tokens_out: r.get("tokens_out"),
+                cache_read_tokens: r.get("cache_read_tokens"),
                 task_count: r.get("task_count"),
                 cost: r.get("cost"),
             })
@@ -446,7 +456,7 @@ impl UsageAnalyticsRepository {
                 SELECT \
                     {key_expr}  AS entity_id, \
                     {name_expr} AS entity_name, \
-                    s.cost_usd, s.tokens_in, s.tokens_out, s.task_id, \
+                    s.cost_usd, s.tokens_in, s.tokens_out, s.cache_read_tokens, s.task_id, \
                     t.status, t.close_reason, t.total_reopen_count \
                 FROM sessions s {joins} {where_clause} \
              ), \
@@ -457,6 +467,7 @@ impl UsageAnalyticsRepository {
                     SUM(cost_usd) AS cost, \
                     COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
                     COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out, \
+                    COALESCE(SUM(cache_read_tokens)::bigint, 0) AS cache_read_tokens, \
                     COUNT(DISTINCT task_id) AS task_count \
                 FROM base GROUP BY entity_id \
              ), \
@@ -480,6 +491,7 @@ impl UsageAnalyticsRepository {
                  sess.cost         AS cost, \
                  sess.tokens_in    AS tokens_in, \
                  sess.tokens_out   AS tokens_out, \
+                 sess.cache_read_tokens AS cache_read_tokens, \
                  sess.task_count   AS task_count, \
                  CASE WHEN ta.closed_count > 0 \
                       THEN ta.completed_count::DOUBLE PRECISION / ta.closed_count::DOUBLE PRECISION \
@@ -502,6 +514,7 @@ impl UsageAnalyticsRepository {
                 cost: r.get("cost"),
                 tokens_in: r.get("tokens_in"),
                 tokens_out: r.get("tokens_out"),
+                cache_read_tokens: r.get("cache_read_tokens"),
                 task_count: r.get("task_count"),
                 success_rate: r.get("success_rate"),
                 avg_reopens: r.get("avg_reopens"),
@@ -584,6 +597,7 @@ impl UsageAnalyticsRepository {
             "WITH filtered_sessions AS ( \
                 SELECT \
                     s.model_id, s.task_id, s.cost_usd, s.tokens_in, s.tokens_out, \
+                    s.cache_read_tokens, \
                     t.status, t.close_reason, t.total_reopen_count \
                 {from_clause} {where_clause} \
              ), \
@@ -593,7 +607,8 @@ impl UsageAnalyticsRepository {
                     COUNT(*) AS sessions, \
                     SUM(cost_usd) AS spend_usd, \
                     COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
-                    COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out \
+                    COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out, \
+                    COALESCE(SUM(cache_read_tokens)::bigint, 0) AS cache_read_tokens \
                 FROM filtered_sessions \
                 GROUP BY model_id \
              ), \
@@ -617,6 +632,7 @@ impl UsageAnalyticsRepository {
                  sa.spend_usd                    AS spend_usd, \
                  sa.tokens_in                    AS tokens_in, \
                  sa.tokens_out                   AS tokens_out, \
+                 sa.cache_read_tokens            AS cache_read_tokens, \
                  COALESCE(ta.completed_count, 0) AS shared_credit_completed_task_count, \
                  CASE WHEN ta.closed_count > 0 \
                       THEN ta.completed_count::DOUBLE PRECISION / ta.closed_count::DOUBLE PRECISION \
@@ -655,6 +671,7 @@ impl UsageAnalyticsRepository {
                     spend_usd,
                     tokens_in,
                     tokens_out,
+                    cache_read_tokens: r.get("cache_read_tokens"),
                     shared_credit_completed_task_count: completed,
                     success_rate: r.get("success_rate"),
                     avg_reopens: r.get("avg_reopens"),
@@ -682,7 +699,7 @@ impl UsageAnalyticsRepository {
                     COALESCE(s.project_id, '') AS project_id, \
                     COALESCE(p.name, '')       AS project_name, \
                     s.model_id                 AS model_id, \
-                    s.cost_usd, s.tokens_in, s.tokens_out, s.task_id, \
+                    s.cost_usd, s.tokens_in, s.tokens_out, s.cache_read_tokens, s.task_id, \
                     t.status, t.close_reason, t.total_reopen_count \
                 FROM sessions s \
                 LEFT JOIN projects p ON p.id = s.project_id \
@@ -696,6 +713,7 @@ impl UsageAnalyticsRepository {
                     SUM(cost_usd) AS spend_usd, \
                     COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
                     COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out, \
+                    COALESCE(SUM(cache_read_tokens)::bigint, 0) AS cache_read_tokens, \
                     COUNT(DISTINCT task_id) AS task_count \
                 FROM base GROUP BY project_id, model_id \
              ), \
@@ -722,6 +740,7 @@ impl UsageAnalyticsRepository {
                  sess.spend_usd    AS spend_usd, \
                  sess.tokens_in    AS tokens_in, \
                  sess.tokens_out   AS tokens_out, \
+                 sess.cache_read_tokens AS cache_read_tokens, \
                  sess.task_count   AS task_count, \
                  CASE WHEN ta.closed_count > 0 \
                       THEN ta.completed_count::DOUBLE PRECISION / ta.closed_count::DOUBLE PRECISION \
@@ -746,6 +765,7 @@ impl UsageAnalyticsRepository {
                 spend_usd: r.get("spend_usd"),
                 tokens_in: r.get("tokens_in"),
                 tokens_out: r.get("tokens_out"),
+                cache_read_tokens: r.get("cache_read_tokens"),
                 task_count: r.get("task_count"),
                 success_rate: r.get("success_rate"),
                 avg_reopens: r.get("avg_reopens"),
@@ -871,6 +891,7 @@ mod tests {
             spend_usd: Some(1.23),
             tokens_in: 100,
             tokens_out: 50,
+            cache_read_tokens: 40,
             shared_credit_completed_task_count: 3,
             success_rate: Some(0.67),
             avg_reopens: Some(0.5),

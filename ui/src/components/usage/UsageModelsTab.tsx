@@ -40,9 +40,18 @@ const METRICS: MetricSpec[] = [
 ];
 
 export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
-  const stats = useMemo(() => buildMetricStats(data.model_effectiveness), [data]);
+  // Hide models that recorded no tokens at all (e.g. a model whose only runs
+  // were empty/failed sessions) — they add noise with nothing to compare.
+  const models = useMemo(
+    () =>
+      data.model_effectiveness.filter(
+        (row) => totalTokens(row.tokens_in, row.tokens_out, row.total_tokens) > 0,
+      ),
+    [data],
+  );
+  const stats = useMemo(() => buildMetricStats(models), [models]);
 
-  if (data.model_effectiveness.length === 0) {
+  if (models.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-8 text-center">
         <p className="text-sm font-medium text-foreground">No worker model data</p>
@@ -69,7 +78,7 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
             </p>
           </div>
           <Badge variant="outline" className="text-muted-foreground">
-            {formatInteger(data.model_effectiveness.length)} models
+            {formatInteger(models.length)} models
           </Badge>
         </div>
       </div>
@@ -91,7 +100,7 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
-            {[...data.model_effectiveness]
+            {[...models]
               .sort(
                 (a, b) =>
                   (b.task_count ?? 0) - (a.task_count ?? 0) ||
@@ -127,7 +136,7 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
                     <div>{formatCompactNumber(totalTokens(row.tokens_in, row.tokens_out, row.total_tokens))}</div>
                     {(row.tokens_in !== undefined || row.tokens_out !== undefined) && (
                       <div className="text-xs text-muted-foreground">
-                        {formatCompactNumber(row.tokens_in ?? 0)} in · {formatCompactNumber(row.tokens_out ?? 0)} out
+                        {formatCompactNumber(row.tokens_in ?? 0)} in · {formatCompactNumber(row.tokens_cached ?? 0)} cached · {formatCompactNumber(row.tokens_out ?? 0)} out
                       </div>
                     )}
                   </td>

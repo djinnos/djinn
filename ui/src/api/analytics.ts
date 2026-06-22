@@ -62,6 +62,8 @@ export interface UsageTimeSeriesPoint {
   cost: number | null;
   tokens_in: number;
   tokens_out: number;
+  /** Cache-read (cached input) tokens — priced separately from fresh input. */
+  tokens_cached?: number;
   task_count: number;
   /** Optional dimension key (model, project, agent_type) when grouped. */
   group_key?: string;
@@ -93,6 +95,8 @@ export interface UsageBreakdownRow {
   cost: number | null;
   tokens_in: number;
   tokens_out: number;
+  /** Cache-read (cached input) tokens — priced separately from fresh input. */
+  tokens_cached?: number;
   task_count: number;
   success_rate: number | null;
   avg_reopens: number | null;
@@ -116,6 +120,8 @@ export interface UsageModelEffectiveness {
   total_tokens: number;
   tokens_in?: number;
   tokens_out?: number;
+  /** Cache-read (cached input) tokens — priced separately from fresh input. */
+  tokens_cached?: number;
   session_count?: number;
   completed_task_count?: number;
   reopen_count?: number;
@@ -130,6 +136,8 @@ export interface UsageProjectModelCell {
   avg_reopens: number | null;
   total_cost: number | null;
   total_tokens: number;
+  /** Cache-read (cached input) tokens — priced separately from fresh input. */
+  tokens_cached?: number;
 }
 
 /**

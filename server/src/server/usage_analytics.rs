@@ -277,6 +277,8 @@ struct SeriesPointDto {
     cost: Option<f64>,
     tokens_in: i64,
     tokens_out: i64,
+    /// Cache-read (cached input) tokens — priced separately from fresh input.
+    tokens_cached: i64,
     task_count: i64,
     model: String,
     project_id: String,
@@ -292,6 +294,8 @@ struct BreakdownRowDto {
     cost: Option<f64>,
     tokens_in: i64,
     tokens_out: i64,
+    /// Cache-read (cached input) tokens — priced separately from fresh input.
+    tokens_cached: i64,
     task_count: i64,
     success_rate: Option<f64>,
     avg_reopens: Option<f64>,
@@ -324,6 +328,8 @@ struct ModelEffectivenessDto {
     total_tokens: i64,
     tokens_in: i64,
     tokens_out: i64,
+    /// Cache-read (cached input) tokens — priced separately from fresh input.
+    tokens_cached: i64,
     session_count: i64,
     /// Shared-credit completed-task count (== task_count); surfaced separately
     /// so the UI can label the attribution semantics.
@@ -342,6 +348,7 @@ impl From<ModelEffectivenessRow> for ModelEffectivenessDto {
             total_tokens: r.tokens_in + r.tokens_out,
             tokens_in: r.tokens_in,
             tokens_out: r.tokens_out,
+            tokens_cached: r.cache_read_tokens,
             session_count: r.sessions,
             completed_task_count: r.shared_credit_completed_task_count,
         }
@@ -359,6 +366,8 @@ struct ProjectModelCellDto {
     avg_reopens: Option<f64>,
     total_cost: Option<f64>,
     total_tokens: i64,
+    /// Cache-read (cached input) tokens — priced separately from fresh input.
+    tokens_cached: i64,
 }
 
 impl From<ProjectModelMatrixRow> for ProjectModelCellDto {
@@ -376,6 +385,7 @@ impl From<ProjectModelMatrixRow> for ProjectModelCellDto {
             avg_reopens: r.avg_reopens,
             total_cost: r.spend_usd,
             total_tokens: r.tokens_in + r.tokens_out,
+            tokens_cached: r.cache_read_tokens,
         }
     }
 }
@@ -533,6 +543,7 @@ fn period_start(day: &str, granularity: Granularity) -> Result<String, (StatusCo
 struct SeriesAccumulator {
     tokens_in: i64,
     tokens_out: i64,
+    tokens_cached: i64,
     task_count: i64,
     cost_sum: f64,
     cost_known: bool,
@@ -546,6 +557,7 @@ impl Default for SeriesAccumulator {
         Self {
             tokens_in: 0,
             tokens_out: 0,
+            tokens_cached: 0,
             task_count: 0,
             cost_sum: 0.0,
             cost_known: true,
@@ -558,6 +570,7 @@ impl SeriesAccumulator {
     fn add(&mut self, row: &SeriesDetailRow) {
         self.tokens_in += row.tokens_in;
         self.tokens_out += row.tokens_out;
+        self.tokens_cached += row.cache_read_tokens;
         self.task_count += row.task_count;
         self.any_usage = true;
         match row.cost {
@@ -608,6 +621,7 @@ fn rollup_series(
                 cost: acc.cost(),
                 tokens_in: acc.tokens_in,
                 tokens_out: acc.tokens_out,
+                tokens_cached: acc.tokens_cached,
                 task_count: acc.task_count,
                 model,
                 project_id,
@@ -636,6 +650,7 @@ fn breakdown_row(row: EntityBreakdownRow, dimension: GroupDimension) -> Breakdow
         cost: row.cost,
         tokens_in: row.tokens_in,
         tokens_out: row.tokens_out,
+        tokens_cached: row.cache_read_tokens,
         task_count: row.task_count,
         success_rate: row.success_rate,
         avg_reopens: row.avg_reopens,
@@ -941,6 +956,7 @@ mod tests {
             session_count: 1,
             tokens_in: 10,
             tokens_out: 5,
+            cache_read_tokens: 3,
             task_count: 1,
             cost,
         }
@@ -983,6 +999,7 @@ mod tests {
             cost: Some(4.0),
             tokens_in: 10,
             tokens_out: 10,
+            cache_read_tokens: 4,
             task_count: 2,
             success_rate: Some(0.5),
             avg_reopens: Some(1.0),
@@ -1008,6 +1025,7 @@ mod tests {
             cost: Some(3.0),
             tokens_in: 1,
             tokens_out: 1,
+            cache_read_tokens: 0,
             task_count: 0,
             success_rate: None,
             avg_reopens: None,
@@ -1024,6 +1042,7 @@ mod tests {
             spend_usd: Some(2.0),
             tokens_in: 100,
             tokens_out: 50,
+            cache_read_tokens: 40,
             shared_credit_completed_task_count: 3,
             success_rate: Some(0.75),
             avg_reopens: Some(0.2),
@@ -1057,6 +1076,7 @@ mod tests {
             spend_usd: Some(6.0),
             tokens_in: 30,
             tokens_out: 20,
+            cache_read_tokens: 12,
             task_count: 3,
             success_rate: Some(1.0),
             avg_reopens: Some(0.0),

@@ -48,6 +48,8 @@ interface BarRow {
   label: string;
   cost: number | null;
   tokens: number;
+  /** Cache-read (cached input) tokens, of the total `tokens`. */
+  cached: number;
 }
 
 const CHART_COLORS = [
@@ -295,6 +297,7 @@ function SpendBarChart({ title, rows }: { title: string; rows: BarRow[] }) {
           }}
           enableLabel={false}
           theme={nivoTheme}
+          tooltip={({ data, color }) => <SpendBarTooltip data={data} color={color} />}
         />
       ) : (
         <ChartEmptyState
@@ -308,6 +311,38 @@ function SpendBarChart({ title, rows }: { title: string; rows: BarRow[] }) {
         />
       )}
     </ChartSection>
+  );
+}
+
+/** Tooltip for the spend bars: spend plus the token total and cached split. */
+function SpendBarTooltip({
+  data,
+  color,
+}: {
+  data: ChartDatum & { fullLabel?: string; Tokens?: number; Cached?: number };
+  color: string;
+}) {
+  const tokens = Number(data.Tokens ?? 0);
+  const cached = Number(data.Cached ?? 0);
+  return (
+    <div className="rounded-md border border-border bg-popover px-2.5 py-1.5 text-xs shadow-md">
+      <div className="flex items-center gap-1.5 font-medium text-foreground">
+        <span
+          className="inline-block h-2 w-2 rounded-[2px]"
+          style={{ backgroundColor: color }}
+          aria-hidden
+        />
+        <span className="truncate" title={data.fullLabel ?? String(data.label)}>
+          {data.fullLabel ?? String(data.label)}
+        </span>
+      </div>
+      <div className="mt-1 tabular-nums text-foreground">
+        {formatCurrency(Number(data.Spend ?? 0))}
+      </div>
+      <div className="mt-0.5 tabular-nums text-muted-foreground">
+        {formatCompactNumber(tokens)} tokens · {formatCompactNumber(cached)} cached
+      </div>
+    </div>
   );
 }
 
@@ -422,12 +457,16 @@ function buildStackedSpend(rows: SeriesRow[]): {
 }
 
 function buildSpendByModel(data: UsageAnalyticsResponse): BarRow[] {
-  const modelRows = data.model_effectiveness.map((row) => ({
-    id: row.model,
-    label: row.model,
-    cost: row.total_cost,
-    tokens: row.total_tokens,
-  }));
+  // Skip models with no tokens at all — they add empty bars/legend rows.
+  const modelRows = data.model_effectiveness
+    .filter((row) => row.total_tokens > 0)
+    .map((row) => ({
+      id: row.model,
+      label: row.model,
+      cost: row.total_cost,
+      tokens: row.total_tokens,
+      cached: row.tokens_cached ?? 0,
+    }));
 
   if (modelRows.length > 0) return sortAndLimitRows(modelRows);
 
@@ -457,9 +496,11 @@ function rollupTimeSeries(
       label,
       cost: null,
       tokens: 0,
+      cached: 0,
     };
     if (point.cost !== null) current.cost = (current.cost ?? 0) + point.cost;
     current.tokens += point.tokens_in + point.tokens_out;
+    current.cached += point.tokens_cached ?? 0;
     byGroup.set(label, current);
   }
   return Array.from(byGroup.values());
@@ -481,8 +522,10 @@ function buildBarChart(rows: BarRow[]): {
     return {
       bucket: row.id,
       label: truncateLabel(row.label),
+      fullLabel: row.label,
       Spend: row.cost ?? 0,
       Tokens: row.tokens,
+      Cached: row.cached,
     };
   });
   return { data, hasPricedCost };
