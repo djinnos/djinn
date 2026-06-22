@@ -285,15 +285,22 @@ describe("codeGraphStore", () => {
       expect(useCodeGraphStore.getState().activeLens).toBe("types");
     });
 
-    it("applyLens snaps complexity color mode back to topology when the lens hides functions", () => {
-      // Calls shows functions → complexity stays engaged.
+    it("applyLens keeps complexity in lenses that show files or functions", () => {
+      // Calls shows functions, Architecture shows files (colored by their
+      // worst function) — both keep the heatmap engaged.
       useCodeGraphStore.getState().applyLens("calls");
       useCodeGraphStore.getState().setColorMode("complexity");
       expect(useCodeGraphStore.getState().colorMode).toBe("complexity");
-
-      // Architecture hides every symbol kind → heatmap would paint nothing,
-      // so the mode snaps back to topology.
       useCodeGraphStore.getState().applyLens("architecture");
+      expect(useCodeGraphStore.getState().colorMode).toBe("complexity");
+    });
+
+    it("applyLens snaps complexity to topology for a lens with neither files nor functions", () => {
+      useCodeGraphStore.getState().applyLens("calls");
+      useCodeGraphStore.getState().setColorMode("complexity");
+      // Types shows classes/structs (no functions) and no file nodes → the
+      // heatmap would paint nothing, so the mode snaps back to topology.
+      useCodeGraphStore.getState().applyLens("types");
       expect(useCodeGraphStore.getState().colorMode).toBe("topology");
     });
 

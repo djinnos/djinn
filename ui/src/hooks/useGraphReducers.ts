@@ -274,6 +274,12 @@ export function useGraphReducers(
     if (!graph) return null;
     const values: number[] = [];
     for (const id of graph.nodes()) {
+      // Sample symbol (function) cognitive only. File nodes now carry an
+      // aggregate `cognitive` (their worst function) so the heatmap works in
+      // the Architecture lens, but those aggregates must not skew the
+      // percentile distribution — files are colored *against* the function
+      // thresholds, not mixed into them.
+      if (graph.getNodeAttribute(id, "kind") !== "symbol") continue;
       const cog = graph.getNodeAttribute(id, "cognitive");
       if (typeof cog === "number" && Number.isFinite(cog)) values.push(cog);
     }
@@ -290,6 +296,10 @@ export function useGraphReducers(
     if (!graph) return new Set();
     const pairs: Array<{ id: string; cognitive: number | null }> = [];
     for (const id of graph.nodes()) {
+      // Symbol nodes only — a file's aggregate `cognitive` equals its worst
+      // function, so including files would halo the file and that function
+      // redundantly.
+      if (graph.getNodeAttribute(id, "kind") !== "symbol") continue;
       const cog = graph.getNodeAttribute(id, "cognitive");
       pairs.push({
         id,

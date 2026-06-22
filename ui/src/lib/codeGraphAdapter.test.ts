@@ -657,6 +657,69 @@ describe("hasPrecomputedCoordinates", () => {
   });
 });
 
+describe("buildGraphFromSnapshot (file complexity)", () => {
+  it("stamps file nodes with their worst function's cognitive", () => {
+    const snapshot: SnapshotPayload = {
+      project_id: "p",
+      git_head: "h",
+      generated_at: "2026-04-28T00:00:00Z",
+      truncated: false,
+      total_nodes: 4,
+      total_edges: 0,
+      nodes: [
+        {
+          id: "file:src/a.rs",
+          kind: "file",
+          label: "a.rs",
+          file_path: "src/a.rs",
+          pagerank: 0.5,
+          x: 0,
+          y: 0,
+        },
+        {
+          id: "symbol:f1",
+          kind: "symbol",
+          label: "f1",
+          symbol_kind: "function",
+          file_path: "src/a.rs",
+          pagerank: 0.1,
+          cognitive: 4,
+          x: 1,
+          y: 1,
+        },
+        {
+          id: "symbol:f2",
+          kind: "symbol",
+          label: "f2",
+          symbol_kind: "function",
+          file_path: "src/a.rs",
+          pagerank: 0.1,
+          cognitive: 11,
+          x: 2,
+          y: 2,
+        },
+        {
+          id: "file:src/empty.rs",
+          kind: "file",
+          label: "empty.rs",
+          file_path: "src/empty.rs",
+          pagerank: 0.2,
+          x: 3,
+          y: 3,
+        },
+      ],
+      edges: [],
+    };
+    const graph = buildGraphFromSnapshot(snapshot);
+    // File with functions → max cognitive (11, not 4 or 15).
+    expect(graph.getNodeAttribute("file:src/a.rs", "cognitive")).toBe(11);
+    // File with no complexity-bearing symbols → no cognitive stamped.
+    expect(
+      graph.getNodeAttribute("file:src/empty.rs", "cognitive"),
+    ).toBeUndefined();
+  });
+});
+
 describe("buildGraphFromSnapshot", () => {
   it("emits one graphology node per snapshot node, excluding containment edges", () => {
     const graph = buildGraphFromSnapshot(fixtureSnapshot);

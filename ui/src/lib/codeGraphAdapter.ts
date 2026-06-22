@@ -929,6 +929,7 @@ export function buildGraphFromSnapshot(
       dropSelfLoops,
     });
     applyContainmentNesting(graph, snapshot);
+    stampFileComplexity(graph);
     graph.setAttribute(PRECOMPUTED_LAYOUT_ATTRIBUTE, true);
     return graph;
   }
@@ -955,8 +956,40 @@ export function buildGraphFromSnapshot(
     dropSelfLoops,
   });
   applyContainmentNesting(graph, snapshot);
+  stampFileComplexity(graph);
 
   return graph;
+}
+
+/**
+ * Give file nodes a `cognitive` value so the complexity heatmap works in the
+ * Architecture (Files) lens, not just Calls (Functions). A file's complexity
+ * is its **worst function** — the max `cognitive` over the symbol nodes that
+ * share its path. Max (not sum) keeps the value on the same scale as function
+ * cognitive, so it reads as a percentile against the same thresholds (which
+ * are sampled from symbol nodes only — see `useGraphReducers`). Files with no
+ * complexity-bearing symbols are left without a `cognitive` attribute.
+ */
+function stampFileComplexity(graph: Graph): void {
+  const maxByPath = new Map<string, number>();
+  graph.forEachNode((_id, attrs) => {
+    if (attrs.kind !== "symbol") return;
+    const cog = attrs.cognitive;
+    const path = attrs.filePath;
+    if (typeof cog !== "number" || !Number.isFinite(cog)) return;
+    if (typeof path !== "string" || path.length === 0) return;
+    const prev = maxByPath.get(path);
+    if (prev === undefined || cog > prev) maxByPath.set(path, cog);
+  });
+  if (maxByPath.size === 0) return;
+  graph.forEachNode((id, attrs) => {
+    if (attrs.kind !== "file") return;
+    const path =
+      typeof attrs.filePath === "string" ? attrs.filePath : undefined;
+    if (!path) return;
+    const max = maxByPath.get(path);
+    if (max !== undefined) graph.setNodeAttribute(id, "cognitive", max);
+  });
 }
 
 function addEdgesFromSnapshot(
