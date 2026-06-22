@@ -9,15 +9,22 @@ import {
   type Provider,
   type ProviderCredential,
 } from '@/api/server';
+import { isSubscriptionProvider } from '@/api/subscriptionProviders';
 import { showToast } from '@/lib/toast';
 
 /**
- * Providers that users can self-serve via the UI (device-code OAuth). Every
- * other provider is expected to be deployment-provisioned; removing one from
- * the UI only clears the vault row but will be re-bootstrapped on the next
- * server restart from the operator-supplied env var.
+ * Providers a user can self-serve (connect AND remove) from the UI: every
+ * personal subscription (ChatGPT/Codex device-code OAuth + the BYO-key coding
+ * plans — Kimi, MiniMax, Z.AI, Xiaomi, OpenCode, …). Removing one deletes only
+ * the acting user's own credential server-side (`owner_user_id = current_user`),
+ * so it never touches an org-provided key. Non-subscription providers are
+ * deployment/operator-provisioned: a UI "remove" would only clear the vault row
+ * and the next server restart re-bootstraps it from the operator env var, so we
+ * keep those locked (managed).
  */
-const SELF_SERVE_PROVIDER_IDS = new Set(['chatgpt_codex']);
+function isSelfServe(providerId: string): boolean {
+  return providerId === 'chatgpt_codex' || isSubscriptionProvider(providerId);
+}
 
 export function useProviders() {
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -95,7 +102,7 @@ export function useProviders() {
 
   const removeProvider = useCallback(
     async (providerId: string) => {
-      if (!SELF_SERVE_PROVIDER_IDS.has(providerId)) {
+      if (!isSelfServe(providerId)) {
         showToast.error('Provisioned via deployment', {
           description:
             'API-key providers are configured through Helm values. Ask your operator to unset the key.',
@@ -119,7 +126,7 @@ export function useProviders() {
   );
 
   const isSelfServeProvider = useCallback(
-    (providerId: string) => SELF_SERVE_PROVIDER_IDS.has(providerId),
+    (providerId: string) => isSelfServe(providerId),
     [],
   );
 

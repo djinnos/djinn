@@ -1,126 +1,15 @@
-import { Delete02Icon, LockIcon } from '@hugeicons/core-free-icons';
-import { HugeiconsIcon } from '@hugeicons/react';
 import { InlineError } from '@/components/InlineError';
 import { AgentConfig } from '@/components/AgentConfig';
-import { CodexSignInCard } from '@/components/CodexSignInCard';
-import { ConfirmButton } from '@/components/ConfirmButton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ModelSection } from '@/components/userConfig/ModelSection';
 import { AiPolicyTab } from '@/components/settings/AiPolicyTab';
+import { ConnectionsTab } from '@/components/settings/ConnectionsTab';
 import { useAuthUser } from '@/components/AuthGate';
 import { SELF_TARGET } from '@/api/userConfig';
-import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
 import { useUserSettings } from '@/hooks/settings/useUserSettings';
 import { useServerHealth } from '@/hooks/useServerHealth';
 import { cn } from '@/lib/utils';
-
-/** Connections tab — provider auth only (connect / disconnect). No model picking. */
-function ConnectionsTab() {
-  const {
-    configuredProviders,
-    loading,
-    loadError,
-    loadData,
-    removeProvider,
-    isSelfServeProvider,
-  } = useProviders();
-
-  if (loading) {
-    return <div className="rounded-lg border border-border bg-card p-6">Loading providers...</div>;
-  }
-
-  if (loadError) {
-    return <InlineError message={loadError} onRetry={() => void loadData()} />;
-  }
-
-  // Codex OAuth is folded into the `openai` provider via builtin merge
-  // (chatgpt_codex.merge_into = "openai"), and openai itself has no native
-  // OAuth — so `oauth` in openai's connection_methods means Codex is signed in.
-  const openaiProvider = configuredProviders.find((p) => p.id === 'openai');
-  const codexConnected = openaiProvider?.connection_methods.includes('oauth') ?? false;
-  // When the codex credential was revoked (a 401 during a run) the server reports
-  // openai disconnected + carries the reason; surface it so the user reconnects.
-  const codexRevokedReason = openaiProvider?.revoked_reason;
-
-  return (
-    <div className="flex flex-col gap-3">
-      <div>
-        <h2 className="text-xl font-bold text-foreground">ChatGPT / Codex</h2>
-        <p className="text-sm text-muted-foreground">
-          Sign in with your ChatGPT subscription. All other providers (Anthropic, OpenAI API,
-          Google, Azure, AWS, Vertex AI) are provisioned by your operator via Helm values —
-          they show up automatically once configured.
-        </p>
-      </div>
-
-      {/* Always render: shows the sign-in CTA when disconnected, and the
-          connected state (with a Remove/Disconnect button) when connected. */}
-      <CodexSignInCard
-        alreadyConnected={codexConnected}
-        revokedReason={codexRevokedReason}
-        onConnected={() => void loadData()}
-      />
-
-      <div className="rounded-lg border border-border bg-card px-4 py-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-sm font-medium text-muted-foreground shrink-0">Connected:</span>
-          {configuredProviders.length === 0 ? (
-            <EmptyConnectedMessage />
-          ) : (
-            configuredProviders.map((provider) => {
-              const removable = isSelfServeProvider(provider.id);
-              return (
-                <span
-                  key={provider.id}
-                  className="flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-sm"
-                  title={
-                    removable
-                      ? undefined
-                      : 'Provisioned via deployment (Helm). Ask your operator to unset the key.'
-                  }
-                >
-                  {provider.name}
-                  {removable ? (
-                    <ConfirmButton
-                      title="Remove provider"
-                      description={`Sign out of "${provider.name}" and delete the stored tokens?`}
-                      confirmLabel="Remove"
-                      onConfirm={() => removeProvider(provider.id)}
-                      size="sm"
-                      variant="ghost"
-                    >
-                      <HugeiconsIcon
-                        icon={Delete02Icon}
-                        size={13}
-                        className="text-destructive"
-                      />
-                    </ConfirmButton>
-                  ) : (
-                    <HugeiconsIcon
-                      icon={LockIcon}
-                      size={13}
-                      className="text-muted-foreground"
-                      aria-label="Provisioned via deployment"
-                    />
-                  )}
-                </span>
-              );
-            })
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function EmptyConnectedMessage() {
-  return (
-    <span className="text-sm text-muted-foreground">
-      None yet. Sign in above, or ask your operator to set a Helm-managed API key.
-    </span>
-  );
-}
 
 /** Model Roles tab — per-user, per-role model lanes + the per-role agent config. */
 function ModelRolesTab() {
