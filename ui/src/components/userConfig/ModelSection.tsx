@@ -37,6 +37,7 @@ import { showToast } from "@/lib/toast";
 
 import { userConfigKeys } from "./userConfigKeys";
 import { formatProvider } from "./providerDisplay";
+import { pickableModels, stripProviderPrefix } from "./modelPicker";
 import {
   PRESETS,
   type PresetKey,
@@ -45,12 +46,6 @@ import {
   reviewDiversityModelIds,
 } from "./presets";
 import { cn } from "@/lib/utils";
-
-/** Strips the provider prefix from a model id ("openai/gpt-5" → "gpt-5"). */
-export function stripProviderPrefix(modelId: string): string {
-  const slash = modelId.indexOf("/");
-  return slash >= 0 ? modelId.slice(slash + 1) : modelId;
-}
 
 /** Human-friendly labels + helper copy for each per-role lane. */
 const LANE_META: Record<ModelLaneKey, { title: string; roles: string }> = {
@@ -106,6 +101,14 @@ export function ModelSection({ targetId }: { targetId: string }) {
     for (const model of connectedModels.data ?? []) map.set(model.id, model);
     return map;
   }, [connectedModels.data]);
+
+  // The curated picker offers only recommended flagships (with a per-provider
+  // fallback to all models when nothing is curated). Already-selected non-
+  // flagship picks still render from `modelsById` — this only limits OFFERS.
+  const pickable = useMemo(
+    () => pickableModels(connectedModels.data ?? []),
+    [connectedModels.data],
+  );
 
   // Distinct union of every model id selected across all three lanes.
   const allSelected = useMemo(() => {
@@ -250,7 +253,7 @@ export function ModelSection({ targetId }: { targetId: string }) {
               order={lanes[lane]}
               modelsById={modelsById}
               caps={caps}
-              availableToAdd={(connectedModels.data ?? []).filter(
+              availableToAdd={pickable.filter(
                 (model) => !lanes[lane].includes(model.id),
               )}
               onAdd={(model) => addModel(lane, model)}

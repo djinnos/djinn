@@ -1,28 +1,20 @@
 import { InlineError } from '@/components/InlineError';
-import { AgentConfig } from '@/components/AgentConfig';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ModelSection } from '@/components/userConfig/ModelSection';
 import { AiPolicyTab } from '@/components/settings/AiPolicyTab';
 import { ConnectionsTab } from '@/components/settings/ConnectionsTab';
 import { useAuthUser } from '@/components/AuthGate';
 import { SELF_TARGET } from '@/api/userConfig';
-import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
 import { useUserSettings } from '@/hooks/settings/useUserSettings';
 import { useServerHealth } from '@/hooks/useServerHealth';
 import { cn } from '@/lib/utils';
 
-/** Model Roles tab — per-user, per-role model lanes + the per-role agent config. */
+/** Model Roles tab — per-user, per-role model lanes for the signed-in caller. */
 function ModelRolesTab() {
-  const agentConfig = useAgentConfig();
-
   return (
     <div className="flex flex-col gap-6">
       {/* Per-user, per-ROLE model lanes for the signed-in caller (self mode). */}
       <ModelSection targetId={SELF_TARGET} />
-
-      <div className="border-t border-border" />
-
-      <AgentConfig {...agentConfig} />
     </div>
   );
 }

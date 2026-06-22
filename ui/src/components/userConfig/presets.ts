@@ -10,11 +10,18 @@ import { type ModelLanes } from "@/api/userSettings";
  * persisted source of truth and stay user-editable underneath; picking a preset
  * just overwrites them with sensible defaults.
  *
- * - `balanced`   — a smart model up top in Plan, cheaper models in
- *                  Implement/Review. The everyday default.
- * - `maxQuality` — the best model in every lane. Also forces cross-model review
- *                  ON when ≥2 distinct model ids exist (the dispatch falls back
- *                  to same-model in the single-model degenerate case).
+ * Presets operate on the curated **flagship** models only — the per-provider
+ * recommended state-of-the-art model (PR-1's `recommended` field), collapsed to
+ * one model per provider. This stops a preset from dumping every GPT-5.x / o-
+ * series / quant variant into the lanes: a user with GPT-5.5 plus a few cheap
+ * Chinese subscriptions should see GPT-5.5 on Plan and the cheap flagships on
+ * Implement/Review — not 30 models.
+ *
+ * - `balanced`   — the priciest flagship up top in Plan (the "smart" model),
+ *                  the cheap flagships in Implement/Review. The everyday default.
+ * - `maxQuality` — the best flagship(s) by quality in every lane. Also forces
+ *                  cross-model review ON when ≥2 distinct model ids exist (the
+ *                  dispatch falls back to same-model in the single-model case).
  */
 export type PresetKey = "balanced" | "maxQuality";
 
@@ -63,27 +70,88 @@ export function rankByCost(models: UserModel[]): UserModel[] {
 }
 
 /**
+ * Collapse the connected models to **one curated flagship per provider** — the
+ * representative model each preset reasons over.
+ *
+ * For a provider that HAS curated flagship(s) (`recommended: true`), we keep the
+ * single best-by-quality recommended model as its representative. For a provider
+ * with NO recommendation (every model `recommended: false` — e.g. a custom or
+ * uncurated provider), we fall back to its best-by-quality model so the user is
+ * never left with an empty lane just because their provider isn't curated.
+ *
+ * The result is deterministic and ordered by provider id for stable output.
+ */
+export function flagshipsPerProvider(models: UserModel[]): UserModel[] {
+  const byProvider = new Map<string, UserModel[]>();
+  for (const model of models) {
+    const provider = model.provider_id ?? "unknown";
+    if (!byProvider.has(provider)) byProvider.set(provider, []);
+    byProvider.get(provider)!.push(model);
+  }
+
+  const reps: UserModel[] = [];
+  for (const [, providerModels] of [...byProvider.entries()].sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    const recommended = providerModels.filter((m) => m.recommended);
+    // Prefer the curated flagship(s); fall back to all models when a provider
+    // has no recommendation so it still contributes a representative.
+    const pool = recommended.length > 0 ? recommended : providerModels;
+    const [best] = rankByQuality(pool);
+    if (best) reps.push(best);
+  }
+  return reps;
+}
+
+/**
  * Build the lane selection for a preset from the user's connected models.
  *
- * Lanes are ordered fallback lists, so we seed each lane with the full ranked
- * list (best/cheapest first) — that gives a sensible primary plus automatic
- * fallbacks. Returns all-empty lanes when the user has no connected models.
+ * Lanes are ordered fallback lists. Presets seed each lane from the curated
+ * per-provider flagships (best/cheapest first) — a sensible primary plus
+ * automatic fallbacks, without the variant clutter. Returns all-empty lanes
+ * when the user has no connected models.
  *
- * - `balanced`   — Plan ranked by quality; Implement + Review ranked by cost.
- * - `maxQuality` — every lane ranked by quality.
+ * - `balanced`   — Plan = flagships priciest-first (the smart model leads);
+ *                  Implement = flagships cheapest-first; Review = the same cheap
+ *                  flagships but rotated so its FIRST entry differs from
+ *                  Implement's (so Thorough review reaches for a 2nd model).
+ * - `maxQuality` — every lane = flagships ranked by quality (best first).
  */
 export function lanesForPreset(preset: PresetKey, models: UserModel[]): ModelLanes {
   if (models.length === 0) {
     return { plan: [], implement: [], review: [] };
   }
-  const byQuality = rankByQuality(models).map((m) => m.id);
-  const byCost = rankByCost(models).map((m) => m.id);
+
+  const flagships = flagshipsPerProvider(models);
+  const byQuality = rankByQuality(flagships).map((m) => m.id);
 
   if (preset === "maxQuality") {
     return { plan: byQuality, implement: byQuality, review: byQuality };
   }
+
   // balanced
-  return { plan: byQuality, implement: byCost, review: byCost };
+  const byCost = rankByCost(flagships);
+  const cheapIds = byCost.map((m) => m.id);
+  // Plan leads with the most EXPENSIVE flagship (the "smart" model), the rest
+  // trailing as fallback.
+  const byPrice = [...byCost].reverse().map((m) => m.id);
+  // Review uses the same cheap pool, but rotated by one so its first entry is a
+  // different model than Implement's first — that gives Thorough review a
+  // genuinely distinct primary reviewer. With a single flagship there's nothing
+  // to rotate, so it degenerates to the same single id (gate stays closed).
+  const reviewIds = rotateFirst(cheapIds);
+
+  return { plan: byPrice, implement: cheapIds, review: reviewIds };
+}
+
+/**
+ * Move the first element to the end, so `[a, b, c]` → `[b, c, a]`. Used to give
+ * the Review lane a different lead model than Implement. Arrays of length < 2
+ * are returned unchanged (nothing distinct to rotate to).
+ */
+function rotateFirst(ids: string[]): string[] {
+  if (ids.length < 2) return ids;
+  return [...ids.slice(1), ids[0]];
 }
 
 /**

@@ -3,7 +3,29 @@ import { describe, expect, it, vi } from "vitest";
 import type { UserModel } from "@/api/userConfig";
 import { render, screen } from "@/test/test-utils";
 
-import { ModelSection, stripProviderPrefix } from "./ModelSection";
+import { ModelSection } from "./ModelSection";
+import { pickableModels, stripProviderPrefix } from "./modelPicker";
+
+function um(id: string, opts: Partial<UserModel> = {}): UserModel {
+  return {
+    id,
+    name: id,
+    provider_id: id.split("/")[0] ?? "p",
+    attachment: false,
+    context_window: 0,
+    output_limit: 0,
+    reasoning: false,
+    recommended: false,
+    tool_call: true,
+    pricing: {
+      input_per_million: 0,
+      output_per_million: 0,
+      cache_read_per_million: 0,
+      cache_write_per_million: 0,
+    },
+    ...opts,
+  } as UserModel;
+}
 
 vi.mock("@/lib/toast", () => ({
   showToast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
@@ -37,6 +59,40 @@ vi.mock("@/api/userConfig", async (importOriginal) => {
     })),
     saveUserModelSelection: vi.fn(),
   };
+});
+
+describe("pickableModels", () => {
+  it("offers only recommended flagships when a provider has them", () => {
+    const offered = pickableModels([
+      um("openai/gpt-5.5", { recommended: true }),
+      um("openai/gpt-5.3"),
+      um("openai/o3"),
+    ]).map((m) => m.id);
+    expect(offered).toEqual(["openai/gpt-5.5"]);
+  });
+
+  it("falls back to ALL of a provider's models when none are recommended", () => {
+    const offered = pickableModels([
+      um("local/a"),
+      um("local/b"),
+    ]).map((m) => m.id).sort();
+    expect(offered).toEqual(["local/a", "local/b"]);
+  });
+
+  it("mixes per provider: flagship for curated, all for uncurated", () => {
+    const offered = new Set(
+      pickableModels([
+        um("openai/gpt-5.5", { recommended: true }),
+        um("openai/gpt-5.3"),
+        um("local/x"),
+        um("local/y"),
+      ]).map((m) => m.id),
+    );
+    expect(offered.has("openai/gpt-5.5")).toBe(true);
+    expect(offered.has("openai/gpt-5.3")).toBe(false);
+    expect(offered.has("local/x")).toBe(true);
+    expect(offered.has("local/y")).toBe(true);
+  });
 });
 
 describe("ModelSection", () => {
