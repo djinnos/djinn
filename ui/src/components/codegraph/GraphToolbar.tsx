@@ -240,11 +240,14 @@ export function GraphToolbar({
   );
 }
 
+// Only the two lenses that carry their weight are surfaced: Architecture
+// (folders/files — the structural skeleton) and Calls (functions/methods —
+// the call graph). The Types and Data-flow presets still exist in the store
+// (LENS_PRESETS) and can be re-surfaced here, but they added clutter without
+// clear value for this codebase.
 const LENS_OPTIONS: { id: LensId; label: string }[] = [
   { id: "architecture", label: "Architecture" },
   { id: "calls", label: "Calls" },
-  { id: "types", label: "Types" },
-  { id: "dataflow", label: "Data flow" },
 ];
 
 interface LensSelectorProps {
