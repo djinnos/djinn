@@ -233,10 +233,10 @@ function ProjectModelCell({
   if (!cell) {
     return (
       <td
-        className="border-b border-border p-2"
+        className="h-full border-b border-border p-2"
         title={`${projectName} / ${model}: never ran`}
       >
-        <div className="flex min-h-20 items-center justify-center rounded-md border border-dashed border-border bg-muted/20 text-xs text-muted-foreground">
+        <div className="flex h-full min-h-24 items-center justify-center rounded-md border border-dashed border-border bg-muted/20 text-xs text-muted-foreground">
           <span className="sr-only">Never ran</span>
           <span aria-hidden>{EM_DASH}</span>
         </div>
@@ -247,15 +247,16 @@ function ProjectModelCell({
   const value = getMetricValue(cell, metric.key);
   const label = metric.format(value);
   const intensity = getMetricIntensity(value, scale, metric);
+  const cached = cell.tokens_cached ?? 0;
   const title = `${projectName} / ${model}: ${metric.label} ${label}; spend ${formatCurrency(
     cell.total_cost,
-  )}; tokens ${formatCompactNumber(cell.total_tokens)}`;
+  )}; tokens ${formatCompactNumber(cell.total_tokens)} (${formatCompactNumber(cached)} cached)`;
 
   return (
-    <td className="border-b border-border p-2" title={title}>
+    <td className="h-full border-b border-border p-2" title={title}>
       <div
         className={cn(
-          "min-h-20 rounded-md border px-3 py-2 tabular-nums transition-colors",
+          "flex h-full min-h-24 flex-col rounded-md border px-3 py-2 tabular-nums transition-colors",
           value === null || value === undefined
             ? "border-dashed border-border bg-muted/20"
             : "border-primary/20 bg-primary/10",
@@ -272,9 +273,12 @@ function ProjectModelCell({
             {metric.emptyLabel}
           </div>
         )}
-        <div className="mt-3 space-y-0.5 text-xs text-muted-foreground">
+        <div className="mt-auto space-y-0.5 pt-3 text-xs text-muted-foreground">
           <div>Spend {formatCurrency(cell.total_cost)}</div>
-          <div>Tokens {formatCompactNumber(cell.total_tokens)}</div>
+          <div>
+            Tokens {formatCompactNumber(cell.total_tokens)}
+            {cached > 0 && ` · ${formatCompactNumber(cached)} cached`}
+          </div>
         </div>
       </div>
     </td>
@@ -289,11 +293,27 @@ interface MetricScale {
 export function buildProjectModelMatrix(
   cells: UsageProjectModelCell[],
 ): BuiltMatrix {
+  // Drop sessions with no project (chat/system runs carry an empty project_id
+  // and would render as a nameless leading row), and drop any project row or
+  // model column that recorded zero tokens across the whole window.
+  const scoped = cells.filter((cell) => cell.project_id !== "");
+  const projectTokens = new Map<string, number>();
+  const modelTokens = new Map<string, number>();
+  for (const cell of scoped) {
+    projectTokens.set(
+      cell.project_id,
+      (projectTokens.get(cell.project_id) ?? 0) + cell.total_tokens,
+    );
+    modelTokens.set(cell.model, (modelTokens.get(cell.model) ?? 0) + cell.total_tokens);
+  }
+
   const projectsById = new Map<string, MatrixProject>();
   const models = new Set<string>();
   const cellsByPair = new Map<string, UsageProjectModelCell>();
 
-  for (const cell of cells) {
+  for (const cell of scoped) {
+    if ((projectTokens.get(cell.project_id) ?? 0) === 0) continue;
+    if ((modelTokens.get(cell.model) ?? 0) === 0) continue;
     projectsById.set(cell.project_id, {
       id: cell.project_id,
       name: cell.project_name || cell.project_id,
