@@ -10,19 +10,59 @@ vi.mock("@/lib/toast", () => ({
 }));
 
 const connected: ConnectedProvider[] = [
-  // Codex sub (oauth on openai) — rendered by its own card, not a row.
+  // Codex sub (oauth on openai) — rendered by its own compact row, not a
+  // generic subscription card.
   {
     id: "openai",
     name: "OpenAI",
     connection_methods: ["oauth"],
     env_vars: ["OPENAI_API_KEY"],
   } as ConnectedProvider,
-  // A personal subscription connected by API key.
+  // A personal subscription connected by API key (standalone, own key).
   {
     id: "kimi-for-coding",
     name: "Kimi for Coding",
     connection_methods: ["credential"],
     env_vars: ["KIMI_API_KEY"],
+  } as ConnectedProvider,
+  // Four Xiaomi endpoints that share ONE credential — must collapse to a
+  // single "Xiaomi" account card, not four rows.
+  {
+    id: "xiaomi",
+    name: "Xiaomi",
+    connection_methods: ["credential"],
+    env_vars: ["XIAOMI_API_KEY"],
+  } as ConnectedProvider,
+  {
+    id: "xiaomi-token-plan-cn",
+    name: "Xiaomi Token Plan (China)",
+    connection_methods: ["credential"],
+    env_vars: ["XIAOMI_API_KEY"],
+  } as ConnectedProvider,
+  {
+    id: "xiaomi-token-plan-ams",
+    name: "Xiaomi Token Plan (Europe)",
+    connection_methods: ["credential"],
+    env_vars: ["XIAOMI_API_KEY"],
+  } as ConnectedProvider,
+  {
+    id: "xiaomi-token-plan-sgp",
+    name: "Xiaomi Token Plan (Singapore)",
+    connection_methods: ["credential"],
+    env_vars: ["XIAOMI_API_KEY"],
+  } as ConnectedProvider,
+  // Z.AI + Zhipu coding plans share ZHIPU_API_KEY — one "Z.AI / Zhipu" card.
+  {
+    id: "zai-coding-plan",
+    name: "Z.AI Coding Plan",
+    connection_methods: ["credential"],
+    env_vars: ["ZHIPU_API_KEY"],
+  } as ConnectedProvider,
+  {
+    id: "zhipuai",
+    name: "Zhipu AI",
+    connection_methods: ["credential"],
+    env_vars: ["ZHIPU_API_KEY"],
   } as ConnectedProvider,
   // An org-provided API key.
   {
@@ -43,24 +83,34 @@ vi.mock("@/api/userConfig", async (importOriginal) => {
 });
 
 describe("ConnectionsTab", () => {
-  it("splits connected providers into subscription vs org-provided buckets", async () => {
+  it("splits providers into buckets and collapses same-account subscriptions", async () => {
     render(<ConnectionsTab />);
 
     // Bucket headings.
     expect(await screen.findByText("Your subscriptions")).toBeInTheDocument();
     expect(screen.getByText("Provided by your org")).toBeInTheDocument();
 
-    // Personal subscription is a first-class removable row.
+    // Standalone personal subscription is a first-class removable row.
     expect(await screen.findByText("Kimi for Coding")).toBeInTheDocument();
-    expect(screen.getByText("Connected · personal subscription")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^remove$/i })).toBeInTheDocument();
 
-    // Org-provided key shows as managed (no remove button for it).
+    // The four Xiaomi endpoints collapse to ONE "Xiaomi" card.
+    expect(screen.getByText("Xiaomi")).toBeInTheDocument();
+    expect(screen.queryByText("Xiaomi Token Plan (China)")).not.toBeInTheDocument();
+    expect(screen.queryByText("Xiaomi Token Plan (Europe)")).not.toBeInTheDocument();
+
+    // Z.AI + Zhipu collapse to ONE "Z.AI / Zhipu" card (the separate-rows bug).
+    expect(screen.getByText("Z.AI / Zhipu")).toBeInTheDocument();
+    expect(screen.queryByText("Zhipu AI")).not.toBeInTheDocument();
+
+    // Multi-plan accounts surface a plan count; each removable card has a Remove.
+    expect(screen.getAllByText(/personal subscription · \d+ plans/).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: /^remove$/i }).length).toBeGreaterThan(0);
+
+    // Org-provided key shows as managed (no Remove for it).
     expect(await screen.findByText("Anthropic")).toBeInTheDocument();
     expect(screen.getByText("Managed by your org")).toBeInTheDocument();
 
-    // The Codex/openai oauth row is NOT duplicated as a plain provider row —
-    // it's owned by the ChatGPT/Codex card. The card heading is present.
+    // ChatGPT/Codex is its own compact row, not duplicated as a plain provider.
     expect(screen.getByText("ChatGPT / Codex")).toBeInTheDocument();
   });
 });

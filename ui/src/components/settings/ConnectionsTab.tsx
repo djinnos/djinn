@@ -7,7 +7,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 
 import { ConfirmButton } from "@/components/ConfirmButton";
-import { CodexSignInCard } from "@/components/CodexSignInCard";
+import { CodexSignInRow } from "@/components/CodexSignInCard";
 import { InlineError } from "@/components/InlineError";
 import { ApiKeyConnectForm } from "@/components/userConfig/ProviderSection";
 import { userConfigKeys } from "@/components/userConfig/userConfigKeys";
@@ -18,16 +18,23 @@ import {
   fetchUserConnectedProviders,
 } from "@/api/userConfig";
 import { removeProviderFull } from "@/api/server";
-import { isSubscriptionProvider } from "@/api/subscriptionProviders";
+import {
+  type SubscriptionGroup,
+  groupSubscriptionsByAccount,
+  isSubscriptionProvider,
+} from "@/api/subscriptionProviders";
 import { showToast } from "@/lib/toast";
 
 /**
- * Connections tab — provider auth for the signed-in user. Reworked so every
- * connected provider is a first-class row in one of two buckets:
+ * Connections tab — provider auth for the signed-in user. Every connection is a
+ * compact row in one of two buckets:
  *
  *  - **Your subscriptions** — personal subscriptions (ChatGPT/Codex OAuth + the
  *    BYO-key coding plans). Per-user and removable; removing deletes only the
- *    caller's own credential server-side.
+ *    caller's own credential server-side. Connected coding-plan providers that
+ *    share one underlying credential (same primary env var — e.g. all four
+ *    Xiaomi token-plan endpoints, or Z.AI + Zhipu coding plans) collapse into a
+ *    single account card whose Remove disconnects the whole group.
  *  - **Provided by your org** — operator/admin-provisioned API keys (Anthropic,
  *    OpenAI API, Google, …). Shown as managed and locked (not removable from
  *    here — they're set via Helm/operator config).
@@ -62,22 +69,27 @@ export function ConnectionsTab() {
     openaiProvider as { revoked_reason?: string } | undefined
   )?.revoked_reason;
 
-  // Split connected providers into the two buckets. The Codex sub is rendered by
-  // its dedicated OAuth card, so an `openai`-via-oauth row is excluded here to
-  // avoid a duplicate; a plain `openai` API key still lands in the org bucket.
-  const { subscriptions, orgProvided } = useMemo(() => {
+  // Split connected providers into the two buckets, then collapse subscriptions
+  // by shared credential. The Codex sub is rendered by its dedicated OAuth row,
+  // so an `openai`-via-oauth row is excluded here to avoid a duplicate; a plain
+  // `openai` API key still lands in the org bucket.
+  const { subscriptionGroups, orgProvided } = useMemo(() => {
     const subs: ConnectedProvider[] = [];
     const org: ConnectedProvider[] = [];
     for (const provider of connected.data ?? []) {
       const isCodexRow =
         provider.id === "openai" && provider.connection_methods.includes("oauth");
-      if (isCodexRow) continue; // owned by the Codex card below
+      if (isCodexRow) continue; // owned by the Codex row below
       if (isSubscriptionProvider(provider.id)) subs.push(provider);
       else org.push(provider);
     }
     const byName = (a: ConnectedProvider, b: ConnectedProvider) =>
       a.name.localeCompare(b.name);
-    return { subscriptions: subs.sort(byName), orgProvided: org.sort(byName) };
+    subs.sort(byName);
+    return {
+      subscriptionGroups: groupSubscriptionsByAccount(subs),
+      orgProvided: org.sort(byName),
+    };
   }, [connected.data]);
 
   if (connected.isError) {
@@ -108,21 +120,20 @@ export function ConnectionsTab() {
           </p>
         </div>
 
-        <CodexSignInCard
-          alreadyConnected={codexConnected}
-          revokedReason={codexRevokedReason}
-          onConnected={refresh}
-        />
-
         {loading ? (
           <CardSkeleton />
-        ) : subscriptions.length > 0 ? (
+        ) : (
           <ul className="flex flex-col gap-2">
-            {subscriptions.map((provider) => (
-              <SubscriptionCard key={provider.id} provider={provider} onRemoved={refresh} />
+            <CodexSignInRow
+              alreadyConnected={codexConnected}
+              revokedReason={codexRevokedReason}
+              onConnected={refresh}
+            />
+            {subscriptionGroups.map((group) => (
+              <SubscriptionGroupCard key={group.key} group={group} onRemoved={refresh} />
             ))}
           </ul>
-        ) : null}
+        )}
 
         <ApiKeyConnectForm
           targetId={SELF_TARGET}
@@ -170,19 +181,25 @@ function CardSkeleton() {
   );
 }
 
-/** A connected personal subscription — first-class row, removable by the owner. */
-function SubscriptionCard({
-  provider,
+/**
+ * A connected personal-subscription account — a first-class row, removable by
+ * the owner. One row stands for every provider id that shares the account's
+ * credential, so Remove disconnects all of them.
+ */
+function SubscriptionGroupCard({
+  group,
   onRemoved,
 }: {
-  provider: ConnectedProvider;
+  group: SubscriptionGroup;
   onRemoved: () => void;
 }) {
   const remove = useMutation({
-    mutationFn: () => removeProviderFull(provider.id),
+    // Disconnect every provider id in the group. They share one credential, but
+    // removing each by id is idempotent server-side and clears any per-id state.
+    mutationFn: () => Promise.all(group.providerIds.map((id) => removeProviderFull(id))),
     onSuccess: () => {
       showToast.success("Subscription removed", {
-        description: `Disconnected ${provider.name}.`,
+        description: `Disconnected ${group.name}.`,
       });
       onRemoved();
     },
@@ -193,18 +210,28 @@ function SubscriptionCard({
     },
   });
 
+  const planCount = group.providerIds.length;
+  const subtitle =
+    planCount > 1
+      ? `Connected · personal subscription · ${planCount} plans`
+      : "Connected · personal subscription";
+
   return (
     <li className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card px-4 py-3">
       <div className="flex min-w-0 items-center gap-2.5">
         <HugeiconsIcon icon={CheckmarkCircle04Icon} size={16} className="shrink-0 text-green-500" />
         <div className="min-w-0">
-          <div className="truncate text-sm font-medium text-foreground">{provider.name}</div>
-          <div className="truncate text-xs text-muted-foreground">Connected · personal subscription</div>
+          <div className="truncate text-sm font-medium text-foreground">{group.name}</div>
+          <div className="truncate text-xs text-muted-foreground">{subtitle}</div>
         </div>
       </div>
       <ConfirmButton
         title="Remove subscription"
-        description={`Disconnect "${provider.name}" and delete the stored key/token for your account?`}
+        description={
+          planCount > 1
+            ? `Disconnect "${group.name}" and delete the stored key for your account? This removes all ${planCount} connected plans on this account.`
+            : `Disconnect "${group.name}" and delete the stored key/token for your account?`
+        }
         confirmLabel="Remove"
         onConfirm={() => remove.mutate()}
         size="sm"
