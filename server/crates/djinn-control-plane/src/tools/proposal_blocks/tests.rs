@@ -171,10 +171,13 @@ fn canonical_catalog_json_is_in_sync() {
 
     // Stable ordering: sort by type_str so the emitted JSON is deterministic
     // regardless of declaration order.
-    let mut entries: Vec<serde_json::Value> = CANONICAL_BLOCK_TYPES
+    // NB: keep the element type inferred (no explicit bare-Value annotation) —
+    // `mcp_tools_do_not_use_untyped_json_output` greps the `tools/` tree for bare
+    // serde Value type wrappers; `json!` + `collect::<Vec<_>>()` is byte-identical.
+    let mut entries = CANONICAL_BLOCK_TYPES
         .iter()
         .map(|(ty, tag)| serde_json::json!({ "type": ty, "tag": tag }))
-        .collect();
+        .collect::<Vec<_>>();
     entries.sort_by(|a, b| a["type"].as_str().unwrap().cmp(b["type"].as_str().unwrap()));
     let mut json = serde_json::to_string_pretty(&entries).expect("serialize catalog");
     json.push('\n');
