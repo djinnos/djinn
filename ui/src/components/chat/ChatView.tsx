@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchProviderModels, type ProviderModel } from '@/api/settings';
 import { userSettingsQueryOptions } from '@/api/queryOptions';
-import { lanesUnion } from '@/api/userSettings';
 import { sendChatMessage } from '@/api/chat';
 import { getChatSessionMessages } from '@/api/chatSessions';
 import { Shimmer } from '@/components/ai-elements/shimmer';
@@ -86,12 +85,13 @@ export function ChatView() {
   const { data: userSettings } = useQuery(userSettingsQueryOptions());
 
   // Order/filter the connected (tool_call-capable) models by the user's
-  // per-user, per-role lane selection. Chat is not role-scoped, so we take the
-  // distinct union across all lanes: when non-empty, show exactly those ids in
-  // priority order, dropping any that aren't connected. When empty, fall back
-  // to the full connected list.
+  // per-user, per-role lane selection. Chat is a plan/reason activity, so it
+  // follows the Plan lane only: when non-empty, show exactly those ids in
+  // priority order, dropping any that aren't connected. When empty (user has
+  // nothing in the plan lane), fall back to the full connected list so chat is
+  // never left with zero models.
   const models = useMemo<ProviderModel[]>(() => {
-    const selection = userSettings ? lanesUnion(userSettings.lanes) : [];
+    const selection = userSettings ? userSettings.lanes.plan : [];
     if (selection.length === 0) return connectedModels;
     const byId = new Map(connectedModels.map((m) => [m.id, m]));
     const ordered: ProviderModel[] = [];
