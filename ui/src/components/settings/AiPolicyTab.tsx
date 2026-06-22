@@ -15,6 +15,8 @@ import {
   jurisdictionLabel,
   saveOrgPolicy,
 } from "@/api/orgPolicy";
+import type { ModelLanes } from "@/api/userSettings";
+import { OrgDefaultLanesSection } from "./OrgDefaultLanesSection";
 import { showToast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
@@ -76,6 +78,7 @@ export function AiPolicyTab() {
   return (
     <div className="flex flex-col gap-6">
       <SubscriptionPolicySection policy={policy} saving={mutation.isPending} onSave={mutation.mutate} />
+      <OrgDefaultLanesSection policy={policy} saving={mutation.isPending} onSave={mutation.mutate} />
       <LaneLockSection policy={policy} saving={mutation.isPending} onSave={mutation.mutate} />
     </div>
   );
@@ -84,7 +87,11 @@ export function AiPolicyTab() {
 interface SectionProps {
   policy: OrgPolicy;
   saving: boolean;
-  onSave: (patch: { blockedSubscriptions?: string[]; lockLevel?: LockLevel }) => void;
+  onSave: (patch: {
+    blockedSubscriptions?: string[];
+    defaultLanes?: ModelLanes;
+    lockLevel?: LockLevel;
+  }) => void;
 }
 
 function SubscriptionPolicySection({ policy, saving, onSave }: SectionProps) {
@@ -196,8 +203,9 @@ function LaneLockSection({ policy, saving, onSave }: SectionProps) {
       <div>
         <h2 className="text-xl font-bold text-foreground">Model role lock</h2>
         <p className="text-sm text-muted-foreground">
-          When locked, the org-default model role assignment is authoritative — members can&apos;t
-          override their plan / implement / review lanes. When flexible, the default only seeds new
+          Controls whether the org-default assignment above is enforced. When
+          locked, it&apos;s authoritative — members can&apos;t override their plan /
+          implement / review lanes. When flexible, the default only seeds new
           members and they may change it.
         </p>
       </div>

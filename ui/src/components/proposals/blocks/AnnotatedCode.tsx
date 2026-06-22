@@ -19,6 +19,11 @@ import type { BlockProps } from "./types";
 import { BlockShell } from "./BlockShell";
 import { splitFilename } from "./diff";
 import {
+  CODE_LANGUAGE_OPTIONS,
+  computeCollapse,
+  resolveCodeLanguage,
+} from "./code";
+import {
   buildLineMarkerMap,
   hasResolvedAnnotations,
   parseAnnotationsAttr,
@@ -38,33 +43,50 @@ import {
 // `react-syntax-highlighter` is heavy; load it only when a code block renders.
 const CodeBlock = lazy(() => import("./CodeBlock"));
 
-/** Long-file collapse threshold — above this we offer a "Show N lines" toggle. */
-const COLLAPSE_LINE_THRESHOLD = 40;
-/** Lines kept visible while collapsed. */
-const COLLAPSE_VISIBLE_LINES = 24;
-
 /**
- * AnnotatedCode — a line-numbered, syntax-highlighted code block with optional
- * line-anchored annotations.
+ * AnnotatedCode — the single, general code block: a line-numbered,
+ * syntax-highlighted snippet with a filename header, copy button, language
+ * switcher, collapse-to-N-lines, and OPTIONAL line-anchored annotations.
  *
  * Header: a filename (dir/basename split) when `filename` is set, a language
- * chip, and a copy-source button. Body: the Prism-highlighted source with a left
- * line-number gutter. Annotations come from the `annotations` attribute (a JSON
+ * switcher (re-highlights as another grammar; "Auto" returns to the
+ * authored/inferred language), and a copy-source button. Body: the
+ * Prism-highlighted source with a left line-number gutter, collapsed behind a
+ * "Show all N lines" toggle once it exceeds `maxLines` (default 40; `0` never
+ * collapses). Annotations come from the optional `annotations` attribute (a JSON
  * string of `{ lines | line, note, label? }[]`, where `lines` is `"3"` or
  * `"3-5"`); each renders as an amber highlight band on its line(s) plus a
  * numbered gutter pip, with the note shown in an on-hover portal card anchored
  * beside the code. Hovering a line ↔ its note cross-highlights, annotated lines
  * are keyboard-focusable (Enter/Space toggles the card, Escape closes), and a
  * visually-hidden stack keeps every note reachable by assistive tech and tests.
+ * When no annotations are authored the block is simply a plain code snippet.
  *
  * Robust: invalid `annotations` JSON renders the code WITHOUT annotations plus a
  * quiet warning (never crashes, never silently swallows). The app is DARK-ONLY.
  */
 export function AnnotatedCode({ attributes, children }: BlockProps) {
-  const language = attributes.lang ?? attributes.language ?? "text";
   const filename = attributes.filename?.trim() || undefined;
   const content =
     typeof children === "string" ? children.replace(/\s+$/, "") : "";
+
+  // The active language can be re-picked via the switcher; it seeds from the
+  // authored `lang`/`language` attr (or filename inference), with "" meaning Auto.
+  const authoredLang = attributes.lang ?? attributes.language;
+  const inferred = useMemo(
+    () => resolveCodeLanguage(authoredLang, filename) ?? "",
+    [authoredLang, filename],
+  );
+  const [selectedLang, setSelectedLang] = useState<string>("");
+  const language = (selectedLang || inferred || "text").trim();
+
+  // Optional collapse-to-N: `maxLines` overrides the default cap (40); `0`
+  // disables collapsing entirely.
+  const rawMax = attributes.maxLines ?? attributes.maxlines;
+  const parsedMax = rawMax != null ? Number(rawMax) : NaN;
+  const maxLines = Number.isFinite(parsedMax)
+    ? Math.max(0, Math.min(2000, Math.floor(parsedMax)))
+    : undefined;
 
   const lineCount = useMemo(
     () => (content ? content.split("\n").length : 0),
@@ -90,9 +112,12 @@ export function AnnotatedCode({ attributes, children }: BlockProps) {
   const hover = useAnnotationHover();
   const activeIndex = hover.activeIndex;
 
-  const collapsible = lineCount > COLLAPSE_LINE_THRESHOLD;
-  const collapsed = collapsible && !expanded;
-  const hiddenLines = collapsible ? lineCount - COLLAPSE_VISIBLE_LINES : 0;
+  const collapse = useMemo(
+    () => computeCollapse(content, expanded, maxLines),
+    [content, expanded, maxLines],
+  );
+  const collapsible = collapse.collapsible;
+  const collapsed = collapse.collapsed;
 
   const copySource = () => {
     if (typeof navigator === "undefined" || !navigator.clipboard) return;
@@ -189,7 +214,27 @@ export function AnnotatedCode({ attributes, children }: BlockProps) {
           </span>
         </span>
       ) : null}
-      {langChip && <span className="font-mono">{langChip}</span>}
+      {/* Language switcher — re-highlights as a different grammar on demand.
+          "Auto" returns to the authored/inferred language. */}
+      <label className="flex items-center gap-1">
+        <span className="sr-only">Code language</span>
+        <select
+          aria-label="Code language"
+          value={selectedLang}
+          onChange={(event) => setSelectedLang(event.target.value)}
+          className="rounded border bg-muted/40 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground transition-colors hover:text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+        >
+          {CODE_LANGUAGE_OPTIONS.map((option) => (
+            <option key={option.value || "auto"} value={option.value}>
+              {option.value
+                ? option.label
+                : langChip
+                  ? `Auto (${langChip})`
+                  : "Auto"}
+            </option>
+          ))}
+        </select>
+      </label>
       <button
         type="button"
         onClick={copySource}
@@ -249,7 +294,9 @@ export function AnnotatedCode({ attributes, children }: BlockProps) {
             aria-expanded={expanded}
             className="flex w-full items-center justify-center border-t bg-muted/30 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
           >
-            {collapsed ? `Show ${hiddenLines} more lines` : "Show less"}
+            {collapsed
+              ? `Show all ${collapse.lineCount} lines`
+              : "Show less"}
           </button>
         )}
 

@@ -26,7 +26,6 @@ pub enum BlockType {
     Callout,
     Table,
     Checklist,
-    Code,
     QuestionForm,
 }
 
@@ -45,7 +44,6 @@ impl BlockType {
             BlockType::Callout => "callout",
             BlockType::Table => "table",
             BlockType::Checklist => "checklist",
-            BlockType::Code => "code",
             BlockType::QuestionForm => "question-form",
         }
     }
@@ -64,7 +62,6 @@ impl BlockType {
             BlockType::Callout => "Callout",
             BlockType::Table => "Table",
             BlockType::Checklist => "Checklist",
-            BlockType::Code => "Code",
             BlockType::QuestionForm => "QuestionForm",
         }
     }
@@ -461,33 +458,6 @@ pub static PROPOSAL_BLOCK_REGISTRY: LazyLock<BTreeMap<&'static str, ProposalBloc
                 ),
             ),
             (
-                "code",
-                block_with_description(
-                    "code",
-                    "Code",
-                    "A single syntax-highlighted code snippet — the standalone \
-                     code primitive (distinct from `AnnotatedCode`, which adds \
-                     line-anchored annotations). The block CHILDREN are the raw \
-                     source code. Set the optional `filename` attribute to a file \
-                     path (shown in the header, split into directory + basename) \
-                     and the optional `lang` attribute to a language hint (e.g. \
-                     `ts`, `rust`, `python`); when `lang` is omitted the language \
-                     is inferred from the filename extension. Set the optional \
-                     `caption` attribute for a one-line note under the snippet, \
-                     and `maxLines` to override the collapse threshold (default \
-                     40; `0` never collapses). The snippet shows line numbers, a \
-                     copy-source button, and a language switcher. Example: \
-                     `<Code id=\"x\" filename=\"src/util.ts\" lang=\"ts\">\\nexport \
-                     function clamp(v: number) { return v; }\\n</Code>`.",
-                    fields(vec![
-                        ("filename", string_field()),
-                        ("lang", string_field()),
-                        ("caption", string_field()),
-                        ("maxLines", string_field()),
-                    ]),
-                ),
-            ),
-            (
                 "question-form",
                 block(
                     "question-form",
@@ -712,7 +682,7 @@ mod tests {
     #[test]
     fn registry_contains_v1_blocks() {
         let registry = proposal_block_registry();
-        assert_eq!(registry.len(), 13);
+        assert_eq!(registry.len(), 12);
         assert_eq!(registry["rich-text"].tag, "RichText");
         assert_eq!(registry["diagram"].tag, "Diagram");
         assert_eq!(registry["annotated-code"].tag, "AnnotatedCode");
@@ -724,7 +694,6 @@ mod tests {
         assert_eq!(registry["callout"].tag, "Callout");
         assert_eq!(registry["table"].tag, "Table");
         assert_eq!(registry["checklist"].tag, "Checklist");
-        assert_eq!(registry["code"].tag, "Code");
         assert_eq!(registry["question-form"].tag, "QuestionForm");
         // The diff block ships authoring guidance for the LLM.
         assert!(
@@ -749,7 +718,6 @@ mod tests {
             BlockType::Callout,
             BlockType::Table,
             BlockType::Checklist,
-            BlockType::Code,
             BlockType::QuestionForm,
         ];
         for bt in types {
@@ -761,7 +729,7 @@ mod tests {
     #[test]
     fn block_registry_new_has_all_definitions() {
         let reg = BlockRegistry::new();
-        assert_eq!(reg.definitions().len(), 13);
+        assert_eq!(reg.definitions().len(), 12);
         assert!(reg.definition_for_tag("RichText").is_some());
         assert!(reg.definition_for_tag("UnknownTag").is_none());
         assert!(reg.tags().contains("RichText"));
@@ -785,7 +753,6 @@ mod tests {
             "Callout",
             "Table",
             "Checklist",
-            "Code",
             "QuestionForm",
         ]
         .into_iter()

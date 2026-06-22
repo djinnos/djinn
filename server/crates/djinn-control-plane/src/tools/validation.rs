@@ -509,12 +509,6 @@ This runs on the hot path.
 - [ ] Backfill job verified
 </Checklist>
 
-<Code id="snippet" filename="src/util.ts" lang="ts">
-export function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-</Code>
-
 <QuestionForm id="open-questions" title="Open Questions">
 Should we use Redis or Memcached?
 </QuestionForm>
