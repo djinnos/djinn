@@ -447,6 +447,36 @@ export function colorForGroup(key: string): string {
   return GROUP_COLORS[fnv1a(key) % GROUP_COLORS.length];
 }
 
+/** One row of the crate legend: a grouping key, its hue, and node count. */
+export interface CrateLegendEntry {
+  key: string;
+  color: string;
+  count: number;
+}
+
+/**
+ * Tally the topology grouping keys present on a built graph into legend rows
+ * (key + hue + count), sorted by count desc then key for stable ordering.
+ * Reads the `colorGroup` attribute stamped by {@link addNode}, so the legend
+ * matches exactly how the dots are colored. Pure + exported for testing.
+ */
+export function computeCrateLegend(graph: Graph): CrateLegendEntry[] {
+  const counts = new Map<string, number>();
+  graph.forEachNode((_id, attrs) => {
+    const key = attrs.colorGroup;
+    if (typeof key === "string" && key.length > 0) {
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  });
+  return Array.from(counts, ([key, count]) => ({
+    key,
+    color: colorForGroup(key),
+    count,
+  })).sort((a, b) =>
+    b.count !== a.count ? b.count - a.count : a.key.localeCompare(b.key, "en"),
+  );
+}
+
 /**
  * Key with the highest count in a tally map, ties broken by lexical order
  * for determinism. Returns `undefined` for an empty map. Used to pick a
@@ -1123,6 +1153,12 @@ function addNode(
     symbolKind: node.symbol_kind,
     pagerank: node.pagerank,
     filePath: node.file_path,
+    /**
+     * The crate/community grouping key this node is colored by — stashed so
+     * the crate legend can tally groups and the crate filter can isolate one
+     * without re-deriving the key from the path on every reducer call.
+     */
+    colorGroup: colorGroupKey(node),
     communityId: node.community_id,
     workspaceKind: node.workspace_kind,
     workspace: node.workspace,

@@ -263,6 +263,22 @@ describe("codeGraphStore", () => {
     });
   });
 
+  describe("crateFilter", () => {
+    it("defaults to null, sets and clears the isolated crate", () => {
+      expect(useCodeGraphStore.getState().crateFilter).toBeNull();
+      useCodeGraphStore.getState().setCrateFilter("djinn-graph");
+      expect(useCodeGraphStore.getState().crateFilter).toBe("djinn-graph");
+      useCodeGraphStore.getState().setCrateFilter(null);
+      expect(useCodeGraphStore.getState().crateFilter).toBeNull();
+    });
+
+    it("reset clears the crate filter", () => {
+      useCodeGraphStore.getState().setCrateFilter("ui");
+      useCodeGraphStore.getState().reset();
+      expect(useCodeGraphStore.getState().crateFilter).toBeNull();
+    });
+  });
+
   describe("intent lenses", () => {
     it("defaults to architecture lens", () => {
       expect(useCodeGraphStore.getState().activeLens).toBe("architecture");

@@ -137,6 +137,13 @@ export interface HighlightView {
    * so the user can progressively explore culled regions.
    */
   expandedRegions: ReadonlySet<string>;
+
+  /**
+   * Crate/community grouping key to isolate (from the legend). When set, the
+   * node reducer hides every node whose `colorGroup` differs, so the canvas
+   * shows just that crate. `null` shows all.
+   */
+  crateFilter: string | null;
 }
 
 /** Bitset-style flag describing which highlight layer wins for a node. */
@@ -175,6 +182,7 @@ export const EMPTY_HIGHLIGHT_VIEW: HighlightView = {
   lodTier: "close",
   viewportBounds: null,
   expandedRegions: new Set<string>(),
+  crateFilter: null,
 };
 
 /**
@@ -289,6 +297,13 @@ export function nodeReducer(
   // `isTest` (test files + symbols defined in them). Sits first so the
   // gate fires regardless of any other highlight/filter state.
   if (view.hideTests && attrs.isTest === true) {
+    return { ...attrs, hidden: true };
+  }
+
+  // Crate isolation (legend click): when a crate is pinned, hide every node
+  // that isn't in it so the canvas shows just that crate. Sits near the top
+  // with the other hard filters.
+  if (view.crateFilter !== null && attrs.colorGroup !== view.crateFilter) {
     return { ...attrs, hidden: true };
   }
 

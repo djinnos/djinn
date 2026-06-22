@@ -258,6 +258,7 @@ export function useGraphReducers(
   const focusDirection = useCodeGraphStore((s) => s.focusDirection);
   const doiRevealCount = useCodeGraphStore((s) => s.doiRevealCount);
   const expandedRegions = useCodeGraphStore((s) => s.expandedRegions);
+  const crateFilter = useCodeGraphStore((s) => s.crateFilter);
 
   // ── Lazy 1-hop neighbor set (memoized) ─────────────────────────────────
   const selectionNeighbors = useMemo<ReadonlySet<string>>(() => {
@@ -385,10 +386,13 @@ export function useGraphReducers(
       viewportBounds: viewRef.current.viewportBounds,
       // Click-to-expand regions from the store.
       expandedRegions,
+      // Crate isolation from the legend.
+      crateFilter,
     };
     sigma?.refresh();
   }, [
     sigma,
+    crateFilter,
     selectionId,
     selectionNeighbors,
     citationIds,

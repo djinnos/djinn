@@ -35,6 +35,7 @@ import type Graph from "graphology";
 import { fetchSnapshot } from "@/api/codeGraph";
 import {
   buildGraphFromSnapshot,
+  computeCrateLegend,
   filterSnapshotForWorkspace,
   isDoubleClick,
   parseSnapshotResponse,
@@ -252,7 +253,81 @@ export function CodeGraphCanvas({
         <LayoutOptimizingPill />
       ) : null}
       <CitationStatusBadge />
+      <CrateLegend graph={graph} />
       <ComplexityLegend thresholds={complexityThresholds} />
+    </div>
+  );
+}
+
+/**
+ * Topology-mode legend: maps each crate/community color to its name + node
+ * count, and lets the user click a row to isolate that crate on the canvas
+ * (the node reducer hides everything else). Click the active row, or "All",
+ * to clear. Hidden in complexity mode (the ComplexityLegend owns that).
+ */
+function CrateLegend({ graph }: { graph: Graph | null }) {
+  const colorMode = useCodeGraphStore((s) => s.colorMode);
+  const crateFilter = useCodeGraphStore((s) => s.crateFilter);
+  const setCrateFilter = useCodeGraphStore((s) => s.setCrateFilter);
+  const entries = useMemo(
+    () => (graph ? computeCrateLegend(graph) : []),
+    [graph],
+  );
+  if (colorMode !== "topology" || entries.length === 0) return null;
+  // Cap the list so a huge monorepo doesn't paint a wall of rows; the long
+  // tail of tiny crates is rarely what you isolate by.
+  const shown = entries.slice(0, 18);
+  return (
+    <div
+      data-testid="crate-legend"
+      className="pointer-events-auto absolute left-3 top-16 flex max-h-[60vh] w-48 flex-col overflow-hidden rounded-lg border border-[#2d2d3d] bg-black/70 text-[11px] text-zinc-200 shadow backdrop-blur"
+    >
+      <div className="flex items-center justify-between border-b border-[#2d2d3d] px-2.5 py-1.5">
+        <span className="text-[9px] font-medium uppercase tracking-wide text-zinc-400">
+          Crates
+        </span>
+        {crateFilter !== null && (
+          <button
+            type="button"
+            onClick={() => setCrateFilter(null)}
+            className="text-[10px] text-blue-300 hover:text-blue-200"
+          >
+            Show all
+          </button>
+        )}
+      </div>
+      <div className="flex flex-col overflow-y-auto py-1">
+        {shown.map((entry) => {
+          const active = crateFilter === entry.key;
+          const dimmed = crateFilter !== null && !active;
+          return (
+            <button
+              key={entry.key}
+              type="button"
+              data-testid={`crate-legend-row-${entry.key}`}
+              onClick={() =>
+                setCrateFilter(active ? null : entry.key)
+              }
+              className={cn(
+                "flex items-center gap-2 px-2.5 py-1 text-left transition-colors hover:bg-white/5",
+                active && "bg-white/10",
+                dimmed && "opacity-45",
+              )}
+              title={`${entry.key} — ${entry.count.toLocaleString()} nodes`}
+            >
+              <span
+                aria-hidden
+                className="h-2.5 w-2.5 shrink-0 rounded-sm"
+                style={{ backgroundColor: entry.color }}
+              />
+              <span className="flex-1 truncate">{entry.key}</span>
+              <span className="shrink-0 tabular-nums text-[10px] text-zinc-500">
+                {entry.count.toLocaleString()}
+              </span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
