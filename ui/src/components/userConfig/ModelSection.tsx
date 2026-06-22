@@ -38,14 +38,19 @@ import { showToast } from "@/lib/toast";
 import { userConfigKeys } from "./userConfigKeys";
 import { formatProvider } from "./providerDisplay";
 import { pickableModels, stripProviderPrefix } from "./modelPicker";
-import {
-  PRESETS,
-  type PresetKey,
-  canEnableDiverseReview,
-  lanesForPreset,
-  reviewDiversityModelIds,
-} from "./presets";
 import { cn } from "@/lib/utils";
+
+/**
+ * Distinct model ids reachable by the Implement + Review lanes. "Distinct" is by
+ * model id, NOT provider — one provider can host many models. This is the set
+ * the cross-model ("Thorough") review gate counts.
+ */
+function reviewDiversityModelIds(lanes: ModelLanes): Set<string> {
+  const ids = new Set<string>();
+  for (const id of lanes.implement) ids.add(id);
+  for (const id of lanes.review) ids.add(id);
+  return ids;
+}
 
 /** Human-friendly labels + helper copy for each per-role lane. */
 const LANE_META: Record<ModelLaneKey, { title: string; roles: string }> = {
@@ -174,20 +179,6 @@ export function ModelSection({ targetId }: { targetId: string }) {
     setDirty(true);
   };
 
-  // Apply a working-style preset: overwrite the lanes from the connected models
-  // and (for Max quality) force cross-model review ON when ≥2 distinct model
-  // ids exist. Lanes stay user-editable afterward — a preset is just a seed.
-  const applyPreset = (preset: PresetKey) => {
-    const nextLanes = lanesForPreset(preset, connectedModels.data ?? []);
-    setLanes(nextLanes);
-    if (preset === "maxQuality") {
-      // Force ON only in the non-degenerate (≥2 distinct) case; otherwise leave
-      // it as-is (dispatch falls back to same-model, surfaced by the hint).
-      setDiverseReview(canEnableDiverseReview(nextLanes));
-    }
-    setDirty(true);
-  };
-
   const toggleDiverseReview = () => {
     if (!diverseReviewEnabled) return; // gated — see hint
     setDiverseReview((prev) => !prev);
@@ -236,8 +227,6 @@ export function ModelSection({ targetId }: { targetId: string }) {
         </div>
       ) : (
         <div className="flex flex-col gap-5">
-          <PresetBar onApply={applyPreset} />
-
           <ThoroughReviewToggle
             checked={effectiveDiverseReview}
             enabled={diverseReviewEnabled}
@@ -265,37 +254,6 @@ export function ModelSection({ targetId }: { targetId: string }) {
         </div>
       )}
     </section>
-  );
-}
-
-/** The two working-style presets (Balanced / Max quality). */
-function PresetBar({ onApply }: { onApply: (preset: PresetKey) => void }) {
-  return (
-    <div className="flex flex-col gap-2 rounded-lg border bg-card/40 p-4">
-      <div>
-        <h4 className="text-sm font-semibold text-foreground">Working style</h4>
-        <p className="text-xs text-muted-foreground/70">
-          A quick start — sets the lanes below from your connected models. You can
-          still tweak each lane afterward.
-        </p>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        {PRESETS.map((preset) => (
-          <Button
-            key={preset.key}
-            variant="outline"
-            size="sm"
-            className="h-auto flex-col items-start gap-0.5 px-3 py-2 text-left"
-            onClick={() => onApply(preset.key)}
-          >
-            <span className="font-semibold">{preset.title}</span>
-            <span className="text-xs font-normal text-muted-foreground">
-              {preset.description}
-            </span>
-          </Button>
-        ))}
-      </div>
-    </div>
   );
 }
 

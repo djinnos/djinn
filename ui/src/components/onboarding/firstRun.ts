@@ -1,13 +1,10 @@
-import type { ModelLanes } from "@/api/userSettings";
-import { stripProviderPrefix } from "@/components/userConfig/modelPicker";
-
 /**
- * First-run onboarding sheet (slice 4 of p8py "Model setup UX").
+ * First-run onboarding sheet.
  *
  * The sheet is a focused, sequential first-run flow shown when a user has no
- * connected providers and/or no model lanes — so they don't land on the full
- * settings page cold. It consolidates: connect a subscription → pick a working
- * style → done.
+ * connected providers — so they don't land on the full settings page cold. It
+ * consolidates: connect a subscription → done. Per-role model lanes are
+ * configured later, manually, in Settings → Model Roles.
  *
  * Dismissal is deliberately CLIENT-SIDE (localStorage keyed by user id) rather
  * than a new DB column: we want to avoid adding a migration in this slice. The
@@ -52,20 +49,4 @@ export function clearFirstRunDismissal(userId: string | null | undefined): void 
   } catch {
     // ignore
   }
-}
-
-/**
- * One-line summary of the resulting role assignment, e.g.
- * "Plan w/ opus · Build w/ gpt-5 · Review w/ gpt-5". Uses the FIRST (primary)
- * model id in each lane, stripped of its provider prefix. Lanes with no model
- * fall back to the deployment default, surfaced as "default".
- */
-export function assignmentSummary(lanes: ModelLanes): string {
-  const primary = (ids: string[]): string =>
-    ids.length > 0 ? stripProviderPrefix(ids[0]!) : "default";
-  return [
-    `Plan w/ ${primary(lanes.plan)}`,
-    `Build w/ ${primary(lanes.implement)}`,
-    `Review w/ ${primary(lanes.review)}`,
-  ].join(" · ");
 }
