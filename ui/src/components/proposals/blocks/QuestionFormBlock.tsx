@@ -18,10 +18,12 @@ import { parseQuestions } from "./questionForm";
  * The freeform children are parsed (`parseQuestions`) into individual questions
  * — a numbered line, a `?`-terminated sentence, a bolded line, or a `###`
  * heading starts a new question; following lines/bullets are that question's
- * sub-detail. Each renders as a clean numbered card with a question-mark marker,
- * the markdown-rendered question text, optional muted sub-detail, and a small
- * "recommended" badge when the author tagged an item. If parsing yields nothing
- * we fall back to the original `BlockMarkdown` render so a proposal never blanks.
+ * sub-detail. Each renders as a clean numbered ROW (separated by subtle dividers,
+ * NOT a card-in-card) with a question-mark marker, the markdown-rendered question
+ * text, optional muted sub-detail, and a small "recommended" badge when the
+ * author tagged an item. The single outer BlockShell is the only card. If parsing
+ * yields nothing we fall back to the original `BlockMarkdown` render so a proposal
+ * never blanks.
  */
 export function QuestionFormBlock({ children }: BlockProps) {
   const content = typeof children === "string" ? children.trim() : "";
@@ -48,11 +50,11 @@ export function QuestionFormBlock({ children }: BlockProps) {
         </span>
       }
     >
-      <ol className="space-y-2.5">
+      <ol className="divide-y divide-border/60">
         {questions.map((q, index) => (
           <li
             key={`${index}-${q.question.slice(0, 24)}`}
-            className="flex gap-3 rounded-lg border bg-muted/20 px-3.5 py-3"
+            className="flex gap-3 py-3 first:pt-0 last:pb-0"
           >
             <span
               className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-pink-500/15 text-pink-300"

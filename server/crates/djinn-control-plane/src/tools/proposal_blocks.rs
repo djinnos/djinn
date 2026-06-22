@@ -365,9 +365,22 @@ pub static PROPOSAL_BLOCK_REGISTRY: LazyLock<BTreeMap<&'static str, ProposalBloc
             ),
             (
                 "file-tree",
-                block(
+                block_with_description(
                     "file-tree",
                     "FileTree",
+                    "A file & change tree. The block CHILDREN are the tree text: \
+                     either an indented ASCII tree (folders end in `/`, files sit \
+                     under a deeper indent) OR one slash-path per line. DECLARE each \
+                     file's change status with a single leading token immediately \
+                     followed by whitespace, then the path: `+` = added/new, `~` = \
+                     modified, `-` = removed/deleted, `>` = renamed/moved; NO token \
+                     means unchanged. Status comes ONLY from this token — words like \
+                     `new`/`modified` are NOT inferred. A trailing note after the \
+                     path (e.g. `~ src/x.rs — wire the route` or `src/y.ts: helper`) \
+                     renders as a muted caption. Example: \
+                     `<FileTree id=\"x\" root=\"src\">\\n+ src/added.rs\\n~ src/main.rs \
+                     bump version\\n- src/old.rs\\n</FileTree>`. Unparseable bodies \
+                     fall back to a raw monospace render.",
                     fields(vec![
                         ("root", string_field()),
                         (

@@ -12,19 +12,38 @@
 //   1. Indented ASCII tree — folders end in `/` (or simply have children under a
 //      deeper indent), files sit beneath them:
 //        src/
-//          main.rs
+//          ~ main.rs
 //          routes/
-//            git.ts (NEW)
+//            + git.ts
 //
 //   2. One slash-path per line:
 //        src/main.rs
-//        src/routes/git.ts (MODIFIED)  -- why it changed
+//        ~ src/routes/git.ts  -- why it changed
 //
-// A per-file change status is derived from an inline marker like `(NEW)`,
-// `(MODIFIED)`, `(DELETED)`, or `(RENAMED)`. A trailing note/description after
-// the path (e.g. `Cargo.toml (add [workspace.lints])` or `foo.ts — does X`) is
-// surfaced as a muted caption. Anything the parser can't make sense of yields an
-// empty file list, so the caller can fall back to the raw <pre>.
+// ── Declared status-token grammar ──────────────────────────────────────────
+// A file's change status is DECLARED by the author with a single leading token,
+// never inferred from English words. The token, when present, is the FIRST
+// non-whitespace character of the row (after any ASCII tree-drawing glyphs like
+// `├ └ │` have been stripped) and MUST be immediately followed by whitespace and
+// then the path:
+//
+//        +  path   → added      (a.k.a. new)
+//        ~  path   → modified
+//        -  path   → removed    (deleted); `−` (U+2212) is accepted too
+//        >  path   → renamed    (moved)
+//     (none) path  → unchanged
+//
+// Token vs bullet-glyph collision: `+` and `-` are ALSO common list bullets, so
+// the declared token is resolved FIRST and takes precedence — a leading `+`/`-`/
+// `~`/`>` followed by whitespace is ALWAYS a status token, not a bullet. Only the
+// `*` glyph (which is not a status token) is still treated as a plain bullet, so
+// `* foo.ts` is an unchanged file. A token must be followed by whitespace: `-x`
+// (no space) is not a token and is parsed as the path `-x`.
+//
+// A trailing note/description after the path (e.g. `Cargo.toml — sets lints` or
+// `foo.ts: does X`) is still surfaced as a muted caption. Anything the parser
+// can't make sense of yields an empty file list, so the caller can fall back to
+// the raw <pre>.
 
 /** The kind of change applied to a file, driving its single-letter badge. */
 export type FileChange = "added" | "modified" | "deleted" | "renamed";
@@ -69,55 +88,33 @@ export interface ChangeTally {
   renamed: number;
 }
 
-/* ── Status + note parsing ─────────────────────────────────────────────────── */
+/* ── Declared status token + note parsing ──────────────────────────────────── */
 
-// Maps the words an author might use in an inline `(…)` marker to a status.
-const STATUS_WORDS: Record<string, FileChange> = {
-  new: "added",
-  added: "added",
-  add: "added",
-  create: "added",
-  created: "added",
-  a: "added",
-  modified: "modified",
-  modify: "modified",
-  changed: "modified",
-  change: "modified",
-  updated: "modified",
-  update: "modified",
-  edit: "modified",
-  edited: "modified",
-  m: "modified",
-  deleted: "deleted",
-  delete: "deleted",
-  removed: "deleted",
-  remove: "deleted",
-  del: "deleted",
-  d: "deleted",
-  renamed: "renamed",
-  rename: "renamed",
-  moved: "renamed",
-  move: "renamed",
-  r: "renamed",
+/** Maps a leading declared status token to its change kind. */
+const STATUS_TOKENS: Record<string, FileChange> = {
+  "+": "added",
+  "~": "modified",
+  "-": "deleted",
+  "−": "deleted", // U+2212 MINUS SIGN, as some authors paste it.
+  ">": "renamed",
 };
 
 /**
- * Pull a leading `(STATUS)` marker out of a trailing-text fragment. Only a
- * marker whose entire content is a recognised status word counts (so a genuine
- * note like `(add [workspace.lints])` is left as a note, not eaten as a status).
+ * Pull a leading DECLARED status token out of a row. The token must be the first
+ * character and be immediately followed by whitespace (so `-x` with no space is
+ * NOT a token — it's a literal path). On a match the token + its trailing
+ * whitespace are stripped and the matching change is returned; otherwise the row
+ * is returned unchanged with no status. Status is NEVER inferred from words.
  */
-function extractStatusMarker(text: string): {
-  change?: FileChange;
-  rest: string;
-} {
-  const trimmed = text.trim();
-  const match = /^\(([A-Za-z]+)\)\s*([\s\S]*)$/.exec(trimmed);
-  if (match) {
-    const word = (match[1] ?? "").toLowerCase();
-    const change = STATUS_WORDS[word];
-    if (change) return { change, rest: (match[2] ?? "").trim() };
+function extractStatusToken(row: string): { change?: FileChange; rest: string } {
+  const first = row[0] ?? "";
+  const change = STATUS_TOKENS[first];
+  // Require whitespace after the token so a path that merely starts with the
+  // character (e.g. `~/home`, `-rf`) is not mistaken for a declared status.
+  if (change && /\s/.test(row[1] ?? "")) {
+    return { change, rest: row.slice(1).replace(/^\s+/u, "") };
   }
-  return { rest: trimmed };
+  return { rest: row };
 }
 
 /** Strip a leading note separator (dash/colon/hash) and unwrap a `(note)`. */
@@ -136,10 +133,18 @@ function cleanNote(text: string): string | undefined {
 function parseRow(raw: string): ParsedFile | null {
   let rest = raw.trim();
   if (!rest) return null;
-  // Strip ASCII tree-drawing glyphs / bullet markers, keeping path + trailing.
-  rest = rest.replace(/^[│|`'+*\s]*[├└][\s─-]*/u, "").trim();
+  // Strip ASCII tree-drawing glyphs first (purely structural, never a status).
+  rest = rest.replace(/^[│|`'*\s]*[├└][\s─]*/u, "").trim();
   rest = rest.replace(/^[│|]\s*/u, "").trim();
-  rest = rest.replace(/^[-*+]\s+/u, "").trim();
+  if (!rest) return null;
+
+  // Resolve a DECLARED leading status token (`+ ~ - >`) BEFORE any bullet
+  // stripping, so the token wins the collision with `+`/`-` list bullets.
+  const status = extractStatusToken(rest);
+  const change = status.change;
+  rest = status.rest;
+  // Only the `*` glyph remains a plain bullet now (`+`/`-` are status tokens).
+  rest = rest.replace(/^\*\s+/u, "").trim();
   if (!rest) return null;
 
   const firstSpace = rest.search(/\s/);
@@ -161,13 +166,7 @@ function parseRow(raw: string): ParsedFile | null {
   // A path token must not contain angle brackets and must have real content.
   if (!path || /[<>]/.test(path)) return null;
 
-  let change: FileChange | undefined;
-  let note: string | undefined;
-  if (trailing) {
-    const marker = extractStatusMarker(trailing);
-    change = marker.change;
-    note = cleanNote(marker.rest);
-  }
+  const note: string | undefined = trailing ? cleanNote(trailing) : undefined;
 
   const isFolder = path.endsWith("/");
   const cleanPath = path.replace(/\/+$/, "");
@@ -192,9 +191,15 @@ function parseRowSegment(raw: string): {
   note?: string;
 } | null {
   let rest = raw.trim();
-  rest = rest.replace(/^[├└][\s─-]*/u, "").trim();
+  rest = rest.replace(/^[├└][\s─]*/u, "").trim();
   rest = rest.replace(/^[│|]\s*/u, "").trim();
-  rest = rest.replace(/^[-*+]\s+/u, "").trim();
+  if (!rest) return null;
+
+  // DECLARED status token wins over `+`/`-` bullets; resolve it first.
+  const status = extractStatusToken(rest);
+  const change = status.change;
+  rest = status.rest;
+  rest = rest.replace(/^\*\s+/u, "").trim();
   if (!rest) return null;
 
   const firstSpace = rest.search(/\s/);
@@ -210,13 +215,7 @@ function parseRowSegment(raw: string): {
   const segment = token.replace(/\/+$/, "");
   if (!segment || !/[A-Za-z0-9._]/.test(segment)) return null;
 
-  let change: FileChange | undefined;
-  let note: string | undefined;
-  if (trailing) {
-    const marker = extractStatusMarker(trailing);
-    change = marker.change;
-    note = cleanNote(marker.rest);
-  }
+  const note: string | undefined = trailing ? cleanNote(trailing) : undefined;
 
   return { segment, rawEndsWithSlash, change, note };
 }

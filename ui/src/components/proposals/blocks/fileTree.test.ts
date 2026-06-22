@@ -61,15 +61,21 @@ describe("parseFileTreeBody", () => {
     ]);
   });
 
-  it("parses inline (NEW)/(MODIFIED)/(DELETED)/(RENAMED) status markers", () => {
+  it("reads the DECLARED leading status token (+ ~ - >) for each kind", () => {
     const files = parseFileTreeBody(
       [
-        "src/added.ts (NEW)",
-        "src/changed.ts (MODIFIED)",
-        "src/gone.ts (DELETED)",
-        "src/moved.ts (RENAMED)",
+        "+ src/added.ts",
+        "~ src/changed.ts",
+        "- src/gone.ts",
+        "> src/moved.ts",
       ].join("\n"),
     );
+    expect(files.map((f) => f.path)).toEqual([
+      "src/added.ts",
+      "src/changed.ts",
+      "src/gone.ts",
+      "src/moved.ts",
+    ]);
     expect(files.map((f) => f.change)).toEqual([
       "added",
       "modified",
@@ -78,23 +84,82 @@ describe("parseFileTreeBody", () => {
     ]);
   });
 
-  it("accepts common status synonyms case-insensitively", () => {
+  it("accepts the U+2212 minus sign as a removed token", () => {
+    const files = parseFileTreeBody("− src/gone.ts");
+    expect(files[0]).toMatchObject({ path: "src/gone.ts", change: "deleted" });
+  });
+
+  it("leaves a row with no token as unchanged", () => {
+    const files = parseFileTreeBody("src/stable.ts\nsrc/other.ts");
+    expect(files.every((f) => f.change === undefined)).toBe(true);
+  });
+
+  it("does NOT infer status from English words like new/modified/deleted", () => {
+    // Words in a trailing note are notes, never status — only the token decides.
     const files = parseFileTreeBody(
-      ["a.ts (added)", "b.ts (Removed)", "c.ts (updated)", "d.ts (moved)"].join(
-        "\n",
-      ),
+      [
+        "src/a.ts (NEW)",
+        "src/b.ts (MODIFIED)",
+        "src/c.ts — newly added",
+      ].join("\n"),
     );
-    expect(files.map((f) => f.change)).toEqual([
-      "added",
-      "deleted",
-      "modified",
-      "renamed",
+    expect(files.every((f) => f.change === undefined)).toBe(true);
+    expect(files[0]).toMatchObject({ path: "src/a.ts", note: "NEW" });
+    expect(files[1]).toMatchObject({ path: "src/b.ts", note: "MODIFIED" });
+    expect(files[2]).toMatchObject({ path: "src/c.ts", note: "newly added" });
+  });
+
+  it("treats a status token as status, NOT as a bullet glyph (collision)", () => {
+    // `-`/`+` followed by whitespace are declared tokens, not list bullets.
+    const files = parseFileTreeBody("- src/removed.ts\n+ src/created.ts");
+    expect(files.map((f) => f.change)).toEqual(["deleted", "added"]);
+    expect(files.map((f) => f.path)).toEqual([
+      "src/removed.ts",
+      "src/created.ts",
     ]);
   });
 
-  it("extracts a trailing note as a caption, keeping it distinct from a status", () => {
+  it("still treats `*` as a plain bullet (unchanged file)", () => {
+    const files = parseFileTreeBody("* src/keep.ts");
+    expect(files[0]).toMatchObject({ path: "src/keep.ts" });
+    expect(files[0]!.change).toBeUndefined();
+  });
+
+  it("requires whitespace after the token: `-rf`/`~` paths are not tokens", () => {
+    const files = parseFileTreeBody("-rf.txt\n~cache.tmp");
+    expect(files.map((f) => f.path)).toEqual(["-rf.txt", "~cache.tmp"]);
+    expect(files.every((f) => f.change === undefined)).toBe(true);
+  });
+
+  it("honors declared tokens inside an indented tree", () => {
+    const body = [
+      "src/",
+      "  + added.rs",
+      "  ~ changed.rs",
+      "  routes/",
+      "    - gone.ts",
+    ].join("\n");
+    const files = parseFileTreeBody(body);
+    expect(files).toEqual([
+      { path: "src/added.rs", name: "added.rs", change: "added", note: undefined },
+      {
+        path: "src/changed.rs",
+        name: "changed.rs",
+        change: "modified",
+        note: undefined,
+      },
+      {
+        path: "src/routes/gone.ts",
+        name: "gone.ts",
+        change: "deleted",
+        note: undefined,
+      },
+    ]);
+  });
+
+  it("extracts a trailing note as a caption alongside a declared token", () => {
     const files = parseFileTreeBody(
-      "Cargo.toml (add [workspace.lints])\nsrc/x.rs (MODIFIED) wire the new route",
+      "Cargo.toml — add [workspace.lints]\n~ src/x.rs wire the new route",
     );
     expect(files[0]).toMatchObject({
       path: "Cargo.toml",
@@ -116,8 +181,8 @@ describe("parseFileTreeBody", () => {
     expect(files[1]).toMatchObject({ path: "src/b.ts", note: "helper" });
   });
 
-  it("attaches status/note to a bare folder row that carries them", () => {
-    const files = parseFileTreeBody("src/legacy/ (DELETED) drop the old module");
+  it("attaches a declared token + note to a bare folder row", () => {
+    const files = parseFileTreeBody("- src/legacy/ drop the old module");
     expect(files).toHaveLength(1);
     expect(files[0]).toMatchObject({
       path: "src/legacy",
@@ -126,7 +191,7 @@ describe("parseFileTreeBody", () => {
     });
   });
 
-  it("ignores bare folder header rows with no change/note", () => {
+  it("ignores bare folder header rows with no token/note", () => {
     const files = parseFileTreeBody("src/\nsrc/main.rs");
     expect(files.map((f) => f.path)).toEqual(["src/main.rs"]);
   });
@@ -137,8 +202,17 @@ describe("parseFileTreeBody", () => {
     expect(files.map((f) => f.path)).toEqual(["src/main.rs", "src/lib.rs"]);
   });
 
+  it("honors a declared token after a tree glyph", () => {
+    const body = ["src", "  ├─ ~ main.rs", "  └─ + lib.rs"].join("\n");
+    const files = parseFileTreeBody(body);
+    expect(files).toEqual([
+      { path: "src/main.rs", name: "main.rs", change: "modified", note: undefined },
+      { path: "src/lib.rs", name: "lib.rs", change: "added", note: undefined },
+    ]);
+  });
+
   it("dedupes repeated paths, keeping the first", () => {
-    const files = parseFileTreeBody("a.ts (NEW)\na.ts (MODIFIED)");
+    const files = parseFileTreeBody("+ a.ts\n~ a.ts");
     expect(files).toHaveLength(1);
     expect(files[0]!.change).toBe("added");
   });
@@ -184,7 +258,7 @@ describe("buildFileTree", () => {
   });
 
   it("carries change + note onto file leaves", () => {
-    const files = parseFileTreeBody("src/x.ts (NEW) added the route");
+    const files = parseFileTreeBody("+ src/x.ts added the route");
     const tree = buildFileTree(files);
     const folder = tree[0] as { children: TreeNode[] };
     expect(folder.children[0]).toMatchObject({
@@ -196,14 +270,14 @@ describe("buildFileTree", () => {
 });
 
 describe("tallyChanges", () => {
-  it("counts each change kind", () => {
+  it("counts each declared change kind", () => {
     const files = parseFileTreeBody(
       [
-        "a.ts (NEW)",
-        "b.ts (NEW)",
-        "c.ts (MODIFIED)",
-        "d.ts (DELETED)",
-        "e.ts (RENAMED)",
+        "+ a.ts",
+        "+ b.ts",
+        "~ c.ts",
+        "- d.ts",
+        "> e.ts",
         "f.ts",
       ].join("\n"),
     );
