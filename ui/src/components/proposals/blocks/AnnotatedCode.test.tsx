@@ -6,7 +6,7 @@ import { AnnotatedCode } from "./AnnotatedCode";
 const CODE = ["const a = 1;", "const b = 2;", "return a + b;"].join("\n");
 
 describe("AnnotatedCode", () => {
-  it("renders the block shell, a filename header (dir/basename split), language chip, and a copy button", () => {
+  it("renders the block shell, a filename header (dir/basename split), language switcher, and a copy button", () => {
     render(
       <AnnotatedCode
         id="c1"
@@ -18,7 +18,12 @@ describe("AnnotatedCode", () => {
     expect(screen.getByText("Code")).toBeInTheDocument();
     expect(screen.getByText("math.ts")).toBeInTheDocument();
     expect(screen.getByText("src/utils/")).toBeInTheDocument();
-    expect(screen.getByText("ts")).toBeInTheDocument();
+    // The language switcher reflects the authored/inferred language via its
+    // "Auto (…)" option.
+    expect(
+      screen.getByRole("combobox", { name: "Code language" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Auto (ts)")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Copy source" }),
     ).toBeInTheDocument();

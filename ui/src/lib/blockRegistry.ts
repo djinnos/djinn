@@ -6,7 +6,6 @@ import {
   ApiEndpointBlock,
   CalloutBlock,
   ChecklistBlock,
-  CodeSnippetBlock,
   DataModelBlock,
   DecisionsBlock,
   Diagram,
@@ -41,14 +40,13 @@ const BLOCK_COMPONENTS: Record<ProposalBlockType, ComponentType<BlockProps>> = {
   callout: CalloutBlock,
   table: TableBlock,
   checklist: ChecklistBlock,
-  code: CodeSnippetBlock,
   "question-form": QuestionFormBlock,
 };
 
 const BLOCK_DISPLAY_NAMES: Record<ProposalBlockType, string> = {
   "rich-text": "Rich Text",
   diagram: "Diagram",
-  "annotated-code": "Annotated Code",
+  "annotated-code": "Code",
   "data-model": "Data Model",
   "api-endpoint": "API Endpoint",
   decisions: "Decisions",
@@ -57,7 +55,6 @@ const BLOCK_DISPLAY_NAMES: Record<ProposalBlockType, string> = {
   callout: "Callout",
   table: "Table",
   checklist: "Checklist",
-  code: "Code",
   "question-form": "Open Questions",
 };
 
