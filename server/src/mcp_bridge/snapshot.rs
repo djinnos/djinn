@@ -5,8 +5,52 @@ use djinn_control_plane::bridge::{
 };
 use petgraph::visit::EdgeRef;
 
+use djinn_graph::repo_graph::RepoGraphEdgeKind;
+
 use super::bridges::{CoordinatorBridge, LspBridge, SlotPoolBridge};
 use super::graph_neighbors::format_node_key;
+
+/// Ceiling on the number of *drawable* (non-containment) edges shipped in a
+/// snapshot. A full graph can carry ~100k edges — overwhelmingly low-value
+/// `FileReference` links — which dominates the wire payload (tens of MB) and
+/// the client's `JSON.parse` + graph-build cost on cold load. The frontend
+/// only ever renders a salience-capped subset anyway (see `MAX_RENDERED_EDGES`
+/// in `ui/src/lib/codeGraphAdapter.ts`), so shipping more is pure waste.
+/// Containment and cross-workspace edges are kept regardless (see
+/// `build_snapshot_payload`); this caps only the cappable remainder.
+pub(crate) const SNAPSHOT_DRAWABLE_EDGE_CAP: usize = 12_000;
+
+/// Containment edges express structural nesting (a file/type contains a
+/// definition/member). The UI converts them into parent/child nesting
+/// metadata rather than drawing them, so they must survive the edge cap
+/// whenever both endpoints are present. Mirrors `CONTAINMENT_EDGE_KINDS`
+/// in `ui/src/lib/codeGraphAdapter.ts`.
+fn is_containment_edge_kind(kind: RepoGraphEdgeKind) -> bool {
+    matches!(
+        kind,
+        RepoGraphEdgeKind::ContainsDefinition
+            | RepoGraphEdgeKind::DeclaredInFile
+            | RepoGraphEdgeKind::MemberOf
+    )
+}
+
+/// Salience used to rank drawable edges when the payload exceeds
+/// `SNAPSHOT_DRAWABLE_EDGE_CAP`. Mirrors the frontend's edge-`size` factors
+/// (`EDGE_STYLES` per-kind multiplier × confidence factor in
+/// `ui/src/lib/codeGraphAdapter.ts`) so the server keeps the same edges the
+/// client would have kept — the per-kind weight (structural/OOP spine over
+/// the call graph) times per-edge confidence.
+fn drawable_edge_salience(kind: RepoGraphEdgeKind, confidence: f64) -> f64 {
+    let multiplier = match kind {
+        RepoGraphEdgeKind::Extends => 1.0,
+        RepoGraphEdgeKind::Implements => 0.9,
+        RepoGraphEdgeKind::SymbolReference => 0.8,
+        RepoGraphEdgeKind::EntryPointOf | RepoGraphEdgeKind::StepInProcess => 0.7,
+        RepoGraphEdgeKind::FileReference | RepoGraphEdgeKind::Writes => 0.6,
+        _ => 0.5,
+    };
+    multiplier * (0.4 + 0.6 * confidence)
+}
 use super::memory_enrichment::MemoryEnrichmentBridge;
 use super::{RepoGraphBridge, shared};
 use crate::server::AppState;
@@ -304,8 +348,19 @@ pub(crate) fn build_snapshot_payload(
     // whose source AND target survived the cap. `total_edges` is
     // the post-exclusion count (we drop edges that touch excluded
     // nodes so the totals match the visible graph).
+    //
+    // Edge payload cap (perf): keep every containment edge (the UI needs
+    // them to nest symbols in files) and every cross-workspace edge (the
+    // few highlighted inter-module links), then cap the remaining drawable
+    // edges to the highest `SNAPSHOT_DRAWABLE_EDGE_CAP` by salience. This
+    // is what makes the snapshot small enough to parse on cold load; the
+    // frontend re-applies the same salience cap. `total_edges` still
+    // reports the full post-exclusion count so the UI shows "N of M".
     let mut total_edges_post_excl: usize = 0;
-    let mut snapshot_edges: Vec<SnapshotEdge> = Vec::new();
+    let mut containment_edges: Vec<SnapshotEdge> = Vec::new();
+    let mut cross_workspace_edges: Vec<SnapshotEdge> = Vec::new();
+    // (salience, edge) for the cappable intra-workspace drawable edges.
+    let mut drawable_edges: Vec<(f64, SnapshotEdge)> = Vec::new();
     for edge_ref in graph.graph().edge_references() {
         let src_in = pagerank_lookup.contains_key(&edge_ref.source());
         let dst_in = pagerank_lookup.contains_key(&edge_ref.target());
@@ -319,14 +374,41 @@ pub(crate) fn build_snapshot_payload(
         let from_node = graph.node(edge_ref.source());
         let to_node = graph.node(edge_ref.target());
         let weight = edge_ref.weight();
-        snapshot_edges.push(SnapshotEdge {
+        let edge = SnapshotEdge {
             from: format_node_key(&from_node.id),
             to: format_node_key(&to_node.id),
             kind: format!("{:?}", weight.kind),
             confidence: weight.confidence,
             reason: weight.reason.clone(),
-        });
+        };
+        if is_containment_edge_kind(weight.kind) {
+            containment_edges.push(edge);
+        } else if from_node.workspace.is_some()
+            && to_node.workspace.is_some()
+            && from_node.workspace != to_node.workspace
+        {
+            cross_workspace_edges.push(edge);
+        } else {
+            drawable_edges.push((drawable_edge_salience(weight.kind, weight.confidence), edge));
+        }
     }
+
+    // Cap the cappable remainder to the budget left after the always-kept
+    // cross-workspace edges, keeping the highest-salience edges.
+    let intra_budget = SNAPSHOT_DRAWABLE_EDGE_CAP.saturating_sub(cross_workspace_edges.len());
+    if drawable_edges.len() > intra_budget {
+        drawable_edges.select_nth_unstable_by(intra_budget, |a, b| {
+            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        drawable_edges.truncate(intra_budget);
+    }
+
+    let mut snapshot_edges: Vec<SnapshotEdge> = Vec::with_capacity(
+        containment_edges.len() + cross_workspace_edges.len() + drawable_edges.len(),
+    );
+    snapshot_edges.append(&mut containment_edges);
+    snapshot_edges.append(&mut cross_workspace_edges);
+    snapshot_edges.extend(drawable_edges.into_iter().map(|(_, edge)| edge));
 
     // Sort edges deterministically (kind > from > to) so test snapshots
     // stay stable across runs.
@@ -572,5 +654,52 @@ fn community_centroid(
         (0.0, 0.0)
     } else {
         (sum_x / count as f64, sum_y / count as f64)
+    }
+}
+
+#[cfg(test)]
+mod edge_cap_tests {
+    use super::*;
+
+    #[test]
+    fn containment_kinds_are_classified_as_containment() {
+        for kind in [
+            RepoGraphEdgeKind::ContainsDefinition,
+            RepoGraphEdgeKind::DeclaredInFile,
+            RepoGraphEdgeKind::MemberOf,
+        ] {
+            assert!(
+                is_containment_edge_kind(kind),
+                "{kind:?} should be containment"
+            );
+        }
+        for kind in [
+            RepoGraphEdgeKind::FileReference,
+            RepoGraphEdgeKind::SymbolReference,
+            RepoGraphEdgeKind::Extends,
+            RepoGraphEdgeKind::EntryPointOf,
+        ] {
+            assert!(
+                !is_containment_edge_kind(kind),
+                "{kind:?} should be drawable"
+            );
+        }
+    }
+
+    #[test]
+    fn salience_ranks_structural_over_file_refs_and_rewards_confidence() {
+        // OOP spine outranks the file-reference wall at equal confidence,
+        // matching the frontend's EDGE_STYLES multipliers.
+        let extends = drawable_edge_salience(RepoGraphEdgeKind::Extends, 1.0);
+        let file_ref = drawable_edge_salience(RepoGraphEdgeKind::FileReference, 1.0);
+        assert!(
+            extends > file_ref,
+            "Extends ({extends}) should outrank FileReference ({file_ref})"
+        );
+
+        // Higher confidence wins within a kind.
+        let hi = drawable_edge_salience(RepoGraphEdgeKind::FileReference, 0.95);
+        let lo = drawable_edge_salience(RepoGraphEdgeKind::FileReference, 0.3);
+        assert!(hi > lo, "higher confidence should rank higher");
     }
 }
