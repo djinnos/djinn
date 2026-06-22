@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { render } from "@/test/test-utils";
 
-import { TableBlock } from "./TableBlock";
 import { FileTreeBlock } from "./FileTreeBlock";
 import { DiffBlock } from "./DiffBlock";
 import { JsonExplorerBlock } from "./JsonExplorerBlock";
@@ -21,20 +20,6 @@ describe("block scroll containers never promote a stray vertical scrollbar", () 
     expect(el).toHaveClass("overflow-x-auto");
     expect(el).toHaveClass("overflow-y-hidden");
   }
-
-  it("TableBlock wide-table wrapper clips vertically", () => {
-    const body = [
-      "| Name | Type | Notes |",
-      "| ---- | ---- | ----- |",
-      "| id   | uuid | primary key with a very long description column |",
-    ].join("\n");
-    const { container } = render(
-      <TableBlock id="t-overflow" attributes={{}}>
-        {body}
-      </TableBlock>,
-    );
-    expectHorizontalOnly(container.querySelector(".overflow-x-auto"));
-  });
 
   it("FileTreeBlock raw-fallback pre clips vertically", () => {
     // Unparseable body falls back to the raw monospace <pre>, the only

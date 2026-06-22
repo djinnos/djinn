@@ -8,7 +8,7 @@ use super::*;
 #[test]
 fn registry_contains_v1_blocks() {
     let registry = proposal_block_registry();
-    assert_eq!(registry.len(), 18);
+    assert_eq!(registry.len(), 17);
     assert_eq!(registry["rich-text"].tag, "RichText");
     assert_eq!(registry["diagram"].tag, "Diagram");
     assert_eq!(registry["annotated-code"].tag, "AnnotatedCode");
@@ -18,7 +18,6 @@ fn registry_contains_v1_blocks() {
     assert_eq!(registry["file-tree"].tag, "FileTree");
     assert_eq!(registry["diff"].tag, "Diff");
     assert_eq!(registry["callout"].tag, "Callout");
-    assert_eq!(registry["table"].tag, "Table");
     assert_eq!(registry["checklist"].tag, "Checklist");
     assert_eq!(registry["json-explorer"].tag, "JsonExplorer");
     assert_eq!(registry["html"].tag, "Html");
@@ -90,7 +89,6 @@ fn block_type_enum_covers_v1() {
         BlockType::FileTree,
         BlockType::Diff,
         BlockType::Callout,
-        BlockType::Table,
         BlockType::Checklist,
         BlockType::JsonExplorer,
         BlockType::Html,
@@ -106,13 +104,13 @@ fn block_type_enum_covers_v1() {
     }
     // Single-sourced coverage check: every canonical (type_str, tag) pair is
     // reachable from the enum's `as_str()`/`tag()` projection.
-    assert_eq!(CANONICAL_BLOCK_TYPES.len(), 18);
+    assert_eq!(CANONICAL_BLOCK_TYPES.len(), 17);
 }
 
 #[test]
 fn block_registry_new_has_all_definitions() {
     let reg = BlockRegistry::new();
-    assert_eq!(reg.definitions().len(), 18);
+    assert_eq!(reg.definitions().len(), 17);
     assert!(reg.definition_for_tag("RichText").is_some());
     assert!(reg.definition_for_tag("UnknownTag").is_none());
     assert!(reg.tags().contains("RichText"));
@@ -129,8 +127,8 @@ fn registry_tags_match_canonical_v1_set() {
         CANONICAL_BLOCK_TYPES.iter().map(|(_, tag)| *tag).collect();
     assert_eq!(
         expected.len(),
-        18,
-        "canonical block list must cover all 18 v1 tags"
+        17,
+        "canonical block list must cover all 17 v1 tags"
     );
     let actual: std::collections::HashSet<&str> = proposal_block_tags().into_iter().collect();
     assert_eq!(

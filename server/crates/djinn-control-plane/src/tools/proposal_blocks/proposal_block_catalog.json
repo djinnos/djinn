@@ -60,10 +60,6 @@
     "tag": "RichText"
   },
   {
-    "type": "table",
-    "tag": "Table"
-  },
-  {
     "type": "tabs",
     "tag": "Tabs"
   },

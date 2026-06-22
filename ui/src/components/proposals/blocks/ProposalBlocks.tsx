@@ -66,14 +66,16 @@ export function ProposalBlocks({ body }: ProposalBlocksProps) {
           // Block segment — look up the component in the registry.
           const def = getBlockByTag(segment.tag);
           if (!def) {
-            // Unknown tag: render as code-fenced text so nothing is silently lost.
+            // Unknown/unregistered tag (e.g. a retired block type left in an old
+            // proposal): degrade gracefully by rendering the block's CHILDREN as
+            // GitHub-flavoured markdown so the authored content still shows. For
+            // example a leftover `<Table>` wrapping a pipe table still renders the
+            // table (remark-gfm), rather than a hard error or raw MDX source.
             return (
-              <pre
+              <MarkdownBody
                 key={`unknown-${segment.index}`}
-                className="overflow-x-auto overflow-y-hidden rounded border border-dashed border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100"
-              >
-                {`<${segment.tag} ...>${segment.content}</${segment.tag}>`}
-              </pre>
+                text={segment.content}
+              />
             );
           }
 
