@@ -151,6 +151,11 @@ export const PROPOSAL_BLOCK_REGISTRY = {
     tag: "Checklist",
     fields: {},
   },
+  "json-explorer": {
+    type: "json-explorer",
+    tag: "JsonExplorer",
+    fields: {},
+  },
   "question-form": {
     type: "question-form",
     tag: "QuestionForm",

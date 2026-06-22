@@ -26,6 +26,7 @@ pub enum BlockType {
     Callout,
     Table,
     Checklist,
+    JsonExplorer,
     QuestionForm,
 }
 
@@ -44,6 +45,7 @@ impl BlockType {
             BlockType::Callout => "callout",
             BlockType::Table => "table",
             BlockType::Checklist => "checklist",
+            BlockType::JsonExplorer => "json-explorer",
             BlockType::QuestionForm => "question-form",
         }
     }
@@ -62,6 +64,7 @@ impl BlockType {
             BlockType::Callout => "Callout",
             BlockType::Table => "Table",
             BlockType::Checklist => "Checklist",
+            BlockType::JsonExplorer => "JsonExplorer",
             BlockType::QuestionForm => "QuestionForm",
         }
     }
@@ -471,6 +474,27 @@ pub static PROPOSAL_BLOCK_REGISTRY: LazyLock<BTreeMap<&'static str, ProposalBloc
                 ),
             ),
             (
+                "json-explorer",
+                block_with_description(
+                    "json-explorer",
+                    "JsonExplorer",
+                    "An interactive, collapsible typed JSON tree (browser-devtools \
+                     / Postman style). The block CHILDREN are a single JSON \
+                     document — an object, array, or primitive. The renderer \
+                     `JSON.parse`s the children and walks the value: object/array \
+                     nodes show a chevron + a one-line summary (`3 keys` / `5 \
+                     items`) and expand/collapse, and leaf values are \
+                     type-colored (string, number, boolean, null). It is \
+                     read-only. If the children are not valid JSON the renderer \
+                     falls back to a plain code block, so always emit a single \
+                     valid JSON document. Set the optional `title` attribute to a \
+                     heading shown in the block header. Example: \
+                     `<JsonExplorer id=\"x\" title=\"Sample response\">\\n{\\n  \
+                     \"id\": \"abc\",\\n  \"active\": true\\n}\\n</JsonExplorer>`.",
+                    fields(vec![]),
+                ),
+            ),
+            (
                 "question-form",
                 block(
                     "question-form",
@@ -695,7 +719,7 @@ mod tests {
     #[test]
     fn registry_contains_v1_blocks() {
         let registry = proposal_block_registry();
-        assert_eq!(registry.len(), 12);
+        assert_eq!(registry.len(), 13);
         assert_eq!(registry["rich-text"].tag, "RichText");
         assert_eq!(registry["diagram"].tag, "Diagram");
         assert_eq!(registry["annotated-code"].tag, "AnnotatedCode");
@@ -707,6 +731,7 @@ mod tests {
         assert_eq!(registry["callout"].tag, "Callout");
         assert_eq!(registry["table"].tag, "Table");
         assert_eq!(registry["checklist"].tag, "Checklist");
+        assert_eq!(registry["json-explorer"].tag, "JsonExplorer");
         assert_eq!(registry["question-form"].tag, "QuestionForm");
         // The diff block ships authoring guidance for the LLM.
         assert!(
@@ -731,6 +756,7 @@ mod tests {
             BlockType::Callout,
             BlockType::Table,
             BlockType::Checklist,
+            BlockType::JsonExplorer,
             BlockType::QuestionForm,
         ];
         for bt in types {
@@ -742,7 +768,7 @@ mod tests {
     #[test]
     fn block_registry_new_has_all_definitions() {
         let reg = BlockRegistry::new();
-        assert_eq!(reg.definitions().len(), 12);
+        assert_eq!(reg.definitions().len(), 13);
         assert!(reg.definition_for_tag("RichText").is_some());
         assert!(reg.definition_for_tag("UnknownTag").is_none());
         assert!(reg.tags().contains("RichText"));
@@ -766,6 +792,7 @@ mod tests {
             "Callout",
             "Table",
             "Checklist",
+            "JsonExplorer",
             "QuestionForm",
         ]
         .into_iter()

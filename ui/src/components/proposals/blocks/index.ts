@@ -11,6 +11,7 @@ export { DiffBlock } from "./DiffBlock";
 export { CalloutBlock } from "./CalloutBlock";
 export { TableBlock } from "./TableBlock";
 export { ChecklistBlock } from "./ChecklistBlock";
+export { JsonExplorerBlock, JsonTree } from "./JsonExplorerBlock";
 
 // Reusable line-anchored annotation engine (pure parsing + React rail UI). The
 // `annotated-code` block consumes it; `diff` and future blocks can adopt it.

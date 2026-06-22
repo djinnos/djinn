@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import {
   ArrowDown01Icon,
   ArrowRight01Icon,
-  CodeIcon,
   LockKeyIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -10,6 +9,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/lib/utils";
 
 import { BlockMarkdown, BlockShell } from "./BlockShell";
+import { JsonTree } from "./JsonExplorerBlock";
 import {
   ACCENT_BADGE,
   httpMethodColor,
@@ -307,24 +307,11 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * A JSON / example body rendered in a styled code surface.
- *
- * TODO(json-explorer): when the dedicated interactive `json-explorer` block
- * lands, upgrade JSON example bodies here to a collapsible, type-colored tree
- * (Postman-style) instead of a flat `<pre>`. This component is the seam: detect
- * parseable JSON, mount the explorer, and keep this `<pre>` as the fallback for
- * non-JSON / unparseable bodies.
+ * A JSON / example body rendered with the shared interactive `json-explorer`
+ * tree: parseable JSON becomes a collapsible, type-colored tree (Postman-style)
+ * and any non-JSON / unparseable body gracefully falls back to a styled `<pre>`
+ * — both handled inside `JsonTree`, so an example is never lost or misrendered.
  */
 function JsonExample({ code }: { code: string }) {
-  return (
-    <div className="overflow-hidden rounded-md border bg-muted/30">
-      <div className="flex items-center gap-1.5 border-b bg-muted/40 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-        <HugeiconsIcon icon={CodeIcon} size={12} className="shrink-0" />
-        Example
-      </div>
-      <pre className="overflow-x-auto px-3 py-2 font-mono text-xs leading-relaxed text-foreground">
-        {code}
-      </pre>
-    </div>
-  );
+  return <JsonTree code={code} label="Example" />;
 }

@@ -509,6 +509,14 @@ This runs on the hot path.
 - [ ] Backfill job verified
 </Checklist>
 
+<JsonExplorer id="config-sample">
+{
+  "enabled": true,
+  "retries": 3,
+  "labels": ["alpha", "beta"]
+}
+</JsonExplorer>
+
 <QuestionForm id="open-questions" title="Open Questions">
 Should we use Redis or Memcached?
 </QuestionForm>

@@ -11,6 +11,7 @@ import {
   Diagram,
   DiffBlock,
   FileTreeBlock,
+  JsonExplorerBlock,
   QuestionFormBlock,
   RichText,
   TableBlock,
@@ -40,6 +41,7 @@ const BLOCK_COMPONENTS: Record<ProposalBlockType, ComponentType<BlockProps>> = {
   callout: CalloutBlock,
   table: TableBlock,
   checklist: ChecklistBlock,
+  "json-explorer": JsonExplorerBlock,
   "question-form": QuestionFormBlock,
 };
 
@@ -55,6 +57,7 @@ const BLOCK_DISPLAY_NAMES: Record<ProposalBlockType, string> = {
   callout: "Callout",
   table: "Table",
   checklist: "Checklist",
+  "json-explorer": "JSON Explorer",
   "question-form": "Open Questions",
 };
 
