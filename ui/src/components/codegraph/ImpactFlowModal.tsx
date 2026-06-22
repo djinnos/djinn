@@ -140,7 +140,9 @@ export function ImpactFlowModal({ open, onClose, impact }: ImpactFlowModalProps)
               current snapshot.
             </p>
           ) : (
-            <MermaidDiagram source={mermaidSource} />
+            // Already inside a Dialog — omit the nested fullscreen toggle
+            // (zoom/pan still available).
+            <MermaidDiagram source={mermaidSource} allowFullscreen={false} />
           )}
         </div>
 

@@ -65,6 +65,22 @@ describe("CodeBlock — line-number alignment", () => {
     expect(row2Text).not.toContain("yanked");
   });
 
+  it("carries the .djinn-code collision-guard hook on its surface", () => {
+    // The Prism `[section]` table-header token ships as `<span class="token
+    // table">`, which collides with Tailwind's global `.table { display: table }`
+    // utility and splits the row (BUG C). The fix is a `.djinn-code .token {
+    // display: inline }` guard in globals.css; jsdom can't compute the Tailwind
+    // layout, but it CAN assert the anchor class stays wired to the surface so
+    // the CSS guard keeps matching. Also assert the colliding token exists.
+    const { container } = render(
+      <CodeBlock language="toml" content={TOML} showLineNumbers />,
+    );
+    expect(container.querySelector(".djinn-code")).not.toBeNull();
+    // The `[advisories]` header tokenized to a `.token.table` span — the exact
+    // class that collides with Tailwind's `.table` utility.
+    expect(container.querySelector(".token.table")).not.toBeNull();
+  });
+
   it("applies per-line props from lineProps to the matching row", () => {
     const { container } = render(
       <CodeBlock
