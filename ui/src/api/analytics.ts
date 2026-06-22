@@ -37,6 +37,11 @@ export interface UsageAnalyticsFilters {
 
 // ── Response types ─────────────────────────────────────────────────────────
 
+export interface UsageKpiPart {
+  label: string;
+  value: number;
+}
+
 export interface UsageKpi {
   label: string;
   value: number | null;
@@ -46,6 +51,8 @@ export interface UsageKpi {
   formatted: string;
   /** Optional qualifier shown under the value (e.g. spend estimate basis). */
   caption?: string | null;
+  /** Optional composition of the value (e.g. Tokens → input / cached / output). */
+  breakdown?: UsageKpiPart[] | null;
 }
 
 export interface UsageTimeSeriesPoint {

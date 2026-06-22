@@ -211,6 +211,22 @@ function KpiCard({ kpi }: { kpi: UsageKpi }) {
           {kpi.caption}
         </p>
       )}
+      {kpi.breakdown && kpi.breakdown.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+          {kpi.breakdown.map((part) => (
+            <span
+              key={part.label}
+              className="text-[11px] text-muted-foreground"
+              title={`${part.label}: ${part.value.toLocaleString()}`}
+            >
+              {part.label}{" "}
+              <span className="tabular-nums font-medium text-foreground">
+                {formatCompactNumber(part.value)}
+              </span>
+            </span>
+          ))}
+        </div>
+      )}
       <div
         className={cn(
           "mt-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
