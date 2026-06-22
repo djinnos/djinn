@@ -87,7 +87,7 @@ export function TabsBlock({ attributes, children }: BlockProps) {
         <div
           role="tablist"
           aria-label="Tabs"
-          className="flex min-w-0 flex-nowrap gap-1 overflow-x-auto"
+          className="flex min-w-0 flex-nowrap gap-1 overflow-x-auto overflow-y-hidden"
         >
           {tabs.map((tab, index) => {
             const selected = index === activeIndex;

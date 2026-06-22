@@ -100,6 +100,29 @@ describe("TabsBlock", () => {
     expect(screen.getByText("Be careful here.")).toBeInTheDocument();
   });
 
+  it("never lets the tab-header strip scroll vertically (overflow-y hidden)", () => {
+    // Regression: the tablist previously used only `overflow-x-auto`, which the
+    // browser promotes the *other* axis to `auto`, so the buttons' `-mb-px` +
+    // `border-b-2` overran the strip by 1px and rendered a stray VERTICAL
+    // scrollbar. The header must clip vertically.
+    render(
+      <TabsBlock
+        id="tscroll"
+        attributes={{
+          tabs: tabsAttr([
+            { label: "Overview", body: "a" },
+            { label: "Details", body: "b" },
+            { label: "Risks", body: "c" },
+          ]),
+        }}
+      />,
+    );
+
+    const tablist = screen.getByRole("tablist");
+    expect(tablist).toHaveClass("overflow-y-hidden");
+    expect(tablist).toHaveClass("overflow-x-auto");
+  });
+
   it("falls back gracefully when the tabs attribute is invalid JSON (no throw)", () => {
     expect(() =>
       render(

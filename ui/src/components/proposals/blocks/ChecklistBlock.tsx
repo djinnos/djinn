@@ -1,8 +1,5 @@
 import { useMemo } from "react";
-import {
-  CheckmarkSquare02Icon,
-  Square01Icon,
-} from "@hugeicons/core-free-icons";
+import { CheckmarkSquare02Icon, SquareIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
 import { cn } from "@/lib/utils";
@@ -48,7 +45,7 @@ export function ChecklistBlock({ children }: BlockProps) {
         {items.map((item, index) => (
           <li key={index} className="flex items-start gap-2.5">
             <HugeiconsIcon
-              icon={item.checked ? CheckmarkSquare02Icon : Square01Icon}
+              icon={item.checked ? CheckmarkSquare02Icon : SquareIcon}
               size={18}
               className={cn(
                 "mt-0.5 shrink-0",
