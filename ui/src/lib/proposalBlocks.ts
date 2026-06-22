@@ -166,6 +166,20 @@ export const PROPOSAL_BLOCK_REGISTRY = {
     tag: "OpenApi",
     fields: {},
   },
+  tabs: {
+    type: "tabs",
+    tag: "Tabs",
+    fields: {
+      tabs: { type: "string" },
+    },
+  },
+  columns: {
+    type: "columns",
+    tag: "Columns",
+    fields: {
+      columns: { type: "string" },
+    },
+  },
   "question-form": {
     type: "question-form",
     tag: "QuestionForm",

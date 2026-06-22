@@ -32,6 +32,8 @@ export const CANONICAL_V1_TAGS = [
   "JsonExplorer",
   "Html",
   "OpenApi",
+  "Tabs",
+  "Columns",
   "QuestionForm",
 ] as const;
 
@@ -235,6 +237,20 @@ describe("canonical proposal.mdx round-trip", () => {
     expect(getProposalBlockDefinitionByTag("OpenApi")!.type).toBe(
       "openapi-spec",
     );
+
+    // Tabs
+    const tabs = byTag.get("Tabs");
+    expect(tabs).toBeDefined();
+    expect(tabs!.id).toBe("walkthrough");
+    expect(tabs!.attributes.tabs).toContain("Overview");
+    expect(getProposalBlockDefinitionByTag("Tabs")!.type).toBe("tabs");
+
+    // Columns
+    const columns = byTag.get("Columns");
+    expect(columns).toBeDefined();
+    expect(columns!.id).toBe("before-after");
+    expect(columns!.attributes.columns).toContain("body");
+    expect(getProposalBlockDefinitionByTag("Columns")!.type).toBe("columns");
 
     // QuestionForm
     const questionForm = byTag.get("QuestionForm");

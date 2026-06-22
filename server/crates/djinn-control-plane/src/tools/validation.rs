@@ -625,6 +625,10 @@ This runs on the hot path.
 }
 </OpenApi>
 
+<Tabs id="views" tabs={[{ "label": "Overview", "body": "Some **markdown**." }, { "label": "Detail", "body": "More detail." }]} />
+
+<Columns id="compare" columns={[{ "body": "Before: the old approach." }, { "body": "After: the new approach." }]} />
+
 <QuestionForm id="open-questions" title="Open Questions">
 Should we use Redis or Memcached?
 </QuestionForm>

@@ -13,6 +13,8 @@ export { TableBlock } from "./TableBlock";
 export { ChecklistBlock } from "./ChecklistBlock";
 export { JsonExplorerBlock, JsonTree } from "./JsonExplorerBlock";
 export { OpenApiSpecBlock } from "./OpenApiSpecBlock";
+export { TabsBlock } from "./TabsBlock";
+export { ColumnsBlock } from "./ColumnsBlock";
 export { HtmlBlock } from "./HtmlBlock";
 export { SandboxedHtmlFrame } from "./SandboxedHtmlFrame";
 export {
@@ -55,6 +57,9 @@ export type {
 } from "./annotationRail.helpers";
 export { BlockRenderer } from "./BlockRenderer";
 export type { BlockRendererProps } from "./BlockRenderer";
+export { ProposalBlocks } from "./ProposalBlocks";
+export type { ProposalBlocksProps } from "./ProposalBlocks";
+export { MAX_BLOCK_DEPTH, useBlockDepth } from "./blockDepth";
 export { parseMdxBody, isPascalCaseTag, extractBlockTags } from "./parseMdxBody";
 export {
   PROPOSAL_BLOCK_REGISTRY,
