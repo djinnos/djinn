@@ -253,6 +253,19 @@ struct UsageKpiDto {
     /// when the card needs no caption.
     #[serde(skip_serializing_if = "Option::is_none")]
     caption: Option<String>,
+    /// Optional composition of the headline value (e.g. the Tokens card split
+    /// into input / cached / output). The UI renders these as a small inline
+    /// row beneath the value. `None` when the card has no breakdown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    breakdown: Option<Vec<UsageKpiPartDto>>,
+}
+
+/// One labelled component of a KPI's headline value (see
+/// [`UsageKpiDto::breakdown`]). The UI formats `value` as a compact number.
+#[derive(Serialize)]
+struct UsageKpiPartDto {
+    label: String,
+    value: f64,
 }
 
 /// A point in the multi-dimensional time series.  Carries the model / project /
@@ -418,6 +431,7 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
                 .map(format_currency)
                 .unwrap_or_default(),
             caption: Some(spend_caption(totals.unpriced_session_count)),
+            breakdown: None,
         },
         UsageKpiDto {
             label: "Tokens".to_string(),
@@ -425,6 +439,24 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
             delta_pct: pct_delta(tokens, prev_tokens),
             formatted: String::new(),
             caption: None,
+            // Split the headline token count into the three meaningful buckets:
+            // fresh input, cache-read (cached input), and output. Cache-read is
+            // tracked separately from `tokens_in`, so this is purely additive
+            // context, not a re-slice of the `tokens` total.
+            breakdown: Some(vec![
+                UsageKpiPartDto {
+                    label: "Input".to_string(),
+                    value: totals.tokens_in as f64,
+                },
+                UsageKpiPartDto {
+                    label: "Cached".to_string(),
+                    value: totals.cache_read_tokens as f64,
+                },
+                UsageKpiPartDto {
+                    label: "Output".to_string(),
+                    value: totals.tokens_out as f64,
+                },
+            ]),
         },
         UsageKpiDto {
             label: "Sessions".to_string(),
@@ -432,6 +464,7 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
             delta_pct: pct_delta(totals.session_count as f64, previous.session_count as f64),
             formatted: String::new(),
             caption: None,
+            breakdown: None,
         },
         UsageKpiDto {
             label: "Cache reads".to_string(),
@@ -442,6 +475,7 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
             ),
             formatted: String::new(),
             caption: None,
+            breakdown: None,
         },
     ]
 }

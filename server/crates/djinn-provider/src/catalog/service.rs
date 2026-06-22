@@ -442,6 +442,11 @@ fn normalize(raw: HashMap<String, RawProvider>) -> (Vec<Provider>, HashMap<Strin
         providers.push(provider);
     }
 
+    // Borrow pay-as-you-go pricing into flat-rate plan providers so their usage
+    // is no longer dropped from spend analytics. Runs on every (re)load — both
+    // the embedded snapshot and live refresh paths go through `normalize`.
+    enrich_plan_pricing(&mut models_idx);
+
     providers.sort_by(|a, b| a.id.cmp(&b.id));
     (providers, models_idx)
 }
@@ -466,6 +471,78 @@ const MODEL_SOURCE_MAP: &[(&str, &str, Option<&str>)] = &[
     ("claude-code", "anthropic", None),
     ("gemini-cli", "google", None),
 ];
+
+// ── Plan → pay-as-you-go pricing reference mapping ────────────────────────────
+//
+// Consumer coding/token plans (e.g. `zai-coding-plan`) are billed as a flat
+// monthly subscription, so models.dev carries their models with all-zero
+// pricing. That makes their usage show as "unpriced" in spend analytics even
+// though the *same* underlying model has a published pay-as-you-go rate under
+// its first-party provider (e.g. `zai/glm-5`). We borrow that rate as the
+// public-API-rate ESTIMATE the usage dashboard already advertises ("Est. at
+// public API rates") so subscription usage is no longer silently dropped from
+// the spend stack.
+//
+// This deliberately mirrors [`MODEL_SOURCE_MAP`]: an explicit, auditable list
+// rather than a fuzzy heuristic. A plan model is only enriched when (a) its own
+// catalog pricing is all-zero and (b) the base provider exposes a model with a
+// matching canonical id that *is* priced. Plan-only models with no priced
+// counterpart (e.g. a `k2p7` whose base id is `kimi-k2.7`) stay unpriced —
+// unknown is never silently encoded as $0.
+//
+// (plan_provider_id, pay-as-you-go_provider_id)
+const PRICING_REFERENCE_MAP: &[(&str, &str)] = &[
+    ("zai-coding-plan", "zai"),
+    ("zhipuai-coding-plan", "zhipuai"),
+    ("minimax-coding-plan", "minimax"),
+    ("minimax-cn-coding-plan", "minimax-cn"),
+    ("kimi-for-coding", "moonshotai"),
+    ("xiaomi-token-plan-sgp", "xiaomi"),
+    ("xiaomi-token-plan-cn", "xiaomi"),
+    ("xiaomi-token-plan-ams", "xiaomi"),
+];
+
+/// Strip non-alphanumeric chars and lowercase so plan/base model ids match
+/// across cosmetic spelling differences (`MiniMax-M2.5` ↔ `minimax-m2.5`).
+fn canonical_model_id(id: &str) -> String {
+    id.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Borrow pay-as-you-go pricing into flat-rate plan providers' zero-priced
+/// models (see [`PRICING_REFERENCE_MAP`]). Mutates `models_idx` in place. Only
+/// fills a plan model whose own pricing is all-zero, and only from a base model
+/// that is itself priced — existing pricing is never overwritten.
+fn enrich_plan_pricing(models_idx: &mut HashMap<String, Vec<Model>>) {
+    for (plan_id, base_id) in PRICING_REFERENCE_MAP {
+        // Index the base provider's priced models by canonical id.
+        let Some(base_models) = models_idx.get(*base_id) else {
+            continue;
+        };
+        let base_pricing: HashMap<String, Pricing> = base_models
+            .iter()
+            .filter(|m| has_nonzero_pricing(&m.pricing))
+            .map(|m| (canonical_model_id(&m.id), m.pricing.clone()))
+            .collect();
+        if base_pricing.is_empty() {
+            continue;
+        }
+
+        let Some(plan_models) = models_idx.get_mut(*plan_id) else {
+            continue;
+        };
+        for m in plan_models.iter_mut() {
+            if has_nonzero_pricing(&m.pricing) {
+                continue;
+            }
+            if let Some(pricing) = base_pricing.get(&canonical_model_id(&m.id)) {
+                m.pricing = pricing.clone();
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -687,6 +764,86 @@ mod tests {
             .expect("injected provider should exist");
         assert_eq!(injected.name, "Test Builtin");
         assert!(!injected.is_openai_compatible);
+    }
+
+    #[test]
+    fn enrich_plan_pricing_borrows_payg_rates_for_zero_priced_plan_models() {
+        // zero-priced plan model + matching priced base model → borrowed.
+        // zero-priced plan model with no base match → stays unpriced.
+        // already-priced plan model → never overwritten.
+        let zero = Pricing::default();
+        let base = Pricing {
+            input_per_million: 1.0,
+            output_per_million: 3.2,
+            cache_read_per_million: 0.2,
+            cache_write_per_million: 0.0,
+        };
+        let mk = |provider: &str, id: &str, pricing: Pricing| Model {
+            id: id.to_string(),
+            provider_id: provider.to_string(),
+            name: id.to_string(),
+            tool_call: true,
+            reasoning: true,
+            attachment: false,
+            context_window: 0,
+            output_limit: 0,
+            pricing,
+        };
+
+        let mut idx: HashMap<String, Vec<Model>> = HashMap::new();
+        // Base pay-as-you-go provider — note the cosmetic id-casing difference.
+        idx.insert("zai".to_string(), vec![mk("zai", "GLM-5", base.clone())]);
+        idx.insert(
+            "zai-coding-plan".to_string(),
+            vec![
+                mk("zai-coding-plan", "glm-5", zero.clone()), // canonical match → borrowed
+                mk("zai-coding-plan", "glm-only-plan", zero.clone()), // no base match → stays unpriced
+                mk("zai-coding-plan", "glm-paid", base.clone()), // already priced → untouched
+            ],
+        );
+
+        enrich_plan_pricing(&mut idx);
+
+        let plan = &idx["zai-coding-plan"];
+        let borrowed = plan.iter().find(|m| m.id == "glm-5").unwrap();
+        assert!(
+            has_nonzero_pricing(&borrowed.pricing),
+            "glm-5 should inherit zai/GLM-5 pricing"
+        );
+        assert_eq!(borrowed.pricing.input_per_million, 1.0);
+        assert_eq!(borrowed.pricing.output_per_million, 3.2);
+
+        let unmatched = plan.iter().find(|m| m.id == "glm-only-plan").unwrap();
+        assert!(
+            !has_nonzero_pricing(&unmatched.pricing),
+            "a plan-only model with no priced base counterpart stays unpriced"
+        );
+
+        let already = plan.iter().find(|m| m.id == "glm-paid").unwrap();
+        assert_eq!(
+            already.pricing.input_per_million, base.input_per_million,
+            "existing pricing must never be overwritten"
+        );
+    }
+
+    #[test]
+    fn enrich_plan_pricing_runs_during_normalize() {
+        // End-to-end through the public seed path: the embedded snapshot's
+        // zai-coding-plan models should resolve real pricing borrowed from `zai`
+        // (both are models.dev-native), so they're no longer "unpriced".
+        let catalog = CatalogService::new();
+        let plan_models = catalog.list_models("zai-coding-plan");
+        if plan_models.is_empty() {
+            return; // snapshot may not carry the plan provider; nothing to assert.
+        }
+        let pricing_map = catalog.pricing_for_all_models();
+        let any_priced = plan_models.iter().any(|m| {
+            pricing_map.contains_key(&format!("zai-coding-plan/{}", m.id))
+        });
+        assert!(
+            any_priced,
+            "at least one zai-coding-plan model should be priced via the zai reference map"
+        );
     }
 
     #[test]
