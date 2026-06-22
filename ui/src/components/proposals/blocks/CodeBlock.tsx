@@ -96,6 +96,10 @@ export default function CodeBlock({
   return (
     <SyntaxHighlighter
       language={language}
+      // Stable hook for the Prism↔Tailwind token-class collision guard in
+      // globals.css. `useInlineStyles` means RSH never adds a `language-*`
+      // class to the <pre>/<code>, so this is our only reliable CSS anchor.
+      className="djinn-code"
       style={oneDark}
       showLineNumbers={showLineNumbers}
       // Inline line numbers keep each number in its line's own row box.

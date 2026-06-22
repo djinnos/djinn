@@ -189,3 +189,36 @@ body {
     background: transparent;
   }
 }
+
+/*
+ * Prism ↔ Tailwind class-name collision guard (NOT in a layer, so it wins over
+ * Tailwind's layered utilities).
+ *
+ * react-syntax-highlighter emits Prism token spans with bare class names like
+ * `token table`, `token number`, `token italic`, `token bold`, `token hidden`,
+ * `token inline`, `token block`. Several of those collide with Tailwind utility
+ * classes (`.table { display: table }`, `.hidden`, `.block`, `.inline`, …),
+ * which then re-flow a single source line into multiple visual rows. The TOML
+ * `[section]` header is the worst case: its inner name tokenizes as
+ * `<span class="token table">`, Tailwind's `.table` makes it `display: table`,
+ * and `[` / `advisories` / `]` each break onto their own line — splitting the
+ * row and desyncing the line-number gutter.
+ *
+ * Force every token span inside a highlighted code surface back to inline flow
+ * and neutralize the layout-affecting utilities, so one source line === exactly
+ * one gutter-aligned row regardless of which grammar / token classes Prism
+ * emits. Color/weight tokens still come from the (inline) oneDark styles.
+ *
+ * Anchored on `.djinn-code` (the class CodeBlock puts on its highlighter
+ * surface): because the highlighter renders with inline styles it never adds a
+ * `language-*` class, so `.djinn-code` is the only stable hook.
+ */
+.djinn-code .token {
+  display: inline;
+}
+.djinn-code .token.italic {
+  font-style: italic;
+}
+.djinn-code .token.bold {
+  font-weight: 700;
+}
