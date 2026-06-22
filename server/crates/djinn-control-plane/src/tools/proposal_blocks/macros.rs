@@ -20,14 +20,6 @@ pub(super) fn string_field() -> ProposalBlockFieldSchema {
     }
 }
 
-pub(super) fn boolean_field() -> ProposalBlockFieldSchema {
-    ProposalBlockFieldSchema {
-        field_type: "boolean",
-        enum_values: None,
-        fields: None,
-        items: None,
-    }
-}
 
 pub(super) fn enum_string_field(values: Vec<&'static str>) -> ProposalBlockFieldSchema {
     ProposalBlockFieldSchema {
@@ -80,7 +72,7 @@ pub(super) fn fields(
 /// }
 /// ```
 ///
-/// where `<field-expr>` is any of `string`, `boolean`, `enum [..]`, or
+/// where `<field-expr>` is any of `string`, `enum [..]`, or
 /// `nested(<ProposalBlockFieldSchema expression>)` for irregular nested shapes
 /// the macro grammar does not model directly.
 macro_rules! define_blocks {
@@ -141,9 +133,6 @@ macro_rules! define_blocks {
     // ── field-expression sub-rules ──────────────────────────────────────────
     (@field string) => {
         $crate::tools::proposal_blocks::macros::string_field()
-    };
-    (@field boolean) => {
-        $crate::tools::proposal_blocks::macros::boolean_field()
     };
     (@field (enum [ $($v:literal),* $(,)? ])) => {
         $crate::tools::proposal_blocks::macros::enum_string_field(vec![ $($v),* ])

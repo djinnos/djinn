@@ -19,10 +19,11 @@ import type { AccentColor } from "./blockBadgeColors";
 import type { BlockProps } from "./types";
 
 /**
- * Callout — a tinted, bordered admonition card with a per-tone icon and a
- * markdown body. The `tone` attribute (info / decision / risk / warning /
- * success, default info) drives the accent via the shared palette
- * (info=blue, decision=violet, risk=red, warning=amber, success=emerald).
+ * Callout — a per-tone admonition rendered as a NATIVE editorial aside: a
+ * left accent bar + a very faint tone tint, NOT a full bordered grey card. The
+ * `tone` attribute (info / decision / risk / warning / success, default info)
+ * drives the accent via the shared palette (info=blue, decision=violet,
+ * risk=red, warning=amber, success=emerald).
  *
  * The body is the block's children text, rendered through `BlockMarkdown`.
  * Ported from agent-native's `callout` block; djinn is read-only so there is no
@@ -37,7 +38,7 @@ export function CalloutBlock({ attributes, children }: BlockProps) {
     <div
       data-tone={tone}
       className={cn(
-        "flex gap-3 rounded-lg border bg-card p-4",
+        "flex gap-3 rounded-r-md border-l-2 py-3 pl-4 pr-3",
         TONE_SURFACE[accent],
       )}
     >
@@ -50,7 +51,7 @@ export function CalloutBlock({ attributes, children }: BlockProps) {
       <div className="min-w-0 flex-1">
         <div
           className={cn(
-            "mb-1.5 text-[11px] font-semibold uppercase tracking-wider",
+            "mb-1 text-[11px] font-semibold uppercase tracking-wider",
             TONE_ICON_INK[accent],
           )}
         >
@@ -80,14 +81,14 @@ const TONE_ICON: Record<CalloutTone, typeof InformationCircleIcon> = {
   success: CheckmarkCircle02Icon,
 };
 
-/** Tinted bordered surface per accent (dark-only). */
+/** Left accent-bar color + faint tone tint per accent (dark-only). */
 const TONE_SURFACE: Record<AccentColor, string> = {
-  blue: "border-blue-500/30 bg-blue-500/[0.07]",
-  violet: "border-violet-500/30 bg-violet-500/[0.07]",
-  red: "border-red-500/30 bg-red-500/[0.07]",
-  amber: "border-amber-500/30 bg-amber-500/[0.07]",
-  emerald: "border-emerald-500/30 bg-emerald-500/[0.07]",
-  slate: "border-slate-500/30 bg-slate-500/[0.07]",
+  blue: "border-blue-400/70 bg-blue-500/[0.05]",
+  violet: "border-violet-400/70 bg-violet-500/[0.05]",
+  red: "border-red-400/70 bg-red-500/[0.05]",
+  amber: "border-amber-400/70 bg-amber-500/[0.05]",
+  emerald: "border-emerald-400/70 bg-emerald-500/[0.05]",
+  slate: "border-slate-400/70 bg-slate-500/[0.05]",
 };
 
 /** Saturated ink per accent for the icon + header. */

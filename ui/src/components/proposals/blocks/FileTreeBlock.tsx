@@ -10,7 +10,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 
 import { cn } from "@/lib/utils";
 
-import { BlockShell } from "./BlockShell";
+import { BlockSection } from "./BlockShell";
 import { ChangeChip } from "./blockBadges";
 import { CHANGE_NAME_INK } from "./blockBadgeColors";
 import type { BlockProps } from "./types";
@@ -68,26 +68,24 @@ export function FileTreeBlock({ attributes, children }: BlockProps) {
   // an oddly-authored tree is never lost.
   if (files.length === 0) {
     return (
-      <BlockShell
+      <BlockSection
         label="Files"
         accent="text-slate-400"
-        flush
         meta={
           root ? <span className="truncate font-mono">{root}</span> : null
         }
       >
-        <pre className="overflow-x-auto overflow-y-hidden px-4 py-3 font-mono text-xs leading-relaxed text-foreground">
+        <pre className="overflow-x-auto overflow-y-hidden py-1 font-mono text-xs leading-relaxed text-foreground">
           {content}
         </pre>
-      </BlockShell>
+      </BlockSection>
     );
   }
 
   return (
-    <BlockShell
+    <BlockSection
       label="Files"
       accent="text-slate-400"
-      flush
       meta={
         <span className="flex min-w-0 items-center gap-2 font-mono">
           {root ? <span className="truncate">{root}</span> : null}
@@ -113,10 +111,10 @@ export function FileTreeBlock({ attributes, children }: BlockProps) {
         </span>
       }
     >
-      <div className="py-1.5 text-[13px]">
+      <div className="py-1 text-[13px]">
         <TreeRows nodes={tree} depth={0} collapsed={collapsed} toggle={toggle} />
       </div>
-    </BlockShell>
+    </BlockSection>
   );
 }
 

@@ -21,12 +21,6 @@ fn handle_request(req: Request) -> Response {
 }
 </AnnotatedCode>
 
-<DataModel id="user-schema" name="User">
-  id: uuid
-  email: string
-  name: string
-</DataModel>
-
 <ApiEndpoint id="get-users" method="GET" path="/api/users">
 Returns a list of all users.
 </ApiEndpoint>
@@ -88,29 +82,6 @@ This runs on the hot path — keep allocations out of the loop.
   "labels": ["alpha", "beta"]
 }
 </JsonExplorer>
-
-<Html id="custom-markup">
-<div style="padding:8px">
-  <strong>Formatted</strong> author markup rendered in a sandboxed iframe.
-</div>
-</Html>
-
-<OpenApi id="petstore-api">
-{
-  "openapi": "3.0.0",
-  "info": { "title": "Petstore", "version": "1.0.0" },
-  "tags": [{ "name": "pets", "description": "Manage pets" }],
-  "paths": {
-    "/pets": {
-      "get": {
-        "tags": ["pets"],
-        "summary": "List pets",
-        "responses": { "200": { "description": "OK" } }
-      }
-    }
-  }
-}
-</OpenApi>
 
 <Tabs id="walkthrough" tabs={[{ "label": "Overview", "body": "<Callout id=\"tab-note\" tone=\"info\">Recursive **markdown** inside a tab.</Callout>" }, { "label": "Details", "body": "Plain markdown body with a list:\n\n- one\n- two" }]} />
 

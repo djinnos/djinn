@@ -1,5 +1,5 @@
 // Pure (React-free) half of the shared block visual vocabulary. The rewritten
-// FileTree / DataModel / ApiEndpoint blocks each independently grew the same
+// FileTree / ApiEndpoint blocks each independently grew the same
 // accent palette, A/M/D/R change colors, and HTTP-method / status-code maps.
 // This module is the single source of truth for those *class strings*; the
 // React components that wrap them (`Badge` / `Pill` / `ChangeChip`) live in

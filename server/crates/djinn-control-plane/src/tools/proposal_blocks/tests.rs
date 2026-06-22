@@ -8,11 +8,10 @@ use super::*;
 #[test]
 fn registry_contains_v1_blocks() {
     let registry = proposal_block_registry();
-    assert_eq!(registry.len(), 17);
+    assert_eq!(registry.len(), 14);
     assert_eq!(registry["rich-text"].tag, "RichText");
     assert_eq!(registry["diagram"].tag, "Diagram");
     assert_eq!(registry["annotated-code"].tag, "AnnotatedCode");
-    assert_eq!(registry["data-model"].tag, "DataModel");
     assert_eq!(registry["api-endpoint"].tag, "ApiEndpoint");
     assert_eq!(registry["decisions"].tag, "Decisions");
     assert_eq!(registry["file-tree"].tag, "FileTree");
@@ -20,26 +19,10 @@ fn registry_contains_v1_blocks() {
     assert_eq!(registry["callout"].tag, "Callout");
     assert_eq!(registry["checklist"].tag, "Checklist");
     assert_eq!(registry["json-explorer"].tag, "JsonExplorer");
-    assert_eq!(registry["html"].tag, "Html");
-    assert_eq!(registry["openapi-spec"].tag, "OpenApi");
     assert_eq!(registry["tabs"].tag, "Tabs");
     assert_eq!(registry["columns"].tag, "Columns");
     assert_eq!(registry["wireframe"].tag, "Wireframe");
     assert_eq!(registry["question-form"].tag, "QuestionForm");
-    // The html block ships authoring guidance noting it is sandboxed.
-    assert!(
-        registry["html"]
-            .description
-            .is_some_and(|d| d.contains("sandboxed iframe")),
-        "html block must advertise its sandboxed/sanitized render"
-    );
-    // The openapi-spec block ships authoring guidance noting $ref resolution.
-    assert!(
-        registry["openapi-spec"]
-            .description
-            .is_some_and(|d| d.contains("OpenAPI") && d.contains("$ref")),
-        "openapi-spec block must advertise OpenAPI/$ref authoring guidance"
-    );
     // The diff block ships authoring guidance for the LLM.
     assert!(
         registry["diff"]
@@ -83,7 +66,6 @@ fn block_type_enum_covers_v1() {
         BlockType::RichText,
         BlockType::Diagram,
         BlockType::AnnotatedCode,
-        BlockType::DataModel,
         BlockType::ApiEndpoint,
         BlockType::Decisions,
         BlockType::FileTree,
@@ -91,8 +73,6 @@ fn block_type_enum_covers_v1() {
         BlockType::Callout,
         BlockType::Checklist,
         BlockType::JsonExplorer,
-        BlockType::Html,
-        BlockType::OpenApiSpec,
         BlockType::Tabs,
         BlockType::Columns,
         BlockType::Wireframe,
@@ -104,13 +84,13 @@ fn block_type_enum_covers_v1() {
     }
     // Single-sourced coverage check: every canonical (type_str, tag) pair is
     // reachable from the enum's `as_str()`/`tag()` projection.
-    assert_eq!(CANONICAL_BLOCK_TYPES.len(), 17);
+    assert_eq!(CANONICAL_BLOCK_TYPES.len(), 14);
 }
 
 #[test]
 fn block_registry_new_has_all_definitions() {
     let reg = BlockRegistry::new();
-    assert_eq!(reg.definitions().len(), 17);
+    assert_eq!(reg.definitions().len(), 14);
     assert!(reg.definition_for_tag("RichText").is_some());
     assert!(reg.definition_for_tag("UnknownTag").is_none());
     assert!(reg.tags().contains("RichText"));
@@ -127,8 +107,8 @@ fn registry_tags_match_canonical_v1_set() {
         CANONICAL_BLOCK_TYPES.iter().map(|(_, tag)| *tag).collect();
     assert_eq!(
         expected.len(),
-        17,
-        "canonical block list must cover all 17 v1 tags"
+        14,
+        "canonical block list must cover all 14 v1 tags"
     );
     let actual: std::collections::HashSet<&str> = proposal_block_tags().into_iter().collect();
     assert_eq!(
@@ -244,12 +224,12 @@ fn main() {}
 #[test]
 fn parse_mdx_blocks_extracts_stable_ids() {
     let body = r#"
-<DataModel id="user-schema" name="User" />
+<FileTree id="repo-layout" name="repo" />
 <ApiEndpoint id="create-user" method="POST" path="/users" />
 "#;
     let blocks = parse_mdx_blocks(body).unwrap();
     assert_eq!(blocks.len(), 2);
-    assert_eq!(blocks[0].id, "user-schema");
+    assert_eq!(blocks[0].id, "repo-layout");
     assert_eq!(blocks[1].id, "create-user");
 }
 
@@ -347,8 +327,8 @@ fn parse_mdx_blocks_returns_unclosed_error() {
 fn validate_ids_passes_with_unique_ids() {
     let blocks = vec![
         ParsedProposalBlock {
-            block_type: "data-model".to_string(),
-            tag: "DataModel".to_string(),
+            block_type: "file-tree".to_string(),
+            tag: "FileTree".to_string(),
             id: "schema-a".to_string(),
             attributes: HashMap::new(),
             raw_content: String::new(),
@@ -367,8 +347,8 @@ fn validate_ids_passes_with_unique_ids() {
 #[test]
 fn validate_ids_fails_on_empty() {
     let blocks = vec![ParsedProposalBlock {
-        block_type: "data-model".to_string(),
-        tag: "DataModel".to_string(),
+        block_type: "file-tree".to_string(),
+        tag: "FileTree".to_string(),
         id: String::new(),
         attributes: HashMap::new(),
         raw_content: String::new(),
@@ -381,8 +361,8 @@ fn validate_ids_fails_on_empty() {
 fn validate_ids_fails_on_duplicate() {
     let blocks = vec![
         ParsedProposalBlock {
-            block_type: "data-model".to_string(),
-            tag: "DataModel".to_string(),
+            block_type: "file-tree".to_string(),
+            tag: "FileTree".to_string(),
             id: "same-id".to_string(),
             attributes: HashMap::new(),
             raw_content: String::new(),
@@ -403,7 +383,7 @@ fn validate_ids_fails_on_duplicate() {
 fn test_validate_question_form_missing() {
     let body = r#"# Proposal
 
-<DataModel id="schema" name="User" />"#;
+<FileTree id="schema" name="repo" />"#;
 
     let err = validate_question_form_placement(body).unwrap_err();
     assert_eq!(
@@ -446,7 +426,7 @@ fn test_validate_question_form_not_last() {
 fn test_validate_question_form_valid() {
     let body = r#"# Proposal
 
-<DataModel id="schema" name="User" />
+<FileTree id="schema" name="repo" />
 
 <QuestionForm id="questions" title="Open questions" />"#;
 
@@ -560,9 +540,9 @@ fn parse_json_expression_attribute_captured_as_raw_text() {
 
 #[test]
 fn parse_block_with_bare_json_children_no_error() {
-    // JsonExplorer / OpenApi children are bare `{ ... }` JSON. The MDX
-    // expression constructs are disabled, so this parses without error and
-    // the raw_content bytes are preserved verbatim.
+    // JsonExplorer children are bare `{ ... }` JSON. The MDX expression
+    // constructs are disabled, so this parses without error and the raw_content
+    // bytes are preserved verbatim.
     let json =
         "\n{\n  \"id\": \"abc\",\n  \"nested\": { \"a\": [1, 2, 3] },\n  \"active\": true\n}\n";
     let body = format!("<JsonExplorer id=\"cfg\" title=\"Sample\">{json}</JsonExplorer>");
@@ -573,11 +553,4 @@ fn parse_block_with_bare_json_children_no_error() {
         blocks[0].raw_content, json,
         "bare-brace JSON children must be preserved byte-for-byte"
     );
-
-    // An OpenApi block with bare JSON children likewise parses cleanly.
-    let oa = "\n{ \"openapi\": \"3.0.0\", \"paths\": {} }\n";
-    let body = format!("<OpenApi id=\"api\">{oa}</OpenApi>");
-    let blocks = parse_mdx_blocks(&body).unwrap();
-    assert_eq!(blocks.len(), 1);
-    assert_eq!(blocks[0].raw_content, oa);
 }

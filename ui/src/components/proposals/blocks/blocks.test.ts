@@ -195,7 +195,7 @@ describe("canonical tag set parity", () => {
 describe("derived block structures completeness", () => {
   const canonical = [...CANONICAL_V1_TAGS].sort();
 
-  it("PROPOSAL_BLOCK_REGISTRY tags === the 17 canonical tags", () => {
+  it("PROPOSAL_BLOCK_REGISTRY tags === the canonical tags", () => {
     const tags = Object.values(PROPOSAL_BLOCK_REGISTRY).map((def) => def.tag);
     expect(tags).toHaveLength(CANONICAL_V1_TAGS.length);
     expect([...tags].sort()).toEqual(canonical);
@@ -304,16 +304,6 @@ describe("canonical proposal.mdx round-trip", () => {
       "annotated-code",
     );
 
-    // DataModel
-    const dataModel = byTag.get("DataModel");
-    expect(dataModel).toBeDefined();
-    expect(dataModel!.id).toBe("user-schema");
-    expect(dataModel!.attributes.name).toBe("User");
-    expect(dataModel!.content).toContain("uuid");
-    expect(getProposalBlockDefinitionByTag("DataModel")!.type).toBe(
-      "data-model",
-    );
-
     // ApiEndpoint
     const apiEndpoint = byTag.get("ApiEndpoint");
     expect(apiEndpoint).toBeDefined();
@@ -375,22 +365,6 @@ describe("canonical proposal.mdx round-trip", () => {
     expect(jsonExplorer!.content).toContain("\"enabled\"");
     expect(getProposalBlockDefinitionByTag("JsonExplorer")!.type).toBe(
       "json-explorer",
-    );
-
-    // Html
-    const html = byTag.get("Html");
-    expect(html).toBeDefined();
-    expect(html!.id).toBe("custom-markup");
-    expect(html!.content).toContain("<strong>");
-    expect(getProposalBlockDefinitionByTag("Html")!.type).toBe("html");
-
-    // OpenApi
-    const openApi = byTag.get("OpenApi");
-    expect(openApi).toBeDefined();
-    expect(openApi!.id).toBe("petstore-api");
-    expect(openApi!.content).toContain("openapi");
-    expect(getProposalBlockDefinitionByTag("OpenApi")!.type).toBe(
-      "openapi-spec",
     );
 
     // Tabs

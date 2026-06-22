@@ -9,14 +9,11 @@ import { ApiEndpointBlock } from "./ApiEndpointBlock";
 import { CalloutBlock } from "./CalloutBlock";
 import { ChecklistBlock } from "./ChecklistBlock";
 import { ColumnsBlock } from "./ColumnsBlock";
-import { DataModelBlock } from "./DataModelBlock";
 import { DecisionsBlock } from "./DecisionsBlock";
 import { Diagram } from "./Diagram";
 import { DiffBlock } from "./DiffBlock";
 import { FileTreeBlock } from "./FileTreeBlock";
-import { HtmlBlock } from "./HtmlBlock";
 import { JsonExplorerBlock } from "./JsonExplorerBlock";
-import { OpenApiSpecBlock } from "./OpenApiSpecBlock";
 import { QuestionFormBlock } from "./QuestionFormBlock";
 import { RichText } from "./RichText";
 import { TabsBlock } from "./TabsBlock";
@@ -133,27 +130,6 @@ export const PROPOSAL_BLOCK_SPECS: readonly ProposalBlockSpec[] = [
     },
   }),
   defineBlock({
-    type: "data-model",
-    tag: "DataModel",
-    displayName: "Data Model",
-    component: DataModelBlock,
-    fields: {
-      name: { type: "string" },
-      fields: {
-        type: "array",
-        items: {
-          type: "object",
-          fields: {
-            name: { type: "string" },
-            type: { type: "string" },
-            optional: { type: "boolean" },
-            description: { type: "string" },
-          },
-        },
-      },
-    },
-  }),
-  defineBlock({
     type: "api-endpoint",
     tag: "ApiEndpoint",
     displayName: "API Endpoint",
@@ -238,20 +214,6 @@ export const PROPOSAL_BLOCK_SPECS: readonly ProposalBlockSpec[] = [
     tag: "JsonExplorer",
     displayName: "JSON Explorer",
     component: JsonExplorerBlock,
-    fields: {},
-  }),
-  defineBlock({
-    type: "html",
-    tag: "Html",
-    displayName: "HTML",
-    component: HtmlBlock,
-    fields: {},
-  }),
-  defineBlock({
-    type: "openapi-spec",
-    tag: "OpenApi",
-    displayName: "OpenAPI Spec",
-    component: OpenApiSpecBlock,
     fields: {},
   }),
   defineBlock({

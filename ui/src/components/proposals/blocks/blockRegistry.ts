@@ -25,9 +25,9 @@ export type {
 export interface ExtractedProposalBlockId {
   /** Stable id attribute used for deep-link anchors and feedback targeting. */
   id: string;
-  /** Canonical PascalCase MDX component tag, e.g. `DataModel`. */
+  /** Canonical PascalCase MDX component tag, e.g. `ApiEndpoint`. */
   tag: string;
-  /** Stable registry block type, e.g. `data-model`. */
+  /** Stable registry block type, e.g. `api-endpoint`. */
   type: string;
 }
 

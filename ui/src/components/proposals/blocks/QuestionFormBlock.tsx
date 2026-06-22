@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { HelpCircleIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
-import { BlockMarkdown, BlockShell } from "./BlockShell";
+import { BlockMarkdown, BlockSection } from "./BlockShell";
 import { Badge } from "./blockBadges";
 import type { BlockProps } from "./types";
 import { parseQuestions } from "./questionForm";
@@ -33,14 +33,14 @@ export function QuestionFormBlock({ children }: BlockProps) {
   // to the original markdown render so an existing proposal never blanks.
   if (questions.length === 0) {
     return (
-      <BlockShell label="Open Questions" accent="text-pink-400">
+      <BlockSection label="Open Questions" accent="text-pink-400">
         <BlockMarkdown>{children}</BlockMarkdown>
-      </BlockShell>
+      </BlockSection>
     );
   }
 
   return (
-    <BlockShell
+    <BlockSection
       label="Open Questions"
       accent="text-pink-400"
       meta={
@@ -89,6 +89,6 @@ export function QuestionFormBlock({ children }: BlockProps) {
           </li>
         ))}
       </ol>
-    </BlockShell>
+    </BlockSection>
   );
 }

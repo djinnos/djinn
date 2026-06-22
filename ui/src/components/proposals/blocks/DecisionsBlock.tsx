@@ -1,6 +1,8 @@
 import { useMemo } from "react";
 
-import { BlockMarkdown, BlockShell } from "./BlockShell";
+import { cn } from "@/lib/utils";
+
+import { BlockMarkdown, BlockSection } from "./BlockShell";
 import { Badge } from "./blockBadges";
 import type { AccentColor } from "./blockBadgeColors";
 import type { BlockProps } from "./types";
@@ -34,14 +36,14 @@ export function DecisionsBlock({ children }: BlockProps) {
   // block that doesn't match our ADR shape is never lost.
   if (decisions.length === 0) {
     return (
-      <BlockShell label="Decisions" accent="text-amber-500">
+      <BlockSection label="Decisions" accent="text-amber-500">
         <BlockMarkdown>{children}</BlockMarkdown>
-      </BlockShell>
+      </BlockSection>
     );
   }
 
   return (
-    <BlockShell
+    <BlockSection
       label="Decisions"
       accent="text-amber-500"
       meta={
@@ -58,7 +60,7 @@ export function DecisionsBlock({ children }: BlockProps) {
           />
         ))}
       </ol>
-    </BlockShell>
+    </BlockSection>
   );
 }
 
@@ -77,6 +79,15 @@ const STATUS_ACCENT: Record<DecisionStatus, AccentColor> = {
   superseded: "violet",
 };
 
+/** Leading-marker ink per status (undeclared status falls back to muted). */
+const STATUS_MARKER_INK: Record<DecisionStatus, string> = {
+  proposed: "text-slate-400",
+  accepted: "text-emerald-400",
+  rejected: "text-red-400",
+  deprecated: "text-amber-400",
+  superseded: "text-violet-400",
+};
+
 /* ── Decision card ──────────────────────────────────────────────────────────── */
 
 function DecisionCard({ decision }: { decision: ParsedDecision }) {
@@ -84,7 +95,16 @@ function DecisionCard({ decision }: { decision: ParsedDecision }) {
 
   return (
     <li className="py-3 first:pt-0 last:pb-0">
-      <div className="flex items-start justify-between gap-2">
+      <div className="flex items-start gap-2.5">
+        <span
+          aria-hidden
+          className={cn(
+            "mt-[3px] shrink-0 text-[10px] leading-none",
+            status ? STATUS_MARKER_INK[status] : "text-muted-foreground/60",
+          )}
+        >
+          ◆
+        </span>
         <h4 className="min-w-0 flex-1 text-sm font-semibold text-foreground">
           {title}
         </h4>
@@ -96,14 +116,14 @@ function DecisionCard({ decision }: { decision: ParsedDecision }) {
       </div>
 
       {supersededBy && (
-        <p className="mt-0.5 text-xs text-muted-foreground">
+        <p className="mt-0.5 pl-5 text-xs text-muted-foreground">
           superseded by{" "}
           <span className="font-medium text-foreground/80">{supersededBy}</span>
         </p>
       )}
 
       {sections ? (
-        <div className="mt-2 space-y-2">
+        <div className="mt-2 space-y-2 pl-5">
           {sections.context && (
             <DecisionSection label="Context" markdown={sections.context} />
           )}
@@ -120,7 +140,7 @@ function DecisionCard({ decision }: { decision: ParsedDecision }) {
       ) : null}
 
       {body && (
-        <div className="prose prose-sm mt-2 max-w-none text-sm dark:prose-invert prose-p:my-1">
+        <div className="prose prose-sm mt-2 max-w-none pl-5 text-sm dark:prose-invert prose-p:my-1">
           <BlockMarkdown>{body}</BlockMarkdown>
         </div>
       )}

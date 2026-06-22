@@ -200,8 +200,8 @@ pub fn validate_mdx_body(body: &str, body_format: Option<&str>) -> Result<(), St
 /// **before it is ever stored**, mirroring agent-native's server regex. It is
 /// deliberately conservative — only `<script>` tags, `on*=` event-handler
 /// attributes, and `javascript:` / `data:text/html` URIs are rejected, so benign
-/// formatted HTML (and inline SVG) still passes. Both `html` and `wireframe` are
-/// sandboxed-HTML surfaces, so both are gated identically.
+/// formatted HTML (and inline SVG) still passes. `wireframe` is the remaining
+/// sandboxed-HTML surface, so its raw markup is gated here.
 fn validate_html_block_safety(body: &str) -> Result<(), String> {
     let blocks = match parse_mdx_blocks(body) {
         Ok(blocks) => blocks,
@@ -210,7 +210,7 @@ fn validate_html_block_safety(body: &str) -> Result<(), String> {
         Err(_) => return Ok(()),
     };
     for block in blocks {
-        if block.block_type != "html" && block.block_type != "wireframe" {
+        if block.block_type != "wireframe" {
             continue;
         }
         if let Some(reason) = first_unsafe_html_reason(&block.raw_content) {
@@ -565,10 +565,6 @@ graph TD
 fn handle_request(req: Request) -> Response {}
 </AnnotatedCode>
 
-<DataModel id="user-schema" name="User">
-  id: uuid
-</DataModel>
-
 <ApiEndpoint id="get-users" method="GET" path="/api/users">
 Returns a list of all users.
 </ApiEndpoint>
@@ -607,18 +603,6 @@ This runs on the hot path.
   "labels": ["alpha", "beta"]
 }
 </JsonExplorer>
-
-<Html id="custom-markup">
-<div style="padding:8px"><strong>Formatted</strong> author markup.</div>
-</Html>
-
-<OpenApi id="petstore-api">
-{
-  "openapi": "3.0.0",
-  "info": { "title": "Petstore", "version": "1.0.0" },
-  "paths": { "/pets": { "get": { "responses": { "200": {} } } } }
-}
-</OpenApi>
 
 <Tabs id="views" tabs={[{ "label": "Overview", "body": "Some **markdown**." }, { "label": "Detail", "body": "More detail." }]} />
 
@@ -701,66 +685,6 @@ Should we use Redis or Memcached?
     fn mdx_body_ignores_lowercase_html() {
         let body = "<div>\n  <span>plain html</span>\n</div>";
         assert!(validate_mdx_body(body, Some("mdx")).is_ok());
-    }
-
-    #[test]
-    fn mdx_body_html_block_allows_benign_markup() {
-        let body = r#"
-<Html id="ok">
-<div style="padding:8px"><strong>Hello</strong> <em>world</em></div>
-<svg viewBox="0 0 10 10"><rect width="10" height="10" fill="red"/></svg>
-</Html>
-"#;
-        assert!(validate_mdx_body(body, Some("mdx")).is_ok());
-    }
-
-    #[test]
-    fn mdx_body_html_block_rejects_script_tag() {
-        let body = r#"
-<Html id="bad">
-<div>hi</div>
-<script>alert(1)</script>
-</Html>
-"#;
-        let err = validate_mdx_body(body, Some("mdx")).unwrap_err();
-        assert!(err.contains("<script>"), "unexpected error: {err}");
-        assert!(err.contains("Html block 'bad'"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn mdx_body_html_block_rejects_event_handler() {
-        let body = r#"
-<Html id="bad">
-<img src="x" onerror="alert(1)" />
-</Html>
-"#;
-        let err = validate_mdx_body(body, Some("mdx")).unwrap_err();
-        assert!(err.contains("on*= event handler"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn mdx_body_html_block_rejects_javascript_uri() {
-        let body = r#"
-<Html id="bad">
-<a href="javascript:alert(1)">click</a>
-</Html>
-"#;
-        let err = validate_mdx_body(body, Some("mdx")).unwrap_err();
-        assert!(
-            err.contains("javascript:/data:text/html"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn mdx_body_html_block_rejects_data_text_html_uri() {
-        let body = r#"
-<Html id="bad">
-<a href="data:text/html,<script>alert(1)</script>">x</a>
-</Html>
-"#;
-        // The data:text/html URI (or the inline <script>) must be rejected.
-        assert!(validate_mdx_body(body, Some("mdx")).is_err());
     }
 
     #[test]

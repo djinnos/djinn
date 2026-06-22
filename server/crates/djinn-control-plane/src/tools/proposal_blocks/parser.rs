@@ -20,7 +20,7 @@ use super::types::{BlockError, ParsedProposalBlock};
 /// the JSX element/attribute grammar (`mdx_jsx_flow` + `mdx_jsx_text`).
 ///
 /// Why: proposal block CHILDREN routinely contain bare `{ ... }` — raw JSON in
-/// `JsonExplorer`/`OpenApi` blocks, braces in code. With expression parsing on,
+/// `JsonExplorer` blocks, braces in code. With expression parsing on,
 /// markdown-rs tries to parse those as JS and fails ("could not parse
 /// expression"). Block children are opaque markdown that each block component
 /// re-parses itself, so we want `{...}` inside content left as literal text —

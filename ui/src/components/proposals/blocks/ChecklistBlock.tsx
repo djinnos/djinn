@@ -4,7 +4,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 
 import { cn } from "@/lib/utils";
 
-import { BlockMarkdown, BlockShell } from "./BlockShell";
+import { BlockMarkdown, BlockSection } from "./BlockShell";
 import { parseChecklist } from "./checklist";
 import type { BlockProps } from "./types";
 
@@ -25,14 +25,14 @@ export function ChecklistBlock({ children }: BlockProps) {
   // Nothing parsed as a checklist — render the raw children as markdown.
   if (total === 0) {
     return (
-      <BlockShell label="Checklist" accent="text-emerald-400">
+      <BlockSection label="Checklist" accent="text-emerald-400">
         <BlockMarkdown>{body}</BlockMarkdown>
-      </BlockShell>
+      </BlockSection>
     );
   }
 
   return (
-    <BlockShell
+    <BlockSection
       label="Checklist"
       accent="text-emerald-400"
       meta={
@@ -73,6 +73,6 @@ export function ChecklistBlock({ children }: BlockProps) {
           </li>
         ))}
       </ul>
-    </BlockShell>
+    </BlockSection>
   );
 }
