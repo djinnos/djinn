@@ -1,5 +1,5 @@
 import type { ModelLanes } from "@/api/userSettings";
-import { stripProviderPrefix } from "@/components/userConfig/ModelSection";
+import { stripProviderPrefix } from "@/components/userConfig/modelPicker";
 
 /**
  * First-run onboarding sheet (slice 4 of p8py "Model setup UX").

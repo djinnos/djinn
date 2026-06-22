@@ -47,6 +47,7 @@ describe('settingsStore', () => {
   it('loads per-user models with per-user caps', async () => {
     vi.mocked(fetchUserSettings).mockResolvedValue({
       autoApprovePrs: false,
+      diverseReview: true,
       lanes: { plan: ['p1/m1'], implement: [], review: [] },
       maxSessions: { 'p1/m1': 3 },
     });
@@ -79,6 +80,7 @@ describe('settingsStore', () => {
         context_window: 0,
         output_limit: 0,
         reasoning: false,
+        recommended: false,
         pricing: PRICING,
       },
     ] satisfies ProviderModelsConnectedOutputSchema.ProviderModelOutput[];
@@ -89,6 +91,7 @@ describe('settingsStore', () => {
     useSettingsStore.getState().addModel({ model: 'm1', provider: 'p1' });
     vi.mocked(patchUserSettings).mockResolvedValue({
       autoApprovePrs: false,
+      diverseReview: true,
       lanes: { plan: ['p1/m1'], implement: ['p1/m1'], review: ['p1/m1'] },
       maxSessions: { 'p1/m1': 1 },
     });
@@ -105,6 +108,7 @@ describe('settingsStore', () => {
     useSettingsStore.getState().updateMaxSessions(0, 4);
     vi.mocked(patchUserSettings).mockResolvedValue({
       autoApprovePrs: false,
+      diverseReview: true,
       lanes: { plan: ['p1/m1'], implement: ['p1/m1'], review: ['p1/m1'] },
       maxSessions: { 'p1/m1': 4 },
     });

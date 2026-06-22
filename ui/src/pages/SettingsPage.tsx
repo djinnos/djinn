@@ -1,7 +1,6 @@
 import { Delete02Icon, LockIcon } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { InlineError } from '@/components/InlineError';
-import { AgentConfig } from '@/components/AgentConfig';
 import { CodexSignInCard } from '@/components/CodexSignInCard';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -10,7 +9,6 @@ import { AiPolicyTab } from '@/components/settings/AiPolicyTab';
 import { useAuthUser } from '@/components/AuthGate';
 import { SELF_TARGET } from '@/api/userConfig';
 import { useProviders } from '@/hooks/settings/useProviders';
-import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
 import { useUserSettings } from '@/hooks/settings/useUserSettings';
 import { useServerHealth } from '@/hooks/useServerHealth';
 import { cn } from '@/lib/utils';
@@ -122,18 +120,12 @@ function EmptyConnectedMessage() {
   );
 }
 
-/** Model Roles tab — per-user, per-role model lanes + the per-role agent config. */
+/** Model Roles tab — per-user, per-role model lanes for the signed-in caller. */
 function ModelRolesTab() {
-  const agentConfig = useAgentConfig();
-
   return (
     <div className="flex flex-col gap-6">
       {/* Per-user, per-ROLE model lanes for the signed-in caller (self mode). */}
       <ModelSection targetId={SELF_TARGET} />
-
-      <div className="border-t border-border" />
-
-      <AgentConfig {...agentConfig} />
     </div>
   );
 }
