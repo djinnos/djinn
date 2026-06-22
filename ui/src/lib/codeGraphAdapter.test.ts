@@ -4,10 +4,13 @@ import {
   COMMUNITY_HULLS_ATTRIBUTE,
   CONTAINMENT_EDGE_KINDS,
   DOUBLE_CLICK_INTERVAL_MS,
+  CURVED_EDGE_TYPE,
   LOD_FAR_RATIO,
   LOD_MID_RATIO,
   MAX_RENDERED_EDGES,
   PRECOMPUTED_LAYOUT_ATTRIBUTE,
+  STRAIGHT_EDGE_THRESHOLD,
+  STRAIGHT_EDGE_TYPE,
   readEdgeRenderStats,
   VIEWPORT_CULLING_MARGIN,
   VIEWPORT_CULLING_THRESHOLD,
@@ -1372,6 +1375,77 @@ describe("edge salience cap", () => {
       if ((attrs.confidence as number) < 0.5) lowConfidenceKept += 1;
     });
     expect(lowConfidenceKept).toBe(0);
+  });
+
+  it("draws straight edges once the rendered set is dense", () => {
+    const graph = buildGraphFromSnapshot(
+      denseSnapshot(200, STRAIGHT_EDGE_THRESHOLD + 50),
+    );
+    let straight = 0;
+    let curved = 0;
+    graph.forEachEdge((_e, attrs) => {
+      if (attrs.type === STRAIGHT_EDGE_TYPE) straight += 1;
+      if (attrs.type === CURVED_EDGE_TYPE) curved += 1;
+    });
+    // All intra-crate edges (no workspace tags in the fixture) go straight.
+    expect(straight).toBe(STRAIGHT_EDGE_THRESHOLD + 50);
+    expect(curved).toBe(0);
+    // Straight edges carry no curvature attribute.
+    graph.forEachEdge((_e, attrs) => {
+      expect(attrs.curvature).toBeUndefined();
+    });
+  });
+
+  it("keeps curved edges for sparse graphs", () => {
+    const graph = buildGraphFromSnapshot(denseSnapshot(50, 100));
+    graph.forEachEdge((_e, attrs) => {
+      expect(attrs.type).toBe(CURVED_EDGE_TYPE);
+      expect(attrs.curvature).toBeGreaterThan(0);
+    });
+  });
+
+  it("keeps cross-crate edges curved even in a dense graph", () => {
+    // Two crates; every edge crosses between them, so all stay curved
+    // and dashed regardless of density.
+    const n = 300;
+    const edgeCount = STRAIGHT_EDGE_THRESHOLD + 100;
+    const nodes: SnapshotNode[] = Array.from({ length: n }, (_, i) => ({
+      id: `symbol:n${i}`,
+      kind: "symbol",
+      label: `n${i}`,
+      symbol_kind: "function",
+      pagerank: 0.1,
+      x: i,
+      y: i,
+      workspace: i % 2 === 0 ? "crate-a" : "crate-b",
+    }));
+    const edges = Array.from({ length: edgeCount }, (_, i) => ({
+      // even -> odd guarantees a crate-a -> crate-b crossing.
+      from: `symbol:n${(i * 2) % n}`,
+      to: `symbol:n${(i * 2 + 1) % n}`,
+      kind: "SymbolReference",
+      confidence: 1,
+      reason: undefined,
+    }));
+    const graph = buildGraphFromSnapshot({
+      project_id: "p",
+      git_head: "g",
+      generated_at: "2026-04-28T00:00:00Z",
+      truncated: false,
+      total_nodes: n,
+      total_edges: edgeCount,
+      nodes,
+      edges,
+    });
+    let crossCurved = 0;
+    graph.forEachEdge((_e, attrs) => {
+      if (attrs.isCrossWorkspace === true) {
+        expect(attrs.type).toBe(CURVED_EDGE_TYPE);
+        expect(attrs.lineStyle).toBe("dashed");
+        crossCurved += 1;
+      }
+    });
+    expect(crossCurved).toBeGreaterThan(0);
   });
 });
 

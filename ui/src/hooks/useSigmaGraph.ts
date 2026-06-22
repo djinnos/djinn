@@ -38,6 +38,7 @@ import {
   type ViewportBounds,
 } from "@/lib/codeGraphAdapter";
 import EdgeCurveProgram from "@sigma/edge-curve";
+import { EdgeRectangleProgram } from "sigma/rendering";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import FA2LayoutSupervisor from "graphology-layout-forceatlas2/worker";
 import noverlap from "graphology-layout-noverlap";
@@ -211,6 +212,11 @@ export function useSigmaGraph(
         defaultEdgeType: "curved",
         edgeProgramClasses: {
           curved: EdgeCurveProgram,
+          // Straight (rectangle) program for dense graphs — far cheaper
+          // than tessellating a bezier per edge. The adapter assigns the
+          // "straight" type to intra-crate edges above
+          // STRAIGHT_EDGE_THRESHOLD.
+          straight: EdgeRectangleProgram,
         },
         labelFont: "JetBrains Mono, ui-monospace, monospace",
         labelSize: 11,

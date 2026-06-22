@@ -67,6 +67,12 @@ vi.mock("@sigma/edge-curve", () => ({
   default: class MockEdgeCurveProgram {},
 }));
 
+// `sigma/rendering` touches WebGL2RenderingContext at module load, which
+// jsdom lacks — stub the straight-edge program the same way.
+vi.mock("sigma/rendering", () => ({
+  EdgeRectangleProgram: class MockEdgeRectangleProgram {},
+}));
+
 // FA2 worker — track every constructor / start / stop / kill so the
 // test can assert which side effects fired on each branch.
 const fa2Instances: {
