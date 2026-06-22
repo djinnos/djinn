@@ -1497,6 +1497,53 @@ describe("colorForNode", () => {
     ).toBe("#a855f7");
   });
 
+  it("colors any node by its crate (workspace) when the tag is present", () => {
+    // Crate wins over community_id, parent-dir, and folder hashing alike,
+    // so the whole topology view reads as crate regions.
+    const sym: SnapshotNode = {
+      id: "s",
+      kind: "symbol",
+      label: "x",
+      pagerank: 0,
+      symbol_kind: "function",
+      community_id: "cluster-7",
+      file_path: "server/crates/djinn-graph/src/lib.rs",
+      workspace: "djinn-graph",
+    };
+    expect(colorForNode(sym)).toBe(colorForWorkspace("djinn-graph"));
+
+    const file: SnapshotNode = {
+      id: "f",
+      kind: "file",
+      label: "lib.rs",
+      file_path: "server/crates/djinn-graph/src/lib.rs",
+      pagerank: 0,
+      workspace: "djinn-graph",
+    };
+    expect(colorForNode(file)).toBe(colorForWorkspace("djinn-graph"));
+  });
+
+  it("colors nodes in the same crate identically, regardless of kind or folder", () => {
+    const a: SnapshotNode = {
+      id: "a",
+      kind: "symbol",
+      label: "a",
+      pagerank: 0,
+      symbol_kind: "function",
+      file_path: "server/crates/djinn-graph/src/communities.rs",
+      workspace: "djinn-graph",
+    };
+    const b: SnapshotNode = {
+      id: "b",
+      kind: "file",
+      label: "lib.rs",
+      file_path: "server/crates/djinn-graph/src/lib.rs",
+      pagerank: 0,
+      workspace: "djinn-graph",
+    };
+    expect(colorForNode(a)).toBe(colorForNode(b));
+  });
+
   it("colorForCommunity is deterministic across calls", () => {
     expect(colorForCommunity("alpha")).toBe(colorForCommunity("alpha"));
   });
@@ -1648,6 +1695,48 @@ describe("deriveCommunityHulls", () => {
       "symbol:scip-rust . . . User#",
       "symbol:scip-rust . . . main()",
     ]);
+  });
+
+  it("colors the hull by its members' dominant crate so it matches the dots", () => {
+    // Three members carry community_id "alpha": two in crate "graph",
+    // one in crate "core". The hull should take the majority crate's hue,
+    // which is exactly what colorForNode assigns those member dots.
+    const snapshot: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: [
+        {
+          id: "m1",
+          kind: "symbol",
+          label: "m1",
+          pagerank: 0,
+          symbol_kind: "function",
+          community_id: "alpha",
+          workspace: "graph",
+        },
+        {
+          id: "m2",
+          kind: "symbol",
+          label: "m2",
+          pagerank: 0,
+          symbol_kind: "function",
+          community_id: "alpha",
+          workspace: "graph",
+        },
+        {
+          id: "m3",
+          kind: "symbol",
+          label: "m3",
+          pagerank: 0,
+          symbol_kind: "function",
+          community_id: "alpha",
+          workspace: "core",
+        },
+      ],
+      edges: [],
+    };
+    const hulls = deriveCommunityHulls(snapshot);
+    const alpha = hulls.find((h) => h.id === "alpha");
+    expect(alpha?.color).toBe(colorForWorkspace("graph"));
   });
 
   it("is deterministic across calls", () => {
