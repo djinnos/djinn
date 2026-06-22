@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@/test/test-utils";
+import { beforeEach, describe, expect, it } from "vitest";
+import { fireEvent, render, screen, waitFor, within } from "@/test/test-utils";
 
 import { DiffBlock } from "./DiffBlock";
 
@@ -11,6 +11,28 @@ const UNIFIED_DIFF = [
   "+  return sum;",
   " }",
 ].join("\n");
+
+// A rust diff with a long unchanged run so collapse kicks in (> 6 context rows).
+const RUST_DIFF = [
+  "@@ -1,12 +1,12 @@",
+  " fn run_chat_loop() {",
+  "     let a = 1;",
+  "     let b = 2;",
+  "     let c = 3;",
+  "     let d = 4;",
+  "     let e = 5;",
+  "     let f = 6;",
+  "     let g = 7;",
+  "-    let total = a + b;",
+  "+    let total = a + b + c;",
+  "     println!(\"{total}\");",
+  " }",
+].join("\n");
+
+// Each test starts from a clean, default (unified) persisted view mode.
+beforeEach(() => {
+  window.localStorage.clear();
+});
 
 describe("DiffBlock", () => {
   it("renders a unified diff with filename, +/- stats, and code lines", () => {
@@ -56,5 +78,93 @@ describe("DiffBlock", () => {
       </DiffBlock>,
     );
     expect(screen.getByText("No changes")).toBeInTheDocument();
+  });
+
+  it("syntax-highlights the code with Prism tokens while keeping the +/- tint", async () => {
+    const { container } = render(
+      <DiffBlock id="d4" attributes={{ filename: "src/loop.rs", lang: "rust" }}>
+        {RUST_DIFF}
+      </DiffBlock>,
+    );
+
+    // The Prism surface lazy-loads; once it does, code lines tokenize into
+    // coloured `.token` spans (RSH inlines the oneDark colour onto each token).
+    const tokens = await waitFor(() => {
+      const found = container.querySelectorAll("span.token");
+      expect(found.length).toBeGreaterThan(0);
+      return found;
+    });
+    // A `let` keyword token carries an inline colour — proof of highlighting.
+    const keyword = Array.from(tokens).find((t) => t.textContent === "let");
+    expect(keyword).toBeTruthy();
+    expect((keyword as HTMLElement).style.color).not.toBe("");
+
+    // The +/- tint still rides underneath: the added/removed rows keep their
+    // low-alpha emerald/rose backgrounds (token colours show through them).
+    expect(container.querySelector(".bg-emerald-500\\/10")).not.toBeNull();
+    expect(container.querySelector(".bg-red-500\\/10")).not.toBeNull();
+
+    // Stats still computed correctly (+1 / −1).
+    expect(screen.getByText("+1")).toBeInTheDocument();
+    expect(screen.getByText("−1")).toBeInTheDocument();
+  });
+
+  it("keeps the collapsible unchanged run and toggle working under highlighting", () => {
+    render(
+      <DiffBlock id="d5" attributes={{ filename: "src/loop.rs", lang: "rust" }}>
+        {RUST_DIFF}
+      </DiffBlock>,
+    );
+    // The long unchanged run collapses behind an expandable control.
+    const toggle = screen.getByRole("button", { name: /unchanged line/i });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(
+      screen.getByRole("button", { name: /unchanged line/i }),
+    ).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("highlights both columns in split view (and the toggle persists)", async () => {
+    const { container } = render(
+      <DiffBlock id="d6" attributes={{ filename: "src/loop.rs", lang: "rust" }}>
+        {RUST_DIFF}
+      </DiffBlock>,
+    );
+    // Switch to split view.
+    fireEvent.click(screen.getByRole("button", { name: "Split" }));
+    expect(screen.getByRole("button", { name: "Split" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    // The choice is persisted to localStorage.
+    expect(window.localStorage.getItem("djinn:proposal-diff-view-mode")).toBe(
+      "split",
+    );
+    // Both side-by-side columns highlight (tokens present in each half).
+    await waitFor(() => {
+      const columns = container.querySelectorAll(".flex-1");
+      expect(columns.length).toBeGreaterThanOrEqual(2);
+      for (const col of [columns[0], columns[1]]) {
+        expect(
+          within(col as HTMLElement).getAllByText(
+            (_, el) => el?.classList.contains("token") ?? false,
+          ).length,
+        ).toBeGreaterThan(0);
+      }
+    });
+  });
+
+  it("falls back to plain (uncoloured) code when the language is unknown", async () => {
+    const { container } = render(
+      <DiffBlock id="d7" attributes={{ lang: "totally-unknown-lang" }}>
+        {UNIFIED_DIFF}
+      </DiffBlock>,
+    );
+    // The added line text renders intact as a single (untokenized) node — no
+    // crash, just no colour.
+    expect(screen.getByText("const sum = a + b;")).toBeInTheDocument();
+    // Give the (no-op) lazy path a tick; still no token spans appear.
+    await Promise.resolve();
+    expect(container.querySelector("span.token")).toBeNull();
   });
 });

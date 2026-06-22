@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   ArrowRight01Icon,
   LayoutTwoColumnIcon,
@@ -11,6 +17,8 @@ import { cn } from "@/lib/utils";
 
 import { BlockShell } from "./BlockShell";
 import type { BlockProps } from "./types";
+import { resolveCodeLanguage } from "./code";
+import { useDiffHighlighter } from "./useDiffHighlighter";
 import {
   diffStats,
   isDiffLike,
@@ -152,6 +160,16 @@ export function DiffBlock({ attributes, children }: BlockProps) {
   const stats = useMemo(() => diffStats(rows), [rows]);
   const fileParts = useMemo(() => splitFilename(filename), [filename]);
 
+  // Resolve the authored `lang` (and any filename hint) to a Prism grammar the
+  // exact same way the standalone Code block does, then lazily load the Prism
+  // surface and get a memoized per-line highlighter. Unknown/no language → a
+  // plain-text identity fn (graceful, uncoloured fallback).
+  const resolvedLang = useMemo(
+    () => resolveCodeLanguage(lang, filename) ?? undefined,
+    [lang, filename],
+  );
+  const highlightLine = useDiffHighlighter(resolvedLang);
+
   const toggleRun = (key: number) =>
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -234,11 +252,11 @@ export function DiffBlock({ attributes, children }: BlockProps) {
             No changes
           </div>
         ) : mode === "split" ? (
-          <SplitView rows={rows} lang={lang} />
+          <SplitView rows={rows} highlightLine={highlightLine} />
         ) : (
           <UnifiedView
             rows={rows}
-            lang={lang}
+            highlightLine={highlightLine}
             expanded={expanded}
             onToggleRun={toggleRun}
           />
@@ -278,20 +296,42 @@ function ModeButton({
   );
 }
 
+/* ── Highlighted code cell ─────────────────────────────────────────────────── */
+
+/** A per-line highlighter: maps one line of code to coloured token nodes. */
+type HighlightLine = (text: string) => ReactNode;
+
+/**
+ * One diff row's code, run through the Prism per-line highlighter so language
+ * tokens get their `oneDark` colours. The +/-/context tint lives on the row
+ * background (`ROW_BG`) underneath, kept low-alpha so the coloured tokens stay
+ * readable through it. An empty line renders a single space to keep row height.
+ */
+function DiffCode({
+  text,
+  highlightLine,
+}: {
+  text: string;
+  highlightLine: HighlightLine;
+}) {
+  return (
+    <span className={CODE_CLASS}>{text ? highlightLine(text) : " "}</span>
+  );
+}
+
 /* ── Unified view ──────────────────────────────────────────────────────────── */
 
 function UnifiedView({
   rows,
-  lang,
+  highlightLine,
   expanded,
   onToggleRun,
 }: {
   rows: DiffRow[];
-  lang?: string;
+  highlightLine: HighlightLine;
   expanded: Set<number>;
   onToggleRun: (key: number) => void;
 }) {
-  void lang;
   const segments = useMemo(() => segmentRows(rows), [rows]);
   let runIndex = 0;
   return (
@@ -310,19 +350,31 @@ function UnifiedView({
                 />
                 {open &&
                   segment.rows.map((row, ri) => (
-                    <UnifiedRow key={`run-${key}-${ri}`} row={row} />
+                    <UnifiedRow
+                      key={`run-${key}-${ri}`}
+                      row={row}
+                      highlightLine={highlightLine}
+                    />
                   ))}
               </div>
             );
           }
-          return <UnifiedRow key={idx} row={segment} />;
+          return (
+            <UnifiedRow key={idx} row={segment} highlightLine={highlightLine} />
+          );
         })}
       </div>
     </div>
   );
 }
 
-function UnifiedRow({ row }: { row: DiffRow }) {
+function UnifiedRow({
+  row,
+  highlightLine,
+}: {
+  row: DiffRow;
+  highlightLine: HighlightLine;
+}) {
   return (
     <div className={cn("flex min-h-5 min-w-full", ROW_BG[row.kind])}>
       <span className={LINE_NO_CLASS}>{row.oldNo ?? ""}</span>
@@ -336,7 +388,7 @@ function UnifiedRow({ row }: { row: DiffRow }) {
       >
         {SIGN[row.kind]}
       </span>
-      <span className={CODE_CLASS}>{row.text || " "}</span>
+      <DiffCode text={row.text} highlightLine={highlightLine} />
     </div>
   );
 }
@@ -371,22 +423,37 @@ function CollapsedRow({
 
 /* ── Split (side-by-side) view ─────────────────────────────────────────────── */
 
-function SplitView({ rows, lang }: { rows: DiffRow[]; lang?: string }) {
-  void lang;
+function SplitView({
+  rows,
+  highlightLine,
+}: {
+  rows: DiffRow[];
+  highlightLine: HighlightLine;
+}) {
   const pairs = useMemo(() => pairSplitRows(rows), [rows]);
   return (
     <div className="flex w-full py-1">
       <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden border-r">
         <div className="inline-block min-w-full">
           {pairs.map((pair, idx) => (
-            <SplitCell key={`old-${idx}`} row={pair.left} side="old" />
+            <SplitCell
+              key={`old-${idx}`}
+              row={pair.left}
+              side="old"
+              highlightLine={highlightLine}
+            />
           ))}
         </div>
       </div>
       <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden">
         <div className="inline-block min-w-full">
           {pairs.map((pair, idx) => (
-            <SplitCell key={`new-${idx}`} row={pair.right} side="new" />
+            <SplitCell
+              key={`new-${idx}`}
+              row={pair.right}
+              side="new"
+              highlightLine={highlightLine}
+            />
           ))}
         </div>
       </div>
@@ -394,7 +461,15 @@ function SplitView({ rows, lang }: { rows: DiffRow[]; lang?: string }) {
   );
 }
 
-function SplitCell({ row, side }: { row?: DiffRow; side: "old" | "new" }) {
+function SplitCell({
+  row,
+  side,
+  highlightLine,
+}: {
+  row?: DiffRow;
+  side: "old" | "new";
+  highlightLine: HighlightLine;
+}) {
   if (!row) {
     return (
       <div className="flex min-h-5 min-w-full bg-muted/20">
@@ -419,7 +494,7 @@ function SplitCell({ row, side }: { row?: DiffRow; side: "old" | "new" }) {
       >
         {showSign ? sign : " "}
       </span>
-      <span className={CODE_CLASS}>{row.text || " "}</span>
+      <DiffCode text={row.text} highlightLine={highlightLine} />
     </div>
   );
 }
