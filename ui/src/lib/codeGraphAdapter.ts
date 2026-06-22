@@ -533,6 +533,39 @@ export function deriveCommunityHulls(
   return hulls;
 }
 
+/**
+ * Minimum member count for a community to be worth a background hull.
+ * Tiny clusters add a glowing blob each without conveying structure —
+ * dropping them is a lever against the "rainbow of balls" mush.
+ */
+export const MIN_HULL_MEMBERS = 6;
+
+/**
+ * Hard cap on rendered hulls. Even after the size filter, dozens of
+ * overlapping translucent regions read as noise; we keep the largest
+ * communities (the ones that actually shape the layout) and let the
+ * smaller ones live as bare crate-colored dots.
+ */
+export const MAX_HULL_REGIONS = 16;
+
+/**
+ * Pick the hulls worth drawing: drop communities below
+ * {@link MIN_HULL_MEMBERS} members, then keep the {@link MAX_HULL_REGIONS}
+ * largest by member count. Ties broken by id so the selection is stable
+ * across renders. Pure + exported so the render path stays thin and the
+ * policy is unit-testable.
+ */
+export function selectRenderableHulls(hulls: CommunityHull[]): CommunityHull[] {
+  return hulls
+    .filter((h) => h.memberCount >= MIN_HULL_MEMBERS)
+    .sort((a, b) =>
+      b.memberCount !== a.memberCount
+        ? b.memberCount - a.memberCount
+        : a.id.localeCompare(b.id, "en"),
+    )
+    .slice(0, MAX_HULL_REGIONS);
+}
+
 export function colorForWorkspace(workspace: string): string {
   return WORKSPACE_COLORS[fnv1a(workspace) % WORKSPACE_COLORS.length];
 }

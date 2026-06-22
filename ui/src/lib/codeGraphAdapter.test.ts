@@ -20,6 +20,9 @@ import {
   colorForNode,
   colorForWorkspace,
   deriveCommunityHulls,
+  selectRenderableHulls,
+  MIN_HULL_MEMBERS,
+  MAX_HULL_REGIONS,
   edgeStyleFor,
   filterSnapshotForWorkspace,
   hasPrecomputedCoordinates,
@@ -1832,6 +1835,45 @@ describe("deriveCommunityHulls", () => {
 
   it("returns an empty array when no community nodes or member ids exist", () => {
     expect(deriveCommunityHulls(fixtureSnapshot)).toEqual([]);
+  });
+});
+
+describe("selectRenderableHulls", () => {
+  function hull(id: string, memberCount: number): CommunityHull {
+    return {
+      id,
+      label: id,
+      keywords: undefined,
+      color: "#22c55e",
+      memberCount,
+      memberIds: [],
+      seed: 1,
+    };
+  }
+
+  it("drops hulls below the minimum member count", () => {
+    const selected = selectRenderableHulls([
+      hull("big", 50),
+      hull("tiny", MIN_HULL_MEMBERS - 1),
+      hull("edge", MIN_HULL_MEMBERS),
+    ]);
+    expect(selected.map((h) => h.id).sort()).toEqual(["big", "edge"]);
+  });
+
+  it("keeps only the largest MAX_HULL_REGIONS, by member count", () => {
+    const many = Array.from({ length: MAX_HULL_REGIONS + 10 }, (_, i) =>
+      hull(`c${i}`, 10 + i),
+    );
+    const selected = selectRenderableHulls(many);
+    expect(selected).toHaveLength(MAX_HULL_REGIONS);
+    // The smallest kept must be larger than the largest dropped.
+    const keptMin = Math.min(...selected.map((h) => h.memberCount));
+    expect(keptMin).toBe(10 + 10); // c0..c9 (counts 10..19) are dropped
+  });
+
+  it("is deterministic for equal member counts (id tiebreak)", () => {
+    const a = selectRenderableHulls([hull("b", 8), hull("a", 8)]);
+    expect(a.map((h) => h.id)).toEqual(["a", "b"]);
   });
 });
 

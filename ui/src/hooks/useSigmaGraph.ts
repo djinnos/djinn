@@ -34,6 +34,7 @@ import type { Attributes } from "@/lib/codeGraphReducers";
 import {
   COMMUNITY_HULLS_ATTRIBUTE,
   PRECOMPUTED_LAYOUT_ATTRIBUTE,
+  selectRenderableHulls,
   type CommunityHull,
   type ViewportBounds,
 } from "@/lib/codeGraphAdapter";
@@ -394,10 +395,13 @@ export function useSigmaGraph(
       },
       getCommunityHullRegions: (): CommunityHullRegion[] => {
         try {
-          const hulls = graph.getAttribute(COMMUNITY_HULLS_ATTRIBUTE) as
+          const allHulls = graph.getAttribute(COMMUNITY_HULLS_ATTRIBUTE) as
             | CommunityHull[]
             | undefined;
-          if (!Array.isArray(hulls) || hulls.length === 0) return [];
+          if (!Array.isArray(allHulls) || allHulls.length === 0) return [];
+          // Only the largest communities earn a background region; the
+          // rest stay as bare crate-colored dots (see selectRenderableHulls).
+          const hulls = selectRenderableHulls(allHulls);
           const projector = (
             sigmaInstance as unknown as {
               graphToViewport?: (point: { x: number; y: number }) => {
