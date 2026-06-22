@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -16,36 +20,134 @@ import { extractProposalBlockIds } from "./blockRegistry";
 import { PROPOSAL_BLOCK_SPECS } from "./registry";
 
 // ------------------------------------------------------------------------------
-// Canonical v1 tag set — single source of truth for parity assertions.
-// If a new block type is added, this array MUST be updated and the Rust
-// registry must be updated in the same commit to prevent tag drift.
+// Canonical v1 tag set — DERIVED from the Rust-emitted block catalog.
+//
+// The literal tag list used to live here, which made it a place where the TS
+// and Rust block sets could silently diverge. Instead we read the committed
+// catalog JSON that the Rust registry emits:
+//
+//   server/crates/djinn-control-plane/src/tools/proposal_blocks/
+//     proposal_block_catalog.json
+//
+// A Rust test (`canonical_catalog_json_is_in_sync`) fails in CI if that file
+// drifts from the Rust registry, so the JSON is a trustworthy mirror of the
+// Rust source of truth. By reading it here, adding a block now requires
+// updating BOTH languages (or CI fails loudly on one side or the other).
+//
+// We read it with plain `fs.readFileSync` and an absolute path resolved from
+// `import.meta.url` — NOT a bundler JSON import — because the file lives
+// outside the `ui/` root and a Vite module import could be blocked by the dev
+// server's `fs.allow` sandbox. A direct `fs` read is unaffected by that.
+//
+// ORDERING CONTRACT: the catalog JSON is sorted by block `type`, but several
+// existing tests assert against FIXTURE order (the order blocks appear in the
+// canonical MDX fixture, which equals `PROPOSAL_BLOCK_SPECS` order with
+// `QuestionForm` LAST). So we take the authoritative tag *set* from the catalog
+// and *order* it by the spec/fixture order. A drift assertion below proves the
+// catalog set and the spec set are identical, so the chosen ordering can never
+// hide a missing/extra tag.
 // ------------------------------------------------------------------------------
-export const CANONICAL_V1_TAGS = [
-  "RichText",
-  "Diagram",
-  "AnnotatedCode",
-  "DataModel",
-  "ApiEndpoint",
-  "Decisions",
-  "FileTree",
-  "Diff",
-  "Callout",
-  "Table",
-  "Checklist",
-  "JsonExplorer",
-  "Html",
-  "OpenApi",
-  "Tabs",
-  "Columns",
-  "QuestionForm",
-] as const;
+
+const TEST_DIR = dirname(fileURLToPath(import.meta.url));
+
+const CATALOG_PATH = resolve(
+  TEST_DIR,
+  "../../../../..",
+  "server/crates/djinn-control-plane/src/tools/proposal_blocks/proposal_block_catalog.json",
+);
+
+interface CatalogEntry {
+  type: string;
+  tag: string;
+}
+
+const CATALOG: readonly CatalogEntry[] = JSON.parse(
+  readFileSync(CATALOG_PATH, "utf8"),
+) as CatalogEntry[];
+
+// Authoritative tag SET from the Rust catalog (catalog is sorted by `type`).
+const CATALOG_TAGS: readonly string[] = CATALOG.map((entry) => entry.tag);
+const CATALOG_TAG_SET = new Set(CATALOG_TAGS);
+
+// Fixture/spec order (QuestionForm last), filtered to the catalog set so the
+// ordered list and the authoritative set are kept in lockstep by construction.
+const SPEC_TAG_ORDER = PROPOSAL_BLOCK_SPECS.map((spec) => spec.tag);
+
+export const CANONICAL_V1_TAGS = SPEC_TAG_ORDER.filter((tag) =>
+  CATALOG_TAG_SET.has(tag),
+) as readonly string[];
 
 export type CanonicalV1Tag = (typeof CANONICAL_V1_TAGS)[number];
+
+// ------------------------------------------------------------------------------
+// Cross-language drift gate: the Rust catalog set and the TS spec set MUST be
+// identical. Combined with the Rust-side `canonical_catalog_json_is_in_sync`
+// test, this makes adding a proposal block require updating BOTH languages.
+// ------------------------------------------------------------------------------
+
+describe("Rust ⇄ TS block catalog drift gate", () => {
+  it("reads the committed Rust block catalog JSON", () => {
+    // Prove the file was actually read (not silently empty / mocked away).
+    expect(CATALOG.length).toBeGreaterThan(0);
+    expect(CATALOG_TAGS.every((tag) => typeof tag === "string")).toBe(true);
+  });
+
+  it("catalog tag set === TS spec tag set (neither side has drifted)", () => {
+    const catalogSorted = [...CATALOG_TAGS].sort();
+    const specSorted = [...SPEC_TAG_ORDER].sort();
+    expect(
+      specSorted,
+      "TS PROPOSAL_BLOCK_SPECS tags must match the Rust block catalog exactly",
+    ).toEqual(catalogSorted);
+  });
+
+  it("derived CANONICAL_V1_TAGS covers exactly the catalog set, in fixture order", () => {
+    // Set equality (order-independent) against the authoritative catalog.
+    expect([...CANONICAL_V1_TAGS].sort()).toEqual([...CATALOG_TAGS].sort());
+    // No tag was dropped by the order-reconciliation filter.
+    expect(CANONICAL_V1_TAGS).toHaveLength(CATALOG_TAGS.length);
+    // Ordering contract: QuestionForm stays last.
+    expect(CANONICAL_V1_TAGS[CANONICAL_V1_TAGS.length - 1]).toBe("QuestionForm");
+  });
+});
 
 // Import the canonical fixture as a raw string so the test suite exercises
 // the exact same MDX sample that backend validation tests use.
 const CANONICAL_MDX = (await import("./__fixtures__/canonicalProposal.mdx?raw"))
   .default as string;
+
+// ------------------------------------------------------------------------------
+// Cross-language completeness: every TS structure and the canonical fixture
+// must contain EXACTLY the Rust catalog tag set. These are phrased directly
+// against `CATALOG_TAG_SET` (the Rust source of truth) rather than the derived
+// `CANONICAL_V1_TAGS`, so they fail loudly if a block is added on one side only.
+// ------------------------------------------------------------------------------
+
+describe("Rust catalog completeness across TS structures", () => {
+  const catalogSorted = [...CATALOG_TAGS].sort();
+
+  it("PROPOSAL_BLOCK_REGISTRY tag set === Rust catalog tag set", () => {
+    const tags = Object.values(PROPOSAL_BLOCK_REGISTRY)
+      .map((def) => def.tag)
+      .sort();
+    expect(tags).toEqual(catalogSorted);
+  });
+
+  it("BLOCK_COMPONENTS keys === BLOCK_DISPLAY_NAMES keys === Rust catalog tag set", () => {
+    const componentTags = Object.keys(BLOCK_COMPONENTS).sort();
+    const displayNameTags = Object.keys(BLOCK_DISPLAY_NAMES).sort();
+    expect(componentTags).toEqual(catalogSorted);
+    expect(displayNameTags).toEqual(catalogSorted);
+  });
+
+  it("canonical MDX fixture exercises EXACTLY the Rust catalog tag set", () => {
+    const fixtureTags = [...new Set(extractBlockTags(CANONICAL_MDX))].sort();
+    expect(
+      fixtureTags,
+      "every catalog block must appear in canonicalProposal.mdx, and no extra",
+    ).toEqual(catalogSorted);
+  });
+});
 
 // ------------------------------------------------------------------------------
 // Parity: canonical tag set
