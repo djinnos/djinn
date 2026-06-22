@@ -132,17 +132,6 @@ define_blocks! {
             "tone" => (enum ["info", "decision", "risk", "warning", "success"]),
         },
 
-    Table => "table", "Table",
-        desc = "A clean styled data table. The block CHILDREN are a \
-                GitHub-flavoured markdown table: a header row, a `| --- | \
-                --- |` separator row, then one body row per line, each \
-                pipe-delimited (`| cell | cell |`). Cells may contain inline \
-                markdown. The renderer falls back to a plain markdown block \
-                if the children are not a valid pipe table, so always emit \
-                real `|`-delimited rows. Example: `<Table id=\"x\">\\n| Name | \
-                Type |\\n| --- | --- |\\n| id | uuid |\\n</Table>`.",
-        fields {},
-
     Checklist => "checklist", "Checklist",
         desc = "A read-only checklist of items with their authored \
                 done-state. The block CHILDREN are GitHub task-list lines: \

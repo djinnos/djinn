@@ -359,13 +359,6 @@ describe("canonical proposal.mdx round-trip", () => {
     expect(callout!.content).toContain("hot path");
     expect(getProposalBlockDefinitionByTag("Callout")!.type).toBe("callout");
 
-    // Table
-    const table = byTag.get("Table");
-    expect(table).toBeDefined();
-    expect(table!.id).toBe("tradeoffs");
-    expect(table!.content).toContain("Option");
-    expect(getProposalBlockDefinitionByTag("Table")!.type).toBe("table");
-
     // Checklist
     const checklist = byTag.get("Checklist");
     expect(checklist).toBeDefined();

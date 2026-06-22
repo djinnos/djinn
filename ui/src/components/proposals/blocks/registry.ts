@@ -19,7 +19,6 @@ import { JsonExplorerBlock } from "./JsonExplorerBlock";
 import { OpenApiSpecBlock } from "./OpenApiSpecBlock";
 import { QuestionFormBlock } from "./QuestionFormBlock";
 import { RichText } from "./RichText";
-import { TableBlock } from "./TableBlock";
 import { TabsBlock } from "./TabsBlock";
 import { WireframeBlock } from "./WireframeBlock";
 
@@ -226,13 +225,6 @@ export const PROPOSAL_BLOCK_SPECS: readonly ProposalBlockSpec[] = [
         enum_values: ["info", "decision", "risk", "warning", "success"],
       },
     },
-  }),
-  defineBlock({
-    type: "table",
-    tag: "Table",
-    displayName: "Table",
-    component: TableBlock,
-    fields: {},
   }),
   defineBlock({
     type: "checklist",

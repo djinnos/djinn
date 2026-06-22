@@ -595,13 +595,6 @@ We chose JWT over session cookies.
 This runs on the hot path.
 </Callout>
 
-<Table id="tradeoffs">
-| Option    | Latency |
-| --------- | ------- |
-| Redis     | low     |
-| Memcached | low     |
-</Table>
-
 <Checklist id="acceptance">
 - [x] Schema migration written
 - [ ] Backfill job verified
