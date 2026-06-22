@@ -1,0 +1,70 @@
+[
+  {
+    "type": "annotated-code",
+    "tag": "AnnotatedCode"
+  },
+  {
+    "type": "api-endpoint",
+    "tag": "ApiEndpoint"
+  },
+  {
+    "type": "callout",
+    "tag": "Callout"
+  },
+  {
+    "type": "checklist",
+    "tag": "Checklist"
+  },
+  {
+    "type": "columns",
+    "tag": "Columns"
+  },
+  {
+    "type": "data-model",
+    "tag": "DataModel"
+  },
+  {
+    "type": "decisions",
+    "tag": "Decisions"
+  },
+  {
+    "type": "diagram",
+    "tag": "Diagram"
+  },
+  {
+    "type": "diff",
+    "tag": "Diff"
+  },
+  {
+    "type": "file-tree",
+    "tag": "FileTree"
+  },
+  {
+    "type": "html",
+    "tag": "Html"
+  },
+  {
+    "type": "json-explorer",
+    "tag": "JsonExplorer"
+  },
+  {
+    "type": "openapi-spec",
+    "tag": "OpenApi"
+  },
+  {
+    "type": "question-form",
+    "tag": "QuestionForm"
+  },
+  {
+    "type": "rich-text",
+    "tag": "RichText"
+  },
+  {
+    "type": "table",
+    "tag": "Table"
+  },
+  {
+    "type": "tabs",
+    "tag": "Tabs"
+  }
+]
