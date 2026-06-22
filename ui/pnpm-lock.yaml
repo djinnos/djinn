@@ -179,6 +179,9 @@ importers:
       react-syntax-highlighter:
         specifier: ^15.6.1
         version: 15.6.6(react@19.2.4)
+      refractor:
+        specifier: ^3.6.0
+        version: 3.6.0
       rehype-highlight:
         specifier: ^7.0.2
         version: 7.0.2
