@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
-  assignmentSummary,
   clearFirstRunDismissal,
   dismissFirstRun,
   firstRunDismissKey,
@@ -45,29 +44,5 @@ describe("firstRun dismissal", () => {
     dismissFirstRun(USER);
     clearFirstRunDismissal(USER);
     expect(isFirstRunDismissed(USER)).toBe(false);
-  });
-});
-
-describe("assignmentSummary", () => {
-  it("uses the primary model id per lane, provider-stripped", () => {
-    expect(
-      assignmentSummary({
-        plan: ["anthropic/opus", "openai/gpt-5"],
-        implement: ["openai/gpt-5-mini"],
-        review: ["fireworks/kimi"],
-      }),
-    ).toBe("Plan w/ opus · Build w/ gpt-5-mini · Review w/ kimi");
-  });
-
-  it("falls back to 'default' for empty lanes", () => {
-    expect(
-      assignmentSummary({ plan: [], implement: [], review: [] }),
-    ).toBe("Plan w/ default · Build w/ default · Review w/ default");
-  });
-
-  it("handles ids without a provider prefix", () => {
-    expect(
-      assignmentSummary({ plan: ["bare-model"], implement: [], review: [] }),
-    ).toBe("Plan w/ bare-model · Build w/ default · Review w/ default");
   });
 });

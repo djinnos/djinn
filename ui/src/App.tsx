@@ -130,11 +130,12 @@ function AuthenticatedApp() {
     return <MainLayout />;
   }
 
-  // First-run model-setup sheet (slice 4 of p8py): a single sequential flow
-  // (connect a subscription → pick a working style → done) shown when this user
-  // has no connected provider and/or no model lanes. Replaces the old separate
-  // provider + model onboarding gates. A client-side dismissal (localStorage,
-  // keyed by user id) suppresses it for someone who skipped without finishing.
+  // First-run model-setup sheet: a single sequential flow (connect a
+  // subscription → done) shown when this user has no connected provider and/or
+  // no model lanes. Replaces the old separate provider + model onboarding
+  // gates; per-role model lanes are configured later in Settings → Model Roles.
+  // A client-side dismissal (localStorage, keyed by user id) suppresses it for
+  // someone who skipped without finishing.
   const needsModelSetup = hasProvider === false || hasModels === false;
   if (needsModelSetup && !isFirstRunDismissed(userId)) {
     return (
