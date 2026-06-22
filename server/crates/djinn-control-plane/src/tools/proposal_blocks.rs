@@ -28,6 +28,7 @@ pub enum BlockType {
     Checklist,
     JsonExplorer,
     Html,
+    OpenApiSpec,
     QuestionForm,
 }
 
@@ -48,6 +49,7 @@ impl BlockType {
             BlockType::Checklist => "checklist",
             BlockType::JsonExplorer => "json-explorer",
             BlockType::Html => "html",
+            BlockType::OpenApiSpec => "openapi-spec",
             BlockType::QuestionForm => "question-form",
         }
     }
@@ -68,6 +70,7 @@ impl BlockType {
             BlockType::Checklist => "Checklist",
             BlockType::JsonExplorer => "JsonExplorer",
             BlockType::Html => "Html",
+            BlockType::OpenApiSpec => "OpenApi",
             BlockType::QuestionForm => "QuestionForm",
         }
     }
@@ -518,6 +521,31 @@ pub static PROPOSAL_BLOCK_REGISTRY: LazyLock<BTreeMap<&'static str, ProposalBloc
                 ),
             ),
             (
+                "openapi-spec",
+                block_with_description(
+                    "openapi-spec",
+                    "OpenApi",
+                    "A whole-document OpenAPI 3.x (or Swagger 2) API reference, \
+                     rendered Redoc / Swagger-UI style. The block CHILDREN are a \
+                     complete OpenAPI document as JSON (an `openapi`/`swagger` \
+                     version, an `info` block, and a `paths` object; optional \
+                     `tags`, `servers`, and `components`). The renderer \
+                     `JSON.parse`s the children, resolves internal \
+                     `$ref`s (e.g. `#/components/schemas/User`, cycle-guarded), \
+                     groups operations by `tags` (operations with no tag fall into \
+                     a `default` group), and renders each operation as a \
+                     collapsible row: a colored METHOD pill + path + summary that \
+                     expands to its parameters, request body, and per-status \
+                     responses, with example bodies derived from the JSON schemas. \
+                     It is read-only. YAML is NOT supported in v1 — emit JSON (a \
+                     YAML or non-OpenAPI body falls back to a raw JSON render). \
+                     Example: `<OpenApi id=\"x\">\\n{\\n  \"openapi\": \"3.0.0\",\\n  \
+                     \"info\": { \"title\": \"My API\", \"version\": \"1.0.0\" },\\n  \
+                     \"paths\": {}\\n}\\n</OpenApi>`.",
+                    fields(vec![]),
+                ),
+            ),
+            (
                 "question-form",
                 block(
                     "question-form",
@@ -742,7 +770,7 @@ mod tests {
     #[test]
     fn registry_contains_v1_blocks() {
         let registry = proposal_block_registry();
-        assert_eq!(registry.len(), 14);
+        assert_eq!(registry.len(), 15);
         assert_eq!(registry["rich-text"].tag, "RichText");
         assert_eq!(registry["diagram"].tag, "Diagram");
         assert_eq!(registry["annotated-code"].tag, "AnnotatedCode");
@@ -756,6 +784,7 @@ mod tests {
         assert_eq!(registry["checklist"].tag, "Checklist");
         assert_eq!(registry["json-explorer"].tag, "JsonExplorer");
         assert_eq!(registry["html"].tag, "Html");
+        assert_eq!(registry["openapi-spec"].tag, "OpenApi");
         assert_eq!(registry["question-form"].tag, "QuestionForm");
         // The html block ships authoring guidance noting it is sandboxed.
         assert!(
@@ -763,6 +792,13 @@ mod tests {
                 .description
                 .is_some_and(|d| d.contains("sandboxed iframe")),
             "html block must advertise its sandboxed/sanitized render"
+        );
+        // The openapi-spec block ships authoring guidance noting $ref resolution.
+        assert!(
+            registry["openapi-spec"]
+                .description
+                .is_some_and(|d| d.contains("OpenAPI") && d.contains("$ref")),
+            "openapi-spec block must advertise OpenAPI/$ref authoring guidance"
         );
         // The diff block ships authoring guidance for the LLM.
         assert!(
@@ -789,6 +825,7 @@ mod tests {
             BlockType::Checklist,
             BlockType::JsonExplorer,
             BlockType::Html,
+            BlockType::OpenApiSpec,
             BlockType::QuestionForm,
         ];
         for bt in types {
@@ -800,7 +837,7 @@ mod tests {
     #[test]
     fn block_registry_new_has_all_definitions() {
         let reg = BlockRegistry::new();
-        assert_eq!(reg.definitions().len(), 14);
+        assert_eq!(reg.definitions().len(), 15);
         assert!(reg.definition_for_tag("RichText").is_some());
         assert!(reg.definition_for_tag("UnknownTag").is_none());
         assert!(reg.tags().contains("RichText"));
@@ -826,6 +863,7 @@ mod tests {
             "Checklist",
             "JsonExplorer",
             "Html",
+            "OpenApi",
             "QuestionForm",
         ]
         .into_iter()

@@ -617,6 +617,14 @@ This runs on the hot path.
 <div style="padding:8px"><strong>Formatted</strong> author markup.</div>
 </Html>
 
+<OpenApi id="petstore-api">
+{
+  "openapi": "3.0.0",
+  "info": { "title": "Petstore", "version": "1.0.0" },
+  "paths": { "/pets": { "get": { "responses": { "200": {} } } } }
+}
+</OpenApi>
+
 <QuestionForm id="open-questions" title="Open Questions">
 Should we use Redis or Memcached?
 </QuestionForm>

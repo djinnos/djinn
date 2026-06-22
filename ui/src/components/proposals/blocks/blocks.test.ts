@@ -31,6 +31,7 @@ export const CANONICAL_V1_TAGS = [
   "Checklist",
   "JsonExplorer",
   "Html",
+  "OpenApi",
   "QuestionForm",
 ] as const;
 
@@ -225,6 +226,15 @@ describe("canonical proposal.mdx round-trip", () => {
     expect(html!.id).toBe("custom-markup");
     expect(html!.content).toContain("<strong>");
     expect(getProposalBlockDefinitionByTag("Html")!.type).toBe("html");
+
+    // OpenApi
+    const openApi = byTag.get("OpenApi");
+    expect(openApi).toBeDefined();
+    expect(openApi!.id).toBe("petstore-api");
+    expect(openApi!.content).toContain("openapi");
+    expect(getProposalBlockDefinitionByTag("OpenApi")!.type).toBe(
+      "openapi-spec",
+    );
 
     // QuestionForm
     const questionForm = byTag.get("QuestionForm");
