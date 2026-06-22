@@ -359,9 +359,26 @@ pub static PROPOSAL_BLOCK_REGISTRY: LazyLock<BTreeMap<&'static str, ProposalBloc
             ),
             (
                 "decisions",
-                block(
+                block_with_description(
                     "decisions",
                     "Decisions",
+                    "ADR-style architecture decision records. The block CHILDREN are \
+                     markdown: write ONE decision per `### Title` heading (`##` also \
+                     accepted). DECLARE each decision's status with an explicit \
+                     `Status:` line directly under the heading — one of exactly \
+                     `proposed`, `accepted`, `rejected`, `deprecated`, `superseded` \
+                     (or an inline `[accepted]` marker on the heading line). Status \
+                     comes ONLY from this declared token; it is NEVER inferred from \
+                     words in the prose. Omit the line for no status badge. A \
+                     superseded record may name its replacement: \
+                     `Status: superseded by #3`. Optionally structure the body with \
+                     `Context`, `Decision`, and `Consequences` sub-section labels \
+                     (plain label, `Context:`, `**Decision**`, or `#### Consequences` \
+                     all work); otherwise the body renders as freeform markdown. \
+                     Example: `<Decisions id=\"x\">\\n### Use JWT for stateless auth\\n\
+                     Status: accepted\\n\\nContext\\nWe scale horizontally.\\n\\n\
+                     Decision\\nAdopt short-lived JWTs.\\n</Decisions>`. A body with no \
+                     `##`/`###` headings falls back to a plain markdown render.",
                     fields(vec![(
                         "items",
                         array_field(object_field(fields(vec![

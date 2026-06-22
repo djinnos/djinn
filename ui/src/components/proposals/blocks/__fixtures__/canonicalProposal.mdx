@@ -32,7 +32,27 @@ Returns a list of all users.
 </ApiEndpoint>
 
 <Decisions id="auth-choice">
-We chose JWT over session cookies for stateless auth.
+### Use JWT for stateless auth
+Status: accepted
+
+Context
+We need authentication that survives horizontal scaling without sticky sessions.
+
+Decision
+Adopt short-lived JWTs validated at the edge.
+
+Consequences
+No central session store; revocation needs a denylist.
+
+### Session cookies
+Status: rejected
+
+Operationally simpler but requires sticky routing we want to avoid.
+
+### Opaque DB tokens
+Status: superseded by #1
+
+Earlier direction before we settled on JWTs.
 </Decisions>
 
 <FileTree id="project-layout" root="src">
