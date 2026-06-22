@@ -27,6 +27,7 @@ pub enum BlockType {
     Table,
     Checklist,
     JsonExplorer,
+    Html,
     QuestionForm,
 }
 
@@ -46,6 +47,7 @@ impl BlockType {
             BlockType::Table => "table",
             BlockType::Checklist => "checklist",
             BlockType::JsonExplorer => "json-explorer",
+            BlockType::Html => "html",
             BlockType::QuestionForm => "question-form",
         }
     }
@@ -65,6 +67,7 @@ impl BlockType {
             BlockType::Table => "Table",
             BlockType::Checklist => "Checklist",
             BlockType::JsonExplorer => "JsonExplorer",
+            BlockType::Html => "Html",
             BlockType::QuestionForm => "QuestionForm",
         }
     }
@@ -495,6 +498,26 @@ pub static PROPOSAL_BLOCK_REGISTRY: LazyLock<BTreeMap<&'static str, ProposalBloc
                 ),
             ),
             (
+                "html",
+                block_with_description(
+                    "html",
+                    "Html",
+                    "Author/agent-supplied HTML rendered SAFELY. The block \
+                     CHILDREN are the HTML document/fragment; it is sanitized \
+                     (DOMPurify, stripping scripts, `on*=` handlers, and \
+                     `javascript:` URLs) and rendered inside a fully sandboxed \
+                     iframe (`sandbox=\"\"`, restrictive CSP, no scripts, no \
+                     same-origin). Use it for rich static formatted markup or \
+                     inline SVG that the other blocks can't express. It is NOT a \
+                     scripting surface — `<script>`, event handlers, and \
+                     `javascript:`/`data:text/html` URLs are rejected at \
+                     validation time and stripped at render. Example: \
+                     `<Html id=\"x\">\\n<div style=\\\"padding:8px\\\"><strong>Hi\
+                     </strong></div>\\n</Html>`.",
+                    fields(vec![]),
+                ),
+            ),
+            (
                 "question-form",
                 block(
                     "question-form",
@@ -719,7 +742,7 @@ mod tests {
     #[test]
     fn registry_contains_v1_blocks() {
         let registry = proposal_block_registry();
-        assert_eq!(registry.len(), 13);
+        assert_eq!(registry.len(), 14);
         assert_eq!(registry["rich-text"].tag, "RichText");
         assert_eq!(registry["diagram"].tag, "Diagram");
         assert_eq!(registry["annotated-code"].tag, "AnnotatedCode");
@@ -732,7 +755,15 @@ mod tests {
         assert_eq!(registry["table"].tag, "Table");
         assert_eq!(registry["checklist"].tag, "Checklist");
         assert_eq!(registry["json-explorer"].tag, "JsonExplorer");
+        assert_eq!(registry["html"].tag, "Html");
         assert_eq!(registry["question-form"].tag, "QuestionForm");
+        // The html block ships authoring guidance noting it is sandboxed.
+        assert!(
+            registry["html"]
+                .description
+                .is_some_and(|d| d.contains("sandboxed iframe")),
+            "html block must advertise its sandboxed/sanitized render"
+        );
         // The diff block ships authoring guidance for the LLM.
         assert!(
             registry["diff"]
@@ -757,6 +788,7 @@ mod tests {
             BlockType::Table,
             BlockType::Checklist,
             BlockType::JsonExplorer,
+            BlockType::Html,
             BlockType::QuestionForm,
         ];
         for bt in types {
@@ -768,7 +800,7 @@ mod tests {
     #[test]
     fn block_registry_new_has_all_definitions() {
         let reg = BlockRegistry::new();
-        assert_eq!(reg.definitions().len(), 13);
+        assert_eq!(reg.definitions().len(), 14);
         assert!(reg.definition_for_tag("RichText").is_some());
         assert!(reg.definition_for_tag("UnknownTag").is_none());
         assert!(reg.tags().contains("RichText"));
@@ -793,6 +825,7 @@ mod tests {
             "Table",
             "Checklist",
             "JsonExplorer",
+            "Html",
             "QuestionForm",
         ]
         .into_iter()

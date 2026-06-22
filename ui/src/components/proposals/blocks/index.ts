@@ -12,6 +12,14 @@ export { CalloutBlock } from "./CalloutBlock";
 export { TableBlock } from "./TableBlock";
 export { ChecklistBlock } from "./ChecklistBlock";
 export { JsonExplorerBlock, JsonTree } from "./JsonExplorerBlock";
+export { HtmlBlock } from "./HtmlBlock";
+export { SandboxedHtmlFrame } from "./SandboxedHtmlFrame";
+export {
+  sanitizeBlockHtml,
+  buildIframeSrcDoc,
+  SANDBOX_VALUE,
+  IFRAME_CSP,
+} from "./sandboxedHtml";
 
 // Reusable line-anchored annotation engine (pure parsing + React rail UI). The
 // `annotated-code` block consumes it; `diff` and future blocks can adopt it.
