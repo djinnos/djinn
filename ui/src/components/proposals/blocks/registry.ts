@@ -21,6 +21,7 @@ import { QuestionFormBlock } from "./QuestionFormBlock";
 import { RichText } from "./RichText";
 import { TableBlock } from "./TableBlock";
 import { TabsBlock } from "./TabsBlock";
+import { WireframeBlock } from "./WireframeBlock";
 
 // ---------------------------------------------------------------------------
 // Field-schema contract
@@ -277,6 +278,18 @@ export const PROPOSAL_BLOCK_SPECS: readonly ProposalBlockSpec[] = [
     component: ColumnsBlock,
     fields: {
       columns: { type: "string" },
+    },
+  }),
+  defineBlock({
+    type: "wireframe",
+    tag: "Wireframe",
+    displayName: "Wireframe",
+    component: WireframeBlock,
+    fields: {
+      surface: {
+        type: "string",
+        enum_values: ["browser", "desktop", "mobile", "popover", "panel"],
+      },
     },
   }),
   // QuestionForm MUST remain LAST.
