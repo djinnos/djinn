@@ -1268,6 +1268,32 @@ export interface ViewportBounds {
 }
 
 /**
+ * Value-equality for viewport bounds. `sigma.getViewportBounds()` returns a
+ * fresh object on every call, so an identity (`!==`) comparison always reports
+ * a change. The reducer's `afterRender` handler uses that comparison to decide
+ * whether to `refresh()`; with identity comparison it refreshes every frame,
+ * and since `refresh()` schedules another render, that's a perpetual 60fps
+ * render loop (re-running every reducer each frame, even at idle) on graphs
+ * past `VIEWPORT_CULLING_THRESHOLD`. Comparing by value breaks the loop.
+ *
+ * Two `null`s are equal (culling inactive on both sides); a `null`/object
+ * mismatch is a change.
+ */
+export function viewportBoundsEqual(
+  a: ViewportBounds | null,
+  b: ViewportBounds | null,
+): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  return (
+    a.minX === b.minX &&
+    a.minY === b.minY &&
+    a.maxX === b.maxX &&
+    a.maxY === b.maxY
+  );
+}
+
+/**
  * Node-count threshold above which viewport culling activates.
  * Below this, all nodes are considered in-viewport (no culling).
  */
