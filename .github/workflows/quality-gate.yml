@@ -71,6 +71,9 @@ jobs:
               - '.github/workflows/quality-gate.yml'
             ui:
               - 'ui/**'
+              # Re-run the UI gate when its own workflow changes, so edits to
+              # the build/test steps are exercised on the PR that makes them.
+              - '.github/workflows/quality-gate.yml'
 
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Cache Warming (main push only)                                 ║
