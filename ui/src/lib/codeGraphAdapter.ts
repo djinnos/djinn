@@ -399,6 +399,55 @@ export function colorForCommunity(communityId: string): string {
 }
 
 /**
+ * Palette for the unified topology grouping (crate → community → folder).
+ * The two base palettes concatenated give ~20 distinct hues, enough that a
+ * monorepo's crates mostly each get their own colour. Vivid -500s first,
+ * lighter -400s after, all legible on the near-black canvas.
+ */
+export const GROUP_COLORS = [...COMMUNITY_COLORS, ...WORKSPACE_COLORS] as const;
+
+/**
+ * The crate / top-level module a repo-relative path belongs to. For a cargo
+ * workspace, `…/crates/<name>/…` → `<name>` (the actual crate); otherwise the
+ * first path segment (`ui`, `server`, …). This is the lever that fixes "all
+ * one colour": the server-side `workspace` tag is the coarse workspace member
+ * (`"server"` for everything under `server/crates/*`), so colouring by it
+ * paints the whole monorepo one hue. Empty string for blank input.
+ */
+export function crateForPath(filePath: string): string {
+  const m = /(?:^|\/)crates\/([^/]+)(?:\/|$)/.exec(filePath);
+  if (m) return m[1];
+  const slash = filePath.indexOf("/");
+  return slash > 0 ? filePath.slice(0, slash) : filePath;
+}
+
+/**
+ * Unified grouping key for topology colour, in the user's mental model:
+ * "crate if we have it, else community/folder — same thing." Prefer the crate
+ * derived from the file path, fall back to the detected community, then the
+ * parent folder, then the node's workspace tag. `null` when nothing applies
+ * (caller picks a neutral fallback).
+ */
+export function colorGroupKey(node: SnapshotNode): string | null {
+  if (node.file_path) {
+    const crate = crateForPath(node.file_path);
+    if (crate.length > 0) return crate;
+  }
+  if (node.community_id) return node.community_id;
+  if (node.file_path) {
+    const parent = parentDirectory(node.file_path);
+    if (parent.length > 0) return parent;
+  }
+  if (node.workspace) return node.workspace;
+  return null;
+}
+
+/** Deterministic hue for a grouping key from the {@link GROUP_COLORS} palette. */
+export function colorForGroup(key: string): string {
+  return GROUP_COLORS[fnv1a(key) % GROUP_COLORS.length];
+}
+
+/**
  * Key with the highest count in a tally map, ties broken by lexical order
  * for determinism. Returns `undefined` for an empty map. Used to pick a
  * community hull's dominant crate.
@@ -584,52 +633,31 @@ function workspaceBadge(workspace: string): string {
 }
 
 /**
- * Color routing. The **crate (workspace)** is the primary topology
- * grouping: every node carrying a `workspace` tag is colored by its
- * crate, so the canvas reads as a handful of crate regions sharing one
- * hue each instead of a per-community / per-folder hash rainbow. This is
- * the lever for "color per crate" — same crate, same color, regardless
- * of kind.
+ * Color routing. Every node is colored by a single **grouping key**
+ * ({@link colorGroupKey}) that prefers the most specific signal available —
+ * the crate derived from the path, else the detected community, else the
+ * parent folder. Same group → same hue, regardless of node kind, so the
+ * canvas reads as ~20 named crate regions instead of one flat color (the old
+ * coarse-`workspace` behavior) or a per-community hash rainbow.
  *
- * Projects without workspace tags (non-Rust repos, pre-workspace
- * snapshots) fall back to the prior hashing so they degrade gracefully:
- *   - Project: fixed purple accent.
- *   - Folder: hash the folder path so siblings under the same parent
- *     share a hue.
- *   - File: hash the parent directory so all files in a folder share a
- *     color.
- *   - Community: hash the stable `community_id`, falling back to the label.
- *   - Symbol: community_id (if F3 populated) → file_path's parent
- *     directory → fallback.
+ * The project root keeps a fixed apex accent; nodes with no usable key fall
+ * back to a neutral slate.
  */
 export function colorForNode(node: SnapshotNode): string {
-  // Crate wins for every kind when the snapshot carries workspace tags.
-  if (node.workspace) return colorForWorkspace(node.workspace);
-
+  // Project root keeps its apex accent no matter what its slug hashes to.
+  if (
+    node.kind === "folder" &&
+    (/project/i.test(node.label) || node.label === "" || !node.file_path)
+  ) {
+    return PROJECT_COLOR;
+  }
+  // Legacy community entries (not rendered) keep their own hue.
   if (node.kind === "community") {
-    if (node.community_id) return colorForCommunity(node.community_id);
-    return colorForCommunity(node.label || node.id);
+    return colorForGroup(node.community_id || node.label || node.id);
   }
-  if (node.kind === "folder") {
-    if (/project/i.test(node.label) || node.label === "" || !node.file_path) {
-      return PROJECT_COLOR;
-    }
-    return colorForCommunity(node.label);
-  }
-  if (node.kind === "file") {
-    const parent = node.file_path
-      ? parentDirectory(node.file_path)
-      : node.label;
-    if (parent.length === 0) return PROJECT_COLOR;
-    return colorForCommunity(parent);
-  }
-
-  if (node.community_id) return colorForCommunity(node.community_id);
-  if (node.file_path) {
-    const parent = parentDirectory(node.file_path);
-    if (parent.length > 0) return colorForCommunity(parent);
-  }
-  return SYMBOL_FALLBACK;
+  const key = colorGroupKey(node);
+  if (key) return colorForGroup(key);
+  return node.kind === "symbol" ? SYMBOL_FALLBACK : PROJECT_COLOR;
 }
 
 // ── Edge styling ────────────────────────────────────────────────────────────

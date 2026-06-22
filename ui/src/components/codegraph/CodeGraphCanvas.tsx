@@ -41,10 +41,7 @@ import {
   readEdgeRenderStats,
   type SnapshotPayload,
 } from "@/lib/codeGraphAdapter";
-import {
-  useSigmaGraph,
-  type CommunityHullRegion,
-} from "@/hooks/useSigmaGraph";
+import { useSigmaGraph } from "@/hooks/useSigmaGraph";
 import { useGraphReducers } from "@/hooks/useGraphReducers";
 import { selectCitationIds, useCodeGraphStore } from "@/stores/codeGraphStore";
 import { RendererCapabilityDialog } from "./RendererCapabilityDialog";
@@ -166,7 +163,6 @@ export function CodeGraphCanvas({
     reducers,
   );
   useAutoFocusOnCitations({ ready, layoutRunning, sigma });
-  const hullRegions = useCommunityHullRegions(sigma);
 
   useEffect(() => {
     setSigmaHandle(sigma);
@@ -245,7 +241,6 @@ export function CodeGraphCanvas({
   return (
     <div className="absolute inset-0" style={{ background: CANVAS_BACKGROUND }}>
       <RendererCapabilityDialog />
-      <CommunityHullOverlay regions={hullRegions} />
       <div
         ref={containerRef}
         data-testid="code-graph-canvas"
@@ -276,59 +271,6 @@ function useAutoFocusOnCitations({
     if (!ready || layoutRunning || !sigma) return;
     sigma.focusNodes(citationIds);
   }, [citationIds, layoutRunning, ready, sigma]);
-}
-
-function useCommunityHullRegions(
-  sigma: ReturnType<typeof useSigmaGraph>["sigma"],
-): CommunityHullRegion[] {
-  const [regions, setRegions] = useState<CommunityHullRegion[]>([]);
-
-  useEffect(() => {
-    if (!sigma) {
-      setRegions([]);
-      return;
-    }
-    const sync = () => setRegions(sigma.getCommunityHullRegions());
-    sync();
-    const off = sigma.on("afterRender", sync);
-    return off;
-  }, [sigma]);
-
-  return regions;
-}
-
-function CommunityHullOverlay({
-  regions,
-}: {
-  regions: CommunityHullRegion[];
-}) {
-  if (regions.length === 0) return null;
-  return (
-    <div
-      data-testid="community-hull-overlay"
-      className="pointer-events-none absolute inset-0 overflow-hidden"
-      aria-hidden="true"
-    >
-      {regions.map((region) => (
-        <div
-          key={region.id}
-          data-testid="community-hull-region"
-          className="absolute rounded-[999px] border opacity-70 transition-all duration-200 ease-out"
-          style={{
-            left: region.left,
-            top: region.top,
-            width: region.width,
-            height: region.height,
-            // Faint crate-colored tint, no outer glow — the boxShadow bloom
-            // was the dominant source of the washed-out "balls" look.
-            borderColor: `${region.color}26`,
-            background: `radial-gradient(circle at 50% 50%, ${region.color}12 0%, ${region.color}08 60%, transparent 74%)`,
-          }}
-          title={`${region.label} (${region.memberCount.toLocaleString()} nodes)`}
-        />
-      ))}
-    </div>
-  );
 }
 
 /**
