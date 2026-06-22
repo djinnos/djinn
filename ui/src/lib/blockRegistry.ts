@@ -13,6 +13,7 @@ import {
   FileTreeBlock,
   HtmlBlock,
   JsonExplorerBlock,
+  OpenApiSpecBlock,
   QuestionFormBlock,
   RichText,
   TableBlock,
@@ -44,6 +45,7 @@ const BLOCK_COMPONENTS: Record<ProposalBlockType, ComponentType<BlockProps>> = {
   checklist: ChecklistBlock,
   "json-explorer": JsonExplorerBlock,
   html: HtmlBlock,
+  "openapi-spec": OpenApiSpecBlock,
   "question-form": QuestionFormBlock,
 };
 
@@ -61,6 +63,7 @@ const BLOCK_DISPLAY_NAMES: Record<ProposalBlockType, string> = {
   checklist: "Checklist",
   "json-explorer": "JSON Explorer",
   html: "HTML",
+  "openapi-spec": "OpenAPI Spec",
   "question-form": "Open Questions",
 };
 

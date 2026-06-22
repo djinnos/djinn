@@ -12,6 +12,7 @@ export { CalloutBlock } from "./CalloutBlock";
 export { TableBlock } from "./TableBlock";
 export { ChecklistBlock } from "./ChecklistBlock";
 export { JsonExplorerBlock, JsonTree } from "./JsonExplorerBlock";
+export { OpenApiSpecBlock } from "./OpenApiSpecBlock";
 export { HtmlBlock } from "./HtmlBlock";
 export { SandboxedHtmlFrame } from "./SandboxedHtmlFrame";
 export {

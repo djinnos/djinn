@@ -161,6 +161,11 @@ export const PROPOSAL_BLOCK_REGISTRY = {
     tag: "Html",
     fields: {},
   },
+  "openapi-spec": {
+    type: "openapi-spec",
+    tag: "OpenApi",
+    fields: {},
+  },
   "question-form": {
     type: "question-form",
     tag: "QuestionForm",
