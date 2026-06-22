@@ -313,15 +313,16 @@ function CommunityHullOverlay({
         <div
           key={region.id}
           data-testid="community-hull-region"
-          className="absolute rounded-[999px] border opacity-80 transition-all duration-200 ease-out"
+          className="absolute rounded-[999px] border opacity-70 transition-all duration-200 ease-out"
           style={{
             left: region.left,
             top: region.top,
             width: region.width,
             height: region.height,
-            borderColor: `${region.color}66`,
-            background: `radial-gradient(circle at 50% 50%, ${region.color}24 0%, ${region.color}10 58%, transparent 72%)`,
-            boxShadow: `0 0 44px ${region.color}24`,
+            // Faint crate-colored tint, no outer glow — the boxShadow bloom
+            // was the dominant source of the washed-out "balls" look.
+            borderColor: `${region.color}26`,
+            background: `radial-gradient(circle at 50% 50%, ${region.color}12 0%, ${region.color}08 60%, transparent 74%)`,
           }}
           title={`${region.label} (${region.memberCount.toLocaleString()} nodes)`}
         />
