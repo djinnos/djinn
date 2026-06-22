@@ -31,6 +31,8 @@ pub enum BlockType {
     JsonExplorer,
     Html,
     OpenApiSpec,
+    Tabs,
+    Columns,
     QuestionForm,
 }
 
@@ -52,6 +54,8 @@ impl BlockType {
             BlockType::JsonExplorer => "json-explorer",
             BlockType::Html => "html",
             BlockType::OpenApiSpec => "openapi-spec",
+            BlockType::Tabs => "tabs",
+            BlockType::Columns => "columns",
             BlockType::QuestionForm => "question-form",
         }
     }
@@ -73,6 +77,8 @@ impl BlockType {
             BlockType::JsonExplorer => "JsonExplorer",
             BlockType::Html => "Html",
             BlockType::OpenApiSpec => "OpenApi",
+            BlockType::Tabs => "Tabs",
+            BlockType::Columns => "Columns",
             BlockType::QuestionForm => "QuestionForm",
         }
     }
@@ -565,6 +571,52 @@ pub static PROPOSAL_BLOCK_REGISTRY: LazyLock<BTreeMap<&'static str, ProposalBloc
                 ),
             ),
             (
+                "tabs",
+                block_with_description(
+                    "tabs",
+                    "Tabs",
+                    "A tabbed container: one tab strip whose active panel \
+                     recursively renders its own proposal-MDX body. The block is \
+                     SELF-CLOSING; all content lives in the `tabs` attribute as a \
+                     JSON array passed via a `{...}` expression: \
+                     `tabs={[{ \"label\": \"...\", \"body\": \"...mdx...\" }, ...]}`. \
+                     Each entry has a `label` (the tab button text) and a `body` \
+                     (a normal proposal-MDX string — the SAME grammar as the \
+                     top-level proposal body, so it may itself contain blocks like \
+                     `<Callout .../>` and inline **markdown**). The body is parsed \
+                     and rendered recursively (nesting is depth-capped). The first \
+                     tab is shown by default. Author the JSON with proper escaping \
+                     (newlines as `\\n`, quotes as `\\\"`). If the attribute is \
+                     missing or not valid JSON the block falls back gracefully. \
+                     Example: `<Tabs id=\"x\" tabs={[{ \"label\": \"Overview\", \
+                     \"body\": \"<Callout id=\\\"c\\\">Hi</Callout>\" }, { \"label\": \
+                     \"API\", \"body\": \"some **markdown**\" }]} />`.",
+                    fields(vec![("tabs", string_field())]),
+                ),
+            ),
+            (
+                "columns",
+                block_with_description(
+                    "columns",
+                    "Columns",
+                    "A responsive multi-column layout container: N columns side by \
+                     side on wide screens, stacked on narrow ones. The block is \
+                     SELF-CLOSING; all content lives in the `columns` attribute as \
+                     a JSON array passed via a `{...}` expression: \
+                     `columns={[{ \"body\": \"...mdx...\" }, { \"body\": \"...mdx...\" }]}`. \
+                     Each entry has a `body` (a normal proposal-MDX string — the \
+                     SAME grammar as the top-level proposal body, so it may itself \
+                     contain blocks like `<DataModel .../>` and inline **markdown**). \
+                     Each column body is parsed and rendered recursively (nesting is \
+                     depth-capped). Author the JSON with proper escaping (newlines \
+                     as `\\n`, quotes as `\\\"`). If the attribute is missing or not \
+                     valid JSON the block falls back gracefully. Example: \
+                     `<Columns id=\"x\" columns={[{ \"body\": \"### Before\\nold\" }, \
+                     { \"body\": \"### After\\nnew\" }]} />`.",
+                    fields(vec![("columns", string_field())]),
+                ),
+            ),
+            (
                 "question-form",
                 block(
                     "question-form",
@@ -991,7 +1043,7 @@ mod tests {
     #[test]
     fn registry_contains_v1_blocks() {
         let registry = proposal_block_registry();
-        assert_eq!(registry.len(), 15);
+        assert_eq!(registry.len(), 17);
         assert_eq!(registry["rich-text"].tag, "RichText");
         assert_eq!(registry["diagram"].tag, "Diagram");
         assert_eq!(registry["annotated-code"].tag, "AnnotatedCode");
@@ -1006,6 +1058,8 @@ mod tests {
         assert_eq!(registry["json-explorer"].tag, "JsonExplorer");
         assert_eq!(registry["html"].tag, "Html");
         assert_eq!(registry["openapi-spec"].tag, "OpenApi");
+        assert_eq!(registry["tabs"].tag, "Tabs");
+        assert_eq!(registry["columns"].tag, "Columns");
         assert_eq!(registry["question-form"].tag, "QuestionForm");
         // The html block ships authoring guidance noting it is sandboxed.
         assert!(
@@ -1028,6 +1082,22 @@ mod tests {
                 .is_some_and(|d| d.contains("unified diff")),
             "diff block must advertise unified-diff authoring guidance"
         );
+        // The tabs block documents its JSON-array `tabs` authoring format.
+        assert_eq!(registry["tabs"].fields["tabs"].field_type, "string");
+        assert!(
+            registry["tabs"]
+                .description
+                .is_some_and(|d| d.contains("tabs={[") && d.contains("body")),
+            "tabs block must advertise its JSON-array authoring format"
+        );
+        // The columns block documents its JSON-array `columns` authoring format.
+        assert_eq!(registry["columns"].fields["columns"].field_type, "string");
+        assert!(
+            registry["columns"]
+                .description
+                .is_some_and(|d| d.contains("columns={[") && d.contains("body")),
+            "columns block must advertise its JSON-array authoring format"
+        );
     }
 
     #[test]
@@ -1047,6 +1117,8 @@ mod tests {
             BlockType::JsonExplorer,
             BlockType::Html,
             BlockType::OpenApiSpec,
+            BlockType::Tabs,
+            BlockType::Columns,
             BlockType::QuestionForm,
         ];
         for bt in types {
@@ -1058,7 +1130,7 @@ mod tests {
     #[test]
     fn block_registry_new_has_all_definitions() {
         let reg = BlockRegistry::new();
-        assert_eq!(reg.definitions().len(), 15);
+        assert_eq!(reg.definitions().len(), 17);
         assert!(reg.definition_for_tag("RichText").is_some());
         assert!(reg.definition_for_tag("UnknownTag").is_none());
         assert!(reg.tags().contains("RichText"));
@@ -1085,6 +1157,8 @@ mod tests {
             "JsonExplorer",
             "Html",
             "OpenApi",
+            "Tabs",
+            "Columns",
             "QuestionForm",
         ]
         .into_iter()

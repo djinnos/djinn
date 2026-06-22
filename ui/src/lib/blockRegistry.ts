@@ -6,6 +6,7 @@ import {
   ApiEndpointBlock,
   CalloutBlock,
   ChecklistBlock,
+  ColumnsBlock,
   DataModelBlock,
   DecisionsBlock,
   Diagram,
@@ -17,6 +18,7 @@ import {
   QuestionFormBlock,
   RichText,
   TableBlock,
+  TabsBlock,
 } from "@/components/proposals/blocks";
 import {
   PROPOSAL_BLOCK_REGISTRY,
@@ -46,6 +48,8 @@ const BLOCK_COMPONENTS: Record<ProposalBlockType, ComponentType<BlockProps>> = {
   "json-explorer": JsonExplorerBlock,
   html: HtmlBlock,
   "openapi-spec": OpenApiSpecBlock,
+  tabs: TabsBlock,
+  columns: ColumnsBlock,
   "question-form": QuestionFormBlock,
 };
 
@@ -64,6 +68,8 @@ const BLOCK_DISPLAY_NAMES: Record<ProposalBlockType, string> = {
   "json-explorer": "JSON Explorer",
   html: "HTML",
   "openapi-spec": "OpenAPI Spec",
+  tabs: "Tabs",
+  columns: "Columns",
   "question-form": "Open Questions",
 };
 
