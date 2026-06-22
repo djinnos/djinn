@@ -6,7 +6,9 @@ import {
   DOUBLE_CLICK_INTERVAL_MS,
   LOD_FAR_RATIO,
   LOD_MID_RATIO,
+  MAX_RENDERED_EDGES,
   PRECOMPUTED_LAYOUT_ATTRIBUTE,
+  readEdgeRenderStats,
   VIEWPORT_CULLING_MARGIN,
   VIEWPORT_CULLING_THRESHOLD,
   WORKSPACE_COLORS,
@@ -1300,6 +1302,76 @@ describe("buildGraphFromSnapshot", () => {
         graph2.getNodeAttribute(id, "y"),
       );
     }
+  });
+});
+
+describe("edge salience cap", () => {
+  // Build a dense snapshot: N symbol nodes with finite coordinates (so the
+  // precomputed branch is taken — fast, no layout) and `edgeCount`
+  // SymbolReference edges spread across them. `multi: true` lets duplicate
+  // endpoints coexist, so we can exceed the cap with a modest node count.
+  function denseSnapshot(
+    nodeCount: number,
+    edgeCount: number,
+    confidenceAt: (i: number) => number = () => 1,
+  ): SnapshotPayload {
+    const nodes: SnapshotNode[] = Array.from({ length: nodeCount }, (_, i) => ({
+      id: `symbol:n${i}`,
+      kind: "symbol",
+      label: `n${i}`,
+      symbol_kind: "function",
+      pagerank: 0.1,
+      x: i,
+      y: i,
+    }));
+    const edges = Array.from({ length: edgeCount }, (_, i) => ({
+      from: `symbol:n${i % nodeCount}`,
+      to: `symbol:n${(i + 1) % nodeCount}`,
+      kind: "SymbolReference",
+      confidence: confidenceAt(i),
+      reason: undefined,
+    }));
+    return {
+      project_id: "proj-dense",
+      git_head: "dense",
+      generated_at: "2026-04-28T00:00:00Z",
+      truncated: false,
+      total_nodes: nodeCount,
+      total_edges: edgeCount,
+      nodes,
+      edges,
+    };
+  }
+
+  it("caps rendered edges at MAX_RENDERED_EDGES and records the original total", () => {
+    const total = MAX_RENDERED_EDGES + 500;
+    const graph = buildGraphFromSnapshot(denseSnapshot(200, total));
+    expect(graph.size).toBe(MAX_RENDERED_EDGES);
+    expect(readEdgeRenderStats(graph)).toEqual({
+      rendered: MAX_RENDERED_EDGES,
+      total,
+    });
+  });
+
+  it("does not trim when drawable edges sit under the ceiling", () => {
+    const graph = buildGraphFromSnapshot(denseSnapshot(50, 100));
+    expect(graph.size).toBe(100);
+    expect(readEdgeRenderStats(graph)).toEqual({ rendered: 100, total: 100 });
+  });
+
+  it("keeps the highest-confidence edges when trimming", () => {
+    // Last `MAX` edges get confidence 1, the rest 0.1 — only the
+    // high-confidence tail should survive the salience sort.
+    const total = MAX_RENDERED_EDGES + 1000;
+    const graph = buildGraphFromSnapshot(
+      denseSnapshot(200, total, (i) => (i >= total - MAX_RENDERED_EDGES ? 1 : 0.1)),
+    );
+    expect(graph.size).toBe(MAX_RENDERED_EDGES);
+    let lowConfidenceKept = 0;
+    graph.forEachEdge((_e, attrs) => {
+      if ((attrs.confidence as number) < 0.5) lowConfidenceKept += 1;
+    });
+    expect(lowConfidenceKept).toBe(0);
   });
 });
 

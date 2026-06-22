@@ -31,12 +31,14 @@ import {
   RefreshIcon,
 } from "@hugeicons/core-free-icons";
 
+import type Graph from "graphology";
 import { fetchSnapshot } from "@/api/codeGraph";
 import {
   buildGraphFromSnapshot,
   filterSnapshotForWorkspace,
   isDoubleClick,
   parseSnapshotResponse,
+  readEdgeRenderStats,
   type SnapshotPayload,
 } from "@/lib/codeGraphAdapter";
 import {
@@ -250,7 +252,7 @@ export function CodeGraphCanvas({
         className="absolute inset-0 transition-opacity duration-200 ease-out"
         style={{ cursor: "grab" }}
       />
-      <CanvasOverlay state={state} visibleSnapshot={visibleSnapshot} />
+      <CanvasOverlay state={state} visibleSnapshot={visibleSnapshot} graph={graph} />
       {layoutRunning && visibleSnapshot?.nodes.length ? (
         <LayoutOptimizingPill />
       ) : null}
@@ -425,9 +427,10 @@ export function CitationStatusBadge() {
 interface CanvasOverlayProps {
   state: FetchState;
   visibleSnapshot: SnapshotPayload | null;
+  graph: Graph | null;
 }
 
-function CanvasOverlay({ state, visibleSnapshot }: CanvasOverlayProps) {
+function CanvasOverlay({ state, visibleSnapshot, graph }: CanvasOverlayProps) {
   if (state.status === "loading") {
     return (
       <CenterCard>
@@ -475,9 +478,37 @@ function CanvasOverlay({ state, visibleSnapshot }: CanvasOverlayProps) {
           </span>
         )}
       </Pill>
-      <Pill>{snapshot.edges.length.toLocaleString()} edges</Pill>
+      <EdgeCountPill snapshot={snapshot} graph={graph} />
     </div>
   );
+}
+
+/**
+ * Edge-count pill. When the salience cap trims the drawable set (large
+ * "All" snapshots), shows "N of M edges" with the rendered count first so
+ * it reads consistently with the node "capped from" treatment. Falls back
+ * to the raw snapshot edge count before the graph is built.
+ */
+function EdgeCountPill({
+  snapshot,
+  graph,
+}: {
+  snapshot: SnapshotPayload;
+  graph: Graph | null;
+}) {
+  const stats = graph ? readEdgeRenderStats(graph) : null;
+  if (stats && stats.rendered < stats.total) {
+    return (
+      <Pill>
+        {stats.rendered.toLocaleString()} edges
+        <span className="ml-1 text-amber-300">
+          (of {stats.total.toLocaleString()})
+        </span>
+      </Pill>
+    );
+  }
+  const count = stats?.rendered ?? snapshot.edges.length;
+  return <Pill>{count.toLocaleString()} edges</Pill>;
 }
 
 function CenterCard({ children }: { children: React.ReactNode }) {
