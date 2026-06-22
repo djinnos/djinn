@@ -18,6 +18,7 @@ import {
   buildGraphFromSnapshot,
   colorForCommunity,
   colorForGroup,
+  computeCrateLegend,
   colorForNode,
   colorForWorkspace,
   crateForPath,
@@ -1702,6 +1703,56 @@ describe("crateForPath / colorForGroup", () => {
       seen.add(colorForGroup(c));
     }
     expect(seen.size).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe("computeCrateLegend", () => {
+  function snapshotFor(paths: string[]): SnapshotPayload {
+    return {
+      project_id: "p",
+      git_head: "h",
+      generated_at: "2026-04-28T00:00:00Z",
+      truncated: false,
+      total_nodes: paths.length,
+      total_edges: 0,
+      nodes: paths.map((fp, i) => ({
+        id: `symbol:n${i}`,
+        kind: "symbol",
+        label: `n${i}`,
+        symbol_kind: "function",
+        pagerank: 0.1,
+        x: i,
+        y: i,
+        file_path: fp,
+      })),
+      edges: [],
+    };
+  }
+
+  it("tallies crate groups with hue + count, sorted by count desc then key", () => {
+    const graph = buildGraphFromSnapshot(
+      snapshotFor([
+        "server/crates/djinn-graph/src/a.rs",
+        "server/crates/djinn-graph/src/b.rs",
+        "server/crates/djinn-graph/src/c.rs",
+        "server/crates/djinn-agent/src/a.rs",
+        "ui/src/main.ts",
+        "ui/src/app.ts",
+      ]),
+    );
+    const legend = computeCrateLegend(graph);
+    expect(legend.map((e) => [e.key, e.count])).toEqual([
+      ["djinn-graph", 3],
+      ["ui", 2],
+      ["djinn-agent", 1],
+    ]);
+    // Hues come from the group palette and match colorForGroup.
+    expect(legend[0].color).toBe(colorForGroup("djinn-graph"));
+  });
+
+  it("returns an empty legend for a graph with no grouped nodes", () => {
+    const graph = buildGraphFromSnapshot(snapshotFor([]));
+    expect(computeCrateLegend(graph)).toEqual([]);
   });
 });
 

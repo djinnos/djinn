@@ -274,6 +274,12 @@ export interface CodeGraphHighlightState {
   graphReady: boolean;
   selectedWorkspaceSlug: string | null;
   /**
+   * Topology grouping key (crate/community) to isolate via the crate legend.
+   * `null` = show all. When set, the node reducer hides nodes whose
+   * `colorGroup` differs, so the canvas shows just that crate.
+   */
+  crateFilter: string | null;
+  /**
    * Active intent lens. `null` means the user has manually toggled
    * individual filters (Advanced mode). Applying a lens replaces all
    * three filter maps from the preset.
@@ -318,6 +324,8 @@ export interface CodeGraphHighlightActions {
   /** Canvas reports whether the graph is ready (loaded with at least one node). */
   setGraphReady: (ready: boolean) => void;
   setSelectedWorkspaceSlug: (slug: string | null) => void;
+  /** Set/clear the isolated crate (legend click). Pass `null` to show all. */
+  setCrateFilter: (key: string | null) => void;
   /** Apply an intent lens, replacing all three filter maps from the preset. */
   applyLens: (lensId: LensId) => void;
   reset: () => void;
@@ -342,6 +350,7 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   complexityAvailable: false,
   graphReady: false,
   selectedWorkspaceSlug: null,
+  crateFilter: null,
   activeLens: "architecture",
 };
 
@@ -496,6 +505,10 @@ export const useCodeGraphStore = create<
 
   setSelectedWorkspaceSlug: (slug) => {
     set({ selectedWorkspaceSlug: slug });
+  },
+
+  setCrateFilter: (key) => {
+    set({ crateFilter: key });
   },
 
   applyLens: (lensId) => {

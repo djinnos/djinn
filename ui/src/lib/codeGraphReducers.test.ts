@@ -232,6 +232,22 @@ describe("nodeReducer", () => {
     expect(out).toBe(attrs);
   });
 
+  it("hides nodes outside the isolated crate when crateFilter is set", () => {
+    const v = viewWith({ crateFilter: "djinn-graph" });
+    const inCrate = nodeReducer(
+      "a",
+      { color: "blue", size: 5, label: "A", colorGroup: "djinn-graph" },
+      v,
+    );
+    expect(inCrate.hidden).toBeUndefined();
+    const otherCrate = nodeReducer(
+      "b",
+      { color: "blue", size: 5, label: "B", colorGroup: "djinn-agent" },
+      v,
+    );
+    expect(otherCrate.hidden).toBe(true);
+  });
+
   it("de-emphasizes workspace context nodes even when no highlight is active", () => {
     const out = nodeReducer(
       "remote",
