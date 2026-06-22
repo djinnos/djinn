@@ -638,6 +638,61 @@ function edgeBaseSize(nodeCount: number): number {
   return 1.0;
 }
 
+/**
+ * Ceiling on edges handed to Sigma. A 10k-node "All" snapshot drags in
+ * ~98k edges, and every one is a curved WebGL geometry — that volume is
+ * the dominant cost of the initial-load hang and renders as an
+ * undifferentiated wash anyway. Above this ceiling we keep only the
+ * highest-salience edges (see {@link edgeSalience}); the rest are
+ * dropped before they ever reach graphology/Sigma. Focused sub-views
+ * (single workspace, DOI expansion) sit far below the cap and are
+ * unaffected.
+ */
+export const MAX_RENDERED_EDGES = 12_000;
+
+/**
+ * Graph-level attribute carrying `{ rendered, total }` edge counts so the
+ * canvas can surface "N of M edges" when the salience cap trims the set.
+ * `total` counts drawable edges (post containment/self-loop/drop filters),
+ * matching what `rendered` is selected from.
+ */
+export const EDGE_RENDER_STATS_ATTRIBUTE = "edgeRenderStats";
+
+export interface EdgeRenderStats {
+  rendered: number;
+  total: number;
+}
+
+/** Read the `{ rendered, total }` edge counts stashed on a built graph. */
+export function readEdgeRenderStats(graph: Graph): EdgeRenderStats | null {
+  const stats = graph.getAttribute(EDGE_RENDER_STATS_ATTRIBUTE);
+  if (
+    stats &&
+    typeof stats === "object" &&
+    typeof (stats as EdgeRenderStats).rendered === "number" &&
+    typeof (stats as EdgeRenderStats).total === "number"
+  ) {
+    return stats as EdgeRenderStats;
+  }
+  return null;
+}
+
+/**
+ * Visual weight of a drawable edge — reuses the same factors that drive
+ * stroke `size`, so the edges that read most strongly on the canvas are
+ * exactly the ones the salience cap keeps: per-kind importance
+ * (structural/OOP spine over the call graph), per-edge confidence, and a
+ * cross-workspace boost.
+ */
+function edgeSalience(
+  multiplier: number,
+  confidence: number,
+  isCrossWorkspace: boolean,
+): number {
+  const confidenceFactor = 0.4 + confidence * 0.6;
+  return multiplier * confidenceFactor * (isCrossWorkspace ? 2.4 : 1);
+}
+
 // ── Adapter ─────────────────────────────────────────────────────────────────
 
 export interface BuildGraphOptions {
@@ -794,6 +849,19 @@ function addEdgesFromSnapshot(
   const { dropSelfLoops } = options;
   const nodeMap = new Map(snapshot.nodes.map((n) => [n.id, n]));
   const baseSize = edgeBaseSize(nodeCount);
+
+  // Collect drawable edges with their fully-resolved attributes and a
+  // salience score, then (if over the ceiling) keep only the strongest
+  // before touching graphology. Dropping at this layer keeps the trimmed
+  // edges out of Sigma's WebGL buffers entirely — the real load win.
+  interface DrawableEdge {
+    from: string;
+    to: string;
+    salience: number;
+    attrs: Record<string, unknown>;
+  }
+  const drawable: DrawableEdge[] = [];
+
   for (const edge of snapshot.edges) {
     // Containment edges (ContainsDefinition / DeclaredInFile /
     // MemberOf) are structural nesting metadata, not drawn or
@@ -812,26 +880,48 @@ function addEdgesFromSnapshot(
       !!targetWorkspace &&
       sourceWorkspace !== targetWorkspace;
     const crossWorkspaceColor = isCrossWorkspace ? "#facc15" : undefined;
-    graph.addEdge(edge.from, edge.to, {
-      kind: edge.kind,
-      confidence: edge.confidence,
-      reason: edge.reason,
-      sourceWorkspace,
-      targetWorkspace,
-      isCrossWorkspace,
-      crossWorkspace: isCrossWorkspace,
-      size:
-        baseSize *
-        style.sizeMultiplier *
-        confidenceFactor *
-        (isCrossWorkspace ? 2.4 : 1),
-      color: crossWorkspaceColor ?? style.color,
-      type: "curved",
-      curvature: (isCrossWorkspace ? 0.28 : 0.12) + 0.04,
-      zIndex: isCrossWorkspace ? 20 : 1,
-      lineStyle: isCrossWorkspace ? "dashed" : "solid",
+    drawable.push({
+      from: edge.from,
+      to: edge.to,
+      salience: edgeSalience(
+        style.sizeMultiplier,
+        edge.confidence,
+        isCrossWorkspace,
+      ),
+      attrs: {
+        kind: edge.kind,
+        confidence: edge.confidence,
+        reason: edge.reason,
+        sourceWorkspace,
+        targetWorkspace,
+        isCrossWorkspace,
+        crossWorkspace: isCrossWorkspace,
+        size: baseSize * style.sizeMultiplier * confidenceFactor *
+          (isCrossWorkspace ? 2.4 : 1),
+        color: crossWorkspaceColor ?? style.color,
+        type: "curved",
+        curvature: (isCrossWorkspace ? 0.28 : 0.12) + 0.04,
+        zIndex: isCrossWorkspace ? 20 : 1,
+        lineStyle: isCrossWorkspace ? "dashed" : "solid",
+      },
     });
   }
+
+  const total = drawable.length;
+  if (total > MAX_RENDERED_EDGES) {
+    // Highest salience first; the slice keeps the strongest MAX edges.
+    drawable.sort((a, b) => b.salience - a.salience);
+    drawable.length = MAX_RENDERED_EDGES;
+  }
+
+  for (const e of drawable) {
+    graph.addEdge(e.from, e.to, e.attrs);
+  }
+
+  graph.setAttribute(EDGE_RENDER_STATS_ATTRIBUTE, {
+    rendered: drawable.length,
+    total,
+  } satisfies EdgeRenderStats);
 }
 
 /**
