@@ -78,6 +78,7 @@
     "react-markdown": "^9.0.1",
     "react-router-dom": "^7.13.2",
     "react-syntax-highlighter": "^15.6.1",
+    "refractor": "^3.6.0",
     "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.0",
     "shadcn": "^3.8.5",
