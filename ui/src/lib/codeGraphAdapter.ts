@@ -398,6 +398,23 @@ export function colorForCommunity(communityId: string): string {
   return COMMUNITY_COLORS[fnv1a(communityId) % COMMUNITY_COLORS.length];
 }
 
+/**
+ * Key with the highest count in a tally map, ties broken by lexical order
+ * for determinism. Returns `undefined` for an empty map. Used to pick a
+ * community hull's dominant crate.
+ */
+function dominantKey(counts: Map<string, number>): string | undefined {
+  let best: string | undefined;
+  let bestCount = -1;
+  for (const [key, count] of counts) {
+    if (count > bestCount || (count === bestCount && best !== undefined && key < best)) {
+      best = key;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
 // ── Community hull metadata ────────────────────────────────────────────────
 
 /**
@@ -456,7 +473,7 @@ export function deriveCommunityHulls(
 ): CommunityHull[] {
   const visibleMembers = new Map<
     string,
-    { ids: Set<string>; legacy?: SnapshotNode }
+    { ids: Set<string>; legacy?: SnapshotNode; workspaces: Map<string, number> }
   >();
 
   for (const node of snapshot.nodes) {
@@ -468,28 +485,44 @@ export function deriveCommunityHulls(
         // Prefer the first legacy entry encountered; do not overwrite.
         if (!entry.legacy) entry.legacy = node;
       } else {
-        visibleMembers.set(cid, { ids: new Set(), legacy: node });
+        visibleMembers.set(cid, {
+          ids: new Set(),
+          legacy: node,
+          workspaces: new Map(),
+        });
       }
       continue;
     }
     if (!node.community_id) continue;
     const cid = node.community_id;
-    const entry = visibleMembers.get(cid);
-    if (entry) {
-      entry.ids.add(node.id);
-    } else {
-      visibleMembers.set(cid, { ids: new Set([node.id]) });
+    let entry = visibleMembers.get(cid);
+    if (!entry) {
+      entry = { ids: new Set(), workspaces: new Map() };
+      visibleMembers.set(cid, entry);
+    }
+    entry.ids.add(node.id);
+    if (node.workspace) {
+      entry.workspaces.set(
+        node.workspace,
+        (entry.workspaces.get(node.workspace) ?? 0) + 1,
+      );
     }
   }
 
   const hulls: CommunityHull[] = [];
   for (const [cid, entry] of visibleMembers) {
     const legacy = entry.legacy;
+    // Match the hull background to the crate its members are colored by,
+    // so the region and the dots inside it read as one crate. Falls back
+    // to the per-community hue when no member carries a workspace tag.
+    const dominantWorkspace = dominantKey(entry.workspaces);
     hulls.push({
       id: cid,
       label: legacy?.label ?? cid,
       keywords: legacy ? normalizeKeywords(legacy.keywords) : undefined,
-      color: colorForCommunity(cid),
+      color: dominantWorkspace
+        ? colorForWorkspace(dominantWorkspace)
+        : colorForCommunity(cid),
       memberCount: legacy?.member_count ?? entry.ids.size,
       memberIds: Array.from(entry.ids).sort((a, b) => a.localeCompare(b, "en")),
       seed: fnv1a(cid),
@@ -518,20 +551,28 @@ function workspaceBadge(workspace: string): string {
 }
 
 /**
- * Color routing:
+ * Color routing. The **crate (workspace)** is the primary topology
+ * grouping: every node carrying a `workspace` tag is colored by its
+ * crate, so the canvas reads as a handful of crate regions sharing one
+ * hue each instead of a per-community / per-folder hash rainbow. This is
+ * the lever for "color per crate" — same crate, same color, regardless
+ * of kind.
+ *
+ * Projects without workspace tags (non-Rust repos, pre-workspace
+ * snapshots) fall back to the prior hashing so they degrade gracefully:
  *   - Project: fixed purple accent.
  *   - Folder: hash the folder path so siblings under the same parent
- *     share a hue — the canvas reads as colored regions per top-level
- *     module instead of one indigo band.
+ *     share a hue.
  *   - File: hash the parent directory so all files in a folder share a
- *     color. This is the lever that breaks up the blue file wall.
- *   - Community: hash the stable `community_id` so each collapsed blob
- *     gets a distinct, deterministic hue. Falls back to the label when
- *     the id is absent (shouldn't happen for real server payloads).
+ *     color.
+ *   - Community: hash the stable `community_id`, falling back to the label.
  *   - Symbol: community_id (if F3 populated) → file_path's parent
  *     directory → fallback.
  */
 export function colorForNode(node: SnapshotNode): string {
+  // Crate wins for every kind when the snapshot carries workspace tags.
+  if (node.workspace) return colorForWorkspace(node.workspace);
+
   if (node.kind === "community") {
     if (node.community_id) return colorForCommunity(node.community_id);
     return colorForCommunity(node.label || node.id);
