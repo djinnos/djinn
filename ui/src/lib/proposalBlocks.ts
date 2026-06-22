@@ -151,16 +151,6 @@ export const PROPOSAL_BLOCK_REGISTRY = {
     tag: "Checklist",
     fields: {},
   },
-  code: {
-    type: "code",
-    tag: "Code",
-    fields: {
-      filename: { type: "string" },
-      lang: { type: "string" },
-      caption: { type: "string" },
-      maxLines: { type: "string" },
-    },
-  },
   "question-form": {
     type: "question-form",
     tag: "QuestionForm",
