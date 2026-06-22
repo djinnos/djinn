@@ -6,11 +6,22 @@ import { defineConfig } from "vite"
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-      // elkjs main entry requires('web-worker') for Node — use browser bundle
-      "elkjs": path.resolve(__dirname, "./node_modules/elkjs/lib/elk.bundled.js"),
-    },
+    alias: [
+      { find: "@", replacement: path.resolve(__dirname, "./src") },
+      // elkjs's main entry requires('web-worker') for Node — point the bare
+      // specifier at the browser bundle instead. Use an EXACT (anchored) match:
+      // a plain string alias matches as a prefix, so it would also rewrite
+      // subpath imports like `elkjs/lib/elk.bundled.js` (used by
+      // beautiful-mermaid) into a doubled `.../elk.bundled.js/lib/elk.bundled.js`
+      // path that the production rollup/commonjs resolver fails to load.
+      {
+        find: /^elkjs$/,
+        replacement: path.resolve(
+          __dirname,
+          "./node_modules/elkjs/lib/elk.bundled.js",
+        ),
+      },
+    ],
   },
   clearScreen: false,
   server: {
