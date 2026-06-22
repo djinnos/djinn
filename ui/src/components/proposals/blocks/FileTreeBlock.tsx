@@ -25,8 +25,9 @@ import {
  * FileTree — an interactive VS Code / GitHub-explorer file & change tree.
  *
  * The freeform body text (indented ASCII tree OR one slash-path per line, with
- * optional `(NEW)`/`(MODIFIED)`/`(DELETED)`/`(RENAMED)` markers and trailing
- * notes) is parsed into a flat file list, then folded into a nested folder tree
+ * an optional DECLARED leading status token — `+` added, `~` modified, `-`
+ * removed, `>` renamed, none = unchanged — and trailing notes) is parsed into a
+ * flat file list, then folded into a nested folder tree
  * (folders before files, single-child chains compacted). Folders expand/collapse
  * (top level open by default); files carry an A/M/D/R change badge and a muted
  * inline note. A header tallies `+N ~N −N »N`.
