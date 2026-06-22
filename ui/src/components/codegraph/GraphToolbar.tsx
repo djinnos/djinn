@@ -97,17 +97,19 @@ export function GraphToolbar({
 
   const disabled = !graphReady;
 
-  // The complexity heatmap colors function/method nodes by cognitive
-  // percentile, so it's only meaningful when those nodes are visible. The
-  // Architecture lens hides every symbol kind, so the heatmap would paint
-  // nothing — gate the toggle on functions being visible, not just on the
-  // data existing.
+  // The complexity heatmap colors function nodes by cognitive percentile, and
+  // file nodes by their worst function (aggregate). So it's meaningful when
+  // either functions OR files are visible — i.e. the Calls or Architecture
+  // lens. It only paints nothing when neither is shown (e.g. a types-only
+  // view). Gate the toggle on that, not just on the data existing.
   const functionsVisible =
     symbolKindFilters.function === true || symbolKindFilters.method === true;
+  const filesVisible = nodeKindFilters.file === true;
+  const complexityNodesVisible = functionsVisible || filesVisible;
   const complexityDisabledReason = !complexityAvailable
     ? "No complexity data — graph not yet warmed for languages in the walker"
-    : !functionsVisible
-      ? "Complexity colors functions — switch to the Calls lens to use it"
+    : !complexityNodesVisible
+      ? "Complexity colors files and functions — switch to the Architecture or Calls lens"
       : undefined;
 
   return (

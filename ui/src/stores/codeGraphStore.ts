@@ -513,11 +513,13 @@ export const useCodeGraphStore = create<
 
   applyLens: (lensId) => {
     const preset = LENS_PRESETS[lensId];
-    // The complexity heatmap only colors function/method nodes; if the lens
-    // hides those (e.g. Architecture), snap the color mode back to topology
-    // so the canvas isn't stuck on a heatmap that paints nothing. Mirrors
-    // the guard in `setComplexityAvailable`.
-    const lensShowsFunctions =
+    // The complexity heatmap colors function nodes and file nodes (by their
+    // worst function); if the lens shows neither (e.g. a types-only view),
+    // snap the color mode back to topology so the canvas isn't stuck on a
+    // heatmap that paints nothing. Mirrors the guard in
+    // `setComplexityAvailable`.
+    const lensShowsComplexityNodes =
+      preset.nodeKindFilters.file === true ||
       preset.symbolKindFilters.function === true ||
       preset.symbolKindFilters.method === true;
     set((state) => ({
@@ -526,7 +528,7 @@ export const useCodeGraphStore = create<
       edgeKindFilters: { ...preset.edgeKindFilters },
       activeLens: lensId,
       colorMode:
-        !lensShowsFunctions && state.colorMode === "complexity"
+        !lensShowsComplexityNodes && state.colorMode === "complexity"
           ? "topology"
           : state.colorMode,
     }));
