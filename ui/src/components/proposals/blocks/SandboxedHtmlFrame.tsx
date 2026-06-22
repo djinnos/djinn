@@ -9,6 +9,17 @@ export interface SandboxedHtmlFrameProps {
   title?: string;
   /** Extra classes for the iframe element. */
   className?: string;
+  /**
+   * Pre-built `srcdoc` document. When supplied it is used verbatim INSTEAD of
+   * `buildIframeSrcDoc(html)`, letting a caller inject a specialized document
+   * (e.g. the `Wireframe` block's `--wf-*` token srcdoc) while keeping this the
+   * single sandboxed-iframe component. The caller is responsible for sanitizing
+   * the body inside its builder — the `Wireframe` srcdoc reuses the same
+   * `sanitizeBlockHtml` + CSP + `sandbox=""` security as the default path.
+   */
+  srcDoc?: string;
+  /** Inline styles for the iframe (e.g. a fixed surface-preset width/height). */
+  style?: React.CSSProperties;
 }
 
 /**
@@ -31,8 +42,11 @@ export function SandboxedHtmlFrame({
   html,
   title = "Embedded HTML",
   className,
+  srcDoc: srcDocOverride,
+  style,
 }: SandboxedHtmlFrameProps) {
-  const srcDoc = useMemo(() => buildIframeSrcDoc(html), [html]);
+  const builtSrcDoc = useMemo(() => buildIframeSrcDoc(html), [html]);
+  const srcDoc = srcDocOverride ?? builtSrcDoc;
 
   return (
     <iframe
@@ -41,6 +55,7 @@ export function SandboxedHtmlFrame({
       sandbox={SANDBOX_VALUE}
       referrerPolicy="no-referrer"
       loading="lazy"
+      style={style}
       className={
         className ??
         "h-80 max-h-[32rem] w-full rounded-md border bg-background"

@@ -66,5 +66,9 @@
   {
     "type": "tabs",
     "tag": "Tabs"
+  },
+  {
+    "type": "wireframe",
+    "tag": "Wireframe"
   }
 ]

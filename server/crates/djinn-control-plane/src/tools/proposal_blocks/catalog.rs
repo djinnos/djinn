@@ -242,6 +242,46 @@ define_blocks! {
                 { \"body\": \"### After\\nnew\" }]} />`.",
         fields { "columns" => string },
 
+    Wireframe => "wireframe", "Wireframe",
+        desc = "A low-fi HTML wireframe of ONE screen, rendered SAFELY in a \
+                sandboxed iframe with the `--wf-*` design tokens. The block \
+                CHILDREN are a self-contained HTML FRAGMENT of a single screen \
+                — real product layout and real content, not lorem. Author PLAIN \
+                semantic HTML and let the renderer style it: bare \
+                `h1`/`h2`/`h3`/`p`/`button`/`input`/`a`/`hr` are auto-themed (no \
+                classes needed) and helper classes carry the rest — `.wf-card` / \
+                `.wf-box` (a bordered padded container), `.wf-pill` / `.wf-chip` \
+                (a rounded tag; add `.accent` for the filled variant), \
+                `.wf-muted` (secondary text), and `button.primary` (or \
+                `[data-primary]`) for the accent button. For ANY custom color use \
+                the `--wf-*` tokens, NEVER a hex literal: `--wf-ink` (text), \
+                `--wf-muted`, `--wf-line` (borders), `--wf-paper` (page bg), \
+                `--wf-card` (surface), `--wf-accent` / `--wf-accent-fg` / \
+                `--wf-accent-soft`, `--wf-warn`, `--wf-ok`, `--wf-radius`. Lay out \
+                with inline flex/grid `style` (`display:flex;gap:10px;\
+                padding:16px;height:100%`). DO NOT emit `<html>`/`<body>`/\
+                `<style>`/`<script>` tags or set `font-family` — the renderer owns \
+                the document chrome and font. For icon-only controls or leading \
+                icons, write an EMPTY marker `<span data-icon=\"mail\"></span>` \
+                (or `<i data-icon=\"search\"></i>`); the renderer swaps it for an \
+                inline SVG (names incl. mail/search/menu/x/check/plus/user/bell/\
+                settings/chevronDown/etc., aliases supported). It is NOT a \
+                scripting surface — `<script>`, `on*=` handlers, and \
+                `javascript:` URIs are rejected at validation and stripped at \
+                render. Set the `surface` attribute to match the real footprint: \
+                `browser` (a web page w/ chrome), `desktop` (an app shell), \
+                `mobile` (a phone screen), `popover` (a small dropdown/menu), or \
+                `panel` (a side panel/inspector); default `desktop`. Example: \
+                `<Wireframe id=\"x\" surface=\"browser\">\\n<div \
+                style=\\\"display:flex;flex-direction:column;gap:10px;\
+                padding:16px;height:100%\\\"><h1>Sign in</h1><div \
+                class=\\\"wf-card\\\"><label>Email<input value=\\\"a@b.co\\\" />\
+                </label><button class=\\\"primary\\\">Sign in</button></div></div>\
+                \\n</Wireframe>`.",
+        fields {
+            "surface" => (enum ["browser", "desktop", "mobile", "popover", "panel"]),
+        },
+
     QuestionForm => "question-form", "QuestionForm",
         fields {
             "title" => string,

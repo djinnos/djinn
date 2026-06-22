@@ -18,11 +18,13 @@
  * accents/edges are the violet primary, node fills sit a hair above the card.
  * The stock-mermaid fallback is likewise forced transparent so it blends too.
  *
- * Wide-diagram readability: the rendered SVG is wrapped in a zoom/pan surface
- * (`ZoomPanSurface`) — fit-to-width by default (previous behavior preserved),
- * with wheel/trackpad zoom, click-drag pan, zoom-in/out/reset controls, and an
- * optional fullscreen dialog (`allowFullscreen`, default on; `ImpactFlowModal`
- * omits it since it already lives in a Dialog).
+ * Wide-diagram readability: the rendered SVG is wrapped in the shared
+ * `ZoomPanSurface` (extracted to `@/components/ZoomPanSurface`) — fit-to-width by
+ * default (previous behavior preserved), with wheel/trackpad zoom, click-drag
+ * pan, zoom-in/out/reset controls, and an optional fullscreen dialog
+ * (`allowFullscreen`, default on; `ImpactFlowModal` omits it since it already
+ * lives in a Dialog). The `mermaid-*` testid prefix and `"Diagram"` fullscreen
+ * title are passed so the existing render specs keep matching.
  *
  * Contract:
  *   - props: `{ source: string; className?: string; allowFullscreen?: boolean }`,
@@ -46,33 +48,11 @@
  * heavy SVG generation when parents re-render. The app is DARK-ONLY.
  */
 
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { memo, useEffect, useId, useMemo, useState } from "react";
 import DOMPurify from "dompurify";
-import {
-  ArrowExpandIcon,
-  ArrowReloadHorizontalIcon,
-  Cancel01Icon,
-  ZoomInAreaIcon,
-  ZoomOutAreaIcon,
-} from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
 
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { ZoomPanSurface } from "@/components/ZoomPanSurface";
 import { DiagramFallback } from "@/components/proposals/blocks/DiagramFallback";
 import { normalizeMermaidSource } from "@/components/proposals/blocks/mermaidNormalize";
 
@@ -179,243 +159,17 @@ interface RenderState {
   error?: string;
 }
 
-const MIN_SCALE = 0.5;
-const MAX_SCALE = 4;
-const ZOOM_STEP = 1.25;
-
-interface Transform {
-  scale: number;
-  x: number;
-  y: number;
-}
-
-const IDENTITY: Transform = { scale: 1, x: 0, y: 0 };
-
-function clampScale(s: number): number {
-  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
-}
-
 /**
- * Zoom/pan surface around an already-rendered (sanitized) SVG. Fit-to-width by
- * default (the SVG keeps `max-w-full h-auto`), then a CSS `transform` (scale +
- * translate) layers interactive zoom on top — wheel/trackpad to zoom toward the
- * cursor, click-drag to pan when zoomed in. A tiny overlay exposes zoom-in,
- * zoom-out, reset(fit) and (optionally) fullscreen. Custom (no zoom/pan dep):
- * the whole behavior is one transform string + a handful of handlers.
+ * Render a sanitized SVG string as the zoomable child of `ZoomPanSurface`. The
+ * svg is sanitized upstream; injecting via `dangerouslySetInnerHTML` is the
+ * standard Mermaid integration pattern.
  */
-function ZoomPanSurface({
-  svg,
-  className,
-  allowFullscreen = true,
-  inFullscreen = false,
-}: {
-  svg: string;
-  className?: string;
-  allowFullscreen?: boolean;
-  inFullscreen?: boolean;
-}) {
-  const [transform, setTransform] = useState<Transform>(IDENTITY);
-  const [fullscreen, setFullscreen] = useState(false);
-  // `dragging` drives the render-time transition toggle (refs can't be read in
-  // render); `dragState` ref holds the live drag math, read only in handlers.
-  const [dragging, setDragging] = useState(false);
-  const viewportRef = useRef<HTMLDivElement | null>(null);
-  const dragState = useRef<{
-    startX: number;
-    startY: number;
-    originX: number;
-    originY: number;
-  } | null>(null);
-
-  const reset = useCallback(() => setTransform(IDENTITY), []);
-
-  // Zoom around the viewport center by a multiplicative factor.
-  const zoomBy = useCallback((factor: number) => {
-    setTransform((prev) => {
-      const nextScale = clampScale(prev.scale * factor);
-      if (nextScale === prev.scale) return prev;
-      // Keep the content centered: scale about the viewport center, so the
-      // existing translate is rescaled proportionally.
-      const ratio = nextScale / prev.scale;
-      return { scale: nextScale, x: prev.x * ratio, y: prev.y * ratio };
-    });
-  }, []);
-
-  const onWheel = useCallback(
-    (e: React.WheelEvent) => {
-      // Only hijack the wheel for zoom (don't fight page scroll otherwise).
-      if (!e.ctrlKey && !e.metaKey && Math.abs(e.deltaY) < 1) return;
-      e.preventDefault();
-      const viewport = viewportRef.current;
-      if (!viewport) return;
-      const rect = viewport.getBoundingClientRect();
-      const cx = e.clientX - rect.left - rect.width / 2;
-      const cy = e.clientY - rect.top - rect.height / 2;
-      setTransform((prev) => {
-        const dir = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
-        const nextScale = clampScale(prev.scale * dir);
-        if (nextScale === prev.scale) return prev;
-        const ratio = nextScale / prev.scale;
-        // Zoom toward the cursor: the point under the cursor stays put.
-        return {
-          scale: nextScale,
-          x: cx - (cx - prev.x) * ratio,
-          y: cy - (cy - prev.y) * ratio,
-        };
-      });
-    },
-    [],
-  );
-
-  const onPointerDown = useCallback(
-    (e: React.PointerEvent) => {
-      if (transform.scale <= 1) return; // nothing to pan at fit
-      (e.target as Element).setPointerCapture?.(e.pointerId);
-      dragState.current = {
-        startX: e.clientX,
-        startY: e.clientY,
-        originX: transform.x,
-        originY: transform.y,
-      };
-      setDragging(true);
-    },
-    [transform],
-  );
-
-  const onPointerMove = useCallback((e: React.PointerEvent) => {
-    const drag = dragState.current;
-    if (!drag) return;
-    setTransform((prev) => ({
-      ...prev,
-      x: drag.originX + (e.clientX - drag.startX),
-      y: drag.originY + (e.clientY - drag.startY),
-    }));
-  }, []);
-
-  const endDrag = useCallback(() => {
-    dragState.current = null;
-    setDragging(false);
-  }, []);
-
-  const zoomed = transform.scale > 1;
-
-  const surface = (
-    <div
-      ref={viewportRef}
-      data-testid="mermaid-zoompan-viewport"
-      className={cn(
-        "relative w-full overflow-hidden",
-        zoomed ? "cursor-grab active:cursor-grabbing" : "cursor-default",
-        inFullscreen ? "h-full" : "max-h-[70vh]",
-      )}
-      onWheel={onWheel}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={endDrag}
-      onPointerLeave={endDrag}
-    >
-      <div
-        data-testid="mermaid-zoompan-content"
-        className="flex w-full items-center justify-center [&_svg]:h-auto [&_svg]:max-w-full"
-        style={{
-          transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
-          transformOrigin: "center center",
-          transition: dragging ? "none" : "transform 0.08s ease-out",
-        }}
-        // The svg is sanitized upstream; injecting via dangerouslySetInnerHTML
-        // is the standard Mermaid integration pattern.
-        dangerouslySetInnerHTML={{ __html: svg }}
-      />
-
-      {/* Controls overlay — top-right, compact ghost icon buttons. */}
-      <div
-        className="absolute right-2 top-2 flex items-center gap-1 rounded-md border border-border/60 bg-card/80 p-0.5 backdrop-blur"
-        data-testid="mermaid-controls"
-      >
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Zoom in"
-          title="Zoom in"
-          onClick={() => zoomBy(ZOOM_STEP)}
-        >
-          <HugeiconsIcon icon={ZoomInAreaIcon} size={14} />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Zoom out"
-          title="Zoom out"
-          onClick={() => zoomBy(1 / ZOOM_STEP)}
-        >
-          <HugeiconsIcon icon={ZoomOutAreaIcon} size={14} />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Reset zoom"
-          title="Reset to fit"
-          onClick={reset}
-        >
-          <HugeiconsIcon icon={ArrowReloadHorizontalIcon} size={14} />
-        </Button>
-        {allowFullscreen && !inFullscreen && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Fullscreen"
-            title="Fullscreen"
-            onClick={() => setFullscreen(true)}
-          >
-            <HugeiconsIcon icon={ArrowExpandIcon} size={14} />
-          </Button>
-        )}
-        {inFullscreen && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Exit fullscreen"
-            title="Exit fullscreen"
-            onClick={() => setFullscreen(false)}
-          >
-            <HugeiconsIcon icon={Cancel01Icon} size={14} />
-          </Button>
-        )}
-      </div>
-    </div>
-  );
-
+function MermaidSvg({ svg }: { svg: string }) {
   return (
-    <div className={cn("w-full", className)}>
-      {surface}
-      {allowFullscreen && !inFullscreen && (
-        <Dialog open={fullscreen} onOpenChange={setFullscreen}>
-          <DialogContent
-            className="flex h-[90vh] max-w-[95vw] flex-col gap-2 sm:max-w-[95vw]"
-            data-testid="mermaid-fullscreen"
-          >
-            <DialogHeader>
-              <DialogTitle className="text-sm">Diagram</DialogTitle>
-            </DialogHeader>
-            <div className="min-h-0 flex-1 rounded-md border border-border/40">
-              {/* A fresh ZoomPanSurface in fullscreen mode (its own transform
-                  state, fills the dialog, no nested fullscreen button). */}
-              <ZoomPanSurface
-                svg={svg}
-                allowFullscreen={false}
-                inFullscreen
-                className="h-full"
-              />
-            </div>
-          </DialogContent>
-        </Dialog>
-      )}
-    </div>
+    <div
+      className="contents"
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
   );
 }
 
@@ -505,7 +259,13 @@ function MermaidDiagramImpl({
 
   return (
     <div data-testid="mermaid-diagram" className={cn("w-full", className)}>
-      <ZoomPanSurface svg={state.svg} allowFullscreen={allowFullscreen} />
+      <ZoomPanSurface
+        allowFullscreen={allowFullscreen}
+        testIdPrefix="mermaid"
+        fullscreenTitle="Diagram"
+      >
+        <MermaidSvg svg={state.svg} />
+      </ZoomPanSurface>
     </div>
   );
 }

@@ -123,6 +123,17 @@ This runs on the hot path — keep allocations out of the loop.
 
 <Columns id="before-after" columns={[{ "body": "### Before\nThe **old** approach." }, { "body": "### After\nThe **new** approach." }]} />
 
+<Wireframe id="signin-screen" surface="browser">
+<div style="display:flex;flex-direction:column;gap:10px;padding:16px;height:100%">
+  <h1>Sign in</h1>
+  <p class="wf-muted">Use your work email to continue.</p>
+  <div class="wf-card" style="display:flex;flex-direction:column;gap:10px">
+    <label>Email<input value="jane@acme.co" /></label>
+    <button class="primary"><span data-icon="mail"></span> Continue</button>
+  </div>
+</div>
+</Wireframe>
+
 <QuestionForm id="open-questions" title="Open Questions">
 Should we use Redis or Memcached for caching?
 </QuestionForm>

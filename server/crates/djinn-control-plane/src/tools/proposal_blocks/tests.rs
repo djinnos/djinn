@@ -8,7 +8,7 @@ use super::*;
 #[test]
 fn registry_contains_v1_blocks() {
     let registry = proposal_block_registry();
-    assert_eq!(registry.len(), 17);
+    assert_eq!(registry.len(), 18);
     assert_eq!(registry["rich-text"].tag, "RichText");
     assert_eq!(registry["diagram"].tag, "Diagram");
     assert_eq!(registry["annotated-code"].tag, "AnnotatedCode");
@@ -25,6 +25,7 @@ fn registry_contains_v1_blocks() {
     assert_eq!(registry["openapi-spec"].tag, "OpenApi");
     assert_eq!(registry["tabs"].tag, "Tabs");
     assert_eq!(registry["columns"].tag, "Columns");
+    assert_eq!(registry["wireframe"].tag, "Wireframe");
     assert_eq!(registry["question-form"].tag, "QuestionForm");
     // The html block ships authoring guidance noting it is sandboxed.
     assert!(
@@ -63,6 +64,18 @@ fn registry_contains_v1_blocks() {
             .is_some_and(|d| d.contains("columns={[") && d.contains("body")),
         "columns block must advertise its JSON-array authoring format"
     );
+    // The wireframe block documents its `surface` enum + the `--wf-*` token /
+    // `data-icon` authoring contract.
+    assert_eq!(
+        registry["wireframe"].fields["surface"].enum_values.as_deref(),
+        Some(["browser", "desktop", "mobile", "popover", "panel"].as_slice())
+    );
+    assert!(
+        registry["wireframe"]
+            .description
+            .is_some_and(|d| d.contains("--wf-") && d.contains("data-icon")),
+        "wireframe block must advertise its --wf-* token + data-icon authoring contract"
+    );
 }
 
 #[test]
@@ -84,6 +97,7 @@ fn block_type_enum_covers_v1() {
         BlockType::OpenApiSpec,
         BlockType::Tabs,
         BlockType::Columns,
+        BlockType::Wireframe,
         BlockType::QuestionForm,
     ];
     for bt in types {
@@ -92,13 +106,13 @@ fn block_type_enum_covers_v1() {
     }
     // Single-sourced coverage check: every canonical (type_str, tag) pair is
     // reachable from the enum's `as_str()`/`tag()` projection.
-    assert_eq!(CANONICAL_BLOCK_TYPES.len(), 17);
+    assert_eq!(CANONICAL_BLOCK_TYPES.len(), 18);
 }
 
 #[test]
 fn block_registry_new_has_all_definitions() {
     let reg = BlockRegistry::new();
-    assert_eq!(reg.definitions().len(), 17);
+    assert_eq!(reg.definitions().len(), 18);
     assert!(reg.definition_for_tag("RichText").is_some());
     assert!(reg.definition_for_tag("UnknownTag").is_none());
     assert!(reg.tags().contains("RichText"));
@@ -115,8 +129,8 @@ fn registry_tags_match_canonical_v1_set() {
         CANONICAL_BLOCK_TYPES.iter().map(|(_, tag)| *tag).collect();
     assert_eq!(
         expected.len(),
-        17,
-        "canonical block list must cover all 17 v1 tags"
+        18,
+        "canonical block list must cover all 18 v1 tags"
     );
     let actual: std::collections::HashSet<&str> = proposal_block_tags().into_iter().collect();
     assert_eq!(

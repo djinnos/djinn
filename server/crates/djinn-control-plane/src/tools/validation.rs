@@ -191,15 +191,17 @@ pub fn validate_mdx_body(body: &str, body_format: Option<&str>) -> Result<(), St
     Ok(())
 }
 
-/// Server-side backstop for the sandboxed `html` block (defense in depth).
+/// Server-side backstop for the sandboxed `html` and `wireframe` blocks (defense
+/// in depth).
 ///
 /// The primary defenses are the client-side iframe `sandbox=""` + restrictive
 /// CSP and the DOMPurify pass before render. This is a third layer that rejects
-/// the most dangerous *active* markup in an `html` block's children **before it
-/// is ever stored**, mirroring agent-native's server regex. It is deliberately
-/// conservative — only `<script>` tags, `on*=` event-handler attributes, and
-/// `javascript:` / `data:text/html` URIs are rejected, so benign formatted HTML
-/// (and inline SVG) still passes.
+/// the most dangerous *active* markup in a sandboxed-HTML block's children
+/// **before it is ever stored**, mirroring agent-native's server regex. It is
+/// deliberately conservative — only `<script>` tags, `on*=` event-handler
+/// attributes, and `javascript:` / `data:text/html` URIs are rejected, so benign
+/// formatted HTML (and inline SVG) still passes. Both `html` and `wireframe` are
+/// sandboxed-HTML surfaces, so both are gated identically.
 fn validate_html_block_safety(body: &str) -> Result<(), String> {
     let blocks = match parse_mdx_blocks(body) {
         Ok(blocks) => blocks,
@@ -208,15 +210,15 @@ fn validate_html_block_safety(body: &str) -> Result<(), String> {
         Err(_) => return Ok(()),
     };
     for block in blocks {
-        if block.block_type != "html" {
+        if block.block_type != "html" && block.block_type != "wireframe" {
             continue;
         }
         if let Some(reason) = first_unsafe_html_reason(&block.raw_content) {
             return Err(format!(
-                "Html block '{}' contains disallowed active markup ({reason}); \
-                 the html block renders sandboxed/sanitized static markup and \
+                "{} block '{}' contains disallowed active markup ({reason}); \
+                 the {} block renders sandboxed/sanitized static markup and \
                  is not a scripting surface",
-                block.id
+                block.tag, block.id, block.block_type
             ));
         }
     }
@@ -629,6 +631,16 @@ This runs on the hot path.
 
 <Columns id="compare" columns={[{ "body": "Before: the old approach." }, { "body": "After: the new approach." }]} />
 
+<Wireframe id="signin-screen" surface="browser">
+<div style="display:flex;flex-direction:column;gap:10px;padding:16px;height:100%">
+  <h1>Sign in</h1>
+  <div class="wf-card">
+    <label>Email<input value="jane@acme.co" /></label>
+    <button class="primary"><span data-icon="mail"></span> Continue</button>
+  </div>
+</div>
+</Wireframe>
+
 <QuestionForm id="open-questions" title="Open Questions">
 Should we use Redis or Memcached?
 </QuestionForm>
@@ -756,6 +768,52 @@ Should we use Redis or Memcached?
 "#;
         // The data:text/html URI (or the inline <script>) must be rejected.
         assert!(validate_mdx_body(body, Some("mdx")).is_err());
+    }
+
+    #[test]
+    fn mdx_body_wireframe_block_allows_benign_markup() {
+        // A benign wireframe (tokens + helper classes + a data-icon marker)
+        // passes the active-markup backstop.
+        let body = r#"
+<Wireframe id="ok" surface="desktop">
+<div style="display:flex;flex-direction:column;gap:10px;padding:16px">
+  <h1>Dashboard</h1>
+  <button class="primary"><span data-icon="plus"></span> New</button>
+</div>
+</Wireframe>
+"#;
+        assert!(validate_mdx_body(body, Some("mdx")).is_ok());
+    }
+
+    #[test]
+    fn mdx_body_wireframe_block_rejects_script_tag() {
+        let body = r#"
+<Wireframe id="bad" surface="desktop">
+<div>hi</div>
+<script>alert(1)</script>
+</Wireframe>
+"#;
+        let err = validate_mdx_body(body, Some("mdx")).unwrap_err();
+        assert!(err.contains("<script>"), "unexpected error: {err}");
+        assert!(
+            err.contains("Wireframe block 'bad'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn mdx_body_wireframe_block_rejects_event_handler() {
+        let body = r#"
+<Wireframe id="bad" surface="mobile">
+<img src="x" onerror="alert(1)" />
+</Wireframe>
+"#;
+        let err = validate_mdx_body(body, Some("mdx")).unwrap_err();
+        assert!(err.contains("on*= event handler"), "unexpected error: {err}");
+        assert!(
+            err.contains("Wireframe block 'bad'"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
