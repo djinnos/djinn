@@ -364,30 +364,42 @@ export function useSigmaGraph(
       getViewportBounds: (): ViewportBounds | null => {
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const cam = (sigmaInstance as any).getCamera?.();
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const container = (sigmaInstance as any).getContainer?.();
-          if (!cam || !container) return null;
-          const ratio = cam.ratio;
-          const cx = cam.x;
-          const cy = cam.y;
+          // `viewportToGraph` converts screen pixels → graph coordinates,
+          // correctly accounting for the camera (pan + zoom). The previous
+          // implementation derived bounds from raw `camera.x/y/ratio`, which
+          // live in Sigma's NORMALIZED framed space — comparing those against
+          // node *graph* coordinates (the culling test in `codeGraphReducers`)
+          // is a coordinate-space mismatch, so it culled the wrong rectangle
+          // and nodes vanished on the left/bottom when zoomed in.
+          const vToG = (
+            sigmaInstance as unknown as {
+              viewportToGraph?: (point: { x: number; y: number }) => {
+                x: number;
+                y: number;
+              };
+            }
+          ).viewportToGraph?.bind(sigmaInstance);
+          if (!container || !vToG) return null;
+          const w = container.clientWidth ?? 800;
+          const h = container.clientHeight ?? 600;
+          // Convert the two viewport corners. Screen Y grows downward while
+          // graph Y grows upward, so take min/max rather than assuming order.
+          const a = vToG({ x: 0, y: 0 });
+          const b = vToG({ x: w, y: h });
           if (
-            typeof ratio !== "number" ||
-            !Number.isFinite(ratio) ||
-            typeof cx !== "number" ||
-            typeof cy !== "number"
+            !Number.isFinite(a.x) ||
+            !Number.isFinite(a.y) ||
+            !Number.isFinite(b.x) ||
+            !Number.isFinite(b.y)
           ) {
             return null;
           }
-          const w = container.clientWidth ?? 800;
-          const h = container.clientHeight ?? 600;
-          const halfW = (w * ratio) / 2;
-          const halfH = (h * ratio) / 2;
           return {
-            minX: cx - halfW,
-            maxX: cx + halfW,
-            minY: cy - halfH,
-            maxY: cy + halfH,
+            minX: Math.min(a.x, b.x),
+            maxX: Math.max(a.x, b.x),
+            minY: Math.min(a.y, b.y),
+            maxY: Math.max(a.y, b.y),
           };
         } catch {
           return null;
