@@ -119,4 +119,99 @@ describe("parseQuestions", () => {
     expect(qs[0]!.question).toBe("First consideration here.");
     expect(qs[0]!.detail).toEqual(["Second consideration here."]);
   });
+
+  it("makes each top-level `?`-bullet its own question (flat list)", () => {
+    const body = [
+      "- Which database should we use?",
+      "- Do we need read replicas?",
+      "- Should auth be session-based?",
+      "- Where does the cache live?",
+    ].join("\n");
+    const qs = parseQuestions(body);
+    expect(qs.map((q) => q.question)).toEqual([
+      "Which database should we use?",
+      "Do we need read replicas?",
+      "Should auth be session-based?",
+      "Where does the cache live?",
+    ]);
+    for (const q of qs) expect(q.detail).toEqual([]);
+  });
+
+  it("treats indented sub-bullets under a top-level question-bullet as detail", () => {
+    const body = [
+      "- Which caching layer should we pick?",
+      "  - Redis is the team default",
+      "  - Memcached is simpler to operate?",
+      "- Do we need replicas?",
+    ].join("\n");
+    const qs = parseQuestions(body);
+    expect(qs).toHaveLength(2);
+    expect(qs[0]!.question).toBe("Which caching layer should we pick?");
+    expect(qs[0]!.detail).toEqual([
+      "Redis is the team default",
+      "Memcached is simpler to operate?",
+    ]);
+    expect(qs[1]!.question).toBe("Do we need replicas?");
+    expect(qs[1]!.detail).toEqual([]);
+  });
+
+  it("keeps a `?`-bullet nested under a numbered question as detail", () => {
+    const body = [
+      "1. Which database should we use?",
+      "- Is Postgres acceptable?",
+      "- Do we need replicas?",
+    ].join("\n");
+    const qs = parseQuestions(body);
+    expect(qs).toHaveLength(1);
+    expect(qs[0]!.question).toBe("Which database should we use?");
+    expect(qs[0]!.detail).toEqual([
+      "Is Postgres acceptable?",
+      "Do we need replicas?",
+    ]);
+  });
+
+  it("keeps a `?`-bullet nested under a heading question as detail", () => {
+    const body = [
+      "### Auth model",
+      "- Should we use sessions?",
+      "- Should we use JWTs?",
+    ].join("\n");
+    const qs = parseQuestions(body);
+    expect(qs).toHaveLength(1);
+    expect(qs[0]!.question).toBe("Auth model");
+    expect(qs[0]!.detail).toEqual([
+      "Should we use sessions?",
+      "Should we use JWTs?",
+    ]);
+  });
+
+  it("reads a uniformly-indented `?`-bullet list as separate questions", () => {
+    const body = [
+      "  - First open question here?",
+      "  - Second open question here?",
+    ].join("\n");
+    const qs = parseQuestions(body);
+    expect(qs.map((q) => q.question)).toEqual([
+      "First open question here?",
+      "Second open question here?",
+    ]);
+    for (const q of qs) expect(q.detail).toEqual([]);
+  });
+
+  it("parses the r0io proposal's 6 open-question bullets as 6 questions", () => {
+    // Verbatim <QuestionForm> children from proposal r0io (the real bug case).
+    const body = [
+      "- Does the **architect** role also get the `visual-spec` native skill by default, or only the planner?",
+      "- How is the native skill **versioned across deploys** — a version stamp recorded in the proposal's revision trail, and what happens when a proposal authored under v1 is re-refined under v2?",
+      "- Should `get_block_catalog` also return the **canonical example body** (the `canonicalProposal.mdx` fixture), or only tags/fields — to keep the pull payload lean?",
+      "- Is **bare-`<` / `>` parser-hardening** in scope here (so authors need not backtick generics), or is it a separate parser proposal?",
+      "- Should there be a small **canonical section-skeleton** (Thesis / Problem / Objective / Decisions / Risks / Open-Questions) that the enricher targets, or does the skill stay structure-agnostic?",
+      "- Does the **immutability guarantee** need an enforcement test (assert native skills never appear in `agent_update`'s editable set), and where does that test live?",
+    ].join("\n");
+    const qs = parseQuestions(body);
+    expect(qs).toHaveLength(6);
+    for (const q of qs) expect(q.detail).toEqual([]);
+    expect(qs[0]!.question).toContain("architect");
+    expect(qs[5]!.question).toContain("immutability guarantee");
+  });
 });

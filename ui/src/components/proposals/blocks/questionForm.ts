@@ -15,11 +15,15 @@
 //   2. a `###`(+) markdown heading
 //   3. a **bolded** line — the whole (trimmed) line wrapped in `**…**`
 //   4. a line that ends in `?` (a question sentence)
-// Following plain lines or `-`/`*`/`+` bullets become that question's detail.
-// Anything before the first recognised question header is attached to the first
-// question as leading detail (or, if there is no header at all, the whole body
-// becomes a single question). Empty input yields `[]` so the caller can fall
-// back to the raw markdown render.
+//   5. a TOP-LEVEL `-`/`*`/`+` bullet that ends in `?` — the most common
+//      authoring pattern is a flat bulleted list of questions, so each base-
+//      indentation question-bullet is its own question.
+// Following plain lines, or bullets that are INDENTED under the current
+// question / do not end in `?`, become that question's detail. Anything before
+// the first recognised question header is attached to the first question as
+// leading detail (or, if there is no header at all, the whole body becomes a
+// single question). Empty input yields `[]` so the caller can fall back to the
+// raw markdown render.
 
 /** One parsed outstanding question: its text plus optional muted sub-detail. */
 export interface ParsedQuestion {
@@ -48,6 +52,22 @@ const HEADING = /^\s*#{1,6}\s+(.*)$/;
 /** A bullet line: `-` / `*` / `+` followed by text. */
 const BULLET = /^\s*[-*+]\s+(.*)$/;
 
+/** Leading-whitespace indent of a line, counting a tab as 2 spaces (file-tree
+ * parser convention) so a top-level `- q?` is distinguishable from a nested
+ * `  - detail?`. */
+function indentOf(line: string): number {
+  const ws = /^[ \t]*/.exec(line)?.[0] ?? "";
+  let n = 0;
+  for (const ch of ws) n += ch === "\t" ? 2 : 1;
+  return n;
+}
+
+/** True when a (trimmed) line ends in `?`, ignoring trailing markdown emphasis
+ * (e.g. `…?**` or `…?*`). */
+function endsInQuestion(line: string): boolean {
+  return /\?\s*\**\s*$/.test(line.trim());
+}
+
 /** True when a (trimmed) line is entirely wrapped in `**…**` (bold). */
 function isBoldLine(line: string): boolean {
   const t = line.trim();
@@ -74,14 +94,33 @@ function asQuestionHeader(line: string): string | null {
 
   if (isBoldLine(line)) return unwrapBold(line);
 
-  // A sentence that ends in `?` (ignoring trailing markdown emphasis) is a
-  // question header — but a bullet/detail line that happens to end in `?` should
-  // stay detail, so bullets are excluded here (handled as detail below).
-  if (!BULLET.test(line) && /\?\s*\**\s*$/.test(line.trim())) {
+  // A non-bullet sentence that ends in `?` (ignoring trailing markdown emphasis)
+  // is a question header. Bullets are handled separately in the parse loop,
+  // where indentation is available to tell a top-level question-bullet from a
+  // nested detail bullet.
+  if (!BULLET.test(line) && endsInQuestion(line)) {
     return line.trim();
   }
 
   return null;
+}
+
+/**
+ * The base indentation of the bulleted list — the minimum indent among all
+ * bullet lines — so a list authored at column 0 OR uniformly indented both read
+ * their top-level bullets as questions. Returns `null` when there are no
+ * bullets.
+ */
+function baseBulletIndent(lines: string[]): number | null {
+  let base: number | null = null;
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    if (BULLET.test(line)) {
+      const indent = indentOf(line);
+      if (base === null || indent < base) base = indent;
+    }
+  }
+  return base;
 }
 
 /**
@@ -97,6 +136,14 @@ export function parseQuestions(body: string): ParsedQuestion[] {
   // Detail seen before any recognised header — attached to the first question.
   const leading: string[] = [];
 
+  // The base (minimum) indent of the bulleted list, so a top-level question-
+  // bullet is distinguishable from a nested detail bullet. `null` = no bullets.
+  const base = baseBulletIndent(lines);
+  // Whether the CURRENT question was opened by a top-level question-bullet. Only
+  // in this "bullet-list" mode does a following base-indent `?`-bullet start a
+  // new question; bullets under a numbered/heading/bold question stay its detail.
+  let inBulletList = false;
+
   const pushDetail = (raw: string) => {
     const bullet = BULLET.exec(raw);
     const text = (bullet ? bullet[1] : raw).trim();
@@ -108,21 +155,42 @@ export function parseQuestions(body: string): ParsedQuestion[] {
     }
   };
 
+  const pushQuestion = (header: string, fromBullet: boolean): void => {
+    const { text, recommended } = extractRecommended(header);
+    // A header that becomes empty after stripping `(recommended)` is just a
+    // stray tag — treat it as detail rather than an empty question.
+    if (!text) {
+      if (recommended && questions.length > 0) {
+        questions[questions.length - 1]!.recommended = true;
+      }
+      return;
+    }
+    questions.push({ question: text, detail: [], recommended });
+    inBulletList = fromBullet;
+  };
+
   for (const raw of lines) {
     if (!raw.trim()) continue;
 
+    const bullet = BULLET.exec(raw);
+    if (bullet) {
+      // A top-level bullet that is a question is its own question — but only
+      // when it sits at the list's base indent AND we are not collecting
+      // detail bullets under a non-bullet (numbered/heading/bold) question.
+      const topLevel = base !== null && indentOf(raw) <= base;
+      const startsQuestion =
+        topLevel && endsInQuestion(raw) && (questions.length === 0 || inBulletList);
+      if (startsQuestion) {
+        pushQuestion((bullet[1] ?? "").trim(), true);
+      } else {
+        pushDetail(raw);
+      }
+      continue;
+    }
+
     const header = asQuestionHeader(raw);
     if (header !== null && header !== "") {
-      const { text, recommended } = extractRecommended(header);
-      // A header that becomes empty after stripping `(recommended)` is just a
-      // stray tag — treat it as detail rather than an empty question.
-      if (!text) {
-        if (recommended && questions.length > 0) {
-          questions[questions.length - 1]!.recommended = true;
-        }
-        continue;
-      }
-      questions.push({ question: text, detail: [], recommended });
+      pushQuestion(header, false);
     } else {
       pushDetail(raw);
     }
