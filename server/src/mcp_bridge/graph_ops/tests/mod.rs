@@ -1297,5 +1297,6 @@ async fn context_imports_bucket_for_file_references_pr_c1() {
 mod complexity_refactor;
 mod flow;
 mod snapshot;
+mod snapshot_edge_cap;
 
 mod route;
