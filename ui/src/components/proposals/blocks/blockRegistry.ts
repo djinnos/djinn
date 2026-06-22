@@ -6,7 +6,7 @@ import {
   type ProposalBlockFieldMap,
   type ProposalBlockFieldSchema,
   type ProposalBlockRegistry,
-} from "@/lib/proposalBlocks";
+} from "./registry";
 
 import { parseMdxBody } from "./parseMdxBody";
 

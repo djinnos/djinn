@@ -2,30 +2,18 @@ import type { ComponentType } from "react";
 
 import type { BlockProps } from "@/components/proposals/blocks/types";
 import {
-  AnnotatedCode,
-  ApiEndpointBlock,
-  CalloutBlock,
-  ChecklistBlock,
-  ColumnsBlock,
-  DataModelBlock,
-  DecisionsBlock,
-  Diagram,
-  DiffBlock,
-  FileTreeBlock,
-  HtmlBlock,
-  JsonExplorerBlock,
-  OpenApiSpecBlock,
-  QuestionFormBlock,
-  RichText,
-  TableBlock,
-  TabsBlock,
-} from "@/components/proposals/blocks";
-import {
-  PROPOSAL_BLOCK_REGISTRY,
+  BLOCK_COMPONENTS,
+  BLOCK_DISPLAY_NAMES,
+  PROPOSAL_BLOCK_SPECS,
   type ProposalBlockDefinition,
-} from "@/components/proposals/blocks/blockRegistry";
+  type ProposalBlockSpec,
+} from "@/components/proposals/blocks/registry";
 
-type ProposalBlockType = keyof typeof PROPOSAL_BLOCK_REGISTRY;
+// Re-export the derived component/display-name maps so consumers that key off
+// the canonical MDX tag keep their original public surface. Both are DERIVED
+// from the single `defineBlock()` source in
+// `@/components/proposals/blocks/registry` — they are never hand-maintained.
+export { BLOCK_COMPONENTS, BLOCK_DISPLAY_NAMES };
 
 export interface BlockTypeDefinition extends ProposalBlockDefinition {
   displayName: string;
@@ -33,75 +21,64 @@ export interface BlockTypeDefinition extends ProposalBlockDefinition {
   component: ComponentType<BlockProps>;
 }
 
-const BLOCK_COMPONENTS: Record<ProposalBlockType, ComponentType<BlockProps>> = {
-  "rich-text": RichText,
-  diagram: Diagram,
-  "annotated-code": AnnotatedCode,
-  "data-model": DataModelBlock,
-  "api-endpoint": ApiEndpointBlock,
-  decisions: DecisionsBlock,
-  "file-tree": FileTreeBlock,
-  diff: DiffBlock,
-  callout: CalloutBlock,
-  table: TableBlock,
-  checklist: ChecklistBlock,
-  "json-explorer": JsonExplorerBlock,
-  html: HtmlBlock,
-  "openapi-spec": OpenApiSpecBlock,
-  tabs: TabsBlock,
-  columns: ColumnsBlock,
-  "question-form": QuestionFormBlock,
-};
+function toBlockTypeDefinition(spec: ProposalBlockSpec): BlockTypeDefinition {
+  return {
+    type: spec.type,
+    tag: spec.tag,
+    fields: spec.fields,
+    displayName: spec.displayName,
+    requiredFields: ["id"],
+    component: spec.component,
+  };
+}
 
-const BLOCK_DISPLAY_NAMES: Record<ProposalBlockType, string> = {
-  "rich-text": "Rich Text",
-  diagram: "Diagram",
-  "annotated-code": "Code",
-  "data-model": "Data Model",
-  "api-endpoint": "API Endpoint",
-  decisions: "Decisions",
-  "file-tree": "File Tree",
-  diff: "Diff",
-  callout: "Callout",
-  table: "Table",
-  checklist: "Checklist",
-  "json-explorer": "JSON Explorer",
-  html: "HTML",
-  "openapi-spec": "OpenAPI Spec",
-  tabs: "Tabs",
-  columns: "Columns",
-  "question-form": "Open Questions",
-};
+// `BLOCK_TYPES` / the by-tag map are built LAZILY on first access. Block
+// component modules (e.g. `ColumnsBlock` → `ProposalBlocks`) import
+// `getBlockByTag` from this module, which creates an import cycle back to
+// `registry`; deferring the read until first call ensures `PROPOSAL_BLOCK_SPECS`
+// is fully initialized before we touch it, instead of reading a TDZ/undefined
+// value at module-init time.
+let blockTypesCache: BlockTypeDefinition[] | null = null;
+let blockTypesByTagCache: Map<string, BlockTypeDefinition> | null = null;
 
 /**
  * Render registry derived from the canonical proposal block contract.
  *
- * The MDX tag names come exclusively from PROPOSAL_BLOCK_REGISTRY, which mirrors
- * the Rust proposal_blocks registry. Component/display metadata is keyed by the
- * stable block type so this file cannot drift into a second, contradictory tag
- * list.
- *
- * All blocks require an `id` attribute so that feedback comments and the debate
- * trail can anchor to a specific block across proposal revisions.
+ * Each block is defined ONCE as a `defineBlock()` spec; this adapts those specs
+ * to the `BlockTypeDefinition` shape (adding the universally required `id`
+ * attribute). The MDX tag names, components, and display names all come from
+ * that single source so this file cannot drift into a second, contradictory
+ * registry. All blocks require an `id` attribute so feedback comments and the
+ * debate trail can anchor to a specific block across proposal revisions.
  */
-const TYPED_PROPOSAL_BLOCK_REGISTRY = PROPOSAL_BLOCK_REGISTRY as unknown as Record<
-  ProposalBlockType,
-  ProposalBlockDefinition
->;
+export function getBlockTypes(): BlockTypeDefinition[] {
+  if (!blockTypesCache) {
+    blockTypesCache = PROPOSAL_BLOCK_SPECS.map(toBlockTypeDefinition);
+  }
+  return blockTypesCache;
+}
 
-export const BLOCK_TYPES: BlockTypeDefinition[] = (
-  Object.keys(TYPED_PROPOSAL_BLOCK_REGISTRY) as ProposalBlockType[]
-).map((type) => {
-  const definition = TYPED_PROPOSAL_BLOCK_REGISTRY[type];
-  return {
-    ...definition,
-    displayName: BLOCK_DISPLAY_NAMES[type],
-    requiredFields: ["id"],
-    component: BLOCK_COMPONENTS[type],
-  };
-});
-
-const BLOCK_TYPES_BY_TAG = new Map(BLOCK_TYPES.map((block) => [block.tag, block]));
+/**
+ * The list of block type definitions. Backed by a lazy getter to stay
+ * cycle-safe; the value is identical to calling {@link getBlockTypes}.
+ */
+export const BLOCK_TYPES: BlockTypeDefinition[] = new Proxy(
+  [] as BlockTypeDefinition[],
+  {
+    get(_target, prop, receiver) {
+      return Reflect.get(getBlockTypes(), prop, receiver);
+    },
+    has(_target, prop) {
+      return Reflect.has(getBlockTypes(), prop);
+    },
+    ownKeys() {
+      return Reflect.ownKeys(getBlockTypes());
+    },
+    getOwnPropertyDescriptor(_target, prop) {
+      return Reflect.getOwnPropertyDescriptor(getBlockTypes(), prop);
+    },
+  },
+);
 
 /**
  * Look up a block type definition by its canonical PascalCase MDX tag name.
@@ -109,5 +86,10 @@ const BLOCK_TYPES_BY_TAG = new Map(BLOCK_TYPES.map((block) => [block.tag, block]
  * Returns `undefined` when no registered block type matches the given tag.
  */
 export function getBlockByTag(tag: string): BlockTypeDefinition | undefined {
-  return BLOCK_TYPES_BY_TAG.get(tag);
+  if (!blockTypesByTagCache) {
+    blockTypesByTagCache = new Map(
+      getBlockTypes().map((block) => [block.tag, block]),
+    );
+  }
+  return blockTypesByTagCache.get(tag);
 }
