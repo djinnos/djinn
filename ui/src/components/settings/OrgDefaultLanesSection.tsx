@@ -5,10 +5,8 @@ import { HugeiconsIcon } from "@hugeicons/react";
 
 import { Button } from "@/components/ui/button";
 import { InlineError } from "@/components/InlineError";
-import {
-  AddModelButton,
-  stripProviderPrefix,
-} from "@/components/userConfig/ModelSection";
+import { AddModelButton } from "@/components/userConfig/ModelSection";
+import { stripProviderPrefix } from "@/components/userConfig/modelPicker";
 import { formatProvider } from "@/components/userConfig/providerDisplay";
 import { userConfigKeys } from "@/components/userConfig/userConfigKeys";
 import {
