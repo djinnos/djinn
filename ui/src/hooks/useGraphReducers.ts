@@ -41,6 +41,7 @@ import { computePagerankPercentiles } from "@/lib/codeGraphLabels";
 import {
   lodTierForZoom,
   VIEWPORT_CULLING_THRESHOLD,
+  viewportBoundsEqual,
   type ViewportBounds,
 } from "@/lib/codeGraphAdapter";
 import {
@@ -459,10 +460,18 @@ export function useGraphReducers(
           nodeCountRef.current >= VIEWPORT_CULLING_THRESHOLD
             ? sigma.getViewportBounds()
             : null;
+        // `getViewportBounds()` returns a fresh object every call, so a
+        // reference (`!==`) comparison here is ALWAYS true — which would
+        // fire `refresh()` on every `afterRender`, and since `refresh()`
+        // schedules another render, that's a perpetual 60fps render loop
+        // (re-running every reducer each frame, even at idle). This only
+        // bites graphs past VIEWPORT_CULLING_THRESHOLD, where bounds are
+        // non-null. Compare by value so we only refresh when the viewport
+        // actually moved.
         if (
           ratio !== viewRef.current.cameraRatio ||
           lodTier !== viewRef.current.lodTier ||
-          viewportBounds !== viewRef.current.viewportBounds
+          !viewportBoundsEqual(viewportBounds, viewRef.current.viewportBounds)
         ) {
           viewRef.current = {
             ...viewRef.current,

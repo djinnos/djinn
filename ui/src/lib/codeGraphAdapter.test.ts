@@ -34,6 +34,7 @@ import {
   massForNode,
   parseSnapshotResponse,
   prettifyLabel,
+  viewportBoundsEqual,
   type CommunityHull,
   type LodTier,
   type SnapshotNode,
@@ -2049,6 +2050,31 @@ describe("isSymbolVisibleAtMidTier", () => {
 });
 
 // ── Viewport culling ─────────────────────────────────────────────────────
+
+describe("viewportBoundsEqual", () => {
+  it("treats distinct objects with equal fields as equal (no spurious refresh)", () => {
+    // This is the regression guard: getViewportBounds() returns a fresh
+    // object each call, so the afterRender handler must compare by VALUE.
+    // Identity comparison here would be `false` and spin a render loop.
+    const a: ViewportBounds = { minX: 0, minY: 0, maxX: 100, maxY: 100 };
+    const b: ViewportBounds = { minX: 0, minY: 0, maxX: 100, maxY: 100 };
+    expect(a).not.toBe(b); // distinct references
+    expect(viewportBoundsEqual(a, b)).toBe(true);
+  });
+
+  it("detects a real viewport change", () => {
+    const a: ViewportBounds = { minX: 0, minY: 0, maxX: 100, maxY: 100 };
+    expect(viewportBoundsEqual(a, { ...a, maxX: 101 })).toBe(false);
+    expect(viewportBoundsEqual(a, { ...a, minY: -1 })).toBe(false);
+  });
+
+  it("treats two nulls (culling inactive) as equal and null/object as changed", () => {
+    expect(viewportBoundsEqual(null, null)).toBe(true);
+    const a: ViewportBounds = { minX: 0, minY: 0, maxX: 1, maxY: 1 };
+    expect(viewportBoundsEqual(a, null)).toBe(false);
+    expect(viewportBoundsEqual(null, a)).toBe(false);
+  });
+});
 
 describe("isInViewport", () => {
   const bounds: ViewportBounds = { minX: 0, minY: 0, maxX: 100, maxY: 100 };
