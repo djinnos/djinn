@@ -3,7 +3,9 @@
 // Each function returns `Result<T, String>` where `Err` is a human-readable
 // message suitable for returning as a JSON `{ "error": ... }` response.
 
-use crate::tools::proposal_blocks::{extract_custom_block_tags, proposal_block_tags};
+use crate::tools::proposal_blocks::{
+    extract_custom_block_tags, parse_mdx_blocks, proposal_block_tags,
+};
 
 /// Decode the handful of HTML entities that LLM-authored plain text routinely
 /// over-escapes (e.g. a title arriving as `A &amp; B`). `&amp;` is decoded last
@@ -185,7 +187,101 @@ pub fn validate_mdx_body(body: &str, body_format: Option<&str>) -> Result<(), St
             return Err(format!("Unknown MDX block tag: '{tag}'"));
         }
     }
+    validate_html_block_safety(body)?;
     Ok(())
+}
+
+/// Server-side backstop for the sandboxed `html` block (defense in depth).
+///
+/// The primary defenses are the client-side iframe `sandbox=""` + restrictive
+/// CSP and the DOMPurify pass before render. This is a third layer that rejects
+/// the most dangerous *active* markup in an `html` block's children **before it
+/// is ever stored**, mirroring agent-native's server regex. It is deliberately
+/// conservative — only `<script>` tags, `on*=` event-handler attributes, and
+/// `javascript:` / `data:text/html` URIs are rejected, so benign formatted HTML
+/// (and inline SVG) still passes.
+fn validate_html_block_safety(body: &str) -> Result<(), String> {
+    let blocks = match parse_mdx_blocks(body) {
+        Ok(blocks) => blocks,
+        // Structural parse errors are surfaced by other validators; don't
+        // double-report here.
+        Err(_) => return Ok(()),
+    };
+    for block in blocks {
+        if block.block_type != "html" {
+            continue;
+        }
+        if let Some(reason) = first_unsafe_html_reason(&block.raw_content) {
+            return Err(format!(
+                "Html block '{}' contains disallowed active markup ({reason}); \
+                 the html block renders sandboxed/sanitized static markup and \
+                 is not a scripting surface",
+                block.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Return a short reason string if `content` carries dangerous active markup,
+/// or `None` if it is safe. Case-insensitive; whitespace inside the
+/// `javascript:` scheme is collapsed so obfuscated `java script:` is caught.
+fn first_unsafe_html_reason(content: &str) -> Option<&'static str> {
+    let lower = content.to_ascii_lowercase();
+    if lower.contains("<script") {
+        return Some("a <script> tag");
+    }
+    // `on…=` event handler attributes, e.g. `onerror=`, `onload =`.
+    if has_event_handler_attribute(&lower) {
+        return Some("an on*= event handler");
+    }
+    // `javascript:` / `vbscript:` / `data:text/html` URIs, tolerating
+    // intra-scheme whitespace used to dodge naive string matches.
+    let collapsed: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+    if collapsed.contains("javascript:")
+        || collapsed.contains("vbscript:")
+        || collapsed.contains("data:text/html")
+    {
+        return Some("a javascript:/data:text/html URI");
+    }
+    None
+}
+
+/// Detect an HTML `on<event>=` attribute (e.g. `onclick=`, `onerror =`).
+/// Looks for a word boundary, `on`, one or more ASCII-alpha event-name chars,
+/// optional whitespace, then `=`. Conservative: an `on`-prefixed plain word
+/// followed by `=` is rare in benign block markup.
+fn has_event_handler_attribute(lower: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let mut i = 0;
+    while let Some(pos) = lower[i..].find("on") {
+        let start = i + pos;
+        i = start + 2;
+        // Require a boundary before `on` (start of string or non-alnum), so
+        // words like `button` / `iron` don't match.
+        let boundary = start == 0
+            || !bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_';
+        if !boundary {
+            continue;
+        }
+        let mut j = i;
+        // event name: at least one alpha char.
+        while j < bytes.len() && bytes[j].is_ascii_alphabetic() {
+            j += 1;
+        }
+        if j == i {
+            continue;
+        }
+        // skip optional whitespace before `=`.
+        let mut k = j;
+        while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+            k += 1;
+        }
+        if k < bytes.len() && bytes[k] == b'=' {
+            return true;
+        }
+    }
+    false
 }
 
 /// Validate reason: max 2,000 chars.
@@ -517,6 +613,10 @@ This runs on the hot path.
 }
 </JsonExplorer>
 
+<Html id="custom-markup">
+<div style="padding:8px"><strong>Formatted</strong> author markup.</div>
+</Html>
+
 <QuestionForm id="open-questions" title="Open Questions">
 Should we use Redis or Memcached?
 </QuestionForm>
@@ -584,6 +684,92 @@ Should we use Redis or Memcached?
     fn mdx_body_ignores_lowercase_html() {
         let body = "<div>\n  <span>plain html</span>\n</div>";
         assert!(validate_mdx_body(body, Some("mdx")).is_ok());
+    }
+
+    #[test]
+    fn mdx_body_html_block_allows_benign_markup() {
+        let body = r#"
+<Html id="ok">
+<div style="padding:8px"><strong>Hello</strong> <em>world</em></div>
+<svg viewBox="0 0 10 10"><rect width="10" height="10" fill="red"/></svg>
+</Html>
+"#;
+        assert!(validate_mdx_body(body, Some("mdx")).is_ok());
+    }
+
+    #[test]
+    fn mdx_body_html_block_rejects_script_tag() {
+        let body = r#"
+<Html id="bad">
+<div>hi</div>
+<script>alert(1)</script>
+</Html>
+"#;
+        let err = validate_mdx_body(body, Some("mdx")).unwrap_err();
+        assert!(err.contains("<script>"), "unexpected error: {err}");
+        assert!(err.contains("Html block 'bad'"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn mdx_body_html_block_rejects_event_handler() {
+        let body = r#"
+<Html id="bad">
+<img src="x" onerror="alert(1)" />
+</Html>
+"#;
+        let err = validate_mdx_body(body, Some("mdx")).unwrap_err();
+        assert!(err.contains("on*= event handler"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn mdx_body_html_block_rejects_javascript_uri() {
+        let body = r#"
+<Html id="bad">
+<a href="javascript:alert(1)">click</a>
+</Html>
+"#;
+        let err = validate_mdx_body(body, Some("mdx")).unwrap_err();
+        assert!(
+            err.contains("javascript:/data:text/html"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn mdx_body_html_block_rejects_data_text_html_uri() {
+        let body = r#"
+<Html id="bad">
+<a href="data:text/html,<script>alert(1)</script>">x</a>
+</Html>
+"#;
+        // The data:text/html URI (or the inline <script>) must be rejected.
+        assert!(validate_mdx_body(body, Some("mdx")).is_err());
+    }
+
+    #[test]
+    fn html_safety_does_not_affect_other_blocks() {
+        // An `onClick`-looking handler inside a non-html block (e.g. RichText
+        // prose / code) is NOT subject to the html active-markup rejection.
+        let body = r#"
+<RichText id="r">
+Bind it with `el.onclick = fn` in the handler.
+</RichText>
+"#;
+        assert!(validate_mdx_body(body, Some("mdx")).is_ok());
+    }
+
+    #[test]
+    fn first_unsafe_html_reason_detects_obfuscated_scheme() {
+        // Intra-scheme whitespace is collapsed before matching.
+        assert!(first_unsafe_html_reason("<a href=\"java\nscript:x\">").is_some());
+        assert!(first_unsafe_html_reason("<div>plain text</div>").is_none());
+    }
+
+    #[test]
+    fn event_handler_detection_avoids_false_positives() {
+        // `iron` / `button=` style substrings must not trip the on*= matcher.
+        assert!(!has_event_handler_attribute("<button class=\"iron\">on the wall</button>"));
+        assert!(has_event_handler_attribute("<div onmouseover=\"x\">"));
     }
 
     #[test]

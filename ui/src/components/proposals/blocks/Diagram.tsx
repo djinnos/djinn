@@ -1,9 +1,9 @@
-import { lazy, Suspense, useMemo } from "react";
-import DOMPurify from "dompurify";
+import { lazy, Suspense } from "react";
 
 import type { BlockProps } from "./types";
 import { BlockShell } from "./BlockShell";
 import { DiagramFallback } from "./DiagramFallback";
+import { SandboxedHtmlFrame } from "./SandboxedHtmlFrame";
 
 // Mermaid is a large dependency; load it only when a mermaid diagram renders.
 const MermaidDiagram = lazy(() =>
@@ -17,24 +17,15 @@ const MermaidDiagram = lazy(() =>
  *   - `mermaid` (default): rendered to an actual SVG via the shared
  *     `MermaidDiagram` component (arrow-normalized + DOMPurify'd, with a
  *     graceful copy-source fallback on parse failure),
- *   - `svg`: inlined after DOMPurify sanitization (defends against stored XSS),
+ *   - `svg`: rendered through the same sandboxed iframe surface as the `html`
+ *     block (DOMPurify + `sandbox=""` + restrictive CSP) — NO raw
+ *     `dangerouslySetInnerHTML`, closing the prior stored-XSS escape hatch,
  *   - anything else (e.g. `plantuml`, for which we have no client renderer):
  *     routed to the same graceful copy-source fallback instead of dumping raw.
  */
 export function Diagram({ attributes, children }: BlockProps) {
   const diagramType = attributes.type ?? "mermaid";
   const content = typeof children === "string" ? children.trim() : "";
-
-  // Sanitize author/agent SVG before inlining — the source may carry
-  // `<script>`/`onload=`/`javascript:` payloads. DOMPurify's SVG profile keeps
-  // the drawing intact while stripping active markup.
-  const sanitizedSvg = useMemo(
-    () =>
-      DOMPurify.sanitize(content, {
-        USE_PROFILES: { svg: true, svgFilters: true, html: true },
-      }),
-    [content],
-  );
 
   return (
     <BlockShell
@@ -53,11 +44,10 @@ export function Diagram({ attributes, children }: BlockProps) {
           <MermaidDiagram source={content} />
         </Suspense>
       ) : diagramType === "svg" ? (
-        <div
-          className="overflow-x-auto"
-          // Content is DOMPurify-sanitized above before injection.
-          dangerouslySetInnerHTML={{ __html: sanitizedSvg }}
-        />
+        // Author/agent SVG may carry `<script>`/`onload=`/`javascript:`
+        // payloads. Render it through the shared sandboxed surface (DOMPurify +
+        // locked-down iframe) instead of inlining it into the live DOM.
+        <SandboxedHtmlFrame html={content} title="Diagram SVG" />
       ) : (
         // No client renderer for this type (e.g. plantuml): show the source with
         // a copy button rather than a raw dump.

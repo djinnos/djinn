@@ -1,6 +1,6 @@
 # Canonical Proposal
 
-This is a canonical proposal.mdx sample that exercises all eight v1 proposal block types. It is used by the UI and backend test suites to prove the registry/parser round-trip contract.
+This is a canonical proposal.mdx sample that exercises all v1 proposal block types. It is used by the UI and backend test suites to prove the registry/parser round-trip contract.
 
 <RichText id="intro">
 Welcome to the proposal. This is **rich text** content.
@@ -75,6 +75,12 @@ This runs on the hot path — keep allocations out of the loop.
   "labels": ["alpha", "beta"]
 }
 </JsonExplorer>
+
+<Html id="custom-markup">
+<div style="padding:8px">
+  <strong>Formatted</strong> author markup rendered in a sandboxed iframe.
+</div>
+</Html>
 
 <QuestionForm id="open-questions" title="Open Questions">
 Should we use Redis or Memcached for caching?
