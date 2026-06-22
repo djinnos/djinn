@@ -160,16 +160,24 @@ Uploads a cargo-deny JSON report for a PR run. Requires a bearer token.
 ## Settings mock
 
 <Wireframe id="settings-ui" surface="browser">
-<div style="display:flex;flex-direction:column;gap:10px;padding:16px;height:100%">
-  <h1>CI guardrails</h1>
-  <p class="wf-muted">Toggle each gate for this repository.</p>
-  <div class="wf-card" style="display:flex;flex-direction:column;gap:10px">
-    <label><input type="checkbox" checked /> cargo-deny advisories</label>
-    <label><input type="checkbox" checked /> license allowlist</label>
-    <label><input type="checkbox" /> boundary checker</label>
-    <button class="primary">Save</button>
-  </div>
-</div>
+┌────────────────────────────────────────────┐
+│  CI guardrails                      [ x ]  │
+├────────────────────────────────────────────┤
+│                                            │
+│  Repository                                │
+│  ┌───────────────────────────────────────┐ │
+│  │ djinnos/djinn                         │ │
+│  └───────────────────────────────────────┘ │
+│                                            │
+│  [x] cargo-deny advisories                 │
+│  [x] license allowlist                     │
+│  [ ] boundary checker                      │
+│                                            │
+│         ┌──────────┐  ┌──────────┐         │
+│         │  Cancel  │  │   Save   │         │
+│         └──────────┘  └──────────┘         │
+│                                            │
+└────────────────────────────────────────────┘
 </Wireframe>
 
 ## Acceptance criteria

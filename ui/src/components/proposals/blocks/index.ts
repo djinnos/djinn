@@ -15,17 +15,6 @@ export { ColumnsBlock } from "./ColumnsBlock";
 export { WireframeBlock } from "./WireframeBlock";
 export { SandboxedHtmlFrame } from "./SandboxedHtmlFrame";
 export {
-  buildWireframeSrcDoc,
-  resolveWireframeSurface,
-  WIREFRAME_SURFACES,
-  DEFAULT_WIREFRAME_SURFACE,
-} from "./wireframeHtml";
-export type { WireframeSurface } from "./wireframeHtml";
-export {
-  renderWireframeIconHtml,
-  WIREFRAME_ICON_NAMES,
-} from "./wireframeIcons";
-export {
   sanitizeBlockHtml,
   buildIframeSrcDoc,
   SANDBOX_VALUE,

@@ -1,99 +1,77 @@
 import { describe, expect, it } from "vitest";
+
 import { render, screen } from "@/test/test-utils";
 
 import { WireframeBlock } from "./WireframeBlock";
-import { WIREFRAME_SURFACES } from "./wireframeHtml";
-
-function frame(): HTMLIFrameElement {
-  return screen.getByTitle("Wireframe mockup") as HTMLIFrameElement;
-}
 
 describe("WireframeBlock", () => {
-  it("renders the children inside a fully sandboxed iframe (no scripts, no same-origin)", () => {
+  it("renders the drawing as a monospace <pre> (no iframe, no svg)", () => {
     render(
-      <WireframeBlock id="w1" attributes={{ surface: "desktop" }}>
-        {'<div class="wf-card"><h1>Sign in</h1></div>'}
+      <WireframeBlock id="w1" attributes={{}}>
+        {"┌────┐\n│ Hi │\n└────┘"}
       </WireframeBlock>,
     );
-    const iframe = frame();
-    expect(iframe.tagName).toBe("IFRAME");
-    expect(iframe.getAttribute("sandbox")).toBe("");
-    expect(iframe.getAttribute("sandbox")).not.toContain("allow-scripts");
-    const srcdoc = iframe.getAttribute("srcdoc") ?? "";
-    expect(srcdoc).toContain("--wf-ink:");
-    expect(srcdoc).toContain('<div class="wf-card">');
-    expect(srcdoc).toContain("Sign in");
-    expect(srcdoc).toContain("Content-Security-Policy");
+    const pre = screen.getByTestId("wireframe-ascii");
+    expect(pre.tagName).toBe("PRE");
+    expect(pre).toHaveTextContent("Hi");
+    // Rendered as text, not an embedded iframe or a generated diagram <svg>.
+    expect(document.querySelector("iframe")).toBeNull();
+    expect(pre.querySelector("svg")).toBeNull();
   });
 
-  it("applies the surface preset width (default desktop)", () => {
-    const { rerender } = render(
-      <WireframeBlock id="w2" attributes={{ surface: "mobile" }}>
-        {"<p>hi</p>"}
-      </WireframeBlock>,
-    );
-    expect(frame().style.width).toBe(`${WIREFRAME_SURFACES.mobile.width}px`);
-
-    // Missing/unknown surface falls back to the default desktop footprint.
-    rerender(
+  it("uses the Monaspace Radon handwriting font", () => {
+    render(
       <WireframeBlock id="w2" attributes={{}}>
-        {"<p>hi</p>"}
+        {"[ Save ]"}
       </WireframeBlock>,
     );
-    expect(frame().style.width).toBe(`${WIREFRAME_SURFACES.desktop.width}px`);
+    const pre = screen.getByTestId("wireframe-ascii");
+    expect(pre.getAttribute("style")).toContain("Monaspace Radon");
   });
 
-  it("transforms data-icon markers into inline svg in the srcdoc", () => {
+  it("strips common leading indentation but keeps the box grid", () => {
     render(
-      <WireframeBlock id="w3" attributes={{ surface: "browser" }}>
-        {'<button><span data-icon="search"></span> Search</button>'}
+      <WireframeBlock id="w3" attributes={{}}>
+        {"    ┌──┐\n    │ok│\n    └──┘"}
       </WireframeBlock>,
     );
-    const srcdoc = frame().getAttribute("srcdoc") ?? "";
-    expect(srcdoc).toContain("<svg");
-    expect(srcdoc).toContain('class="wf-icon"');
-    expect(srcdoc).toContain('data-icon="search"');
+    // De-dented: lines start at the box edge, not four spaces in.
+    expect(screen.getByTestId("wireframe-ascii").textContent).toBe(
+      "┌──┐\n│ok│\n└──┘",
+    );
   });
 
-  it("strips active markup (scripts) from the wireframe srcdoc", () => {
+  it("offers a copy button", () => {
     render(
-      <WireframeBlock id="w4" attributes={{ surface: "desktop" }}>
-        {"<b>keep</b><script>alert(1)</script>"}
+      <WireframeBlock id="w4" attributes={{}}>
+        {"┌──┐\n└──┘"}
       </WireframeBlock>,
     );
-    const srcdoc = frame().getAttribute("srcdoc") ?? "";
-    expect(srcdoc).toContain("<b>keep</b>");
-    expect(srcdoc).not.toContain("alert(1)");
-  });
-
-  it("exposes zoom/pan controls (de-chromed: no shell label)", () => {
-    render(
-      <WireframeBlock id="w5" attributes={{ surface: "desktop" }}>
-        {"<p>body</p>"}
-      </WireframeBlock>,
-    );
-    // No "Wireframe" header/eyebrow — the mockup's own device frame is the chrome.
-    expect(screen.queryByText("Wireframe")).not.toBeInTheDocument();
-    expect(screen.getByTestId("wireframe-controls")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Zoom in" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Reset zoom" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Fullscreen" }),
+      screen.getByRole("button", { name: /copy wireframe/i }),
     ).toBeInTheDocument();
   });
 
-  it("renders a calm frame for empty/invalid children without throwing", () => {
+  it("renders a calm placeholder for empty children without throwing", () => {
     expect(() =>
       render(
-        <WireframeBlock id="w6" attributes={{ surface: "desktop" }}>
+        <WireframeBlock id="w5" attributes={{ surface: "desktop" }}>
           {""}
         </WireframeBlock>,
       ),
     ).not.toThrow();
-    expect(frame().tagName).toBe("IFRAME");
+    expect(screen.getByTestId("wireframe-ascii")).toHaveTextContent(
+      "empty wireframe",
+    );
+  });
+
+  it("stays de-chromed (no shell label) and tolerates a legacy surface attr", () => {
+    render(
+      <WireframeBlock id="w6" attributes={{ surface: "mobile" }}>
+        {"┌──┐\n│ok│\n└──┘"}
+      </WireframeBlock>,
+    );
+    expect(screen.queryByText("Wireframe")).not.toBeInTheDocument();
+    expect(screen.getByTestId("wireframe-ascii")).toBeInTheDocument();
   });
 });

@@ -30,6 +30,22 @@
   font-display: swap;
 }
 
+/*
+ * Monaspace Radon — GitHub's handwriting-style MONOSPACED font, used only by the
+ * proposal Wireframe block to render ASCII/box-drawing screens as a hand-drawn
+ * lo-fi sketch. Self-hosted and SUBSET to Latin + box-drawing/arrows/blocks
+ * (U+2500–25FF) so the connected box glyphs tile while the file stays ~50KB
+ * (vs the 1.24MB full font). The full font's contextual handwriting alternates
+ * are preserved.
+ */
+@font-face {
+  font-family: "Monaspace Radon";
+  src: url("../assets/fonts/MonaspaceRadon-wireframe.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --background: oklch(0.141 0.005 285.823);
   --foreground: oklch(0.985 0 0);
