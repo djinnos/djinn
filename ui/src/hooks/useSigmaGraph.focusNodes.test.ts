@@ -61,6 +61,10 @@ vi.mock("@sigma/edge-curve", () => ({
   default: class MockEdgeCurveProgram {},
 }));
 
+vi.mock("sigma/rendering", () => ({
+  EdgeRectangleProgram: class MockEdgeRectangleProgram {},
+}));
+
 vi.mock("graphology-layout-forceatlas2/worker", () => ({
   default: class MockSupervisor {
     start = vi.fn();

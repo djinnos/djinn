@@ -692,6 +692,23 @@ function edgeBaseSize(nodeCount: number): number {
 export const MAX_RENDERED_EDGES = 12_000;
 
 /**
+ * Above this many rendered edges, intra-crate edges switch from curved
+ * beziers to straight lines. Curved edges tessellate a quadratic curve
+ * into many GPU segments; at a few thousand edges that geometry is the
+ * bulk of the per-frame cost and the curvature is imperceptible in the
+ * dense wash anyway. The few cross-crate edges stay curved + dashed so
+ * they remain legible as the highlighted inter-module links. Focused
+ * sub-views (single crate, DOI expansion) sit below the threshold and
+ * keep the prettier curved rendering.
+ */
+export const STRAIGHT_EDGE_THRESHOLD = 2_500;
+
+/** Sigma edge-program type for straight (rectangle) edges. */
+export const STRAIGHT_EDGE_TYPE = "straight";
+/** Sigma edge-program type for curved (bezier) edges. */
+export const CURVED_EDGE_TYPE = "curved";
+
+/**
  * Graph-level attribute carrying `{ rendered, total }` edge counts so the
  * canvas can surface "N of M edges" when the salience cap trims the set.
  * `total` counts drawable edges (post containment/self-loop/drop filters),
@@ -898,6 +915,7 @@ function addEdgesFromSnapshot(
   interface DrawableEdge {
     from: string;
     to: string;
+    isCrossWorkspace: boolean;
     salience: number;
     attrs: Record<string, unknown>;
   }
@@ -924,6 +942,7 @@ function addEdgesFromSnapshot(
     drawable.push({
       from: edge.from,
       to: edge.to,
+      isCrossWorkspace,
       salience: edgeSalience(
         style.sizeMultiplier,
         edge.confidence,
@@ -940,8 +959,6 @@ function addEdgesFromSnapshot(
         size: baseSize * style.sizeMultiplier * confidenceFactor *
           (isCrossWorkspace ? 2.4 : 1),
         color: crossWorkspaceColor ?? style.color,
-        type: "curved",
-        curvature: (isCrossWorkspace ? 0.28 : 0.12) + 0.04,
         zIndex: isCrossWorkspace ? 20 : 1,
         lineStyle: isCrossWorkspace ? "dashed" : "solid",
       },
@@ -955,8 +972,19 @@ function addEdgesFromSnapshot(
     drawable.length = MAX_RENDERED_EDGES;
   }
 
+  // Decide the edge program from the *rendered* count: dense graphs draw
+  // intra-crate edges as cheap straight lines, sparse ones keep curves.
+  const dense = drawable.length > STRAIGHT_EDGE_THRESHOLD;
   for (const e of drawable) {
-    graph.addEdge(e.from, e.to, e.attrs);
+    const curved = e.isCrossWorkspace || !dense;
+    graph.addEdge(e.from, e.to, {
+      ...e.attrs,
+      type: curved ? CURVED_EDGE_TYPE : STRAIGHT_EDGE_TYPE,
+      // curvature only applies to the bezier program; straight edges omit it.
+      ...(curved
+        ? { curvature: (e.isCrossWorkspace ? 0.28 : 0.12) + 0.04 }
+        : {}),
+    });
   }
 
   graph.setAttribute(EDGE_RENDER_STATS_ATTRIBUTE, {
