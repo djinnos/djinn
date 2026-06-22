@@ -248,16 +248,30 @@ impl McpState {
             })
             .collect();
 
-        // Org-policy gate: reject any model on a blocked subscription provider
-        // before the connectivity check, with a distinct message.
+        // Org-policy gate: reject any model on a blocked subscription before the
+        // connectivity check, with a distinct message. We resolve each model to
+        // its governable subscription IDENTITY (not just its namespace provider)
+        // so a blocked ChatGPT/Codex sub catches `openai/...-codex` models even
+        // though they surface under the `openai` namespace — while a plain openai
+        // BYO API key stays ungoverned.
         let blocked = self.blocked_subscription_ids().await;
         if !blocked.is_empty() {
-            let mut blocked_hits: Vec<String> = configured_provider_ids
+            let mut blocked_hits: Vec<String> = models
                 .iter()
-                .filter(|pid| blocked.contains(&pid.to_ascii_lowercase()))
-                .cloned()
+                .filter_map(|model| {
+                    let provider_id = model
+                        .split_once('/')
+                        .map(|(pid, _)| pid)
+                        .unwrap_or(model.as_str());
+                    djinn_provider::catalog::builtin::governable_subscription_for_model(
+                        provider_id,
+                        model,
+                    )
+                    .filter(|sub| blocked.contains(&sub.to_ascii_lowercase()))
+                })
                 .collect();
             blocked_hits.sort();
+            blocked_hits.dedup();
             if !blocked_hits.is_empty() {
                 return Err(format!(
                     "models reference subscriptions blocked by org policy: {}",

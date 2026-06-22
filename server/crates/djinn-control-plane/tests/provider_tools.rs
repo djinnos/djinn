@@ -347,3 +347,113 @@ async fn org_policy_get_reports_jurisdiction_and_lock_default() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn org_policy_subscription_enumeration_includes_codex_chinese_and_dedupes_copilot() {
+    let harness = McpTestHarness::new().await;
+    let result = harness
+        .call_tool("org_policy_get", json!({}))
+        .await
+        .expect("org_policy_get dispatch");
+    let subs = result["subscriptions"].as_array().expect("subscriptions");
+
+    let by_id = |id: &str| subs.iter().find(|s| s["id"] == id);
+
+    // ChatGPT/Codex is a governable subscription, classified US — even though it
+    // is a merged child the catalog otherwise hides under `openai`.
+    let codex = by_id("chatgpt_codex").expect("chatgpt_codex must be enumerated");
+    assert_eq!(codex["jurisdiction"], "us", "codex is US-hosted");
+
+    // Connected Chinese subs are classified CN.
+    for cn_id in ["minimax-coding-plan", "kimi-for-coding", "zai-coding-plan"] {
+        let item = by_id(cn_id).unwrap_or_else(|| panic!("{cn_id} must be enumerated"));
+        assert_eq!(item["jurisdiction"], "cn", "{cn_id} should be China-hosted");
+    }
+
+    // The two GitHub Copilot ids (`github-copilot` + `githubcopilot`) collapse to
+    // exactly one row.
+    let copilot_count = subs
+        .iter()
+        .filter(|s| {
+            s["id"]
+                .as_str()
+                .map(|id| {
+                    let canon: String = id
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric())
+                        .flat_map(|c| c.to_lowercase())
+                        .collect();
+                    canon == "githubcopilot"
+                })
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(
+        copilot_count, 1,
+        "GitHub Copilot must be de-duplicated to one row"
+    );
+
+    // Non-subscription API providers are never listed.
+    assert!(
+        by_id("openai").is_none(),
+        "plain openai api key is not governed"
+    );
+    assert!(by_id("anthropic").is_none());
+    assert!(by_id("fireworks-ai").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn org_policy_blocks_codex_subscription_via_openai_namespaced_models() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db().clone();
+
+    // Connect the openai provider so the connectivity check passes; the test
+    // then isolates the org-policy gate (codex block) from connectivity.
+    CredentialRepository::new(db, EventBus::noop())
+        .set("openai", "OPENAI_API_KEY", "sk-test")
+        .await
+        .unwrap();
+
+    // Baseline: a codex model (surfaced under the openai namespace) validates.
+    harness
+        .state()
+        .validate_models_for_user(&["openai/gpt-5.3-codex".to_string()], None)
+        .await
+        .expect("codex model validates before block");
+
+    // Admin blocks the ChatGPT/Codex subscription by its own identity.
+    let set = harness
+        .call_tool(
+            "org_policy_set",
+            json!({"blocked_subscriptions": ["chatgpt_codex"]}),
+        )
+        .await
+        .expect("org_policy_set dispatch");
+    assert!(
+        set["blocked_subscriptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "chatgpt_codex"),
+        "codex sub must be storable in the blocklist (it is a subscription)"
+    );
+
+    // Enforcement: a codex model namespaced `openai/...` is now rejected, because
+    // it resolves to the blocked chatgpt_codex subscription identity.
+    let err = harness
+        .state()
+        .validate_models_for_user(&["openai/gpt-5.3-codex".to_string()], None)
+        .await
+        .expect_err("codex model must be rejected once the sub is blocked");
+    assert!(
+        err.contains("blocked by org policy"),
+        "rejection should mention org policy, got: {err}"
+    );
+
+    // A plain openai API-key model is NOT governed by the codex block.
+    harness
+        .state()
+        .validate_models_for_user(&["openai/gpt-5.5".to_string()], None)
+        .await
+        .expect("plain openai api-key model stays ungoverned");
+}
