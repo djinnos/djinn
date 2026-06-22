@@ -46,8 +46,8 @@ fn registry_contains_v1_blocks() {
             .is_some_and(|d| d.contains("columns={[") && d.contains("body")),
         "columns block must advertise its JSON-array authoring format"
     );
-    // The wireframe block documents its `surface` enum + the `--wf-*` token /
-    // `data-icon` authoring contract.
+    // The wireframe block documents its `surface` enum + the ASCII / box-drawing
+    // authoring contract (HTML/`--wf-*`/`data-icon` are gone).
     assert_eq!(
         registry["wireframe"].fields["surface"].enum_values.as_deref(),
         Some(["browser", "desktop", "mobile", "popover", "panel"].as_slice())
@@ -55,8 +55,8 @@ fn registry_contains_v1_blocks() {
     assert!(
         registry["wireframe"]
             .description
-            .is_some_and(|d| d.contains("--wf-") && d.contains("data-icon")),
-        "wireframe block must advertise its --wf-* token + data-icon authoring contract"
+            .is_some_and(|d| d.contains("ASCII") && d.contains("box-drawing")),
+        "wireframe block must advertise its ASCII / box-drawing authoring contract"
     );
 }
 
