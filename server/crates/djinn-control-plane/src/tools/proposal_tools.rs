@@ -2030,6 +2030,102 @@ mod export_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_export_canonical_fixture_body_is_byte_identical() {
+        // A canonical-fixture-derived MDX body containing the trickier blocks:
+        // a `>` inside an attribute value, bare-brace JSON children
+        // (JsonExplorer / OpenApi), and a nested same-tag child. The exported
+        // body must be byte-equal to the stored body AND the structural
+        // round-trip equality check inside `proposal_export` must pass.
+        let (server, db) = test_server().await;
+        let body = r#"# Canonical Proposal
+
+<RichText id="intro">
+Welcome to the proposal.
+</RichText>
+
+<ApiEndpoint id="get-users" method="GET" path="/api/users?filter=>active">
+Returns active users.
+</ApiEndpoint>
+
+<JsonExplorer id="config-sample">
+{
+  "enabled": true,
+  "nested": { "a": [1, 2, 3] },
+  "labels": ["alpha", "beta"]
+}
+</JsonExplorer>
+
+<OpenApi id="petstore-api">
+{
+  "openapi": "3.0.0",
+  "info": { "title": "Petstore", "version": "1.0.0" },
+  "paths": { "/pets": { "get": { "responses": { "200": {} } } } }
+}
+</OpenApi>
+
+<Callout id="outer" tone="warning">
+before
+<Callout id="inner">nested</Callout>
+after
+</Callout>
+
+<QuestionForm id="open-questions" title="Open Questions">
+Should we use Redis or Memcached?
+</QuestionForm>
+"#;
+        let repo = ProposalRepository::new(db, EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Canonical",
+                body,
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: Some("mdx"),
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .proposal_export(Parameters(ProposalExportParams {
+                id: proposal.id.clone(),
+            }))
+            .await
+            .0;
+
+        // The structural round-trip equality check inside `proposal_export`
+        // must pass (no error surfaced).
+        assert!(
+            response.error.is_none(),
+            "round-trip should succeed, got: {:?}",
+            response.error
+        );
+        let mdx = response.mdx.as_deref().expect("mdx field should be set");
+        let (_, exported_body) = split_proposal_mdx_frontmatter(mdx).unwrap();
+
+        // Export is verbatim: the body after the frontmatter is byte-identical
+        // to what was stored.
+        assert_eq!(
+            exported_body, body,
+            "exported body must be byte-identical to the stored body"
+        );
+
+        // And the parsed blocks are structurally identical across the two parses.
+        let original_blocks = parse_mdx_blocks(body).unwrap();
+        let exported_blocks = parse_mdx_blocks(exported_body).unwrap();
+        assert_eq!(original_blocks, exported_blocks);
+        // The nested same-tag child is preserved inside the outer block's
+        // raw_content (the old regex would have truncated it here).
+        let outer = original_blocks
+            .iter()
+            .find(|b| b.id == "outer")
+            .expect("outer callout present");
+        assert!(
+            outer.raw_content.contains("<Callout id=\"inner\">nested</Callout>"),
+            "nested same-tag child must survive in raw_content"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn proposal_export_nonexistent_id_returns_error() {
         let (server, _db) = test_server().await;
 

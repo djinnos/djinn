@@ -7,6 +7,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::LazyLock;
 
+use markdown::mdast::{AttributeContent, AttributeValue, Node};
+use markdown::{Constructs, ParseOptions};
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
@@ -600,39 +602,216 @@ pub fn proposal_block_tags() -> HashSet<&'static str> {
         .collect()
 }
 
+/// Build the [`ParseOptions`] used for every proposal-MDX parse.
+///
+/// We start from the MDX construct set and then disable the MDX **expression**
+/// (`{...}` flow/text) and **ESM** (`import`/`export`) constructs, keeping ONLY
+/// the JSX element/attribute grammar (`mdx_jsx_flow` + `mdx_jsx_text`).
+///
+/// Why: proposal block CHILDREN routinely contain bare `{ ... }` — raw JSON in
+/// `JsonExplorer`/`OpenApi` blocks, braces in code. With expression parsing on,
+/// markdown-rs tries to parse those as JS and fails ("could not parse
+/// expression"). Block children are opaque markdown that each block component
+/// re-parses itself, so we want `{...}` inside content left as literal text —
+/// exactly as the old regex did. We also do NOT install an
+/// `mdx_expression_parse`/`mdx_esm_parse` JS hook: without one, markdown-rs
+/// captures `{...}` JSX *attribute* values as RAW (brace-balanced) text, which
+/// is precisely the behavior we want (store the raw expression string, e.g. for
+/// a forward-compat `tabs={[...]}` attribute) and never evaluates JS.
+fn proposal_parse_options() -> ParseOptions {
+    let constructs = Constructs {
+        mdx_expression_flow: false,
+        mdx_expression_text: false,
+        mdx_esm: false,
+        ..Constructs::mdx()
+    };
+    ParseOptions {
+        constructs,
+        ..ParseOptions::mdx()
+    }
+}
+
+/// Returns `true` when `tag` follows the canonical PascalCase component
+/// convention (starts with uppercase, then alphanumeric). This mirrors the old
+/// `<([A-Z][A-Za-z0-9]*)` regex used to distinguish registered block tags from
+/// ordinary lowercase HTML elements.
+fn is_pascal_case_tag(tag: &str) -> bool {
+    let mut chars = tag.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_uppercase())
+        && chars.all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Offset just after the opening tag's closing `>` (or `/>`), scanning from the
+/// element's start offset while skipping quoted attribute values and `{...}`
+/// expression depth. This is the start of the block's children-markdown content
+/// and mirrors exactly where the old regex's content group began — preserving
+/// the leading `\n` after `>` that the previous parser captured.
+fn open_tag_end_offset(source: &[u8], start: usize) -> usize {
+    let mut i = start + 1; // skip the leading '<'
+    let mut depth: i32 = 0;
+    let mut quote: Option<u8> = None;
+    while i < source.len() {
+        let ch = source[i];
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            b'"' | b'\'' => quote = Some(ch),
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            b'>' if depth == 0 => return i + 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    i
+}
+
+/// A JSX element node (block or inline flavor) decomposed into the fields the
+/// block parser needs. Adjacent JSX elements not separated by a blank line are
+/// parsed as the inline (`MdxJsxTextElement`) flavor inside a paragraph, so both
+/// variants must be matched for parity with the old blank-line-agnostic regex.
+struct JsxElementRef<'a> {
+    name: &'a str,
+    attributes: &'a [AttributeContent],
+    children: &'a [Node],
+    position: Option<&'a markdown::unist::Position>,
+}
+
+fn as_jsx_element(node: &Node) -> Option<JsxElementRef<'_>> {
+    match node {
+        Node::MdxJsxFlowElement(e) => Some(JsxElementRef {
+            name: e.name.as_deref()?,
+            attributes: &e.attributes,
+            children: &e.children,
+            position: e.position.as_ref(),
+        }),
+        Node::MdxJsxTextElement(e) => Some(JsxElementRef {
+            name: e.name.as_deref()?,
+            attributes: &e.attributes,
+            children: &e.children,
+            position: e.position.as_ref(),
+        }),
+        _ => None,
+    }
+}
+
+/// Collect every top-level (non-nested) PascalCase JSX element in document
+/// order. We never descend *into* a matched block — its children are opaque
+/// markdown sliced from source, exactly as the old non-greedy regex captured
+/// them. Lowercase HTML elements (`<div>`) are skipped but recursed through so a
+/// PascalCase block wrapped in a `<div>` is still found.
+fn collect_block_elements<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+    if let Some(el) = as_jsx_element(node)
+        && is_pascal_case_tag(el.name)
+    {
+        out.push(node);
+        return; // do not descend into block children
+    }
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_block_elements(child, out);
+        }
+    }
+}
+
+/// Resolve a JSX element's attributes into the flat `name -> string` map the
+/// contract stores. String attributes keep their literal value; `{...}`
+/// expression attributes store their raw expression text (forward-compat, e.g.
+/// `tabs={[...]}`); bare/boolean attributes (`<Tag flag>`) become `"true"`.
+/// `{...spread}` attributes are skipped (no name).
+fn attributes_of(attributes: &[AttributeContent]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for attr in attributes {
+        let AttributeContent::Property(prop) = attr else {
+            continue; // skip {...spread}
+        };
+        let value = match &prop.value {
+            None => "true".to_string(),
+            Some(AttributeValue::Literal(s)) => s.clone(),
+            Some(AttributeValue::Expression(expr)) => expr.value.trim().to_string(),
+        };
+        map.insert(prop.name.clone(), value);
+    }
+    map
+}
+
+/// Slice the children-markdown of a block element from the original `body`
+/// between the end of the opening tag and the start of the closing tag, rather
+/// than re-stringifying the mdast children (which would churn whitespace and
+/// break the byte-identical export contract). Self-closing elements (no
+/// children) yield an empty string.
+fn block_raw_content(body: &str, el: &JsxElementRef<'_>) -> String {
+    if el.children.is_empty() {
+        return String::new();
+    }
+    let Some(pos) = el.position else {
+        return String::new();
+    };
+    let start = pos.start.offset;
+    let end = pos.end.offset;
+    let content_start = open_tag_end_offset(body.as_bytes(), start);
+    let close_start = end.saturating_sub(format!("</{}>", el.name).len());
+    if close_start <= content_start {
+        return String::new();
+    }
+    body[content_start..close_start].to_string()
+}
+
+/// Map a markdown-rs parse error to a [`BlockError`]. An end-tag mismatch for a
+/// registered block surfaces as [`BlockError::UnclosedBlock`] (preserving the
+/// old "no closing `</tag>`" semantics); anything else is a generic
+/// [`BlockError::ParseError`].
+fn mdx_error_to_block_error(message: &markdown::message::Message) -> BlockError {
+    let reason = &message.reason;
+    // markdown-rs phrases unclosed/mismatched JSX as:
+    //   "Expected a closing tag for `<Diagram>` (…)" / "Unexpected closing tag …".
+    if let Some(tag) = reason
+        .split_once("for `<")
+        .and_then(|(_, rest)| rest.split_once('>'))
+        .map(|(tag, _)| tag.to_string())
+        .filter(|t| proposal_block_definition_for_tag(t).is_some())
+    {
+        return BlockError::UnclosedBlock(tag);
+    }
+    BlockError::ParseError(reason.clone())
+}
+
 /// Extract registered proposal MDX blocks from a body string.
 ///
-/// This lightweight parser is intended for validation/introspection workflows,
-/// not for rendering arbitrary MDX. It recognizes the PascalCase component tags
-/// published in [`PROPOSAL_BLOCK_REGISTRY`] and skips unrelated HTML/MDX tags.
+/// This walks a real MDX abstract syntax tree (mdast) — produced by the
+/// `markdown` crate with the JSX-only construct set — instead of a regex. It
+/// recognizes the PascalCase component tags published in
+/// [`PROPOSAL_BLOCK_REGISTRY`] and skips unrelated HTML/MDX. `raw_content` is
+/// sliced verbatim from the source `body` so it stays byte-identical to the old
+/// parser (and keeps `proposal_export` round-tripping).
 pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedProposalBlock>, BlockError> {
-    let re = regex::Regex::new(r"<([A-Z][A-Za-z0-9]*)([^>]*)>")
-        .map_err(|e| BlockError::ParseError(format!("block parser regex error: {e}")))?;
-    let mut blocks = Vec::new();
+    if body.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let tree = markdown::to_mdast(body, &proposal_parse_options())
+        .map_err(|e| mdx_error_to_block_error(&e))?;
 
-    for cap in re.captures_iter(body) {
-        let tag = &cap[1];
-        let Some(definition) = proposal_block_definition_for_tag(tag) else {
+    let mut nodes = Vec::new();
+    collect_block_elements(&tree, &mut nodes);
+
+    let mut blocks = Vec::new();
+    for node in nodes {
+        let el = as_jsx_element(node).expect("collected nodes are JSX elements");
+        let Some(definition) = proposal_block_definition_for_tag(el.name) else {
             continue;
         };
-        let attrs_str = &cap[2];
-        let open_end = cap.get(0).expect("full match exists").end();
-        let attributes = parse_attributes(attrs_str);
+        let attributes = attributes_of(el.attributes);
         let id = attributes.get("id").cloned().unwrap_or_default();
-        let raw_content = if attrs_str.trim_end().ends_with('/') {
-            String::new()
-        } else {
-            let closing_tag = format!("</{tag}>");
-            let close_start = body[open_end..]
-                .find(&closing_tag)
-                .map(|pos| open_end + pos)
-                .ok_or_else(|| BlockError::UnclosedBlock(tag.to_string()))?;
-            body[open_end..close_start].to_string()
-        };
+        let raw_content = block_raw_content(body, &el);
 
         blocks.push(ParsedProposalBlock {
             block_type: definition.block_type.to_string(),
-            tag: tag.to_string(),
+            tag: el.name.to_string(),
             id,
             attributes,
             raw_content,
@@ -642,21 +821,65 @@ pub fn parse_mdx_blocks(body: &str) -> Result<Vec<ParsedProposalBlock>, BlockErr
     Ok(blocks)
 }
 
+/// Recursively collect every PascalCase JSX element name in the AST, in
+/// document order. Unlike [`collect_block_elements`] this DESCENDS into block
+/// children so nested tags (known or unknown) are seen — required by the
+/// nesting validation/extract semantics.
+fn collect_jsx_names(node: &Node, out: &mut Vec<String>) {
+    if let Some(el) = as_jsx_element(node) {
+        if is_pascal_case_tag(el.name) {
+            out.push(el.name.to_string());
+        }
+        for child in el.children {
+            collect_jsx_names(child, out);
+        }
+        return;
+    }
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_jsx_names(child, out);
+        }
+    }
+}
+
+/// All PascalCase JSX element names in `body`, in first-seen document order,
+/// descending through nested blocks. Falls back to a lightweight opening-tag
+/// scan when the body is not well-formed MDX (e.g. mismatched tags), preserving
+/// the old regex's lenient behavior on malformed input.
+fn pascal_case_tag_names(body: &str) -> Vec<String> {
+    match markdown::to_mdast(body, &proposal_parse_options()) {
+        Ok(tree) => {
+            let mut names = Vec::new();
+            collect_jsx_names(&tree, &mut names);
+            names
+        }
+        Err(_) => scan_opening_tags(body),
+    }
+}
+
+/// Lenient opening-tag scanner used only when MDX parsing fails. Mirrors the old
+/// `<([A-Z][A-Za-z0-9]*)` regex: every opening PascalCase tag, in order, NOT
+/// de-duplicated (callers dedupe as needed).
+fn scan_opening_tags(body: &str) -> Vec<String> {
+    static RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"<([A-Z][A-Za-z0-9]*)").expect("tag regex compiles"));
+    RE.captures_iter(body)
+        .map(|cap| cap[1].to_string())
+        .collect()
+}
+
 /// Validate an MDX body against the block registry.
 ///
-/// Extracts every PascalCase component tag and rejects the first unknown tag
-/// with [`BlockError::UnknownBlock`]. Registered tags (including self-closing
-/// and nested variants) pass silently. Empty or whitespace-only bodies are
-/// accepted.
+/// Walks the MDX AST collecting every PascalCase component name (descending
+/// into nested blocks) and rejects the first unknown tag with
+/// [`BlockError::UnknownBlock`]. Registered tags (including self-closing and
+/// nested variants) pass silently. Empty or whitespace-only bodies are accepted.
 pub fn validate_mdx_blocks(body: &str) -> Result<(), BlockError> {
     if body.trim().is_empty() {
         return Ok(());
     }
     let allowed = proposal_block_tags();
-    let re = regex::Regex::new(r"<([A-Z][A-Za-z0-9]*)")
-        .map_err(|e| BlockError::ParseError(format!("tag regex error: {e}")))?;
-    for cap in re.captures_iter(body) {
-        let tag = cap[1].to_string();
+    for tag in pascal_case_tag_names(body) {
         if !allowed.contains(tag.as_str()) {
             return Err(BlockError::UnknownBlock(tag));
         }
@@ -713,33 +936,14 @@ pub fn validate_question_form_placement_for_format(
 /// detect unknown blocks. Lowercase HTML tags (`<div>`, `<span>`, …) and
 /// closing tags (`</Tag>`) are intentionally ignored.
 pub fn extract_custom_block_tags(body: &str) -> Vec<String> {
-    let re = regex::Regex::new(r"<([A-Z][A-Za-z0-9]*)").expect("tag regex should compile");
     let mut tags = Vec::new();
     let mut seen = HashSet::new();
-    for cap in re.captures_iter(body) {
-        let tag = cap[1].to_string();
+    for tag in pascal_case_tag_names(body) {
         if seen.insert(tag.clone()) {
             tags.push(tag);
         }
     }
     tags
-}
-
-/// Parse `key="value"` and `key='value'` attributes from an MDX opening tag.
-fn parse_attributes(attrs_str: &str) -> HashMap<String, String> {
-    let re = regex::Regex::new(r#"([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#)
-        .expect("attr regex should compile");
-    let mut map = HashMap::new();
-    for cap in re.captures_iter(attrs_str) {
-        let key = cap[1].to_string();
-        let value = cap
-            .get(2)
-            .or_else(|| cap.get(3))
-            .map(|m| m.as_str().to_string())
-            .unwrap_or_default();
-        map.insert(key, value);
-    }
-    map
 }
 
 /// Ensure all parsed blocks have non-empty, unique `id` attributes.
@@ -1208,5 +1412,80 @@ graph TD;
     fn extract_tags_empty_body() {
         assert!(extract_custom_block_tags("").is_empty());
         assert!(extract_custom_block_tags("plain markdown only").is_empty());
+    }
+
+    // ── AST-parser parity tests (regressions the old regex could not handle) ──
+
+    #[test]
+    fn parse_attribute_value_containing_gt() {
+        // The old regex's `([^>]*)` attribute group stopped at the first `>`,
+        // truncating both the `path` attribute and the raw_content. The AST
+        // walker reads the full attribute and keeps the children intact.
+        let body = r#"<ApiEndpoint id="x" path="/a?to=>b">body</ApiEndpoint>"#;
+        let blocks = parse_mdx_blocks(body).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].tag, "ApiEndpoint");
+        assert_eq!(blocks[0].id, "x");
+        assert_eq!(
+            blocks[0].attributes.get("path").map(String::as_str),
+            Some("/a?to=>b"),
+            "attribute value with a `>` must be captured in full"
+        );
+        assert_eq!(blocks[0].raw_content, "body");
+    }
+
+    #[test]
+    fn parse_nested_same_tag_children_not_truncated() {
+        // The old non-greedy `([\s\S]*?)</tag>` matched the FIRST close tag, so
+        // a nested same-named block truncated the outer block's raw_content.
+        // The AST slices the full children span between the OUTER open/close.
+        let body = "<Callout id=\"outer\">\nbefore\n<Callout id=\"inner\">nested</Callout>\nafter\n</Callout>";
+        let blocks = parse_mdx_blocks(body).unwrap();
+        assert_eq!(blocks.len(), 1, "only the outer block is a top-level block");
+        assert_eq!(blocks[0].id, "outer");
+        assert_eq!(
+            blocks[0].raw_content,
+            "\nbefore\n<Callout id=\"inner\">nested</Callout>\nafter\n",
+            "outer raw_content must contain the whole nested same-tag child"
+        );
+    }
+
+    #[test]
+    fn parse_json_expression_attribute_captured_as_raw_text() {
+        // A `{...}` JSX attribute expression is stored as raw (brace-balanced)
+        // text — never JS-evaluated — for forward-compat container blocks.
+        let body = r#"<Diagram id="d" config={{ "a": 1 }} />"#;
+        let blocks = parse_mdx_blocks(body).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].tag, "Diagram");
+        assert_eq!(
+            blocks[0].attributes.get("config").map(String::as_str),
+            Some(r#"{ "a": 1 }"#),
+            "expression attribute must store the raw inner expression text"
+        );
+        assert!(blocks[0].raw_content.is_empty());
+    }
+
+    #[test]
+    fn parse_block_with_bare_json_children_no_error() {
+        // JsonExplorer / OpenApi children are bare `{ ... }` JSON. The MDX
+        // expression constructs are disabled, so this parses without error and
+        // the raw_content bytes are preserved verbatim.
+        let json = "\n{\n  \"id\": \"abc\",\n  \"nested\": { \"a\": [1, 2, 3] },\n  \"active\": true\n}\n";
+        let body = format!("<JsonExplorer id=\"cfg\" title=\"Sample\">{json}</JsonExplorer>");
+        let blocks = parse_mdx_blocks(&body).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].block_type, "json-explorer");
+        assert_eq!(
+            blocks[0].raw_content, json,
+            "bare-brace JSON children must be preserved byte-for-byte"
+        );
+
+        // An OpenApi block with bare JSON children likewise parses cleanly.
+        let oa = "\n{ \"openapi\": \"3.0.0\", \"paths\": {} }\n";
+        let body = format!("<OpenApi id=\"api\">{oa}</OpenApi>");
+        let blocks = parse_mdx_blocks(&body).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].raw_content, oa);
     }
 }
