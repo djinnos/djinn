@@ -17,8 +17,11 @@ import {
   WORKSPACE_COLORS,
   buildGraphFromSnapshot,
   colorForCommunity,
+  colorForGroup,
   colorForNode,
   colorForWorkspace,
+  crateForPath,
+  GROUP_COLORS,
   deriveCommunityHulls,
   selectRenderableHulls,
   MIN_HULL_MEMBERS,
@@ -1510,7 +1513,7 @@ describe("massForNode", () => {
 });
 
 describe("colorForNode", () => {
-  it("colors symbols by community_id when present", () => {
+  it("colors symbols by the crate derived from the path (crates/<name> wins over community)", () => {
     const sym: SnapshotNode = {
       id: "s",
       kind: "symbol",
@@ -1518,50 +1521,54 @@ describe("colorForNode", () => {
       pagerank: 0,
       symbol_kind: "function",
       community_id: "cluster-7",
-      file_path: "any/path/file.ts",
+      file_path: "server/crates/djinn-graph/src/lib.rs",
     };
-    expect(colorForNode(sym)).toBe(colorForCommunity("cluster-7"));
+    // Crate from the path is the most specific signal and wins.
+    expect(colorForNode(sym)).toBe(colorForGroup("djinn-graph"));
   });
 
-  it("falls back to parent-directory hash when community_id is absent", () => {
+  it("uses the first path segment as the group for non-crates/ paths", () => {
     const sym: SnapshotNode = {
       id: "s",
       kind: "symbol",
       label: "x",
       pagerank: 0,
       symbol_kind: "function",
-      file_path: "server/crates/djinn-graph/src/lib.rs",
+      file_path: "ui/src/lib/codeGraphAdapter.ts",
     };
-    expect(colorForNode(sym)).toBe(
-      colorForCommunity("server/crates/djinn-graph/src"),
-    );
+    expect(colorForNode(sym)).toBe(colorForGroup("ui"));
   });
 
-  it("colors files by parent-directory hash so siblings share a hue", () => {
-    const a: SnapshotNode = {
-      id: "f1",
+  it("colors every node in a crate the same hue, regardless of kind", () => {
+    const sym: SnapshotNode = {
+      id: "a",
+      kind: "symbol",
+      label: "a",
+      pagerank: 0,
+      symbol_kind: "function",
+      file_path: "server/crates/djinn-graph/src/communities.rs",
+    };
+    const file: SnapshotNode = {
+      id: "b",
       kind: "file",
-      label: "page_worker.go",
-      file_path: "internal/worker/page_worker.go",
+      label: "lib.rs",
+      file_path: "server/crates/djinn-graph/src/lib.rs",
       pagerank: 0,
     };
-    const b: SnapshotNode = {
-      id: "f2",
-      kind: "file",
-      label: "interfaces.go",
-      file_path: "internal/worker/interfaces.go",
+    expect(colorForNode(sym)).toBe(colorForNode(file));
+    expect(colorForNode(sym)).toBe(colorForGroup("djinn-graph"));
+  });
+
+  it("falls back to the community when the node has no file path", () => {
+    const sym: SnapshotNode = {
+      id: "s",
+      kind: "symbol",
+      label: "x",
       pagerank: 0,
+      symbol_kind: "function",
+      community_id: "cluster-7",
     };
-    const c: SnapshotNode = {
-      id: "f3",
-      kind: "file",
-      label: "client.go",
-      file_path: "internal/strategies/connectwise/client.go",
-      pagerank: 0,
-    };
-    expect(colorForNode(a)).toBe(colorForCommunity("internal/worker"));
-    expect(colorForNode(a)).toBe(colorForNode(b));
-    expect(colorForNode(a)).not.toBe(colorForNode(c));
+    expect(colorForNode(sym)).toBe(colorForGroup("cluster-7"));
   });
 
   it("uses the project accent for folders that look like the project root", () => {
@@ -1573,53 +1580,6 @@ describe("colorForNode", () => {
         pagerank: 0,
       }),
     ).toBe("#a855f7");
-  });
-
-  it("colors any node by its crate (workspace) when the tag is present", () => {
-    // Crate wins over community_id, parent-dir, and folder hashing alike,
-    // so the whole topology view reads as crate regions.
-    const sym: SnapshotNode = {
-      id: "s",
-      kind: "symbol",
-      label: "x",
-      pagerank: 0,
-      symbol_kind: "function",
-      community_id: "cluster-7",
-      file_path: "server/crates/djinn-graph/src/lib.rs",
-      workspace: "djinn-graph",
-    };
-    expect(colorForNode(sym)).toBe(colorForWorkspace("djinn-graph"));
-
-    const file: SnapshotNode = {
-      id: "f",
-      kind: "file",
-      label: "lib.rs",
-      file_path: "server/crates/djinn-graph/src/lib.rs",
-      pagerank: 0,
-      workspace: "djinn-graph",
-    };
-    expect(colorForNode(file)).toBe(colorForWorkspace("djinn-graph"));
-  });
-
-  it("colors nodes in the same crate identically, regardless of kind or folder", () => {
-    const a: SnapshotNode = {
-      id: "a",
-      kind: "symbol",
-      label: "a",
-      pagerank: 0,
-      symbol_kind: "function",
-      file_path: "server/crates/djinn-graph/src/communities.rs",
-      workspace: "djinn-graph",
-    };
-    const b: SnapshotNode = {
-      id: "b",
-      kind: "file",
-      label: "lib.rs",
-      file_path: "server/crates/djinn-graph/src/lib.rs",
-      pagerank: 0,
-      workspace: "djinn-graph",
-    };
-    expect(colorForNode(a)).toBe(colorForNode(b));
   });
 
   it("colorForCommunity is deterministic across calls", () => {
@@ -1706,6 +1666,45 @@ const communitySnapshot: SnapshotPayload = {
   ],
 };
 
+describe("crateForPath / colorForGroup", () => {
+  it("extracts the crate name from a cargo workspace path", () => {
+    expect(crateForPath("server/crates/djinn-graph/src/lib.rs")).toBe(
+      "djinn-graph",
+    );
+    expect(crateForPath("crates/foo/mod.rs")).toBe("foo");
+    // directory node (no trailing file) still resolves the crate
+    expect(crateForPath("server/crates/djinn-agent")).toBe("djinn-agent");
+  });
+
+  it("uses the first path segment when there is no crates/ marker", () => {
+    expect(crateForPath("ui/src/lib/codeGraphAdapter.ts")).toBe("ui");
+    expect(crateForPath("server/src/main.rs")).toBe("server");
+    expect(crateForPath("README.md")).toBe("README.md");
+  });
+
+  it("colorForGroup is deterministic and from the group palette", () => {
+    expect(colorForGroup("djinn-graph")).toBe(colorForGroup("djinn-graph"));
+    expect(GROUP_COLORS).toContain(colorForGroup("djinn-graph"));
+  });
+
+  it("spreads distinct crates across multiple hues (not all one color)", () => {
+    const seen = new Set<string>();
+    for (const c of [
+      "djinn-graph",
+      "djinn-agent",
+      "djinn-control-plane",
+      "djinn-k8s",
+      "djinn-provider",
+      "djinn-db",
+      "ui",
+      "server",
+    ]) {
+      seen.add(colorForGroup(c));
+    }
+    expect(seen.size).toBeGreaterThanOrEqual(4);
+  });
+});
+
 describe("colorForNode (community)", () => {
   it("colors community nodes by their stable community_id", () => {
     const node: SnapshotNode = {
@@ -1715,7 +1714,7 @@ describe("colorForNode (community)", () => {
       pagerank: 0,
       community_id: "auth",
     };
-    expect(colorForNode(node)).toBe(colorForCommunity("auth"));
+    expect(colorForNode(node)).toBe(colorForGroup("auth"));
   });
 
   it("falls back to hashing the label when community_id is absent", () => {
@@ -1725,8 +1724,8 @@ describe("colorForNode (community)", () => {
       label: "auth-fallback",
       pagerank: 0,
     };
-    expect(colorForNode(node)).toBe(colorForCommunity("auth-fallback"));
-    expect(COMMUNITY_COLORS).toContain(colorForNode(node));
+    expect(colorForNode(node)).toBe(colorForGroup("auth-fallback"));
+    expect(GROUP_COLORS).toContain(colorForNode(node));
   });
 });
 
