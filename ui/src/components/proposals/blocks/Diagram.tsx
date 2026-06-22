@@ -39,7 +39,10 @@ export function Diagram({ attributes, children }: BlockProps) {
             </div>
           }
         >
-          <MermaidDiagram source={content} />
+          {/* Inline proposal diagrams are a STATIC overview: no inline
+              pan/zoom, only a fullscreen button. Inspection (pan/zoom + all
+              controls) happens in the fullscreen dialog. */}
+          <MermaidDiagram source={content} inlineInteractive={false} />
         </Suspense>
       ) : diagramType === "svg" ? (
         // Author/agent SVG may carry `<script>`/`onload=`/`javascript:`

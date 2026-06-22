@@ -70,6 +70,20 @@ export interface ZoomPanSurfaceProps {
    * dialogs) — the fullscreen copy passes this.
    */
   allowFullscreen?: boolean;
+  /**
+   * Whether the INLINE viewport is itself pan/zoom-interactive. Default `true`
+   * (current behavior). When `false` the inline surface is a STATIC overview:
+   *   - no wheel-zoom / drag-pan handlers are attached (the page scrolls
+   *     normally over it, no scroll capture), and the content sits at its
+   *     default fit,
+   *   - the controls overlay shows ONLY the fullscreen toggle (zoom-in /
+   *     zoom-out / reset are hidden) — inspection happens in fullscreen.
+   * The FULLSCREEN dialog copy is always fully interactive regardless of this
+   * flag (it omits this prop, so it defaults back to `true`). Pair with
+   * `allowFullscreen` — a static surface with no fullscreen has no interaction
+   * at all, so don't set both off.
+   */
+  inlineInteractive?: boolean;
   /** Internal: this instance is the fullscreen copy (fills the dialog). */
   inFullscreen?: boolean;
   /**
@@ -98,9 +112,13 @@ export function ZoomPanSurface({
   allowFullscreen = true,
   inFullscreen = false,
   framedContent = false,
+  inlineInteractive = true,
   testIdPrefix = "zoompan",
   fullscreenTitle = "Preview",
 }: ZoomPanSurfaceProps) {
+  // The fullscreen dialog copy is always interactive; only the inline surface
+  // honors `inlineInteractive`. `inFullscreen` therefore forces interaction on.
+  const interactive = inFullscreen || inlineInteractive;
   const [transform, setTransform] = useState<Transform>(IDENTITY);
   const [fullscreen, setFullscreen] = useState(false);
   // `dragging` drives the render-time transition toggle (refs can't be read in
@@ -183,20 +201,35 @@ export function ZoomPanSurface({
 
   const zoomed = transform.scale > 1;
 
+  // Which controls render: zoom trio only when interactive; a fullscreen OR
+  // exit toggle depending on mode. If nothing would show (the unsupported
+  // static + no-fullscreen combo), skip the empty overlay box entirely.
+  const showFullscreenToggle = allowFullscreen && !inFullscreen;
+  const showExitToggle = inFullscreen;
+  const showControls = interactive || showFullscreenToggle || showExitToggle;
+
   const surface = (
     <div
       ref={viewportRef}
       data-testid={`${testIdPrefix}-zoompan-viewport`}
       className={cn(
-        "relative w-full overflow-hidden",
-        zoomed ? "cursor-grab active:cursor-grabbing" : "cursor-default",
+        "relative w-full",
+        // A static inline surface must NOT capture scroll: leave overflow
+        // visible so the content sits at its natural fit and the page scrolls
+        // normally over it. Interactive surfaces clip + grab as before.
+        interactive ? "overflow-hidden" : "overflow-visible",
+        interactive && zoomed
+          ? "cursor-grab active:cursor-grabbing"
+          : "cursor-default",
         inFullscreen ? "h-full" : "max-h-[70vh]",
       )}
-      onWheel={onWheel}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={endDrag}
-      onPointerLeave={endDrag}
+      // Static inline mode attaches NO wheel/drag handlers — no zoom capture,
+      // no pan; the page scrolls right over it.
+      onWheel={interactive ? onWheel : undefined}
+      onPointerDown={interactive ? onPointerDown : undefined}
+      onPointerMove={interactive ? onPointerMove : undefined}
+      onPointerUp={interactive ? endDrag : undefined}
+      onPointerLeave={interactive ? endDrag : undefined}
     >
       <div
         data-testid={`${testIdPrefix}-zoompan-content`}
@@ -217,41 +250,48 @@ export function ZoomPanSurface({
       </div>
 
       {/* Controls overlay — top-right, compact ghost icon buttons. */}
+      {showControls && (
       <div
         className="absolute right-2 top-2 flex items-center gap-1 rounded-md border border-border/60 bg-card/80 p-0.5 backdrop-blur"
         data-testid={`${testIdPrefix}-controls`}
       >
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Zoom in"
-          title="Zoom in"
-          onClick={() => zoomBy(ZOOM_STEP)}
-        >
-          <HugeiconsIcon icon={ZoomInAreaIcon} size={14} />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Zoom out"
-          title="Zoom out"
-          onClick={() => zoomBy(1 / ZOOM_STEP)}
-        >
-          <HugeiconsIcon icon={ZoomOutAreaIcon} size={14} />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Reset zoom"
-          title="Reset to fit"
-          onClick={reset}
-        >
-          <HugeiconsIcon icon={ArrowReloadHorizontalIcon} size={14} />
-        </Button>
-        {allowFullscreen && !inFullscreen && (
+        {/* Zoom-in / zoom-out / reset belong to interactive surfaces only. A
+            static inline overview shows ONLY the fullscreen toggle below. */}
+        {interactive && (
+          <>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Zoom in"
+              title="Zoom in"
+              onClick={() => zoomBy(ZOOM_STEP)}
+            >
+              <HugeiconsIcon icon={ZoomInAreaIcon} size={14} />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Zoom out"
+              title="Zoom out"
+              onClick={() => zoomBy(1 / ZOOM_STEP)}
+            >
+              <HugeiconsIcon icon={ZoomOutAreaIcon} size={14} />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Reset zoom"
+              title="Reset to fit"
+              onClick={reset}
+            >
+              <HugeiconsIcon icon={ArrowReloadHorizontalIcon} size={14} />
+            </Button>
+          </>
+        )}
+        {showFullscreenToggle && (
           <Button
             type="button"
             variant="ghost"
@@ -263,7 +303,7 @@ export function ZoomPanSurface({
             <HugeiconsIcon icon={ArrowExpandIcon} size={14} />
           </Button>
         )}
-        {inFullscreen && (
+        {showExitToggle && (
           <Button
             type="button"
             variant="ghost"
@@ -276,6 +316,7 @@ export function ZoomPanSurface({
           </Button>
         )}
       </div>
+      )}
     </div>
   );
 

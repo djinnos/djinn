@@ -76,6 +76,69 @@ describe("ZoomPanSurface", () => {
     expect(content.style.pointerEvents).toBe("");
   });
 
+  describe("static inline mode (inlineInteractive=false)", () => {
+    it("shows ONLY the fullscreen control (no zoom-in/out/reset)", () => {
+      render(
+        <ZoomPanSurface testIdPrefix="wf" inlineInteractive={false}>
+          <div>x</div>
+        </ZoomPanSurface>,
+      );
+      // The overlay still renders, but only the fullscreen toggle is in it.
+      expect(
+        screen.getByRole("button", { name: "Fullscreen" }),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Zoom in" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Zoom out" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Reset zoom" })).toBeNull();
+    });
+
+    it("does NOT wheel-zoom or drag-pan the inline viewport", () => {
+      render(
+        <ZoomPanSurface testIdPrefix="wf" inlineInteractive={false}>
+          <div>x</div>
+        </ZoomPanSurface>,
+      );
+      const viewport = screen.getByTestId("wf-zoompan-viewport");
+      const content = screen.getByTestId("wf-zoompan-content");
+      expect(scaleOf(content)).toBe(1);
+
+      // Wheel does nothing (no handler attached) — scale stays at fit.
+      fireEvent.wheel(viewport, { deltaY: -200, ctrlKey: true });
+      expect(scaleOf(content)).toBe(1);
+
+      // Drag does nothing either — no pan translate is applied.
+      fireEvent.pointerDown(viewport, {
+        clientX: 10,
+        clientY: 10,
+        pointerId: 1,
+      });
+      fireEvent.pointerMove(viewport, {
+        clientX: 80,
+        clientY: 80,
+        pointerId: 1,
+      });
+      fireEvent.pointerUp(viewport, { pointerId: 1 });
+      expect(content.style.transform).not.toMatch(/translate\((?!0px, 0px)/);
+
+      // The static viewport must not clip/capture scroll.
+      expect(viewport.className).toContain("overflow-visible");
+      expect(viewport.className).not.toContain("overflow-hidden");
+    });
+
+    it("static + no fullscreen renders no empty controls overlay", () => {
+      render(
+        <ZoomPanSurface
+          testIdPrefix="wf"
+          inlineInteractive={false}
+          allowFullscreen={false}
+        >
+          <div>x</div>
+        </ZoomPanSurface>,
+      );
+      expect(screen.queryByTestId("wf-controls")).toBeNull();
+    });
+  });
+
   it("uses the testIdPrefix for all surface nodes", () => {
     render(
       <ZoomPanSurface testIdPrefix="mermaid">
