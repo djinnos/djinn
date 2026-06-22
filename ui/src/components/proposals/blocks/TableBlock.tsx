@@ -30,7 +30,7 @@ export function TableBlock({ children }: BlockProps) {
 
   return (
     <BlockShell label="Table" accent="text-slate-400" flush>
-      <div className="overflow-x-auto" dir="ltr">
+      <div className="overflow-x-auto overflow-y-hidden" dir="ltr">
         <table className="w-full border-collapse text-left text-sm">
           <thead>
             <tr className="border-b border-border bg-muted/30">

@@ -216,7 +216,7 @@ export function DiffBlock({ attributes, children }: BlockProps) {
       >
         <pre
           dir="ltr"
-          className="overflow-x-auto px-4 py-3 font-mono text-xs leading-relaxed text-foreground [unicode-bidi:isolate]"
+          className="overflow-x-auto overflow-y-hidden px-4 py-3 font-mono text-xs leading-relaxed text-foreground [unicode-bidi:isolate]"
         >
           {content}
         </pre>
@@ -295,7 +295,7 @@ function UnifiedView({
   const segments = useMemo(() => segmentRows(rows), [rows]);
   let runIndex = 0;
   return (
-    <div className="overflow-x-auto py-1">
+    <div className="overflow-x-auto overflow-y-hidden py-1">
       <div className="w-max min-w-full">
         {segments.map((segment, idx) => {
           if ("collapsed" in segment) {
@@ -376,14 +376,14 @@ function SplitView({ rows, lang }: { rows: DiffRow[]; lang?: string }) {
   const pairs = useMemo(() => pairSplitRows(rows), [rows]);
   return (
     <div className="flex w-full py-1">
-      <div className="min-w-0 flex-1 overflow-x-auto border-r">
+      <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden border-r">
         <div className="inline-block min-w-full">
           {pairs.map((pair, idx) => (
             <SplitCell key={`old-${idx}`} row={pair.left} side="old" />
           ))}
         </div>
       </div>
-      <div className="min-w-0 flex-1 overflow-x-auto">
+      <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden">
         <div className="inline-block min-w-full">
           {pairs.map((pair, idx) => (
             <SplitCell key={`new-${idx}`} row={pair.right} side="new" />

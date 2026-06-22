@@ -43,7 +43,7 @@ export function ContainerFallback({
         <span>{label}</span>
       </div>
       {rawAttribute ? (
-        <pre className="mt-2 overflow-x-auto rounded bg-background/60 p-2 text-xs">
+        <pre className="mt-2 overflow-x-auto overflow-y-hidden rounded bg-background/60 p-2 text-xs">
           {rawAttribute}
         </pre>
       ) : null}

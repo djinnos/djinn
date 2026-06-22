@@ -74,4 +74,21 @@ describe("AnnotatedCode", () => {
     expect(screen.getByText("Code")).toBeInTheDocument();
     expect(screen.queryByText(/could not be parsed/i)).not.toBeInTheDocument();
   });
+
+  it("clips the code surface vertically so overflow-x never promotes a stray vertical scrollbar", () => {
+    // Regression: the surface used only `overflow-x-auto` in its expanded
+    // state, which the browser promotes the *other* axis to `auto`, rendering a
+    // stray VERTICAL scrollbar on the proposal detail page. The surface is
+    // content-height, so vertical clipping is a no-op except that it stops the
+    // promotion. `overflow-y-hidden` must be present regardless of collapse.
+    const { container } = render(
+      <AnnotatedCode id="c5" attributes={{ lang: "ts" }}>
+        {CODE}
+      </AnnotatedCode>,
+    );
+    const surface = container.querySelector(".annotated-code-surface");
+    expect(surface).toBeTruthy();
+    expect(surface).toHaveClass("overflow-x-auto");
+    expect(surface).toHaveClass("overflow-y-hidden");
+  });
 });

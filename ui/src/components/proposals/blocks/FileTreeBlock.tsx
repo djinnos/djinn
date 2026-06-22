@@ -76,7 +76,7 @@ export function FileTreeBlock({ attributes, children }: BlockProps) {
           root ? <span className="truncate font-mono">{root}</span> : null
         }
       >
-        <pre className="overflow-x-auto px-4 py-3 font-mono text-xs leading-relaxed text-foreground">
+        <pre className="overflow-x-auto overflow-y-hidden px-4 py-3 font-mono text-xs leading-relaxed text-foreground">
           {content}
         </pre>
       </BlockShell>
