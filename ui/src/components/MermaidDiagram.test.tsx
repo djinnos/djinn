@@ -134,4 +134,30 @@ describe("MermaidDiagram — zoom/pan controls", () => {
       ).toBeNull(),
     );
   });
+
+  it("static inline (inlineInteractive=false) shows ONLY a fullscreen button — no zoom trio, no inline zoom", async () => {
+    render(
+      <MermaidDiagram source={REPRO_SOURCE} inlineInteractive={false} />,
+    );
+    await screen.findByTestId("mermaid-diagram");
+    await waitFor(() =>
+      expect(screen.getByTestId("mermaid-controls")).toBeInTheDocument(),
+    );
+
+    // Only the fullscreen toggle survives inline.
+    expect(
+      screen.getByRole("button", { name: "Fullscreen" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Zoom in" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Zoom out" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reset zoom" })).toBeNull();
+
+    // No wheel-zoom on the inline viewport (no handler attached).
+    const viewport = screen.getByTestId("mermaid-zoompan-viewport");
+    const content = screen.getByTestId("mermaid-zoompan-content");
+    expect(scaleOf(content)).toBe(1);
+    fireEvent.wheel(viewport, { deltaY: -200, ctrlKey: true });
+    expect(scaleOf(content)).toBe(1);
+    expect(viewport.className).toContain("overflow-visible");
+  });
 });

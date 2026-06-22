@@ -79,3 +79,21 @@ export const BadSource: Story = {
     source: "this is not valid mermaid syntax !!!",
   },
 };
+
+/**
+ * Static inline mode (the proposal `Diagram` block path). The inline surface is
+ * a non-interactive overview: no wheel-zoom / drag-pan, and only a fullscreen
+ * button in the overlay. Clicking fullscreen opens the fully-interactive dialog.
+ */
+export const StaticInline: Story = {
+  args: {
+    inlineInteractive: false,
+    source: [
+      "flowchart TD",
+      "  a[Architect] --> b[Reviewer]",
+      "  b --> c[Worker]",
+      "  c --> d[Quality Gate]",
+      "  d --> e[Merge Queue]",
+    ].join("\n"),
+  },
+};

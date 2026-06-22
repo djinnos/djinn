@@ -151,6 +151,15 @@ export interface MermaidDiagramProps {
    * `false` because it already renders inside a Dialog (avoids nested dialogs).
    */
   allowFullscreen?: boolean;
+  /**
+   * Whether the INLINE diagram is itself pan/zoom-interactive. Default `true`.
+   * The proposal `Diagram` block sets this `false` so the inline diagram is a
+   * STATIC overview (no wheel/drag, only a fullscreen button) — inspection
+   * moves into the fullscreen dialog, which stays fully interactive.
+   * `ImpactFlowModal` keeps the default `true` (it has no fullscreen to fall
+   * back to, so inline must stay interactive).
+   */
+  inlineInteractive?: boolean;
 }
 
 interface RenderState {
@@ -177,6 +186,7 @@ function MermaidDiagramImpl({
   source,
   className,
   allowFullscreen = true,
+  inlineInteractive = true,
 }: MermaidDiagramProps) {
   // Stable id per instance — stock mermaid uses it as the SVG root id and
   // demands it be unique within the document and start with a letter.
@@ -261,6 +271,7 @@ function MermaidDiagramImpl({
     <div data-testid="mermaid-diagram" className={cn("w-full", className)}>
       <ZoomPanSurface
         allowFullscreen={allowFullscreen}
+        inlineInteractive={inlineInteractive}
         testIdPrefix="mermaid"
         fullscreenTitle="Diagram"
       >
@@ -275,5 +286,6 @@ export const MermaidDiagram = memo(
   (prev, next) =>
     prev.source === next.source &&
     prev.className === next.className &&
-    prev.allowFullscreen === next.allowFullscreen,
+    prev.allowFullscreen === next.allowFullscreen &&
+    prev.inlineInteractive === next.inlineInteractive,
 );
