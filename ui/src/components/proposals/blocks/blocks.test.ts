@@ -29,6 +29,7 @@ export const CANONICAL_V1_TAGS = [
   "Callout",
   "Table",
   "Checklist",
+  "JsonExplorer",
   "QuestionForm",
 ] as const;
 
@@ -206,6 +207,15 @@ describe("canonical proposal.mdx round-trip", () => {
     expect(checklist!.content).toContain("[x]");
     expect(getProposalBlockDefinitionByTag("Checklist")!.type).toBe(
       "checklist",
+    );
+
+    // JsonExplorer
+    const jsonExplorer = byTag.get("JsonExplorer");
+    expect(jsonExplorer).toBeDefined();
+    expect(jsonExplorer!.id).toBe("config-sample");
+    expect(jsonExplorer!.content).toContain("\"enabled\"");
+    expect(getProposalBlockDefinitionByTag("JsonExplorer")!.type).toBe(
+      "json-explorer",
     );
 
     // QuestionForm
