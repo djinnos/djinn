@@ -600,9 +600,31 @@ fn format_member_uid(key: &RepoNodeKey) -> String {
 /// 4. Last resort: return the display_name of the member with the
 ///    highest degree.
 fn derive_label(graph: &RepoDependencyGraph, members: &[usize]) -> String {
-    let pg = graph.graph();
+    let member_segments = member_path_segments(graph, members);
 
-    // Collect path segments after skipping workspace-root component.
+    if !member_segments.is_empty() {
+        if let Some(vote_idx) = distinguishing_index(&member_segments)
+            && let Some(seg) = vote_on_segment(&member_segments, vote_idx)
+        {
+            return seg;
+        }
+
+        // No segment distinguishes this community (or no distinguishing
+        // segment dominates) — fall back to top keyword token.
+        let keywords = derive_keywords(graph, members, KEYWORDS_PER_COMMUNITY);
+        if let Some(top) = keywords.into_iter().next() {
+            return top;
+        }
+    }
+
+    highest_degree_member_name(graph, members).unwrap_or_else(|| String::from("community"))
+}
+
+/// Collect path segments for each member after skipping the workspace-root
+/// component (the first segment matching the node's `workspace` field).
+/// Only members with a non-empty remaining segment list are included.
+fn member_path_segments(graph: &RepoDependencyGraph, members: &[usize]) -> Vec<Vec<String>> {
+    let pg = graph.graph();
     let mut member_segments: Vec<Vec<String>> = Vec::new();
     for &v in members {
         let node = &pg[NodeIndex::new(v)];
@@ -632,55 +654,54 @@ fn derive_label(graph: &RepoDependencyGraph, members: &[usize]) -> String {
             }
         }
     }
+    member_segments
+}
 
-    if !member_segments.is_empty() {
-        // Find the first component index where not all members agree.
-        // Length differences count as distinguishing: if one path ends
-        // while another has another segment, the extra segment can be
-        // useful. If every path has exactly the same remaining segments,
-        // there is no distinguishing path component and we should use
-        // keyword-derived tokens instead of returning a shared prefix like
-        // "crates" or "src".
-        let max_len = member_segments.iter().map(|s| s.len()).max().unwrap_or(0);
-        let mut distinguishing_idx: Option<usize> = None;
-        for i in 0..max_len {
-            let first = member_segments[0].get(i).map(String::as_str);
-            if member_segments
-                .iter()
-                .any(|s| s.get(i).map(String::as_str) != first)
-            {
-                distinguishing_idx = Some(i);
-                break;
-            }
+/// Find the first component index where not all members agree.
+/// Length differences count as distinguishing: if one path ends
+/// while another has another segment, the extra segment can be
+/// useful. If every path has exactly the same remaining segments,
+/// there is no distinguishing path component and callers should
+/// fall back to keyword-derived tokens instead of returning a
+/// shared prefix like "crates" or "src".
+fn distinguishing_index(member_segments: &[Vec<String>]) -> Option<usize> {
+    let max_len = member_segments.iter().map(|s| s.len()).max().unwrap_or(0);
+    for i in 0..max_len {
+        let first = member_segments[0].get(i).map(String::as_str);
+        if member_segments
+            .iter()
+            .any(|s| s.get(i).map(String::as_str) != first)
+        {
+            return Some(i);
         }
+    }
+    None
+}
 
-        if let Some(vote_idx) = distinguishing_idx {
-            let mut segment_counts: BTreeMap<String, usize> = BTreeMap::new();
-            let members_with_path = member_segments.len();
-            for segs in &member_segments {
-                if segs.len() > vote_idx {
-                    *segment_counts.entry(segs[vote_idx].clone()).or_default() += 1;
-                }
-            }
-
-            if let Some((seg, &count)) = segment_counts
-                .iter()
-                .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
-                && count * 2 >= members_with_path
-            {
-                return seg.clone();
-            }
-        }
-
-        // No segment distinguishes this community (or no distinguishing
-        // segment dominates) — fall back to top keyword token.
-        let keywords = derive_keywords(graph, members, KEYWORDS_PER_COMMUNITY);
-        if let Some(top) = keywords.into_iter().next() {
-            return top;
+/// Vote on segments at the given index across all members. Returns the
+/// winning segment if it dominates (count * 2 >= members with paths).
+/// Tie-break favors lexicographically *larger* segment names (reversed
+/// `BTreeMap` comparison in the `max_by`).
+fn vote_on_segment(member_segments: &[Vec<String>], vote_idx: usize) -> Option<String> {
+    let mut segment_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let members_with_path = member_segments.len();
+    for segs in member_segments {
+        if segs.len() > vote_idx {
+            *segment_counts.entry(segs[vote_idx].clone()).or_default() += 1;
         }
     }
 
-    // Fallback: pick the member with the largest total adjacency.
+    segment_counts
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+        .filter(|&(_, &count)| count * 2 >= members_with_path)
+        .map(|(seg, _)| seg.clone())
+}
+
+/// Return the display_name of the member with the largest total
+/// adjacency (highest degree). Returns `None` for an empty member list.
+fn highest_degree_member_name(graph: &RepoDependencyGraph, members: &[usize]) -> Option<String> {
+    let pg = graph.graph();
     let mut best_idx: Option<NodeIndex> = None;
     let mut best_degree = 0usize;
     for &v in members {
@@ -691,11 +712,7 @@ fn derive_label(graph: &RepoDependencyGraph, members: &[usize]) -> String {
             best_idx = Some(idx);
         }
     }
-    if let Some(idx) = best_idx {
-        return pg[idx].display_name.clone();
-    }
-    // Truly empty community (shouldn't reach here given min_community_size).
-    String::from("community")
+    best_idx.map(|idx| pg[idx].display_name.clone())
 }
 
 /// Tokenize each member display_name on `_`, `::`, `/`, `.`, and
