@@ -378,4 +378,29 @@ mod tests {
             }
         }
     }
+
+    /// AC3: Test callers are documented with valid file paths and line
+    /// numbers.  These entries are informational (not asserted by
+    /// default) but should still be well-formed.
+    #[test]
+    fn test_callers_have_valid_paths() {
+        for entry in CORPUS {
+            for (name, path, line) in entry.test_callers {
+                assert!(
+                    !path.is_empty(),
+                    "{}::{} test caller '{}' must have a file path",
+                    entry.trait_name,
+                    entry.method_name,
+                    name,
+                );
+                assert!(
+                    *line > 0,
+                    "{}::{} test caller '{}' must have line > 0",
+                    entry.trait_name,
+                    entry.method_name,
+                    name,
+                );
+            }
+        }
+    }
 }
