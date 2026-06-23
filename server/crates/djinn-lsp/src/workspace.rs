@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 /// How to pick the project root among ancestor directories containing a
 /// root marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RootStrategy {
+pub(crate) enum RootStrategy {
     /// Nearest ancestor containing a root marker (classic LSP behavior).
     Nearest,
     /// Topmost ancestor whose `Cargo.toml` declares a `[workspace]` table.
@@ -15,7 +15,7 @@ pub(super) enum RootStrategy {
     CargoWorkspace,
 }
 
-pub(super) fn find_root(
+pub(crate) fn find_root(
     path: &Path,
     worktree: &Path,
     sentinels: &[&str],
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn cargo_workspace_prefers_workspace_root_over_member_crate() {
-        let tmp = crate::test_helpers::test_tempdir("djinn-lsp-root-");
+        let tmp = crate::test_support::test_tempdir("djinn-lsp-root-");
         let worktree = tmp.path();
         write(
             &worktree.join("server/Cargo.toml"),
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn cargo_workspace_detects_dotted_workspace_table() {
-        let tmp = crate::test_helpers::test_tempdir("djinn-lsp-root-");
+        let tmp = crate::test_support::test_tempdir("djinn-lsp-root-");
         let worktree = tmp.path();
         write(
             &worktree.join("Cargo.toml"),
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn cargo_workspace_falls_back_to_nearest_for_standalone_crate() {
-        let tmp = crate::test_helpers::test_tempdir("djinn-lsp-root-");
+        let tmp = crate::test_support::test_tempdir("djinn-lsp-root-");
         let worktree = tmp.path();
         write(
             &worktree.join("app/Cargo.toml"),

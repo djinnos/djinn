@@ -2,13 +2,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
-use super::Diagnostic;
-use super::client::LspClient;
+use crate::Diagnostic;
+use crate::client::LspClient;
 use tokio::sync::Mutex;
 
 mod diagnostics;
 mod manager_lifecycle;
 mod manager_state;
+
+// Re-export the shared test tempdir helper for submodules.
+use crate::test_support::test_tempdir;
 
 fn make_diag(file: &str, line: u32, character: u32, severity: u32, msg: &str) -> Diagnostic {
     Diagnostic {

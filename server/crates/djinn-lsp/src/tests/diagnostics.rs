@@ -1,4 +1,4 @@
-use crate::lsp::format_diagnostics_xml;
+use crate::format_diagnostics_xml;
 
 use super::make_diag;
 

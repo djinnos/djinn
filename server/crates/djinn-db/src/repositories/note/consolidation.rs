@@ -390,9 +390,7 @@ impl NoteConsolidationRepository {
             .map(|note| (note.id.clone(), note))
             .collect();
 
-        let (adjacency, edge_scores) = self
-            .build_graph(project_id, notes, &notes_by_id)
-            .await?;
+        let (adjacency, edge_scores) = self.build_graph(project_id, notes, &notes_by_id).await?;
 
         if edge_scores.is_empty() {
             return Ok(Vec::new());
