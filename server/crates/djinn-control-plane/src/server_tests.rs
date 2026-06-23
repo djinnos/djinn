@@ -573,6 +573,66 @@ mod tests {
         assert!(event.get("created_at").and_then(|v| v.as_str()).is_some());
     }
 
+    /// `proposal_update` and `proposal_create` must keep the spec revision's
+    /// `event_metadata` column NULL — the proposal MCP surface is an
+    /// ordinary-edit path, not the targeted-patch primitive. Only the future
+    /// patch tool (and its sibling callers) should ever populate metadata;
+    /// every other surface must stay metadata-free so the `event_metadata`
+    /// column is a precise signal of "this revision was authored by the
+    /// targeted-patch primitive".
+    #[tokio::test]
+    async fn proposal_show_revisions_have_null_event_metadata_for_ordinary_updates() {
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        create_project(&db, std::path::Path::new("")).await;
+        let server = DjinnMcpServer::new(state);
+
+        let created = server
+            .dispatch_tool("proposal_create", json!({ "title": "Metadata Compat" }))
+            .await
+            .expect("dispatch proposal_create");
+        let id = created
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("proposal id")
+            .to_string();
+
+        // A material ordinary edit — must stay metadata-free.
+        server
+            .dispatch_tool(
+                "proposal_update",
+                json!({
+                    "id": id,
+                    "title": "Metadata Compat v2",
+                    "body": "v2 body",
+                }),
+            )
+            .await
+            .expect("dispatch proposal_update");
+
+        let shown = server
+            .dispatch_tool("proposal_show", json!({ "id": id }))
+            .await
+            .expect("dispatch proposal_show");
+        let revisions = shown
+            .get("revisions")
+            .and_then(|v| v.as_array())
+            .expect("revisions array");
+        // create seed + material update = 2 revisions, all spec_revision kind
+        assert_eq!(revisions.len(), 2);
+        for rev in revisions {
+            assert_eq!(
+                rev.get("event_kind").and_then(|v| v.as_str()),
+                Some("spec_revision")
+            );
+            assert!(
+                rev.get("event_metadata").map_or(true, |v| v.is_null()),
+                "ordinary proposal_update/create revisions must surface null event_metadata, got {:?}",
+                rev.get("event_metadata")
+            );
+        }
+    }
+
     /// Parity check between the two MCP dispatch paths (see
     /// `dispatch.rs` vs the `#[tool_router]`-generated router).
     ///

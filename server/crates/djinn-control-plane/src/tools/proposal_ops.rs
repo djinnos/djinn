@@ -8,6 +8,83 @@ use djinn_core::models::{
 };
 use serde::{Deserialize, Serialize};
 
+// ── Revision metadata convention ─────────────────────────────────────────────
+//
+// Material proposal revisions persist structured metadata in
+// `proposal_revisions.event_metadata` (a JSONB column already surfaced by
+// `ProposalRevisionModel::event_metadata` and `ProposalRepository::revisions`).
+// The convention below is the typed shape future targeted-patch callers use to
+// attribute authoring revisions to the active native-skill version (and to
+// record the targeted range they patched). Ordinary `proposal_update` calls
+// leave the column `NULL`, preserving the pre-existing contract.
+//
+// Persistence is fully additive: callers build a `TargetedBlockPatchMetadata`
+// (or any compatible JSON object), serialize it with [`serde_json::to_value`],
+// and pass the resulting `serde_json::Value` to
+// `ProposalRepository::update` via `ProposalUpdateInput { event_metadata, .. }`.
+
+/// Change-kind tags persisted on `proposal_revisions.event_metadata`.
+///
+/// The string values are part of the public contract for downstream consumers
+/// (UI attribution badges, audit queries, planner provenance). New tags are
+/// additive; renaming an existing tag is a breaking change and must update any
+/// consumers that filter on the literal.
+pub mod revision_change_kind {
+    /// A targeted MDX block-patch — one selected paragraph/section/list was
+    /// wrapped or replaced with valid MDX block content while the rest of the
+    /// body was preserved. Drives one proposal revision per patch.
+    pub const TARGETED_BLOCK_PATCH: &str = "targeted_block_patch";
+
+    /// A full-body rewrite of the proposal spec. Reserved for cases where the
+    /// planner intentionally regenerates the whole spec (rare; the targeted
+    /// patch primitive is preferred for refinement).
+    pub const BODY_REWRITE: &str = "body_rewrite";
+}
+
+/// One targeted block-patch attribution payload. Serialized into
+/// `proposal_revisions.event_metadata` so the planner refinement loop and
+/// downstream UI can render a per-revision provenance badge linking the
+/// revision to the active native-skill version and the section it touched.
+///
+/// `serde_json::Value` is the on-disk shape — the structured form here is the
+/// typed contract callers build before serializing. This keeps the metadata
+/// type-safe at the call site (so the planner and the future patch primitive
+/// can't drift on field names) while leaving the database and HTTP layers
+/// schema-free.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TargetedBlockPatchMetadata {
+    /// [`revision_change_kind::TARGETED_BLOCK_PATCH`] (or another declared kind).
+    /// Always present — it discriminates which metadata fields downstream
+    /// consumers can rely on.
+    pub change_kind: String,
+    /// Stable identifier of the block catalog entry that was inserted, when
+    /// the patch installs a known block. `None` for free-form text edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_id: Option<String>,
+    /// Human-readable description of the targeted range (e.g. the matched
+    /// paragraph, section heading, or fenced offset). `None` when the patch
+    /// has no meaningful range (e.g. a body rewrite).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    /// Inclusive byte offset of the patched range, when known. Paired with
+    /// [`Self::range_end_byte`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_start_byte: Option<i64>,
+    /// Exclusive byte offset of the patched range, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_end_byte: Option<i64>,
+    /// Name of the active native skill that produced the patch (e.g.
+    /// `visual-spec`). Surfaces provenance for the per-revision badge.
+    pub native_skill_name: String,
+    /// Pinned version of the active native skill. Combined with
+    /// `native_skill_name`, this fully identifies the authoring surface.
+    pub native_skill_version: String,
+    /// Optional free-form notes the caller wants persisted alongside the
+    /// structured fields. Kept short; not queryable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 pub struct ProposalModel {
     pub id: String,
