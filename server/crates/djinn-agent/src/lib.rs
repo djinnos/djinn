@@ -150,3 +150,56 @@ mod tests {
         assert_eq!(AgentType::Architect.dispatch_role(), "architect");
     }
 }
+
+/// Regression: verify the djinn-agent compatibility facade for djinn-roles
+/// imports remains available.
+///
+/// After Phase 3 extraction, `AgentType`, `RoleConfig`, `config_for`,
+/// `TaskContext`, and prompt templates are owned by `djinn-roles` but
+/// re-exported under the original `djinn_agent::*` paths.  These compile-time
+/// assertions catch accidental removal of the re-exports.
+#[cfg(test)]
+mod djinn_roles_facade_regression {
+    // ── AgentType re-export ────────────────────────────────────────────
+    #[test]
+    fn agent_type_available_through_djinn_agent() {
+        // The type must be accessible via the crate root.
+        let _agent_type: super::AgentType = super::AgentType::Worker;
+    }
+
+    // ── RoleConfig and config_for re-export via roles module ──────────
+    #[test]
+    fn role_config_and_config_for_available_through_djinn_agent_roles() {
+        let cfg: &crate::roles::RoleConfig = crate::roles::config_for(super::AgentType::Worker);
+        assert_eq!(cfg.name, "worker");
+    }
+
+    // ── TaskContext and render fn accessible via prompts module ────────
+    // We don't construct TaskContext (many fields), but verify the type
+    // alias / re-export resolves and a function accepting it is reachable.
+    #[test]
+    fn task_context_and_render_accessible_through_djinn_agent_prompts() {
+        // Verify the type is visible.
+        fn _assert_type_exists(_ctx: &crate::prompts::TaskContext) {}
+        // Verify the facade re-exported render function compiles.
+        let _render_fn: fn(
+            &crate::roles::RoleConfig,
+            &djinn_core::models::Task,
+            &crate::prompts::TaskContext,
+        ) -> String = crate::prompts::render_prompt_for_role;
+    }
+
+    // ── Prompt template re-exports ────────────────────────────────────
+    #[test]
+    fn prompt_templates_available_through_djinn_agent_prompts() {
+        // All public templates should be non-empty static strings accessible
+        // through the djinn_agent::prompts facade.
+        assert!(!crate::prompts::BASE_TEMPLATE.is_empty());
+        assert!(!crate::prompts::DEV_TEMPLATE.is_empty());
+        assert!(!crate::prompts::REVIEWER_TEMPLATE.is_empty());
+        assert!(!crate::prompts::LEAD_TEMPLATE.is_empty());
+        assert!(!crate::prompts::PLANNER_TEMPLATE.is_empty());
+        assert!(!crate::prompts::ARCHITECT_TEMPLATE.is_empty());
+        assert!(!crate::prompts::CLUSTER_DOC_TEMPLATE.is_empty());
+    }
+}

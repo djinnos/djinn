@@ -1441,6 +1441,7 @@ dependencies = [
  "insta",
  "serde",
  "serde_json",
+ "toml",
  "tracing",
  "workspace-hack",
 ]

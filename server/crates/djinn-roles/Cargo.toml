@@ -16,3 +16,4 @@ workspace-hack.workspace = true
 
 [dev-dependencies]
 insta = { version = "1", features = ["json"] }
+toml = "0.9"

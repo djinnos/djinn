@@ -205,3 +205,81 @@ mod tests {
         assert_eq!(AgentType::Architect.dispatch_role(), "architect");
     }
 }
+
+// ─── Boundary regression checks ─────────────────────────────────────────────
+//
+// These tests ensure the extraction boundaries introduced in Phase 3 stay
+// clean.  They parse `Cargo.toml` at test time so any forbidden dependency
+// added to this crate causes an immediate test failure.
+//
+// Cross-reference: boundary_rules.toml rules `no-roles-imports-agent` and
+// `no-roles-imports-extension`.
+
+#[cfg(test)]
+mod boundary_regression {
+    /// Parse the `[dependencies]` table from the crate's own `Cargo.toml` and
+    /// return the set of dependency names.
+    fn crate_dependency_names() -> std::collections::BTreeSet<String> {
+        let cargo_toml_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let contents = std::fs::read_to_string(&cargo_toml_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", cargo_toml_path.display()));
+        let doc: toml::Value =
+            toml::from_str(&contents).unwrap_or_else(|e| panic!("failed to parse Cargo.toml: {e}"));
+        let mut names = std::collections::BTreeSet::new();
+        // Walk the standard dependency tables.
+        for table_key in &["dependencies", "dev-dependencies", "build-dependencies"] {
+            if let Some(table) = doc.get(table_key).and_then(|v| v.as_table()) {
+                names.extend(table.keys().cloned());
+            }
+        }
+        names
+    }
+
+    /// Assert that `djinn-roles` does NOT declare a dependency on the given
+    /// crate name.  The test reads the real `Cargo.toml` so it reflects any
+    /// future edits.
+    fn assert_no_dependency(dep_name: &str) {
+        let deps = crate_dependency_names();
+        assert!(
+            !deps.contains(dep_name),
+            "djinn-roles must not depend on `{dep_name}` — add it to \
+             boundary_rules.toml and fix the extraction boundary."
+        );
+    }
+
+    #[test]
+    fn no_djinn_agent_dependency() {
+        assert_no_dependency("djinn-agent");
+    }
+
+    #[test]
+    fn no_djinn_mcp_extension_dependency() {
+        // Phase 4 owns extension extraction; djinn-roles must remain
+        // extension-agnostic.
+        assert_no_dependency("djinn-mcp-extension");
+    }
+
+    #[test]
+    fn no_sqlx_dependency() {
+        // djinn-roles owns role config and prompt rendering, not database
+        // access.  sqlx must not appear as a direct dependency.
+        assert_no_dependency("sqlx");
+    }
+
+    #[test]
+    fn allowed_djinn_dependency_is_djinn_core_only() {
+        let deps = crate_dependency_names();
+        let djinn_deps: Vec<&str> = deps
+            .iter()
+            .filter(|name| name.starts_with("djinn-"))
+            .map(|s| s.as_str())
+            .collect();
+        assert_eq!(
+            djinn_deps,
+            vec!["djinn-core"],
+            "djinn-roles should depend only on djinn-core among djinn-* crates; \
+             found: {djinn_deps:?}.  If adding a new djinn-* dep is intentional, \
+             update this assertion and add a boundary_rules.toml rule."
+        );
+    }
+}
