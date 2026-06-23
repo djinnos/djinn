@@ -8,6 +8,97 @@ use djinn_db::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+// ─── Native skill name protection ───────────────────────────────────────────
+
+/// Canonical list of native (platform-owned) skill name prefixes.
+///
+/// These names are **immutable** at the platform level: they cannot be added,
+/// edited, or removed through the user-editable `skills` field on agent
+/// create/update.  Native skill roles are bound through the native registry
+/// (see `djinn_agent::native_skills`), not through the mutable agent skills
+/// list.
+///
+/// Keep this list aligned with the native registry in `djinn-agent`.  We use
+/// a local allowlist here to avoid introducing a production dependency cycle
+/// (`djinn-agent` already depends on `djinn-control-plane`).
+const NATIVE_SKILL_NAME_PREFIXES: &[&str] = &["visual-spec"];
+
+/// Returns `true` when `name` matches a native skill name prefix.
+///
+/// A name is native when it exactly equals or starts with one of the
+/// [`NATIVE_SKILL_NAME_PREFIXES`] followed by a hyphen or end-of-string.
+/// This covers both exact matches (e.g. `"visual-spec"`) and versioned
+/// sub-skills (e.g. `"visual-spec-v2"`) defensively.
+pub fn is_native_skill_name(name: &str) -> bool {
+    NATIVE_SKILL_NAME_PREFIXES.iter().any(|prefix| {
+        name == *prefix
+            || (name.starts_with(prefix) && name.as_bytes().get(prefix.len()) == Some(&b'-'))
+    })
+}
+
+/// Extract a human-readable skill identifier from an [`AnyJson`] entry.
+///
+/// Skill entries can arrive as bare strings (e.g. `"my-skill"`) or as
+/// objects with obvious name keys (`name`, `id`, `skill`, or `skill_name`).
+/// Returns `None` if no identifier can be extracted.
+fn skill_name_from_entry(entry: &AnyJson) -> Option<String> {
+    match &entry.0 {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Object(map) => {
+            for key in &["name", "id", "skill", "skill_name"] {
+                if let Some(serde_json::Value::String(v)) = map.get(*key) {
+                    return Some(v.clone());
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Reject a skills payload that contains any native skill names.
+///
+/// Returns `Ok(())` when the payload is clean, or `Err(message)` listing
+/// the offending native names.  Call this before persisting `skills` in
+/// `agent_create` and `agent_update`.
+pub fn reject_native_skill_entries(skills: &[AnyJson]) -> Result<(), String> {
+    let offenders: Vec<String> = skills
+        .iter()
+        .filter_map(|entry| skill_name_from_entry(entry).filter(|name| is_native_skill_name(name)))
+        .collect();
+
+    if offenders.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "native/immutable skill names cannot be set through the mutable skills API: {}. \
+             Native skills are platform-owned and role-bound through the native registry. \
+             They cannot be added, edited, or removed via agent_create or agent_update.",
+            offenders
+                .iter()
+                .map(|n| format!("'{n}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+}
+
+/// Filter native skill names out of a skills array.
+///
+/// Used by [`AgentModel::from`] so that stale persisted native skill names
+/// in legacy database rows are hidden from user-editable API responses
+/// (`agent_show`, `agent_list`).
+pub fn filter_native_skill_entries(skills: Vec<AnyJson>) -> Vec<AnyJson> {
+    skills
+        .into_iter()
+        .filter(|entry| {
+            skill_name_from_entry(entry)
+                .map(|name| !is_native_skill_name(&name))
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct AgentModel {
     pub id: String,
@@ -40,7 +131,7 @@ impl From<&Agent> for AgentModel {
             system_prompt_extensions: r.system_prompt_extensions.clone(),
             model_preference: r.model_preference.clone(),
             mcp_servers: parse_json_array_any(&r.mcp_servers),
-            skills: parse_json_array_any(&r.skills),
+            skills: filter_native_skill_entries(parse_json_array_any(&r.skills)),
             is_default: r.is_default,
             learned_prompt: r.learned_prompt.clone(),
             created_at: r.created_at.clone(),
@@ -164,6 +255,16 @@ pub async fn create_agent(
     };
 
     if let Err(e) = validate_base_role(&params.base_role) {
+        return AgentSingleResponse {
+            agent: None,
+            error: Some(e),
+        };
+    }
+
+    // Reject native skill names before persisting.
+    if let Some(ref skills) = params.skills
+        && let Err(e) = reject_native_skill_entries(skills)
+    {
         return AgentSingleResponse {
             agent: None,
             error: Some(e),
@@ -341,4 +442,208 @@ pub async fn resolve_agent(
     repo.get_by_name_for_project(project_id, id_or_name)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_native_skill_name_matches_visual_spec() {
+        assert!(is_native_skill_name("visual-spec"));
+    }
+
+    #[test]
+    fn is_native_skill_name_matches_versioned_prefix() {
+        assert!(is_native_skill_name("visual-spec-v2"));
+    }
+
+    #[test]
+    fn is_native_skill_name_rejects_non_native() {
+        assert!(!is_native_skill_name("my-skill"));
+        assert!(!is_native_skill_name("visual")); // prefix only, no hyphen
+        assert!(!is_native_skill_name("")); // empty
+        assert!(!is_native_skill_name("visual-specification")); // different word
+    }
+
+    #[test]
+    fn skill_name_from_entry_extracts_string() {
+        let entry = AnyJson(serde_json::json!("visual-spec"));
+        assert_eq!(
+            skill_name_from_entry(&entry),
+            Some("visual-spec".to_string())
+        );
+    }
+
+    #[test]
+    fn skill_name_from_entry_extracts_object_name_key() {
+        let entry = AnyJson(serde_json::json!({"name": "visual-spec"}));
+        assert_eq!(
+            skill_name_from_entry(&entry),
+            Some("visual-spec".to_string())
+        );
+    }
+
+    #[test]
+    fn skill_name_from_entry_extracts_object_id_key() {
+        let entry = AnyJson(serde_json::json!({"id": "visual-spec"}));
+        assert_eq!(
+            skill_name_from_entry(&entry),
+            Some("visual-spec".to_string())
+        );
+    }
+
+    #[test]
+    fn skill_name_from_entry_extracts_object_skill_key() {
+        let entry = AnyJson(serde_json::json!({"skill": "visual-spec"}));
+        assert_eq!(
+            skill_name_from_entry(&entry),
+            Some("visual-spec".to_string())
+        );
+    }
+
+    #[test]
+    fn skill_name_from_entry_extracts_object_skill_name_key() {
+        let entry = AnyJson(serde_json::json!({"skill_name": "visual-spec"}));
+        assert_eq!(
+            skill_name_from_entry(&entry),
+            Some("visual-spec".to_string())
+        );
+    }
+
+    #[test]
+    fn skill_name_from_entry_returns_none_for_number() {
+        let entry = AnyJson(serde_json::json!(42));
+        assert_eq!(skill_name_from_entry(&entry), None);
+    }
+
+    #[test]
+    fn reject_native_skill_entries_allows_non_native() {
+        let skills = vec![
+            AnyJson(serde_json::json!("my-skill")),
+            AnyJson(serde_json::json!("another-skill")),
+        ];
+        assert!(reject_native_skill_entries(&skills).is_ok());
+    }
+
+    #[test]
+    fn reject_native_skill_entries_rejects_string_native() {
+        let skills = vec![
+            AnyJson(serde_json::json!("my-skill")),
+            AnyJson(serde_json::json!("visual-spec")),
+        ];
+        let err = reject_native_skill_entries(&skills).unwrap_err();
+        assert!(err.contains("'visual-spec'"));
+        assert!(err.contains("native/immutable"));
+        assert!(err.contains("platform-owned"));
+    }
+
+    #[test]
+    fn reject_native_skill_entries_rejects_object_native() {
+        let skills = vec![AnyJson(serde_json::json!({"name": "visual-spec"}))];
+        let err = reject_native_skill_entries(&skills).unwrap_err();
+        assert!(err.contains("'visual-spec'"));
+    }
+
+    #[test]
+    fn reject_native_skill_entries_rejects_versioned_native() {
+        let skills = vec![AnyJson(serde_json::json!("visual-spec-v2"))];
+        let err = reject_native_skill_entries(&skills).unwrap_err();
+        assert!(err.contains("'visual-spec-v2'"));
+    }
+
+    #[test]
+    fn reject_native_skill_entries_allows_empty() {
+        assert!(reject_native_skill_entries(&[]).is_ok());
+    }
+
+    #[test]
+    fn filter_native_skill_entries_removes_native() {
+        let skills = vec![
+            AnyJson(serde_json::json!("my-skill")),
+            AnyJson(serde_json::json!("visual-spec")),
+            AnyJson(serde_json::json!("another-skill")),
+        ];
+        let filtered = filter_native_skill_entries(skills);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].0, serde_json::json!("my-skill"));
+        assert_eq!(filtered[1].0, serde_json::json!("another-skill"));
+    }
+
+    #[test]
+    fn filter_native_skill_entries_removes_object_native() {
+        let skills = vec![
+            AnyJson(serde_json::json!({"name": "visual-spec"})),
+            AnyJson(serde_json::json!({"name": "good-skill"})),
+        ];
+        let filtered = filter_native_skill_entries(skills);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, serde_json::json!({"name": "good-skill"}));
+    }
+
+    #[test]
+    fn filter_native_skill_entries_preserves_non_native() {
+        let skills = vec![
+            AnyJson(serde_json::json!("skill-a")),
+            AnyJson(serde_json::json!("skill-b")),
+        ];
+        let filtered = filter_native_skill_entries(skills.clone());
+        assert_eq!(filtered.len(), skills.len());
+    }
+
+    #[test]
+    fn filter_native_skill_entries_handles_empty() {
+        let filtered = filter_native_skill_entries(vec![]);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn agent_model_from_filters_native_skills() {
+        use djinn_core::models::Agent;
+
+        let agent = Agent {
+            id: "test-id".to_string(),
+            project_id: "proj".to_string(),
+            name: "test-agent".to_string(),
+            base_role: "worker".to_string(),
+            description: "".to_string(),
+            system_prompt_extensions: "".to_string(),
+            model_preference: None,
+            mcp_servers: "[]".to_string(),
+            skills: r#"["my-skill", "visual-spec", "another-skill"]"#.to_string(),
+            is_default: false,
+            learned_prompt: None,
+            created_at: "2024-01-01".to_string(),
+            updated_at: "2024-01-01".to_string(),
+        };
+
+        let model = AgentModel::from(&agent);
+        assert_eq!(model.skills.len(), 2);
+        assert_eq!(model.skills[0].0, serde_json::json!("my-skill"));
+        assert_eq!(model.skills[1].0, serde_json::json!("another-skill"));
+    }
+
+    #[test]
+    fn agent_model_from_preserves_non_native_skills() {
+        use djinn_core::models::Agent;
+
+        let agent = Agent {
+            id: "test-id".to_string(),
+            project_id: "proj".to_string(),
+            name: "test-agent".to_string(),
+            base_role: "worker".to_string(),
+            description: "".to_string(),
+            system_prompt_extensions: "".to_string(),
+            model_preference: None,
+            mcp_servers: "[]".to_string(),
+            skills: r#"["skill-a", "skill-b"]"#.to_string(),
+            is_default: false,
+            learned_prompt: None,
+            created_at: "2024-01-01".to_string(),
+            updated_at: "2024-01-01".to_string(),
+        };
+
+        let model = AgentModel::from(&agent);
+        assert_eq!(model.skills.len(), 2);
+    }
 }
