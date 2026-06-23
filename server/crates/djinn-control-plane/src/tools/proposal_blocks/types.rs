@@ -115,6 +115,27 @@ pub struct ProposalBlocksResponse {
     pub blocks: BTreeMap<&'static str, ProposalBlockDefinition>,
 }
 
+/// Params for the lean `get_block_catalog` tool (no fields required).
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct GetBlockCatalogParams {}
+
+/// A single entry in the lean block catalog: just the stable type tag and
+/// MDX component tag name, loaded from `proposal_block_catalog.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BlockCatalogEntry {
+    /// Stable kebab-case block type, e.g. `annotated-code`.
+    #[serde(rename = "type")]
+    pub block_type: String,
+    /// MDX component tag, e.g. `AnnotatedCode`.
+    pub tag: String,
+}
+
+/// Response envelope for `get_block_catalog`: a lean list of type/tag pairs.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct GetBlockCatalogResponse {
+    pub blocks: Vec<BlockCatalogEntry>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParsedProposalBlock {
     /// Stable proposal block type identifier, e.g. `annotated-code`.

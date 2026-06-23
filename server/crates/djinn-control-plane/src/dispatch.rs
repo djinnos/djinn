@@ -41,7 +41,7 @@ use crate::tools::project_tools::{
     ProjectEnvironmentConfigSetParams, ProjectGraphExclusionsGetParams,
     ProjectGraphExclusionsSetParams, ProjectRemoveParams, RetriggerImageBuildParams,
 };
-use crate::tools::proposal_blocks::ProposalBlocksParams;
+use crate::tools::proposal_blocks::{GetBlockCatalogParams, ProposalBlocksParams};
 use crate::tools::proposal_tools::{
     ProposalCreateParams, ProposalDeleteParams, ProposalExportParams, ProposalFeedbackAddParams,
     ProposalFeedbackResolveParams, ProposalGraduateParams, ProposalImportParams,
@@ -407,6 +407,13 @@ impl DjinnMcpServer {
                 name,
                 self.proposal_blocks(Parameters(decode_args::<ProposalBlocksParams>(name, args)?))
                     .await,
+            ),
+            "get_block_catalog" => map_json(
+                name,
+                self.get_block_catalog(Parameters(decode_args::<GetBlockCatalogParams>(
+                    name, args,
+                )?))
+                .await,
             ),
             "proposal_show" => map_json(
                 name,
