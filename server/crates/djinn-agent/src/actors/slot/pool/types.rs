@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, oneshot};
 
-use djinn_orchestration_types::coordinator::DebugSlot;
 use crate::context::AgentContext;
+use djinn_orchestration_types::coordinator::DebugSlot;
 
 use super::super::{SlotHandle, SlotPoolConfig};
 

@@ -678,8 +678,13 @@ fn render_prompt_with_skills(
     let task = make_task();
     let ctx = make_ctx();
     let base = render_prompt(agent_type, &task, &ctx);
-    let (merged, _native_names) =
-        crate::actors::slot::lifecycle::mcp_resolve::merge_native_skills(role_name, project_skills);
+    let (merged, _native_names) = crate::actors::slot::lifecycle::mcp_resolve::merge_native_skills(
+        role_name,
+        project_skills,
+        Some(
+            crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger::ProposalAuthoring,
+        ),
+    );
     apply_skills(&base, &merged)
 }
 

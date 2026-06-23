@@ -491,6 +491,7 @@ pub(crate) async fn execute_stage(
         worktree_path,
         runtime_role.as_ref(),
         &task.short_id,
+        &task.issue_type,
         role_mcp_servers.as_deref(),
         &role_skills,
         #[cfg(test)]

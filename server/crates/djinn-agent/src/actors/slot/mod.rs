@@ -3,8 +3,8 @@
 // crate so the slot side can use them without importing coordinator internals.
 
 pub use djinn_orchestration_types::slot::{
-    MergeConflictMetadata, MERGE_CONFLICT_PREFIX, ModelSlotConfig, SlotInfo,
-    SlotPoolConfig, SlotState,
+    MERGE_CONFLICT_PREFIX, MergeConflictMetadata, ModelSlotConfig, SlotInfo, SlotPoolConfig,
+    SlotState,
 };
 
 // ─── Slot types ──────────────────────────────────────────────────────────────

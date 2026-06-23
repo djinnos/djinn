@@ -257,7 +257,7 @@ where
         "code_search" => call_code_search(state, &call.arguments).await,
         "skill_read" => {
             let root = state.working_root_for(worktree_path);
-            call_skill_read(&call.arguments, &root).await
+            call_skill_read(&call.arguments, &root, state, session_role, session_task_id).await
         }
         "write" => call_write(state, &call.arguments, worktree_path, project_id.as_deref()).await,
         "edit" => call_edit(state, &call.arguments, worktree_path, project_id.as_deref()).await,
@@ -301,13 +301,21 @@ where
 }
 
 /// Load the full content of an assigned skill on demand (G5 progressive
-/// disclosure). Resolves the skill from the session worktree the same way the
-/// lifecycle does (`crate::skills::load_skills`), so the body returned here is
-/// byte-identical to what the inlined form would have produced. Errors cleanly
-/// when the name does not resolve to an assigned skill.
+/// disclosure).  For native skills (platform-owned, compiled-in), the body is
+/// served from the immutable native registry rather than the worktree.  For
+/// project/worktree skills, the body is resolved from `.djinn/skills/` (or
+/// `.claude/`, `.opencode/`) with manifest verification.
+///
+/// Native skills are only served when the session role has the skill assigned
+/// (i.e., the native skill is recommended for the role AND the session's
+/// authoring trigger resolved it).  Unknown or unassigned names produce a clean
+/// error.
 async fn call_skill_read(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_root: &Path,
+    state: &AgentContext,
+    session_role: Option<&str>,
+    session_task_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let name = arguments
         .as_ref()
@@ -317,9 +325,65 @@ async fn call_skill_read(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "skill_read requires a non-empty `name` argument".to_string())?;
 
-    // `load_skills` resolves the named skill file from the worktree's skill
-    // directories and returns at most one entry for a single requested name
-    // (frontmatter may override the display name, so match on the single
+    // ── Native skill path ──────────────────────────────────────────────────
+    // If the requested name matches a native skill, check whether the session
+    // role has it assigned.  Native skill bodies are immutable and come from
+    // the compiled-in registry — they never touch `.djinn/skills.json` or
+    // worktree skill paths.
+    if let Some(native) = crate::native_skills::native_skill(name) {
+        let role = session_role.unwrap_or("");
+        let recommended = crate::native_skills::native_skill_names_for_role(role);
+        if !recommended.contains(&name) {
+            return Err(format!(
+                "unknown skill `{name}`: not an assigned skill for this session"
+            ));
+        }
+
+        // Check the authoring trigger: native skills are only served when the
+        // current task qualifies as an authoring session.
+        let task_issue_type = if let Some(task_id) = session_task_id {
+            let task_repo =
+                djinn_db::TaskRepository::new(state.db.clone(), state.event_bus.clone());
+            match task_repo.get_by_short_id(task_id).await {
+                Ok(Some(task)) => task.issue_type,
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        };
+
+        let trigger = if role == "planner" && task_issue_type == "epic_breakdown" {
+            Some(crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger::ProposalAuthoring)
+        } else {
+            None
+        };
+
+        if trigger.is_none() {
+            return Err(format!(
+                "unknown skill `{name}`: not an assigned skill for this session"
+            ));
+        }
+
+        tracing::info!(
+            skill = %name,
+            version = %native.version,
+            role = %role,
+            "skill_read: serving native skill from registry"
+        );
+
+        return Ok(serde_json::json!({
+            "name": native.name,
+            "description": native.description,
+            "required": true,
+            "content": native.content,
+            "version": native.version,
+        }));
+    }
+
+    // ── Project/worktree skill path ────────────────────────────────────────
+    // `load_verified_skills` resolves the named skill file from the worktree's
+    // skill directories and returns at most one entry for a single requested
+    // name (frontmatter may override the display name, so match on the single
     // resolved entry rather than the requested string).
     let skill = crate::skills_manifest::load_verified_skills(worktree_root, &[name.to_string()])
         .map_err(|err| format!("skill_read refused to serve `{name}`: {err}"))?
