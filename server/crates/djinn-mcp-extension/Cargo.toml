@@ -1,0 +1,20 @@
+[package]
+name = "djinn-mcp-extension"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+rmcp = { version = "0.16", features = ["server"] }
+thiserror = "2"
+tracing = "0.1"
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }

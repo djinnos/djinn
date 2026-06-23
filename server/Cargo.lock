@@ -1070,6 +1070,7 @@ dependencies = [
  "djinn-git",
  "djinn-k8s",
  "djinn-lsp",
+ "djinn-mcp-extension",
  "djinn-memory",
  "djinn-provider",
  "djinn-roles",
@@ -1374,6 +1375,21 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "djinn-mcp-extension"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rmcp",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "workspace-hack",
 ]
 
 [[package]]
