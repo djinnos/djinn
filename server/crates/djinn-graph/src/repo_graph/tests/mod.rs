@@ -18,6 +18,7 @@ mod scip_file_iter;
 mod stable_uid;
 mod symbols_complexity;
 mod synthetic_dedup;
+mod trait_dispatch;
 
 use std::path::{Path, PathBuf};
 
