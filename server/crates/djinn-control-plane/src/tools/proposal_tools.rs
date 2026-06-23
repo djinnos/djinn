@@ -504,6 +504,10 @@ impl DjinnMcpServer {
                         status: &existing.status,
                         superseded_by: existing.superseded_by.as_deref(),
                         body_format: Some(&imported.body_format),
+                        // Imported proposals restore historical state — they
+                        // are not authoring operations and carry no
+                        // block-patch / native-skill attribution.
+                        event_metadata: None,
                     },
                 )
                 .await
@@ -824,6 +828,10 @@ impl DjinnMcpServer {
                     status,
                     superseded_by: superseded_by.as_deref(),
                     body_format: p.body_format.as_deref(),
+                    // Plain `proposal_update` writes carry no authoring
+                    // attribution metadata — block-patch / native-skill tagging
+                    // is reserved for the targeted patch primitive.
+                    event_metadata: None,
                 },
             )
             .await

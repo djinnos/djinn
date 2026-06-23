@@ -104,6 +104,13 @@ pub struct ProposalUpdateInput<'a> {
     pub superseded_by: Option<&'a str>,
     /// Body encoding: `markdown` (default) or `mdx`.
     pub body_format: Option<&'a str>,
+    /// Optional structured metadata persisted to `proposal_revisions.event_metadata`
+    /// when the update triggers a material spec revision. When `None`, the
+    /// revision row's `event_metadata` stays `NULL` (preserves the pre-existing
+    /// behavior for ordinary `proposal_update` callers). Used by the planner
+    /// refinement loop to attribute authoring revisions to the active native-skill
+    /// version and to record targeted block-patch context (selector, range, etc.).
+    pub event_metadata: Option<&'a serde_json::Value>,
 }
 
 pub struct ProposalFeedbackCreateInput<'a> {
@@ -153,6 +160,12 @@ struct ProposalRevisionSnapshot<'a> {
     body_format: &'a str,
     acceptance_criteria: &'a serde_json::Value,
     edited_by: Option<&'a str>,
+    /// Optional structured metadata to persist into the revision row's
+    /// `event_metadata` JSONB column. `None` writes SQL `NULL` (the historical
+    /// default for ordinary `proposal_update` revisions). Set by callers that
+    /// need to attribute the revision to a specific source (e.g. a planner
+    /// targeted block-patch attached to the active native-skill version).
+    event_metadata: Option<&'a serde_json::Value>,
 }
 
 pub struct ProposalRepository {
@@ -239,7 +252,9 @@ impl ProposalRepository {
         .execute(self.db.pool())
         .await?;
         // Seed revision 1 with the initial spec so every proposal has a head to
-        // diff against.
+        // diff against. The seed carries no authoring metadata — the proposal
+        // is brand-new, so the block-patch / native-skill attribution contract
+        // does not apply.
         self.insert_revision(ProposalRevisionSnapshot {
             proposal_id: &id,
             seq: 1,
@@ -248,6 +263,7 @@ impl ProposalRepository {
             body_format,
             acceptance_criteria: &acceptance_criteria,
             edited_by: author_user_id.as_deref(),
+            event_metadata: None,
         })
         .await?;
         let proposal = self.get_required(&id).await?;
@@ -333,6 +349,7 @@ impl ProposalRepository {
                 body_format,
                 acceptance_criteria: &acceptance_criteria,
                 edited_by: editor.as_deref(),
+                event_metadata: input.event_metadata,
             })
             .await?;
         } else if record_done_status_event {
@@ -579,10 +596,18 @@ impl ProposalRepository {
     #[allow(clippy::too_many_arguments)]
     async fn insert_revision(&self, revision: ProposalRevisionSnapshot<'_>) -> Result<()> {
         let id = uuid::Uuid::now_v7().to_string();
+        // When the caller passes no event_metadata (the common case for ordinary
+        // `proposal_update` writes), bind SQL NULL so the column stays empty —
+        // preserving the historical shape. A non-None payload is stored as JSONB
+        // for downstream attribution (targeted block-patch selection, native-skill
+        // version, etc.). We persist `serde_json::Value` directly: `sqlx`'s Pg
+        // encoder maps `Value::Null` to a SQL NULL, while any object/array is
+        // sent as the underlying JSON literal.
+        let metadata: Option<serde_json::Value> = revision.event_metadata.cloned();
         sqlx::query(
             r#"INSERT INTO proposal_revisions
-                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision')"#,
+                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision', $9)"#,
         )
         .bind(id)
         .bind(revision.proposal_id)
@@ -592,6 +617,7 @@ impl ProposalRepository {
         .bind(revision.body_format)
         .bind(revision.acceptance_criteria)
         .bind(revision.edited_by)
+        .bind(metadata)
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -1342,6 +1368,10 @@ impl ProposalRepository {
             body_format: &current.body_format,
             acceptance_criteria: &acceptance_criteria,
             edited_by: editor.as_deref(),
+            // AC amendments stamp a separate `proposal_feedback` audit entry
+            // that holds the structured change list — no extra metadata needed
+            // on the spec revision itself.
+            event_metadata: None,
         })
         .await?;
 
@@ -1787,6 +1817,7 @@ mod tests {
                     status: "archived",
                     superseded_by: None,
                     body_format: None,
+                    event_metadata: None,
                 },
             )
             .await
@@ -1939,6 +1970,7 @@ mod tests {
             status,
             superseded_by: None,
             body_format: None,
+            event_metadata: None,
         }
     }
 
@@ -2953,6 +2985,7 @@ mod tests {
                 status: "archived",
                 superseded_by: None,
                 body_format: None,
+                event_metadata: None,
             },
         )
         .await
@@ -2962,6 +2995,243 @@ mod tests {
         assert!(
             !results.iter().any(|r| r.short_id == p.short_id),
             "archived proposals should not appear in search results"
+        );
+    }
+
+    // ── Material revision metadata (event_metadata) plumbing ──────────────────
+    //
+    // The block-patch primitive and the planner refinement loop depend on the
+    // repository persisting structured metadata on the spec revision row so
+    // each targeted patch (and the native-skill version that produced it) is
+    // attributable after the fact. These tests pin the contract:
+    //
+    //   * The create seed revision and ordinary `proposal_update` calls write
+    //     `event_metadata = NULL` (backward compatible — no schema change, no
+    //     contract drift for existing callers).
+    //   * When a caller passes a `serde_json::Value` through
+    //     `ProposalUpdateInput { event_metadata, .. }`, the same value is
+    //     round-tripped through `ProposalRepository::revisions`.
+    //   * Status-only updates and the `status_change` audit events keep
+    //     `event_metadata = NULL` (audit history stays metadata-free).
+    //   * A `proposal_create` followed by an `update` with metadata produces
+    //     a head revision whose metadata survives the read path unchanged.
+
+    /// The seed revision written by `ProposalRepository::create` must keep
+    /// `event_metadata` NULL. The seed is not an authoring operation — the
+    /// block-patch / native-skill attribution contract does not apply.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_seed_revision_has_null_event_metadata() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Seed Meta")).await.unwrap();
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        assert_eq!(revisions.len(), 1, "create must seed exactly one revision");
+        let seed = &revisions[0];
+        assert_eq!(seed.seq, 1);
+        assert_eq!(seed.event_kind, "spec_revision");
+        assert!(
+            seed.event_metadata.is_none(),
+            "create seed revision must leave event_metadata NULL, got {:?}",
+            seed.event_metadata
+        );
+    }
+
+    /// Ordinary `proposal_update` (no `event_metadata` payload) must keep the
+    /// `event_metadata` column NULL. This is the backward-compatibility
+    /// contract the task description pins for every existing caller
+    /// (`proposal_update`, `proposal_create`, `proposal_import`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ordinary_update_writes_null_event_metadata() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Backward Compat")).await.unwrap();
+        repo.update(
+            &p.id,
+            ProposalUpdateInput {
+                title: "Backward Compat v2",
+                body: "v2 body",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        assert_eq!(revisions.len(), 2);
+        let head = revisions.last().expect("head revision");
+        assert_eq!(head.seq, 2);
+        assert!(
+            head.event_metadata.is_none(),
+            "ordinary proposal_update must keep event_metadata NULL, got {:?}",
+            head.event_metadata
+        );
+    }
+
+    /// When the caller supplies structured metadata through
+    /// `ProposalUpdateInput { event_metadata, .. }`, the repository must
+    /// persist it into the `proposal_revisions.event_metadata` JSONB column
+    /// unchanged (stable JSON shape) and the read path must surface the same
+    /// text. The metadata is the typed contract that future targeted-patch
+    /// calls will build.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_with_event_metadata_round_trips_to_revision() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Patchy")).await.unwrap();
+        let metadata = serde_json::json!({
+            "change_kind": "targeted_block_patch",
+            "block_id": "callout-tip",
+            "selector": "paragraph: 'lifecycle: draft'",
+            "range_start_byte": 12,
+            "range_end_byte": 48,
+            "native_skill_name": "visual-spec",
+            "native_skill_version": "0.1.0",
+            "note": "replace markdown tip prose with <Callout />"
+        });
+        repo.update(
+            &p.id,
+            ProposalUpdateInput {
+                title: "Patchy",
+                body: "lifecycle: <Callout>draft</Callout>",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: Some("mdx"),
+                event_metadata: Some(&metadata),
+            },
+        )
+        .await
+        .unwrap();
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        let head = revisions.last().expect("head revision");
+        assert_eq!(head.seq, 2);
+        let stored = head
+            .event_metadata
+            .as_deref()
+            .expect("head revision must carry event_metadata for a targeted patch");
+        let parsed: serde_json::Value = serde_json::from_str(stored)
+            .expect("event_metadata must be a valid JSON document on the read path");
+        assert_eq!(parsed, metadata);
+        // Stable field-by-field contract: every key the design promises is
+        // present and round-trips byte-for-byte. This is what the
+        // `proposal_show`/revision model surfaces to UI consumers.
+        assert_eq!(parsed["change_kind"], "targeted_block_patch");
+        assert_eq!(parsed["block_id"], "callout-tip");
+        assert_eq!(parsed["native_skill_name"], "visual-spec");
+        assert_eq!(parsed["native_skill_version"], "0.1.0");
+        assert_eq!(parsed["range_start_byte"], 12);
+        assert_eq!(parsed["range_end_byte"], 48);
+    }
+
+    /// Two successive material updates — each carrying distinct metadata —
+    /// must each land on their own revision row, with `latest_revision_seq`
+    /// advancing once per patch. This is the per-patch attribution contract
+    /// the design pins (one revision per targeted block-patch, not a
+    /// monolithic body rewrite).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_targeted_patches_persist_two_distinct_revisions() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Multi Patch")).await.unwrap();
+
+        let first = serde_json::json!({
+            "change_kind": "targeted_block_patch",
+            "block_id": "callout-tip",
+            "native_skill_name": "visual-spec",
+            "native_skill_version": "0.1.0",
+        });
+        repo.update(
+            &p.id,
+            ProposalUpdateInput {
+                title: "Multi Patch",
+                body: "patch-1 body",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: Some("mdx"),
+                event_metadata: Some(&first),
+            },
+        )
+        .await
+        .unwrap();
+
+        let second = serde_json::json!({
+            "change_kind": "targeted_block_patch",
+            "block_id": "metric-tile",
+            "selector": "section: '## Metrics'",
+            "native_skill_name": "visual-spec",
+            "native_skill_version": "0.1.0",
+        });
+        repo.update(
+            &p.id,
+            ProposalUpdateInput {
+                title: "Multi Patch",
+                body: "patch-1 + patch-2 body",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: Some("mdx"),
+                event_metadata: Some(&second),
+            },
+        )
+        .await
+        .unwrap();
+
+        let updated = repo.get(&p.id).await.unwrap().expect("proposal row");
+        assert_eq!(updated.latest_revision_seq, 3, "seed + two patches = 3");
+
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        assert_eq!(revisions.len(), 3);
+        assert!(revisions[0].event_metadata.is_none(), "seed stays NULL");
+        let r1: serde_json::Value = serde_json::from_str(
+            revisions[1]
+                .event_metadata
+                .as_deref()
+                .expect("first patch metadata"),
+        )
+        .unwrap();
+        assert_eq!(r1["block_id"], "callout-tip");
+        let r2: serde_json::Value = serde_json::from_str(
+            revisions[2]
+                .event_metadata
+                .as_deref()
+                .expect("second patch metadata"),
+        )
+        .unwrap();
+        assert_eq!(r2["block_id"], "metric-tile");
+        assert_eq!(r2["selector"], "section: '## Metrics'");
+    }
+
+    /// Status-only updates and the `status_change` audit events they emit
+    /// must keep `event_metadata` NULL. The audit trail of lifecycle
+    /// transitions is not authoring metadata and should not be conflated
+    /// with the targeted-patch contract.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn status_only_event_keeps_event_metadata_null() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Status Only")).await.unwrap();
+        // Move the proposal to `done` (status-only path that triggers a
+        // `status_change` audit row in addition to the create seed).
+        repo.update(
+            &p.id,
+            ProposalUpdateInput {
+                title: &p.title,
+                body: &p.body,
+                acceptance_criteria: &p.acceptance_criteria,
+                status: "done",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        // seed (spec_revision) + status_change audit
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[1].event_kind, "status_change");
+        assert!(
+            revisions[1].event_metadata.is_none(),
+            "status_change rows must leave event_metadata NULL"
         );
     }
 }
