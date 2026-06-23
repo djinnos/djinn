@@ -68,10 +68,15 @@ const CATALOG: readonly CatalogEntry[] = JSON.parse(
 // Authoritative tag SET from the Rust catalog (catalog is sorted by `type`).
 const CATALOG_TAGS: readonly string[] = CATALOG.map((entry) => entry.tag);
 const CATALOG_TAG_SET = new Set(CATALOG_TAGS);
+// Authoritative type SET from the Rust catalog. Mirrors CATALOG_TAGS but keyed
+// by the stable Rust-side block `type` (e.g. "rich-text", "question-form").
+const CATALOG_TYPES: readonly string[] = CATALOG.map((entry) => entry.type);
+const CATALOG_TYPE_SET = new Set(CATALOG_TYPES);
 
 // Fixture/spec order (QuestionForm last), filtered to the catalog set so the
 // ordered list and the authoritative set are kept in lockstep by construction.
 const SPEC_TAG_ORDER = PROPOSAL_BLOCK_SPECS.map((spec) => spec.tag);
+const SPEC_TYPE_ORDER = PROPOSAL_BLOCK_SPECS.map((spec) => spec.type);
 
 export const CANONICAL_V1_TAGS = SPEC_TAG_ORDER.filter((tag) =>
   CATALOG_TAG_SET.has(tag),
@@ -90,6 +95,22 @@ describe("Rust ⇄ TS block catalog drift gate", () => {
     // Prove the file was actually read (not silently empty / mocked away).
     expect(CATALOG.length).toBeGreaterThan(0);
     expect(CATALOG_TAGS.every((tag) => typeof tag === "string")).toBe(true);
+    expect(CATALOG_TYPES.every((type) => typeof type === "string")).toBe(true);
+  });
+
+  it("catalog entries have unique `type` and unique `tag` values", () => {
+    // Drift-defense: if two catalog entries shared a `type` or `tag`, the
+    // sorted-equality assertion below would silently collapse the duplicate
+    // (both sides would dedupe by accident) and the drift gate would mask a
+    // bug rather than fail. Catch duplicates BEFORE the set comparison.
+    const types = CATALOG.map((entry) => entry.type);
+    const tags = CATALOG.map((entry) => entry.tag);
+    expect(new Set(types).size, "catalog `type` values must be unique").toBe(
+      types.length,
+    );
+    expect(new Set(tags).size, "catalog `tag` values must be unique").toBe(
+      tags.length,
+    );
   });
 
   it("catalog tag set === TS spec tag set (neither side has drifted)", () => {
@@ -98,6 +119,20 @@ describe("Rust ⇄ TS block catalog drift gate", () => {
     expect(
       specSorted,
       "TS PROPOSAL_BLOCK_SPECS tags must match the Rust block catalog exactly",
+    ).toEqual(catalogSorted);
+  });
+
+  it("catalog type set === TS spec type set (neither side has drifted)", () => {
+    // Symmetric to the tag check above: the Rust `proposal_block_registry`
+    // and the JSON catalog emit a stable `type` per block, and the TS
+    // `PROPOSAL_BLOCK_SPECS` MUST use the exact same type set. A mismatch
+    // here means a block was added/removed/renamed on one side only — which
+    // is exactly the drift we are trying to gate.
+    const catalogSorted = [...CATALOG_TYPES].sort();
+    const specSorted = [...SPEC_TYPE_ORDER].sort();
+    expect(
+      specSorted,
+      "TS PROPOSAL_BLOCK_SPECS types must match the Rust block catalog exactly",
     ).toEqual(catalogSorted);
   });
 
