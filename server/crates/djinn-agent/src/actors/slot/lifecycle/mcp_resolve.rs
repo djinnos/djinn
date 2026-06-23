@@ -195,6 +195,11 @@ pub(crate) async fn resolve_mcp_and_skills(
     // before project skills so they appear first in the prompt's skills section.
     // A project/worktree skill whose name collides with a native skill is
     // filtered out — the native body must not be shadowed or mutated.
+    //
+    // Native skills are only merged when the authoring trigger fires for the
+    // current task.  This gates `visual-spec` (and future native authoring
+    // skills) to proposal-authoring/grooming/refinement planner sessions,
+    // keeping ordinary wave-planning/dispatch sessions free of context cost.
     let role_name = runtime_role.config().name;
     let (resolved_skills, native_skill_names) =
         merge_native_skills(role_name, project_skills, authoring_trigger);
@@ -205,7 +210,8 @@ pub(crate) async fn resolve_mcp_and_skills(
             role = %role_name,
             native_count = native_skill_names.len(),
             native_names = %native_skill_names.join(", "),
-            "Lifecycle: prepended native skills for role"
+            ?authoring_trigger,
+            "Lifecycle: merged native skills for role"
         );
     }
 
@@ -220,7 +226,10 @@ pub(crate) async fn resolve_mcp_and_skills(
 
 /// Merge native skills for `role_name` with project-resolved skills.
 ///
-/// Native skills recommended for the role are prepended to the project list.
+/// When `authoring_trigger` is `Some`, native skills recommended for the role
+/// are prepended to the project list.  When `None`, native skills are not
+/// merged — only project skills are returned.
+///
 /// Any project skill whose name matches a native skill name is filtered out to
 /// prevent shadowing of the immutable native body.
 ///
@@ -231,14 +240,10 @@ pub(crate) fn merge_native_skills(
     project_skills: Vec<ResolvedSkill>,
     authoring_trigger: Option<NativeSkillTrigger>,
 ) -> (Vec<ResolvedSkill>, Vec<String>) {
-    // Native skills are only loaded when an authoring trigger is present.
-    // This gates platform-owned skills like `visual-spec` so that
-    // non-authoring planner sessions (wave planning, dispatch) do not pay
-    // the context cost of heavy authoring skill bodies.
-    let _trigger = match authoring_trigger {
-        Some(t) => t,
-        None => return (project_skills, Vec::new()),
-    };
+    // Only merge native skills when the authoring trigger fires.
+    if authoring_trigger.is_none() {
+        return (project_skills, Vec::new());
+    }
 
     let native = native_skills::resolved_native_skills_for_role(role_name);
     let native_names: Vec<String> = native.iter().map(|s| s.name.clone()).collect();
@@ -438,6 +443,14 @@ mod tests {
     // ── effective_skills telemetry ───────────────────────────────────────
 
     #[test]
+    fn empty_project_skills_with_planner() {
+        let (merged, native_names) = merge_native_skills("planner", Vec::new(), AUTHORING);
+        assert_eq!(native_names, vec!["visual-spec"]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].name, "visual-spec");
+    }
+
+    #[test]
     fn effective_skills_excludes_native_names() {
         // effective_skill_names computes project/global/role skill names only.
         // Native skills are not part of this list.
@@ -454,5 +467,24 @@ mod tests {
         assert_eq!(merged[0].name, "visual-spec");
         assert_eq!(merged[0].trust_level, "platform");
         assert_eq!(merged[1].name, "git");
+    }
+
+    #[test]
+    fn no_authoring_trigger_means_no_native_skills() {
+        // Without the authoring trigger, native skills are not merged.
+        let (merged, native_names) = merge_native_skills("planner", Vec::new(), None);
+        assert!(native_names.is_empty(), "no native skills without trigger");
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn no_trigger_preserves_project_skills() {
+        // Without the authoring trigger, project skills pass through unchanged.
+        let project = vec![project_skill("git"), project_skill("testing")];
+        let (merged, native_names) = merge_native_skills("planner", project, None);
+        assert!(native_names.is_empty());
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].name, "git");
+        assert_eq!(merged[1].name, "testing");
     }
 }
