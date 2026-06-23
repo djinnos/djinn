@@ -3537,6 +3537,57 @@ expression: signatures
     }
   },
   {
+    "name": "get_block_catalog",
+    "read_only": true,
+    "destructive": false,
+    "idempotent": true,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Params for the lean `get_block_catalog` tool (no fields required).",
+      "title": "GetBlockCatalogParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "BlockCatalogEntry": {
+          "description": "A single entry in the lean block catalog: just the stable type tag and\nMDX component tag name, loaded from `proposal_block_catalog.json`.",
+          "properties": {
+            "tag": {
+              "description": "MDX component tag, e.g. `AnnotatedCode`.",
+              "type": "string"
+            },
+            "type": {
+              "description": "Stable kebab-case block type, e.g. `annotated-code`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "tag"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response envelope for `get_block_catalog`: a lean list of type/tag pairs.",
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/BlockCatalogEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "blocks"
+      ],
+      "title": "GetBlockCatalogResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "get_project_devcontainer_status",
     "read_only": false,
     "destructive": true,

@@ -27,16 +27,17 @@ mod types;
 mod tests;
 
 pub use catalog::{
-    BlockType, CANONICAL_BLOCK_TYPES, PROPOSAL_BLOCK_REGISTRY, proposal_block_definition_for_tag,
-    proposal_block_registry, proposal_block_tags,
+    BlockType, CANONICAL_BLOCK_TYPES, PROPOSAL_BLOCK_REGISTRY, proposal_block_catalog,
+    proposal_block_definition_for_tag, proposal_block_registry, proposal_block_tags,
 };
 pub use parser::{
     extract_custom_block_tags, parse_mdx_blocks, validate_block_ids, validate_mdx_blocks,
     validate_question_form_placement, validate_question_form_placement_for_format,
 };
 pub use types::{
-    BlockError, BlockRegistry, ParsedProposalBlock, ProposalBlockDefinition,
-    ProposalBlockFieldSchema, ProposalBlocksParams, ProposalBlocksResponse,
+    BlockCatalogEntry, BlockError, BlockRegistry, GetBlockCatalogParams, GetBlockCatalogResponse,
+    ParsedProposalBlock, ProposalBlockDefinition, ProposalBlockFieldSchema, ProposalBlocksParams,
+    ProposalBlocksResponse,
 };
 
 #[tool_router(router = proposal_blocks_tool_router, vis = "pub")]
@@ -56,6 +57,24 @@ impl DjinnMcpServer {
     ) -> Json<ProposalBlocksResponse> {
         Json(ProposalBlocksResponse {
             blocks: proposal_block_registry(),
+        })
+    }
+
+    #[tool(
+        description = "Return the committed proposal MDX block vocabulary as a lean list of (type, tag) pairs sourced from proposal_block_catalog.json.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn get_block_catalog(
+        &self,
+        Parameters(_): Parameters<GetBlockCatalogParams>,
+    ) -> Json<GetBlockCatalogResponse> {
+        Json(GetBlockCatalogResponse {
+            blocks: proposal_block_catalog(),
         })
     }
 }

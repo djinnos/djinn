@@ -244,3 +244,19 @@ pub fn proposal_block_tags() -> HashSet<&'static str> {
         .map(|definition| definition.tag)
         .collect()
 }
+
+/// Load the lean catalog from the committed `proposal_block_catalog.json`.
+///
+/// Returns deterministic (type, tag) pairs sorted by `type` key.
+pub fn proposal_block_catalog() -> Vec<super::types::BlockCatalogEntry> {
+    use std::sync::LazyLock;
+
+    static CATALOG: LazyLock<Vec<super::types::BlockCatalogEntry>> = LazyLock::new(|| {
+        let raw = include_str!("proposal_block_catalog.json");
+        let entries: Vec<super::types::BlockCatalogEntry> =
+            serde_json::from_str(raw).expect("proposal_block_catalog.json must be valid JSON");
+        entries
+    });
+
+    CATALOG.clone()
+}
