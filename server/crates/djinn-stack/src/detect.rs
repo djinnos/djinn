@@ -259,136 +259,29 @@ fn build_stack(files: &[FileEntry], bodies: &HashMap<String, String>) -> Stack {
 
     // Cargo.toml
     if signals.has_cargo_toml {
-        let cargo_body = bodies.get("Cargo.toml").map(String::as_str).unwrap_or("");
-        let toolchain_body = bodies.get("rust-toolchain.toml").map(String::as_str);
-        let info = manifests::parse_cargo_toml(cargo_body, toolchain_body);
-        if !collector.pms.contains(&"cargo".to_string()) {
-            collector.pms.push("cargo".into());
-        }
-        if info.is_workspace {
-            collector.monorepo.push("cargo-workspace".into());
-        }
-        if let Some(rust) = info.rust_version {
-            collector.runtimes.rust = Some(rust);
-        }
-        // nextest config presence
-        if files
-            .iter()
-            .any(|f| NEXTEST_CONFIG_PATHS.iter().any(|p| *p == f.path))
-        {
-            collector.test_runners.push("nextest");
-        }
+        probe_cargo(bodies, files, &mut collector);
     }
 
     // pyproject.toml
     if signals.has_pyproject_toml {
-        let body = bodies
-            .get("pyproject.toml")
-            .map(String::as_str)
-            .unwrap_or("");
-        let info = manifests::parse_pyproject(body);
-        if let Some(pm) = info.package_manager {
-            if !collector.pms.contains(&pm) {
-                collector.pms.push(pm);
-            }
-        } else if !collector
-            .pms
-            .iter()
-            .any(|p| matches!(p.as_str(), "uv" | "poetry" | "pdm" | "pip"))
-        {
-            collector.pms.push("pip".into());
-        }
-        if let Some(py) = info.python_version {
-            collector.runtimes.python = Some(py);
-        }
-        for dep in &info.dep_names {
-            if let Some(fw) = framework_for_dep(dep) {
-                collector.framework_slugs.push(fw);
-            }
-            if let Some(runner) = runner_for_dep(dep) {
-                collector.test_runners.push(runner);
-            }
-        }
-        // Pytest config in pyproject is a strong signal even without a runtime dep.
-        if body.contains("[tool.pytest") && !collector.test_runners.contains(&"pytest") {
-            collector.test_runners.push("pytest");
-        }
+        probe_python(bodies, &mut collector);
     }
 
     // go.mod
     if signals.has_go_mod {
-        let body = bodies.get("go.mod").map(String::as_str).unwrap_or("");
-        let info = manifests::parse_go_mod(body);
-        if !collector.pms.contains(&"go-mod".to_string()) {
-            collector.pms.push("go-mod".into());
-        }
-        if let Some(go) = info.go_version {
-            collector.runtimes.go = Some(go);
-        }
-        collector.test_runners.push("go-test");
-        // go.work signals a go workspace (monorepo).
-        if files.iter().any(|f| f.path == "go.work") {
-            collector.monorepo.push("go-workspace".into());
-        }
+        probe_go(bodies, files, &mut collector);
     }
 
     // Gemfile
     if files.iter().any(|f| f.path == "Gemfile") {
-        let body = bodies.get("Gemfile").map(String::as_str).unwrap_or("");
-        let info = manifests::parse_gemfile(body);
-        if !collector.pms.contains(&"bundler".to_string()) {
-            collector.pms.push("bundler".into());
-        }
-        for gem in &info.gems {
-            if let Some(fw) = framework_for_dep(gem) {
-                collector.framework_slugs.push(fw);
-            }
-            if let Some(runner) = runner_for_dep(gem) {
-                collector.test_runners.push(runner);
-            }
-        }
+        probe_ruby(bodies, &mut collector);
     }
 
     // Java (pom.xml / build.gradle*).
-    let has_pom = files.iter().any(|f| f.path == "pom.xml");
-    let has_gradle = files
-        .iter()
-        .any(|f| f.path == "build.gradle" || f.path == "build.gradle.kts");
-    if has_pom || has_gradle {
-        if has_pom && !collector.pms.contains(&"maven".to_string()) {
-            collector.pms.push("maven".into());
-        }
-        if has_gradle && !collector.pms.contains(&"gradle".to_string()) {
-            collector.pms.push("gradle".into());
-        }
-        let combined: String = bodies
-            .iter()
-            .filter(|(k, _)| matches!(k.as_str(), "pom.xml" | "build.gradle" | "build.gradle.kts"))
-            .map(|(_, v)| v.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let info = manifests::parse_pom(&combined);
-        if info.has_spring {
-            collector.framework_slugs.push("spring");
-        }
-        if info.has_junit {
-            collector.test_runners.push("junit");
-        }
-    }
+    probe_java(bodies, files, &mut collector);
 
     // Monorepo tooling signals.
-    if signals.has_pnpm_workspace {
-        collector.monorepo.push("pnpm-workspaces".into());
-    }
-    if signals.has_turbo_json {
-        collector.monorepo.push("turbo".into());
-    }
-    if files.iter().any(|f| f.path == "nx.json") {
-        collector.monorepo.push("nx".into());
-    }
-    if files.iter().any(|f| f.path == "lerna.json") {
-        collector.monorepo.push("lerna".into());
-    }
+    probe_monorepo_tools(&signals, files, &mut collector);
 
     // Canonicalise the collected slug lists.
     let package_managers = dedup_sorted(collector.pms);
@@ -506,6 +399,164 @@ fn node_pm_from_lockfiles(files: &[FileEntry]) -> &'static str {
         "bun"
     } else {
         "npm"
+    }
+}
+
+/// Probe `Cargo.toml` and update `collector` with the detected cargo
+/// package manager, workspace monorepo signal, rust runtime, and
+/// nextest test runner.
+fn probe_cargo(
+    bodies: &HashMap<String, String>,
+    files: &[FileEntry],
+    collector: &mut StackCollector,
+) {
+    let cargo_body = bodies.get("Cargo.toml").map(String::as_str).unwrap_or("");
+    let toolchain_body = bodies.get("rust-toolchain.toml").map(String::as_str);
+    let info = manifests::parse_cargo_toml(cargo_body, toolchain_body);
+    if !collector.pms.contains(&"cargo".to_string()) {
+        collector.pms.push("cargo".into());
+    }
+    if info.is_workspace {
+        collector.monorepo.push("cargo-workspace".into());
+    }
+    if let Some(rust) = info.rust_version {
+        collector.runtimes.rust = Some(rust);
+    }
+    // nextest config presence
+    if files
+        .iter()
+        .any(|f| NEXTEST_CONFIG_PATHS.iter().any(|p| *p == f.path))
+    {
+        collector.test_runners.push("nextest");
+    }
+}
+
+/// Probe `pyproject.toml` and update `collector` with the detected
+/// python package manager, python runtime, and dependency-derived
+/// framework/test-runner slugs.
+fn probe_python(bodies: &HashMap<String, String>, collector: &mut StackCollector) {
+    let body = bodies
+        .get("pyproject.toml")
+        .map(String::as_str)
+        .unwrap_or("");
+    let info = manifests::parse_pyproject(body);
+    if let Some(pm) = info.package_manager {
+        if !collector.pms.contains(&pm) {
+            collector.pms.push(pm);
+        }
+    } else if !collector
+        .pms
+        .iter()
+        .any(|p| matches!(p.as_str(), "uv" | "poetry" | "pdm" | "pip"))
+    {
+        collector.pms.push("pip".into());
+    }
+    if let Some(py) = info.python_version {
+        collector.runtimes.python = Some(py);
+    }
+    for dep in &info.dep_names {
+        if let Some(fw) = framework_for_dep(dep) {
+            collector.framework_slugs.push(fw);
+        }
+        if let Some(runner) = runner_for_dep(dep) {
+            collector.test_runners.push(runner);
+        }
+    }
+    // Pytest config in pyproject is a strong signal even without a runtime dep.
+    if body.contains("[tool.pytest") && !collector.test_runners.contains(&"pytest") {
+        collector.test_runners.push("pytest");
+    }
+}
+
+/// Probe `go.mod` and update `collector` with the detected go package
+/// manager, go runtime, go-test runner, and go-workspace monorepo signal.
+fn probe_go(bodies: &HashMap<String, String>, files: &[FileEntry], collector: &mut StackCollector) {
+    let body = bodies.get("go.mod").map(String::as_str).unwrap_or("");
+    let info = manifests::parse_go_mod(body);
+    if !collector.pms.contains(&"go-mod".to_string()) {
+        collector.pms.push("go-mod".into());
+    }
+    if let Some(go) = info.go_version {
+        collector.runtimes.go = Some(go);
+    }
+    collector.test_runners.push("go-test");
+    // go.work signals a go workspace (monorepo).
+    if files.iter().any(|f| f.path == "go.work") {
+        collector.monorepo.push("go-workspace".into());
+    }
+}
+
+/// Probe `Gemfile` and update `collector` with the detected bundler
+/// package manager and dependency-derived framework/test-runner slugs.
+fn probe_ruby(bodies: &HashMap<String, String>, collector: &mut StackCollector) {
+    let body = bodies.get("Gemfile").map(String::as_str).unwrap_or("");
+    let info = manifests::parse_gemfile(body);
+    if !collector.pms.contains(&"bundler".to_string()) {
+        collector.pms.push("bundler".into());
+    }
+    for gem in &info.gems {
+        if let Some(fw) = framework_for_dep(gem) {
+            collector.framework_slugs.push(fw);
+        }
+        if let Some(runner) = runner_for_dep(gem) {
+            collector.test_runners.push(runner);
+        }
+    }
+}
+
+/// Probe `pom.xml` and `build.gradle*` files and update `collector`
+/// with the detected maven/gradle package managers and spring/junit
+/// framework/test-runner slugs.
+fn probe_java(
+    bodies: &HashMap<String, String>,
+    files: &[FileEntry],
+    collector: &mut StackCollector,
+) {
+    let has_pom = files.iter().any(|f| f.path == "pom.xml");
+    let has_gradle = files
+        .iter()
+        .any(|f| f.path == "build.gradle" || f.path == "build.gradle.kts");
+    if has_pom || has_gradle {
+        if has_pom && !collector.pms.contains(&"maven".to_string()) {
+            collector.pms.push("maven".into());
+        }
+        if has_gradle && !collector.pms.contains(&"gradle".to_string()) {
+            collector.pms.push("gradle".into());
+        }
+        let combined: String = bodies
+            .iter()
+            .filter(|(k, _)| matches!(k.as_str(), "pom.xml" | "build.gradle" | "build.gradle.kts"))
+            .map(|(_, v)| v.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let info = manifests::parse_pom(&combined);
+        if info.has_spring {
+            collector.framework_slugs.push("spring");
+        }
+        if info.has_junit {
+            collector.test_runners.push("junit");
+        }
+    }
+}
+
+/// Probe monorepo tooling signals and update `collector` with detected
+/// monorepo tool slugs.
+fn probe_monorepo_tools(
+    signals: &ManifestSignals,
+    files: &[FileEntry],
+    collector: &mut StackCollector,
+) {
+    if signals.has_pnpm_workspace {
+        collector.monorepo.push("pnpm-workspaces".into());
+    }
+    if signals.has_turbo_json {
+        collector.monorepo.push("turbo".into());
+    }
+    if files.iter().any(|f| f.path == "nx.json") {
+        collector.monorepo.push("nx".into());
+    }
+    if files.iter().any(|f| f.path == "lerna.json") {
+        collector.monorepo.push("lerna".into());
     }
 }
 
@@ -1218,5 +1269,149 @@ mod tests {
         assert!(stack.frameworks.contains(&"react".to_string()));
         assert!(stack.frameworks.contains(&"next".to_string()));
         assert!(stack.test_runners.contains(&"vitest".to_string()));
+    }
+
+    // ---- build_stack non-Node manifest integration ----------------------------
+
+    #[test]
+    fn build_stack_cargo_workspace_with_toolchain() {
+        let files = file_entries(&["Cargo.toml", "rust-toolchain.toml"]);
+        let mut bodies = HashMap::new();
+        bodies.insert(
+            "Cargo.toml".into(),
+            "[workspace]\nmembers = [\"crates/*\"]\n[package]\nname = \"x\"\n".into(),
+        );
+        bodies.insert(
+            "rust-toolchain.toml".into(),
+            "[toolchain]\nchannel = \"1.85.0\"\n".into(),
+        );
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.package_managers.contains(&"cargo".to_string()));
+        assert!(
+            stack
+                .monorepo_tools
+                .contains(&"cargo-workspace".to_string())
+        );
+        assert!(stack.is_monorepo);
+        assert_eq!(stack.runtimes.rust.as_deref(), Some("1.85.0"));
+    }
+
+    #[test]
+    fn build_stack_python_uv_with_pytest() {
+        let files = file_entries(&["pyproject.toml"]);
+        let mut bodies = HashMap::new();
+        bodies.insert(
+            "pyproject.toml".into(),
+            r#"
+[project]
+name = "x"
+requires-python = ">=3.12"
+dependencies = ["requests>=2.31"]
+
+[tool.uv]
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+"#
+            .into(),
+        );
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.package_managers.contains(&"uv".to_string()));
+        assert_eq!(stack.runtimes.python.as_deref(), Some("3.12"));
+        assert!(stack.test_runners.contains(&"pytest".to_string()));
+    }
+
+    #[test]
+    fn build_stack_go_mod_with_workspace() {
+        let files = file_entries(&["go.mod", "go.work"]);
+        let mut bodies = HashMap::new();
+        bodies.insert(
+            "go.mod".into(),
+            "module github.com/foo/bar\ngo 1.22\n".into(),
+        );
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.package_managers.contains(&"go-mod".to_string()));
+        assert_eq!(stack.runtimes.go.as_deref(), Some("1.22"));
+        assert!(stack.test_runners.contains(&"go-test".to_string()));
+        assert!(stack.monorepo_tools.contains(&"go-workspace".to_string()));
+        assert!(stack.is_monorepo);
+    }
+
+    #[test]
+    fn build_stack_ruby_rails_rspec() {
+        let files = file_entries(&["Gemfile"]);
+        let mut bodies = HashMap::new();
+        bodies.insert(
+            "Gemfile".into(),
+            r#"
+source "https://rubygems.org"
+ruby "3.3.0"
+gem "rails"
+gem "rspec"
+"#
+            .into(),
+        );
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.package_managers.contains(&"bundler".to_string()));
+        assert!(stack.frameworks.contains(&"rails".to_string()));
+        assert!(stack.test_runners.contains(&"rspec".to_string()));
+    }
+
+    #[test]
+    fn build_stack_java_pom_spring_junit() {
+        let files = file_entries(&["pom.xml"]);
+        let mut bodies = HashMap::new();
+        bodies.insert(
+            "pom.xml".into(),
+            r#"
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter</artifactId>
+</dependency>
+<dependency>
+  <groupId>org.junit.jupiter</groupId>
+  <artifactId>junit-jupiter</artifactId>
+</dependency>
+"#
+            .into(),
+        );
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.package_managers.contains(&"maven".to_string()));
+        assert!(stack.frameworks.contains(&"spring".to_string()));
+        assert!(stack.test_runners.contains(&"junit".to_string()));
+    }
+
+    // ---- build_stack monorepo-tool integration --------------------------------
+
+    #[test]
+    fn build_stack_monorepo_tools_nx_and_turbo() {
+        let files = file_entries(&[
+            "package.json",
+            "nx.json",
+            "turbo.json",
+            "pnpm-workspace.yaml",
+        ]);
+        let mut bodies = HashMap::new();
+        bodies.insert("package.json".into(), r#"{"name":"x"}"#.into());
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.monorepo_tools.contains(&"nx".to_string()));
+        assert!(stack.monorepo_tools.contains(&"turbo".to_string()));
+        assert!(
+            stack
+                .monorepo_tools
+                .contains(&"pnpm-workspaces".to_string())
+        );
+        assert!(stack.is_monorepo);
+    }
+
+    #[test]
+    fn build_stack_monorepo_tools_lerna() {
+        let files = file_entries(&["package.json", "lerna.json"]);
+        let mut bodies = HashMap::new();
+        bodies.insert("package.json".into(), r#"{"name":"x"}"#.into());
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.monorepo_tools.contains(&"lerna".to_string()));
+        assert!(stack.is_monorepo);
     }
 }

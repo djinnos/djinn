@@ -295,6 +295,78 @@ pub struct EpicReadSourceParams {
     pub read_source: String,
 }
 
+/// Validated and normalised fields produced by [`validate_epic_create_params`].
+struct ValidatedEpicCreateFields {
+    title: String,
+    description: String,
+    emoji: String,
+    color: String,
+    owner: String,
+    status: Option<String>,
+    memory_refs_json: Option<String>,
+}
+
+/// Validate every scalar field of [`EpicCreateParams`] and return the
+/// normalised values, or the exact same error string that the tool boundary
+/// would produce so callers can forward it in `EpicSingleResponse.error`.
+fn validate_epic_create_params(p: &EpicCreateParams) -> Result<ValidatedEpicCreateFields, String> {
+    let title = validate_title(&p.title)?;
+    let description = p.description.clone().unwrap_or_default();
+    validate_description(&description)?;
+    let emoji = p.emoji.clone().unwrap_or_default();
+    validate_emoji(&emoji)?;
+    let color = p.color.clone().unwrap_or_default();
+    validate_color(&color)?;
+    let owner = validate_owner(p.owner.as_deref().unwrap_or(""))?;
+    let status = validate_epic_create_status(p.status.as_deref())?.map(|s| s.to_owned());
+    let memory_refs_json = p
+        .memory_refs
+        .as_ref()
+        .map(|refs| serde_json::to_string(refs).unwrap_or_else(|_| "[]".to_string()));
+    Ok(ValidatedEpicCreateFields {
+        title,
+        description,
+        emoji,
+        color,
+        owner,
+        status,
+        memory_refs_json,
+    })
+}
+
+/// Resolve the target project and any `blocked_by` epic references for an
+/// `epic_create` call.  Returns `(project_id, blocked_by_ids)` on success,
+/// or an error string suitable for `EpicSingleResponse.error`.
+///
+/// The blocker refs are returned as resolved UUIDs so the caller can pass them
+/// into `EpicRepository::create_for_project` — preserving atomic blocker-edge
+/// insertion before the `epic_created` event.
+async fn resolve_epic_create_project_and_blockers(
+    server: &DjinnMcpServer,
+    repo: &EpicRepository,
+    p: &EpicCreateParams,
+) -> Result<(String, Option<Vec<String>>), String> {
+    let project_id = server.resolve_project_id(&p.project).await?;
+
+    let blocked_by_ids: Option<Vec<String>> = match &p.blocked_by {
+        Some(refs) if !refs.is_empty() => {
+            let mut ids = Vec::new();
+            for r in refs {
+                match repo.resolve(r).await {
+                    Ok(Some(e)) => ids.push(e.id),
+                    _ => {
+                        return Err(format!("blocker epic not found: {r}"));
+                    }
+                }
+            }
+            Some(ids)
+        }
+        _ => None,
+    };
+
+    Ok((project_id, blocked_by_ids))
+}
+
 // ── Tool implementations ─────────────────────────────────────────────────────
 
 #[tool_router(router = epic_tool_router, vis = "pub")]
@@ -307,38 +379,9 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<EpicCreateParams>,
     ) -> Json<EpicSingleResponse> {
-        let title = match validate_title(&p.title) {
-            Ok(t) => t,
-            Err(e) => {
-                return Json(EpicSingleResponse {
-                    epic: None,
-                    error: Some(e),
-                });
-            }
-        };
-        let description = p.description.as_deref().unwrap_or("");
-        if let Err(e) = validate_description(description) {
-            return Json(EpicSingleResponse {
-                epic: None,
-                error: Some(e),
-            });
-        }
-        let emoji = p.emoji.as_deref().unwrap_or("");
-        if let Err(e) = validate_emoji(emoji) {
-            return Json(EpicSingleResponse {
-                epic: None,
-                error: Some(e),
-            });
-        }
-        let color = p.color.as_deref().unwrap_or("");
-        if let Err(e) = validate_color(color) {
-            return Json(EpicSingleResponse {
-                epic: None,
-                error: Some(e),
-            });
-        }
-        let owner = match validate_owner(p.owner.as_deref().unwrap_or("")) {
-            Ok(o) => o,
+        // ── Validate scalar fields ──────────────────────────────────────────
+        let validated = match validate_epic_create_params(&p) {
+            Ok(v) => v,
             Err(e) => {
                 return Json(EpicSingleResponse {
                     epic: None,
@@ -347,67 +390,35 @@ impl DjinnMcpServer {
             }
         };
 
-        let status = match validate_epic_create_status(p.status.as_deref()) {
-            Ok(s) => s,
-            Err(e) => {
-                return Json(EpicSingleResponse {
-                    epic: None,
-                    error: Some(e),
-                });
-            }
-        };
-
-        let memory_refs_json = p
-            .memory_refs
-            .as_ref()
-            .map(|refs| serde_json::to_string(refs).unwrap_or_else(|_| "[]".to_string()));
-
+        // ── Resolve project & blocker refs ───────────────────────────────────
         let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
-        let project_id = match self.resolve_project_id(&p.project).await {
-            Ok(id) => id,
-            Err(e) => {
-                return Json(EpicSingleResponse {
-                    epic: None,
-                    error: Some(e),
-                });
-            }
-        };
-
-        // Resolve blocked_by refs to UUIDs so create_for_project can wire
-        // blocker edges atomically before emitting the epic_created event.
-        let blocked_by_ids: Option<Vec<String>> = match &p.blocked_by {
-            Some(refs) if !refs.is_empty() => {
-                let mut ids = Vec::new();
-                for r in refs {
-                    match repo.resolve(r).await {
-                        Ok(Some(e)) => ids.push(e.id),
-                        _ => {
-                            return Json(EpicSingleResponse {
-                                epic: None,
-                                error: Some(format!("blocker epic not found: {r}")),
-                            });
-                        }
-                    }
+        let (project_id, blocked_by_ids) =
+            match resolve_epic_create_project_and_blockers(self, &repo, &p).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Json(EpicSingleResponse {
+                        epic: None,
+                        error: Some(e),
+                    });
                 }
-                Some(ids)
-            }
-            _ => None,
-        };
+            };
+
         let blocked_by_refs: Option<Vec<&str>> = blocked_by_ids
             .as_ref()
             .map(|ids| ids.iter().map(|s| s.as_str()).collect());
 
+        // ── Persist ──────────────────────────────────────────────────────────
         match repo
             .create_for_project(
                 &project_id,
                 djinn_db::EpicCreateInput {
-                    title: &title,
-                    description,
-                    emoji,
-                    color,
-                    owner: &owner,
-                    memory_refs: memory_refs_json.as_deref(),
-                    status,
+                    title: &validated.title,
+                    description: &validated.description,
+                    emoji: &validated.emoji,
+                    color: &validated.color,
+                    owner: &validated.owner,
+                    memory_refs: validated.memory_refs_json.as_deref(),
+                    status: validated.status.as_deref(),
                     auto_breakdown: p.auto_breakdown,
                     originating_adr_id: p.originating_adr_id.as_deref(),
                     blocked_by: blocked_by_refs.as_deref(),

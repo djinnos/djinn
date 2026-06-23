@@ -4,16 +4,16 @@ use std::sync::atomic::AtomicU64;
 
 use serde_json::json;
 
-use super::client::{
+use crate::client::{
     ClientStdin, OpenedFiles, PendingResponses, clone_client_request_refs, ensure_did_open,
     send_request, spawn_client,
 };
-use super::server_config::server_for_path;
-use super::symbols::{SymbolQuery, format_document_symbols, resolve_symbol_position};
-use super::workspace::find_root;
-use super::{LspManager, REQUEST_TIMEOUT};
+use crate::server_config::server_for_path;
+use crate::symbols::{SymbolQuery, format_document_symbols, resolve_symbol_position};
+use crate::workspace::find_root;
+use crate::{LspManager, REQUEST_TIMEOUT};
 
-pub(super) async fn fetch_document_symbols(
+pub(crate) async fn fetch_document_symbols(
     manager: &LspManager,
     worktree: &Path,
     path: &Path,
@@ -45,7 +45,7 @@ pub(super) async fn fetch_document_symbols(
     Ok(symbols)
 }
 
-pub(super) async fn resolve_symbol_to_position(
+pub(crate) async fn resolve_symbol_to_position(
     manager: &LspManager,
     worktree: &Path,
     path: &Path,
@@ -56,7 +56,7 @@ pub(super) async fn resolve_symbol_to_position(
     Ok((position.line, position.character))
 }
 
-pub(super) async fn get_request_refs(
+pub(crate) async fn get_request_refs(
     manager: &LspManager,
     worktree: &Path,
     path: &Path,
@@ -94,7 +94,7 @@ pub(super) async fn get_request_refs(
     Ok((stdin, pending, seq, client.opened.clone()))
 }
 
-pub(super) async fn hover(
+pub(crate) async fn hover(
     manager: &LspManager,
     worktree: &Path,
     path: &Path,
@@ -120,7 +120,7 @@ pub(super) async fn hover(
     Ok(format_hover_result(&result))
 }
 
-pub(super) async fn go_to_definition(
+pub(crate) async fn go_to_definition(
     manager: &LspManager,
     worktree: &Path,
     path: &Path,
@@ -146,7 +146,7 @@ pub(super) async fn go_to_definition(
     Ok(format_definition_result(&result))
 }
 
-pub(super) async fn find_references(
+pub(crate) async fn find_references(
     manager: &LspManager,
     worktree: &Path,
     path: &Path,
@@ -173,7 +173,7 @@ pub(super) async fn find_references(
     Ok(format_references_result(&result))
 }
 
-pub(super) async fn document_symbols(
+pub(crate) async fn document_symbols(
     manager: &LspManager,
     worktree: &Path,
     path: &Path,
@@ -187,7 +187,7 @@ pub(super) async fn document_symbols(
     Ok(format_document_symbols(&symbols, &query))
 }
 
-pub(super) async fn hover_symbol(
+pub(crate) async fn hover_symbol(
     manager: &LspManager,
     worktree: &Path,
     path: &Path,
@@ -198,7 +198,7 @@ pub(super) async fn hover_symbol(
     hover(manager, worktree, path, line, character).await
 }
 
-pub(super) async fn go_to_definition_symbol(
+pub(crate) async fn go_to_definition_symbol(
     manager: &LspManager,
     worktree: &Path,
     path: &Path,
@@ -209,7 +209,7 @@ pub(super) async fn go_to_definition_symbol(
     go_to_definition(manager, worktree, path, line, character).await
 }
 
-pub(super) async fn find_references_symbol(
+pub(crate) async fn find_references_symbol(
     manager: &LspManager,
     worktree: &Path,
     path: &Path,

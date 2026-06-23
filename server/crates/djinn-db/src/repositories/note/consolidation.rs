@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use djinn_core::events::EventBus;
 use djinn_memory::{
@@ -378,7 +378,7 @@ impl NoteConsolidationRepository {
         project_id: &str,
         notes: &[ConsolidationNote],
     ) -> Result<Vec<ConsolidationCluster>> {
-        use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+        use std::collections::HashMap;
 
         if notes.len() < 2 {
             return Ok(Vec::new());
@@ -390,6 +390,27 @@ impl NoteConsolidationRepository {
             .map(|note| (note.id.clone(), note))
             .collect();
 
+        let (adjacency, edge_scores) = self
+            .build_graph(project_id, notes, &notes_by_id)
+            .await?;
+
+        if edge_scores.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let components = Self::traverse_components(&adjacency, &edge_scores, &notes_by_id);
+        Ok(components)
+    }
+
+    async fn build_graph(
+        &self,
+        project_id: &str,
+        notes: &[ConsolidationNote],
+        notes_by_id: &HashMap<String, ConsolidationNote>,
+    ) -> Result<(
+        BTreeMap<String, BTreeSet<String>>,
+        BTreeMap<(String, String), f64>,
+    )> {
         let mut adjacency: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut edge_scores: BTreeMap<(String, String), f64> = BTreeMap::new();
 
@@ -420,10 +441,14 @@ impl NoteConsolidationRepository {
             }
         }
 
-        if edge_scores.is_empty() {
-            return Ok(Vec::new());
-        }
+        Ok((adjacency, edge_scores))
+    }
 
+    fn traverse_components(
+        adjacency: &BTreeMap<String, BTreeSet<String>>,
+        edge_scores: &BTreeMap<(String, String), f64>,
+        notes_by_id: &HashMap<String, ConsolidationNote>,
+    ) -> Vec<ConsolidationCluster> {
         let mut visited = HashSet::new();
         let mut components = Vec::new();
 
@@ -432,53 +457,72 @@ impl NoteConsolidationRepository {
                 continue;
             }
 
-            let mut queue = VecDeque::from([start.clone()]);
-            let mut component_ids = BTreeSet::from([start.clone()]);
-
-            while let Some(node) = queue.pop_front() {
-                if let Some(neighbors) = adjacency.get(&node) {
-                    for neighbor in neighbors {
-                        if visited.insert(neighbor.clone()) {
-                            queue.push_back(neighbor.clone());
-                        }
-                        component_ids.insert(neighbor.clone());
-                    }
-                }
-            }
+            let component_ids = Self::collect_component(start, adjacency, &mut visited);
 
             if component_ids.len() < 2 {
                 continue;
             }
 
-            let component_id_set: HashSet<_> = component_ids.iter().cloned().collect();
-            let notes = sorted_component_notes(&component_ids, &notes_by_id);
-            let note_ids = notes.iter().map(|note| note.id.clone()).collect::<Vec<_>>();
-
-            let mut edges = Vec::new();
-            for (left, right) in edge_scores.keys() {
-                if component_id_set.contains(left) && component_id_set.contains(right) {
-                    edges.push(ConsolidationCandidateEdge {
-                        left_note_id: left.clone(),
-                        right_note_id: right.clone(),
-                        score: edge_scores[&(left.clone(), right.clone())],
-                    });
-                }
-            }
-            edges.sort_by(|left, right| {
-                left.left_note_id
-                    .cmp(&right.left_note_id)
-                    .then_with(|| left.right_note_id.cmp(&right.right_note_id))
-            });
-
-            components.push(ConsolidationCluster {
-                note_ids,
-                notes,
-                edges,
-            });
+            let component = Self::assemble_component(&component_ids, edge_scores, notes_by_id);
+            components.push(component);
         }
 
         components.sort_by(|left, right| left.note_ids.cmp(&right.note_ids));
-        Ok(components)
+        components
+    }
+
+    fn collect_component(
+        start: &str,
+        adjacency: &BTreeMap<String, BTreeSet<String>>,
+        visited: &mut HashSet<String>,
+    ) -> BTreeSet<String> {
+        let mut queue = VecDeque::from([start.to_string()]);
+        let mut component_ids = BTreeSet::from([start.to_string()]);
+
+        while let Some(node) = queue.pop_front() {
+            if let Some(neighbors) = adjacency.get(&node) {
+                for neighbor in neighbors {
+                    if visited.insert(neighbor.clone()) {
+                        queue.push_back(neighbor.clone());
+                    }
+                    component_ids.insert(neighbor.clone());
+                }
+            }
+        }
+
+        component_ids
+    }
+
+    fn assemble_component(
+        component_ids: &BTreeSet<String>,
+        edge_scores: &BTreeMap<(String, String), f64>,
+        notes_by_id: &HashMap<String, ConsolidationNote>,
+    ) -> ConsolidationCluster {
+        let component_id_set: HashSet<_> = component_ids.iter().cloned().collect();
+        let notes = sorted_component_notes(component_ids, notes_by_id);
+        let note_ids = notes.iter().map(|note| note.id.clone()).collect::<Vec<_>>();
+
+        let mut edges = Vec::new();
+        for (left, right) in edge_scores.keys() {
+            if component_id_set.contains(left) && component_id_set.contains(right) {
+                edges.push(ConsolidationCandidateEdge {
+                    left_note_id: left.clone(),
+                    right_note_id: right.clone(),
+                    score: edge_scores[&(left.clone(), right.clone())],
+                });
+            }
+        }
+        edges.sort_by(|left, right| {
+            left.left_note_id
+                .cmp(&right.left_note_id)
+                .then_with(|| left.right_note_id.cmp(&right.right_note_id))
+        });
+
+        ConsolidationCluster {
+            note_ids,
+            notes,
+            edges,
+        }
     }
 
     async fn dedup_candidates_for_group(
