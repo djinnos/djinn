@@ -262,13 +262,14 @@ impl TaskRepository {
         // matched row reports rows_affected=1 even when every column is a
         // no-op, including the LWW "this peer is older" and the terminal
         // "local closed, peer wants to regress" paths.
-        let existing: Option<(String, String)> =
-            sqlx::query_as("SELECT updated_at, status FROM tasks WHERE id = $1")
-                .bind(&task.id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        if let Some((existing_updated_at, existing_status)) = existing.as_ref() {
-            if existing_updated_at.as_str() >= task.updated_at.as_str() {
+        let existing = sqlx::query!(
+            "SELECT updated_at, status FROM tasks WHERE id = $1",
+            task.id
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(row) = existing.as_ref() {
+            if row.updated_at.as_str() >= task.updated_at.as_str() {
                 tx.commit().await?;
                 return Ok(false);
             }
@@ -276,7 +277,7 @@ impl TaskRepository {
             // regressed by a peer that tries to move it back to a non-closed
             // status. The upsert SQL gates all status-transition columns
             // on the same predicate, so the row is effectively unchanged.
-            if existing_status == "closed" && task.status != "closed" {
+            if row.status == "closed" && task.status != "closed" {
                 tx.commit().await?;
                 return Ok(false);
             }
@@ -448,16 +449,17 @@ impl TaskRepository {
 
         // Pre-check existing row; see `upsert_peer` for the CLIENT_FOUND_ROWS
         // rationale and the terminal-state-protection behaviour.
-        let existing: Option<(String, String)> =
-            sqlx::query_as("SELECT updated_at, status FROM tasks WHERE id = $1")
-                .bind(&task.id)
-                .fetch_optional(&mut **tx)
-                .await?;
-        if let Some((existing_updated_at, existing_status)) = existing.as_ref() {
-            if existing_updated_at.as_str() >= task.updated_at.as_str() {
+        let existing = sqlx::query!(
+            "SELECT updated_at, status FROM tasks WHERE id = $1",
+            task.id
+        )
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(row) = existing.as_ref() {
+            if row.updated_at.as_str() >= task.updated_at.as_str() {
                 return Ok(false);
             }
-            if existing_status == "closed" && task.status != "closed" {
+            if row.status == "closed" && task.status != "closed" {
                 return Ok(false);
             }
         }
