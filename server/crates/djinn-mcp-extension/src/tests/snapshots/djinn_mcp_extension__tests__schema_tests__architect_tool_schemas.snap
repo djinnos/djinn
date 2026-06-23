@@ -431,7 +431,7 @@ expression: tool_schemas_architect()
         },
         "key": {
           "type": "string",
-          "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations, describe)"
+          "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations, describe, context)"
         },
         "direction": {
           "type": "string",
@@ -564,6 +564,12 @@ expression: tool_schemas_architect()
         "edge_kind": {
           "type": "string",
           "description": "Edge-kind filter for edges; for query_subgraph, a single-kind compatibility alias when edge_filters is omitted"
+        },
+        "min_confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Minimum edge-confidence threshold for operation='impact'. Edges below this value are skipped during BFS traversal. Omit for the default (0.85), which excludes synthesized trait-dispatch edges (confidence ~0.70); lower to ~0.70 to include trait-dispatch callers in the blast radius."
         },
         "file": {
           "type": "string",

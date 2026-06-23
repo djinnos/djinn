@@ -1685,7 +1685,8 @@ fn code_graph_capabilities() -> serde_json::Value {
             "impact_default_min_confidence": 0.85,
             "impact_behavioral_edge_whitelist": [
                 "Reads", "Writes", "SymbolReference", "FileReference",
-                "Implements", "Extends", "TypeDefines", "Defines"
+                "Implements", "Extends", "TypeDefines", "Defines",
+                "TraitDispatchCall"
             ],
             "cycles_default_kind_filter": "symbol",
             "ranked_default_sort_by": "fused"
