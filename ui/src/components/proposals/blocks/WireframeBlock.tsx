@@ -67,6 +67,12 @@ export function WireframeBlock({ children }: BlockProps) {
  * The wireframe surface: the drawing as monospace `<pre>` in Monaspace Radon at a
  * muted grey. `whitespace-pre` keeps every authored cell; `overflow-x-auto` lets
  * a wide screen scroll rather than wrap (wrapping would shear the boxes).
+ *
+ * `overflow-y-hidden` is required, not incidental: per the CSS overflow spec a
+ * non-`visible` value on one axis promotes the other axis from `visible` to
+ * `auto`, so `overflow-x-auto` alone would render a stray VERTICAL scrollbar on
+ * a 1px overrun — a second scrollbar beside the page's. The PAGE owns vertical
+ * scroll; the figure only ever scrolls horizontally.
  */
 function AsciiPre({ ascii, muted }: { ascii: string; muted?: boolean }) {
   return (
@@ -82,7 +88,7 @@ function AsciiPre({ ascii, muted }: { ascii: string; muted?: boolean }) {
         fontVariantLigatures: "none",
       }}
       className={cn(
-        "overflow-x-auto whitespace-pre text-[13px] text-zinc-300",
+        "overflow-x-auto overflow-y-hidden whitespace-pre text-[13px] text-zinc-300",
         muted && "italic text-muted-foreground/60",
       )}
     >

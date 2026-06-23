@@ -4,6 +4,7 @@ import { render } from "@/test/test-utils";
 import { FileTreeBlock } from "./FileTreeBlock";
 import { DiffBlock } from "./DiffBlock";
 import { JsonExplorerBlock } from "./JsonExplorerBlock";
+import { WireframeBlock } from "./WireframeBlock";
 
 /**
  * Regression: proposal block scroll containers used `overflow-x-auto` with no
@@ -49,6 +50,22 @@ describe("block scroll containers never promote a stray vertical scrollbar", () 
     expect(
       container.querySelectorAll(".overflow-x-auto").length,
     ).toBeGreaterThan(0);
+  });
+
+  it("WireframeBlock ascii pre clips vertically", () => {
+    // A tall + wide ASCII drawing is the only horizontal-scroll container in
+    // this block; without overflow-y-hidden the horizontal scrollbar's own
+    // height triggers a stray vertical scrollbar beside the page's.
+    const wide = "+" + "-".repeat(200) + "+";
+    const tall = Array.from({ length: 40 }, (_, i) => `| row ${i}`).join("\n");
+    const { container } = render(
+      <WireframeBlock id="w-overflow" attributes={{}}>
+        {`${wide}\n${tall}\n${wide}`}
+      </WireframeBlock>,
+    );
+    expectHorizontalOnly(
+      container.querySelector('[data-testid="wireframe-ascii"]'),
+    );
   });
 
   it("JsonExplorerBlock tree container clips vertically", () => {
