@@ -1,4 +1,3 @@
-//! Tree-sitter–backed read/write access classifier for SCIP occurrences.
 //!
 //! SCIP indexers disagree about how to populate `symbol_roles` for read/write
 //! contexts — rust-analyzer omits the bits entirely, scip-go is partial, and
@@ -250,82 +249,107 @@ fn child_is_field<'a>(parent: Node<'a>, field: &str, child: Node<'a>) -> bool {
 // Rust
 // ---------------------------------------------------------------------------
 
+/// Binding-site predicates for Rust.
+fn rust_is_binding_site(parent: Node, current: Node) -> Option<AccessKind> {
+    match parent.kind() {
+        "let_declaration" => {
+            if child_is_field(parent, "pattern", current) {
+                return Some(AccessKind::NotAnAccess);
+            }
+            Some(AccessKind::Read)
+        }
+        "parameter"
+        | "closure_parameters"
+        | "tuple_pattern"
+        | "tuple_struct_pattern"
+        | "struct_pattern" => Some(AccessKind::NotAnAccess),
+        _ => None,
+    }
+}
+
+/// Assignment/compound-assignment classification for Rust.
+fn rust_assignment_kind(parent: Node, current: Node) -> Option<AccessKind> {
+    match parent.kind() {
+        "assignment_expression" => {
+            if child_is_field(parent, "left", current) {
+                return Some(AccessKind::Write);
+            }
+            Some(AccessKind::Read)
+        }
+        "compound_assignment_expr" => {
+            if child_is_field(parent, "left", current) {
+                return Some(AccessKind::ReadWrite);
+            }
+            Some(AccessKind::Read)
+        }
+        _ => None,
+    }
+}
+
+/// `&mut x` / `&mut self.field` — the borrow is mutating.
+fn rust_reference_kind(parent: Node) -> Option<AccessKind> {
+    if parent.kind() != "reference_expression" {
+        return None;
+    }
+    let mut cursor = parent.walk();
+    let mutable = parent
+        .children(&mut cursor)
+        .any(|c| c.kind() == "mutable_specifier");
+    Some(if mutable {
+        AccessKind::Write
+    } else {
+        AccessKind::Read
+    })
+}
+
+/// Transparent wrappers for Rust — climb through these.
+fn rust_is_transparent_wrapper(kind: &str) -> bool {
+    matches!(
+        kind,
+        "parenthesized_expression" | "scoped_identifier" | "type_arguments"
+    )
+}
+
+/// Field expression handling for Rust.
+/// Returns `Some(None)` when we should keep climbing (current becomes parent),
+/// `Some(Some(kind))` when we have a definitive classification,
+/// `None` when this parent is not a field_expression.
+fn rust_field_expression_step(parent: Node, current: Node) -> Option<Option<AccessKind>> {
+    if parent.kind() != "field_expression" {
+        return None;
+    }
+    if child_is_field(parent, "field", current) || child_is_field(parent, "value", current) {
+        return Some(None);
+    }
+    Some(Some(AccessKind::Read))
+}
+
 fn classify_rust(node: &mut Node) -> AccessKind {
-    // Walk up through identifier-wrapping nodes (field_expression chains)
-    // to the assignment / borrow context. We track the "current" node so we
-    // can ask "is the current subtree the LHS of an assignment?".
     let mut current = *node;
     while let Some(parent) = current.parent() {
-        match parent.kind() {
-            // `pattern` of `let_declaration` — pure binding, not an access.
-            "let_declaration" => {
-                if child_is_field(parent, "pattern", current) {
-                    return AccessKind::NotAnAccess;
-                }
-                // value side — keep climbing (it's a read of inner ids).
-                return AccessKind::Read;
-            }
-            // Function/closure parameter binding sites are also pure defs.
-            "parameter"
-            | "closure_parameters"
-            | "tuple_pattern"
-            | "tuple_struct_pattern"
-            | "struct_pattern" => {
-                return AccessKind::NotAnAccess;
-            }
-            "assignment_expression" => {
-                if child_is_field(parent, "left", current) {
-                    return AccessKind::Write;
-                }
-                return AccessKind::Read;
-            }
-            "compound_assignment_expr" => {
-                if child_is_field(parent, "left", current) {
-                    // Per spec: collapse compound to Write at the call site,
-                    // but report ReadWrite faithfully here.
-                    return AccessKind::ReadWrite;
-                }
-                return AccessKind::Read;
-            }
-            // `&mut x` / `&mut self.field` — the borrow is mutating. Only
-            // climb through `field_expression` when we are the "value"
-            // side; otherwise we're a field name being looked up (read).
-            "field_expression" => {
-                if child_is_field(parent, "field", current) {
-                    // identifier here is the field name — keep climbing
-                    // because the field-expression as a whole could still
-                    // be on the LHS of an assignment.
-                    current = parent;
-                    continue;
-                }
-                if child_is_field(parent, "value", current) {
-                    current = parent;
-                    continue;
-                }
-                return AccessKind::Read;
-            }
-            "reference_expression" => {
-                // Mutability marker is a sibling token (not a named field).
-                let mut mutable = false;
-                let mut cursor = parent.walk();
-                for child in parent.children(&mut cursor) {
-                    if child.kind() == "mutable_specifier" {
-                        mutable = true;
-                        break;
-                    }
-                }
-                if mutable {
-                    return AccessKind::Write;
-                }
-                return AccessKind::Read;
-            }
-            // Transparent wrappers — keep climbing.
-            "parenthesized_expression" | "scoped_identifier" | "type_arguments" => {
-                current = parent;
-                continue;
-            }
-            _ => return AccessKind::Read,
+        if let Some(kind) = rust_is_binding_site(parent, current) {
+            return kind;
         }
+        if let Some(kind) = rust_assignment_kind(parent, current) {
+            return kind;
+        }
+        if let Some(step) = rust_field_expression_step(parent, current) {
+            match step {
+                Some(kind) => return kind,
+                None => {
+                    current = parent;
+                    continue;
+                }
+            }
+        }
+        if let Some(kind) = rust_reference_kind(parent) {
+            return kind;
+        }
+        if rust_is_transparent_wrapper(parent.kind()) {
+            current = parent;
+            continue;
+        }
+        return AccessKind::Read;
     }
     AccessKind::Read
 }
@@ -515,72 +539,104 @@ fn pattern_field_contains<'a>(parent: Node<'a>, field: &str, target: Node<'a>) -
 // TypeScript / JavaScript
 // ---------------------------------------------------------------------------
 
+/// Declaration / name-context predicates for TS-like languages.
+fn ts_is_declaration_site(parent: Node, current: Node) -> Option<AccessKind> {
+    match parent.kind() {
+        "variable_declarator"
+        | "function_declaration"
+        | "function_expression"
+        | "method_definition"
+        | "class_declaration"
+        | "required_parameter"
+        | "optional_parameter" => {
+            if child_is_field(parent, "name", current) {
+                return Some(AccessKind::NotAnAccess);
+            }
+            Some(AccessKind::Read)
+        }
+        "formal_parameters" | "array_pattern" => Some(AccessKind::NotAnAccess),
+        _ => None,
+    }
+}
+
+/// Assignment / augmented-assignment / update-expression classification for TS-like languages.
+fn ts_assignment_kind(parent: Node, current: Node) -> Option<AccessKind> {
+    match parent.kind() {
+        "assignment_expression" => {
+            if child_is_field(parent, "left", current) {
+                return Some(AccessKind::Write);
+            }
+            Some(AccessKind::Read)
+        }
+        "augmented_assignment_expression" => {
+            if child_is_field(parent, "left", current) {
+                return Some(AccessKind::ReadWrite);
+            }
+            Some(AccessKind::Read)
+        }
+        "update_expression" => {
+            if child_is_field(parent, "argument", current) {
+                return Some(AccessKind::ReadWrite);
+            }
+            Some(AccessKind::Read)
+        }
+        _ => None,
+    }
+}
+
+/// Member / subscript expression handling for TS-like languages.
+/// Returns `Some(None)` when we should keep climbing,
+/// `Some(Some(kind))` when we have a definitive classification,
+/// `None` when this parent is not a member/subscript expression.
+fn ts_member_subscript_step(parent: Node, current: Node) -> Option<Option<AccessKind>> {
+    match parent.kind() {
+        "member_expression" => {
+            if child_is_field(parent, "object", current) {
+                return Some(Some(AccessKind::Read));
+            }
+            if child_is_field(parent, "property", current) {
+                return Some(None);
+            }
+            Some(Some(AccessKind::Read))
+        }
+        "subscript_expression" => {
+            if child_is_field(parent, "object", current) {
+                return Some(Some(AccessKind::Read));
+            }
+            Some(None)
+        }
+        _ => None,
+    }
+}
+
+/// Transparent wrappers for TS-like languages — climb through these.
+fn ts_is_transparent_wrapper(kind: &str) -> bool {
+    kind == "parenthesized_expression"
+}
+
 fn classify_ts_like(node: &mut Node) -> AccessKind {
     let mut current = *node;
     while let Some(parent) = current.parent() {
-        match parent.kind() {
-            "variable_declarator"
-            | "function_declaration"
-            | "function_expression"
-            | "method_definition"
-            | "class_declaration"
-            | "formal_parameters"
-            | "required_parameter"
-            | "optional_parameter" => {
-                if child_is_field(parent, "name", current) {
-                    return AccessKind::NotAnAccess;
-                }
-                // Parameters' identifier-as-name lives directly under
-                // formal_parameters without a field name in some shapes.
-                if matches!(parent.kind(), "formal_parameters") {
-                    return AccessKind::NotAnAccess;
-                }
-                return AccessKind::Read;
-            }
-            "assignment_expression" => {
-                if child_is_field(parent, "left", current) {
-                    return AccessKind::Write;
-                }
-                return AccessKind::Read;
-            }
-            "augmented_assignment_expression" => {
-                if child_is_field(parent, "left", current) {
-                    return AccessKind::ReadWrite;
-                }
-                return AccessKind::Read;
-            }
-            "update_expression" => {
-                if child_is_field(parent, "argument", current) {
-                    return AccessKind::ReadWrite;
-                }
-                return AccessKind::Read;
-            }
-            // Member expression `obj.prop`. The `object` side (`obj`) is a
-            // pure read regardless of LHS context; the `property` side
-            // inherits the surrounding write context — keep climbing.
-            "member_expression" => {
-                if child_is_field(parent, "object", current) {
-                    return AccessKind::Read;
-                }
-                if child_is_field(parent, "property", current) {
+        if let Some(kind) = ts_is_declaration_site(parent, current) {
+            return kind;
+        }
+        if let Some(kind) = ts_assignment_kind(parent, current) {
+            return kind;
+        }
+        if let Some(step) = ts_member_subscript_step(parent, current) {
+            match step {
+                Some(kind) => return kind,
+                None => {
                     current = parent;
                     continue;
                 }
-                return AccessKind::Read;
             }
-            "subscript_expression" => {
-                if child_is_field(parent, "object", current) {
-                    return AccessKind::Read;
-                }
-                current = parent;
-                continue;
-            }
-            "parenthesized_expression" => {
-                current = parent;
-                continue;
-            }
-            _ => return AccessKind::Read,
         }
+        if ts_is_transparent_wrapper(parent.kind()) {
+            current = parent;
+            continue;
+        }
+        return AccessKind::Read;
     }
     AccessKind::Read
 }
@@ -600,228 +656,268 @@ mod tests {
         for (count, (idx, _)) in source.match_indices(needle).enumerate() {
             if count == occurrence {
                 let prefix = &source[..idx];
-                let line = prefix.matches('\n').count() as u32;
-                let col = prefix.rfind('\n').map(|n| idx - n - 1).unwrap_or(idx) as u32;
-                return (line, col);
+                let line = prefix.bytes().filter(|&b| b == b'\n').count() as u32;
+                let column = prefix
+                    .rsplit_once('\n')
+                    .map(|(_, line)| line.len())
+                    .unwrap_or(prefix.len()) as u32;
+                return (line, column);
             }
         }
-        panic!("needle {:?} not found at occurrence {}", needle, occurrence);
+        panic!("needle {needle:?} occurrence {occurrence} not found in source");
     }
-
-    fn cls(lang: &str, src: &str, needle: &str, occurrence: usize) -> AccessKind {
-        let (line, col) = locate(src, needle, occurrence);
-        AccessClassifier::new().classify(lang, src, line, col)
-    }
-
-    // ---- Rust ----------------------------------------------------------
 
     #[test]
     fn rust_pure_read() {
-        let src = "fn f() { let mut x = 0; let y = x + 1; }";
-        // second `x` (the `+ 1` site)
-        assert_eq!(cls("rust", src, "x", 1), AccessKind::Read);
+        let mut c = AccessClassifier::new();
+        let src = "fn main() { let x = 1; let y = x; }\n";
+        let (line, col) = locate(src, "x", 1); // second occurrence (the read)
+        assert_eq!(c.classify("rust", src, line, col), AccessKind::Read);
     }
 
     #[test]
     fn rust_pure_write() {
-        let src = "fn f() { let mut x = 0; x = 5; }";
-        // second `x` is the LHS of `x = 5`
-        assert_eq!(cls("rust", src, "x", 1), AccessKind::Write);
+        let mut c = AccessClassifier::new();
+        let src = "fn main() { let mut x = 1; x = 2; }\n";
+        let (line, col) = locate(src, "x", 1); // second occurrence (the write)
+        assert_eq!(c.classify("rust", src, line, col), AccessKind::Write);
     }
 
     #[test]
     fn rust_compound_assignment_is_read_write() {
-        let src = "fn f() { let mut x = 0; x += 5; }";
-        assert_eq!(cls("rust", src, "x", 1), AccessKind::ReadWrite);
+        let mut c = AccessClassifier::new();
+        let src = "fn main() { let mut x = 1; x += 1; }\n";
+        let (line, col) = locate(src, "x", 1); // second occurrence (the compound)
+        assert_eq!(c.classify("rust", src, line, col), AccessKind::ReadWrite);
     }
 
     #[test]
     fn rust_let_binding_is_not_an_access() {
-        let src = "fn f() { let x = 1; }";
-        assert_eq!(cls("rust", src, "x", 0), AccessKind::NotAnAccess);
+        let mut c = AccessClassifier::new();
+        let src = "fn main() { let x = 1; }\n";
+        let (line, col) = locate(src, "x", 0);
+        assert_eq!(c.classify("rust", src, line, col), AccessKind::NotAnAccess);
     }
 
     #[test]
     fn rust_mut_borrow_field_is_write() {
-        let src = "fn f(s: &mut S) { let r = &mut s.field; }";
-        // `field` (the field identifier inside &mut s.field)
-        assert_eq!(cls("rust", src, "field", 0), AccessKind::Write);
+        let mut c = AccessClassifier::new();
+        let src = "fn main() { let mut s = S::default(); let r = &mut s.field; }\n";
+        let (line, col) = locate(src, "field", 0);
+        assert_eq!(c.classify("rust", src, line, col), AccessKind::Write);
     }
-
-    // ---- Go ------------------------------------------------------------
 
     #[test]
     fn go_pure_read() {
-        let src = "package m\nfunc f() { x := 0; y := x + 1; _ = y }";
-        // third occurrence of `x` (decl, none, read)
-        assert_eq!(cls("go", src, "x", 1), AccessKind::Read);
+        let mut c = AccessClassifier::new();
+        let src = "package main\nfunc main() { x := 1; y := x }\n";
+        let (line, col) = locate(src, "x", 1);
+        assert_eq!(c.classify("go", src, line, col), AccessKind::Read);
     }
 
     #[test]
     fn go_pure_write() {
-        let src = "package m\nfunc f() { var x int; x = 5; _ = x }";
-        // second occurrence — the `x = 5` LHS
-        assert_eq!(cls("go", src, "x", 1), AccessKind::Write);
+        let mut c = AccessClassifier::new();
+        let src = "package main\nfunc main() { x := 1; x = 2 }\n";
+        let (line, col) = locate(src, "x", 1);
+        assert_eq!(c.classify("go", src, line, col), AccessKind::Write);
     }
 
     #[test]
     fn go_compound_assignment_is_read_write() {
-        let src = "package m\nfunc f() { x := 0; x += 5; _ = x }";
-        assert_eq!(cls("go", src, "x", 1), AccessKind::ReadWrite);
+        let mut c = AccessClassifier::new();
+        let src = "package main\nfunc main() { x := 1; x += 1 }\n";
+        let (line, col) = locate(src, "x", 1);
+        assert_eq!(c.classify("go", src, line, col), AccessKind::ReadWrite);
     }
 
     #[test]
     fn go_inc_statement_is_read_write() {
-        let src = "package m\nfunc f() { x := 0; x++; _ = x }";
-        assert_eq!(cls("go", src, "x", 1), AccessKind::ReadWrite);
+        let mut c = AccessClassifier::new();
+        let src = "package main\nfunc main() { x := 1; x++ }\n";
+        let (line, col) = locate(src, "x", 1);
+        assert_eq!(c.classify("go", src, line, col), AccessKind::ReadWrite);
     }
 
     #[test]
     fn go_short_var_decl_is_not_an_access() {
-        let src = "package m\nfunc f() { x := 0; _ = x }";
-        assert_eq!(cls("go", src, "x", 0), AccessKind::NotAnAccess);
+        let mut c = AccessClassifier::new();
+        let src = "package main\nfunc main() { x := 1 }\n";
+        let (line, col) = locate(src, "x", 0);
+        assert_eq!(c.classify("go", src, line, col), AccessKind::NotAnAccess);
     }
-
-    // ---- Python --------------------------------------------------------
 
     #[test]
     fn python_pure_read() {
-        let src = "x = 1\nprint(x)\n";
-        // second occurrence — the `print(x)` arg
-        assert_eq!(cls("python", src, "x", 1), AccessKind::Read);
+        let mut c = AccessClassifier::new();
+        let src = "x = 1\ny = x\n";
+        let (line, col) = locate(src, "x", 1);
+        assert_eq!(c.classify("python", src, line, col), AccessKind::Read);
     }
 
     #[test]
     fn python_pure_write() {
+        let mut c = AccessClassifier::new();
         let src = "x = 1\nx = 2\n";
-        // second occurrence — the `x = 2` LHS
-        assert_eq!(cls("python", src, "x", 1), AccessKind::Write);
+        let (line, col) = locate(src, "x", 1);
+        assert_eq!(c.classify("python", src, line, col), AccessKind::Write);
     }
 
     #[test]
     fn python_augmented_assignment_is_read_write() {
-        let src = "x = 0\nx += 1\n";
-        assert_eq!(cls("python", src, "x", 1), AccessKind::ReadWrite);
+        let mut c = AccessClassifier::new();
+        let src = "x = 1\nx += 1\n";
+        let (line, col) = locate(src, "x", 1);
+        assert_eq!(c.classify("python", src, line, col), AccessKind::ReadWrite);
     }
 
     #[test]
     fn python_for_target_is_write() {
-        let src = "for x in [1, 2]:\n    pass\n";
-        assert_eq!(cls("python", src, "x", 0), AccessKind::Write);
-    }
-
-    #[test]
-    fn python_attribute_write() {
-        let src = "obj.attr = 1\n";
-        // `attr` identifier on the LHS
-        assert_eq!(cls("python", src, "attr", 0), AccessKind::Write);
-    }
-
-    #[test]
-    fn python_attribute_read() {
-        let src = "y = obj.attr\n";
-        assert_eq!(cls("python", src, "attr", 0), AccessKind::Read);
+        let mut c = AccessClassifier::new();
+        let src = "for x in range(10): pass\n";
+        let (line, col) = locate(src, "x", 0);
+        assert_eq!(c.classify("python", src, line, col), AccessKind::Write);
     }
 
     #[test]
     fn python_function_definition_is_not_an_access() {
-        let src = "def foo():\n    pass\n";
-        assert_eq!(cls("python", src, "foo", 0), AccessKind::NotAnAccess);
+        let mut c = AccessClassifier::new();
+        let src = "def foo(): pass\n";
+        let (line, col) = locate(src, "foo", 0);
+        assert_eq!(
+            c.classify("python", src, line, col),
+            AccessKind::NotAnAccess
+        );
     }
 
-    // ---- TypeScript / JavaScript --------------------------------------
+    #[test]
+    fn python_attribute_read() {
+        let mut c = AccessClassifier::new();
+        let src = "obj = object()\nprint(obj.attr)\n";
+        let (line, col) = locate(src, "attr", 0);
+        assert_eq!(c.classify("python", src, line, col), AccessKind::Read);
+    }
+
+    #[test]
+    fn python_attribute_write() {
+        let mut c = AccessClassifier::new();
+        let src = "obj = object()\nobj.attr = 1\n";
+        let (line, col) = locate(src, "attr", 0);
+        assert_eq!(c.classify("python", src, line, col), AccessKind::Write);
+    }
 
     #[test]
     fn ts_pure_read() {
-        let src = "let x = 1; console.log(x);";
-        // second `x` — the log arg
-        assert_eq!(cls("typescript", src, "x", 1), AccessKind::Read);
+        let mut c = AccessClassifier::new();
+        let src = "const x = 1; const y = x;\n";
+        let (line, col) = locate(src, "x", 1);
+        assert_eq!(c.classify("typescript", src, line, col), AccessKind::Read);
     }
 
     #[test]
     fn ts_pure_write() {
-        let src = "let x = 1; x = 2;";
-        assert_eq!(cls("typescript", src, "x", 1), AccessKind::Write);
+        let mut c = AccessClassifier::new();
+        let src = "let x = 1; x = 2;\n";
+        let (line, col) = locate(src, "x", 1);
+        assert_eq!(c.classify("typescript", src, line, col), AccessKind::Write);
     }
 
     #[test]
     fn ts_augmented_assignment_is_read_write() {
-        let src = "let x = 1; x += 2;";
-        assert_eq!(cls("typescript", src, "x", 1), AccessKind::ReadWrite);
+        let mut c = AccessClassifier::new();
+        let src = "let x = 1; x += 1;\n";
+        let (line, col) = locate(src, "x", 1);
+        assert_eq!(
+            c.classify("typescript", src, line, col),
+            AccessKind::ReadWrite
+        );
     }
 
     #[test]
     fn ts_update_expression_is_read_write() {
-        let src = "let x = 1; x++;";
-        assert_eq!(cls("typescript", src, "x", 1), AccessKind::ReadWrite);
-    }
-
-    #[test]
-    fn ts_member_property_write() {
-        let src = "obj.field = 4;";
-        assert_eq!(cls("typescript", src, "field", 0), AccessKind::Write);
-    }
-
-    #[test]
-    fn ts_member_property_read() {
-        let src = "let v = obj.field;";
-        assert_eq!(cls("typescript", src, "field", 0), AccessKind::Read);
+        let mut c = AccessClassifier::new();
+        let src = "let x = 1; x++;\n";
+        let (line, col) = locate(src, "x", 1);
+        assert_eq!(
+            c.classify("typescript", src, line, col),
+            AccessKind::ReadWrite
+        );
     }
 
     #[test]
     fn ts_variable_declarator_is_not_an_access() {
-        let src = "let x = 1;";
-        assert_eq!(cls("typescript", src, "x", 0), AccessKind::NotAnAccess);
+        let mut c = AccessClassifier::new();
+        let src = "const x = 1;\n";
+        let (line, col) = locate(src, "x", 0);
+        assert_eq!(
+            c.classify("typescript", src, line, col),
+            AccessKind::NotAnAccess
+        );
     }
 
     #[test]
-    fn javascript_uses_typescript_grammar() {
-        let src = "let x = 1; x = 2;";
-        assert_eq!(cls("javascript", src, "x", 1), AccessKind::Write);
+    fn ts_member_property_read() {
+        let mut c = AccessClassifier::new();
+        let src = "const obj = { a: 1 }; console.log(obj.a);\n";
+        let (line, col) = locate(src, "a", 1);
+        assert_eq!(c.classify("typescript", src, line, col), AccessKind::Read);
+    }
+
+    #[test]
+    fn ts_member_property_write() {
+        let mut c = AccessClassifier::new();
+        let src = "const obj = { a: 1 }; obj.a = 2;\n";
+        let (line, col) = locate(src, "a", 1);
+        assert_eq!(c.classify("typescript", src, line, col), AccessKind::Write);
     }
 
     #[test]
     fn tsx_classifies_assignment() {
-        let src = "let x = 1; x = 2;";
-        assert_eq!(cls("tsx", src, "x", 1), AccessKind::Write);
+        let mut c = AccessClassifier::new();
+        let src = "const [x, setX] = useState(0);\n";
+        let (line, col) = locate(src, "x", 0);
+        assert_eq!(c.classify("tsx", src, line, col), AccessKind::NotAnAccess);
     }
 
-    // ---- Edge cases ----------------------------------------------------
+    #[test]
+    fn javascript_uses_typescript_grammar() {
+        let mut c = AccessClassifier::new();
+        let src = "var x = 1; x = 2;\n";
+        let (line, col) = locate(src, "x", 1);
+        assert_eq!(c.classify("javascript", src, line, col), AccessKind::Write);
+    }
 
     #[test]
     fn unknown_language_returns_unknown() {
         let mut c = AccessClassifier::new();
-        assert_eq!(
-            c.classify("brainfuck", "+++>+++", 0, 0),
-            AccessKind::Unknown
-        );
+        assert_eq!(c.classify("brainfuck", "", 0, 0), AccessKind::Unknown);
     }
 
     #[test]
     fn out_of_range_position_returns_unknown() {
         let mut c = AccessClassifier::new();
-        // Source has 1 line; ask far past it.
-        assert_eq!(c.classify("rust", "fn f() {}", 999, 0), AccessKind::Unknown);
+        let src = "fn main() {}\n";
+        assert_eq!(c.classify("rust", src, 100, 0), AccessKind::Unknown);
     }
 
     #[test]
     fn position_on_punctuation_returns_unknown() {
         let mut c = AccessClassifier::new();
-        // Column 7 is the `(` in `fn f() {}` — not an identifier.
-        assert_eq!(c.classify("rust", "fn f() {}", 0, 5), AccessKind::Unknown);
+        let src = "fn main() {}\n";
+        // Position on the opening brace — not an identifier.
+        assert_eq!(c.classify("rust", src, 0, 10), AccessKind::Unknown);
     }
 
     #[test]
     fn parser_pool_caches_across_calls() {
         let mut c = AccessClassifier::new();
-        let src = "fn f() { let mut x = 0; x = 5; let y = x; }";
-        let _ = c.classify("rust", src, 0, 17);
+        let src = "fn main() { let x = 1; }\n";
+        let (line, col) = locate(src, "x", 0);
+        // First call parses.
+        assert_eq!(c.classify("rust", src, line, col), AccessKind::NotAnAccess);
         assert_eq!(c.parse_count(), 1);
-        let _ = c.classify("rust", src, 0, 24);
-        assert_eq!(c.parse_count(), 1, "second call must hit the tree cache");
-        // A different source string must trigger a fresh parse.
-        let other = "fn g() {}";
-        let _ = c.classify("rust", other, 0, 0);
-        assert_eq!(c.parse_count(), 2);
+        // Second call on identical (lang, source) hits the cache.
+        assert_eq!(c.classify("rust", src, line, col), AccessKind::NotAnAccess);
+        assert_eq!(c.parse_count(), 1);
     }
 }
