@@ -2580,3 +2580,154 @@ mod stop_build_tests {
         assert!(!r2.ok);
     }
 }
+
+// ── Schema-lean regression tests ──────────────────────────────────────────
+//
+// Guard `ProposalCreateParams` and `ProposalUpdateParams` against accidental
+// inlining of block vocabulary (tags, field schemas, catalog enums). Clients
+// discover vocabulary via `get_block_catalog` / `proposal_blocks`, then
+// submit proposal bodies through the existing `body` + `body_format` fields.
+
+#[cfg(test)]
+mod schema_lean_tests {
+    use schemars::schema_for;
+    use serde_json::Value;
+
+    /// Recursively collect every string value reachable from `value`.
+    fn collect_strings(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(s) => out.push(s.clone()),
+            Value::Array(arr) => {
+                for item in arr {
+                    collect_strings(item, out);
+                }
+            }
+            Value::Object(map) => {
+                for v in map.values() {
+                    collect_strings(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Assert that the serialized JSON schema does not mention any of the
+    /// given forbidden terms.  A single traversal collects all string values
+    /// (keys, enum entries, titles, descriptions, …) and a linear scan
+    /// checks every one.
+    fn assert_schema_excludes_terms(schema: &Value, forbidden: &[&str], context: &str) {
+        let mut strings = Vec::new();
+        collect_strings(schema, &mut strings);
+        for term in forbidden {
+            for s in &strings {
+                assert!(
+                    !s.contains(term),
+                    "{context} schema unexpectedly contains forbidden term \
+                     \"{term}\" in string value \"{s}\""
+                );
+            }
+        }
+    }
+
+    /// Terms that must never appear in a proposal write-schema.  These
+    /// cover: generic vocabulary field names, concrete MDX block tags, and
+    /// block-field/enum concepts.
+    const FORBIDDEN_BLOCK_TERMS: &[&str] = &[
+        // generic vocabulary surface
+        "block_types",
+        "catalog",
+        "blocks",
+        // concrete MDX block tags (must match proposal_block_catalog.json)
+        "AnnotatedCode",
+        "ApiEndpoint",
+        "Callout",
+        "Checklist",
+        "Columns",
+        "Decisions",
+        "Diagram",
+        "Diff",
+        "FileTree",
+        "JsonExplorer",
+        "QuestionForm",
+        "RichText",
+        "Tabs",
+        "Wireframe",
+        // kebab-case type identifiers
+        "annotated-code",
+        "api-endpoint",
+        "callout",
+        "checklist",
+        "columns",
+        "decisions",
+        "diagram",
+        "diff",
+        "file-tree",
+        "json-explorer",
+        "question-form",
+        "rich-text",
+        "tabs",
+        "wireframe",
+        // block enum / field schema vocabulary
+        "BlockType",
+        "ProposalBlock",
+    ];
+
+    /// Expected top-level properties for `ProposalCreateParams`.
+    const CREATE_ALLOWED_PROPS: &[&str] = &[
+        "title",
+        "body",
+        "acceptance_criteria",
+        "target_projects",
+        "status",
+        "body_format",
+    ];
+
+    /// Expected top-level properties for `ProposalUpdateParams`.
+    const UPDATE_ALLOWED_PROPS: &[&str] = &[
+        "id",
+        "title",
+        "body",
+        "acceptance_criteria",
+        "status",
+        "superseded_by",
+        "body_format",
+    ];
+
+    #[test]
+    fn proposal_create_params_schema_is_lean_and_excludes_block_vocabulary() {
+        let schema = schema_for!(super::ProposalCreateParams);
+        let json: Value = serde_json::to_value(&schema).expect("schema serializes");
+
+        // Verify allowed properties.
+        let props = json["properties"]
+            .as_object()
+            .expect("ProposalCreateParams schema should have properties object");
+        let prop_keys: Vec<&str> = props.keys().map(String::as_str).collect();
+        assert_eq!(
+            prop_keys, CREATE_ALLOWED_PROPS,
+            "ProposalCreateParams properties drifted: got {prop_keys:?}, \
+             expected {CREATE_ALLOWED_PROPS:?}"
+        );
+
+        assert_schema_excludes_terms(&json, FORBIDDEN_BLOCK_TERMS, "ProposalCreateParams");
+    }
+
+    #[test]
+    fn proposal_update_params_schema_is_lean_and_excludes_block_vocabulary() {
+        let schema = schema_for!(super::ProposalUpdateParams);
+        let json: Value = serde_json::to_value(&schema).expect("schema serializes");
+
+        // Verify allowed properties.
+        let props = json["properties"]
+            .as_object()
+            .expect("ProposalUpdateParams schema should have properties object");
+        let prop_keys: Vec<&str> = props.keys().map(String::as_str).collect();
+        assert_eq!(
+            prop_keys, UPDATE_ALLOWED_PROPS,
+            "ProposalUpdateParams properties drifted: got {prop_keys:?}, \
+             expected {UPDATE_ALLOWED_PROPS:?}"
+        );
+
+        assert_schema_excludes_terms(&json, FORBIDDEN_BLOCK_TERMS, "ProposalUpdateParams");
+    }
+}
