@@ -1,0 +1,28 @@
+---
+source: crates/djinn-mcp-extension/src/tests/boundary_tests.rs
+expression: deps
+---
+[
+  "anyhow",
+  "async-trait",
+  "djinn-control-plane",
+  "djinn-core",
+  "djinn-db",
+  "djinn-lsp",
+  "djinn-memory",
+  "djinn-provider",
+  "djinn-supervisor",
+  "djinn-telemetry",
+  "insta",
+  "regex",
+  "rmcp",
+  "schemars",
+  "serde",
+  "serde_json",
+  "tempfile",
+  "thiserror",
+  "tokio",
+  "tracing",
+  "uuid",
+  "workspace-hack.workspace"
+]

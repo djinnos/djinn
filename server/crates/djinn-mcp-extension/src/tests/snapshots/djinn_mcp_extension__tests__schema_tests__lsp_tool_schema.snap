@@ -1,0 +1,58 @@
+---
+source: crates/djinn-mcp-extension/src/tests/schema_tests.rs
+expression: "serde_json::to_value(tool_lsp()).unwrap()"
+---
+{
+  "name": "lsp",
+  "description": "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.",
+  "inputSchema": {
+    "type": "object",
+    "required": [
+      "operation",
+      "file_path"
+    ],
+    "properties": {
+      "operation": {
+        "type": "string",
+        "enum": [
+          "hover",
+          "definition",
+          "references",
+          "symbols"
+        ],
+        "description": "LSP operation to perform"
+      },
+      "file_path": {
+        "type": "string",
+        "description": "Absolute or worktree-relative file path"
+      },
+      "line": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "1-based line number (required for hover, definition, references)"
+      },
+      "character": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "1-based column number (required for hover, definition, references when symbol is omitted)"
+      },
+      "symbol": {
+        "type": "string",
+        "description": "Optional symbol name path for hover, definition, or references as an alternative to line+character"
+      },
+      "depth": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Maximum nesting depth for operation='symbols'. 0 = top-level only; omitted = unlimited"
+      },
+      "kind": {
+        "type": "string",
+        "description": "Comma-separated symbol kind filter for operation='symbols' (e.g. function,method,struct,class,interface,enum,variable,constant,module,field,property,constructor,type_parameter)"
+      },
+      "name_filter": {
+        "type": "string",
+        "description": "Case-insensitive substring filter applied to symbol names and name paths for operation='symbols'"
+      }
+    }
+  }
+}

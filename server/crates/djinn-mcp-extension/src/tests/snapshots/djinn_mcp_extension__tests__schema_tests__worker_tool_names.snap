@@ -1,6 +1,5 @@
 ---
-source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 2989
+source: crates/djinn-mcp-extension/src/tests/schema_tests.rs
 expression: names
 ---
 [
@@ -12,13 +11,19 @@ expression: names
   "memory_list",
   "shell",
   "read",
+  "code_search",
+  "skill_read",
   "lsp",
+  "ci_job_log",
+  "github_search",
   "output_view",
   "output_grep",
   "write",
   "edit",
   "apply_patch",
-  "github_action_logs",
+  "memory_build_context",
+  "memory_write",
+  "memory_edit",
   "request_lead",
   "submit_work"
 ]
