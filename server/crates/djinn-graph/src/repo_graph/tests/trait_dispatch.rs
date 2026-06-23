@@ -208,6 +208,23 @@ fn rust_caller_occurrence_resolving_to_trait_method_emits_trait_dispatch_call_ed
         EdgeConfidenceTier::Inferred,
         "synthesized trait-dispatch edge classifies as Inferred at the floor"
     );
+
+    // The direct caller → trait-method edge carries its provenance via
+    // the `TraitDispatchCall` edge *kind*, not via an explicit `reason`
+    // string. For non-local symbols, `derive_edge_confidence` leaves the
+    // reason as `None` (no local-prefix penalty applied) — the fan-out
+    // reason constant (`REASON_TRAIT_DISPATCH_FANOUT`) is only stamped
+    // on caller → impl-method edges, NOT on this direct edge.
+    assert_ne!(
+        weight.reason.as_deref(),
+        Some(crate::repo_graph::REASON_TRAIT_DISPATCH_FANOUT),
+        "direct caller → trait-method edge must not carry the fan-out reason"
+    );
+    assert_ne!(
+        weight.reason.as_deref(),
+        Some(crate::repo_graph::REASON_TRAIT_DISPATCH_SUPPRESSED),
+        "direct caller → trait-method edge must not carry the suppressed reason"
+    );
 }
 
 #[test]
@@ -776,14 +793,44 @@ fn trait_dispatch_fanout_emits_edges_to_known_implementations_within_cap() {
 
     // The Implements edges from impl methods to the trait method
     // must still be present (fan-out does not consume/remove them).
-    let impl_a_impl_edges = graph
+    let impl_a_impl_edges: Vec<_> = graph
         .graph()
         .edges(impl_a_index)
         .filter(|e| e.weight().kind == RepoGraphEdgeKind::Implements)
-        .count();
+        .collect();
     assert!(
-        impl_a_impl_edges >= 1,
+        !impl_a_impl_edges.is_empty(),
         "StructA → trait Implements edge must remain"
+    );
+
+    // Criterion 2: the extracted SCIP `Implements` relationship edges
+    // must retain their original high-confidence classification — they
+    // are directly extracted from SCIP, NOT synthesized, so their
+    // confidence value must be unchanged at the `Implements` floor and
+    // must NOT carry a synthesized reason.
+    let impl_edge = impl_a_impl_edges[0].weight();
+    assert!(
+        (impl_edge.confidence
+            - crate::repo_graph::edge_confidence_floor(RepoGraphEdgeKind::Implements))
+        .abs()
+            < f64::EPSILON,
+        "Implements edge confidence must remain at the extracted floor, got {}",
+        impl_edge.confidence
+    );
+    assert_ne!(
+        impl_edge.confidence_tier(),
+        EdgeConfidenceTier::Ambiguous,
+        "extracted Implements edge must never be classified Ambiguous"
+    );
+    assert_ne!(
+        impl_edge.reason.as_deref(),
+        Some(crate::repo_graph::REASON_TRAIT_DISPATCH_FANOUT),
+        "extracted Implements edge must not carry a synthesized fan-out reason"
+    );
+    assert_ne!(
+        impl_edge.reason.as_deref(),
+        Some(crate::repo_graph::REASON_TRAIT_DISPATCH_CALL),
+        "extracted Implements edge must not carry a synthesized dispatch reason"
     );
 }
 
@@ -853,5 +900,121 @@ fn trait_dispatch_fanout_emits_edges_at_exact_cap() {
         expected,
         "at exact cap, all fan-out edges should be emitted (expected {expected}, got {})",
         dispatch_edges.len()
+    );
+}
+
+#[test]
+fn trait_dispatch_synthesized_edge_provenance_is_distinguishable_from_extracted_edges() {
+    // Consolidation regression: the synthesized trait-dispatch edges
+    // must be distinguishable by kind/confidence/reason from the
+    // directly-extracted SCIP relationship edges. This pins the full
+    // confidence/reason/tier contract in a single test so future
+    // refactors that touch `derive_edge_confidence` or `finish()`
+    // surface a clear failure if the provenance distinction breaks.
+    let graph = RepoDependencyGraph::build(&[trait_dispatch_fanout_index()]);
+
+    let caller_index = graph
+        .symbol_node(CALLER_SYMBOL)
+        .expect("caller symbol must exist");
+    let trait_method_index = graph
+        .symbol_node(TRAIT_METHOD_SYMBOL)
+        .expect("trait-method symbol must exist");
+    let impl_a_index = graph
+        .symbol_node(IMPL_A_METHOD_SYMBOL)
+        .expect("StructA impl method must exist");
+
+    let dispatch_floor =
+        crate::repo_graph::edge_confidence_floor(RepoGraphEdgeKind::TraitDispatchCall);
+    let implements_floor = crate::repo_graph::edge_confidence_floor(RepoGraphEdgeKind::Implements);
+
+    // The synthesized TraitDispatchCall confidence floor (0.70) must be
+    // strictly below the extracted Implements floor (0.85) so
+    // `min_confidence` filtering can separate the two populations.
+    assert!(
+        dispatch_floor < implements_floor,
+        "synthesized dispatch floor ({dispatch_floor}) must be below the extracted Implements floor ({implements_floor})"
+    );
+
+    // ── Direct caller → trait-method edge ──────────────────────────
+    let direct_edge = graph
+        .graph()
+        .edges(caller_index)
+        .find(|e| {
+            e.weight().kind == RepoGraphEdgeKind::TraitDispatchCall
+                && e.target() == trait_method_index
+        })
+        .map(|e| e.weight().clone())
+        .expect("direct caller → trait-method TraitDispatchCall edge");
+    assert_eq!(
+        direct_edge.confidence_tier(),
+        EdgeConfidenceTier::Inferred,
+        "direct dispatch edge must be Inferred tier"
+    );
+    assert!(
+        (direct_edge.confidence - dispatch_floor).abs() < f64::EPSILON,
+        "direct dispatch edge confidence must be at the floor"
+    );
+    // The direct edge carries provenance via the *kind*, not via the
+    // fan-out reason constant.
+    assert_ne!(
+        direct_edge.reason.as_deref(),
+        Some(crate::repo_graph::REASON_TRAIT_DISPATCH_FANOUT),
+    );
+
+    // ── Fan-out caller → impl-method edge ──────────────────────────
+    let fanout_edge = graph
+        .graph()
+        .edges(caller_index)
+        .find(|e| {
+            e.weight().kind == RepoGraphEdgeKind::TraitDispatchCall && e.target() == impl_a_index
+        })
+        .map(|e| e.weight().clone())
+        .expect("caller → StructA fan-out TraitDispatchCall edge");
+    assert_eq!(
+        fanout_edge.confidence_tier(),
+        EdgeConfidenceTier::Inferred,
+        "fan-out dispatch edge must be Inferred tier"
+    );
+    assert!(
+        (fanout_edge.confidence - dispatch_floor).abs() < f64::EPSILON,
+        "fan-out dispatch edge confidence must be at the floor"
+    );
+    // The fan-out edge is positively identified by its reason — this
+    // is the load-bearing provenance signal for distinguishing direct
+    // vs. fan-out dispatch edges.
+    assert_eq!(
+        fanout_edge.reason.as_deref(),
+        Some(crate::repo_graph::REASON_TRAIT_DISPATCH_FANOUT),
+        "fan-out edge must carry REASON_TRAIT_DISPATCH_FANOUT"
+    );
+
+    // ── Extracted Implements edge (impl → trait method) ────────────
+    let implements_edge = graph
+        .graph()
+        .edges(impl_a_index)
+        .find(|e| e.weight().kind == RepoGraphEdgeKind::Implements)
+        .map(|e| e.weight().clone())
+        .expect("StructA → trait-method Implements edge");
+    // The extracted Implements edge retains its confidence at the
+    // higher extracted floor, and is NOT classified as Ambiguous.
+    assert!(
+        (implements_edge.confidence - implements_floor).abs() < f64::EPSILON,
+        "extracted Implements edge confidence must be unchanged at its floor, got {}",
+        implements_edge.confidence
+    );
+    assert_ne!(
+        implements_edge.confidence_tier(),
+        EdgeConfidenceTier::Ambiguous,
+        "extracted Implements edge must never be Ambiguous"
+    );
+    // The Implements edge must NOT carry any synthesized dispatch
+    // reason — it is a directly-extracted SCIP relationship.
+    assert_ne!(
+        implements_edge.reason.as_deref(),
+        Some(crate::repo_graph::REASON_TRAIT_DISPATCH_FANOUT),
+    );
+    assert_ne!(
+        implements_edge.reason.as_deref(),
+        Some(crate::repo_graph::REASON_TRAIT_DISPATCH_CALL),
     );
 }
