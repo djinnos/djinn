@@ -99,7 +99,12 @@ impl From<&Agent> for AgentResponse {
             description: r.description.clone(),
             system_prompt_extensions: split_extensions(&r.system_prompt_extensions),
             mcp_servers: parse_json_string_array(&r.mcp_servers),
-            skills: parse_json_string_array(&r.skills),
+            // Filter native skill names from the mutable skills response so
+            // stale persisted entries are hidden from user-editable surfaces.
+            skills: parse_json_string_array(&r.skills)
+                .into_iter()
+                .filter(|name| !djinn_control_plane::tools::agent_tools::is_native_skill_name(name))
+                .collect(),
             model_preference: r.model_preference.clone(),
             is_default: r.is_default,
             learned_prompt: r.learned_prompt.clone(),
@@ -173,7 +178,23 @@ async fn create_agent(
         .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "[]".to_string()));
     let skills_json = body
         .skills
-        .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "[]".to_string()));
+        .as_ref()
+        .map(|v| {
+            // Reject native skill names before persisting.
+            for name in v {
+                if djinn_control_plane::tools::agent_tools::is_native_skill_name(name) {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "native/immutable skill names cannot be set through the mutable skills API: '{name}'. \
+                             Native skills are platform-owned and role-bound through the native registry."
+                        ),
+                    ));
+                }
+            }
+            Ok::<_, (StatusCode, String)>(serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()))
+        })
+        .transpose()?;
     let role = repo
         .create_for_project(
             &body.project_id,
@@ -248,7 +269,22 @@ async fn update_agent(
         .unwrap_or_else(|| existing.mcp_servers.clone());
     let skills_str = body
         .skills
-        .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "[]".to_string()))
+        .map(|v| {
+            // Reject native skill names before persisting.
+            for name in &v {
+                if djinn_control_plane::tools::agent_tools::is_native_skill_name(name) {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "native/immutable skill names cannot be set through the mutable skills API: '{name}'. \
+                             Native skills are platform-owned and role-bound through the native registry."
+                        ),
+                    ));
+                }
+            }
+            Ok::<_, (StatusCode, String)>(serde_json::to_string(&v).unwrap_or_else(|_| "[]".to_string()))
+        })
+        .transpose()?
         .unwrap_or_else(|| existing.skills.clone());
     let model_preference = if body.model_preference.is_some() {
         body.model_preference.as_deref()
