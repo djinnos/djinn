@@ -20,9 +20,9 @@ use tokio_util::sync::CancellationToken;
 // Types that are pure DTOs and shared between slot and coordinator sides.
 
 pub use djinn_orchestration_types::coordinator::{
-    BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
-    DebugCooldown, DebugDispatchState, DebugFailureStreak, DebugInflightEntry,
-    DebugSlot, DebugTotals, DispatchPauseView,
+    BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot, DebugCooldown,
+    DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
+    DispatchPauseView,
 };
 
 /// State of the PR-poller's mechanical clean-merge fast path for one task.
