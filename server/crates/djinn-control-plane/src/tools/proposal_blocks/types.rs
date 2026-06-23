@@ -121,7 +121,7 @@ pub struct GetBlockCatalogParams {}
 
 /// A single entry in the lean block catalog: just the stable type tag and
 /// MDX component tag name, loaded from `proposal_block_catalog.json`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BlockCatalogEntry {
     /// Stable kebab-case block type, e.g. `annotated-code`.
     #[serde(rename = "type")]

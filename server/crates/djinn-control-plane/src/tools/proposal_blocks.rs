@@ -35,9 +35,9 @@ pub use parser::{
     validate_question_form_placement, validate_question_form_placement_for_format,
 };
 pub use types::{
-    BlockCatalogEntry, BlockError, BlockRegistry, GetBlockCatalogParams,
-    GetBlockCatalogResponse, ParsedProposalBlock, ProposalBlockDefinition,
-    ProposalBlockFieldSchema, ProposalBlocksParams, ProposalBlocksResponse,
+    BlockCatalogEntry, BlockError, BlockRegistry, GetBlockCatalogParams, GetBlockCatalogResponse,
+    ParsedProposalBlock, ProposalBlockDefinition, ProposalBlockFieldSchema, ProposalBlocksParams,
+    ProposalBlocksResponse,
 };
 
 #[tool_router(router = proposal_blocks_tool_router, vis = "pub")]
