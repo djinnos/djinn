@@ -259,6 +259,11 @@ impl Default for RoleRegistry {
 
 impl RoleRegistry {
     pub fn new() -> Self {
+        // Ensure the djinn-roles tool schema registry is populated before any
+        // prompt rendering or tool-schema resolution.  This is idempotent
+        // (guarded by `Once` inside) so it's safe to call from tests too.
+        crate::init_tool_schema_registry();
+
         let roles = HashMap::from([
             ("worker", crate::AgentType::Worker),
             ("reviewer", crate::AgentType::Reviewer),

@@ -70,19 +70,25 @@ pub use djinn_roles::AgentType;
 /// Initialize the djinn-roles tool schema registry with the extension-provided
 /// schema functions.
 ///
-/// Must be called once at startup before any prompt rendering that requires
-/// tool schemas.  Typically called from the server boot path.
+/// Idempotent: safe to call multiple times — the registry is only populated
+/// on the first call.  Called automatically from [`roles::RoleRegistry::new()`]
+/// so production boot paths get tool schemas without a separate init step.
 pub fn init_tool_schema_registry() {
-    use std::collections::HashMap;
+    use std::sync::Once;
 
-    let mut schemas: HashMap<&'static str, fn() -> Vec<serde_json::Value>> = HashMap::new();
-    schemas.insert("worker", extension::tool_schemas_worker);
-    schemas.insert("reviewer", extension::tool_schemas_reviewer);
-    schemas.insert("lead", extension::tool_schemas_lead);
-    schemas.insert("planner", extension::tool_schemas_planner);
-    schemas.insert("architect", extension::tool_schemas_architect);
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        use std::collections::HashMap;
 
-    djinn_roles::register_tool_schemas(schemas);
+        let mut schemas: HashMap<&'static str, fn() -> Vec<serde_json::Value>> = HashMap::new();
+        schemas.insert("worker", extension::tool_schemas_worker);
+        schemas.insert("reviewer", extension::tool_schemas_reviewer);
+        schemas.insert("lead", extension::tool_schemas_lead);
+        schemas.insert("planner", extension::tool_schemas_planner);
+        schemas.insert("architect", extension::tool_schemas_architect);
+
+        djinn_roles::register_tool_schemas(schemas);
+    });
 }
 
 #[cfg(test)]
