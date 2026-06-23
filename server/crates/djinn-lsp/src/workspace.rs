@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn find_root_finds_cargo_toml() {
         let worktree = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let file = worktree.join("src/agent/lsp.rs");
+        let file = worktree.join("src/lib.rs");
         let root = find_root(&file, &worktree, &["Cargo.toml"], RootStrategy::Nearest);
         assert_eq!(root, Some(worktree));
     }
@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn find_root_falls_back_to_worktree() {
         let worktree = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let file = worktree.join("src/agent/lsp.rs");
+        let file = worktree.join("src/lib.rs");
         let root = find_root(
             &file,
             &worktree,

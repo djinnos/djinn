@@ -1,3 +1,8 @@
+// LSP module — Language Server Protocol client management.
+//
+// Extracted from djinn-agent as a focused leaf crate. Provides LSP server
+// lifecycle, diagnostics, symbol queries, and code-intelligence requests.
+
 pub use diagnostics::{Diagnostic, format_diagnostics_xml};
 pub use manager::{LspManager, LspWarning};
 pub use symbols::{SymbolQuery, parse_symbol_kind_filter};

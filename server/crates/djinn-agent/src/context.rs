@@ -625,8 +625,10 @@ impl bridge::GitOps for AgentGitOps {
     }
 }
 
+struct LspOpsAdapter(pub LspManager);
+
 #[async_trait]
-impl bridge::LspOps for AgentLspOps {
+impl bridge::LspOps for LspOpsAdapter {
     async fn warnings(&self) -> Vec<bridge::LspWarning> {
         self.0
             .warnings()
@@ -639,12 +641,6 @@ impl bridge::LspOps for AgentLspOps {
             .collect()
     }
 }
-
-/// Local adapter that implements `bridge::LspOps` for `djinn-lsp`'s
-/// `LspManager`. Needed because the orphan rule prevents implementing a
-/// foreign trait (`bridge::LspOps`) for a foreign type (`djinn_lsp::LspManager`)
-/// after the LSP extraction.
-struct AgentLspOps(LspManager);
 
 impl AgentContext {
     /// Build the public djinn-control-plane state bridge expected by the shared task-mutation ops.
@@ -669,7 +665,7 @@ impl AgentContext {
             None,
             None,
             None,
-            Arc::new(AgentLspOps(self.lsp.clone())),
+            Arc::new(LspOpsAdapter(self.lsp.clone())),
             runtime_ops,
             Arc::new(AgentGitOps {
                 git_actors: self.git_actors.clone(),

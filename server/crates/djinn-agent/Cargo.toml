@@ -46,7 +46,6 @@ rmcp = { version = "0.16", features = ["server", "client", "transport-io", "tran
 schemars = "1"
 regex = "1.12.3"
 git2 = "0.20"
-dirs = "6"
 libc = "0.2"
 wait-timeout = "0.2"
 base64 = "0.22"

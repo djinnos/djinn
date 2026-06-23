@@ -1,9 +1,10 @@
-//! Thin facade re-exporting the public LSP API from the `djinn-lsp` crate.
-//!
-/// Implementation lives in `server/crates/djinn-lsp`; this module preserves
-/// the historical `djinn_agent::lsp::*` import paths used by server and
-/// internal consumers.
-pub use djinn_lsp::{
-    Diagnostic, LspManager, LspWarning, SymbolQuery, format_diagnostics_xml,
-    parse_symbol_kind_filter,
-};
+// LSP facade — re-exports from djinn-lsp.
+//
+// The implementation has moved to the `djinn-lsp` crate. This module
+// preserves existing `djinn_agent::lsp::...` import paths for server
+// and crate consumers.
+
+// Re-export the entire djinn_lsp public API so that existing
+// `djinn_agent::lsp::LspManager`, `djinn_agent::lsp::format_diagnostics_xml`,
+// `djinn_agent::lsp::SymbolQuery`, etc. paths continue to resolve.
+pub use djinn_lsp::*;
