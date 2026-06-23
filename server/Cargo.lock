@@ -1387,6 +1387,10 @@ dependencies = [
  "djinn-core",
  "djinn-db",
  "djinn-lsp",
+ "djinn-memory",
+ "djinn-provider",
+ "djinn-supervisor",
+ "djinn-telemetry",
  "rmcp",
  "schemars 1.2.1",
  "serde",
@@ -1394,6 +1398,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
  "workspace-hack",
 ]
 
