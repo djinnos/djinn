@@ -55,7 +55,6 @@ pub(crate) enum NativeSkillTrigger {
 /// `mcp_resolve::classify_authoring_trigger` and the `skill_read` handler)
 /// inline the matching logic directly.  This function is the canonical
 /// `Task`-based API and is exercised by the unit tests below.
-#[allow(dead_code)]
 pub(crate) fn classify_native_skill_trigger(
     role_name: &str,
     task: &Task,

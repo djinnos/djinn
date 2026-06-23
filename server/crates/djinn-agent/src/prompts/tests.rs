@@ -673,6 +673,7 @@ fn render_prompt_with_skills(
     agent_type: AgentType,
     role_name: &str,
     project_skills: Vec<crate::skills::ResolvedSkill>,
+    authoring_trigger: Option<crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger>,
 ) -> String {
     ensure_registry();
     let task = make_task();
@@ -681,9 +682,7 @@ fn render_prompt_with_skills(
     let (merged, _native_names) = crate::actors::slot::lifecycle::mcp_resolve::merge_native_skills(
         role_name,
         project_skills,
-        Some(
-            crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger::ProposalAuthoring,
-        ),
+        authoring_trigger,
     );
     apply_skills(&base, &merged)
 }
@@ -692,7 +691,14 @@ fn render_prompt_with_skills(
 /// version stamp and the key authoring guidance sections visible.
 #[test]
 fn planner_prompt_includes_native_visual_spec_with_version_and_guidance() {
-    let prompt = render_prompt_with_skills(AgentType::Planner, "planner", Vec::new());
+    let prompt = render_prompt_with_skills(
+        AgentType::Planner,
+        "planner",
+        Vec::new(),
+        Some(
+            crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger::ProposalAuthoring,
+        ),
+    );
 
     // Native visual-spec must be present in the planner prompt.
     assert!(
@@ -746,7 +752,14 @@ fn planner_prompt_includes_native_visual_spec_with_version_and_guidance() {
 /// AC2: Worker prompt does NOT include native `visual-spec` by default.
 #[test]
 fn worker_prompt_does_not_include_native_visual_spec() {
-    let prompt = render_prompt_with_skills(AgentType::Worker, "worker", Vec::new());
+    let prompt = render_prompt_with_skills(
+        AgentType::Worker,
+        "worker",
+        Vec::new(),
+        Some(
+            crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger::ProposalAuthoring,
+        ),
+    );
     assert!(
         !prompt.contains("visual-spec"),
         "worker prompt must not contain visual-spec — it is planner-only"
@@ -756,7 +769,14 @@ fn worker_prompt_does_not_include_native_visual_spec() {
 /// AC2: Reviewer prompt does NOT include native `visual-spec` by default.
 #[test]
 fn reviewer_prompt_does_not_include_native_visual_spec() {
-    let prompt = render_prompt_with_skills(AgentType::Reviewer, "reviewer", Vec::new());
+    let prompt = render_prompt_with_skills(
+        AgentType::Reviewer,
+        "reviewer",
+        Vec::new(),
+        Some(
+            crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger::ProposalAuthoring,
+        ),
+    );
     assert!(
         !prompt.contains("visual-spec"),
         "reviewer prompt must not contain visual-spec — it is planner-only"
@@ -766,7 +786,14 @@ fn reviewer_prompt_does_not_include_native_visual_spec() {
 /// AC2: Lead prompt does NOT include native `visual-spec` by default.
 #[test]
 fn lead_prompt_does_not_include_native_visual_spec() {
-    let prompt = render_prompt_with_skills(AgentType::Lead, "lead", Vec::new());
+    let prompt = render_prompt_with_skills(
+        AgentType::Lead,
+        "lead",
+        Vec::new(),
+        Some(
+            crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger::ProposalAuthoring,
+        ),
+    );
     assert!(
         !prompt.contains("visual-spec"),
         "lead prompt must not contain visual-spec — it is planner-only"
@@ -776,7 +803,14 @@ fn lead_prompt_does_not_include_native_visual_spec() {
 /// AC2: Architect prompt does NOT include native `visual-spec` by default.
 #[test]
 fn architect_prompt_does_not_include_native_visual_spec() {
-    let prompt = render_prompt_with_skills(AgentType::Architect, "architect", Vec::new());
+    let prompt = render_prompt_with_skills(
+        AgentType::Architect,
+        "architect",
+        Vec::new(),
+        Some(
+            crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger::ProposalAuthoring,
+        ),
+    );
     assert!(
         !prompt.contains("visual-spec"),
         "architect prompt must not contain visual-spec — it is planner-only"
@@ -813,6 +847,9 @@ fn project_visual_spec_skill_cannot_shadow_native_body_in_planner_prompt() {
         AgentType::Planner,
         "planner",
         vec![project_visual_spec, other_project_skill],
+        Some(
+            crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger::ProposalAuthoring,
+        ),
     );
 
     // The native body must be present (contains the backtick constraint).
@@ -846,8 +883,14 @@ fn required_project_visual_spec_still_cannot_shadow_native() {
         tags: Vec::new(),
     };
 
-    let prompt =
-        render_prompt_with_skills(AgentType::Planner, "planner", vec![project_visual_spec]);
+    let prompt = render_prompt_with_skills(
+        AgentType::Planner,
+        "planner",
+        vec![project_visual_spec],
+        Some(
+            crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger::ProposalAuthoring,
+        ),
+    );
 
     assert!(
         !prompt.contains("REQUIRED_PROJECT_BODY_SHOULD_NOT_APPEAR"),
@@ -875,7 +918,14 @@ fn non_planner_with_project_visual_spec_sees_project_body() {
         tags: Vec::new(),
     };
 
-    let prompt = render_prompt_with_skills(AgentType::Worker, "worker", vec![project_visual_spec]);
+    let prompt = render_prompt_with_skills(
+        AgentType::Worker,
+        "worker",
+        vec![project_visual_spec],
+        Some(
+            crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger::ProposalAuthoring,
+        ),
+    );
 
     assert!(
         prompt.contains("WORKER_PROJECT_VISUAL_SPEC_BODY"),
