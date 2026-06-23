@@ -1063,6 +1063,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64 0.22.1",
+ "djinn-compaction",
  "djinn-control-plane",
  "djinn-core",
  "djinn-db",
@@ -1136,6 +1137,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "djinn-compaction"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "djinn-provider",
+ "futures",
+ "serde_json",
+ "tokio",
+ "tracing",
  "workspace-hack",
 ]
 

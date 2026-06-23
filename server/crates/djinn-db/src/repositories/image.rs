@@ -1,12 +1,15 @@
-//! Registered image catalog (`images` + `image_builds`, migration 46).
+//! Registered image catalog (`images` + `image_service_presets`, migration 46/66).
 //!
 //! A small curated set of named images projects pick from. An image's `config`
 //! is a serialized `djinn_stack` EnvironmentConfig (build fields), so the
 //! existing Dockerfile generator + content hash apply unchanged. Identity is
 //! the content hash + the immutable registry digest.
 //!
-//! Non-macro `sqlx::query` form so a fresh table doesn't require regenerating
-//! the offline `.sqlx` cache.
+//! These queries deliberately use the **runtime** `sqlx::query` API (not the
+//! compile-time `query!` macros). The image tables are young and their schema
+//! still evolves; runtime queries keep them buildable without regenerating the
+//! committed `.sqlx` offline cache on every migration. If the tables stabilise,
+//! converting to `query!` would add compile-time SQL validation.
 
 use sqlx::Row;
 

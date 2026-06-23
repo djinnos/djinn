@@ -680,14 +680,14 @@ impl NoteRepository {
             )));
         }
 
-        sqlx::query(
+        sqlx::query!(
             r#"UPDATE notes SET
                 status = $1,
                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $2"#,
+            status,
+            id
         )
-        .bind(&status)
-        .bind(id)
         .execute(self.db.pool())
         .await?;
 
@@ -721,7 +721,7 @@ impl NoteRepository {
             let content_hash = note_content_hash(&content);
 
             let stage = async {
-                sqlx::query(
+                sqlx::query!(
                     r#"UPDATE notes SET
                         title   = $1,
                         content = $2,
@@ -729,12 +729,12 @@ impl NoteRepository {
                         content_hash = $4,
                         updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                      WHERE id = $5"#,
+                    title,
+                    content,
+                    tags,
+                    content_hash,
+                    id
                 )
-                .bind(&title)
-                .bind(&content)
-                .bind(&tags)
-                .bind(&content_hash)
-                .bind(&id)
                 .execute(&mut *tx)
                 .await?;
 
@@ -777,14 +777,14 @@ impl NoteRepository {
         let retrieval_anchor = retrieval_anchor.map(str::to_owned);
         let mut tx = self.db.pool().begin().await?;
 
-        sqlx::query(
+        sqlx::query!(
             r#"UPDATE notes SET
                 retrieval_anchor = $1,
                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $2"#,
+            retrieval_anchor,
+            id
         )
-        .bind(&retrieval_anchor)
-        .bind(&id)
         .execute(&mut *tx)
         .await?;
 
@@ -806,16 +806,16 @@ impl NoteRepository {
         let id = id.to_owned();
         let mut tx = self.db.pool().begin().await?;
 
-        sqlx::query(
+        sqlx::query!(
             r#"UPDATE notes SET
                 abstract = $1,
                 overview = $2,
                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $3"#,
+            abstract_summary,
+            overview,
+            id
         )
-        .bind(abstract_summary)
-        .bind(overview)
-        .bind(&id)
         .execute(&mut *tx)
         .await?;
 
@@ -846,8 +846,7 @@ impl NoteRepository {
         crate::retry::retry_on_serialization_failure(crate::retry::DEFAULT_MAX_TX_RETRIES, || {
             let id_owned = id_owned.clone();
             async move {
-                sqlx::query("DELETE FROM notes WHERE id = $1")
-                    .bind(&id_owned)
+                sqlx::query!("DELETE FROM notes WHERE id = $1", id_owned)
                     .execute(self.db.pool())
                     .await?;
                 Ok::<_, crate::Error>(())
@@ -871,13 +870,13 @@ impl NoteRepository {
             .await?
             .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
 
-        sqlx::query(
+        sqlx::query!(
             r#"UPDATE notes SET
                 last_accessed = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                 access_count = access_count + 1
              WHERE id = $1"#,
+            id
         )
-        .bind(id)
         .execute(self.db.pool())
         .await?;
 
@@ -918,7 +917,7 @@ impl NoteRepository {
 
             let stage = async {
                 // file_path stays empty (no on-disk mirror anymore).
-                sqlx::query(
+                sqlx::query!(
                     r#"UPDATE notes SET
                         title      = $1,
                         file_path  = '',
@@ -927,12 +926,12 @@ impl NoteRepository {
                         permalink  = $4,
                         updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                      WHERE id = $5"#,
+                    new_title,
+                    new_note_type,
+                    new_folder,
+                    new_permalink,
+                    id
                 )
-                .bind(new_title)
-                .bind(new_note_type)
-                .bind(&new_folder)
-                .bind(&new_permalink)
-                .bind(id)
                 .execute(&mut *tx)
                 .await?;
 

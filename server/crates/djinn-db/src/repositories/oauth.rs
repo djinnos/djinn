@@ -6,12 +6,11 @@
 //! validation is a row lookup checking expiry + audience — multi-replica safe
 //! and trivially revocable, mirroring `user_auth_sessions`.
 //!
-//! These queries deliberately use the **runtime** `sqlx::query`/`query_as`
-//! API (not the compile-time `query!` macros). The workspace validates the
-//! macros against a live Postgres / committed `.sqlx` offline cache; runtime
-//! queries need neither, which keeps these brand-new tables buildable without
-//! regenerating the cache. Postgres dialect throughout: `$N` binds, no
-//! backticks, JSONB for the array columns.
+//! These queries deliberately use the **runtime** `sqlx::query` API (not the
+//! compile-time `query!` macros). The OAuth tables are young and their schema
+//! still evolves; runtime queries keep them buildable without regenerating the
+//! committed `.sqlx` offline cache on every migration. Postgres dialect
+//! throughout: `$N` binds, no backticks, JSONB for the array columns.
 
 use serde::{Deserialize, Serialize};
 use sqlx::Row;

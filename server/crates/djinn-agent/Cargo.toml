@@ -31,6 +31,7 @@ djinn-workspace = { path = "../djinn-workspace" }
 djinn-roles = { path = "../djinn-roles" }
 djinn-sandbox = { path = "../djinn-sandbox" }
 djinn-lsp = { path = "../djinn-lsp" }
+djinn-compaction = { path = "../djinn-compaction" }
 kube = { version = "0.95", features = ["runtime", "derive"] }
 anyhow = "1"
 thiserror = "2"

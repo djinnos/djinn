@@ -762,6 +762,265 @@ struct ChatLoopContext {
     extra_allowed_mcp: Vec<String>,
 }
 
+/// Dispatch a single tool call and return its `ToolResult` content block.
+///
+/// Sends `tool_call` and `tool_result` SSE events.  Handles stash tools,
+/// chat-extension dispatch, allowed MCP dispatch (global + proposal-scoped),
+/// gated unavailable tools, timeout wrapping, and result rendering/stashing.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_tool_call(
+    id: String,
+    name: String,
+    input: serde_json::Value,
+    agent_ctx: &djinn_agent::context::AgentContext,
+    resolver: &Arc<ProjectResolver>,
+    mcp: &DjinnMcpServer,
+    extra_allowed_mcp: &[String],
+    output_stash: &Arc<Mutex<djinn_agent::output_stash::OutputStash>>,
+    tx: &tokio::sync::mpsc::Sender<Event>,
+) -> ContentBlock {
+    let _ = tx
+        .send(sse_json_event(
+            "tool_call",
+            &ToolCallPayload {
+                name: name.clone(),
+                id: id.clone(),
+                input: input.clone(),
+            },
+        ))
+        .await;
+
+    let args = serde_json::Value::Object(input.as_object().cloned().unwrap_or_default());
+    let started_at = Instant::now();
+
+    // `output_view` / `output_grep` are served in-process against the
+    // per-request stash — they never hit tool dispatch, and their
+    // results are already size-bounded by the stash. Intercept before
+    // the extension/MCP tiers (and before the timeout wrapper, since
+    // there's nothing here that can wedge).
+    if djinn_agent::chat_tools::is_chat_stash_tool(&name) {
+        let (output, success) = match djinn_agent::output_stash::handle_stash_tool(
+            output_stash,
+            &name,
+            args.as_object(),
+        ) {
+            Ok(text) => (text, true),
+            Err(e) => (e, false),
+        };
+        let elapsed_ms = started_at.elapsed().as_millis() as u64;
+        let result = ContentBlock::ToolResult {
+            tool_use_id: id.clone(),
+            content: vec![ContentBlock::text(output.clone())],
+            is_error: !success,
+        };
+        let _ = tx
+            .send(sse_json_event(
+                "tool_result",
+                &ToolResultPayload {
+                    id,
+                    output,
+                    elapsed_ms,
+                    success,
+                    message: None,
+                },
+            ))
+            .await;
+        return result;
+    }
+
+    // Outer per-tool timeout. Defense-in-depth on top of the
+    // op-specific timeouts inside `code_graph` dispatchers — any
+    // tool that wedges (an LSP server hung on a 100k-line file,
+    // a pathological SQL plan, an external API call without its
+    // own timeout) returns a structured `is_error` tool_result
+    // here instead of stalling the SSE stream forever. The
+    // model gets a turn to recover. Override with
+    // `DJINN_CHAT_TOOL_DISPATCH_TIMEOUT_SECS`; default 120s
+    // gives the inner code_graph dispatcher's 60s comfortable
+    // headroom plus margin for other tools.
+    let tool_timeout = chat_tool_dispatch_timeout();
+    let dispatch_future = async {
+        if djinn_agent::chat_tools::is_chat_extension_tool(&name) {
+            let resolver_for_dispatch = resolver.clone();
+            let resolve_fn = move |project_ref: String| {
+                let resolver = resolver_for_dispatch.clone();
+                Box::pin(async move {
+                    resolver
+                        .resolve(&project_ref)
+                        .await
+                        .map(|resolved| ChatResolvedProject {
+                            id: resolved.id,
+                            clone_path: resolved.clone_path,
+                        })
+                        .map_err(|e| match e {
+                            ProjectResolverError::NotFound(r) => {
+                                format!("project '{r}' not found")
+                            }
+                            ProjectResolverError::InvalidId => {
+                                "project id invalid (must be UUID-shaped)".to_owned()
+                            }
+                            ProjectResolverError::Workspace(inner) => {
+                                format!("workspace failed: {inner}")
+                            }
+                            ProjectResolverError::Database(inner) => {
+                                format!("project lookup failed: {inner}")
+                            }
+                        })
+                })
+                    as std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<Output = Result<ChatResolvedProject, String>>
+                                + Send,
+                        >,
+                    >
+            };
+            djinn_agent::chat_tools::dispatch_chat_tool(agent_ctx, &name, args, &resolve_fn).await
+        } else if djinn_agent::chat_tools::is_chat_allowed_mcp_tool(&name)
+            || extra_allowed_mcp.iter().any(|t| t == &name)
+        {
+            mcp.dispatch_tool(&name, args).await
+        } else {
+            Err(format!(
+                "tool '{name}' is not available from chat (admin or write tools are gated)"
+            ))
+        }
+    };
+    let dispatch_result = match tokio::time::timeout(tool_timeout, dispatch_future).await {
+        Ok(r) => r,
+        Err(_) => Err(format!(
+            "tool '{name}' exceeded {}s — aborting so the chat can continue. \
+             If this is expected for the input, narrow the call \
+             (smaller scope, smaller limit, etc.)",
+            tool_timeout.as_secs()
+        )),
+    };
+    match dispatch_result {
+        Ok(value) => {
+            // Truncate-and-stash oversized results so neither the
+            // persisted history nor the next provider request can carry
+            // an unbounded string. The model browses the full output via
+            // `output_view` / `output_grep` against `output_stash`.
+            let output =
+                djinn_agent::output_stash::render_tool_result(output_stash, &id, &name, &value);
+            let elapsed_ms = started_at.elapsed().as_millis() as u64;
+            let result = ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: vec![ContentBlock::text(output.clone())],
+                is_error: false,
+            };
+            let _ = tx
+                .send(sse_json_event(
+                    "tool_result",
+                    &ToolResultPayload {
+                        id,
+                        output,
+                        elapsed_ms,
+                        success: true,
+                        message: None,
+                    },
+                ))
+                .await;
+            result
+        }
+        Err(e) => {
+            let elapsed_ms = started_at.elapsed().as_millis() as u64;
+            tracing::warn!(tool=%name, error=%e, "tool dispatch failed");
+            let result = ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: vec![ContentBlock::text(e.clone())],
+                is_error: true,
+            };
+            let _ = tx
+                .send(sse_json_event(
+                    "tool_result",
+                    &ToolResultPayload {
+                        id,
+                        output: e.clone(),
+                        elapsed_ms,
+                        success: false,
+                        message: Some(e),
+                    },
+                ))
+                .await;
+            result
+        }
+    }
+}
+
+/// Persist tool results as a paired user row and append to conversation.
+///
+/// The tool-result turn is written as a `user` row immediately after the
+/// paired assistant turn so the persisted history always carries matching
+/// `function_call` / `function_call_output` items.
+async fn persist_and_append_tool_results(
+    tool_results: Vec<ContentBlock>,
+    state: &AppState,
+    session_id: &str,
+    conversation: &mut Conversation,
+) {
+    if tool_results.is_empty() {
+        return;
+    }
+    // Persist the tool results as their own user row, paired with
+    // the assistant turn above. Previously these were dropped,
+    // leaving the persisted `function_call` orphaned and breaking
+    // the next turn's request.
+    persist_turn(state, session_id, "user", &tool_results).await;
+    conversation.push(Message {
+        role: Role::User,
+        content: tool_results,
+        metadata: None,
+    });
+}
+
+/// Finalize a completed chat loop: generate/update session title and emit
+/// the final `done` SSE event.
+///
+/// Title generation only runs on successful completion (`completed_ok`)
+/// when the session was still on the default placeholder title.  Any
+/// failure logs and falls through — the UI keeps rendering "New Chat"
+/// until the next turn.
+#[allow(clippy::too_many_arguments)]
+async fn finalize_chat_completion(
+    completed_ok: bool,
+    needs_title: bool,
+    user_turn_for_title: Option<Vec<ContentBlock>>,
+    assistant_content_for_title: &[ContentBlock],
+    model_id: &str,
+    session_id: &str,
+    state: &AppState,
+    tx: &tokio::sync::mpsc::Sender<Event>,
+) {
+    if completed_ok && needs_title {
+        let title = generate_chat_title(
+            state,
+            user_turn_for_title.as_deref(),
+            assistant_content_for_title,
+            model_id,
+            session_id,
+        )
+        .await;
+        if let Some(title) = title {
+            let repo = SessionRepository::new(state.db().clone(), state.event_bus());
+            if let Err(e) = repo.update_chat_title(session_id, &title).await {
+                tracing::warn!(session_id=%session_id, error=%e, "failed to persist chat title");
+            } else {
+                let _ = tx
+                    .send(sse_json_event(
+                        "session_title",
+                        &SessionTitlePayload {
+                            session_id: session_id.to_string(),
+                            title,
+                        },
+                    ))
+                    .await;
+            }
+        }
+    }
+
+    let _ = tx.send(Event::default().event("done").data("{}")).await;
+}
+
 async fn run_chat_loop(ctx: ChatLoopContext) {
     let ChatLoopContext {
         state,
@@ -895,233 +1154,36 @@ async fn run_chat_loop(ctx: ChatLoopContext) {
             let ContentBlock::ToolUse { id, name, input } = tool_call else {
                 continue;
             };
-            let _ = tx
-                .send(sse_json_event(
-                    "tool_call",
-                    &ToolCallPayload {
-                        name: name.clone(),
-                        id: id.clone(),
-                        input: input.clone(),
-                    },
-                ))
-                .await;
-
-            let args = serde_json::Value::Object(input.as_object().cloned().unwrap_or_default());
-            let started_at = Instant::now();
-
-            // `output_view` / `output_grep` are served in-process against the
-            // per-request stash — they never hit tool dispatch, and their
-            // results are already size-bounded by the stash. Intercept before
-            // the extension/MCP tiers (and before the timeout wrapper, since
-            // there's nothing here that can wedge).
-            if djinn_agent::chat_tools::is_chat_stash_tool(&name) {
-                let (output, success) = match djinn_agent::output_stash::handle_stash_tool(
-                    &output_stash,
-                    &name,
-                    args.as_object(),
-                ) {
-                    Ok(text) => (text, true),
-                    Err(e) => (e, false),
-                };
-                let elapsed_ms = started_at.elapsed().as_millis() as u64;
-                tool_results.push(ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: vec![ContentBlock::text(output.clone())],
-                    is_error: !success,
-                });
-                let _ = tx
-                    .send(sse_json_event(
-                        "tool_result",
-                        &ToolResultPayload {
-                            id,
-                            output,
-                            elapsed_ms,
-                            success,
-                            message: None,
-                        },
-                    ))
-                    .await;
-                continue;
-            }
-
-            // Outer per-tool timeout. Defense-in-depth on top of the
-            // op-specific timeouts inside `code_graph` dispatchers — any
-            // tool that wedges (an LSP server hung on a 100k-line file,
-            // a pathological SQL plan, an external API call without its
-            // own timeout) returns a structured `is_error` tool_result
-            // here instead of stalling the SSE stream forever. The
-            // model gets a turn to recover. Override with
-            // `DJINN_CHAT_TOOL_DISPATCH_TIMEOUT_SECS`; default 120s
-            // gives the inner code_graph dispatcher's 60s comfortable
-            // headroom plus margin for other tools.
-            let tool_timeout = chat_tool_dispatch_timeout();
-            let dispatch_future = async {
-                if djinn_agent::chat_tools::is_chat_extension_tool(&name) {
-                    let resolver_for_dispatch = resolver.clone();
-                    let resolve_fn = move |project_ref: String| {
-                        let resolver = resolver_for_dispatch.clone();
-                        Box::pin(async move {
-                            resolver
-                                .resolve(&project_ref)
-                                .await
-                                .map(|resolved| ChatResolvedProject {
-                                    id: resolved.id,
-                                    clone_path: resolved.clone_path,
-                                })
-                                .map_err(|e| match e {
-                                    ProjectResolverError::NotFound(r) => {
-                                        format!("project '{r}' not found")
-                                    }
-                                    ProjectResolverError::InvalidId => {
-                                        "project id invalid (must be UUID-shaped)".to_owned()
-                                    }
-                                    ProjectResolverError::Workspace(inner) => {
-                                        format!("workspace failed: {inner}")
-                                    }
-                                    ProjectResolverError::Database(inner) => {
-                                        format!("project lookup failed: {inner}")
-                                    }
-                                })
-                        })
-                            as std::pin::Pin<
-                                Box<
-                                    dyn std::future::Future<
-                                            Output = Result<ChatResolvedProject, String>,
-                                        > + Send,
-                                >,
-                            >
-                    };
-                    djinn_agent::chat_tools::dispatch_chat_tool(
-                        &agent_ctx,
-                        &name,
-                        args,
-                        &resolve_fn,
-                    )
-                    .await
-                } else if djinn_agent::chat_tools::is_chat_allowed_mcp_tool(&name)
-                    || extra_allowed_mcp.iter().any(|t| t == &name)
-                {
-                    mcp.dispatch_tool(&name, args).await
-                } else {
-                    Err(format!(
-                        "tool '{name}' is not available from chat (admin or write tools are gated)"
-                    ))
-                }
-            };
-            let dispatch_result = match tokio::time::timeout(tool_timeout, dispatch_future).await {
-                Ok(r) => r,
-                Err(_) => Err(format!(
-                    "tool '{name}' exceeded {}s — aborting so the chat can continue. \
-                     If this is expected for the input, narrow the call \
-                     (smaller scope, smaller limit, etc.)",
-                    tool_timeout.as_secs()
-                )),
-            };
-            match dispatch_result {
-                Ok(value) => {
-                    // Truncate-and-stash oversized results so neither the
-                    // persisted history nor the next provider request can carry
-                    // an unbounded string. The model browses the full output via
-                    // `output_view` / `output_grep` against `output_stash`.
-                    let output = djinn_agent::output_stash::render_tool_result(
-                        &output_stash,
-                        &id,
-                        &name,
-                        &value,
-                    );
-                    let elapsed_ms = started_at.elapsed().as_millis() as u64;
-                    tool_results.push(ContentBlock::ToolResult {
-                        tool_use_id: id.clone(),
-                        content: vec![ContentBlock::text(output.clone())],
-                        is_error: false,
-                    });
-                    let _ = tx
-                        .send(sse_json_event(
-                            "tool_result",
-                            &ToolResultPayload {
-                                id,
-                                output,
-                                elapsed_ms,
-                                success: true,
-                                message: None,
-                            },
-                        ))
-                        .await;
-                }
-                Err(e) => {
-                    let elapsed_ms = started_at.elapsed().as_millis() as u64;
-                    tracing::warn!(tool=%name, error=%e, "tool dispatch failed");
-                    tool_results.push(ContentBlock::ToolResult {
-                        tool_use_id: id.clone(),
-                        content: vec![ContentBlock::text(e.clone())],
-                        is_error: true,
-                    });
-                    let _ = tx
-                        .send(sse_json_event(
-                            "tool_result",
-                            &ToolResultPayload {
-                                id,
-                                output: e.clone(),
-                                elapsed_ms,
-                                success: false,
-                                message: Some(e),
-                            },
-                        ))
-                        .await;
-                }
-            }
+            let result = dispatch_tool_call(
+                id,
+                name,
+                input,
+                &agent_ctx,
+                &resolver,
+                &mcp,
+                &extra_allowed_mcp,
+                &output_stash,
+                &tx,
+            )
+            .await;
+            tool_results.push(result);
         }
-        if !tool_results.is_empty() {
-            // Persist the tool results as their own user row, paired with
-            // the assistant turn above. Previously these were dropped,
-            // leaving the persisted `function_call` orphaned and breaking
-            // the next turn's request.
-            persist_turn(&state, &session_id, "user", &tool_results).await;
-            conversation.push(Message {
-                role: Role::User,
-                content: tool_results,
-                metadata: None,
-            });
-        }
+        persist_and_append_tool_results(tool_results, &state, &session_id, &mut conversation).await;
     }
 
     // Every turn was persisted incrementally as it finalized, so there is
     // nothing left to flush here before the title / done events.
-
-    // Server-side auto-title pass.  Only runs on successful completion
-    // (completed_ok) AND when the session was still on the default
-    // placeholder title at the start of this request.  Any failure
-    // (provider down, malformed reply) logs and falls through without
-    // emitting `session_title` — the UI keeps rendering "New Chat"
-    // until the next turn.
-    if completed_ok && needs_title {
-        let title = generate_chat_title(
-            &state,
-            user_turn_for_title.as_deref(),
-            &assistant_content_for_title,
-            &model_id,
-            &session_id,
-        )
-        .await;
-        if let Some(title) = title {
-            let repo = SessionRepository::new(state.db().clone(), state.event_bus());
-            if let Err(e) = repo.update_chat_title(&session_id, &title).await {
-                tracing::warn!(session_id=%session_id, error=%e, "failed to persist chat title");
-            } else {
-                let _ = tx
-                    .send(sse_json_event(
-                        "session_title",
-                        &SessionTitlePayload {
-                            session_id: session_id.clone(),
-                            title,
-                        },
-                    ))
-                    .await;
-            }
-        }
-    }
-
-    let _ = tx.send(Event::default().event("done").data("{}")).await;
+    finalize_chat_completion(
+        completed_ok,
+        needs_title,
+        user_turn_for_title,
+        &assistant_content_for_title,
+        &model_id,
+        &session_id,
+        &state,
+        &tx,
+    )
+    .await;
 }
 
 /// Build the proposal-scoped system overlay: the rendered spec + the list of
