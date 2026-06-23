@@ -17,6 +17,7 @@ use crate::tools::validation::{
     validate_color, validate_description, validate_emoji, validate_epic_create_status,
     validate_limit, validate_offset, validate_owner, validate_sort, validate_title,
 };
+use djinn_core::models::Epic;
 use djinn_db::{EpicCountQuery, EpicListQuery, EpicRepository, ProjectRepository};
 
 #[derive(Clone)]
@@ -367,6 +368,78 @@ async fn resolve_epic_create_project_and_blockers(
     Ok((project_id, blocked_by_ids))
 }
 
+/// Construct [`EpicCreateInput`] from validated fields and persist through
+/// [`EpicRepository::create_for_project`].  Blocker refs are wired atomically
+/// before the `epic_created` event is emitted.
+async fn create_epic_for_project(
+    repo: &EpicRepository,
+    project_id: &str,
+    validated: &ValidatedEpicCreateFields,
+    p: &EpicCreateParams,
+    blocked_by_ids: Option<&[String]>,
+) -> Result<Epic, String> {
+    let blocked_by_refs: Option<Vec<&str>> =
+        blocked_by_ids.map(|ids| ids.iter().map(|s| s.as_str()).collect());
+
+    repo.create_for_project(
+        project_id,
+        djinn_db::EpicCreateInput {
+            title: &validated.title,
+            description: &validated.description,
+            emoji: &validated.emoji,
+            color: &validated.color,
+            owner: &validated.owner,
+            memory_refs: validated.memory_refs_json.as_deref(),
+            status: validated.status.as_deref(),
+            auto_breakdown: p.auto_breakdown,
+            originating_adr_id: p.originating_adr_id.as_deref(),
+            blocked_by: blocked_by_refs.as_deref(),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Seed read-only multi-repo sources requested at epic creation time.
+///
+/// Best-effort: unresolvable sources, self-references, duplicates, and
+/// add failures are silently skipped so epic creation still succeeds.
+async fn seed_epic_read_sources(
+    server: &DjinnMcpServer,
+    repo: &EpicRepository,
+    epic: &Epic,
+    sources: Option<&[String]>,
+) {
+    if let Some(sources) = sources {
+        let project_repo =
+            ProjectRepository::new(server.state.db().clone(), server.state.event_bus());
+        for src in sources {
+            if let Ok(Some(src_id)) = project_repo.resolve(src).await
+                && src_id != epic.project_id
+            {
+                let _ = repo.add_read_source(&epic.id, &src_id).await;
+            }
+        }
+    }
+}
+
+/// Record a proposal → epic link when the epic was created from a graduated
+/// proposal (Planner Mode D).
+///
+/// Best-effort: an unresolvable proposal ref or link failure does not fail
+/// epic creation.
+async fn link_epic_to_proposal(server: &DjinnMcpServer, epic: &Epic, proposal_ref: Option<&str>) {
+    if let Some(proposal_ref) = proposal_ref {
+        let proposal_repo =
+            djinn_db::ProposalRepository::new(server.state.db().clone(), server.state.event_bus());
+        if let Ok(Some(proposal)) = proposal_repo.resolve(proposal_ref).await {
+            let _ = proposal_repo
+                .link_epic(&proposal.id, &epic.id, &epic.project_id)
+                .await;
+        }
+    }
+}
+
 // ── Tool implementations ─────────────────────────────────────────────────────
 
 #[tool_router(router = epic_tool_router, vis = "pub")]
@@ -403,59 +476,21 @@ impl DjinnMcpServer {
                 }
             };
 
-        let blocked_by_refs: Option<Vec<&str>> = blocked_by_ids
-            .as_ref()
-            .map(|ids| ids.iter().map(|s| s.as_str()).collect());
-
-        // ── Persist ──────────────────────────────────────────────────────────
-        match repo
-            .create_for_project(
-                &project_id,
-                djinn_db::EpicCreateInput {
-                    title: &validated.title,
-                    description: &validated.description,
-                    emoji: &validated.emoji,
-                    color: &validated.color,
-                    owner: &validated.owner,
-                    memory_refs: validated.memory_refs_json.as_deref(),
-                    status: validated.status.as_deref(),
-                    auto_breakdown: p.auto_breakdown,
-                    originating_adr_id: p.originating_adr_id.as_deref(),
-                    blocked_by: blocked_by_refs.as_deref(),
-                },
-            )
-            .await
+        // ── Persist (blockers wired atomically) ──────────────────────────────
+        match create_epic_for_project(
+            &repo,
+            &project_id,
+            &validated,
+            &p,
+            blocked_by_ids.as_deref(),
+        )
+        .await
         {
             Ok(epic) => {
-                // Read-only multi-repo: seed any read sources requested at
-                // creation time (e.g. chat "migrate from A into B" →
-                // read_sources=[A]). Best-effort: unresolvable / self / dup
-                // sources are skipped so epic creation still succeeds.
-                if let Some(sources) = &p.read_sources {
-                    let project_repo =
-                        ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-                    for src in sources {
-                        if let Ok(Some(src_id)) = project_repo.resolve(src).await
-                            && src_id != epic.project_id
-                        {
-                            let _ = repo.add_read_source(&epic.id, &src_id).await;
-                        }
-                    }
-                }
-                // Record the proposal → epic link when this epic is a product of
-                // proposal decomposition (Planner Mode D). Best-effort: an
-                // unresolvable proposal ref does not fail epic creation.
-                if let Some(proposal_ref) = &p.proposal_id {
-                    let proposal_repo = djinn_db::ProposalRepository::new(
-                        self.state.db().clone(),
-                        self.state.event_bus(),
-                    );
-                    if let Ok(Some(proposal)) = proposal_repo.resolve(proposal_ref).await {
-                        let _ = proposal_repo
-                            .link_epic(&proposal.id, &epic.id, &epic.project_id)
-                            .await;
-                    }
-                }
+                // ── Best-effort post-create side effects ─────────────────────
+                seed_epic_read_sources(self, &repo, &epic, p.read_sources.as_deref()).await;
+                link_epic_to_proposal(self, &epic, p.proposal_id.as_deref()).await;
+
                 Json(EpicSingleResponse {
                     epic: Some(EpicModel::from(&epic)),
                     error: None,
@@ -463,7 +498,7 @@ impl DjinnMcpServer {
             }
             Err(e) => Json(EpicSingleResponse {
                 epic: None,
-                error: Some(e.to_string()),
+                error: Some(e),
             }),
         }
     }
