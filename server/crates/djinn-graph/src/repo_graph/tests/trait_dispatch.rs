@@ -17,8 +17,8 @@ use petgraph::visit::EdgeRef;
 
 use super::*;
 use crate::scip_parser::{
-    ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipSymbol, ScipSymbolKind,
-    ScipSymbolRole,
+    ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
+    ScipRelationshipKind, ScipSymbol, ScipSymbolKind, ScipSymbolRole,
 };
 
 /// Trait method identifier (the trait is declared, the method has a
@@ -397,5 +397,461 @@ fn trait_dispatch_edge_is_suppressed_for_external_target() {
     assert_eq!(
         trait_dispatch_edges, 0,
         "TraitDispatchCall edge is bounded to in-repo symbols; external targets get no edge"
+    );
+}
+
+// ── PR 1h6c: Bounded trait-method fan-out tests ──────────────────────────
+
+/// Concrete implementation method: `StructA` implements
+/// `RuntimeOps::list_jobs`.
+const IMPL_A_METHOD_SYMBOL: &str = "scip-rust pkg src/impl_a.rs 0.1.0 StructA#list_jobs().";
+const IMPL_A_TYPE_SYMBOL: &str = "scip-rust pkg src/impl_a.rs 0.1.0 StructA#";
+
+/// Second concrete implementation: `StructB` implements
+/// `RuntimeOps::list_jobs`.
+const IMPL_B_METHOD_SYMBOL: &str = "scip-rust pkg src/impl_b.rs 0.1.0 StructB#list_jobs().";
+const IMPL_B_TYPE_SYMBOL: &str = "scip-rust pkg src/impl_b.rs 0.1.0 StructB#";
+
+/// Build a synthetic index with the trait, two concrete implementations,
+/// and a caller that references the trait method. The impl methods have
+/// `Implementation` relationships pointing to the trait method.
+fn trait_dispatch_fanout_index() -> ParsedScipIndex {
+    let trait_type_symbol = ScipSymbol {
+        symbol: TRAIT_TYPE_SYMBOL.to_string(),
+        kind: Some(ScipSymbolKind::Type),
+        display_name: Some("RuntimeOps".to_string()),
+        signature: None,
+        documentation: vec![],
+        relationships: vec![],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
+    };
+    let trait_method_symbol = ScipSymbol {
+        symbol: TRAIT_METHOD_SYMBOL.to_string(),
+        kind: Some(ScipSymbolKind::Method),
+        display_name: Some("list_jobs".to_string()),
+        signature: Some("fn list_jobs(&self) -> Vec<Job>".to_string()),
+        documentation: vec![],
+        relationships: vec![],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
+    };
+    let caller_symbol = ScipSymbol {
+        symbol: CALLER_SYMBOL.to_string(),
+        kind: Some(ScipSymbolKind::Function),
+        display_name: Some("run".to_string()),
+        signature: Some("fn run()".to_string()),
+        documentation: vec![],
+        relationships: vec![],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
+    };
+    // StructA type symbol.
+    let impl_a_type = ScipSymbol {
+        symbol: IMPL_A_TYPE_SYMBOL.to_string(),
+        kind: Some(ScipSymbolKind::Type),
+        display_name: Some("StructA".to_string()),
+        signature: None,
+        documentation: vec![],
+        relationships: vec![],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
+    };
+    // StructA::list_jobs — implements the trait method.
+    let impl_a_method = ScipSymbol {
+        symbol: IMPL_A_METHOD_SYMBOL.to_string(),
+        kind: Some(ScipSymbolKind::Method),
+        display_name: Some("list_jobs".to_string()),
+        signature: Some("fn list_jobs(&self) -> Vec<Job>".to_string()),
+        documentation: vec![],
+        relationships: vec![ScipRelationship {
+            source_symbol: IMPL_A_METHOD_SYMBOL.to_string(),
+            target_symbol: TRAIT_METHOD_SYMBOL.to_string(),
+            kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
+        }],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
+    };
+    // StructB type symbol.
+    let impl_b_type = ScipSymbol {
+        symbol: IMPL_B_TYPE_SYMBOL.to_string(),
+        kind: Some(ScipSymbolKind::Type),
+        display_name: Some("StructB".to_string()),
+        signature: None,
+        documentation: vec![],
+        relationships: vec![],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
+    };
+    // StructB::list_jobs — implements the trait method.
+    let impl_b_method = ScipSymbol {
+        symbol: IMPL_B_METHOD_SYMBOL.to_string(),
+        kind: Some(ScipSymbolKind::Method),
+        display_name: Some("list_jobs".to_string()),
+        signature: Some("fn list_jobs(&self) -> Vec<Job>".to_string()),
+        documentation: vec![],
+        relationships: vec![ScipRelationship {
+            source_symbol: IMPL_B_METHOD_SYMBOL.to_string(),
+            target_symbol: TRAIT_METHOD_SYMBOL.to_string(),
+            kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
+        }],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
+    };
+
+    ParsedScipIndex {
+        workspace_slug: "root".to_string(),
+        metadata: ScipMetadata {
+            project_root: Some("file:///workspace/repo".to_string()),
+            tool_name: Some("rust-analyzer".to_string()),
+            tool_version: Some("1.0.0".to_string()),
+        },
+        files: vec![
+            ScipFile {
+                language: "rust".to_string(),
+                relative_path: PathBuf::from("src/traits.rs"),
+                definitions: vec![
+                    definition_at(TRAIT_TYPE_SYMBOL, 0, 5),
+                    definition_at(TRAIT_METHOD_SYMBOL, 1, 3),
+                ],
+                references: vec![],
+                occurrences: vec![
+                    definition_at(TRAIT_TYPE_SYMBOL, 0, 5),
+                    definition_at(TRAIT_METHOD_SYMBOL, 1, 3),
+                ],
+                symbols: vec![trait_type_symbol, trait_method_symbol],
+            },
+            ScipFile {
+                language: "rust".to_string(),
+                relative_path: PathBuf::from("src/impl_a.rs"),
+                definitions: vec![
+                    definition_at(IMPL_A_TYPE_SYMBOL, 0, 10),
+                    definition_at(IMPL_A_METHOD_SYMBOL, 2, 5),
+                ],
+                references: vec![],
+                occurrences: vec![
+                    definition_at(IMPL_A_TYPE_SYMBOL, 0, 10),
+                    definition_at(IMPL_A_METHOD_SYMBOL, 2, 5),
+                ],
+                symbols: vec![impl_a_type, impl_a_method],
+            },
+            ScipFile {
+                language: "rust".to_string(),
+                relative_path: PathBuf::from("src/impl_b.rs"),
+                definitions: vec![
+                    definition_at(IMPL_B_TYPE_SYMBOL, 0, 10),
+                    definition_at(IMPL_B_METHOD_SYMBOL, 2, 5),
+                ],
+                references: vec![],
+                occurrences: vec![
+                    definition_at(IMPL_B_TYPE_SYMBOL, 0, 10),
+                    definition_at(IMPL_B_METHOD_SYMBOL, 2, 5),
+                ],
+                symbols: vec![impl_b_type, impl_b_method],
+            },
+            ScipFile {
+                language: "rust".to_string(),
+                relative_path: PathBuf::from("src/main.rs"),
+                definitions: vec![definition_at(CALLER_SYMBOL, 0, 10)],
+                references: vec![reference_at(TRAIT_METHOD_SYMBOL, 5, 0, 10)],
+                occurrences: vec![
+                    definition_at(CALLER_SYMBOL, 0, 10),
+                    reference_at(TRAIT_METHOD_SYMBOL, 5, 0, 10),
+                ],
+                symbols: vec![caller_symbol],
+            },
+        ],
+        external_symbols: vec![],
+    }
+}
+
+/// Build a fanout index with `count` implementations (plus the trait
+/// and caller). Each impl method has an `Implementation` relationship
+/// to the trait method.
+fn trait_dispatch_fanout_index_with_impl_count(count: usize) -> ParsedScipIndex {
+    let trait_type_symbol = ScipSymbol {
+        symbol: TRAIT_TYPE_SYMBOL.to_string(),
+        kind: Some(ScipSymbolKind::Type),
+        display_name: Some("RuntimeOps".to_string()),
+        signature: None,
+        documentation: vec![],
+        relationships: vec![],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
+    };
+    let trait_method_symbol = ScipSymbol {
+        symbol: TRAIT_METHOD_SYMBOL.to_string(),
+        kind: Some(ScipSymbolKind::Method),
+        display_name: Some("list_jobs".to_string()),
+        signature: Some("fn list_jobs(&self) -> Vec<Job>".to_string()),
+        documentation: vec![],
+        relationships: vec![],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
+    };
+    let caller_symbol = ScipSymbol {
+        symbol: CALLER_SYMBOL.to_string(),
+        kind: Some(ScipSymbolKind::Function),
+        display_name: Some("run".to_string()),
+        signature: Some("fn run()".to_string()),
+        documentation: vec![],
+        relationships: vec![],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
+    };
+
+    let mut files = vec![ScipFile {
+        language: "rust".to_string(),
+        relative_path: PathBuf::from("src/traits.rs"),
+        definitions: vec![
+            definition_at(TRAIT_TYPE_SYMBOL, 0, 5),
+            definition_at(TRAIT_METHOD_SYMBOL, 1, 3),
+        ],
+        references: vec![],
+        occurrences: vec![
+            definition_at(TRAIT_TYPE_SYMBOL, 0, 5),
+            definition_at(TRAIT_METHOD_SYMBOL, 1, 3),
+        ],
+        symbols: vec![trait_type_symbol, trait_method_symbol],
+    }];
+
+    // Generate `count` impl files.
+    for i in 0..count {
+        let type_sym = format!("scip-rust pkg src/impl_{i}.rs 0.1.0 Impl{i}#");
+        let method_sym = format!("scip-rust pkg src/impl_{i}.rs 0.1.0 Impl{i}#list_jobs().");
+        let impl_type = ScipSymbol {
+            symbol: type_sym.clone(),
+            kind: Some(ScipSymbolKind::Type),
+            display_name: Some(format!("Impl{i}")),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+            signature_parts: None,
+        };
+        let impl_method = ScipSymbol {
+            symbol: method_sym.clone(),
+            kind: Some(ScipSymbolKind::Method),
+            display_name: Some("list_jobs".to_string()),
+            signature: Some("fn list_jobs(&self) -> Vec<Job>".to_string()),
+            documentation: vec![],
+            relationships: vec![ScipRelationship {
+                source_symbol: method_sym.clone(),
+                target_symbol: TRAIT_METHOD_SYMBOL.to_string(),
+                kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
+            }],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+            signature_parts: None,
+        };
+        files.push(ScipFile {
+            language: "rust".to_string(),
+            relative_path: PathBuf::from(format!("src/impl_{i}.rs")),
+            definitions: vec![
+                definition_at(&type_sym, 0, 10),
+                definition_at(&method_sym, 2, 5),
+            ],
+            references: vec![],
+            occurrences: vec![
+                definition_at(&type_sym, 0, 10),
+                definition_at(&method_sym, 2, 5),
+            ],
+            symbols: vec![impl_type, impl_method],
+        });
+    }
+
+    // Caller file.
+    files.push(ScipFile {
+        language: "rust".to_string(),
+        relative_path: PathBuf::from("src/main.rs"),
+        definitions: vec![definition_at(CALLER_SYMBOL, 0, 10)],
+        references: vec![reference_at(TRAIT_METHOD_SYMBOL, 5, 0, 10)],
+        occurrences: vec![
+            definition_at(CALLER_SYMBOL, 0, 10),
+            reference_at(TRAIT_METHOD_SYMBOL, 5, 0, 10),
+        ],
+        symbols: vec![caller_symbol],
+    });
+
+    ParsedScipIndex {
+        workspace_slug: "root".to_string(),
+        metadata: ScipMetadata {
+            project_root: Some("file:///workspace/repo".to_string()),
+            tool_name: Some("rust-analyzer".to_string()),
+            tool_version: Some("1.0.0".to_string()),
+        },
+        files,
+        external_symbols: vec![],
+    }
+}
+
+#[test]
+fn trait_dispatch_fanout_emits_edges_to_known_implementations_within_cap() {
+    let graph = RepoDependencyGraph::build(&[trait_dispatch_fanout_index()]);
+
+    let caller_index = graph
+        .symbol_node(CALLER_SYMBOL)
+        .expect("caller symbol must exist");
+    let trait_method_index = graph
+        .symbol_node(TRAIT_METHOD_SYMBOL)
+        .expect("trait-method symbol must exist");
+    let impl_a_index = graph
+        .symbol_node(IMPL_A_METHOD_SYMBOL)
+        .expect("StructA impl method must exist");
+    let impl_b_index = graph
+        .symbol_node(IMPL_B_METHOD_SYMBOL)
+        .expect("StructB impl method must exist");
+
+    // Collect all TraitDispatchCall edges from the caller.
+    let dispatch_edges: Vec<_> = graph
+        .graph()
+        .edges(caller_index)
+        .filter(|e| e.weight().kind == RepoGraphEdgeKind::TraitDispatchCall)
+        .collect();
+
+    // We expect 3 edges: 1 direct caller → trait-method, plus 2
+    // caller → impl-method fan-out edges.
+    assert_eq!(
+        dispatch_edges.len(),
+        3,
+        "expected 3 TraitDispatchCall edges (1 direct + 2 fan-out), got {}",
+        dispatch_edges.len()
+    );
+
+    let targets: BTreeSet<NodeIndex> = dispatch_edges.iter().map(|e| e.target()).collect();
+    assert!(
+        targets.contains(&trait_method_index),
+        "direct caller → trait-method edge must be present"
+    );
+    assert!(
+        targets.contains(&impl_a_index),
+        "fan-out to StructA implementation must be present"
+    );
+    assert!(
+        targets.contains(&impl_b_index),
+        "fan-out to StructB implementation must be present"
+    );
+
+    // The direct caller → trait-method edge should NOT carry the
+    // fan-out reason (it has no Implements relationship).
+    let direct_edge = dispatch_edges
+        .iter()
+        .find(|e| e.target() == trait_method_index)
+        .expect("direct edge");
+    assert_ne!(
+        direct_edge.weight().reason.as_deref(),
+        Some("trait-dispatch-fanout"),
+        "direct caller → trait-method edge should not carry the fan-out reason"
+    );
+
+    // The fan-out edges (to impl methods) should carry the fan-out
+    // reason, distinguishing them from the direct edge.
+    let fanout_a = dispatch_edges
+        .iter()
+        .find(|e| e.target() == impl_a_index)
+        .expect("fan-out A edge");
+    assert_eq!(
+        fanout_a.weight().reason.as_deref(),
+        Some("trait-dispatch-fanout"),
+        "fan-out edge to StructA should carry the fan-out reason"
+    );
+
+    let fanout_b = dispatch_edges
+        .iter()
+        .find(|e| e.target() == impl_b_index)
+        .expect("fan-out B edge");
+    assert_eq!(
+        fanout_b.weight().reason.as_deref(),
+        Some("trait-dispatch-fanout"),
+        "fan-out edge to StructB should carry the fan-out reason"
+    );
+
+    // All TraitDispatchCall edges classify as Inferred.
+    for edge in &dispatch_edges {
+        assert_eq!(
+            edge.weight().confidence_tier(),
+            EdgeConfidenceTier::Inferred,
+            "all TraitDispatchCall edges should be Inferred tier"
+        );
+    }
+
+    // The Implements edges from impl methods to the trait method
+    // must still be present (fan-out does not consume/remove them).
+    let impl_a_impl_edges = graph
+        .graph()
+        .edges(impl_a_index)
+        .filter(|e| e.weight().kind == RepoGraphEdgeKind::Implements)
+        .count();
+    assert!(
+        impl_a_impl_edges >= 1,
+        "StructA → trait Implements edge must remain"
+    );
+}
+
+#[test]
+fn trait_dispatch_fanout_suppressed_when_impl_count_exceeds_cap() {
+    // Build an index with TRAIT_DISPATCH_FANOUT_CAP + 1 implementations.
+    // The builder should NOT emit any fan-out edges — only the direct
+    // caller → trait-method edge remains.
+    let cap_plus_one = crate::repo_graph::TRAIT_DISPATCH_FANOUT_CAP + 1;
+    let graph =
+        RepoDependencyGraph::build(&[trait_dispatch_fanout_index_with_impl_count(cap_plus_one)]);
+
+    let caller_index = graph
+        .symbol_node(CALLER_SYMBOL)
+        .expect("caller symbol must exist");
+
+    // Collect all TraitDispatchCall edges from the caller.
+    let dispatch_edges: Vec<_> = graph
+        .graph()
+        .edges(caller_index)
+        .filter(|e| e.weight().kind == RepoGraphEdgeKind::TraitDispatchCall)
+        .collect();
+
+    // Only the direct caller → trait-method edge should exist.
+    // Fan-out edges are suppressed because impl_count > cap.
+    assert_eq!(
+        dispatch_edges.len(),
+        1,
+        "when impl count ({cap_plus_one}) exceeds cap ({cap}), only the \
+         direct caller → trait-method edge should exist (got {})",
+        dispatch_edges.len(),
+        cap = crate::repo_graph::TRAIT_DISPATCH_FANOUT_CAP,
+    );
+
+    let trait_method_index = graph
+        .symbol_node(TRAIT_METHOD_SYMBOL)
+        .expect("trait-method symbol must exist");
+    assert_eq!(
+        dispatch_edges[0].target(),
+        trait_method_index,
+        "the single remaining edge must point to the trait method"
+    );
+}
+
+#[test]
+fn trait_dispatch_fanout_emits_edges_at_exact_cap() {
+    // Build an index with exactly TRAIT_DISPATCH_FANOUT_CAP implementations.
+    // Fan-out should be emitted (count <= cap).
+    let graph = RepoDependencyGraph::build(&[trait_dispatch_fanout_index_with_impl_count(
+        crate::repo_graph::TRAIT_DISPATCH_FANOUT_CAP,
+    )]);
+
+    let caller_index = graph
+        .symbol_node(CALLER_SYMBOL)
+        .expect("caller symbol must exist");
+
+    let dispatch_edges: Vec<_> = graph
+        .graph()
+        .edges(caller_index)
+        .filter(|e| e.weight().kind == RepoGraphEdgeKind::TraitDispatchCall)
+        .collect();
+
+    // 1 direct + cap fan-out edges.
+    let expected = 1 + crate::repo_graph::TRAIT_DISPATCH_FANOUT_CAP;
+    assert_eq!(
+        dispatch_edges.len(),
+        expected,
+        "at exact cap, all fan-out edges should be emitted (expected {expected}, got {})",
+        dispatch_edges.len()
     );
 }
