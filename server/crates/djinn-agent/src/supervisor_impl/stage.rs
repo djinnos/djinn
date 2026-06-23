@@ -79,7 +79,6 @@ use crate::actors::slot::lifecycle::mcp_resolve::{McpAndSkills, resolve_mcp_and_
 use crate::actors::slot::lifecycle::model_resolution::{
     ModelResolutionError, resolve_model_and_credential,
 };
-use crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger;
 use crate::actors::slot::lifecycle::prompt_context::{
     PromptContext, PromptContextInputs, ReadSourceInfo, build_prompt_context,
 };
@@ -87,6 +86,7 @@ use crate::actors::slot::lifecycle::role_overrides::{
     ResolvedRoleOverrides, resolve_role_overrides,
 };
 use crate::actors::slot::lifecycle::setup::{SetupContext, SetupError, resolve_setup_context};
+use crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger;
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
 use crate::actors::slot::reply_loop::error_handling::BudgetWindDownIgnored;
 use crate::actors::slot::reply_loop::loop_guard::{
@@ -487,8 +487,7 @@ pub(crate) async fn execute_stage(
     // planner sessions (epic_breakdown) receive platform-owned skills like
     // `visual-spec`.  Non-authoring planner sessions (wave planning, dispatch)
     // skip native skills to avoid paying the context cost.
-    let authoring_trigger =
-        classify_native_skill_trigger(runtime_role.config().name, task);
+    let authoring_trigger = classify_native_skill_trigger(runtime_role.config().name, task);
 
     let McpAndSkills {
         effective_mcp_servers,
