@@ -1,6 +1,6 @@
 //! Read-only shell execution for the in-process chat subsystem.
 //!
-//! This sandbox is distinct from [`super::linux::LandlockSandbox`]. That one
+//! This sandbox is distinct from [`crate::linux::LandlockSandbox`]. That one
 //! backs the worker/architect subprocesses and intentionally grants write
 //! access to a task worktree, `/var/tmp`, the cargo shared build dir, and the
 //! repo `.git/` — workers have to run `cargo test`, merge commits, etc.

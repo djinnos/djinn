@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use super::{Sandbox, djinn_cache_dir, git_metadata_dir};
+use crate::{Sandbox, djinn_cache_dir, git_metadata_dir};
 
 /// Seatbelt (sandbox-exec) based filesystem sandbox for macOS.
 ///
