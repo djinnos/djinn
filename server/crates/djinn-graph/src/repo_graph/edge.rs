@@ -9,11 +9,12 @@ use super::constants::{
     EDGE_CONFIDENCE_FILE_REFERENCE, EDGE_CONFIDENCE_HANDLES_ROUTE, EDGE_CONFIDENCE_IMPLEMENTS,
     EDGE_CONFIDENCE_MEMBER_OF, EDGE_CONFIDENCE_READS, EDGE_CONFIDENCE_ROUTE,
     EDGE_CONFIDENCE_STEP_IN_PROCESS, EDGE_CONFIDENCE_SYMBOL_REFERENCE,
-    EDGE_CONFIDENCE_TYPE_DEFINES, EDGE_CONFIDENCE_WRITES, EDGE_WEIGHT_DEFINES,
-    EDGE_WEIGHT_DEFINITION_TO_FILE, EDGE_WEIGHT_ENTRY_POINT_OF, EDGE_WEIGHT_EXTENDS,
-    EDGE_WEIGHT_FETCHES, EDGE_WEIGHT_FILE_REFERENCE, EDGE_WEIGHT_FILE_TO_DEFINITION,
-    EDGE_WEIGHT_HANDLES_ROUTE, EDGE_WEIGHT_IMPLEMENTS, EDGE_WEIGHT_MEMBER_OF, EDGE_WEIGHT_ROUTE,
-    EDGE_WEIGHT_STEP_IN_PROCESS, EDGE_WEIGHT_SYMBOL_REFERENCE, EDGE_WEIGHT_TYPE_DEFINES,
+    EDGE_CONFIDENCE_TRAIT_DISPATCH_CALL, EDGE_CONFIDENCE_TYPE_DEFINES, EDGE_CONFIDENCE_WRITES,
+    EDGE_WEIGHT_DEFINES, EDGE_WEIGHT_DEFINITION_TO_FILE, EDGE_WEIGHT_ENTRY_POINT_OF,
+    EDGE_WEIGHT_EXTENDS, EDGE_WEIGHT_FETCHES, EDGE_WEIGHT_FILE_REFERENCE,
+    EDGE_WEIGHT_FILE_TO_DEFINITION, EDGE_WEIGHT_HANDLES_ROUTE, EDGE_WEIGHT_IMPLEMENTS,
+    EDGE_WEIGHT_MEMBER_OF, EDGE_WEIGHT_ROUTE, EDGE_WEIGHT_STEP_IN_PROCESS,
+    EDGE_WEIGHT_SYMBOL_REFERENCE, EDGE_WEIGHT_TRAIT_DISPATCH_CALL, EDGE_WEIGHT_TYPE_DEFINES,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -101,6 +102,17 @@ pub enum RepoGraphEdgeKind {
     /// Appended after the v10 route-extraction variants to preserve existing
     /// bincode discriminants for `HandlesRoute` and `Fetches`.
     Route,
+    /// Synthesized trait-dispatch caller edge: the *source* symbol calls a
+    /// trait method (the *target*) via dynamic dispatch. The edge is stamped
+    /// by the graph builder when a SCIP occurrence resolves to a trait-method
+    /// symbol; the concrete implementation resolved at runtime is unknown at
+    /// graph-build time. Carries [`REASON_TRAIT_DISPATCH_CALL`] as its
+    /// `reason` and classifies as [`EdgeConfidenceTier::Inferred`] unless
+    /// the confidence drops below the floor (→ `Ambiguous`).
+    ///
+    /// Appended after the v10 `Route` variant to preserve bincode
+    /// discriminants for all pre-v11 variants. New in artifact v11.
+    TraitDispatchCall,
 }
 
 /// Model-level confidence tier for graph edges.
@@ -170,6 +182,7 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::HandlesRoute => EDGE_CONFIDENCE_HANDLES_ROUTE,
         RepoGraphEdgeKind::Fetches => EDGE_CONFIDENCE_FETCHES,
         RepoGraphEdgeKind::Route => EDGE_CONFIDENCE_ROUTE,
+        RepoGraphEdgeKind::TraitDispatchCall => EDGE_CONFIDENCE_TRAIT_DISPATCH_CALL,
     }
 }
 
@@ -194,7 +207,9 @@ pub fn edge_confidence_tier(
         {
             EdgeConfidenceTier::Extracted
         }
-        RepoGraphEdgeKind::Route | RepoGraphEdgeKind::Fetches => EdgeConfidenceTier::Inferred,
+        RepoGraphEdgeKind::Route
+        | RepoGraphEdgeKind::Fetches
+        | RepoGraphEdgeKind::TraitDispatchCall => EdgeConfidenceTier::Inferred,
         RepoGraphEdgeKind::ContainsDefinition
         | RepoGraphEdgeKind::DeclaredInFile
         | RepoGraphEdgeKind::SymbolReference
@@ -267,6 +282,7 @@ pub(crate) fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::HandlesRoute => EDGE_WEIGHT_HANDLES_ROUTE,
         RepoGraphEdgeKind::Fetches => EDGE_WEIGHT_FETCHES,
         RepoGraphEdgeKind::Route => EDGE_WEIGHT_ROUTE,
+        RepoGraphEdgeKind::TraitDispatchCall => EDGE_WEIGHT_TRAIT_DISPATCH_CALL,
     }
 }
 
@@ -288,6 +304,10 @@ mod tests {
             serde_json::to_string(&RepoGraphEdgeKind::Route).expect("serialize kind"),
             "\"route\""
         );
+        assert_eq!(
+            serde_json::to_string(&RepoGraphEdgeKind::TraitDispatchCall).expect("serialize kind"),
+            "\"trait_dispatch_call\""
+        );
     }
 
     #[test]
@@ -295,12 +315,18 @@ mod tests {
         let handles_confidence = edge_confidence_floor(RepoGraphEdgeKind::HandlesRoute);
         let route_confidence = edge_confidence_floor(RepoGraphEdgeKind::Route);
         let fetches_confidence = edge_confidence_floor(RepoGraphEdgeKind::Fetches);
+        let trait_dispatch_confidence = edge_confidence_floor(RepoGraphEdgeKind::TraitDispatchCall);
 
         assert!(handles_confidence > fetches_confidence);
         assert!(handles_confidence > route_confidence);
+        // Trait-dispatch is lower-trust than route edges.
+        assert!(route_confidence > trait_dispatch_confidence);
         assert!((handles_confidence - EDGE_CONFIDENCE_HANDLES_ROUTE).abs() < f64::EPSILON);
         assert!((fetches_confidence - EDGE_CONFIDENCE_FETCHES).abs() < f64::EPSILON);
         assert!((route_confidence - EDGE_CONFIDENCE_ROUTE).abs() < f64::EPSILON);
+        assert!(
+            (trait_dispatch_confidence - EDGE_CONFIDENCE_TRAIT_DISPATCH_CALL).abs() < f64::EPSILON
+        );
         assert!(
             (edge_weight(RepoGraphEdgeKind::HandlesRoute) - EDGE_WEIGHT_HANDLES_ROUTE).abs()
                 < f64::EPSILON
@@ -309,6 +335,11 @@ mod tests {
             (edge_weight(RepoGraphEdgeKind::Fetches) - EDGE_WEIGHT_FETCHES).abs() < f64::EPSILON
         );
         assert!((edge_weight(RepoGraphEdgeKind::Route) - EDGE_WEIGHT_ROUTE).abs() < f64::EPSILON);
+        assert!(
+            (edge_weight(RepoGraphEdgeKind::TraitDispatchCall) - EDGE_WEIGHT_TRAIT_DISPATCH_CALL)
+                .abs()
+                < f64::EPSILON
+        );
     }
 
     #[test]
@@ -339,6 +370,32 @@ mod tests {
         );
         assert_eq!(
             edge_confidence_tier(RepoGraphEdgeKind::Fetches, 0.80, Some("ambiguous-path")),
+            EdgeConfidenceTier::Ambiguous
+        );
+        // Trait-dispatch edges classify as Inferred at the floor and
+        // Ambiguous when confidence drops below the floor.
+        assert_eq!(
+            edge_confidence_tier(
+                RepoGraphEdgeKind::TraitDispatchCall,
+                EDGE_CONFIDENCE_TRAIT_DISPATCH_CALL,
+                Some("trait-dispatch-call")
+            ),
+            EdgeConfidenceTier::Inferred
+        );
+        assert_eq!(
+            edge_confidence_tier(
+                RepoGraphEdgeKind::TraitDispatchCall,
+                0.50,
+                Some("trait-dispatch-call")
+            ),
+            EdgeConfidenceTier::Ambiguous
+        );
+        assert_eq!(
+            edge_confidence_tier(
+                RepoGraphEdgeKind::TraitDispatchCall,
+                EDGE_CONFIDENCE_TRAIT_DISPATCH_CALL,
+                Some("below-floor-reason")
+            ),
             EdgeConfidenceTier::Ambiguous
         );
     }
