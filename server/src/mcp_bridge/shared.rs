@@ -426,8 +426,10 @@ fn edge_propagates(kind: RepoGraphEdgeKind) -> bool {
         | RepoGraphEdgeKind::Defines
         | RepoGraphEdgeKind::HandlesRoute
         | RepoGraphEdgeKind::Fetches
-        // Trait-dispatch call edges carry "if this changes, that breaks"
-        // semantics — the caller depends on the trait method.
+        // PR t16t: synthesized trait-dispatch caller edge. It carries the
+        // same "if this changes, that breaks" blast-radius semantics as a
+        // direct call site — the caller depends on the trait method, even
+        // though we don't yet know which concrete impl it resolves to.
         | RepoGraphEdgeKind::TraitDispatchCall => true,
         RepoGraphEdgeKind::ContainsDefinition
         | RepoGraphEdgeKind::DeclaredInFile
