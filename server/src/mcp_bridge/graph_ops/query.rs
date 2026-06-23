@@ -262,6 +262,10 @@ impl RepoGraphBridge {
                 "entry_point_of" | "entrypointof" => Ok(RepoGraphEdgeKind::EntryPointOf),
                 "member_of" | "memberof" => Ok(RepoGraphEdgeKind::MemberOf),
                 "step_in_process" | "stepinprocess" => Ok(RepoGraphEdgeKind::StepInProcess),
+                // PR t16t: synthesized trait-dispatch caller edge.
+                "trait_dispatch_call" | "traitdispatchcall" => {
+                    Ok(RepoGraphEdgeKind::TraitDispatchCall)
+                }
                 other => Err(format!("invalid edge kind '{other}' for query_subgraph")),
             }
         }
@@ -504,20 +508,9 @@ impl RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
-        // v8: filter implementor symbols through the project's
-        // graph_excluded_paths so vendored impl files (e.g. a `vendor/`
-        // copy of an interface implementation) don't show up alongside
-        // the in-repo implementors.
+        // v8: exclude vendored impl files via graph_excluded_paths.
         let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
-        // Route through the shared resolver so the call accepts the
-        // canonical `symbol:<scip>`-prefixed form that MCP/chat
-        // pre-resolution produces (see
-        // `graph_ops::insights::resolve` returning
-        // `ResolveOutcome::Found(format_node_key(...))`). Before this
-        // carve-out, `graph.symbol_node` was called directly with the
-        // bare SCIP symbol and the op would fail with
-        // `symbol 'symbol:…' not found in graph` once a caller passed
-        // the canonical key.
+        // Route through shared resolver to accept canonical `symbol:<scip>`-prefixed keys.
         let node_index = resolve_node_or_err(&graph, symbol)?;
         Ok(collect_implementations(&graph, node_index, &exclusions))
     }
@@ -603,11 +596,7 @@ impl RepoGraphBridge {
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
             _ => None,
         };
-        // PR F4: ask `search_by_name` for an unbounded result set so the
-        // exclusions filter runs BEFORE we cap to `limit`. Otherwise a
-        // user with a noisy `tests/**` prefix would see ≤limit matches
-        // even when there were plenty of legitimate hits past the
-        // truncation point.
+        // PR F4: over-fetch so exclusions filter runs before capping to `limit`.
         let hits = graph.search_by_name(query, filter, usize::MAX);
         let mut out: Vec<SearchHit> = Vec::new();
         for hit in hits {
@@ -617,17 +606,7 @@ impl RepoGraphBridge {
             if exclusions.excludes(&key, file.as_deref(), &node.display_name) {
                 continue;
             }
-            // v8: drop test-file results from name search by default.
-            // User feedback (cross-repo eval): searching `Strategy`
-            // returned mock-dominated results because mocks/test
-            // fixtures share the same display name as core types.
-            // Mocks are caught by Tier 1.5; tests need this extra
-            // file-path check (a real `Strategy` symbol in
-            // `internal/strategies/strategy_test.go` would otherwise
-            // outrank the prod `Strategy` type at limit boundaries).
-            // Externals already excluded by the search ranker upstream
-            // for symbol-kind queries; this catches the residual file
-            // case.
+            // v8: skip test-file results to avoid mock-dominated rankings.
             if let Some(path) = file.as_deref()
                 && djinn_control_plane::tools::graph_exclusions::is_test_path(path)
             {
@@ -668,15 +647,7 @@ impl RepoGraphBridge {
         kind_filter: Option<&str>,
         min_size: usize,
     ) -> Result<Vec<CycleGroup>, String> {
-        // Read the cached per-kind SCC sets populated by
-        // `ensure_canonical_graph` during warm.  Without this cache, every
-        // `cycles` call re-ran `tarjan_scc` over the full graph (or a
-        // node-filtered subgraph) and hung for tens of seconds on real-world
-        // graphs.  The cache holds three precomputed sets — full / file /
-        // symbol — because `kind_filter` filters the graph *before* the SCC
-        // search, so a single unfiltered representation cannot reproduce the
-        // kind-specific results.  `min_size` is applied at read time against
-        // the cached set (which is materialised at `min_size = 2`).
+        // v8: use precomputed per-kind SCC cache; `min_size` applied at read time (materialised at 2).
         let (graph, _ranking, sccs) = djinn_graph::canonical_graph::load_canonical_graph(
             &self.state,
             &ctx.id,
@@ -987,6 +958,10 @@ impl RepoGraphBridge {
                     | RepoGraphEdgeKind::Route
                     | RepoGraphEdgeKind::HandlesRoute
                     | RepoGraphEdgeKind::Fetches
+                    // PR t16t: synthesized trait-dispatch caller edges
+                    // carry the same "behavioral" blast-radius semantics
+                    // as a direct call site.
+                    | RepoGraphEdgeKind::TraitDispatchCall
             )
         };
         let fan_in = graph
@@ -1234,276 +1209,7 @@ impl RepoGraphBridge {
     }
 }
 
-async fn crate_graph_from_warmed_cache(ctx: &ProjectCtx) -> Result<CrateGraphResponse, String> {
-    let (_project_root, index_tree_path) =
-        djinn_graph::canonical_graph::normalize_graph_query_paths(&ctx.clone_path);
-
-    let (graph, crate_map) = {
-        let cache = djinn_graph::canonical_graph::GRAPH_CACHE.read().await;
-        let Some(cached) = cache
-            .as_ref()
-            .filter(|cached| cached.project_path == index_tree_path)
-        else {
-            return Ok(CrateGraphResponse {
-                crates: Vec::new(),
-                edges: Vec::new(),
-                message: Some("Graph not warmed for this workspace.".to_string()),
-            });
-        };
-        (cached.graph.clone(), cached.crate_map.clone())
-    };
-
-    if crate_map.is_empty() {
-        return Ok(CrateGraphResponse {
-            crates: Vec::new(),
-            edges: Vec::new(),
-            message: Some(
-                "No crate mapping found — not a Rust workspace or workspace not yet warmed."
-                    .to_string(),
-            ),
-        });
-    }
-
-    let crate_graph = djinn_graph::repo_graph::build_crate_graph(&graph, crate_map.as_ref());
-    Ok(CrateGraphResponse {
-        crates: crate_graph
-            .crates
-            .into_iter()
-            .map(|node| CrateNodeEntry {
-                name: node.name,
-                manifest_path: node.manifest_path.to_string_lossy().into_owned(),
-                loc: node.loc,
-                node_count: node.node_count,
-                fan_in: node.fan_in,
-                fan_out: node.fan_out,
-                inbound_weight: node.inbound_weight,
-                outbound_weight: node.outbound_weight,
-            })
-            .collect(),
-        edges: crate_graph
-            .edges
-            .into_iter()
-            .map(|edge| CrateEdgeEntry {
-                source: edge.source,
-                target: edge.target,
-                weight: edge.weight,
-                edge_count: edge.edge_count,
-            })
-            .collect(),
-        message: None,
-    })
-}
-
-/// Collect the implementor symbols for the trait/interface node at
-/// `target`. Extracted from [`RepoGraphBridge::implementations`] so the
-/// same predicate (and exclusion filter) can be exercised in unit
-/// tests without spinning up an [`AppState`].
-///
-/// Walks every incoming `Implements` edge to `target`, drops external
-/// implementors and anything filtered by `exclusions`, and returns the
-/// remaining implementor SCIP symbol strings in graph order. The order
-/// is deterministic (petgraph's storage order over `edges_directed`)
-/// so callers can `==`-compare two result lists.
-fn collect_implementations(
-    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
-    target: petgraph::graph::NodeIndex,
-    exclusions: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
-) -> Vec<String> {
-    use djinn_graph::repo_graph::RepoGraphEdgeKind;
-    let mut impls = Vec::new();
-    for edge in graph
-        .graph()
-        .edges_directed(target, petgraph::Direction::Incoming)
-    {
-        if edge.weight().kind != RepoGraphEdgeKind::Implements {
-            continue;
-        }
-        let source_node = graph.node(edge.source());
-        // v8: skip external (vendored / third-party) implementors.
-        // "Who implements this trait" should be in-repo by default.
-        if source_node.is_external {
-            continue;
-        }
-        let Some(sym) = &source_node.symbol else {
-            continue;
-        };
-        let src_key = format_node_key(&source_node.id);
-        let src_file = source_node
-            .file_path
-            .as_ref()
-            .map(|p| p.display().to_string());
-        if exclusions.excludes(&src_key, src_file.as_deref(), &source_node.display_name) {
-            continue;
-        }
-        impls.push(sym.clone());
-    }
-    impls
-}
-
+// Helpers extracted to query_helpers.rs to satisfy the file-size guard.
 #[cfg(test)]
-pub(super) mod test_helpers {
-    //! Re-export the inner `implementations` algorithm and the shared
-    //! resolver shim so the `graph_ops::tests` module can drive both
-    //! the bare-SCIP and `symbol:<scip>`-prefixed call shapes against
-    //! a fixture graph without standing up an `AppState`. Mirrors the
-    //! `flow::test_helpers` / `routes::test_helpers` pattern used by
-    //! the rest of the bridge op module.
-    use super::*;
-    use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
-    use djinn_graph::repo_graph::RepoDependencyGraph;
-
-    /// Resolve `key` against `graph` via the shared resolver and
-    /// return the same implementor list the bridge op would return.
-    /// `key` is forwarded verbatim — passing a bare SCIP symbol and
-    /// the canonical `symbol:<scip>` form must produce identical
-    /// results.
-    pub(crate) fn implementations_for_graph(
-        graph: &RepoDependencyGraph,
-        key: &str,
-    ) -> Result<Vec<String>, String> {
-        let node_index = resolve_node_or_err(graph, key)?;
-        Ok(collect_implementations(
-            graph,
-            node_index,
-            &GraphExclusions::empty(),
-        ))
-    }
-}
-
-#[cfg(test)]
-mod crate_graph_tests {
-    use super::*;
-    use djinn_graph::canonical_graph::{CachedGraph, GRAPH_CACHE, derive_graph_caches};
-    use djinn_graph::repo_graph::{
-        REPO_GRAPH_ARTIFACT_VERSION, RepoDependencyGraph, RepoGraphArtifact, RepoGraphNode,
-        RepoGraphNodeKind, RepoNodeKey, RouteExclusionConfig,
-    };
-    use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
-    use std::sync::{Arc, LazyLock};
-
-    static GRAPH_CACHE_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-        LazyLock::new(|| tokio::sync::Mutex::new(()));
-
-    fn crate_graph_ctx(clone_path: &str) -> ProjectCtx {
-        ProjectCtx {
-            id: "crate-graph-test-project".to_string(),
-            clone_path: clone_path.to_string(),
-            workspace: None,
-            sub_path: None,
-        }
-    }
-
-    fn one_crate_graph() -> RepoDependencyGraph {
-        let node = RepoGraphNode {
-            id: RepoNodeKey::File(PathBuf::from("crate-a/src/lib.rs")),
-            kind: RepoGraphNodeKind::File,
-            display_name: "crate-a/src/lib.rs".to_string(),
-            language: Some("rust".to_string()),
-            file_path: Some(PathBuf::from("crate-a/src/lib.rs")),
-            symbol: None,
-            symbol_kind: None,
-            is_external: false,
-            visibility: None,
-            signature: None,
-            documentation: vec![],
-            signature_parts: None,
-            is_test: false,
-            complexity: None,
-            workspace: None,
-            route_framework: None,
-            route_handler_symbol: None,
-        };
-        RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
-            version: REPO_GRAPH_ARTIFACT_VERSION,
-            nodes: vec![node],
-            edges: vec![],
-            symbol_ranges: BTreeMap::new(),
-            communities: vec![],
-            processes: vec![],
-            route_exclusion_config: RouteExclusionConfig::default(),
-            layout_positions: BTreeMap::new(),
-        })
-    }
-
-    async fn install_cached_graph(
-        clone_path: &str,
-        graph: RepoDependencyGraph,
-        crate_map: BTreeMap<PathBuf, String>,
-    ) {
-        let (_project_root, index_tree_path) =
-            djinn_graph::canonical_graph::normalize_graph_query_paths(clone_path);
-        let (pagerank, sccs, layout_positions, _) =
-            derive_graph_caches(&graph, Path::new("/var/tmp/djinn-crate-graph-test"));
-        let mut cache = GRAPH_CACHE.write().await;
-        *cache = Some(CachedGraph {
-            graph,
-            project_path: index_tree_path,
-            git_head: "test-head".to_string(),
-            pagerank,
-            sccs,
-            layout_positions,
-            crate_map: Arc::new(crate_map),
-        });
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn crate_graph_returns_message_when_graph_cache_is_empty() {
-        let _guard = GRAPH_CACHE_TEST_LOCK.lock().await;
-        *GRAPH_CACHE.write().await = None;
-
-        let response = crate_graph_from_warmed_cache(&crate_graph_ctx("/workspace/no-cache"))
-            .await
-            .expect("crate_graph should return a non-error empty response");
-
-        assert!(response.crates.is_empty());
-        assert!(response.edges.is_empty());
-        assert_eq!(
-            response.message.as_deref(),
-            Some("Graph not warmed for this workspace.")
-        );
-
-        *GRAPH_CACHE.write().await = None;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn crate_graph_returns_message_when_crate_map_is_empty() {
-        let _guard = GRAPH_CACHE_TEST_LOCK.lock().await;
-        let clone_path = "/workspace/empty-crate-map";
-        install_cached_graph(clone_path, one_crate_graph(), BTreeMap::new()).await;
-
-        let response = crate_graph_from_warmed_cache(&crate_graph_ctx(clone_path))
-            .await
-            .expect("crate_graph should return a non-error empty response");
-
-        assert!(response.crates.is_empty());
-        assert!(response.edges.is_empty());
-        assert_eq!(
-            response.message.as_deref(),
-            Some("No crate mapping found — not a Rust workspace or workspace not yet warmed.")
-        );
-
-        *GRAPH_CACHE.write().await = None;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn crate_graph_maps_warmed_crate_graph_to_bridge_response() {
-        let _guard = GRAPH_CACHE_TEST_LOCK.lock().await;
-        let clone_path = "/workspace/warmed-crate-map";
-        let crate_map = BTreeMap::from([(PathBuf::from("crate-a"), "crate-a".to_string())]);
-        install_cached_graph(clone_path, one_crate_graph(), crate_map).await;
-
-        let response = crate_graph_from_warmed_cache(&crate_graph_ctx(clone_path))
-            .await
-            .expect("crate_graph should aggregate the warmed graph");
-
-        assert_eq!(response.message, None);
-        assert_eq!(response.crates.len(), 1);
-        assert_eq!(response.crates[0].name, "crate-a");
-        assert_eq!(response.crates[0].manifest_path, "crate-a");
-        assert_eq!(response.crates[0].node_count, 1);
-        assert!(response.edges.is_empty());
-
-        *GRAPH_CACHE.write().await = None;
-    }
-}
+pub(super) use query_helpers::test_helpers;
+use query_helpers::{collect_implementations, crate_graph_from_warmed_cache};
