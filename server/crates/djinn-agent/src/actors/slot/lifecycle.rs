@@ -14,4 +14,5 @@ pub(crate) mod prompt_context;
 pub(crate) mod retry;
 pub(crate) mod role_overrides;
 pub(crate) mod setup;
+pub(crate) mod task_classifier;
 pub(crate) mod teardown;
