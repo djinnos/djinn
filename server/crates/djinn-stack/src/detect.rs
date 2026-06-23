@@ -250,52 +250,11 @@ fn build_stack(files: &[FileEntry], bodies: &HashMap<String, String>) -> Stack {
     let signals = manifest_signals(files, bodies);
 
     // Package-manager detection.
-    let mut pms: Vec<String> = Vec::new();
-    let mut monorepo: Vec<String> = Vec::new();
-    let mut test_runners: Vec<&'static str> = Vec::new();
-    let mut framework_slugs: Vec<&'static str> = Vec::new();
-    let mut runtimes = Runtimes::default();
+    let mut collector = StackCollector::new();
 
     // package.json
     if let Some(body) = bodies.get("package.json") {
-        let info = manifests::parse_package_json(body);
-        if let Some(pm) = info.package_manager.clone() {
-            pms.push(pm);
-        } else {
-            // Lockfile-based fallback when `packageManager` field is absent.
-            let has_pnpm_lock = files.iter().any(|f| f.path == "pnpm-lock.yaml");
-            let has_yarn_lock = files.iter().any(|f| f.path == "yarn.lock");
-            let has_bun_lock = files
-                .iter()
-                .any(|f| f.path == "bun.lockb" || f.path == "bun.lock");
-            let has_npm_lock = files.iter().any(|f| f.path == "package-lock.json");
-            if has_pnpm_lock {
-                pms.push("pnpm".into());
-            } else if has_yarn_lock {
-                pms.push("yarn".into());
-            } else if has_bun_lock {
-                pms.push("bun".into());
-            } else {
-                // `has_npm_lock` or no lockfile — either way npm is
-                // the reasonable default.
-                let _ = has_npm_lock;
-                pms.push("npm".into());
-            }
-        }
-        if info.has_workspaces {
-            monorepo.push("npm-workspaces".into());
-        }
-        if let Some(node) = info.node_engine {
-            runtimes.node = Some(node);
-        }
-        for dep in &info.dep_names {
-            if let Some(fw) = framework_for_dep(dep) {
-                framework_slugs.push(fw);
-            }
-            if let Some(runner) = runner_for_dep(dep) {
-                test_runners.push(runner);
-            }
-        }
+        probe_node_package_json(body, files, &mut collector);
     }
 
     // Cargo.toml
@@ -303,21 +262,21 @@ fn build_stack(files: &[FileEntry], bodies: &HashMap<String, String>) -> Stack {
         let cargo_body = bodies.get("Cargo.toml").map(String::as_str).unwrap_or("");
         let toolchain_body = bodies.get("rust-toolchain.toml").map(String::as_str);
         let info = manifests::parse_cargo_toml(cargo_body, toolchain_body);
-        if !pms.contains(&"cargo".to_string()) {
-            pms.push("cargo".into());
+        if !collector.pms.contains(&"cargo".to_string()) {
+            collector.pms.push("cargo".into());
         }
         if info.is_workspace {
-            monorepo.push("cargo-workspace".into());
+            collector.monorepo.push("cargo-workspace".into());
         }
         if let Some(rust) = info.rust_version {
-            runtimes.rust = Some(rust);
+            collector.runtimes.rust = Some(rust);
         }
         // nextest config presence
         if files
             .iter()
             .any(|f| NEXTEST_CONFIG_PATHS.iter().any(|p| *p == f.path))
         {
-            test_runners.push("nextest");
+            collector.test_runners.push("nextest");
         }
     }
 
@@ -329,29 +288,30 @@ fn build_stack(files: &[FileEntry], bodies: &HashMap<String, String>) -> Stack {
             .unwrap_or("");
         let info = manifests::parse_pyproject(body);
         if let Some(pm) = info.package_manager {
-            if !pms.contains(&pm) {
-                pms.push(pm);
+            if !collector.pms.contains(&pm) {
+                collector.pms.push(pm);
             }
-        } else if !pms
+        } else if !collector
+            .pms
             .iter()
             .any(|p| matches!(p.as_str(), "uv" | "poetry" | "pdm" | "pip"))
         {
-            pms.push("pip".into());
+            collector.pms.push("pip".into());
         }
         if let Some(py) = info.python_version {
-            runtimes.python = Some(py);
+            collector.runtimes.python = Some(py);
         }
         for dep in &info.dep_names {
             if let Some(fw) = framework_for_dep(dep) {
-                framework_slugs.push(fw);
+                collector.framework_slugs.push(fw);
             }
             if let Some(runner) = runner_for_dep(dep) {
-                test_runners.push(runner);
+                collector.test_runners.push(runner);
             }
         }
         // Pytest config in pyproject is a strong signal even without a runtime dep.
-        if body.contains("[tool.pytest") && !test_runners.contains(&"pytest") {
-            test_runners.push("pytest");
+        if body.contains("[tool.pytest") && !collector.test_runners.contains(&"pytest") {
+            collector.test_runners.push("pytest");
         }
     }
 
@@ -359,16 +319,16 @@ fn build_stack(files: &[FileEntry], bodies: &HashMap<String, String>) -> Stack {
     if signals.has_go_mod {
         let body = bodies.get("go.mod").map(String::as_str).unwrap_or("");
         let info = manifests::parse_go_mod(body);
-        if !pms.contains(&"go-mod".to_string()) {
-            pms.push("go-mod".into());
+        if !collector.pms.contains(&"go-mod".to_string()) {
+            collector.pms.push("go-mod".into());
         }
         if let Some(go) = info.go_version {
-            runtimes.go = Some(go);
+            collector.runtimes.go = Some(go);
         }
-        test_runners.push("go-test");
+        collector.test_runners.push("go-test");
         // go.work signals a go workspace (monorepo).
         if files.iter().any(|f| f.path == "go.work") {
-            monorepo.push("go-workspace".into());
+            collector.monorepo.push("go-workspace".into());
         }
     }
 
@@ -376,15 +336,15 @@ fn build_stack(files: &[FileEntry], bodies: &HashMap<String, String>) -> Stack {
     if files.iter().any(|f| f.path == "Gemfile") {
         let body = bodies.get("Gemfile").map(String::as_str).unwrap_or("");
         let info = manifests::parse_gemfile(body);
-        if !pms.contains(&"bundler".to_string()) {
-            pms.push("bundler".into());
+        if !collector.pms.contains(&"bundler".to_string()) {
+            collector.pms.push("bundler".into());
         }
         for gem in &info.gems {
             if let Some(fw) = framework_for_dep(gem) {
-                framework_slugs.push(fw);
+                collector.framework_slugs.push(fw);
             }
             if let Some(runner) = runner_for_dep(gem) {
-                test_runners.push(runner);
+                collector.test_runners.push(runner);
             }
         }
     }
@@ -395,11 +355,11 @@ fn build_stack(files: &[FileEntry], bodies: &HashMap<String, String>) -> Stack {
         .iter()
         .any(|f| f.path == "build.gradle" || f.path == "build.gradle.kts");
     if has_pom || has_gradle {
-        if has_pom && !pms.contains(&"maven".to_string()) {
-            pms.push("maven".into());
+        if has_pom && !collector.pms.contains(&"maven".to_string()) {
+            collector.pms.push("maven".into());
         }
-        if has_gradle && !pms.contains(&"gradle".to_string()) {
-            pms.push("gradle".into());
+        if has_gradle && !collector.pms.contains(&"gradle".to_string()) {
+            collector.pms.push("gradle".into());
         }
         let combined: String = bodies
             .iter()
@@ -409,32 +369,32 @@ fn build_stack(files: &[FileEntry], bodies: &HashMap<String, String>) -> Stack {
             .join("\n");
         let info = manifests::parse_pom(&combined);
         if info.has_spring {
-            framework_slugs.push("spring");
+            collector.framework_slugs.push("spring");
         }
         if info.has_junit {
-            test_runners.push("junit");
+            collector.test_runners.push("junit");
         }
     }
 
     // Monorepo tooling signals.
     if signals.has_pnpm_workspace {
-        monorepo.push("pnpm-workspaces".into());
+        collector.monorepo.push("pnpm-workspaces".into());
     }
     if signals.has_turbo_json {
-        monorepo.push("turbo".into());
+        collector.monorepo.push("turbo".into());
     }
     if files.iter().any(|f| f.path == "nx.json") {
-        monorepo.push("nx".into());
+        collector.monorepo.push("nx".into());
     }
     if files.iter().any(|f| f.path == "lerna.json") {
-        monorepo.push("lerna".into());
+        collector.monorepo.push("lerna".into());
     }
 
     // Canonicalise the collected slug lists.
-    let package_managers = dedup_sorted(pms);
-    let monorepo_tools = dedup_sorted(monorepo);
-    let frameworks = frameworks::canonicalize(framework_slugs);
-    let test_runners = test_runners::canonicalize(test_runners);
+    let package_managers = dedup_sorted(collector.pms);
+    let monorepo_tools = dedup_sorted(collector.monorepo);
+    let frameworks = frameworks::canonicalize(collector.framework_slugs);
+    let test_runners = test_runners::canonicalize(collector.test_runners);
     let is_monorepo = !monorepo_tools.is_empty();
 
     Stack {
@@ -446,7 +406,7 @@ fn build_stack(files: &[FileEntry], bodies: &HashMap<String, String>) -> Stack {
         is_monorepo,
         test_runners,
         frameworks,
-        runtimes,
+        runtimes: collector.runtimes,
         manifest_signals: signals,
         // `workspaces` is populated by `detect_blocking` via
         // `discover_workspaces_blocking` after `build_stack` returns —
@@ -465,6 +425,87 @@ fn manifest_signals(files: &[FileEntry], _bodies: &HashMap<String, String>) -> M
         has_go_mod: has("go.mod"),
         has_pnpm_workspace: has("pnpm-workspace.yaml"),
         has_turbo_json: has("turbo.json"),
+    }
+}
+
+/// Mutable collector for detection results accumulated across manifest
+/// branches in [`build_stack`]. Keeps the per-branch probes focused on
+/// extraction while the orchestration layer in `build_stack` owns the
+/// canonicalisation and `Stack` construction.
+struct StackCollector {
+    pms: Vec<String>,
+    monorepo: Vec<String>,
+    test_runners: Vec<&'static str>,
+    framework_slugs: Vec<&'static str>,
+    runtimes: Runtimes,
+}
+
+impl StackCollector {
+    fn new() -> Self {
+        Self {
+            pms: Vec::new(),
+            monorepo: Vec::new(),
+            test_runners: Vec::new(),
+            framework_slugs: Vec::new(),
+            runtimes: Runtimes::default(),
+        }
+    }
+}
+
+/// Probe the root `package.json` and update `collector` with the
+/// detected package manager, monorepo signal, node runtime, and
+/// dependency-derived framework/test-runner slugs.
+///
+/// Package-manager resolution:
+/// 1. `packageManager` field in `package.json` (e.g. `"pnpm@9.5.0"`).
+/// 2. Lockfile fallback ordering when `packageManager` is absent:
+///    `pnpm-lock.yaml` → `yarn.lock` → `bun.lockb`/`bun.lock` → npm
+///    (default, even when `package-lock.json` is also absent).
+fn probe_node_package_json(body: &str, files: &[FileEntry], collector: &mut StackCollector) {
+    let info = manifests::parse_package_json(body);
+
+    // Package manager: explicit field wins, lockfile fallback otherwise.
+    if let Some(pm) = info.package_manager.clone() {
+        collector.pms.push(pm);
+    } else {
+        let pm = node_pm_from_lockfiles(files);
+        collector.pms.push(pm.into());
+    }
+
+    // npm-workspaces monorepo signal.
+    if info.has_workspaces {
+        collector.monorepo.push("npm-workspaces".into());
+    }
+
+    // Node runtime pin from `engines.node`.
+    if let Some(node) = info.node_engine {
+        collector.runtimes.node = Some(node);
+    }
+
+    // Dependency-derived frameworks and test runners.
+    for dep in &info.dep_names {
+        if let Some(fw) = framework_for_dep(dep) {
+            collector.framework_slugs.push(fw);
+        }
+        if let Some(runner) = runner_for_dep(dep) {
+            collector.test_runners.push(runner);
+        }
+    }
+}
+
+/// Return the canonical package-manager slug based on lockfile presence
+/// in `files`. Ordering: `pnpm-lock.yaml` → `yarn.lock` → `bun.lockb` /
+/// `bun.lock` → `"npm"` (default when no lockfile matches).
+fn node_pm_from_lockfiles(files: &[FileEntry]) -> &'static str {
+    let has = |needle: &str| files.iter().any(|f| f.path == needle);
+    if has("pnpm-lock.yaml") {
+        "pnpm"
+    } else if has("yarn.lock") {
+        "yarn"
+    } else if has("bun.lockb") || has("bun.lock") {
+        "bun"
+    } else {
+        "npm"
     }
 }
 
@@ -973,5 +1014,209 @@ mod tests {
         // `tools/codegen/rust-toolchain.toml` doesn't exist, so it must
         // not be requested.
         assert!(!paths.contains(&"tools/codegen/rust-toolchain.toml".to_string()));
+    }
+
+    // ---- node_pm_from_lockfiles ------------------------------------------------
+
+    #[test]
+    fn lockfile_pnpm_beats_yarn() {
+        let files = file_entries(&["pnpm-lock.yaml", "yarn.lock", "package.json"]);
+        assert_eq!(node_pm_from_lockfiles(&files), "pnpm");
+    }
+
+    #[test]
+    fn lockfile_yarn_beats_bun() {
+        let files = file_entries(&["yarn.lock", "bun.lockb", "package.json"]);
+        assert_eq!(node_pm_from_lockfiles(&files), "yarn");
+    }
+
+    #[test]
+    fn lockfile_bun_lockb_beats_npm() {
+        let files = file_entries(&["bun.lockb", "package-lock.json", "package.json"]);
+        assert_eq!(node_pm_from_lockfiles(&files), "bun");
+    }
+
+    #[test]
+    fn lockfile_bun_lock_beats_npm() {
+        let files = file_entries(&["bun.lock", "package-lock.json", "package.json"]);
+        assert_eq!(node_pm_from_lockfiles(&files), "bun");
+    }
+
+    #[test]
+    fn lockfile_npm_lock_returns_npm() {
+        let files = file_entries(&["package-lock.json", "package.json"]);
+        assert_eq!(node_pm_from_lockfiles(&files), "npm");
+    }
+
+    #[test]
+    fn lockfile_no_lock_returns_npm() {
+        let files = file_entries(&["package.json"]);
+        assert_eq!(node_pm_from_lockfiles(&files), "npm");
+    }
+
+    // ---- probe_node_package_json ------------------------------------------------
+
+    #[test]
+    fn probe_uses_explicit_package_manager() {
+        let body = r#"{"packageManager":"pnpm@9.5.0","name":"x"}"#;
+        let files = file_entries(&["package.json", "yarn.lock"]);
+        let mut c = StackCollector::new();
+        probe_node_package_json(body, &files, &mut c);
+        assert_eq!(c.pms, vec!["pnpm"]);
+    }
+
+    #[test]
+    fn probe_falls_back_to_lockfile_ordering() {
+        // pnpm-lock.yaml present → should pick pnpm
+        let body = r#"{"name":"x"}"#;
+        let files = file_entries(&["package.json", "pnpm-lock.yaml"]);
+        let mut c = StackCollector::new();
+        probe_node_package_json(body, &files, &mut c);
+        assert_eq!(c.pms, vec!["pnpm"]);
+    }
+
+    #[test]
+    fn probe_detects_npm_workspaces_monorepo() {
+        let body = r#"{"name":"x","workspaces":["packages/*"]}"#;
+        let files = file_entries(&["package.json"]);
+        let mut c = StackCollector::new();
+        probe_node_package_json(body, &files, &mut c);
+        assert!(c.monorepo.contains(&"npm-workspaces".to_string()));
+    }
+
+    #[test]
+    fn probe_extracts_node_runtime() {
+        let body = r#"{"name":"x","engines":{"node":">=20.10"}}"#;
+        let files = file_entries(&["package.json"]);
+        let mut c = StackCollector::new();
+        probe_node_package_json(body, &files, &mut c);
+        assert_eq!(c.runtimes.node.as_deref(), Some("20"));
+    }
+
+    #[test]
+    fn probe_detects_frameworks_from_deps() {
+        let body = r#"{"name":"x","dependencies":{"react":"18","next":"14"}}"#;
+        let files = file_entries(&["package.json"]);
+        let mut c = StackCollector::new();
+        probe_node_package_json(body, &files, &mut c);
+        assert!(c.framework_slugs.contains(&"react"));
+        assert!(c.framework_slugs.contains(&"next"));
+    }
+
+    #[test]
+    fn probe_detects_test_runners_from_deps() {
+        let body = r#"{"name":"x","devDependencies":{"vitest":"2.0","@playwright/test":"1.40"}}"#;
+        let files = file_entries(&["package.json"]);
+        let mut c = StackCollector::new();
+        probe_node_package_json(body, &files, &mut c);
+        assert!(c.test_runners.contains(&"vitest"));
+        assert!(c.test_runners.contains(&"playwright"));
+    }
+
+    #[test]
+    fn probe_all_together() {
+        let body = r#"{
+            "name":"app",
+            "packageManager":"yarn@4.0.0",
+            "workspaces":["packages/*"],
+            "engines":{"node":">=22"},
+            "dependencies":{"react":"18","next":"14"},
+            "devDependencies":{"jest":"29"}
+        }"#;
+        let files = file_entries(&["package.json", "pnpm-lock.yaml"]);
+        let mut c = StackCollector::new();
+        probe_node_package_json(body, &files, &mut c);
+        // packageManager field wins over lockfile
+        assert_eq!(c.pms, vec!["yarn"]);
+        assert!(c.monorepo.contains(&"npm-workspaces".to_string()));
+        assert_eq!(c.runtimes.node.as_deref(), Some("22"));
+        assert!(c.framework_slugs.contains(&"react"));
+        assert!(c.framework_slugs.contains(&"next"));
+        assert!(c.test_runners.contains(&"jest"));
+    }
+
+    // ---- build_stack Node integration -------------------------------------------
+
+    #[test]
+    fn build_stack_node_explicit_pm() {
+        let body = r#"{"packageManager":"pnpm@9.5.0","name":"x"}"#;
+        let files = file_entries(&["package.json"]);
+        let mut bodies = HashMap::new();
+        bodies.insert("package.json".into(), body.into());
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.package_managers.contains(&"pnpm".to_string()));
+    }
+
+    #[test]
+    fn build_stack_node_lockfile_fallback_pnpm() {
+        let body = r#"{"name":"x"}"#;
+        let files = file_entries(&["package.json", "pnpm-lock.yaml"]);
+        let mut bodies = HashMap::new();
+        bodies.insert("package.json".into(), body.into());
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.package_managers.contains(&"pnpm".to_string()));
+    }
+
+    #[test]
+    fn build_stack_node_lockfile_fallback_yarn() {
+        let body = r#"{"name":"x"}"#;
+        let files = file_entries(&["package.json", "yarn.lock"]);
+        let mut bodies = HashMap::new();
+        bodies.insert("package.json".into(), body.into());
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.package_managers.contains(&"yarn".to_string()));
+    }
+
+    #[test]
+    fn build_stack_node_lockfile_fallback_bun() {
+        let body = r#"{"name":"x"}"#;
+        let files = file_entries(&["package.json", "bun.lockb"]);
+        let mut bodies = HashMap::new();
+        bodies.insert("package.json".into(), body.into());
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.package_managers.contains(&"bun".to_string()));
+    }
+
+    #[test]
+    fn build_stack_node_lockfile_fallback_npm_default() {
+        let body = r#"{"name":"x"}"#;
+        let files = file_entries(&["package.json"]);
+        let mut bodies = HashMap::new();
+        bodies.insert("package.json".into(), body.into());
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.package_managers.contains(&"npm".to_string()));
+    }
+
+    #[test]
+    fn build_stack_node_npm_workspaces() {
+        let body = r#"{"name":"x","workspaces":["packages/*"]}"#;
+        let files = file_entries(&["package.json"]);
+        let mut bodies = HashMap::new();
+        bodies.insert("package.json".into(), body.into());
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.monorepo_tools.contains(&"npm-workspaces".to_string()));
+        assert!(stack.is_monorepo);
+    }
+
+    #[test]
+    fn build_stack_node_runtime() {
+        let body = r#"{"name":"x","engines":{"node":">=22"}}"#;
+        let files = file_entries(&["package.json"]);
+        let mut bodies = HashMap::new();
+        bodies.insert("package.json".into(), body.into());
+        let stack = build_stack(&files, &bodies);
+        assert_eq!(stack.runtimes.node.as_deref(), Some("22"));
+    }
+
+    #[test]
+    fn build_stack_node_framework_and_test_runner() {
+        let body = r#"{"name":"x","dependencies":{"react":"18","next":"14"},"devDependencies":{"vitest":"2.0"}}"#;
+        let files = file_entries(&["package.json"]);
+        let mut bodies = HashMap::new();
+        bodies.insert("package.json".into(), body.into());
+        let stack = build_stack(&files, &bodies);
+        assert!(stack.frameworks.contains(&"react".to_string()));
+        assert!(stack.frameworks.contains(&"next".to_string()));
+        assert!(stack.test_runners.contains(&"vitest".to_string()));
     }
 }
