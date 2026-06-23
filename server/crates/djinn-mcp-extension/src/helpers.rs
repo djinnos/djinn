@@ -16,19 +16,64 @@ use crate::context::ExtensionContext;
 /// context's database and event bus.
 ///
 /// This replaces `project_id_for_path` from the djinn-agent helpers.
+/// Handles UUIDs, `owner/repo` slugs, *and* filesystem paths that end in
+/// `{projects_root}/{owner}/{repo}` — the same fallback chain that
+/// `AgentContext::require_project_id_for_task_ops` provides.
 pub(crate) async fn project_id_for_path(
     ctx: &dyn ExtensionContext,
     project_path: &str,
 ) -> Result<String, String> {
     let repo = ProjectRepository::new(ctx.db(), ctx.event_bus());
-    match repo
+
+    // 1. Direct resolve (UUID or owner/repo slug).
+    if let Some(id) = repo
         .resolve(project_path)
         .await
         .map_err(|e| e.to_string())?
     {
-        Some(id) => Ok(id),
-        None => Err(format!("project not found: {project_path}")),
+        return Ok(id);
     }
+
+    // 2. Try with trailing path separators stripped.
+    let trimmed = project_path
+        .trim_end_matches(std::path::MAIN_SEPARATOR)
+        .trim_end_matches('/');
+    if trimmed != project_path
+        && let Some(id) = repo.resolve(trimmed).await.map_err(|e| e.to_string())?
+    {
+        return Ok(id);
+    }
+
+    // 3. Fall back to reverse-parsing the `{root}/{owner}/{repo}` clone
+    //    path shape.  The project identity is (github_owner, github_repo);
+    //    any raw filesystem path we get here is expected to end in that
+    //    two-segment tail.
+    let segments: Vec<String> = std::path::Path::new(project_path)
+        .components()
+        .rev()
+        .take(2)
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if segments.len() >= 2 {
+        // rev().take(2) yields [repo, owner]; flip them.
+        let repo_name = &segments[0];
+        let owner_name = &segments[1];
+        if let Some(project) = repo
+            .get_by_github(owner_name, repo_name)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(project.id);
+        }
+    }
+
+    // 4. Fall back to the context's default project id (K8s single-project
+    //    workers).
+    if let Some(default_id) = ctx.default_project_id().filter(|s| !s.is_empty()) {
+        return Ok(default_id.to_string());
+    }
+
+    Err(format!("project not found: {project_path}"))
 }
 
 pub(crate) fn acceptance_criterion_to_string(value: &serde_json::Value) -> String {
@@ -96,6 +141,24 @@ pub(crate) async fn resolve_project_id_for_agent_tools(
         match repo.resolve(project).await.map_err(|e| e.to_string())? {
             Some(id) => return Ok(id),
             None => {
+                // Try filesystem-path fallback (e.g. `{root}/{owner}/{repo}`).
+                let segments: Vec<String> = std::path::Path::new(project)
+                    .components()
+                    .rev()
+                    .take(2)
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                if segments.len() >= 2 {
+                    let repo_name = &segments[0];
+                    let owner_name = &segments[1];
+                    if let Some(found) = repo
+                        .get_by_github(owner_name, repo_name)
+                        .await
+                        .map_err(|e| e.to_string())?
+                    {
+                        return Ok(found.id);
+                    }
+                }
                 if let Some(default_id) = default_id {
                     return Ok(default_id.to_string());
                 }

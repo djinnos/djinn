@@ -160,12 +160,30 @@ async fn resolve_project(
         candidates.push(proj.to_string());
     }
     let mut resolved: Option<djinn_core::models::Project> = None;
-    for cand in candidates {
-        if let Ok(Some(id)) = repo.resolve(&cand).await
+    for cand in &candidates {
+        // Try direct resolve (UUID or owner/repo slug).
+        if let Ok(Some(id)) = repo.resolve(cand).await
             && let Ok(Some(proj)) = repo.get(&id).await
         {
             resolved = Some(proj);
             break;
+        }
+        // Fall back to reverse-parsing `{root}/{owner}/{repo}` filesystem
+        // paths — the same logic AgentContext::require_project_id_for_task_ops
+        // uses.
+        let segments: Vec<String> = std::path::Path::new(cand)
+            .components()
+            .rev()
+            .take(2)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        if segments.len() >= 2 {
+            let repo_name = &segments[0];
+            let owner_name = &segments[1];
+            if let Ok(Some(proj)) = repo.get_by_github(owner_name, repo_name).await {
+                resolved = Some(proj);
+                break;
+            }
         }
     }
     if resolved.is_none()

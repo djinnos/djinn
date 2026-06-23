@@ -130,6 +130,8 @@ pub(crate) async fn call_lsp(
             let result = lsp.document_symbols(worktree_path, &path, query).await?;
             Ok(serde_json::json!({ "operation": "symbols", "result": result }))
         }
-        other => Err(format!("unknown lsp operation: {other}")),
+        other => Err(format!(
+            "unknown LSP operation: {other}. Use: hover, definition, references, or symbols"
+        )),
     }
 }
