@@ -105,14 +105,14 @@ impl NoteRepository {
         let scope_paths: serde_json::Value = serde_json::from_str(scope_paths)
             .map_err(|e| Error::InvalidData(format!("invalid json for notes.scope_paths: {e}")))?;
 
-        sqlx::query(
+        sqlx::query!(
             r#"UPDATE notes SET
                 scope_paths = $1,
                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $2"#,
+            scope_paths,
+            id
         )
-        .bind(scope_paths)
-        .bind(&id)
         .execute(self.db.pool())
         .await?;
 
@@ -152,14 +152,14 @@ impl NoteRepository {
         let tags: serde_json::Value = serde_json::from_str(tags)
             .map_err(|e| Error::InvalidData(format!("invalid json for notes.tags: {e}")))?;
 
-        sqlx::query(
+        sqlx::query!(
             r#"UPDATE notes SET
                 tags = $1,
                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $2"#,
+            tags,
+            id
         )
-        .bind(&tags)
-        .bind(&id)
         .execute(self.db.pool())
         .await?;
 
@@ -221,23 +221,23 @@ impl NoteRepository {
                 // `storage` and `file_path` are vestigial columns from the
                 // file-on-disk era; we still write them for back-compat with
                 // pre-cut-over rows but they are no longer read by new code.
-                sqlx::query(
+                sqlx::query!(
                     "INSERT INTO notes
                         (id, project_id, permalink, title, file_path,
                          storage, note_type, folder, tags, content, retrieval_anchor, content_hash, scope_paths)
-                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, $7, $8, $9, $10, $11)"
+                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, $7, $8, $9, $10, $11)",
+                    id,
+                    project_id,
+                    permalink,
+                    title,
+                    note_type,
+                    folder,
+                    tags_json,
+                    content,
+                    retrieval_anchor,
+                    content_hash,
+                    empty_scope
                 )
-                .bind(&id)
-                .bind(&project_id)
-                .bind(&permalink)
-                .bind(&title)
-                .bind(&note_type)
-                .bind(&folder)
-                .bind(&tags_json)
-                .bind(&content)
-                .bind(&retrieval_anchor)
-                .bind(&content_hash)
-                .bind(&empty_scope)
                 .execute(&mut *tx)
                 .await?;
 
@@ -470,24 +470,24 @@ impl NoteRepository {
                     }
                     None => None,
                 };
-                sqlx::query(
+                sqlx::query!(
                     "INSERT INTO notes
                         (id, project_id, permalink, title, file_path,
                          storage, note_type, folder, status, tags, content, retrieval_anchor, content_hash, scope_paths)
-                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, COALESCE($7, 'active'), $8, $9, $10, $11, $12)"
+                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, COALESCE($7, 'active'), $8, $9, $10, $11, $12)",
+                    id,
+                    project_id,
+                    permalink,
+                    title,
+                    note_type,
+                    folder,
+                    normalized_status,
+                    tags_json,
+                    content,
+                    retrieval_anchor,
+                    content_hash,
+                    scope_paths_json
                 )
-                .bind(&id)
-                .bind(&project_id)
-                .bind(&permalink)
-                .bind(&title)
-                .bind(&note_type)
-                .bind(&folder)
-                .bind(&normalized_status)
-                .bind(&tags_json)
-                .bind(&content)
-                .bind(&retrieval_anchor)
-                .bind(&content_hash)
-                .bind(&scope_paths_json)
                 .execute(&mut *tx)
                 .await?;
 
