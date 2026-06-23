@@ -1072,6 +1072,7 @@ dependencies = [
  "djinn-memory",
  "djinn-provider",
  "djinn-runtime",
+ "djinn-sandbox",
  "djinn-stack",
  "djinn-supervisor",
  "djinn-telemetry",
@@ -1082,14 +1083,12 @@ dependencies = [
  "hex",
  "insta",
  "kube",
- "landlock",
  "libc",
  "regex",
  "reqwest 0.13.2",
  "ring",
  "rmcp",
  "schemars 1.2.1",
- "seccompiler",
  "serde",
  "serde_json",
  "sha2",
@@ -1423,6 +1422,20 @@ dependencies = [
  "tokio-util",
  "tracing",
  "workspace-hack",
+]
+
+[[package]]
+name = "djinn-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "landlock",
+ "libc",
+ "seccompiler",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
