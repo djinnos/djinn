@@ -38,7 +38,17 @@ export function BlockShell({
   children,
 }: BlockShellProps) {
   return (
-    <div className={cn("overflow-hidden rounded-lg border bg-card", className)}>
+    // `relative` makes the shell the containing block for any absolutely
+    // positioned descendant (e.g. the header's `sr-only` "Code language" label
+    // on `AnnotatedCode`). Without it, such a child anchors to `<body>` at its
+    // deep in-flow offset, inflating the document's scrollHeight and spawning a
+    // phantom page-level scrollbar alongside the real in-panel one.
+    <div
+      className={cn(
+        "relative overflow-hidden rounded-lg border bg-card",
+        className,
+      )}
+    >
       <div className="flex items-center justify-between gap-3 border-b bg-muted/30 px-4 py-2">
         <span
           className={cn(
