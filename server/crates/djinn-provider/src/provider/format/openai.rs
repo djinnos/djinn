@@ -343,27 +343,7 @@ pub fn parse_openai_line(
 
     // Usage field (appears in final chunk when stream_options.include_usage=true)
     if let Some(usage) = chunk.usage {
-        let cache_read = usage
-            .prompt_tokens_details
-            .as_ref()
-            .map(|d| d.cached())
-            .unwrap_or(0);
-        let reasoning_output = usage
-            .completion_tokens_details
-            .as_ref()
-            .map(|d| d.reasoning())
-            .unwrap_or(0);
-        let input = usage.prompt_tokens.unwrap_or(0);
-        events.push(StreamEvent::Usage(TokenUsage {
-            input,
-            output: usage.completion_tokens.unwrap_or(0),
-            cache_read,
-            cache_write: 0,
-            reasoning_output,
-            // OpenAI `prompt_tokens` already includes cached tokens, so it is
-            // the full context (adding cache_read would double-count).
-            context_total: input,
-        }));
+        events.push(usage_event(usage));
     }
 
     let choices = match chunk.choices {
@@ -377,79 +357,141 @@ pub fn parse_openai_line(
             None => continue,
         };
 
-        // Reasoning/thinking content (e.g. Kimi K2.5, DeepSeek-R1, GLM-4.7)
-        let thinking = delta
-            .reasoning_content
-            .or(delta.reasoning_details)
-            .filter(|s| !s.is_empty());
-        if let Some(text) = thinking {
-            events.push(StreamEvent::Thinking(text));
-        }
+        append_reasoning_delta(
+            delta.reasoning_content,
+            delta.reasoning_details,
+            &mut events,
+        );
 
-        // Text content
-        if let Some(text) = delta.content
-            && !text.is_empty()
-        {
-            events.push(StreamEvent::Delta(ContentBlock::Text { text }));
-        }
+        append_text_delta(delta.content, &mut events);
 
         // Tool calls — accumulate across chunks, keyed by index
         if let Some(tool_calls) = delta.tool_calls {
             for tc in tool_calls {
-                let idx = tc.index.unwrap_or(0);
-                let func = tc.function.unwrap_or_default();
-                if let Some(entry) = tool_acc.get_mut(&idx) {
-                    // Existing entry — append fragments
-                    if let Some(id) = tc.id
-                        && !id.is_empty()
-                    {
-                        entry.0 = id;
-                    }
-                    if let Some(name) = func.name
-                        && !name.is_empty()
-                    {
-                        entry.1 = name;
-                    }
-                    if let Some(frag) = func.arguments {
-                        entry.2.push_str(&frag);
-                    }
-                } else {
-                    // New entry for this index
-                    tool_acc.insert(
-                        idx,
-                        (
-                            tc.id.unwrap_or_default(),
-                            func.name.unwrap_or_default(),
-                            func.arguments.unwrap_or_default(),
-                        ),
-                    );
-                }
+                accumulate_tool_call(tc, tool_acc);
             }
         }
 
         // On finish_reason="tool_calls", emit all accumulated tool uses
-        if choice
-            .finish_reason
-            .as_deref()
-            .map(|r| r == "tool_calls")
-            .unwrap_or(false)
-        {
-            // Drain all entries sorted by index (BTreeMap iterates in order)
-            let entries: Vec<_> = tool_acc.keys().cloned().collect();
-            for idx in entries {
-                if let Some((id, name, args)) = tool_acc.remove(&idx) {
-                    let input = serde_json::from_str(&args).unwrap_or(Value::Null);
-                    events.push(StreamEvent::Delta(ContentBlock::ToolUse {
-                        id,
-                        name,
-                        input,
-                    }));
-                }
-            }
+        if is_tool_calls_finish(choice.finish_reason.as_deref()) {
+            append_finished_tool_calls(tool_acc, &mut events);
         }
     }
 
     events
+}
+
+// ─── Stream-parsing helpers ──────────────────────────────────────────────────
+
+/// Convert an OpenAI `UsageChunk` into a `StreamEvent::Usage`.
+///
+/// Preserves the convention that `context_total` equals `prompt_tokens`
+/// (which already includes cached tokens, so adding `cache_read` would
+/// double-count).
+fn usage_event(usage: UsageChunk) -> StreamEvent {
+    let cache_read = usage
+        .prompt_tokens_details
+        .as_ref()
+        .map(|d| d.cached())
+        .unwrap_or(0);
+    let reasoning_output = usage
+        .completion_tokens_details
+        .as_ref()
+        .map(|d| d.reasoning())
+        .unwrap_or(0);
+    let input = usage.prompt_tokens.unwrap_or(0);
+    StreamEvent::Usage(TokenUsage {
+        input,
+        output: usage.completion_tokens.unwrap_or(0),
+        cache_read,
+        cache_write: 0,
+        reasoning_output,
+        context_total: input,
+    })
+}
+
+/// Emit a `StreamEvent::Thinking` for reasoning/thinking content from
+/// models like Kimi K2.5, DeepSeek-R1, or GLM-4.7. Preserves the
+/// `reasoning_content`-first precedence and empty-string suppression.
+fn append_reasoning_delta(
+    reasoning_content: Option<String>,
+    reasoning_details: Option<String>,
+    events: &mut Vec<StreamEvent>,
+) {
+    let thinking = reasoning_content
+        .or(reasoning_details)
+        .filter(|s| !s.is_empty());
+    if let Some(text) = thinking {
+        events.push(StreamEvent::Thinking(text));
+    }
+}
+
+/// Emit a `StreamEvent::Delta(Text)` for non-empty text content.
+fn append_text_delta(content: Option<String>, events: &mut Vec<StreamEvent>) {
+    if let Some(text) = content
+        && !text.is_empty()
+    {
+        events.push(StreamEvent::Delta(ContentBlock::Text { text }));
+    }
+}
+
+/// Accumulate a single `DeltaToolCall` into the tool-call accumulator.
+///
+/// Preserves current behavior: default index to 0, non-empty `id`/`name`
+/// replacement for existing entries, and argument fragment append.
+fn accumulate_tool_call(tc: DeltaToolCall, tool_acc: &mut BTreeMap<u32, (String, String, String)>) {
+    let idx = tc.index.unwrap_or(0);
+    let func = tc.function.unwrap_or_default();
+    if let Some(entry) = tool_acc.get_mut(&idx) {
+        // Existing entry — append fragments
+        if let Some(id) = tc.id
+            && !id.is_empty()
+        {
+            entry.0 = id;
+        }
+        if let Some(name) = func.name
+            && !name.is_empty()
+        {
+            entry.1 = name;
+        }
+        if let Some(frag) = func.arguments {
+            entry.2.push_str(&frag);
+        }
+    } else {
+        // New entry for this index
+        tool_acc.insert(
+            idx,
+            (
+                tc.id.unwrap_or_default(),
+                func.name.unwrap_or_default(),
+                func.arguments.unwrap_or_default(),
+            ),
+        );
+    }
+}
+
+/// Check whether a finish-reason signals tool-call completion.
+fn is_tool_calls_finish(reason: Option<&str>) -> bool {
+    matches!(reason, Some("tool_calls"))
+}
+
+/// Drain all accumulated tool calls (sorted by index via `BTreeMap`) and
+/// emit each as a `StreamEvent::Delta(ToolUse)`.
+fn append_finished_tool_calls(
+    tool_acc: &mut BTreeMap<u32, (String, String, String)>,
+    events: &mut Vec<StreamEvent>,
+) {
+    let entries: Vec<_> = tool_acc.keys().cloned().collect();
+    for idx in entries {
+        if let Some((id, name, args)) = tool_acc.remove(&idx) {
+            let input = serde_json::from_str(&args).unwrap_or(Value::Null);
+            events.push(StreamEvent::Delta(ContentBlock::ToolUse {
+                id,
+                name,
+                input,
+            }));
+        }
+    }
 }
 
 /// Parse a complete (non-streaming) OpenAI chat completion response into

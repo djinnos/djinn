@@ -49,7 +49,9 @@ fn registry_contains_v1_blocks() {
     // The wireframe block documents its `surface` enum + the ASCII / box-drawing
     // authoring contract (HTML/`--wf-*`/`data-icon` are gone).
     assert_eq!(
-        registry["wireframe"].fields["surface"].enum_values.as_deref(),
+        registry["wireframe"].fields["surface"]
+            .enum_values
+            .as_deref(),
         Some(["browser", "desktop", "mobile", "popover", "panel"].as_slice())
     );
     assert!(
