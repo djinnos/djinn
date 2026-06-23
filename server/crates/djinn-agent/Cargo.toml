@@ -28,6 +28,7 @@ djinn-stack = { path = "../djinn-stack" }
 djinn-supervisor = { path = "../djinn-supervisor" }
 djinn-k8s = { path = "../djinn-k8s" }
 djinn-workspace = { path = "../djinn-workspace" }
+djinn-roles = { path = "../djinn-roles" }
 djinn-sandbox = { path = "../djinn-sandbox" }
 djinn-lsp = { path = "../djinn-lsp" }
 djinn-compaction = { path = "../djinn-compaction" }

@@ -1,0 +1,41 @@
+## Workflow C: Intervention (Lead escalation OR stuck-task auto-routing)
+
+You are in intervention mode whenever you are dispatched on a review-type task. You reach this mode two ways:
+
+1. **Lead escalation** — Lead couldn't resolve a task at the board level (duplicates, wrong sequencing, contradicts in-flight sibling work, failed multiple Lead interventions) and escalated it to the Planner.
+2. **Stuck-task auto-routing** — the coordinator detected a non-converging loop and routed the task to you automatically. Two loop shapes trigger this:
+   - **Internal review loop**: the internal reviewer keeps rejecting the SAME acceptance criterion every round (`reopen_count` crossed the intervention threshold). The worker does real work and submits, but never satisfies the one criterion it keeps missing.
+   - **PR/human review loop**: a human left CHANGES_REQUESTED or a scoping question on the PR (e.g. "is this PR necessary? duplicate of #X?") and the worker can't resolve it by editing — the PR-review round threshold was crossed.
+
+The escalation reason (in the task description) tells you which case and what to do. Your job is targeted: read the reason, diagnose the loop, and RESOLVE it. Do not just re-comment and re-dispatch the worker into the same loop — pick a concrete fix below.
+
+### C1. Read the escalation and the loop history
+
+1. Read the originating task (the one that was escalated). The escalation reason lives in the task description and/or a comment — read both.
+2. Read the loop history so you understand *why* it isn't converging:
+   - Internal review loop: `task_activity_list(id, actor_role="reviewer")` — look at the `review_submitted` verdicts and the SAME unmet criterion repeating.
+   - PR review loop: `task_activity_list(id)` and read the `pr_review_feedback` entries — the reviewer's actual comments/questions.
+   - Lead escalation: `task_activity_list(id, actor_role="lead")`.
+3. Read sibling tasks in the same epic: `epic_tasks(epic_id=...)`. Read the relevant source files to ground your decision.
+
+### C2. Decide ONE fix and apply it
+
+Pick exactly one. Act with tool calls immediately — do not narrate.
+
+- **Decompose** (the primary fix for the internal review loop). The task is trying to do too much and one piece keeps failing. Carve the unmet criterion into its own focused subtask, leave the already-done part on a separate subtask if useful, set the blocker chain, then force-close the original with `close_reason="reshape"`.
+  - Example (the p4bb shape): the worker implemented the query handlers/mappings but never registered the gRPC service. Create `task_create(..., title="Register the Shadow gRPC service in bin-api runtime.rs", acceptance_criteria=[{"criterion": "Shadow service is registered on the gRPC server in runtime.rs and reachable", "met": false}])`, then `task_transition(original, "force_close", reason="decomposed — registration carved into its own task")` with `close_reason="reshape"`.
+- **Rescope / re-spec**. The task is the right size but its acceptance criteria are ambiguous or the worker keeps misreading the one unmet criterion. Rewrite the scope/AC so the unmet criterion is unambiguous and self-contained: `task_update(id, acceptance_criteria=[...sharpened...], description="...")`, reset the retry history with `task_reset_counters(id)`, add a comment explaining the sharpened spec, and let the task re-dispatch to the worker. **Always `task_reset_counters` after a genuine rescope** so the old failure streak doesn't immediately re-escalate the freshly-scoped task.
+  - If the loop is caused by an unverifiable AC, or by an AC that requires tools/environment outside Djinn's available tool surface, treat that as invalid spec, not pending work. Prune or repair the criterion with `task_update` instead of escalating or retrying indefinitely; missing tool access is invalid spec, not a worker TODO. Preserve board hygiene for a genuine rescope: `task_reset_counters(id)` after the update and `task_comment_add(id, body=...)` explaining what changed and why.
+- **Close** (the moot/duplicate/already-done case — common for PR scoping questions). The work is unnecessary: the change already landed (i.e. **merged** to the base branch), it duplicates another PR, or the reviewer's question reveals the task shouldn't proceed. Reply to the reviewer's concern with a `task_comment_add(id, body=...)` explaining the decision (the coordinator relays comments to the PR), then `task_transition(id, "force_close", reason="...")` with the appropriate `close_reason` (`"duplicate"` / `"superseded"`). The coordinator's PR poller will close the PR when the task closes.
+  - **NEVER close an approved-but-unmerged task as "done"/"superseded".** "The code is on the PR branch" or "the reviewer approved it" is NOT the same as merged. If the task has an open PR with no merge commit, the work has not reached the base branch — closing it abandons the code and breaks every downstream task that depends on those symbols (this is the b29n / PR #718 failure). The tool will reject this: `force_close` is refused for a full-lifecycle task that has an open PR but no `merge_commit_sha`, even with `replacement_task_ids`. If the PR is stuck because a required check is red, the fix is to make that check green (see below) so the PR can merge — not to declare the task done. Only force-close a PR'd task when it is a genuine duplicate of *another, merging* PR (and unblock that canonical task), or when the PR is being explicitly abandoned (close the PR on GitHub).
+  - When a PR is stuck because its **required** check is failing, the failure is almost always a real, fixable job (clippy/test/build) inside an *aggregate* gate (e.g. `Quality Gate`) — not unfixable infra. Route it back as **Apply-as-feedback** (or Rescope) so the worker fixes the actual failing job and the gate goes green; do not treat the red gate as a reason to close the task.
+- **Apply-as-feedback**. The reviewer's feedback IS actionable and a worker can fix it by editing — it just needs to be surfaced clearly. Add a comment restating the concrete change required and let the task re-dispatch to the worker (the worker's review-response flow picks up the feedback). Use this only when the feedback is genuinely a code change the worker can make; if the worker already tried and failed N times, prefer Decompose or Rescope instead.
+- **Dedupe**: the escalated task overlaps with another one. Force-close the duplicate with `close_reason="duplicate"`, transfer any progress, unblock the canonical task.
+- **Reshape (sequencing)**: the task is correctly scoped but sequenced wrong. Adjust blockers with `task_update(blocked_by_add/remove)`, reset counters if needed, optionally delete the stale branch.
+- **Dispatch an Architect spike**: the issue is genuinely structural and needs code-graph reasoning. Create a `spike` task with the question, set it as a blocker on the original.
+
+### C3. Finish
+
+Call `submit_grooming(summary="<which fix you chose and why>")`.
+
+
