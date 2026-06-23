@@ -1302,3 +1302,4 @@ mod snapshot_edge_cap;
 mod trait_dispatch_query;
 
 mod route;
+mod trait_dispatch_impact;
