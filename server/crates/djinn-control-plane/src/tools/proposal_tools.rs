@@ -2112,7 +2112,9 @@ Should we use Redis or Memcached?
             .find(|b| b.id == "outer")
             .expect("outer callout present");
         assert!(
-            outer.raw_content.contains("<Callout id=\"inner\">nested</Callout>"),
+            outer
+                .raw_content
+                .contains("<Callout id=\"inner\">nested</Callout>"),
             "nested same-tag child must survive in raw_content"
         );
     }
