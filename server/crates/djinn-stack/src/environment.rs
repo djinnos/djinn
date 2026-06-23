@@ -600,25 +600,33 @@ fn validate_workspaces(workspaces: &[Workspace]) -> EnvResult<()> {
                 language: ws.language.clone(),
             });
         }
-        // `root` is a path within the repo; allow `/` and be lenient.
-        validate_path("workspaces[*].root", &ws.root)?;
-        if let Some(slug) = &ws.slug {
-            validate_identifier("workspaces[*].slug", slug)?;
-        }
-        if let Some(name) = &ws.name {
-            validate_workspace_name("workspaces[*].name", name)?;
-        }
-        validate_workspace_tags("workspaces[*].tags", &ws.tags)?;
-        validate_identifier("workspaces[*].language", &ws.language)?;
-        if let Some(t) = &ws.toolchain {
-            validate_identifier("workspaces[*].toolchain", t)?;
-        }
-        if let Some(v) = &ws.version {
-            validate_identifier("workspaces[*].version", v)?;
-        }
-        if let Some(pm) = &ws.package_manager {
-            validate_identifier("workspaces[*].package_manager", pm)?;
-        }
+        validate_workspace_fields(ws)?;
+    }
+    Ok(())
+}
+
+/// Validate all fields of a single workspace, preserving the exact
+/// field-path strings and early-return order established by the
+/// original inline loop.
+fn validate_workspace_fields(ws: &Workspace) -> EnvResult<()> {
+    // `root` is a path within the repo; allow `/` and be lenient.
+    validate_path("workspaces[*].root", &ws.root)?;
+    if let Some(slug) = &ws.slug {
+        validate_identifier("workspaces[*].slug", slug)?;
+    }
+    if let Some(name) = &ws.name {
+        validate_workspace_name("workspaces[*].name", name)?;
+    }
+    validate_workspace_tags("workspaces[*].tags", &ws.tags)?;
+    validate_identifier("workspaces[*].language", &ws.language)?;
+    if let Some(t) = &ws.toolchain {
+        validate_identifier("workspaces[*].toolchain", t)?;
+    }
+    if let Some(v) = &ws.version {
+        validate_identifier("workspaces[*].version", v)?;
+    }
+    if let Some(pm) = &ws.package_manager {
+        validate_identifier("workspaces[*].package_manager", pm)?;
     }
     Ok(())
 }
@@ -713,19 +721,26 @@ fn validate_env(env: &BTreeMap<String, String>) -> EnvResult<()> {
         });
     }
     for (k, v) in env {
-        if !is_valid_env_key(k) {
-            return Err(EnvironmentConfigError::InvalidEnvKey { key: k.clone() });
-        }
-        if v.contains('\n') || v.contains('\r') || v.contains('\0') {
-            return Err(EnvironmentConfigError::InvalidEnvValue { key: k.clone() });
-        }
-        if v.len() > MAX_STRING_LEN {
-            return Err(EnvironmentConfigError::TooLong {
-                field: format!("env[{k}]"),
-                len: v.len(),
-                max: MAX_STRING_LEN,
-            });
-        }
+        validate_env_entry(k, v)?;
+    }
+    Ok(())
+}
+
+/// Validate a single env var entry, preserving exact error variants
+/// and early-return order.
+fn validate_env_entry(key: &str, value: &str) -> EnvResult<()> {
+    if !is_valid_env_key(key) {
+        return Err(EnvironmentConfigError::InvalidEnvKey { key: key.into() });
+    }
+    if value.contains('\n') || value.contains('\r') || value.contains('\0') {
+        return Err(EnvironmentConfigError::InvalidEnvValue { key: key.into() });
+    }
+    if value.len() > MAX_STRING_LEN {
+        return Err(EnvironmentConfigError::TooLong {
+            field: format!("env[{key}]"),
+            len: value.len(),
+            max: MAX_STRING_LEN,
+        });
     }
     Ok(())
 }
@@ -839,15 +854,18 @@ pub struct LifecycleHooks {
 
 impl LifecycleHooks {
     fn validate(&self) -> EnvResult<()> {
-        validate_hook_list("lifecycle.post_build", &self.post_build)?;
-        validate_hook_list("lifecycle.pre_anything", &self.pre_anything)?;
-        validate_hook_list("lifecycle.pre_task", &self.pre_task)?;
-        validate_hook_list("lifecycle.pre_verification", &self.pre_verification)?;
+        validate_lifecycle_phase("lifecycle.post_build", &self.post_build)?;
+        validate_lifecycle_phase("lifecycle.pre_anything", &self.pre_anything)?;
+        validate_lifecycle_phase("lifecycle.pre_task", &self.pre_task)?;
+        validate_lifecycle_phase("lifecycle.pre_verification", &self.pre_verification)?;
         Ok(())
     }
 }
 
-fn validate_hook_list(field: &str, hooks: &[HookCommand]) -> EnvResult<()> {
+/// Validate one lifecycle phase: cap the list length, then validate each hook
+/// with its indexed field path.  Preserves exact field strings and early-return
+/// order.
+fn validate_lifecycle_phase(field: &str, hooks: &[HookCommand]) -> EnvResult<()> {
     if hooks.len() > MAX_HOOKS_PER_PHASE {
         return Err(EnvironmentConfigError::ListTooLong {
             field: field.into(),
@@ -1922,6 +1940,68 @@ mod tests {
         assert!(
             matches!(err, EnvironmentConfigError::UnsafeIdentifier { ref field, .. } if field == "languages.node.default_version"),
             "expected node error first, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_first_error_is_root_before_slug() {
+        // When a workspace has both an invalid root and an invalid slug,
+        // the root error (UnsafeIdentifier) must be returned first because
+        // validate_workspace_fields checks root before slug.
+        let mut cfg = valid_minimal();
+        cfg.workspaces = vec![Workspace {
+            slug: Some("bad slug".to_owned()),
+            name: None,
+            tags: Vec::new(),
+            root: "/etc".to_owned(),
+            language: "rust".to_owned(),
+            toolchain: None,
+            version: None,
+            package_manager: None,
+        }];
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::UnsafeIdentifier { ref field, .. } if field == "workspaces[*].root"),
+            "expected root error first, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn env_var_value_too_long_reports_correct_field() {
+        let mut cfg = valid_minimal();
+        let long_value = "x".repeat(MAX_STRING_LEN + 1);
+        cfg.env.insert("KEY".to_owned(), long_value);
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::TooLong { ref field, .. } if field == "env[KEY]"),
+            "expected env[KEY] TooLong, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_hook_field_path_preserved_for_exec_argv() {
+        // A HookCommand::Exec with an empty argv list must report the
+        // indexed field path so callers know which phase and hook failed.
+        let mut cfg = valid_minimal();
+        cfg.lifecycle.pre_task = vec![HookCommand::Exec(vec![])];
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::EmptyValue { ref field } if field == "lifecycle.pre_task[0]"),
+            "expected lifecycle.pre_task[0] EmptyValue, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_phase_order_preserved() {
+        // post_build is validated before pre_anything, so an error in
+        // post_build wins even when pre_anything is also invalid.
+        let mut cfg = valid_minimal();
+        cfg.lifecycle.post_build = vec![HookCommand::Exec(vec![])];
+        cfg.lifecycle.pre_anything = vec![HookCommand::Shell("x".repeat(MAX_HOOK_SHELL_LEN + 1))];
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::EmptyValue { ref field } if field == "lifecycle.post_build[0]"),
+            "expected post_build error first, got: {err:?}"
         );
     }
 
