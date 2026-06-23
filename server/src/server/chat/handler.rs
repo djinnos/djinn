@@ -47,6 +47,205 @@ const MAX_TOOL_ITERATIONS: usize = 20;
 /// the chat loop (C3). Matches the worker reply loop's `MAX_COMPACTION_RETRIES`.
 const MAX_CHAT_COMPACTION_RETRIES: u32 = 2;
 
+/// Outcome of draining a single provider stream turn.
+enum TurnResult {
+    /// Normal turn with text, provider state, and optional tool calls.
+    Ok {
+        text: String,
+        provider_state: Vec<ContentBlock>,
+        tool_calls: Vec<ContentBlock>,
+    },
+    /// Provider stream emitted an error event; partial assistant content
+    /// was already persisted and the caller should abort the loop.
+    StreamError,
+    /// Provider returned an empty turn (no text and no tool calls).
+    Empty,
+}
+
+/// Outcome of `init_provider_stream` — distinguishes the two error paths
+/// that the caller must handle with different control flow (`continue` vs
+/// `break`).
+enum StreamInitOutcome {
+    /// A recoverable compaction succeeded; the caller should retry stream
+    /// creation (i.e. `continue` the chat loop).
+    CompactedAndContinue,
+    /// An unrecoverable failure: either a non-compaction error or compaction
+    /// exhaustion. An SSE error event has already been sent; the caller
+    /// should `break` the chat loop.
+    UnrecoverableBreak,
+}
+
+/// Proactively compact the conversation if it exceeds the compaction threshold.
+async fn maybe_compact_proactively(
+    provider: &dyn LlmProvider,
+    conversation: &mut Conversation,
+    session_id: &str,
+    context_window: i64,
+) {
+    if djinn_agent::compaction::needs_compaction(
+        conversation.token_estimate() as u32,
+        context_window,
+    ) {
+        djinn_agent::compaction::compact_conversation(
+            provider,
+            conversation,
+            session_id,
+            "",
+            djinn_agent::compaction::CompactionContext::ChatSession,
+            context_window,
+        )
+        .await;
+    }
+}
+
+/// Attempt to initialize a provider stream, with bounded recoverable compaction retry.
+///
+/// Returns `Ok(stream)` on success. On recoverable compaction success, returns
+/// `Err(StreamInitOutcome::CompactedAndContinue)` so the caller retries. On
+/// unrecoverable failure, sends an SSE error event and returns
+/// `Err(StreamInitOutcome::UnrecoverableBreak)` so the caller breaks the loop.
+async fn init_provider_stream(
+    provider: &dyn LlmProvider,
+    conversation: &mut Conversation,
+    tool_schemas: &[serde_json::Value],
+    tx: &tokio::sync::mpsc::Sender<Event>,
+    session_id: &str,
+    context_window: i64,
+    compaction_attempts: &mut u32,
+) -> Result<
+    std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent, anyhow::Error>> + Send>>,
+    StreamInitOutcome,
+> {
+    match provider
+        .stream(
+            conversation,
+            tool_schemas,
+            Some(djinn_provider::provider::ToolChoice::Auto),
+        )
+        .await
+    {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            // C3 reactive net: a context-overflow (or orphaned-tool) failure
+            // on stream init is recoverable — summarise and retry rather than
+            // dropping the turn. Bounded by MAX_CHAT_COMPACTION_RETRIES.
+            if djinn_agent::compaction::is_compaction_recoverable_error(&e)
+                && *compaction_attempts < MAX_CHAT_COMPACTION_RETRIES
+            {
+                *compaction_attempts += 1;
+                tracing::warn!(
+                    error = %e,
+                    attempt = *compaction_attempts,
+                    "chat: recoverable stream-init failure; compacting and retrying"
+                );
+                if djinn_agent::compaction::compact_conversation(
+                    provider,
+                    conversation,
+                    session_id,
+                    "",
+                    djinn_agent::compaction::CompactionContext::ChatSession,
+                    context_window,
+                )
+                .await
+                {
+                    return Err(StreamInitOutcome::CompactedAndContinue);
+                }
+            }
+            tracing::warn!(error=%e, "provider stream init failed");
+            let _ = tx
+                .send(sse_json_event(
+                    "error",
+                    &ErrorPayload {
+                        message: format!("provider stream failed: {e}"),
+                    },
+                ))
+                .await;
+            Err(StreamInitOutcome::UnrecoverableBreak)
+        }
+    }
+}
+
+/// Drain a single provider stream turn, forwarding deltas via SSE and assembling
+/// the turn result. On stream errors, persists partial assistant content and returns
+/// `TurnResult::StreamError` so the caller can abort.
+async fn drain_provider_turn(
+    stream: &mut (impl futures::Stream<Item = Result<StreamEvent, anyhow::Error>> + Unpin),
+    tx: &tokio::sync::mpsc::Sender<Event>,
+    state: &AppState,
+    session_id: &str,
+) -> TurnResult {
+    let mut turn_text = String::new();
+    let mut turn_provider_state: Vec<ContentBlock> = Vec::new();
+    let mut tool_calls: Vec<ContentBlock> = Vec::new();
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(StreamEvent::Delta(ContentBlock::Text { text })) => {
+                turn_text.push_str(&text);
+                let _ = tx
+                    .send(sse_json_event("delta", &DeltaPayload { text }))
+                    .await;
+            }
+            Ok(StreamEvent::Delta(tool @ ContentBlock::ToolUse { .. })) => tool_calls.push(tool),
+            Ok(StreamEvent::Delta(state @ ContentBlock::OpenAIReasoning { .. }))
+            | Ok(StreamEvent::Delta(state @ ContentBlock::Thinking { .. })) => {
+                turn_provider_state.push(state);
+            }
+            Ok(StreamEvent::Done) => break,
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error=%e, "provider stream event failed");
+                let _ = tx
+                    .send(sse_json_event(
+                        "error",
+                        &ErrorPayload {
+                            message: format!("provider stream error: {e}"),
+                        },
+                    ))
+                    .await;
+                // Prior turns were already persisted incrementally and
+                // are well-formed. Persist this turn's partial text /
+                // reasoning so a refresh can show it — but DROP any
+                // buffered tool calls: their results will never be
+                // produced, and persisting a `function_call` with no
+                // `function_call_output` is exactly the orphan that
+                // wedges the next turn.
+                let mut partial: Vec<ContentBlock> = Vec::new();
+                partial.append(&mut turn_provider_state);
+                if !turn_text.is_empty() {
+                    partial.push(ContentBlock::Text { text: turn_text });
+                }
+                persist_turn(state, session_id, "assistant", &partial).await;
+                return TurnResult::StreamError;
+            }
+        }
+    }
+
+    if turn_text.is_empty() && tool_calls.is_empty() {
+        tracing::warn!(
+            provider_state_items = turn_provider_state.len(),
+            "chat provider returned an empty assistant turn"
+        );
+        let _ = tx
+            .send(sse_json_event(
+                "error",
+                &ErrorPayload {
+                    message: "provider returned an empty response; this usually means the upstream Codex backend refused or throttled the request".to_string(),
+                },
+            ))
+            .await;
+        // Prior turns already persisted incrementally; this turn has no
+        // content worth storing.
+        return TurnResult::Empty;
+    }
+
+    TurnResult::Ok {
+        text: turn_text,
+        provider_state: turn_provider_state,
+        tool_calls,
+    }
+}
+
 /// The initial title stamped on a freshly-upserted chat session.  The
 /// server-side auto-title path in [`run_chat_loop`] only fires when it
 /// observes this exact value, so both the repository layer
@@ -627,136 +826,41 @@ async fn run_chat_loop(ctx: ChatLoopContext) {
         // compaction machinery (same 80%-of-window trigger). After a compaction
         // the in-memory estimate falls back below threshold, so this no-ops on
         // subsequent iterations within the same request.
-        if djinn_agent::compaction::needs_compaction(
-            conversation.token_estimate() as u32,
+        maybe_compact_proactively(
+            provider.as_ref(),
+            &mut conversation,
+            &session_id,
             context_window,
-        ) {
-            djinn_agent::compaction::compact_conversation(
-                provider.as_ref(),
-                &mut conversation,
-                &session_id,
-                "",
-                djinn_agent::compaction::CompactionContext::ChatSession,
-                context_window,
-            )
-            .await;
-        }
+        )
+        .await;
 
-        let stream = match provider
-            .stream(
-                &conversation,
-                &tool_schemas,
-                Some(djinn_provider::provider::ToolChoice::Auto),
-            )
-            .await
+        let stream = match init_provider_stream(
+            provider.as_ref(),
+            &mut conversation,
+            &tool_schemas,
+            &tx,
+            &session_id,
+            context_window,
+            &mut compaction_attempts,
+        )
+        .await
         {
             Ok(s) => s,
-            Err(e) => {
-                // C3 reactive net: a context-overflow (or orphaned-tool) failure
-                // on stream init is recoverable — summarise and retry rather than
-                // dropping the turn. Bounded by MAX_CHAT_COMPACTION_RETRIES.
-                if djinn_agent::compaction::is_compaction_recoverable_error(&e)
-                    && compaction_attempts < MAX_CHAT_COMPACTION_RETRIES
-                {
-                    compaction_attempts += 1;
-                    tracing::warn!(
-                        error = %e,
-                        attempt = compaction_attempts,
-                        "chat: recoverable stream-init failure; compacting and retrying"
-                    );
-                    if djinn_agent::compaction::compact_conversation(
-                        provider.as_ref(),
-                        &mut conversation,
-                        &session_id,
-                        "",
-                        djinn_agent::compaction::CompactionContext::ChatSession,
-                        context_window,
-                    )
-                    .await
-                    {
-                        continue;
-                    }
-                }
-                tracing::warn!(error=%e, "provider stream init failed");
-                let _ = tx
-                    .send(sse_json_event(
-                        "error",
-                        &ErrorPayload {
-                            message: format!("provider stream failed: {e}"),
-                        },
-                    ))
-                    .await;
-                break;
-            }
+            Err(StreamInitOutcome::CompactedAndContinue) => continue,
+            Err(StreamInitOutcome::UnrecoverableBreak) => break,
         };
 
         tokio::pin!(stream);
-        let mut turn_text = String::new();
-        let mut turn_provider_state: Vec<ContentBlock> = Vec::new();
-        let mut tool_calls: Vec<ContentBlock> = Vec::new();
-
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(StreamEvent::Delta(ContentBlock::Text { text })) => {
-                    turn_text.push_str(&text);
-                    let _ = tx
-                        .send(sse_json_event("delta", &DeltaPayload { text }))
-                        .await;
-                }
-                Ok(StreamEvent::Delta(tool @ ContentBlock::ToolUse { .. })) => {
-                    tool_calls.push(tool)
-                }
-                Ok(StreamEvent::Delta(state @ ContentBlock::OpenAIReasoning { .. }))
-                | Ok(StreamEvent::Delta(state @ ContentBlock::Thinking { .. })) => {
-                    turn_provider_state.push(state);
-                }
-                Ok(StreamEvent::Done) => break,
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error=%e, "provider stream event failed");
-                    let _ = tx
-                        .send(sse_json_event(
-                            "error",
-                            &ErrorPayload {
-                                message: format!("provider stream error: {e}"),
-                            },
-                        ))
-                        .await;
-                    // Prior turns were already persisted incrementally and
-                    // are well-formed. Persist this turn's partial text /
-                    // reasoning so a refresh can show it — but DROP any
-                    // buffered tool calls: their results will never be
-                    // produced, and persisting a `function_call` with no
-                    // `function_call_output` is exactly the orphan that
-                    // wedges the next turn.
-                    let mut partial: Vec<ContentBlock> = Vec::new();
-                    partial.append(&mut turn_provider_state);
-                    if !turn_text.is_empty() {
-                        partial.push(ContentBlock::Text { text: turn_text });
-                    }
-                    persist_turn(&state, &session_id, "assistant", &partial).await;
-                    return;
-                }
-            }
-        }
-
-        if turn_text.is_empty() && tool_calls.is_empty() {
-            tracing::warn!(
-                provider_state_items = turn_provider_state.len(),
-                "chat provider returned an empty assistant turn"
-            );
-            let _ = tx
-                .send(sse_json_event(
-                    "error",
-                    &ErrorPayload {
-                        message: "provider returned an empty response; this usually means the upstream Codex backend refused or throttled the request".to_string(),
-                    },
-                ))
-                .await;
-            // Prior turns already persisted incrementally; this turn has no
-            // content worth storing.
-            return;
-        }
+        let turn = drain_provider_turn(&mut stream, &tx, &state, &session_id).await;
+        let (turn_text, turn_provider_state, tool_calls) = match turn {
+            TurnResult::Ok {
+                text,
+                provider_state,
+                tool_calls,
+            } => (text, provider_state, tool_calls),
+            TurnResult::StreamError => return,
+            TurnResult::Empty => return,
+        };
 
         let mut assistant_content = Vec::new();
         assistant_content.extend(turn_provider_state);

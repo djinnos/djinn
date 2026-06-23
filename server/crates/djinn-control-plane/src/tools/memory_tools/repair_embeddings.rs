@@ -5,7 +5,11 @@
 
 use rmcp::{Json, handler::server::wrapper::Parameters, tool, tool_router};
 
-use djinn_db::{CodeChunkRepository, embedding_content_hash};
+use djinn_db::{
+    CodeChunkRepository, NoteRepository, embedding_content_hash,
+    repositories::code_chunk::CodeChunkRepairEmbeddingRow,
+    repositories::note::NoteRepairEmbeddingRow,
+};
 
 use super::write_services::note_repository;
 use super::{MemoryRepairEmbeddingFailure, MemoryRepairEmbeddingsResponse, RepairEmbeddingsParams};
@@ -35,6 +39,128 @@ impl DjinnMcpServer {
     ) -> Json<MemoryRepairEmbeddingsResponse> {
         Json(repair_embeddings(self, p).await)
     }
+}
+
+/// Returns `true` when a note's embedding metadata is missing or stale.
+///
+/// Staleness is detected by content-hash drift, model-version drift, or
+/// (when the vector store is active) a non-`"ready"` extension state that
+/// indicates the Qdrant upsert never completed.
+fn note_row_needs_repair(
+    row: &NoteRepairEmbeddingRow,
+    expected_hash: &str,
+    model_version: &str,
+    vector_store_active: bool,
+) -> bool {
+    match (row.content_hash.as_deref(), row.model_version.as_deref()) {
+        (Some(hash), Some(version)) => {
+            let content_or_model_drifted = hash != expected_hash || version != model_version;
+            // Only let `extension_state` invalidate freshness when the
+            // vector store can index. Otherwise every Noop /
+            // unreachable-Qdrant meta row reads as stale forever.
+            let vector_missing = vector_store_active
+                && row.extension_state.as_deref().unwrap_or("pending") != "ready";
+            content_or_model_drifted || vector_missing
+        }
+        // No meta row at all → definitely needs embedding.
+        _ => true,
+    }
+}
+
+/// Handle a single note embedding repair row: skip if up-to-date (unless
+/// `force`), attempt the embed, and update the response counters. Performs
+/// one cooperative `yield_now` at the end so a large repair doesn't starve
+/// the runtime.
+async fn repair_note_embedding_row(
+    repo: &NoteRepository,
+    row: NoteRepairEmbeddingRow,
+    force: bool,
+    model_version: &str,
+    vector_store_active: bool,
+    response: &mut MemoryRepairEmbeddingsResponse,
+) {
+    let expected_hash = embedding_content_hash(
+        &row.title,
+        &row.note_type,
+        &row.tags,
+        &row.content,
+        row.retrieval_anchor.as_deref(),
+    );
+
+    let is_stale = note_row_needs_repair(&row, &expected_hash, model_version, vector_store_active);
+
+    if !force && !is_stale {
+        response.up_to_date += 1;
+    } else {
+        match repo
+            .embed_note_now(
+                &row.id,
+                &row.title,
+                &row.note_type,
+                &row.tags,
+                &row.content,
+                row.retrieval_anchor.as_deref(),
+            )
+            .await
+        {
+            Ok(_) => response.repaired += 1,
+            Err(reason) => {
+                response.failed += 1;
+                if response.failures.len() < MAX_REPORTED_FAILURES {
+                    response.failures.push(MemoryRepairEmbeddingFailure {
+                        note_id: row.id.clone(),
+                        reason,
+                    });
+                }
+            }
+        }
+    }
+
+    // Cooperative yield so a large repair doesn't starve the runtime.
+    tokio::task::yield_now().await;
+}
+
+/// Returns `true` when a code-chunk row's embedding metadata is missing or
+/// stale. Unlike the note-side check, this always considers the extension
+/// state (the vector-store-active guard is unnecessary because code-chunk
+/// meta rows only exist when the backend has been enabled).
+fn code_chunk_row_needs_repair(row: &CodeChunkRepairEmbeddingRow, model_version: &str) -> bool {
+    match (
+        row.meta_content_hash.as_deref(),
+        row.meta_model_version.as_deref(),
+    ) {
+        (Some(hash), Some(version)) => {
+            hash != row.content_hash
+                || version != model_version
+                || row.meta_extension_state.as_deref().unwrap_or("pending") != "ready"
+        }
+        _ => true,
+    }
+}
+
+/// Account for a single code-chunk row: skip if up-to-date (unless `force`),
+/// or count as failed. The actual embed call hasn't shipped yet (PR B3), so
+/// stale chunks are always counted as failures without touching the
+/// note-scoped failures vector. Performs one cooperative `yield_now` at the
+/// end.
+async fn account_code_chunk_repair_row(
+    row: &CodeChunkRepairEmbeddingRow,
+    force: bool,
+    model_version: &str,
+    response: &mut MemoryRepairEmbeddingsResponse,
+) {
+    let is_stale = code_chunk_row_needs_repair(row, model_version);
+
+    if !force && !is_stale {
+        response.code_chunks_up_to_date += 1;
+    } else {
+        // PR B3 wires the actual embed call. Until then, we
+        // can't repair: count as failed without touching the
+        // failures vector (those are note-scoped today).
+        response.code_chunks_failed += 1;
+    }
+
+    tokio::task::yield_now().await;
 }
 
 async fn repair_embeddings(
@@ -87,57 +213,15 @@ async fn repair_embeddings(
     };
 
     for row in rows {
-        let expected_hash = embedding_content_hash(
-            &row.title,
-            &row.note_type,
-            &row.tags,
-            &row.content,
-            row.retrieval_anchor.as_deref(),
-        );
-
-        let is_stale = match (row.content_hash.as_deref(), row.model_version.as_deref()) {
-            (Some(hash), Some(version)) => {
-                let content_or_model_drifted = hash != expected_hash || version != model_version;
-                // Only let `extension_state` invalidate freshness when the
-                // vector store can actually index. Otherwise every Noop /
-                // unreachable-Qdrant meta row reads as stale forever.
-                let vector_missing = vector_store_active
-                    && row.extension_state.as_deref().unwrap_or("pending") != "ready";
-                content_or_model_drifted || vector_missing
-            }
-            // No meta row at all → definitely needs embedding.
-            _ => true,
-        };
-
-        if !force && !is_stale {
-            response.up_to_date += 1;
-        } else {
-            match repo
-                .embed_note_now(
-                    &row.id,
-                    &row.title,
-                    &row.note_type,
-                    &row.tags,
-                    &row.content,
-                    row.retrieval_anchor.as_deref(),
-                )
-                .await
-            {
-                Ok(_) => response.repaired += 1,
-                Err(reason) => {
-                    response.failed += 1;
-                    if response.failures.len() < MAX_REPORTED_FAILURES {
-                        response.failures.push(MemoryRepairEmbeddingFailure {
-                            note_id: row.id.clone(),
-                            reason,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Cooperative yield so a large repair doesn't starve the runtime.
-        tokio::task::yield_now().await;
+        repair_note_embedding_row(
+            &repo,
+            row,
+            force,
+            &model_version,
+            vector_store_active,
+            &mut response,
+        )
+        .await;
     }
 
     // Code-chunk pass (PR B1 scaffolding). The chunker (B2) and embedding
@@ -153,33 +237,7 @@ async fn repair_embeddings(
         Ok(rows) => {
             response.code_chunks_total = rows.len() as i64;
             for row in rows {
-                // Mirror the note-side rule: a row whose Qdrant upsert
-                // failed is recorded with `extension_state="pending"`
-                // and must be treated as stale even when the content
-                // hash + model version match — the vector store doesn't
-                // actually have a point yet.
-                let is_stale = match (
-                    row.meta_content_hash.as_deref(),
-                    row.meta_model_version.as_deref(),
-                ) {
-                    (Some(hash), Some(version)) => {
-                        hash != row.content_hash
-                            || version != model_version
-                            || row.meta_extension_state.as_deref().unwrap_or("pending") != "ready"
-                    }
-                    _ => true,
-                };
-
-                if !force && !is_stale {
-                    response.code_chunks_up_to_date += 1;
-                } else {
-                    // PR B3 wires the actual embed call. Until then, we
-                    // can't repair: count as failed without touching the
-                    // failures vector (those are note-scoped today).
-                    response.code_chunks_failed += 1;
-                }
-
-                tokio::task::yield_now().await;
+                account_code_chunk_repair_row(&row, force, &model_version, &mut response).await;
             }
         }
         Err(error) => {

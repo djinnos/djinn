@@ -1,16 +1,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use super::workspace::RootStrategy;
+use crate::workspace::RootStrategy;
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct ServerDef {
-    pub(super) id: &'static str,
+pub(crate) struct ServerDef {
+    pub(crate) id: &'static str,
     /// The binary name (first element) and fixed args.
-    pub(super) cmd: &'static [&'static str],
-    pub(super) root_markers: &'static [&'static str],
+    pub(crate) cmd: &'static [&'static str],
+    pub(crate) root_markers: &'static [&'static str],
     /// How to pick the project root among marker-bearing ancestors.
-    pub(super) root_strategy: RootStrategy,
+    pub(crate) root_strategy: RootStrategy,
     /// How to install this server if it's not found on PATH.
     install: InstallMethod,
 }
@@ -25,7 +25,7 @@ enum InstallMethod {
     GoInstall(&'static str),
 }
 
-pub(super) fn server_for_path(path: &Path) -> Option<ServerDef> {
+pub(crate) fn server_for_path(path: &Path) -> Option<ServerDef> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("rs") => Some(ServerDef {
             id: "rust-analyzer",
@@ -69,7 +69,7 @@ pub(super) fn server_for_path(path: &Path) -> Option<ServerDef> {
 /// commands (observed wedging 3 of 4 pods on the VPS). The agent runs its
 /// own `cargo check` constantly, so flycheck is redundant; rust-analyzer's
 /// native diagnostics (type errors etc.) still publish without it.
-pub(super) fn initialization_options(server_id: &str) -> Option<serde_json::Value> {
+pub(crate) fn initialization_options(server_id: &str) -> Option<serde_json::Value> {
     match server_id {
         "rust-analyzer" => Some(serde_json::json!({ "checkOnSave": false })),
         _ => None,
@@ -77,7 +77,7 @@ pub(super) fn initialization_options(server_id: &str) -> Option<serde_json::Valu
 }
 
 /// Djinn-managed binary directory for auto-installed LSP servers.
-pub(super) fn djinn_bin_dir() -> PathBuf {
+pub(crate) fn djinn_bin_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| {
             PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share")
@@ -88,14 +88,14 @@ pub(super) fn djinn_bin_dir() -> PathBuf {
 
 /// Resolve the binary for an LSP server: check PATH (augmented with
 /// ~/.djinn/bin), and auto-install if missing.
-pub(super) async fn resolve_binary(server: &ServerDef) -> Result<PathBuf, String> {
+pub(crate) async fn resolve_binary(server: &ServerDef) -> Result<PathBuf, String> {
     let bin_dir = djinn_bin_dir();
     let system_path = std::env::var("PATH").unwrap_or_default();
     resolve_binary_inner(server, &bin_dir, &system_path)
 }
 
 /// Core resolution logic, factored out for testing.
-pub(super) fn resolve_binary_inner(
+pub(crate) fn resolve_binary_inner(
     server: &ServerDef,
     bin_dir: &Path,
     system_path: &str,
@@ -228,7 +228,7 @@ pub(super) fn resolve_binary_inner(
 }
 
 /// Simple which(1) — scan colon-delimited PATH for an executable.
-pub(super) fn which_in_path(binary: &str, path_var: &str) -> Option<PathBuf> {
+pub(crate) fn which_in_path(binary: &str, path_var: &str) -> Option<PathBuf> {
     for dir in path_var.split(':') {
         let candidate = Path::new(dir).join(binary);
         if candidate.is_file() {
@@ -242,7 +242,7 @@ pub(super) fn which_in_path(binary: &str, path_var: &str) -> Option<PathBuf> {
     None
 }
 
-pub(super) fn language_id_for_path(path: &Path) -> Option<&'static str> {
+pub(crate) fn language_id_for_path(path: &Path) -> Option<&'static str> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("rs") => Some("rust"),
         Some("go") => Some("go"),
@@ -275,7 +275,7 @@ mod tests {
     }
 
     fn tempdir_in_tmp() -> tempfile::TempDir {
-        crate::test_helpers::test_tempdir("djinn-lsp-")
+        crate::test_support::test_tempdir("djinn-lsp-")
     }
 
     #[test]
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn which_in_path_finds_existing_binary() {
-        let tmp = crate::test_helpers::test_tempdir("djinn-lsp-which-");
+        let tmp = crate::test_support::test_tempdir("djinn-lsp-which-");
         make_fake_binary(tmp.path(), "ls", "#!/bin/sh\n");
         let result = which_in_path("ls", &tmp.path().to_string_lossy());
         assert_eq!(result, Some(tmp.path().join("ls")));
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn which_in_path_scans_multiple_dirs() {
-        let tmp = crate::test_helpers::test_tempdir("djinn-lsp-which-");
+        let tmp = crate::test_support::test_tempdir("djinn-lsp-which-");
         let first = tmp.path().join("first");
         let second = tmp.path().join("second");
         std::fs::create_dir_all(&first).unwrap();

@@ -5,7 +5,7 @@ use super::spawn_fake_client;
 #[tokio::test]
 async fn shutdown_for_worktree_removes_matching_clients() {
     let mgr = LspManager::new();
-    let temp = crate::test_helpers::test_tempdir("djinn-lsp-worktree-");
+    let temp = super::test_tempdir("djinn-lsp-worktree-");
     let wt1_buf = temp.path().join("worktree1");
     let wt2_buf = temp.path().join("worktree2");
     let wt1 = wt1_buf.to_string_lossy().to_string();
@@ -34,7 +34,7 @@ async fn shutdown_for_worktree_removes_matching_clients() {
 #[tokio::test]
 async fn shutdown_for_worktree_noop_on_no_match() {
     let mgr = LspManager::new();
-    let temp = crate::test_helpers::test_tempdir("djinn-lsp-worktree-");
+    let temp = super::test_tempdir("djinn-lsp-worktree-");
     let other = temp.path().join("other");
     let nonexistent = temp.path().join("nonexistent");
     let (k, c) = spawn_fake_client(&other.join("proj").to_string_lossy()).await;
@@ -48,7 +48,7 @@ async fn shutdown_for_worktree_noop_on_no_match() {
 #[tokio::test]
 async fn shutdown_all_kills_all_clients() {
     let mgr = LspManager::new();
-    let temp = crate::test_helpers::test_tempdir("djinn-lsp-worktree-");
+    let temp = super::test_tempdir("djinn-lsp-worktree-");
     let wt = temp.path().join("wt");
     let (k1, c1) = spawn_fake_client(&wt.join("proj").to_string_lossy()).await;
     let (k2, c2) = spawn_fake_client(&wt.join("proj2").to_string_lossy()).await;
@@ -65,7 +65,7 @@ async fn shutdown_all_kills_all_clients() {
 #[tokio::test]
 async fn session_end_leaves_no_clients_for_worktree() {
     let mgr = LspManager::new();
-    let temp = crate::test_helpers::test_tempdir("djinn-lsp-worktree-");
+    let temp = super::test_tempdir("djinn-lsp-worktree-");
     let worktree = temp.path().join("task-abc").join("worktree");
     let other = temp.path().join("task-xyz").join("worktree");
     let worktree_str = worktree.to_string_lossy().to_string();

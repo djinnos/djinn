@@ -7,12 +7,12 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant, sleep};
 
-use super::client::{LspClient, clone_client_refs, kill_client, spawn_client, write_lsp_message};
-use super::diagnostics::{Diagnostic, clear_uri, collect_for_worktree};
-use super::requests;
-use super::server_config::{language_id_for_path, server_for_path};
-use super::symbols::SymbolQuery;
-use super::workspace::find_root;
+use crate::client::{LspClient, clone_client_refs, kill_client, spawn_client, write_lsp_message};
+use crate::diagnostics::{Diagnostic, clear_uri, collect_for_worktree};
+use crate::requests;
+use crate::server_config::{language_id_for_path, server_for_path};
+use crate::symbols::SymbolQuery;
+use crate::workspace::find_root;
 
 #[derive(Debug, Clone)]
 pub struct LspWarning {
@@ -24,12 +24,12 @@ pub struct LspWarning {
 
 #[derive(Clone)]
 pub struct LspManager {
-    pub(super) inner: Arc<Mutex<LspInner>>,
+    pub(crate) inner: Arc<Mutex<LspInner>>,
 }
 
-pub(super) struct LspInner {
-    pub(super) clients: HashMap<String, LspClient>,
-    pub(super) broken_servers: HashSet<String>,
+pub(crate) struct LspInner {
+    pub(crate) clients: HashMap<String, LspClient>,
+    pub(crate) broken_servers: HashSet<String>,
     /// Warnings for missing LSP servers, surfaced to the user via board_health.
     warnings: Vec<LspWarning>,
 }
@@ -322,7 +322,7 @@ impl LspManager {
     /// server is still indexing, an explicit status note replaces the
     /// silently-empty (and misleading) result.
     pub async fn diagnostics_xml(&self, worktree: &Path) -> String {
-        let mut xml = super::diagnostics::format_diagnostics_xml(self.diagnostics(worktree).await);
+        let mut xml = crate::diagnostics::format_diagnostics_xml(self.diagnostics(worktree).await);
         if self.indexing(worktree).await {
             xml.push_str(
                 "<diagnostics-status>language server is still indexing; \
