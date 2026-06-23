@@ -27,7 +27,12 @@ fn dummy_tool_schema_with_safety(name: &str, concurrent_safe: bool) -> serde_jso
     })
 }
 
-async fn make_context() -> (crate::host::AgentContext, String, String, CancellationToken) {
+async fn make_context() -> (
+    crate::context::AgentContext,
+    String,
+    String,
+    CancellationToken,
+) {
     let cancel = CancellationToken::new();
     let db = create_test_db();
     let ctx = agent_context_from_db(db.clone(), cancel.clone());
@@ -51,7 +56,7 @@ async fn run_with_provider(
     provider: &dyn djinn_provider::provider::LlmProvider,
     tools: &[serde_json::Value],
     conversation: &mut Conversation,
-    app_state: &crate::host::AgentContext,
+    app_state: &crate::context::AgentContext,
     project_path: &str,
     task_id: &str,
     cancel: &CancellationToken,

@@ -1,17 +1,2262 @@
-//! LLM-powered knowledge extraction (stub).
-use crate::host::SlotContext;
-use crate::session_extraction::SessionTaxonomy;
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
+//! LLM-powered knowledge extraction from completed sessions.
+//!
+//! After structural extraction builds the `SessionTaxonomy`, this module feeds
+//! the taxonomy + task description to an LLM and extracts three note types:
+//!
+//! - **cases**: problem + solution pairs from successful task outcomes
+//! - **patterns**: reusable processes or methods discovered during the session
+//! - **pitfalls**: errors encountered and how they were resolved
+//!
+//! Each extracted note goes through the normal note-creation pipeline. Notes
+//! start at confidence 0.5 (lower than human-written 1.0). Session provenance
+//! is recorded in the note content footer.
+//!
+//! All errors are logged as warnings; nothing propagates to the caller.
+//!
+//! # Wiring (Phase 2.2)
+//!
+//! [`run_llm_extraction`] is driven by
+//! `session_extraction::run_post_session_extraction`, which runs server-side
+//! (fire-and-forget) when a task-run completes. The production path resolves
+//! the model via creator-scoped dispatch-style resolution, with an explicit
+//! org-shared/no-user memory-provider fallback when the creator-scoped path
+//! cannot resolve.
+//! The file-level `#[allow(dead_code)]` is retained only to cover the
+//! `_with_provider` test entry points and helpers exercised solely by tests.
 
-/// Run LLM extraction on a completed session.
-pub(crate) async fn run_llm_extraction(
-    _task_id: &str,
-    _taxonomy: &SessionTaxonomy,
-    _ctx: &SlotContext,
-) -> ExtractionResult {
-    ExtractionResult::default()
+#![allow(dead_code)]
+
+use std::path::Path;
+use std::sync::Arc;
+
+use djinn_db::repositories::task_run::TaskRunRepository;
+use djinn_db::{
+    CreateConsolidationRunMetric, NoteConsolidationRepository, NoteRepository, ProjectRepository,
+    SessionRepository, TaskRepository, assess_note_quality, folder_for_type, permalink_for,
+};
+use djinn_provider::provider::{LlmProvider, TelemetryMeta, create_provider};
+use djinn_provider::{CompletionRequest, complete, resolve_memory_provider_for_user};
+use serde::Deserialize;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+use super::session_extraction::SessionTaxonomy;
+use crate::host::{KnowledgeBranchTarget, SlotContext};
+
+// ── Prompt constants ──────────────────────────────────────────────────────────
+
+const SYSTEM_PROMPT: &str = "You are a knowledge extractor. Given a completed agent session \
+summary, extract reusable knowledge as structured notes. Respond with valid JSON only.";
+
+/// Maximum novelty candidates to check before creating a new note.
+const NOVELTY_CANDIDATE_LIMIT: usize = 3;
+
+/// Confidence signal applied to an existing note when a new extraction is
+/// semantically judged to be already known.
+const DUPLICATE_CONFIDENCE_SIGNAL: f64 = 0.65;
+
+const EXTRACTION_SYSTEM_PROMPT: &str = SYSTEM_PROMPT;
+const NOVELTY_SYSTEM_PROMPT: &str = "You are a semantic novelty judge for extracted knowledge notes. Compare a proposed note summary against an existing note summary. Respond with valid JSON only.";
+
+/// Max characters of session transcript fed to the extraction LLM.
+const TRANSCRIPT_EXCERPT_CHARS: usize = 12_000;
+
+/// Max output tokens for the extraction completion.
+///
+/// The extraction returns up to three structured note types in one JSON object
+/// (up to 3 cases + 3 patterns + 2 pitfalls), and each durable note must carry
+/// its full set of required ADR-054 markdown sections. The previous 1024-token
+/// cap routinely truncated the JSON mid-array, which then failed to parse and
+/// silently dropped every note. 4096 gives enough headroom for the full
+/// structured payload while staying well within the model's context window.
+const EXTRACTION_MAX_TOKENS: u32 = 4096;
+
+const NO_LLM_PROVIDER_WARNING: &str =
+    "llm_extraction: no LLM provider available; skipping extraction";
+
+enum LlmExtractionProviderResolution {
+    Provider(Box<dyn LlmProvider>),
+    NoProvider {
+        warning_message: &'static str,
+        error: String,
+    },
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct ExtractionResult {
-    pub notes_created: usize,
+async fn resolve_llm_extraction_provider_after_creator_attempt(
+    db: &djinn_db::Database,
+    session_id: &str,
+    creator_resolved_provider: Option<Box<dyn LlmProvider>>,
+    telemetry: TelemetryMeta,
+) -> LlmExtractionProviderResolution {
+    if let Some(provider) = creator_resolved_provider {
+        return LlmExtractionProviderResolution::Provider(provider);
+    }
+
+    match resolve_memory_provider_for_user(db, None).await {
+        Ok(provider) => match provider.config_snapshot() {
+            Some(mut config) => {
+                config.telemetry = Some(telemetry);
+                LlmExtractionProviderResolution::Provider(create_provider(config))
+            }
+            None => LlmExtractionProviderResolution::Provider(provider),
+        },
+        Err(e) => {
+            let error = e.to_string();
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "llm_extraction: no LLM provider available; skipping extraction"
+            );
+            LlmExtractionProviderResolution::NoProvider {
+                warning_message: NO_LLM_PROVIDER_WARNING,
+                error,
+            }
+        }
+    }
+}
+
+/// Render the extraction prompt the LLM sees.
+///
+/// Exposed (not inlined into `run_llm_extraction_inner`) so the prompt schema
+/// can be unit-tested independently of the rest of the extraction pipeline.
+/// The prompt asks for one `applies_when` anchor per case/pattern/pitfall
+/// note, distinct from the durable markdown body, and lists the exact
+/// ADR-054 markdown headings each note type must include. The headings must
+/// remain present so a future prompt edit does not silently regress the
+/// durable note schema (T2 of the x72l epic).
+fn build_extraction_prompt(
+    title: &str,
+    description: &str,
+    taxonomy_json: &str,
+    transcript: &str,
+    scope_json: &str,
+) -> String {
+    format!(
+        "Task: {title}\n\
+         Description: {description}\n\n\
+         Session event counts: {taxonomy_json}\n\n\
+         Session transcript (excerpt — assistant reasoning, tool actions, and results; \
+         this is the actual work to distill knowledge from):\n{transcript}\n\n\
+         Files touched were in these areas: {scope_json}\n\
+         Include a \"scope_paths\" array per note with relevant path prefixes from the list above.\n\n\
+         Extract knowledge from this session. Return JSON:\n\
+         {{\n\
+           \"cases\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required case headings\", \"applies_when\": \"One sentence describing when this case applies.\", \"scope_paths\": [\"...\"]}}],\n\
+           \"patterns\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required pattern headings\", \"applies_when\": \"One sentence describing when this pattern applies.\", \"scope_paths\": [\"...\"]}}],\n\
+           \"pitfalls\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required pitfall headings\", \"applies_when\": \"One sentence describing when this pitfall applies.\", \"scope_paths\": [\"...\"]}}]\n\
+         }}\n\
+         Required durable templates:\n\
+         Pattern content must contain exactly these markdown headings in order:\n\
+         ## Context\n## Problem shape\n## Recommended approach\n## Why it works\n## Tradeoffs / limits\n## When to use\n## When not to use\n## Related\n\
+         Pitfall content must contain exactly these markdown headings in order:\n\
+         ## Trigger / smell\n## Failure mode\n## Observable symptoms\n## Prevention\n## Recovery\n## Related\n\
+         Case content must contain exactly these markdown headings in order:\n\
+         ## Situation\n## Constraint\n## Approach taken\n## Result\n## Why it worked / failed\n## Reusable lesson\n## Related\n\
+         For every note, also include an \"applies_when\" field: a single concise sentence \
+         describing the situation where the note is the right thing to recall. \
+         \"applies_when\" must be DISTINCT from the markdown body (do not duplicate a heading) \
+         and must be one sentence ending in a period. If you cannot articulate a useful \
+         applies_when for a note, omit that note instead of returning a vague one. \
+         If you cannot fill every required section for a note type, omit that note instead of returning a shorter paragraph.\n\
+         Return empty arrays if nothing significant was learned. \
+         Maximum 3 cases, 3 patterns, 2 pitfalls.\n\
+         Only extract if there is clear signal (high errors+files_changed suggests pitfalls; \
+         many notes_written suggests patterns).",
+        title = title,
+        description = description,
+        taxonomy_json = taxonomy_json,
+        scope_json = scope_json,
+    )
+}
+
+/// Render a compact transcript excerpt for the extraction prompt: assistant
+/// reasoning, tool actions, and (truncated) tool results, capped to `max_chars`
+/// and tail-biased so the session's outcome/conclusions are retained. The
+/// taxonomy only carries event COUNTS; without the actual content here the LLM
+/// has nothing to distill into case/pattern/pitfall notes (and returns empty
+/// arrays every time).
+fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars: usize) -> String {
+    use djinn_core::message::{ContentBlock, Role};
+
+    fn take_chars(s: &str, n: usize) -> String {
+        if s.chars().count() > n {
+            let mut t: String = s.chars().take(n).collect();
+            t.push('…');
+            t
+        } else {
+            s.to_string()
+        }
+    }
+    fn blocks_text(blocks: &[ContentBlock]) -> String {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.trim()),
+                _ => None,
+            })
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for msg in messages {
+        let role = match msg.role {
+            Role::System => continue,
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        for block in &msg.content {
+            match block {
+                ContentBlock::Text { text } => {
+                    let t = text.trim();
+                    if !t.is_empty() {
+                        lines.push(format!("{role}: {t}"));
+                    }
+                }
+                ContentBlock::ToolUse { name, input, .. } => {
+                    lines.push(format!(
+                        "{role} → {name}({})",
+                        take_chars(&input.to_string(), 200)
+                    ));
+                }
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
+                    let body = take_chars(&blocks_text(content), 600);
+                    if !body.is_empty() {
+                        let tag = if *is_error {
+                            "tool error"
+                        } else {
+                            "tool result"
+                        };
+                        lines.push(format!("{tag}: {body}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let full = lines.join("\n");
+    if full.len() <= max_chars {
+        return full;
+    }
+    // Tail-biased: keep the most recent content, aligned to a char boundary.
+    let target = full.len() - max_chars;
+    let start = full
+        .char_indices()
+        .find(|(i, _)| *i >= target)
+        .map(|(i, _)| i)
+        .unwrap_or(full.len());
+    format!("…(earlier turns omitted)…\n{}", &full[start..])
+}
+
+const MIN_DURABLE_WORDS: usize = 16;
+
+// ── JSON response shape ───────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct ExtractedNote {
+    title: String,
+    content: String,
+    /// One-sentence retrieval situation where the note applies. Distinct from
+    /// the durable markdown body. Prompted and parsed as `applies_when` (the
+    /// human-facing prompt term) with `retrieval_anchor` accepted as an alias
+    /// for callers that already use the storage-field name. Missing or empty
+    /// values are tolerated so a model that forgets the field does not break
+    /// extraction — durable write happens, just without an anchor.
+    #[serde(default, alias = "applies_when")]
+    retrieval_anchor: Option<String>,
+    #[serde(default)]
+    scope_paths: Vec<String>,
+}
+
+impl ExtractedNote {
+    /// Returns the retrieval anchor as a normalized one-sentence string, or
+    /// `None` when the model did not provide one. Normalization trims
+    /// surrounding whitespace and treats empty / whitespace-only values as
+    /// missing so the persistence path never stores a blank anchor.
+    fn normalized_anchor(&self) -> Option<String> {
+        self.retrieval_anchor
+            .as_deref()
+            .map(str::trim)
+            .filter(|anchor| !anchor.is_empty())
+            .map(str::to_owned)
+    }
+}
+
+/// Normalized dedup key for an extracted note: lowercase+trimmed title paired
+/// with its note_type. Two notes with the same key carry the same knowledge as
+/// far as this batch is concerned.
+fn note_dedup_key(note_type: &str, note: &ExtractedNote) -> (String, String) {
+    (
+        note.title.trim().to_lowercase(),
+        note_type.trim().to_lowercase(),
+    )
+}
+
+/// Collapse notes that are duplicated WITHIN a single extraction by their
+/// normalized (title, note_type) key, preserving first-seen order. Returns the
+/// deduplicated `(note_type, note)` list and the number of duplicates dropped.
+fn dedup_extracted_notes(
+    extracted: &ExtractionResponse,
+) -> (Vec<(&'static str, ExtractedNote)>, usize) {
+    let candidates: [(&'static str, &[ExtractedNote]); 3] = [
+        ("case", extracted.cases.as_slice()),
+        ("pattern", extracted.patterns.as_slice()),
+        ("pitfall", extracted.pitfalls.as_slice()),
+    ];
+
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut out: Vec<(&'static str, ExtractedNote)> = Vec::new();
+    let mut dupes = 0usize;
+    for (note_type, notes) in candidates {
+        for note in notes {
+            if seen.insert(note_dedup_key(note_type, note)) {
+                out.push((note_type, note.clone()));
+            } else {
+                dupes += 1;
+            }
+        }
+    }
+    (out, dupes)
+}
+
+impl ExtractionContext<'_> {
+    async fn create_extracted_note(
+        &self,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        scope_paths_json: &str,
+        retrieval_anchor: Option<&str>,
+    ) -> djinn_db::Result<djinn_memory::Note> {
+        match self.knowledge_branch_target {
+            KnowledgeBranchTarget::Main => {
+                self.note_repo
+                    .create_db_note_with_scope_and_retrieval_anchor(
+                        self.project_id,
+                        title,
+                        content,
+                        note_type,
+                        "[]",
+                        scope_paths_json,
+                        retrieval_anchor,
+                    )
+                    .await
+            }
+            KnowledgeBranchTarget::TaskScoped { .. } => {
+                self.note_repo
+                    .create_with_scope_and_retrieval_anchor(
+                        self.project_id,
+                        title,
+                        content,
+                        note_type,
+                        None,
+                        "[]",
+                        scope_paths_json,
+                        retrieval_anchor,
+                    )
+                    .await
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ExtractionResponse {
+    #[serde(default)]
+    cases: Vec<ExtractedNote>,
+    #[serde(default)]
+    patterns: Vec<ExtractedNote>,
+    #[serde(default)]
+    pitfalls: Vec<ExtractedNote>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NoveltyDecisionKind {
+    AlreadyKnown,
+    Novel,
+}
+
+#[derive(Debug, Deserialize)]
+struct NoveltyDecision {
+    decision: NoveltyDecisionKind,
+    existing_note_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
+enum ExtractionOutcome {
+    DurableWrite,
+    MergeIntoExisting,
+    DowngradeToWorkingSpec,
+    Discard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoveltyAssessment {
+    Novel,
+    Duplicate,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+struct QualityAssessment {
+    specificity: bool,
+    generality: bool,
+    durability: bool,
+    novelty: NoveltyAssessment,
+    type_fit: bool,
+    required_structure: bool,
+    outcome: ExtractionOutcome,
+    reasons: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone)]
+struct NoveltyCheckResult {
+    assessment: NoveltyAssessment,
+    existing_note_id: Option<String>,
+}
+
+#[cfg(test)]
+type CandidateLookupOverride = fn(&str, &str, &str, &str) -> Vec<djinn_db::NoteDedupCandidate>;
+
+struct ExtractionContext<'a> {
+    note_repo: &'a NoteRepository,
+    provider: &'a dyn LlmProvider,
+    project_id: &'a str,
+    project_path: &'a str,
+    knowledge_branch_target: &'a KnowledgeBranchTarget,
+    session_id: &'a str,
+    task_short_id: &'a str,
+    task_title: &'a str,
+    task_description: &'a str,
+    provenance: &'a str,
+    session_scope_paths: &'a [String],
+    #[cfg(test)]
+    candidate_lookup: CandidateLookup,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct CandidateLookup {
+    override_lookup: Option<CandidateLookupOverride>,
+}
+
+#[cfg(test)]
+impl CandidateLookup {
+    const fn production() -> Self {
+        Self {
+            override_lookup: None,
+        }
+    }
+
+    const fn with_override(override_lookup: CandidateLookupOverride) -> Self {
+        Self {
+            override_lookup: Some(override_lookup),
+        }
+    }
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+/// Run LLM-based knowledge extraction for a completed session.
+///
+/// Loads the session, resolves its task and project, calls the LLM to extract
+/// structured notes, and writes each note via `NoteRepository::create`.
+///
+/// All errors are logged as warnings; nothing propagates to the caller.
+pub(crate) async fn run_llm_extraction(
+    session_id: String,
+    taxonomy: SessionTaxonomy,
+    app_state: SlotContext,
+) {
+    run_llm_extraction_inner(
+        session_id,
+        taxonomy,
+        app_state,
+        None,
+        #[cfg(test)]
+        None,
+    )
+    .await;
+}
+
+/// Test-only entry point that injects a pre-built LLM provider, bypassing
+/// credential loading and memory provider resolution.
+#[cfg(test)]
+pub(crate) async fn run_llm_extraction_with_provider(
+    session_id: String,
+    taxonomy: SessionTaxonomy,
+    app_state: SlotContext,
+    provider: Arc<dyn LlmProvider>,
+) {
+    run_llm_extraction_inner(session_id, taxonomy, app_state, Some(provider), None).await;
+}
+
+#[cfg(test)]
+pub(crate) async fn run_llm_extraction_with_provider_and_candidate_lookup(
+    session_id: String,
+    taxonomy: SessionTaxonomy,
+    app_state: SlotContext,
+    provider: Arc<dyn LlmProvider>,
+    candidate_lookup_override: CandidateLookupOverride,
+) {
+    run_llm_extraction_inner(
+        session_id,
+        taxonomy,
+        app_state,
+        Some(provider),
+        Some(candidate_lookup_override),
+    )
+    .await;
+}
+
+/// Inner implementation that accepts an optional provider override for test injection.
+///
+/// When `provider_override` is `Some`, the given provider is used directly
+/// instead of resolving a memory provider.
+async fn run_llm_extraction_inner(
+    session_id: String,
+    mut taxonomy: SessionTaxonomy,
+    app_state: SlotContext,
+    provider_override: Option<Arc<dyn LlmProvider>>,
+    #[cfg(test)] candidate_lookup_override: Option<CandidateLookupOverride>,
+) {
+    // ── Load session ───────────────────────────────────────────────────────
+    let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let session = match session_repo.get(&session_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            tracing::debug!(
+                session_id = %session_id,
+                "llm_extraction: session not found; skipping"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "llm_extraction: failed to load session; skipping"
+            );
+            return;
+        }
+    };
+
+    // ── Require a task_id ─────────────────────────────────────────────────
+    let task_id = match session.task_id {
+        Some(ref id) => id.clone(),
+        None => {
+            tracing::debug!(
+                session_id = %session_id,
+                "llm_extraction: session has no task_id; skipping"
+            );
+            return;
+        }
+    };
+
+    // ── Load task ──────────────────────────────────────────────────────────
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let task = match task_repo.get(&task_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            tracing::debug!(
+                session_id = %session_id,
+                task_id = %task_id,
+                "llm_extraction: task not found; skipping"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                task_id = %task_id,
+                error = %e,
+                "llm_extraction: failed to load task; skipping"
+            );
+            return;
+        }
+    };
+
+    // ── Load project ───────────────────────────────────────────────────────
+    // Since migration 14, `sessions.project_id` is NULL for chat sessions.
+    // This extractor only runs for task-scoped (non-chat) sessions, but guard
+    // defensively: without a project_id there's nothing to extract against.
+    let session_project_id = match session.project_id.as_deref() {
+        Some(p) => p,
+        None => {
+            tracing::debug!(
+                session_id = %session_id,
+                "llm_extraction: session has no project_id (chat?); skipping"
+            );
+            return;
+        }
+    };
+    let project_repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let project = match project_repo.get(session_project_id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            tracing::debug!(
+                session_id = %session_id,
+                project_id = %session_project_id,
+                "llm_extraction: project not found; skipping"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                project_id = %session_project_id,
+                error = %e,
+                "llm_extraction: failed to load project; skipping"
+            );
+            return;
+        }
+    };
+
+    // ── Resolve provider ───────────────────────────────────────────────────
+    // In tests, a provider_override bypasses credential loading entirely.
+    let provider: Box<dyn LlmProvider> = if let Some(p) = provider_override {
+        struct ArcProvider(Arc<dyn LlmProvider>);
+        use std::pin::Pin;
+        impl LlmProvider for ArcProvider {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            fn stream<'a>(
+                &'a self,
+                conv: &'a djinn_provider::message::Conversation,
+                tools: &'a [serde_json::Value],
+                tool_choice: Option<djinn_provider::provider::ToolChoice>,
+            ) -> Pin<
+                Box<
+                    dyn futures::Future<
+                            Output = anyhow::Result<
+                                Pin<
+                                    Box<
+                                        dyn futures::Stream<
+                                                Item = anyhow::Result<
+                                                    djinn_provider::provider::StreamEvent,
+                                                >,
+                                            > + Send,
+                                    >,
+                                >,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                self.0.stream(conv, tools, tool_choice)
+            }
+        }
+        Box::new(ArcProvider(p))
+    } else {
+        // Resolve the memory model the way DISPATCH does — act as the task's
+        // creator (the owning user) so extraction uses THEIR
+        // configured model + credential, like other system-initiated LLM work. The
+        // session already ran on `session.model_id` for this user, so resolving
+        // it under the creator's `SESSION_USER_ID` scope reuses the proven
+        // provider path: e.g. an `openai/*` id served via the connected
+        // `chatgpt_codex` credential. If creator-scoped resolution fails, fall
+        // back only to the explicit org-shared/no-user memory-provider scope;
+        // never borrow another user's private credential.
+        let creator = task.created_by_user_id.clone();
+        let attributed_user_id = creator
+            .clone()
+            .or_else(djinn_core::auth_context::current_user_id);
+        let memory_model_id = session.model_id.clone();
+        let telemetry = crate::helpers::build_telemetry_meta_with_attribution(
+            "memory_extraction",
+            &task_id,
+            Some("memory_extraction"),
+            attributed_user_id.as_deref(),
+        );
+        // One-shot completion over a small (taxonomy) prompt — no compaction —
+        // so a generous fixed context window is safe.
+        const MEMORY_CONTEXT_WINDOW: u32 = 128_000;
+        let creator_scoped = djinn_core::auth_context::SESSION_USER_ID
+            .scope(
+                creator.clone(),
+                crate::lifecycle::model_resolution::resolve_model_and_credential(
+                    &memory_model_id,
+                    &task_id,
+                    &app_state,
+                ),
+            )
+            .await;
+        let via_creator = match creator_scoped {
+            Ok(resolved) => {
+                let base_url = if crate::helpers::resolved_needs_base_url(&resolved) {
+                    crate::helpers::default_base_url(&resolved.catalog_provider_id)
+                } else {
+                    String::new()
+                };
+                crate::helpers::build_provider_from_resolved(
+                    resolved,
+                    MEMORY_CONTEXT_WINDOW,
+                    Some(telemetry.clone()),
+                    None,
+                    base_url,
+                )
+            }
+            Err(e) => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    error = %e.reason,
+                    "llm_extraction: creator-scoped model resolution failed; trying scoped memory provider fallback"
+                );
+                None
+            }
+        };
+        match resolve_llm_extraction_provider_after_creator_attempt(
+            &app_state.db,
+            &session_id,
+            via_creator,
+            telemetry,
+        )
+        .await
+        {
+            LlmExtractionProviderResolution::Provider(provider) => provider,
+            LlmExtractionProviderResolution::NoProvider { .. } => return,
+        }
+    };
+
+    // B5a: knowledge extraction (the extraction completion + the per-note
+    // novelty judgements) is a cheap background distillation, not the agent's
+    // reasoning loop. Force the weakest reasoning tier so it doesn't waste
+    // deep-thinking tokens/latency. `with_reasoning_effort` returns `None` for
+    // config-less providers (e.g. test mocks), in which case we keep the
+    // provider unchanged.
+    let provider: Box<dyn LlmProvider> =
+        match provider.with_reasoning_effort(djinn_provider::provider::ReasoningEffort::Minimal) {
+            Some(downgraded) => downgraded,
+            None => provider,
+        };
+
+    // ── Build prompt ───────────────────────────────────────────────────────
+    let taxonomy_json = serde_json::to_string(&taxonomy).unwrap_or_else(|_| "{}".to_string());
+    // Load the actual conversation so the LLM has real content to distill —
+    // the taxonomy is only event counts. Best-effort: an empty excerpt just
+    // means the LLM falls back to counts (the prior behaviour).
+    let transcript = {
+        let msg_repo = djinn_db::SessionMessageRepository::new(
+            app_state.db.clone(),
+            app_state.event_bus.clone(),
+        );
+        match msg_repo.load_conversation(&session_id).await {
+            Ok(conv) => build_transcript_excerpt(&conv.messages, TRANSCRIPT_EXCERPT_CHARS),
+            Err(e) => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    error = %e,
+                    "llm_extraction: could not load transcript for prompt; using counts only"
+                );
+                String::new()
+            }
+        }
+    };
+    let project_path_buf =
+        djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+    let project_path = project_path_buf.to_string_lossy();
+    let session_scope_paths =
+        crate::session_extraction::derive_scope_paths(&taxonomy.changed_file_paths, &project_path);
+    let scope_json =
+        serde_json::to_string(&session_scope_paths).unwrap_or_else(|_| "[]".to_string());
+    let prompt = build_extraction_prompt(
+        &task.title,
+        &task.description,
+        &taxonomy_json,
+        &transcript,
+        &scope_json,
+    );
+
+    // ── Call LLM ───────────────────────────────────────────────────────────
+    let response = match complete(
+        provider.as_ref(),
+        CompletionRequest {
+            system: EXTRACTION_SYSTEM_PROMPT.to_string(),
+            prompt,
+            max_tokens: EXTRACTION_MAX_TOKENS,
+        },
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "llm_extraction: LLM completion failed; skipping extraction"
+            );
+            return;
+        }
+    };
+
+    // ── Parse JSON response ────────────────────────────────────────────────
+    // FAILURE case: the call returned text but it could not be parsed as the
+    // expected JSON shape. This is an error (the model misbehaved, the output
+    // was truncated, etc.) and must be logged at warn — it is NOT the same as a
+    // legitimately-empty extraction (handled below at debug).
+    let extracted = match parse_extraction_response(&response.text) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                raw_response = %response.text,
+                "llm_extraction: LLM response parse FAILED; skipping (extraction error, not empty)"
+            );
+            return;
+        }
+    };
+
+    // ── Intra-batch dedup ──────────────────────────────────────────────────
+    // The model can emit the same note more than once within a single
+    // extraction (e.g. a case and a pitfall with an identical title, or two
+    // copies of the same case). Collapse them by a normalized key
+    // (lowercase+trimmed title + note_type) BEFORE any DB work so the same
+    // note isn't created twice from one extraction. The cross-session /
+    // semantic dedup against existing notes still happens later per-note.
+    let (deduped_notes, intra_batch_dupes) = dedup_extracted_notes(&extracted);
+    taxonomy.extraction_quality.dedup_skipped += intra_batch_dupes as u32;
+
+    let total = deduped_notes.len();
+    taxonomy.extraction_quality.extracted = total as u32;
+    // EMPTY (success) case: the call + parse succeeded, but after dedup there is
+    // nothing novel to record. This is normal — log at debug, not warn.
+    if total == 0 {
+        persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
+        tracing::debug!(
+            session_id = %session_id,
+            intra_batch_dupes,
+            "llm_extraction: extraction succeeded but found nothing to record (empty, not a failure)"
+        );
+        return;
+    }
+
+    tracing::debug!(
+        session_id = %session_id,
+        cases = extracted.cases.len(),
+        patterns = extracted.patterns.len(),
+        pitfalls = extracted.pitfalls.len(),
+        intra_batch_dupes,
+        unique = total,
+        "llm_extraction: writing extracted notes"
+    );
+
+    // ── Write notes ────────────────────────────────────────────────────────
+    // Resolve the workspace path from the session's task_run.  Task #8
+    // removed the `sessions.worktree_path` migration-window fallback; task
+    // #13 will drop the column outright.
+    let task_run_repo = TaskRunRepository::new(app_state.db.clone());
+    let workspace_path: Option<String> = match session.task_run_id.as_deref() {
+        Some(run_id) => task_run_repo
+            .get(run_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|run| run.workspace_path),
+        None => None,
+    };
+    let knowledge_branch_target = app_state
+        .knowledge_branch_target_for(Path::new(project_path.as_ref()), workspace_path.as_deref());
+    tracing::debug!(
+        session_id = %session_id,
+        knowledge_branch_target = %knowledge_branch_target.intent_label(),
+        worktree_root = ?knowledge_branch_target.worktree_root(),
+        "llm_extraction: resolved knowledge write target"
+    );
+    // Notes are db-only — no on-disk mirror — so the knowledge_branch_target
+    // worktree_root no longer routes file writes. The repo is constructed
+    // without a worktree root; the embedding branch is set explicitly below.
+    let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+        .with_embedding_branch(
+            knowledge_branch_target
+                .worktree_root()
+                .and_then(djinn_db::infer_embedding_branch_from_worktree),
+        );
+    let provenance = format!(
+        "\n\n---\n*Extracted from session {session_id}. Confidence: 0.5 (session-extracted).*"
+    );
+
+    let mut extraction_quality = taxonomy.extraction_quality.clone();
+    let extraction_context = ExtractionContext {
+        note_repo: &note_repo,
+        provider: provider.as_ref(),
+        project_id: &project.id,
+        project_path: &project_path,
+        knowledge_branch_target: &knowledge_branch_target,
+        session_id: &session_id,
+        task_short_id: &task.short_id,
+        task_title: &task.title,
+        task_description: &task.description,
+        provenance: &provenance,
+        session_scope_paths: &session_scope_paths,
+        #[cfg(test)]
+        candidate_lookup: candidate_lookup_override
+            .map(|lookup| CandidateLookup::with_override(lookup))
+            .unwrap_or_else(CandidateLookup::production),
+    };
+
+    for (note_type, note) in &deduped_notes {
+        process_extracted_note(
+            &extraction_context,
+            note_type,
+            note,
+            &mut extraction_quality,
+        )
+        .await;
+    }
+
+    taxonomy.extraction_quality = extraction_quality;
+
+    persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
+
+    // Write a lightweight consolidation_run_metrics row so the admission-dropped
+    // count is queryable via memory_health and list_run_metrics. The row uses
+    // note_type "extraction" and zeros for consolidation-specific fields. The
+    // row is written even when admission_dropped == 0 so health() returns 0
+    // (not NULL) for sessions with no drops.
+    let now = now_rfc3339();
+    let consolidation_repo = NoteConsolidationRepository::new(app_state.db.clone());
+    if let Err(error) = consolidation_repo
+        .create_run_metric(CreateConsolidationRunMetric {
+            project_id: &project.id,
+            note_type: "extraction",
+            status: "completed",
+            scanned_note_count: deduped_notes.len() as i64,
+            candidate_cluster_count: 0,
+            consolidated_cluster_count: 0,
+            consolidated_note_count: taxonomy.extraction_quality.written as i64,
+            source_note_count: 0,
+            decayed_note_count: 0,
+            archived_note_count: 0,
+            superseded_source_note_count: 0,
+            admission_dropped_note_count: taxonomy.extraction_quality.admission_dropped as i64,
+            started_at: &now,
+            completed_at: Some(&now),
+            error_message: None,
+        })
+        .await
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %error,
+            "llm_extraction: failed to write admission-dropped metric row"
+        );
+    }
+}
+
+async fn persist_extraction_quality(
+    session_repo: &SessionRepository,
+    session_id: &str,
+    taxonomy: &SessionTaxonomy,
+) {
+    let taxonomy_json = match serde_json::to_string(taxonomy) {
+        Ok(json) => json,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "llm_extraction: failed to serialize taxonomy with extraction quality"
+            );
+            return;
+        }
+    };
+
+    if let Err(error) = session_repo
+        .set_event_taxonomy(session_id, &taxonomy_json)
+        .await
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %error,
+            "llm_extraction: failed to persist extraction quality taxonomy"
+        );
+    }
+}
+
+/// Return the current UTC time as an RFC 3339 string.
+fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .expect("rfc3339 timestamp formatting should succeed")
+}
+
+async fn process_extracted_note(
+    extraction_context: &ExtractionContext<'_>,
+    note_type: &str,
+    note: &ExtractedNote,
+    extraction_quality: &mut super::session_extraction::ExtractionQuality,
+) {
+    // ── ADR-054 admission gate ──────────────────────────────────────────────
+    // Runs BEFORE the novelty judge and BEFORE `create_extracted_note`. A
+    // candidate that fails the structural gate is dropped without a novelty
+    // LLM call, without a working-spec fallback, and without any note write
+    // (neither `case`/`pattern`/`pitfall` nor `design` working spec). The
+    // `is_underspecified` decision is delegated to the shared
+    // `assess_note_quality` classifier so this gate and the corpus audit
+    // (graph.rs::extracted_note_audit) cannot drift. The gate is scoped to
+    // `run_llm_extraction_inner`; human-authored memory writes are
+    // unaffected.
+    if matches!(note_type, "case" | "pattern" | "pitfall") {
+        let quality = assess_note_quality(note_type, &note.content);
+        if quality.is_underspecified {
+            extraction_quality.admission_dropped += 1;
+            tracing::warn!(
+                session_id = %extraction_context.session_id,
+                project_id = %extraction_context.project_id,
+                note_type = %note_type,
+                title = %note.title,
+                reasons = ?quality.reasons,
+                "llm_extraction: dropping underspecified note at admission gate"
+            );
+            return;
+        }
+    }
+
+    let novelty = match novelty_decision(extraction_context, note_type, note).await {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::debug!(
+                session_id = %extraction_context.session_id,
+                note_type = %note_type,
+                title = %note.title,
+                error = %e,
+                "llm_extraction: novelty check failed; evaluating with unknown novelty"
+            );
+            NoveltyCheckResult {
+                assessment: NoveltyAssessment::Unknown,
+                existing_note_id: None,
+            }
+        }
+    };
+
+    let assessment = assess_quality_gate(note_type, note, &novelty);
+
+    tracing::debug!(
+        session_id = %extraction_context.session_id,
+        note_type = %note_type,
+        title = %note.title,
+        outcome = ?assessment.outcome,
+        specificity = assessment.specificity,
+        generality = assessment.generality,
+        durability = assessment.durability,
+        novelty = ?assessment.novelty,
+        type_fit = assessment.type_fit,
+        required_structure = assessment.required_structure,
+        reasons = ?assessment.reasons,
+        "llm_extraction: evaluated extraction quality gate"
+    );
+
+    match assessment.outcome {
+        ExtractionOutcome::MergeIntoExisting => {
+            if let Some(candidate_id) = novelty.existing_note_id.as_deref() {
+                match extraction_context
+                    .note_repo
+                    .update_confidence(candidate_id, DUPLICATE_CONFIDENCE_SIGNAL)
+                    .await
+                {
+                    Ok(updated_confidence) => tracing::debug!(
+                        session_id = %extraction_context.session_id,
+                        note_type = %note_type,
+                        title = %note.title,
+                        existing_note_id = %candidate_id,
+                        updated_confidence,
+                        "llm_extraction: merged extraction into existing note via confidence boost"
+                    ),
+                    Err(e) => tracing::warn!(
+                        session_id = %extraction_context.session_id,
+                        note_type = %note_type,
+                        title = %note.title,
+                        existing_note_id = %candidate_id,
+                        error = %e,
+                        "llm_extraction: merge outcome failed to update existing confidence"
+                    ),
+                }
+                extraction_quality.novelty_skipped += 1;
+                extraction_quality.merged += 1;
+            }
+            return;
+        }
+        ExtractionOutcome::DowngradeToWorkingSpec => {
+            persist_working_spec(extraction_context, note, &assessment.reasons).await;
+            extraction_quality.downgraded += 1;
+            return;
+        }
+        ExtractionOutcome::Discard => {
+            extraction_quality.discarded += 1;
+            return;
+        }
+        ExtractionOutcome::DurableWrite => {}
+    }
+
+    let content_with_provenance = format!("{}{}", note.content, extraction_context.provenance);
+    let scope_paths = if note.scope_paths.is_empty() {
+        extraction_context.session_scope_paths.to_vec()
+    } else {
+        note.scope_paths.clone()
+    };
+    let scope_paths_json = serde_json::to_string(&scope_paths).unwrap_or_else(|_| "[]".to_string());
+    let retrieval_anchor = note.normalized_anchor();
+    if note
+        .retrieval_anchor
+        .as_deref()
+        .map(str::trim)
+        .map(str::is_empty)
+        .unwrap_or(false)
+    {
+        // Model emitted an anchor that was empty after whitespace trimming.
+        // The field is optional, so we accept the note without it — debug only.
+        tracing::debug!(
+            session_id = %extraction_context.session_id,
+            note_type = %note_type,
+            title = %note.title,
+            "llm_extraction: retrieval anchor was empty after trim; writing note without anchor"
+        );
+    }
+    match extraction_context
+        .create_extracted_note(
+            &note.title,
+            &content_with_provenance,
+            note_type,
+            &scope_paths_json,
+            retrieval_anchor.as_deref(),
+        )
+        .await
+    {
+        Ok(created) => {
+            if let Err(e) = extraction_context
+                .note_repo
+                .set_confidence(&created.id, 0.5)
+                .await
+            {
+                tracing::warn!(
+                    session_id = %extraction_context.session_id,
+                    note_id = %created.id,
+                    error = %e,
+                    "llm_extraction: failed to set confidence on extracted note"
+                );
+            }
+            tracing::debug!(
+                session_id = %extraction_context.session_id,
+                note_id = %created.id,
+                note_type = %note_type,
+                title = %note.title,
+                "llm_extraction: note created"
+            );
+            extraction_quality.written += 1;
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %extraction_context.session_id,
+                note_type = %note_type,
+                title = %note.title,
+                error = %e,
+                "llm_extraction: failed to create note; skipping"
+            );
+        }
+    }
+}
+
+async fn persist_working_spec(
+    extraction_context: &ExtractionContext<'_>,
+    note: &ExtractedNote,
+    reasons: &[&'static str],
+) {
+    let scope_paths = if note.scope_paths.is_empty() {
+        extraction_context.session_scope_paths.to_vec()
+    } else {
+        note.scope_paths.clone()
+    };
+    let scope_paths_json = serde_json::to_string(&scope_paths).unwrap_or_else(|_| "[]".to_string());
+    let title = format!("Working Spec {}", extraction_context.task_short_id);
+    let permalink = permalink_for("design", &title);
+    let section = render_working_spec_entry(extraction_context, note, reasons, &scope_paths);
+
+    match extraction_context
+        .note_repo
+        .get_by_permalink(extraction_context.project_id, &permalink)
+        .await
+    {
+        Ok(Some(existing)) => {
+            let merged = merge_working_spec_content(&existing.content, &section);
+            match extraction_context
+                .note_repo
+                .update(&existing.id, &title, &merged, "[]")
+                .await
+            {
+                Ok(updated) => {
+                    if let Err(error) = extraction_context
+                        .note_repo
+                        .update_scope_paths(&updated.id, &scope_paths_json)
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id = %extraction_context.session_id,
+                            note_id = %updated.id,
+                            error = %error,
+                            "llm_extraction: failed to update working spec scope paths"
+                        );
+                    }
+                    tracing::debug!(
+                        session_id = %extraction_context.session_id,
+                        note_id = %updated.id,
+                        permalink = %permalink,
+                        "llm_extraction: updated task working spec"
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    session_id = %extraction_context.session_id,
+                    permalink = %permalink,
+                    error = %error,
+                    "llm_extraction: failed to update working spec"
+                ),
+            }
+        }
+        Ok(None) => match extraction_context
+            .note_repo
+            .create_with_scope(
+                extraction_context.project_id,
+                &title,
+                &render_working_spec_document(extraction_context, &section, &scope_paths),
+                "design",
+                None,
+                "[]",
+                &scope_paths_json,
+            )
+            .await
+        {
+            Ok(created) => tracing::debug!(
+                session_id = %extraction_context.session_id,
+                note_id = %created.id,
+                permalink = %permalink,
+                "llm_extraction: created task working spec"
+            ),
+            Err(error) => tracing::warn!(
+                session_id = %extraction_context.session_id,
+                permalink = %permalink,
+                error = %error,
+                "llm_extraction: failed to create working spec"
+            ),
+        },
+        Err(error) => tracing::warn!(
+            session_id = %extraction_context.session_id,
+            permalink = %permalink,
+            error = %error,
+            "llm_extraction: failed to load existing working spec"
+        ),
+    }
+}
+
+fn render_working_spec_document(
+    extraction_context: &ExtractionContext<'_>,
+    section: &str,
+    scope_paths: &[String],
+) -> String {
+    let scope_lines = if scope_paths.is_empty() {
+        "- none captured".to_string()
+    } else {
+        scope_paths
+            .iter()
+            .map(|path| format!("- `{path}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        "# Working Spec\n\n## Active objective\n- Task {task_short_id}: {task_title}\n- {task_description}\n\n## Relevant scope\n{scope_lines}\n\n## Constraints\n- This note is task-scoped working context routed from non-durable extraction output.\n- Keep mutable hypotheses and open questions here instead of promoting them to durable case/pattern/pitfall notes.\n\n## Current hypotheses\n- Session-local understanding may evolve as implementation continues.\n\n## Open questions\n- Which parts of this working context should be promoted or discarded when the task completes?\n\n## Captured session knowledge\n{section}",
+        task_short_id = extraction_context.task_short_id,
+        task_title = extraction_context.task_title,
+        task_description = extraction_context.task_description,
+    )
+}
+
+fn render_working_spec_entry(
+    extraction_context: &ExtractionContext<'_>,
+    note: &ExtractedNote,
+    reasons: &[&'static str],
+    scope_paths: &[String],
+) -> String {
+    let routing_reasons = if reasons.is_empty() {
+        "- session_local_context".to_string()
+    } else {
+        reasons
+            .iter()
+            .map(|reason| format!("- {reason}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let scope_lines = if scope_paths.is_empty() {
+        "- none captured".to_string()
+    } else {
+        scope_paths
+            .iter()
+            .map(|path| format!("- `{path}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        "### {title}\n\n#### Objective\n- Preserve useful but non-durable understanding for task {task_short_id}.\n\n#### Files / symbols / scope\n{scope_lines}\n\n#### Constraints\n{routing_reasons}\n\n#### Current hypotheses\n- {content}\n\n#### Open questions\n- Should any portion of this be promoted into durable memory after the task completes?\n\n#### Routing rationale\n- Routed from extracted session output because it was useful for the current task but failed durable extraction thresholds.\n\n#### Provenance\n- Extracted from session {session_id}.\n",
+        title = note.title,
+        task_short_id = extraction_context.task_short_id,
+        content = note.content.trim(),
+        session_id = extraction_context.session_id,
+    )
+}
+
+fn merge_working_spec_content(existing: &str, section: &str) -> String {
+    let trimmed_existing = existing.trim_end();
+    let trimmed_section = section.trim();
+    if trimmed_existing.contains(trimmed_section) {
+        trimmed_existing.to_string()
+    } else {
+        format!("{trimmed_existing}\n\n{trimmed_section}\n")
+    }
+}
+
+async fn novelty_decision(
+    extraction_context: &ExtractionContext<'_>,
+    note_type: &str,
+    note: &ExtractedNote,
+) -> Result<NoveltyCheckResult, String> {
+    let candidate_abstract = summarize_candidate_note(note);
+    let folder = folder_for_type(note_type);
+    let candidates = lookup_candidates(extraction_context, folder, note_type, &candidate_abstract)
+        .await
+        .map_err(|e| format!("candidate lookup failed: {e}"))?;
+
+    if candidates.is_empty() {
+        return Ok(NoveltyCheckResult {
+            assessment: NoveltyAssessment::Novel,
+            existing_note_id: None,
+        });
+    }
+
+    let response = complete(
+        extraction_context.provider,
+        CompletionRequest {
+            system: NOVELTY_SYSTEM_PROMPT.to_string(),
+            prompt: build_novelty_prompt(note_type, note, &candidate_abstract, &candidates),
+            max_tokens: 300,
+        },
+    )
+    .await
+    .map_err(|e| format!("semantic compare failed: {e}"))?;
+
+    let decision: NoveltyDecision = serde_json::from_str(response.text.trim())
+        .map_err(|e| format!("invalid novelty decision json: {e}"))?;
+
+    match decision.decision {
+        NoveltyDecisionKind::Novel => Ok(NoveltyCheckResult {
+            assessment: NoveltyAssessment::Novel,
+            existing_note_id: None,
+        }),
+        NoveltyDecisionKind::AlreadyKnown => {
+            let existing_note_id = decision
+                .existing_note_id
+                .filter(|id| candidates.iter().any(|candidate| candidate.id == *id))
+                .ok_or_else(|| {
+                    "already_known decision missing valid existing_note_id".to_string()
+                })?;
+            tracing::debug!(
+                session_id = %extraction_context.session_id,
+                note_type = %note_type,
+                title = %note.title,
+                existing_note_id = %existing_note_id,
+                "llm_extraction: semantic duplicate decision returned already_known"
+            );
+            Ok(NoveltyCheckResult {
+                assessment: NoveltyAssessment::Duplicate,
+                existing_note_id: Some(existing_note_id),
+            })
+        }
+    }
+}
+
+fn assess_quality_gate(
+    note_type: &str,
+    note: &ExtractedNote,
+    novelty: &NoveltyCheckResult,
+) -> QualityAssessment {
+    let specificity = has_specificity(note);
+    let generality = has_generality(note);
+    let durability = has_durability(note);
+    let type_fit = matches_type_semantics(note_type, note);
+    // The ADR-054 structural gate now delegates to the shared
+    // `assess_note_quality` classifier (the single source of truth shared with
+    // `extracted_note_audit`), so the gate and corpus audit cannot drift.
+    let quality = assess_note_quality(note_type, &note.content);
+    let required_structure = !quality.is_underspecified;
+    let novelty_assessment = novelty.assessment;
+
+    let mut reasons = Vec::new();
+    if !specificity {
+        reasons.push("insufficient_specificity");
+    }
+    if !generality {
+        reasons.push("task_local_or_overly_narrow");
+    }
+    if !durability {
+        reasons.push("not_durable_beyond_current_task");
+    }
+    if !type_fit {
+        reasons.push("type_fit_mismatch");
+    }
+    if !required_structure {
+        reasons.push("missing_required_adr_054_sections");
+    }
+    if novelty_assessment == NoveltyAssessment::Duplicate {
+        reasons.push("semantic_duplicate_of_existing_note");
+    }
+
+    let outcome = if novelty_assessment == NoveltyAssessment::Duplicate {
+        ExtractionOutcome::MergeIntoExisting
+    } else if !required_structure {
+        ExtractionOutcome::DowngradeToWorkingSpec
+    } else if !specificity || !type_fit {
+        ExtractionOutcome::Discard
+    } else if !generality || !durability {
+        ExtractionOutcome::DowngradeToWorkingSpec
+    } else {
+        ExtractionOutcome::DurableWrite
+    };
+
+    QualityAssessment {
+        specificity,
+        generality,
+        durability,
+        novelty: novelty_assessment,
+        type_fit,
+        required_structure,
+        outcome,
+        reasons,
+    }
+}
+
+fn has_specificity(note: &ExtractedNote) -> bool {
+    let text = normalized_text(note);
+    if text.split_whitespace().count() < 8 {
+        return false;
+    }
+    let signals = [
+        text.contains("situation"),
+        text.contains("constraint"),
+        text.contains("result"),
+        text.contains("lesson"),
+        text.contains("approach"),
+        text.contains("recommended"),
+        text.contains("why it works"),
+        text.contains("prevention"),
+        text.contains("recovery"),
+        text.contains('/'),
+        text.contains("`"),
+        !note.scope_paths.is_empty(),
+    ];
+    signals.into_iter().filter(|flag| *flag).count() >= 2
+}
+
+fn has_generality(note: &ExtractedNote) -> bool {
+    let text = normalized_text(note);
+    let positive = [
+        "reusable", "future", "across", "multiple", "general", "whenever", "teams", "tasks",
+        "pattern", "lesson", "prevent",
+    ];
+    let negative = [
+        "this task",
+        "current task",
+        "temporary",
+        "for now",
+        "wip",
+        "working spec",
+        "session-only",
+        "local experiment",
+    ];
+    positive.iter().any(|token| text.contains(token))
+        && !negative.iter().any(|token| text.contains(token))
+}
+
+fn has_durability(note: &ExtractedNote) -> bool {
+    let text = normalized_text(note);
+    if text.split_whitespace().count() < MIN_DURABLE_WORDS {
+        return false;
+    }
+    let durable_markers = [
+        "guideline",
+        "recommend",
+        "use when",
+        "avoid",
+        "prevention",
+        "tradeoff",
+        "lesson",
+        "result",
+        "constraint",
+    ];
+    let transient_markers = [
+        "todo",
+        "next step",
+        "open question",
+        "hypothesis",
+        "investigate",
+        "maybe",
+        "might",
+        "could",
+    ];
+    durable_markers.iter().any(|token| text.contains(token))
+        && !transient_markers.iter().any(|token| text.contains(token))
+}
+
+fn matches_type_semantics(note_type: &str, note: &ExtractedNote) -> bool {
+    let text = normalized_text(note);
+    match note_type {
+        "pattern" => {
+            contains_any(
+                &text,
+                &[
+                    "reusable",
+                    "recommended",
+                    "approach",
+                    "use when",
+                    "when to use",
+                ],
+            ) && contains_any(&text, &["because", "why", "tradeoff", "works"])
+        }
+        "pitfall" => {
+            contains_any(
+                &text,
+                &["pitfall", "failure", "error", "smell", "trigger", "symptom"],
+            ) && contains_any(&text, &["prevent", "recovery", "resolve", "avoid"])
+        }
+        "case" => {
+            contains_any(
+                &text,
+                &[
+                    "situation",
+                    "constraint",
+                    "result",
+                    "lesson",
+                    "worked",
+                    "failed",
+                ],
+            ) && contains_any(
+                &text,
+                &["approach", "did", "implemented", "fixed", "resolved"],
+            )
+        }
+        _ => false,
+    }
+}
+
+fn contains_any(text: &str, tokens: &[&str]) -> bool {
+    tokens.iter().any(|token| text.contains(token))
+}
+
+fn normalized_text(note: &ExtractedNote) -> String {
+    format!("{}\n{}", note.title, note.content).to_lowercase()
+}
+
+async fn lookup_candidates(
+    extraction_context: &ExtractionContext<'_>,
+    folder: &str,
+    note_type: &str,
+    candidate_abstract: &str,
+) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>> {
+    #[cfg(test)]
+    if let Some(lookup) = extraction_context.candidate_lookup.override_lookup {
+        return Ok(lookup(
+            extraction_context.project_id,
+            folder,
+            note_type,
+            candidate_abstract,
+        ));
+    }
+
+    extraction_context
+        .note_repo
+        .dedup_candidates(
+            extraction_context.project_id,
+            folder,
+            note_type,
+            candidate_abstract,
+            NOVELTY_CANDIDATE_LIMIT,
+        )
+        .await
+}
+
+fn summarize_candidate_note(note: &ExtractedNote) -> String {
+    let trimmed = note.content.trim();
+    if trimmed.is_empty() {
+        note.title.trim().to_string()
+    } else {
+        format!("{}\n\n{}", note.title.trim(), trimmed)
+    }
+}
+
+fn build_novelty_prompt(
+    note_type: &str,
+    note: &ExtractedNote,
+    candidate_abstract: &str,
+    candidates: &[djinn_db::NoteDedupCandidate],
+) -> String {
+    let candidate_lines = candidates
+        .iter()
+        .map(|candidate| {
+            let summary = candidate
+                .abstract_
+                .as_deref()
+                .or(candidate.overview.as_deref())
+                .unwrap_or("");
+            format!(
+                "- id: {}\n  title: {}\n  summary: {}",
+                candidate.id, candidate.title, summary
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "Note type: {note_type}\nProposed extracted note title: {title}\nProposed extracted note summary:\n{candidate_abstract}\n\nExisting candidates:\n{candidate_lines}\n\nReturn JSON only in this schema:\n{{\"decision\":\"already_known\"|\"novel\",\"existing_note_id\":\"candidate-id-or-null\"}}\nChoose already_known only when the proposed note is semantically the same knowledge as one existing candidate. Otherwise choose novel.",
+        title = note.title,
+    )
+}
+
+// ── JSON parsing helpers ──────────────────────────────────────────────────────
+
+/// Parse the LLM response text into an `ExtractionResponse`.
+///
+/// The LLM is asked to return pure JSON, but may wrap it in a markdown fence
+/// or include leading/trailing whitespace. We strip common wrappers before
+/// parsing.
+fn parse_extraction_response(text: &str) -> Result<ExtractionResponse, String> {
+    let text = text.trim();
+
+    // Strip optional markdown code fences: ```json ... ``` or ``` ... ```
+    let text = if let Some(inner) = text
+        .strip_prefix("```json")
+        .or_else(|| text.strip_prefix("```"))
+    {
+        inner.trim_start()
+    } else {
+        text
+    };
+    let text = if let Some(inner) = text.strip_suffix("```") {
+        inner.trim_end()
+    } else {
+        text
+    };
+
+    serde_json::from_str::<ExtractionResponse>(text).map_err(|e| format!("JSON parse error: {e}"))
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::session_extraction::ExtractionQuality;
+    use crate::test_helpers::{agent_context_from_db, create_test_db, test_path};
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn take(&self) -> String {
+            let mut buf = self.0.lock().expect("captured logs mutex poisoned");
+            let out =
+                String::from_utf8(buf.clone()).expect("captured log bytes were not valid utf-8");
+            buf.clear();
+            out
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogsWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogsWriter {
+                inner: std::sync::Arc::clone(&self.0),
+            }
+        }
+    }
+
+    struct CapturedLogsWriter {
+        inner: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for CapturedLogsWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner
+                .lock()
+                .expect("captured logs mutex poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn extraction_telemetry_for_test(
+        task_id: &str,
+        creator: Option<&str>,
+    ) -> djinn_provider::provider::TelemetryMeta {
+        crate::helpers::build_telemetry_meta_with_attribution(
+            "memory_extraction",
+            task_id,
+            Some("memory_extraction"),
+            creator,
+        )
+    }
+
+    #[tokio::test]
+    async fn llm_extraction_fallback_returns_early_when_no_org_shared_provider() {
+        use tracing::dispatcher::Dispatch;
+
+        let db = djinn_db::Database::open_in_memory().expect("in-memory db");
+        djinn_db::SettingsRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .set("settings.raw", r#"{"models":["openai/gpt-4.1-mini"]}"#)
+            .await
+            .expect("configure memory model without credentials");
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(false)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = Dispatch::new(subscriber);
+
+        let guard = tracing::dispatcher::set_default(&dispatch);
+        let resolution = resolve_llm_extraction_provider_after_creator_attempt(
+            &db,
+            "session-no-provider",
+            None,
+            extraction_telemetry_for_test("task-no-provider", Some("user_a")),
+        )
+        .await;
+        drop(guard);
+
+        let captured = logs.take();
+        assert!(
+            captured.contains(NO_LLM_PROVIDER_WARNING),
+            "fallback branch must emit the existing loud warning; captured: {captured}"
+        );
+        assert!(
+            captured.contains("session-no-provider"),
+            "warning should retain session context; captured: {captured}"
+        );
+
+        match resolution {
+            LlmExtractionProviderResolution::NoProvider {
+                warning_message,
+                error,
+            } => {
+                assert_eq!(warning_message, NO_LLM_PROVIDER_WARNING);
+                assert!(
+                    error.contains("no connected builtin provider models are available"),
+                    "fallback should fail before any completion-capable provider is returned: {error}"
+                );
+            }
+            LlmExtractionProviderResolution::Provider(provider) => panic!(
+                "expected no provider and therefore no possible LLM completion call, got {}",
+                provider.name()
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_extraction_fallback_uses_org_shared_provider_with_memory_telemetry() {
+        let db = djinn_db::Database::open_in_memory().expect("in-memory db");
+        djinn_db::SettingsRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .set(
+                "settings.raw",
+                r#"{"models":["anthropic/claude-3-5-haiku-latest"]}"#,
+            )
+            .await
+            .expect("configure org-shared memory model");
+        djinn_provider::repos::CredentialRepository::new(
+            db.clone(),
+            djinn_core::events::EventBus::noop(),
+        )
+        .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "org-key", None)
+        .await
+        .expect("configure org-shared credential");
+
+        let resolution = resolve_llm_extraction_provider_after_creator_attempt(
+            &db,
+            "session-fallback",
+            None,
+            extraction_telemetry_for_test("task-fallback", Some("user_a")),
+        )
+        .await;
+
+        let provider = match resolution {
+            LlmExtractionProviderResolution::Provider(provider) => provider,
+            LlmExtractionProviderResolution::NoProvider { error, .. } => {
+                panic!("expected org-shared fallback provider, got error: {error}")
+            }
+        };
+        assert_eq!(provider.name(), "anthropic");
+
+        let config = provider
+            .config_snapshot()
+            .expect("org-shared fallback provider should expose config snapshot");
+        let telemetry = config
+            .telemetry
+            .expect("fallback branch must attach memory extraction telemetry");
+        assert_eq!(telemetry.user_id.as_deref(), Some("user_a"));
+        assert_eq!(telemetry.operation.as_deref(), Some("memory_extraction"));
+    }
+
+    /// B5a: knowledge extraction is a cheap background distillation. The call
+    /// site downgrades its resolved provider to the weakest reasoning tier
+    /// before issuing the extraction + novelty completions. This locks the
+    /// exact downgrade expression used in `run_llm_extraction_inner`.
+    #[test]
+    fn extraction_downgrades_provider_to_weakest_reasoning_tier() {
+        use djinn_provider::provider::{
+            AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig, ReasoningEffort,
+            create_provider,
+        };
+
+        // A resolved provider as extraction would build it — start STRONG so a
+        // missing/incorrect override is visible.
+        let provider: Box<dyn LlmProvider> = create_provider(ProviderConfig {
+            base_url: "https://example.test".to_string(),
+            auth: AuthMethod::NoAuth,
+            format_family: FormatFamily::Anthropic,
+            model_id: "test-model".to_string(),
+            context_window: 128_000,
+            telemetry: None,
+            session_affinity_key: None,
+            provider_headers: Default::default(),
+            capabilities: ProviderCapabilities::default(),
+            reasoning_effort: Some(ReasoningEffort::High),
+        });
+
+        // Exact downgrade logic from the call site.
+        let provider: Box<dyn LlmProvider> =
+            match provider.with_reasoning_effort(ReasoningEffort::Minimal) {
+                Some(downgraded) => downgraded,
+                None => provider,
+            };
+
+        assert_eq!(
+            provider.config_snapshot().unwrap().reasoning_effort,
+            Some(ReasoningEffort::Minimal),
+            "extraction must run its LLM calls at the weakest reasoning tier"
+        );
+    }
+
+    #[test]
+    fn transcript_excerpt_renders_text_tools_and_results_and_skips_system() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+        let messages = vec![
+            Message {
+                role: Role::System,
+                content: vec![ContentBlock::text("you are a worker")],
+                metadata: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::text("I'll fix the migrations path"),
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "edit".into(),
+                        input: serde_json::json!({"file": "migrations.rs"}),
+                    },
+                ],
+                metadata: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: vec![ContentBlock::text("No such file or directory")],
+                    is_error: true,
+                }],
+                metadata: None,
+            },
+        ];
+        let out = build_transcript_excerpt(&messages, 12_000);
+        assert!(
+            !out.contains("you are a worker"),
+            "system prompt must be skipped"
+        );
+        assert!(out.contains("assistant: I'll fix the migrations path"));
+        assert!(out.contains("assistant → edit("));
+        assert!(out.contains("tool error: No such file or directory"));
+    }
+
+    #[test]
+    fn transcript_excerpt_tail_biased_truncation() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+        let messages: Vec<Message> = (0..200)
+            .map(|i| Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::text(format!("line {i}"))],
+                metadata: None,
+            })
+            .collect();
+        let out = build_transcript_excerpt(&messages, 200);
+        assert!(
+            out.len() <= 240,
+            "should be capped near max_chars: {}",
+            out.len()
+        );
+        assert!(out.contains("earlier turns omitted"));
+        assert!(
+            out.contains("line 199"),
+            "tail (latest) content must be kept"
+        );
+        assert!(!out.contains("line 0:"), "head should be dropped");
+    }
+
+    #[test]
+    fn parse_extraction_response_valid_json() {
+        let json = r#"{"cases":[{"title":"T","content":"C"}],"patterns":[],"pitfalls":[]}"#;
+        let result = parse_extraction_response(json).expect("valid json");
+        assert_eq!(result.cases.len(), 1);
+        assert_eq!(result.cases[0].title, "T");
+        assert!(result.patterns.is_empty());
+        assert!(result.pitfalls.is_empty());
+    }
+
+    #[test]
+    fn parse_extraction_response_strips_markdown_fence() {
+        let json = "```json\n{\"cases\":[],\"patterns\":[],\"pitfalls\":[]}\n```";
+        let result = parse_extraction_response(json).expect("markdown-wrapped json");
+        assert!(result.cases.is_empty());
+    }
+
+    #[test]
+    fn parse_extraction_response_strips_plain_fence() {
+        let json = "```\n{\"cases\":[],\"patterns\":[],\"pitfalls\":[]}\n```";
+        let result = parse_extraction_response(json).expect("plain-fenced json");
+        assert!(result.cases.is_empty());
+    }
+
+    #[test]
+    fn parse_extraction_response_empty_arrays_when_fields_missing() {
+        let json = r#"{}"#;
+        let result = parse_extraction_response(json).expect("empty object");
+        assert!(result.cases.is_empty());
+        assert!(result.patterns.is_empty());
+        assert!(result.pitfalls.is_empty());
+    }
+
+    #[test]
+    fn parse_extraction_response_returns_error_on_invalid_json() {
+        let result = parse_extraction_response("not json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_extraction_response_parses_applies_when_per_note() {
+        // Prompt-facing field name `applies_when` must parse into the durable
+        // `retrieval_anchor` slot.
+        let json = r#"{
+            "cases": [{"title":"T","content":"C","applies_when":"When T applies."}],
+            "patterns": [{"title":"P","content":"P","applies_when":"When P applies."}],
+            "pitfalls": [{"title":"F","content":"F","applies_when":"When F applies."}]
+        }"#;
+        let result = parse_extraction_response(json).expect("applies_when json parses");
+        assert_eq!(
+            result.cases[0].normalized_anchor().as_deref(),
+            Some("When T applies.")
+        );
+        assert_eq!(
+            result.patterns[0].normalized_anchor().as_deref(),
+            Some("When P applies.")
+        );
+        assert_eq!(
+            result.pitfalls[0].normalized_anchor().as_deref(),
+            Some("When F applies.")
+        );
+    }
+
+    #[test]
+    fn parse_extraction_response_accepts_retrieval_anchor_alias() {
+        // The storage-facing field name `retrieval_anchor` is also accepted as
+        // a serde alias so existing call sites that already use it still work.
+        let json = r#"{
+            "cases": [{"title":"T","content":"C","retrieval_anchor":"When T applies."}],
+            "patterns": [],
+            "pitfalls": []
+        }"#;
+        let result = parse_extraction_response(json).expect("retrieval_anchor alias parses");
+        assert_eq!(
+            result.cases[0].normalized_anchor().as_deref(),
+            Some("When T applies.")
+        );
+    }
+
+    #[test]
+    fn parse_extraction_response_tolerates_missing_applies_when() {
+        // A model that forgets the field must not break extraction — the note
+        // persists without an anchor (legacy behavior).
+        let json = r#"{
+            "cases": [{"title":"T","content":"C"}],
+            "patterns": [],
+            "pitfalls": []
+        }"#;
+        let result = parse_extraction_response(json).expect("missing anchor parses");
+        assert_eq!(result.cases.len(), 1);
+        assert!(result.cases[0].normalized_anchor().is_none());
+    }
+
+    #[test]
+    fn parse_extraction_response_tolerates_empty_and_whitespace_anchor() {
+        // Empty / whitespace-only anchors normalize to None and do not crash.
+        let json = r#"{
+            "cases": [
+                {"title":"A","content":"A","applies_when":""},
+                {"title":"B","content":"B","applies_when":"   "},
+                {"title":"C","content":"C","applies_when":"\n\t"}
+            ],
+            "patterns": [],
+            "pitfalls": []
+        }"#;
+        let result = parse_extraction_response(json).expect("empty anchor json parses");
+        for note in &result.cases {
+            assert!(
+                note.normalized_anchor().is_none(),
+                "empty/whitespace anchor must normalize to None; got {:?}",
+                note.normalized_anchor()
+            );
+        }
+    }
+
+    #[test]
+    fn normalized_anchor_trims_surrounding_whitespace() {
+        let note = ExtractedNote {
+            title: "T".to_string(),
+            content: "C".to_string(),
+            retrieval_anchor: Some("  When trimming matters.  \n".to_string()),
+            scope_paths: vec![],
+        };
+        assert_eq!(
+            note.normalized_anchor().as_deref(),
+            Some("When trimming matters.")
+        );
+    }
+
+    #[test]
+    fn prompt_template_requires_applies_when_field() {
+        // The full extraction prompt must explicitly request `applies_when`
+        // and the ADR-054 sections. (Reuse the production prompt builder so
+        // the test cannot drift from the live template.)
+        let prompt = build_extraction_prompt("title-x", "desc-y", "{}", "(none)", "[]");
+
+        assert!(
+            prompt.contains("\"applies_when\""),
+            "prompt must include the applies_when field name"
+        );
+        // All three ADR-054 section lists must remain — the new anchor field
+        // must not displace the durable body schema.
+        assert!(prompt.contains("## Recommended approach"));
+        assert!(prompt.contains("## Failure mode"));
+        assert!(prompt.contains("## Approach taken"));
+        // Anchor must be required to be distinct from the body.
+        assert!(prompt.contains("DISTINCT from the markdown body"));
+    }
+
+    #[test]
+    fn extraction_quality_defaults_to_zero() {
+        assert_eq!(ExtractionQuality::default().novelty_skipped, 0);
+    }
+
+    #[test]
+    fn extraction_max_tokens_is_raised_value() {
+        // Guards against a regression back to the truncating 1024 cap.
+        assert_eq!(EXTRACTION_MAX_TOKENS, 4096);
+    }
+
+    #[test]
+    fn dedup_extracted_notes_collapses_same_normalized_title_and_type() {
+        // Two cases with the same title modulo case/whitespace must collapse to one.
+        let extracted = ExtractionResponse {
+            cases: vec![
+                ExtractedNote {
+                    title: "Flaky Extraction".to_string(),
+                    content: "first body".to_string(),
+                    retrieval_anchor: Some("When extraction is flaky across runs.".to_string()),
+                    scope_paths: vec![],
+                },
+                ExtractedNote {
+                    title: "  flaky extraction ".to_string(),
+                    content: "second body (duplicate)".to_string(),
+                    retrieval_anchor: Some("When extraction is flaky across runs.".to_string()),
+                    scope_paths: vec![],
+                },
+            ],
+            patterns: vec![],
+            pitfalls: vec![],
+        };
+        let (deduped, dupes) = dedup_extracted_notes(&extracted);
+        assert_eq!(dupes, 1, "one intra-batch duplicate should be dropped");
+        assert_eq!(deduped.len(), 1, "only the first-seen note is kept");
+        assert_eq!(deduped[0].0, "case");
+        assert_eq!(deduped[0].1.content, "first body");
+    }
+
+    #[test]
+    fn dedup_extracted_notes_keeps_same_title_across_different_types() {
+        // Same title but different note_type are NOT duplicates (key includes type).
+        let extracted = ExtractionResponse {
+            cases: vec![ExtractedNote {
+                title: "Shared Title".to_string(),
+                content: "case body".to_string(),
+                retrieval_anchor: None,
+                scope_paths: vec![],
+            }],
+            patterns: vec![],
+            pitfalls: vec![ExtractedNote {
+                title: "shared title".to_string(),
+                content: "pitfall body".to_string(),
+                retrieval_anchor: None,
+                scope_paths: vec![],
+            }],
+        };
+        let (deduped, dupes) = dedup_extracted_notes(&extracted);
+        assert_eq!(dupes, 0);
+        assert_eq!(deduped.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn run_llm_extraction_returns_early_when_session_has_no_task_id() {
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let ctx = agent_context_from_db(db.clone(), cancel);
+
+        // Create a session without task_id via SessionRepository
+        let session_repo =
+            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let project_repo =
+            djinn_db::ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        // Need a project first
+        let id = uuid::Uuid::now_v7().to_string();
+        let _ = test_path(&format!("djinn-llm-extraction-no-task-{id}-"));
+        let name = format!("proj-{id}");
+        let project = project_repo
+            .create(&name, "test", &name)
+            .await
+            .expect("create project");
+
+        let session = session_repo
+            .create(djinn_db::CreateSessionParams {
+                project_id: &project.id,
+                task_id: None, // no task_id
+                model: "test-model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .expect("create session");
+
+        let taxonomy = SessionTaxonomy::default();
+
+        // Should return early without panicking
+        run_llm_extraction(session.id, taxonomy, ctx).await;
+    }
+
+    #[tokio::test]
+    async fn run_llm_extraction_graceful_degradation_when_provider_unavailable() {
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let ctx = agent_context_from_db(db.clone(), cancel);
+
+        let events = djinn_core::events::EventBus::noop();
+        let session_repo = djinn_db::SessionRepository::new(db.clone(), events.clone());
+        let project_repo = djinn_db::ProjectRepository::new(db.clone(), events.clone());
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), events.clone());
+        let epic_repo = djinn_db::EpicRepository::new(db.clone(), events.clone());
+
+        let id = uuid::Uuid::now_v7().to_string();
+        let _ = test_path(&format!("djinn-llm-extraction-provider-{id}-"));
+        let name = format!("proj-{id}");
+        let project = project_repo
+            .create(&name, "test", &name)
+            .await
+            .expect("create project");
+
+        let epic = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "test-epic",
+                    description: "desc",
+                    emoji: "🧪",
+                    color: "blue",
+                    owner: "test",
+                    memory_refs: None,
+                    status: None,
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                    blocked_by: None,
+                },
+            )
+            .await
+            .expect("create epic");
+
+        let task = task_repo
+            .create_in_project(
+                &project.id,
+                Some(&epic.id),
+                "test-task",
+                "test task description",
+                "test design",
+                "task",
+                2,
+                "test",
+                None,
+                None,
+            )
+            .await
+            .expect("create task");
+
+        let session = session_repo
+            .create(djinn_db::CreateSessionParams {
+                project_id: &project.id,
+                task_id: Some(&task.id),
+                model: "test-model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+            })
+            .await
+            .expect("create session");
+
+        let taxonomy = SessionTaxonomy {
+            files_changed: 5,
+            errors: 3,
+            tools_used: 8,
+            notes_read: 1,
+            notes_written: 2,
+            tasks_transitioned: 1,
+            changed_file_paths: vec![],
+            extraction_quality: ExtractionQuality::default(),
+        };
+
+        // No credentials configured → resolve_memory_provider will fail → graceful skip
+        // Should not panic
+        run_llm_extraction(session.id, taxonomy, ctx).await;
+    }
 }

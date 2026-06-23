@@ -25,6 +25,8 @@ use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
 use djinn_orchestration_types::trigger::CoordinatorTrigger;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
+use crate::helpers::ProviderCredential;
+
 // ─── KnowledgeBranchTarget ──────────────────────────────────────────────────
 
 /// Identifies the knowledge-write target for a session.
@@ -103,6 +105,16 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
         ctx: &'a SlotContext,
     ) -> Pin<Box<dyn Future<Output = Result<String, ErrorResponse>> + Send + 'a>>;
 
+    /// Resolve a provider credential from the host's credential store
+    /// (including OAuth refresh when applicable).  Returns the credential
+    /// as a serializable JSON blob; the slot crate uses
+    /// [`ProviderCredential`] to carry it.
+    fn resolve_provider_credential<'a>(
+        &'a self,
+        provider_id: &'a str,
+        ctx: &'a SlotContext,
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderCredential, String>> + Send + 'a>>;
+
     /// Run the supervisor dispatch for a task.  This encapsulates the entire
     /// `supervisor_runner::run_supervisor_dispatch` logic and its dependencies
     /// (runtime_bridge, supervisor, lifecycle stages, reply_loop, etc.).
@@ -159,6 +171,8 @@ pub struct SlotContext {
     pub coordinator_trigger: Option<Arc<dyn CoordinatorTrigger>>,
     /// The runtime-ops handle for task-run management.
     pub runtime_ops: Option<Arc<dyn RuntimeOps>>,
+    /// Code-graph operations handle (for auto code-context features).
+    pub repo_graph_ops: Option<Arc<dyn djinn_control_plane::bridge::RepoGraphOps>>,
     /// Host-specific callbacks for complex operations.
     pub callbacks: Arc<dyn SlotHostCallbacks>,
 }

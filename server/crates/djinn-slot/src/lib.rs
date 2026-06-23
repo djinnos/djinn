@@ -33,6 +33,7 @@ pub use djinn_orchestration_types::slot::{
 mod actor;
 mod commands;
 pub(crate) mod finalize_handlers;
+pub mod finalize_types;
 pub mod helpers;
 pub(crate) mod lifecycle;
 pub(crate) mod llm_extraction;
@@ -50,6 +51,8 @@ mod helpers_tests;
 mod llm_extraction_tests;
 #[cfg(test)]
 mod reply_loop_tests;
+#[cfg(test)]
+pub(crate) mod test_helpers;
 
 // ─── Public re-exports ──────────────────────────────────────────────────────
 
