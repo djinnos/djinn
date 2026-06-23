@@ -486,6 +486,7 @@ pub(crate) async fn execute_stage(
         effective_skills,
         mcp_registry,
         resolved_skills,
+        native_skill_names: _native_skill_names,
     } = resolve_mcp_and_skills(
         worktree_path,
         runtime_role.as_ref(),
