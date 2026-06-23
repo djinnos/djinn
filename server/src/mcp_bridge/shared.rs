@@ -425,7 +425,10 @@ fn edge_propagates(kind: RepoGraphEdgeKind) -> bool {
         | RepoGraphEdgeKind::TypeDefines
         | RepoGraphEdgeKind::Defines
         | RepoGraphEdgeKind::HandlesRoute
-        | RepoGraphEdgeKind::Fetches => true,
+        | RepoGraphEdgeKind::Fetches
+        // Trait-dispatch call edges carry "if this changes, that breaks"
+        // semantics — the caller depends on the trait method.
+        | RepoGraphEdgeKind::TraitDispatchCall => true,
         RepoGraphEdgeKind::ContainsDefinition
         | RepoGraphEdgeKind::DeclaredInFile
         | RepoGraphEdgeKind::MemberOf
