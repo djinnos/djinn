@@ -492,31 +492,21 @@ impl Languages {
             || self.clang.is_some()
     }
 
+    /// Validate each language block, in canonical order: rust, node, python,
+    /// go, java, ruby, dotnet, clang.  The first invalid language block
+    /// determines the returned error.
     fn validate(&self) -> EnvResult<()> {
-        if let Some(r) = &self.rust {
-            r.validate()?;
-        }
-        if let Some(n) = &self.node {
-            n.validate()?;
-        }
-        if let Some(p) = &self.python {
-            p.validate()?;
-        }
-        if let Some(g) = &self.go {
-            g.validate()?;
-        }
-        if let Some(j) = &self.java {
-            j.validate()?;
-        }
-        if let Some(r) = &self.ruby {
-            r.validate()?;
-        }
-        if let Some(d) = &self.dotnet {
-            d.validate()?;
-        }
-        if let Some(c) = &self.clang {
-            c.validate()?;
-        }
+        // Order matches the field declaration order and the historical
+        // validation sequence.  Changing this order would change which error
+        // is returned first for a config with multiple invalid language blocks.
+        validate_optional(&self.rust)?;
+        validate_optional(&self.node)?;
+        validate_optional(&self.python)?;
+        validate_optional(&self.go)?;
+        validate_optional(&self.java)?;
+        validate_optional(&self.ruby)?;
+        validate_optional(&self.dotnet)?;
+        validate_optional(&self.clang)?;
         Ok(())
     }
 }
@@ -531,13 +521,6 @@ pub struct RustLanguage {
     pub default_toolchain: String,
 }
 
-impl RustLanguage {
-    fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.rust.default_toolchain", &self.default_toolchain)?;
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct NodeLanguage {
     pub default_version: String,
@@ -548,25 +531,9 @@ pub struct NodeLanguage {
     pub default_package_manager: Option<String>,
 }
 
-impl NodeLanguage {
-    fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.node.default_version", &self.default_version)?;
-        if let Some(pm) = &self.default_package_manager {
-            validate_identifier("languages.node.default_package_manager", pm)?;
-        }
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PythonLanguage {
     pub default_version: String,
-}
-
-impl PythonLanguage {
-    fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.python.default_version", &self.default_version)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -574,21 +541,9 @@ pub struct GoLanguage {
     pub default_version: String,
 }
 
-impl GoLanguage {
-    fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.go.default_version", &self.default_version)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct JavaLanguage {
     pub default_version: String,
-}
-
-impl JavaLanguage {
-    fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.java.default_version", &self.default_version)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -596,32 +551,14 @@ pub struct RubyLanguage {
     pub default_version: String,
 }
 
-impl RubyLanguage {
-    fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.ruby.default_version", &self.default_version)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DotnetLanguage {
     pub default_version: String,
 }
 
-impl DotnetLanguage {
-    fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.dotnet.default_version", &self.default_version)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ClangLanguage {
     pub default_version: String,
-}
-
-impl ClangLanguage {
-    fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.clang.default_version", &self.default_version)
-    }
 }
 
 // ---- workspaces ---------------------------------------------------------
@@ -663,25 +600,33 @@ fn validate_workspaces(workspaces: &[Workspace]) -> EnvResult<()> {
                 language: ws.language.clone(),
             });
         }
-        // `root` is a path within the repo; allow `/` and be lenient.
-        validate_path("workspaces[*].root", &ws.root)?;
-        if let Some(slug) = &ws.slug {
-            validate_identifier("workspaces[*].slug", slug)?;
-        }
-        if let Some(name) = &ws.name {
-            validate_workspace_name("workspaces[*].name", name)?;
-        }
-        validate_workspace_tags("workspaces[*].tags", &ws.tags)?;
-        validate_identifier("workspaces[*].language", &ws.language)?;
-        if let Some(t) = &ws.toolchain {
-            validate_identifier("workspaces[*].toolchain", t)?;
-        }
-        if let Some(v) = &ws.version {
-            validate_identifier("workspaces[*].version", v)?;
-        }
-        if let Some(pm) = &ws.package_manager {
-            validate_identifier("workspaces[*].package_manager", pm)?;
-        }
+        validate_workspace_fields(ws)?;
+    }
+    Ok(())
+}
+
+/// Validate all fields of a single workspace, preserving the exact
+/// field-path strings and early-return order established by the
+/// original inline loop.
+fn validate_workspace_fields(ws: &Workspace) -> EnvResult<()> {
+    // `root` is a path within the repo; allow `/` and be lenient.
+    validate_path("workspaces[*].root", &ws.root)?;
+    if let Some(slug) = &ws.slug {
+        validate_identifier("workspaces[*].slug", slug)?;
+    }
+    if let Some(name) = &ws.name {
+        validate_workspace_name("workspaces[*].name", name)?;
+    }
+    validate_workspace_tags("workspaces[*].tags", &ws.tags)?;
+    validate_identifier("workspaces[*].language", &ws.language)?;
+    if let Some(t) = &ws.toolchain {
+        validate_identifier("workspaces[*].toolchain", t)?;
+    }
+    if let Some(v) = &ws.version {
+        validate_identifier("workspaces[*].version", v)?;
+    }
+    if let Some(pm) = &ws.package_manager {
+        validate_identifier("workspaces[*].package_manager", pm)?;
     }
     Ok(())
 }
@@ -776,19 +721,26 @@ fn validate_env(env: &BTreeMap<String, String>) -> EnvResult<()> {
         });
     }
     for (k, v) in env {
-        if !is_valid_env_key(k) {
-            return Err(EnvironmentConfigError::InvalidEnvKey { key: k.clone() });
-        }
-        if v.contains('\n') || v.contains('\r') || v.contains('\0') {
-            return Err(EnvironmentConfigError::InvalidEnvValue { key: k.clone() });
-        }
-        if v.len() > MAX_STRING_LEN {
-            return Err(EnvironmentConfigError::TooLong {
-                field: format!("env[{k}]"),
-                len: v.len(),
-                max: MAX_STRING_LEN,
-            });
-        }
+        validate_env_entry(k, v)?;
+    }
+    Ok(())
+}
+
+/// Validate a single env var entry, preserving exact error variants
+/// and early-return order.
+fn validate_env_entry(key: &str, value: &str) -> EnvResult<()> {
+    if !is_valid_env_key(key) {
+        return Err(EnvironmentConfigError::InvalidEnvKey { key: key.into() });
+    }
+    if value.contains('\n') || value.contains('\r') || value.contains('\0') {
+        return Err(EnvironmentConfigError::InvalidEnvValue { key: key.into() });
+    }
+    if value.len() > MAX_STRING_LEN {
+        return Err(EnvironmentConfigError::TooLong {
+            field: format!("env[{key}]"),
+            len: value.len(),
+            max: MAX_STRING_LEN,
+        });
     }
     Ok(())
 }
@@ -902,15 +854,18 @@ pub struct LifecycleHooks {
 
 impl LifecycleHooks {
     fn validate(&self) -> EnvResult<()> {
-        validate_hook_list("lifecycle.post_build", &self.post_build)?;
-        validate_hook_list("lifecycle.pre_anything", &self.pre_anything)?;
-        validate_hook_list("lifecycle.pre_task", &self.pre_task)?;
-        validate_hook_list("lifecycle.pre_verification", &self.pre_verification)?;
+        validate_lifecycle_phase("lifecycle.post_build", &self.post_build)?;
+        validate_lifecycle_phase("lifecycle.pre_anything", &self.pre_anything)?;
+        validate_lifecycle_phase("lifecycle.pre_task", &self.pre_task)?;
+        validate_lifecycle_phase("lifecycle.pre_verification", &self.pre_verification)?;
         Ok(())
     }
 }
 
-fn validate_hook_list(field: &str, hooks: &[HookCommand]) -> EnvResult<()> {
+/// Validate one lifecycle phase: cap the list length, then validate each hook
+/// with its indexed field path.  Preserves exact field strings and early-return
+/// order.
+fn validate_lifecycle_phase(field: &str, hooks: &[HookCommand]) -> EnvResult<()> {
     if hooks.len() > MAX_HOOKS_PER_PHASE {
         return Err(EnvironmentConfigError::ListTooLong {
             field: field.into(),
@@ -923,6 +878,84 @@ fn validate_hook_list(field: &str, hooks: &[HookCommand]) -> EnvResult<()> {
     }
     Ok(())
 }
+
+// ---- validation helpers -------------------------------------------------
+
+/// Call `validate` on the inner value when the option is `Some`.
+/// Preserves early-return semantics: the first validation failure wins.
+fn validate_optional<T: Validatable>(opt: &Option<T>) -> EnvResult<()> {
+    if let Some(inner) = opt {
+        inner.validate()?;
+    }
+    Ok(())
+}
+
+/// Trait for types that carry a `validate(&self) -> EnvResult<()>` method.
+/// Used by [`validate_optional`] to dispatch validation generically on
+/// per-language `Option<T>` fields.
+trait Validatable {
+    fn validate(&self) -> EnvResult<()>;
+}
+
+impl Validatable for RustLanguage {
+    fn validate(&self) -> EnvResult<()> {
+        validate_identifier("languages.rust.default_toolchain", &self.default_toolchain)
+    }
+}
+
+impl Validatable for NodeLanguage {
+    fn validate(&self) -> EnvResult<()> {
+        validate_identifier("languages.node.default_version", &self.default_version)?;
+        if let Some(pm) = &self.default_package_manager {
+            validate_identifier("languages.node.default_package_manager", pm)?;
+        }
+        Ok(())
+    }
+}
+
+impl Validatable for PythonLanguage {
+    fn validate(&self) -> EnvResult<()> {
+        validate_default_version("python", &self.default_version)
+    }
+}
+
+impl Validatable for GoLanguage {
+    fn validate(&self) -> EnvResult<()> {
+        validate_default_version("go", &self.default_version)
+    }
+}
+
+impl Validatable for JavaLanguage {
+    fn validate(&self) -> EnvResult<()> {
+        validate_default_version("java", &self.default_version)
+    }
+}
+
+impl Validatable for RubyLanguage {
+    fn validate(&self) -> EnvResult<()> {
+        validate_default_version("ruby", &self.default_version)
+    }
+}
+
+impl Validatable for DotnetLanguage {
+    fn validate(&self) -> EnvResult<()> {
+        validate_default_version("dotnet", &self.default_version)
+    }
+}
+
+impl Validatable for ClangLanguage {
+    fn validate(&self) -> EnvResult<()> {
+        validate_default_version("clang", &self.default_version)
+    }
+}
+
+/// Validate a language's `default_version` field as an identifier.
+/// Centralizes the repeated `validate_identifier("languages.<lang>.default_version", ...)`
+/// call shared by six of the eight per-language validators.
+fn validate_default_version(lang: &str, value: &str) -> EnvResult<()> {
+    validate_identifier(&format!("languages.{lang}.default_version"), value)
+}
+
 // ---- string validators --------------------------------------------------
 
 /// Accept `[A-Za-z0-9._-]+` — the character set that's safe in a `RUN`
@@ -1837,5 +1870,179 @@ mod tests {
         }"#;
         let cfg: EnvironmentConfig = serde_json::from_str(raw).unwrap();
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_reports_schema_version_zero_before_language_errors() {
+        // Top-level ordering: schema_version == 0 is checked before
+        // language validation, so even an invalid toolchain is invisible
+        // when the schema version is the reseed sentinel.
+        let mut cfg = EnvironmentConfig {
+            schema_version: 0,
+            ..EnvironmentConfig::empty()
+        };
+        cfg.languages.rust = Some(RustLanguage {
+            default_toolchain: "bad;injection".into(),
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::EmptyValue { ref field } if field == "schema_version"),
+            "expected EmptyValue for schema_version, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reports_unsupported_schema_version_before_language_errors() {
+        let mut cfg = EnvironmentConfig {
+            schema_version: SCHEMA_VERSION + 1,
+            ..EnvironmentConfig::empty()
+        };
+        cfg.languages.python = Some(PythonLanguage {
+            default_version: "bad;injection".into(),
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::UnsupportedSchemaVersion { .. }),
+            "expected UnsupportedSchemaVersion, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn language_validate_rust_before_python_ordering() {
+        // Language ordering: rust is validated before python, so when both
+        // have invalid values the rust error wins.
+        let mut cfg = EnvironmentConfig::empty();
+        cfg.languages.rust = Some(RustLanguage {
+            default_toolchain: "bad;injection".into(),
+        });
+        cfg.languages.python = Some(PythonLanguage {
+            default_version: "also;bad".into(),
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::UnsafeIdentifier { ref field, .. } if field == "languages.rust.default_toolchain"),
+            "expected rust error first, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn language_validate_node_before_dotnet_ordering() {
+        // node (index 1) is validated before dotnet (index 6).
+        let mut cfg = EnvironmentConfig::empty();
+        cfg.languages.node = Some(NodeLanguage {
+            default_version: "bad;node".into(),
+            default_package_manager: None,
+        });
+        cfg.languages.dotnet = Some(DotnetLanguage {
+            default_version: "bad;dotnet".into(),
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::UnsafeIdentifier { ref field, .. } if field == "languages.node.default_version"),
+            "expected node error first, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_first_error_is_root_before_slug() {
+        // When a workspace has both an invalid root and an invalid slug,
+        // the root error (UnsafeIdentifier) must be returned first because
+        // validate_workspace_fields checks root before slug.
+        let mut cfg = valid_minimal();
+        cfg.workspaces = vec![Workspace {
+            slug: Some("bad slug".to_owned()),
+            name: None,
+            tags: Vec::new(),
+            root: "/etc".to_owned(),
+            language: "rust".to_owned(),
+            toolchain: None,
+            version: None,
+            package_manager: None,
+        }];
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::UnsafeIdentifier { ref field, .. } if field == "workspaces[*].root"),
+            "expected root error first, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn env_var_value_too_long_reports_correct_field() {
+        let mut cfg = valid_minimal();
+        let long_value = "x".repeat(MAX_STRING_LEN + 1);
+        cfg.env.insert("KEY".to_owned(), long_value);
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::TooLong { ref field, .. } if field == "env[KEY]"),
+            "expected env[KEY] TooLong, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_hook_field_path_preserved_for_exec_argv() {
+        // A HookCommand::Exec with an empty argv list must report the
+        // indexed field path so callers know which phase and hook failed.
+        let mut cfg = valid_minimal();
+        cfg.lifecycle.pre_task = vec![HookCommand::Exec(vec![])];
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::EmptyValue { ref field } if field == "lifecycle.pre_task[0]"),
+            "expected lifecycle.pre_task[0] EmptyValue, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_phase_order_preserved() {
+        // post_build is validated before pre_anything, so an error in
+        // post_build wins even when pre_anything is also invalid.
+        let mut cfg = valid_minimal();
+        cfg.lifecycle.post_build = vec![HookCommand::Exec(vec![])];
+        cfg.lifecycle.pre_anything = vec![HookCommand::Shell("x".repeat(MAX_HOOK_SHELL_LEN + 1))];
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::EmptyValue { ref field } if field == "lifecycle.post_build[0]"),
+            "expected post_build error first, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn cargo_cache_policy_warm_command_validation_preserved() {
+        // Cargo-cache-policy section ordering: a malformed warm command is
+        // caught after languages, workspaces, system_packages, env, and
+        // lifecycle all pass.  This test guards the warm-command field-path
+        // string in the error variant.
+        let mut cfg = EnvironmentConfig::empty();
+        cfg.cargo_cache_policy = Some(CargoCachePolicy::Explicit(CargoCachePolicyOverride {
+            workspace: true,
+            features: Vec::new(),
+            all_features: false,
+            warm_commands: vec![CargoWarmCommand {
+                label: String::new(), // triggers EmptyValue
+                args: vec!["build".into()],
+            }],
+        }));
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::EmptyValue { ref field } if field == "cargo_cache_policy.policy.warm_commands[0].label"),
+            "expected warm_commands[0].label EmptyValue, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn cargo_cache_policy_all_features_incompatibility_preserved() {
+        // features + all_features conflict is caught by
+        // CargoCachePolicyOverride::validate.
+        let mut cfg = EnvironmentConfig::empty();
+        cfg.cargo_cache_policy = Some(CargoCachePolicy::Explicit(CargoCachePolicyOverride {
+            workspace: false,
+            features: vec!["ci".into()],
+            all_features: true,
+            warm_commands: Vec::new(),
+        }));
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, EnvironmentConfigError::UnsafeIdentifier { ref field, .. } if field == "cargo_cache_policy.policy.features"),
+            "expected features conflict, got: {err:?}"
+        );
     }
 }
