@@ -444,6 +444,10 @@ pub(super) fn classify_edge_category(
         // node; expose under its own category so UI groupers can
         // separate process membership from real calls / references.
         RepoGraphEdgeKind::StepInProcess => EdgeCategory::Process,
+        // Trait-dispatch call edges represent synthesized caller → trait-method
+        // relationships. Surface as Calls so the UI groups them with other
+        // call-site edges.
+        RepoGraphEdgeKind::TraitDispatchCall => EdgeCategory::Calls,
     }
 }
 
