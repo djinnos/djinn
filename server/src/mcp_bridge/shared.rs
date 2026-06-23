@@ -425,7 +425,8 @@ fn edge_propagates(kind: RepoGraphEdgeKind) -> bool {
         | RepoGraphEdgeKind::TypeDefines
         | RepoGraphEdgeKind::Defines
         | RepoGraphEdgeKind::HandlesRoute
-        | RepoGraphEdgeKind::Fetches => true,
+        | RepoGraphEdgeKind::Fetches
+        | RepoGraphEdgeKind::TraitDispatchCall => true,
         RepoGraphEdgeKind::ContainsDefinition
         | RepoGraphEdgeKind::DeclaredInFile
         | RepoGraphEdgeKind::MemberOf
