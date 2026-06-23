@@ -676,7 +676,7 @@ mod tests {
 
         // No orphaned tool result anywhere in the rebuilt conversation.
         assert!(
-            crate::compaction::policy::find_orphaned_tool_result(&rebuilt).is_none(),
+            crate::policy::find_orphaned_tool_result(&rebuilt).is_none(),
             "preserved tail orphaned a tool result"
         );
 
@@ -718,7 +718,7 @@ mod tests {
         );
 
         assert!(
-            crate::compaction::policy::find_orphaned_tool_result(&rebuilt).is_none(),
+            crate::policy::find_orphaned_tool_result(&rebuilt).is_none(),
             "tail started mid-pair and orphaned a tool result"
         );
 
@@ -762,7 +762,7 @@ mod tests {
             !dangling,
             "dangling tool call was preserved after the summary"
         );
-        assert!(crate::compaction::policy::find_orphaned_tool_result(&rebuilt).is_none());
+        assert!(crate::policy::find_orphaned_tool_result(&rebuilt).is_none());
 
         // The user line is still preserved/re-appended so the model has the task.
         assert_eq!(rebuilt.last().unwrap().text_content(), "Do the task.");
@@ -849,7 +849,7 @@ mod tests {
             &CompactionContext::MidSession("worker".to_string()),
         );
 
-        assert!(crate::compaction::policy::find_orphaned_tool_result(&rebuilt).is_none());
+        assert!(crate::policy::find_orphaned_tool_result(&rebuilt).is_none());
         // No system-only / summary-only message gets preserved as a "turn"; the
         // last user line is still re-appended once for the model to answer.
         assert_eq!(rebuilt[0].role, Role::System);

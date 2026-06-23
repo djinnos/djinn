@@ -70,7 +70,7 @@ fn cap_summary(summary: String, context_window: i64) -> String {
         SUMMARY_CAP_MAX_CHARS
     };
     let cap = SUMMARY_CAP_MAX_CHARS.min(window_chars);
-    crate::truncate::smart_truncate(&summary, cap)
+    super::truncate::smart_truncate(&summary, cap)
 }
 
 /// Return `true` if the accumulated input tokens have reached the compaction
