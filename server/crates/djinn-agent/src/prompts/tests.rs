@@ -985,3 +985,241 @@ fn native_skill_name_recognized_by_control_plane() {
         "control-plane is_native_skill_name must reject non-native names"
     );
 }
+
+// ── Planner prompt regressions for authoring-only visual-spec loading (y8p2) ──
+//
+// These end-to-end regression tests verify lazy native-skill behavior:
+// `visual-spec` appears in proposal-authoring planner prompts (task shape
+// drives the classifier → trigger fires → skill merged) and is absent from
+// ordinary wave-planning/dispatch planner prompts (classifier returns None
+// → skill not merged).
+//
+// Unlike the 5uzr tests above that pass an explicit trigger value, these
+// tests use task fixtures + `classify_native_skill_trigger` to exercise the
+// full classifier → merge → prompt pipeline.  Stable content-marker
+// assertions are preferred over large brittle snapshots.
+
+use crate::actors::slot::lifecycle::mcp_resolve::merge_native_skills;
+use crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger;
+
+/// Fixture: a proposal-authoring planner task (`epic_breakdown`).
+fn make_authoring_planner_task() -> Task {
+    let mut task = make_task();
+    task.issue_type = "epic_breakdown".into();
+    task.title = "Decompose proposal r0io into epics".into();
+    task.description =
+        "Break the graduated proposal r0io into implementation epics with acceptance criteria."
+            .into();
+    task
+}
+
+/// Fixture: a non-authoring wave-planning/dispatch planner task.
+fn make_wave_planning_task() -> Task {
+    let mut task = make_task();
+    task.issue_type = "planning".into();
+    task.title = "Plan next wave: Lazy native-skill prompt loading".into();
+    task.description = "Plan the next wave of worker tasks for epic y8p2.".into();
+    task
+}
+
+/// Render a planner prompt for `task`, using the task classifier to derive
+/// the authoring trigger and merging native + project skills.
+///
+/// Mirrors the production pipeline: `classify_native_skill_trigger` →
+/// `merge_native_skills` → `apply_skills`.
+fn render_planner_prompt_for_task(task: &Task) -> String {
+    ensure_registry();
+    let ctx = make_ctx();
+    let base = render_prompt(AgentType::Planner, task, &ctx);
+    let trigger = crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger(
+        "planner", task,
+    );
+    let (merged, _native_names) = merge_native_skills("planner", Vec::new(), trigger);
+    apply_skills(&base, &merged)
+}
+
+/// Regression (y8p2 AC1): an authoring planner prompt for an `epic_breakdown`
+/// task contains the `visual-spec` native body and stable content markers.
+///
+/// The classifier fires `ProposalAuthoring` for `epic_breakdown`, so native
+/// skills recommended for planner are merged into the prompt.
+#[test]
+fn authoring_planner_prompt_regression_contains_visual_spec() {
+    let task = make_authoring_planner_task();
+
+    // Verify the classifier fires for this task shape.
+    assert_eq!(
+        crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger(
+            "planner", &task,
+        ),
+        Some(NativeSkillTrigger::ProposalAuthoring),
+        "epic_breakdown task must trigger ProposalAuthoring"
+    );
+
+    let prompt = render_planner_prompt_for_task(&task);
+
+    // Skill name and section header present.
+    assert!(
+        prompt.contains("visual-spec"),
+        "authoring planner prompt must contain visual-spec skill name"
+    );
+    assert!(
+        prompt.contains("## Available Skills"),
+        "authoring planner prompt must include the skills section header"
+    );
+
+    // Native body stable markers (from embedded SKILL.md).
+    let lower = prompt.to_lowercase();
+    assert!(
+        prompt.contains("backtick"),
+        "visual-spec body must contain the bare-angle backtick constraint"
+    );
+    assert!(
+        lower.contains("progressive"),
+        "visual-spec body must teach progressive markdown-to-MDX enrichment"
+    );
+    assert!(
+        lower.contains("mdx"),
+        "visual-spec body must mention MDX enrichment"
+    );
+    assert!(
+        lower.contains("self-contained"),
+        "visual-spec body must mention block authoring quality"
+    );
+    assert!(
+        lower.contains("constitution") || lower.contains("case law"),
+        "visual-spec body must contain the constitution/case-law memory analogy"
+    );
+
+    // Trust level marker for native skill.
+    assert!(
+        prompt.contains("platform"),
+        "authoring planner prompt must show native skill trust_level 'platform'"
+    );
+
+    // Version stamp is available from the registry (stable marker).
+    let version = crate::native_skills::VISUAL_SPEC_VERSION;
+    assert!(!version.is_empty(), "VISUAL_SPEC_VERSION must be non-empty");
+}
+
+/// Regression (y8p2 AC2): a non-authoring wave-planning planner prompt for a
+/// `planning` task does NOT contain `visual-spec` body, references, or
+/// availability text.
+///
+/// The classifier returns `None` for `planning` tasks, so native skills are
+/// not merged and the prompt pays no context cost for visual-spec.
+#[test]
+fn wave_planning_planner_prompt_regression_omits_visual_spec() {
+    let task = make_wave_planning_task();
+
+    // Verify the classifier does NOT fire for this task shape.
+    assert_eq!(
+        crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger(
+            "planner", &task,
+        ),
+        None,
+        "planning task must not trigger native skill loading"
+    );
+
+    let prompt = render_planner_prompt_for_task(&task);
+
+    // visual-spec name must be completely absent.
+    assert!(
+        !prompt.contains("visual-spec"),
+        "non-authoring planner prompt must not contain visual-spec"
+    );
+
+    // No heavyweight native body markers.
+    let lower = prompt.to_lowercase();
+    assert!(
+        !prompt.contains("backtick"),
+        "non-authoring planner prompt must not contain visual-spec backtick guidance"
+    );
+    assert!(
+        !lower.contains("progressive markdown-to-mdx"),
+        "non-authoring planner prompt must not contain visual-spec enrichment guidance"
+    );
+    assert!(
+        !lower.contains("constitution") && !lower.contains("case law"),
+        "non-authoring planner prompt must not contain visual-spec memory analogy"
+    );
+
+    // If a skills section exists (from project skills), visual-spec must not
+    // appear within it.
+    if let Some(idx) = prompt.find("## Available Skills") {
+        let skills_section = &prompt[idx..];
+        assert!(
+            !skills_section.contains("visual-spec"),
+            "skills section must not list visual-spec in non-authoring prompt"
+        );
+    }
+}
+
+/// Regression (y8p2 AC2 variant): a non-authoring planner prompt with
+/// project skills present still omits visual-spec while preserving the
+/// project skills.
+#[test]
+fn wave_planning_with_project_skills_omits_visual_spec_but_keeps_project() {
+    let task = make_wave_planning_task();
+    ensure_registry();
+    let ctx = make_ctx();
+    let base = render_prompt(AgentType::Planner, &task, &ctx);
+
+    let trigger = crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger(
+        "planner", &task,
+    );
+    let project_skills = vec![crate::skills::ResolvedSkill {
+        name: "git".into(),
+        description: "Git workflow".into(),
+        content: "Git best practices from project.".into(),
+        required: false,
+        trust_level: "project".into(),
+        recommended_for_roles: vec![],
+        tags: vec![],
+    }];
+    let (merged, native_names) = merge_native_skills("planner", project_skills, trigger);
+    let prompt = apply_skills(&base, &merged);
+
+    // No native skills merged.
+    assert!(
+        native_names.is_empty(),
+        "non-authoring planner must have no native skills"
+    );
+
+    // Project skill preserved.
+    assert!(
+        prompt.contains("Git best practices from project"),
+        "project skills must be preserved in non-authoring planner prompt"
+    );
+
+    // visual-spec absent.
+    assert!(
+        !prompt.contains("visual-spec"),
+        "non-authoring planner prompt must not contain visual-spec even with project skills"
+    );
+}
+
+/// Regression (y8p2): the classifier end-to-end matches both positive and
+/// negative task shapes used in the prompt regressions above.  This is a
+/// focused sanity check that the two fixtures exercise distinct classifier
+/// paths.
+#[test]
+fn classifier_distinguishes_authoring_from_wave_planning_tasks() {
+    let authoring = make_authoring_planner_task();
+    let planning = make_wave_planning_task();
+
+    assert_eq!(
+        crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger(
+            "planner", &authoring,
+        ),
+        Some(NativeSkillTrigger::ProposalAuthoring),
+        "epic_breakdown task must classify as ProposalAuthoring"
+    );
+    assert_eq!(
+        crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger(
+            "planner", &planning,
+        ),
+        None,
+        "planning task must not classify as authoring"
+    );
+}
