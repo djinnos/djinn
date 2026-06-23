@@ -14,20 +14,23 @@
 //!
 //! | Module | Contents |
 //! |--------|----------|
+//! | [`context`] | `ExtensionContext` capability trait |
 //! | [`shared_schemas`] | Shared tool schema builders and safety annotations |
 //! | [`tool_defs`] | Per-role tool schema aggregation functions |
 //! | [`tool_defs_code_graph`] | Code-graph and PR-review-context tool schemas |
 //! | [`finalize_tools`] | Finalize tool schemas (submit_work, submit_review, etc.) |
-//! | [`context`] | `ExtensionContext` capability trait (future) |
 //! | [`dispatch`] | Tool dispatch and handler orchestration (future) |
 //! | [`types`] | Shared types used across extension handlers (future) |
 
+pub mod context;
 pub mod finalize_tools;
 pub mod shared_schemas;
 pub mod tool_defs;
 pub mod tool_defs_code_graph;
 
+// Re-export the ExtensionContext trait at crate root for ergonomic imports.
+pub use context::ExtensionContext;
+
 // Skeleton modules for future extraction waves.
-pub mod context;
 pub mod dispatch;
 pub mod types;

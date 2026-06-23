@@ -1382,6 +1382,11 @@ name = "djinn-mcp-extension"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "djinn-control-plane",
+ "djinn-core",
+ "djinn-db",
+ "djinn-lsp",
  "rmcp",
  "schemars 1.2.1",
  "serde",
