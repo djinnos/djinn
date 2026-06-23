@@ -212,80 +212,34 @@ pub fn redact_secrets(body: &str, sent_secrets: &[&str]) -> String {
     out
 }
 
-/// Sensitive JSON key fragments. We match a key if its lowercased form
-/// contains any of these (modulo `-`/`_` separators normalising to the
-/// `api_key` / `access_token` forms below).
+/// Sensitive-key fragments. A key is sensitive if its lowercased,
+/// dash-to-underscore-normalised form contains any of these substrings.
+const SENSITIVE_KEY_FRAGMENTS: &[&str] = &[
+    "authorization",
+    "apikey",
+    "api_key",
+    "access_token",
+    "accesstoken",
+    "secret",
+    "bearer",
+];
+
+/// Does the given JSON key carry a secret value that should be redacted?
+///
+/// Normalises exactly as before: lowercasing and mapping `-` → `_`, then
+/// checks the fragment table.
 fn key_is_sensitive(key: &str) -> bool {
     let normalized: String = key
         .to_ascii_lowercase()
         .chars()
         .map(|c| if c == '-' { '_' } else { c })
         .collect();
-    normalized.contains("authorization")
-        || normalized.contains("apikey")
-        || normalized.contains("api_key")
-        || normalized.contains("access_token")
-        || normalized.contains("accesstoken")
-        || normalized.contains("secret")
-        || normalized.contains("bearer")
+    SENSITIVE_KEY_FRAGMENTS
+        .iter()
+        .any(|frag| normalized.contains(frag))
 }
 
-/// Pass 1: walk the text looking for `"<key>" : "<value>"` / `"<key>": <value>`
-/// JSON pairs and replace the value when the key is sensitive. Operates on the
-/// raw string (not a parsed `serde_json::Value`) so it survives non-JSON and
-/// malformed bodies without throwing them away.
-fn redact_sensitive_fields(body: &str) -> String {
-    let bytes = body.as_bytes();
-    let mut out = String::with_capacity(body.len());
-    let mut i = 0;
-
-    while i < bytes.len() {
-        // Look for the start of a quoted key.
-        if bytes[i] == b'"' {
-            // Find the end of this string literal (respecting escapes).
-            if let Some(key_end) = find_string_end(bytes, i + 1) {
-                let key = &body[i + 1..key_end];
-                // Tentatively emit the key string verbatim.
-                let after_key = key_end + 1; // index past closing quote
-                // Scan past whitespace + a single ':' to see if this is a key.
-                let mut j = after_key;
-                while j < bytes.len() && (bytes[j] as char).is_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b':' && key_is_sensitive(key) {
-                    j += 1;
-                    while j < bytes.len() && (bytes[j] as char).is_whitespace() {
-                        j += 1;
-                    }
-                    if j < bytes.len() && bytes[j] == b'"' {
-                        // String value — redact its contents.
-                        if let Some(val_end) = find_string_end(bytes, j + 1) {
-                            out.push_str(&body[i..after_key]); // "key"
-                            out.push_str(&body[after_key..j]); // ws + : + ws
-                            out.push('"');
-                            out.push_str(REDACTED);
-                            out.push('"');
-                            i = val_end + 1;
-                            continue;
-                        }
-                    }
-                }
-                // Not a sensitive key/value pair — emit the key literal as-is
-                // and continue scanning after it.
-                out.push_str(&body[i..after_key]);
-                i = after_key;
-                continue;
-            }
-        }
-        // Default: copy the byte through. `body` is valid UTF-8 so we can index
-        // char-by-char via the char_indices boundary the loop maintains.
-        let ch = body[i..].chars().next().unwrap();
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-
-    out
-}
+// ── Scanner helpers ──────────────────────────────────────────────────────
 
 /// Given the index just past an opening `"`, return the index of the matching
 /// closing `"`, honouring backslash escapes. `None` if unterminated.
@@ -298,6 +252,85 @@ fn find_string_end(bytes: &[u8], mut i: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// If `bytes[pos]` is `"`, find the matching closing quote.
+/// Returns `(open_quote_index, close_quote_index)` on success.
+fn try_parse_quoted_string(bytes: &[u8], pos: usize) -> Option<(usize, usize)> {
+    if pos < bytes.len() && bytes[pos] == b'"' {
+        find_string_end(bytes, pos + 1).map(|end| (pos, end))
+    } else {
+        None
+    }
+}
+
+/// Advance past any ASCII whitespace starting at `pos`.
+fn skip_whitespace(bytes: &[u8], pos: usize) -> usize {
+    let mut p = pos;
+    while p < bytes.len() && (bytes[p] as char).is_whitespace() {
+        p += 1;
+    }
+    p
+}
+
+/// After parsing a quoted key that ends at `key_end`, check whether it is the
+/// left-hand side of a sensitive `"key": "value"` pair.  If so, emit the
+/// redacted form into `out` and return `Some(next_position)`.
+///
+/// Returns `None` when the key is not sensitive, no colon follows, or the
+/// value is not a quoted string — the caller should emit the key verbatim.
+fn try_redact_kv(
+    body: &str,
+    bytes: &[u8],
+    key_start: usize,
+    key_end: usize,
+    out: &mut String,
+) -> Option<usize> {
+    let key = &body[key_start + 1..key_end];
+    let after_key = key_end + 1;
+    let colon_pos = skip_whitespace(bytes, after_key);
+
+    if colon_pos >= bytes.len() || bytes[colon_pos] != b':' || !key_is_sensitive(key) {
+        return None;
+    }
+
+    let val_start = skip_whitespace(bytes, colon_pos + 1);
+    let (_, val_end) = try_parse_quoted_string(bytes, val_start)?;
+
+    out.push_str(&body[key_start..after_key]);
+    out.push_str(&body[after_key..val_start]);
+    out.push('"');
+    out.push_str(REDACTED);
+    out.push('"');
+    Some(val_end + 1)
+}
+
+/// Walk the text looking for `"<key>" : "<value>"` JSON pairs and replace the
+/// value when the key is sensitive.  Operates on the raw string (not a parsed
+/// `serde_json::Value`) so it survives non-JSON and malformed bodies.
+fn redact_sensitive_fields(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if let Some((key_start, key_end)) = try_parse_quoted_string(bytes, i) {
+            if let Some(next) = try_redact_kv(body, bytes, key_start, key_end, &mut out) {
+                i = next;
+            } else {
+                let after_key = key_end + 1;
+                out.push_str(&body[i..after_key]);
+                i = after_key;
+            }
+            continue;
+        }
+        // Default: copy the byte through.
+        let ch = body[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    out
 }
 
 #[cfg(test)]
