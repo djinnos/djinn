@@ -1,5 +1,10 @@
-use super::super::fuzzy::{fuzzy_replace, reindent_replacement};
-use super::*;
+//! Tests for fuzzy string matching utilities.
+//!
+//! Moved from `djinn-agent::extension::tests::fuzzy_replace_tests` during
+//! the Phase 4 extraction — these test `crate::fuzzy` directly.
+
+use crate::fuzzy::{fuzzy_replace, reindent_replacement};
+use std::path::Path;
 
 #[test]
 fn rebases_multiline_replacement_using_matched_indentation() {

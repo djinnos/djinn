@@ -293,7 +293,7 @@ fn trait_dispatch_edge_is_suppressed_when_caller_cannot_be_resolved() {
     if let Some(file) = index
         .files
         .iter_mut()
-        .find(|f| f.relative_path == PathBuf::from("src/main.rs"))
+        .find(|f| f.relative_path == Path::new("src/main.rs"))
     {
         // Re-stamp the reference with an out-of-range enclosing
         // range so `enclosing_definition_for` returns None.
@@ -343,7 +343,7 @@ fn trait_dispatch_edge_is_suppressed_for_non_rust_file() {
     if let Some(file) = index
         .files
         .iter_mut()
-        .find(|f| f.relative_path == PathBuf::from("src/main.rs"))
+        .find(|f| f.relative_path == Path::new("src/main.rs"))
     {
         file.language = "typescript".to_string();
         for occ in &mut file.occurrences {
@@ -375,7 +375,7 @@ fn trait_dispatch_edge_is_suppressed_for_external_target() {
     if let Some(file) = index
         .files
         .iter_mut()
-        .find(|f| f.relative_path == PathBuf::from("src/traits.rs"))
+        .find(|f| f.relative_path == Path::new("src/traits.rs"))
     {
         // Drop the trait-method symbol from the file's symbols
         // list, and from definitions / occurrences, so the parser

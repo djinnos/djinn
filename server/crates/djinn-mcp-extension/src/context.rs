@@ -119,4 +119,152 @@ mod boundary_tests {
              use djinn-db repository helpers instead"
         );
     }
+
+    /// Verify that `djinn-supervisor` usage is limited to the `SupervisorServices`
+    /// trait (needed by the dispatch module for tool routing).  The crate must
+    /// not depend on supervisor internals or actor lifecycle management.
+    #[test]
+    fn supervisor_usage_is_trait_only() {
+        let src_root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let forbidden = scan_source_imports(
+            src_root,
+            &[
+                "djinn_supervisor::pool",
+                "djinn_supervisor::slot",
+                "djinn_supervisor::actor",
+            ],
+        );
+        assert!(
+            forbidden.is_empty(),
+            "djinn-mcp-extension must only use djinn_supervisor::SupervisorServices trait, \
+             not supervisor internals:\n{}",
+            forbidden.join("\n")
+        );
+    }
+
+    /// Scan all non-test `.rs` source files for `use djinn_agent` imports.
+    /// This catches accidental references to the façade crate in production
+    /// code (test modules are allowed to be absent from the scan since they
+    /// do not ship).
+    #[test]
+    fn no_source_imports_from_djinn_agent() {
+        let src_root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let forbidden = scan_source_imports(src_root, &["djinn_agent"]);
+        assert!(
+            forbidden.is_empty(),
+            "djinn-mcp-extension source files must not import from djinn_agent:\n{}",
+            forbidden.join("\n")
+        );
+    }
+
+    /// Scan all non-test `.rs` source files for direct `use sqlx` imports.
+    #[test]
+    fn no_source_imports_from_sqlx() {
+        let src_root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let forbidden = scan_source_imports(src_root, &["sqlx"]);
+        assert!(
+            forbidden.is_empty(),
+            "djinn-mcp-extension source files must not import from sqlx:\n{}",
+            forbidden.join("\n")
+        );
+    }
+
+    /// Scan all non-test `.rs` source files for broad `djinn_supervisor`
+    /// imports beyond the allowed `SupervisorServices` trait.  The dispatch
+    /// module legitimately uses the trait for tool routing, but the crate
+    /// must not import supervisor internals (pool, slot, actor modules).
+    #[test]
+    fn no_source_imports_from_supervisor_internals() {
+        let src_root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let forbidden = scan_source_imports(
+            src_root,
+            &[
+                "djinn_supervisor::pool",
+                "djinn_supervisor::slot",
+                "djinn_supervisor::actor",
+            ],
+        );
+        assert!(
+            forbidden.is_empty(),
+            "djinn-mcp-extension source files must not import supervisor internals:\n{}",
+            forbidden.join("\n")
+        );
+    }
+
+    /// Scan all non-test `.rs` source files for imports from `crate::context`
+    /// patterns that reference `AgentContext` or `context.rs` internals of
+    /// `djinn-agent`.
+    ///
+    /// `djinn-mcp-extension` must reference context capabilities only through
+    /// its own `ExtensionContext` trait.
+    #[test]
+    fn no_source_imports_from_djinn_agent_context() {
+        let src_root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let forbidden = scan_source_imports(src_root, &["djinn_agent::context"]);
+        assert!(
+            forbidden.is_empty(),
+            "djinn-mcp-extension source files must not import from djinn_agent::context:\n{}",
+            forbidden.join("\n")
+        );
+    }
+
+    /// Walk `src_root` looking for `use <forbidden_crate>` statements in
+    /// non-test `.rs` files.  Returns a list of `path:line: content` for
+    /// each hit, excluding test modules (`#[cfg(test)]` blocks).
+    fn scan_source_imports(src_root: &str, forbidden_crates: &[&str]) -> Vec<String> {
+        let mut hits = Vec::new();
+        let Ok(entries) = std::fs::read_dir(src_root) else {
+            return hits;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && path.file_name().is_some_and(|n| n != "tests") {
+                hits.extend(scan_source_imports(
+                    &path.to_string_lossy(),
+                    forbidden_crates,
+                ));
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                // Skip test files themselves
+                let fname = path.file_name().unwrap().to_string_lossy();
+                if fname == "tests.rs" || path.to_string_lossy().contains("/tests/") {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let mut in_test_cfg = false;
+                let mut brace_depth: u32 = 0;
+                for (line_no, line) in content.lines().enumerate() {
+                    let trimmed = line.trim();
+                    // Track `#[cfg(test)]` blocks to skip imports inside them
+                    if trimmed.contains("#[cfg(test)]") {
+                        in_test_cfg = true;
+                        brace_depth = 0;
+                        continue;
+                    }
+                    if in_test_cfg {
+                        brace_depth += trimmed.chars().filter(|&c| c == '{').count() as u32;
+                        brace_depth = brace_depth
+                            .saturating_sub(trimmed.chars().filter(|&c| c == '}').count() as u32);
+                        if brace_depth == 0 && trimmed.contains('}') {
+                            in_test_cfg = false;
+                        }
+                        continue;
+                    }
+                    if trimmed.starts_with("//") || trimmed.starts_with("//!") {
+                        continue;
+                    }
+                    for &krate in forbidden_crates {
+                        let pattern = format!("use {krate}");
+                        if trimmed.contains(&pattern)
+                            || trimmed.contains(&format!("use crate::{krate}"))
+                        {
+                            hits.push(format!("{}:{}: {}", path.display(), line_no + 1, trimmed));
+                        }
+                    }
+                }
+            }
+        }
+        hits
+    }
 }
