@@ -262,6 +262,10 @@ impl RepoGraphBridge {
                 "entry_point_of" | "entrypointof" => Ok(RepoGraphEdgeKind::EntryPointOf),
                 "member_of" | "memberof" => Ok(RepoGraphEdgeKind::MemberOf),
                 "step_in_process" | "stepinprocess" => Ok(RepoGraphEdgeKind::StepInProcess),
+                // PR t16t: synthesized trait-dispatch caller edge.
+                "trait_dispatch_call" | "traitdispatchcall" => {
+                    Ok(RepoGraphEdgeKind::TraitDispatchCall)
+                }
                 other => Err(format!("invalid edge kind '{other}' for query_subgraph")),
             }
         }
@@ -987,6 +991,10 @@ impl RepoGraphBridge {
                     | RepoGraphEdgeKind::Route
                     | RepoGraphEdgeKind::HandlesRoute
                     | RepoGraphEdgeKind::Fetches
+                    // PR t16t: synthesized trait-dispatch caller edges
+                    // carry the same "behavioral" blast-radius semantics
+                    // as a direct call site.
+                    | RepoGraphEdgeKind::TraitDispatchCall
             )
         };
         let fan_in = graph
