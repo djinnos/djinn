@@ -1299,5 +1299,6 @@ mod crate_graph;
 mod flow;
 mod snapshot;
 mod snapshot_edge_cap;
+mod trait_dispatch_query;
 
 mod route;
