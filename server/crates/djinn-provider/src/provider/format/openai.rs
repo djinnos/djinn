@@ -29,114 +29,17 @@ impl OpenAIProvider {
         tools: &[Value],
         tool_choice: Option<ToolChoice>,
     ) -> Value {
-        // Convert messages — OpenAI Chat Completions format requires:
-        // - Assistant tool calls in a separate `tool_calls` field (NOT in content)
-        // - Tool results as standalone messages with role "tool"
         let mut messages: Vec<Value> = Vec::new();
 
         for msg in &conversation.messages {
-            let role = match msg.role {
-                Role::System => "system",
-                Role::User => "user",
-                Role::Assistant => "assistant",
-            };
-
-            // Separate content blocks by type
-            let mut text_blocks: Vec<Value> = Vec::new();
-            let mut tool_calls: Vec<Value> = Vec::new();
-            let mut tool_results: Vec<Value> = Vec::new();
+            let role = openai_role(msg.role.clone());
+            let mut acc = BlockAccumulator::new();
 
             for block in &msg.content {
-                match block {
-                    ContentBlock::Text { text } => {
-                        text_blocks.push(json!({"type": "text", "text": text}));
-                    }
-                    ContentBlock::Image { media_type, data } => {
-                        text_blocks.push(json!({
-                            "type": "image_url",
-                            "image_url": {
-                                "url": format!("data:{media_type};base64,{data}")
-                            }
-                        }));
-                    }
-                    ContentBlock::Document {
-                        media_type,
-                        data,
-                        filename,
-                    } => {
-                        text_blocks.push(json!({
-                            "type": "file",
-                            "file": {
-                                "filename": filename.as_deref().unwrap_or("document"),
-                                "file_data": format!("data:{media_type};base64,{data}")
-                            }
-                        }));
-                    }
-                    ContentBlock::ToolUse { id, name, input } => {
-                        tool_calls.push(json!({
-                            "id": id,
-                            "type": "function",
-                            "function": {"name": name, "arguments": input.to_string()}
-                        }));
-                    }
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        is_error: _,
-                    } => {
-                        let text = content
-                            .iter()
-                            .filter_map(|c| {
-                                if let ContentBlock::Text { text } = c {
-                                    Some(text.as_str())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("");
-                        tool_results.push(json!({
-                            "role": "tool",
-                            "tool_call_id": tool_use_id,
-                            "content": text
-                        }));
-                    }
-                    // Provider-private state is not sent to Chat Completions.
-                    ContentBlock::Thinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
-                }
+                acc.accumulate(block);
             }
 
-            if !tool_results.is_empty() {
-                // Tool results become standalone messages with role "tool"
-                for tr in tool_results {
-                    messages.push(tr);
-                }
-            } else if !tool_calls.is_empty() {
-                // Assistant message with tool_calls
-                let mut assistant_msg = json!({"role": role});
-                if !text_blocks.is_empty() {
-                    let text = text_blocks
-                        .iter()
-                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                        .collect::<Vec<_>>()
-                        .join("");
-                    assistant_msg["content"] = json!(text);
-                } else {
-                    assistant_msg["content"] = Value::Null;
-                }
-                assistant_msg["tool_calls"] = json!(tool_calls);
-                messages.push(assistant_msg);
-            } else if text_blocks.len() == 1 {
-                // Simple single text — use string content form
-                let text = text_blocks[0]
-                    .get("text")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
-                messages.push(json!({"role": role, "content": text}));
-            } else {
-                // Multiple text blocks — use array content form
-                messages.push(json!({"role": role, "content": text_blocks}));
-            }
+            append_openai_messages(role, acc, &mut messages);
         }
 
         let mut body = json!({
@@ -147,34 +50,8 @@ impl OpenAIProvider {
         });
 
         if !tools.is_empty() {
-            // Convert RMCP tool format to OpenAI function-calling format.
-            // RMCP: {"name", "description", "inputSchema"}
-            // OpenAI: {"type": "function", "function": {"name", "description", "parameters"}}
-            let openai_tools: Vec<Value> = tools
-                .iter()
-                .map(|t| {
-                    if t.get("type").is_some() && t.get("function").is_some() {
-                        // Already in OpenAI format.
-                        t.clone()
-                    } else {
-                        json!({
-                            "type": "function",
-                            "function": {
-                                "name": t.get("name").cloned().unwrap_or(json!("")),
-                                "description": t.get("description").cloned().unwrap_or(json!("")),
-                                "parameters": t.get("inputSchema").cloned().unwrap_or(json!({"type": "object"})),
-                            }
-                        })
-                    }
-                })
-                .collect();
-            body["tools"] = json!(openai_tools);
-
-            match tool_choice.unwrap_or(ToolChoice::Auto) {
-                ToolChoice::Auto => {}
-                ToolChoice::Required => body["tool_choice"] = json!("required"),
-                ToolChoice::None => body["tool_choice"] = json!("none"),
-            }
+            body["tools"] = json!(convert_tools_to_openai(tools));
+            apply_tool_choice(&mut body, tool_choice);
         }
 
         if let Some(session_affinity_key) = &self.config.session_affinity_key
@@ -205,11 +82,172 @@ impl OpenAIProvider {
     }
 }
 
+// ─── Role mapping ───────────────────────────────────────────────────────────────
+
+fn openai_role(role: Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+    }
+}
+
+// ─── Content-block accumulator ────────────────────────────────────────────────
+
+struct BlockAccumulator {
+    text_blocks: Vec<Value>,
+    tool_calls: Vec<Value>,
+    tool_results: Vec<Value>,
+}
+
+impl BlockAccumulator {
+    fn new() -> Self {
+        Self {
+            text_blocks: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+        }
+    }
+
+    fn accumulate(&mut self, block: &ContentBlock) {
+        match block {
+            ContentBlock::Text { text } => {
+                self.text_blocks.push(json!({"type": "text", "text": text}));
+            }
+            ContentBlock::Image { media_type, data } => {
+                self.text_blocks.push(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{media_type};base64,{data}")
+                    }
+                }));
+            }
+            ContentBlock::Document {
+                media_type,
+                data,
+                filename,
+            } => {
+                self.text_blocks.push(json!({
+                    "type": "file",
+                    "file": {
+                        "filename": filename.as_deref().unwrap_or("document"),
+                        "file_data": format!("data:{media_type};base64,{data}")
+                    }
+                }));
+            }
+            ContentBlock::ToolUse { id, name, input } => {
+                self.tool_calls.push(json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": input.to_string()}
+                }));
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error: _,
+            } => {
+                let text = collect_tool_result_text(content);
+                self.tool_results.push(json!({
+                    "role": "tool",
+                    "tool_call_id": tool_use_id,
+                    "content": text
+                }));
+            }
+            ContentBlock::Thinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
+        }
+    }
+}
+
+// ─── Text extraction from tool-result content ─────────────────────────────────
+
+fn collect_tool_result_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(|c| {
+            if let ContentBlock::Text { text } = c {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+// ─── Message assembly ─────────────────────────────────────────────────────────
+
+fn append_openai_messages(role: &'static str, acc: BlockAccumulator, messages: &mut Vec<Value>) {
+    if !acc.tool_results.is_empty() {
+        for tr in acc.tool_results {
+            messages.push(tr);
+        }
+    } else if !acc.tool_calls.is_empty() {
+        let mut assistant_msg = json!({"role": role});
+        if !acc.text_blocks.is_empty() {
+            let text = acc
+                .text_blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("");
+            assistant_msg["content"] = json!(text);
+        } else {
+            assistant_msg["content"] = Value::Null;
+        }
+        assistant_msg["tool_calls"] = json!(acc.tool_calls);
+        messages.push(assistant_msg);
+    } else if acc.text_blocks.len() == 1 {
+        let text = acc.text_blocks[0]
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        messages.push(json!({"role": role, "content": text}));
+    } else {
+        messages.push(json!({"role": role, "content": acc.text_blocks}));
+    }
+}
+
+// ─── Tool conversion ────────────────────────────────────────────────────────────
+
+fn convert_tools_to_openai(tools: &[Value]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|t| {
+            if t.get("type").is_some() && t.get("function").is_some() {
+                // Already in OpenAI format.
+                t.clone()
+            } else {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.get("name").cloned().unwrap_or(json!("")),
+                        "description": t.get("description").cloned().unwrap_or(json!("")),
+                        "parameters": t.get("inputSchema").cloned().unwrap_or(json!({"type": "object"})),
+                    }
+                })
+            }
+        })
+        .collect()
+}
+
+// ─── Tool-choice application ────────────────────────────────────────────────────
+
+fn apply_tool_choice(body: &mut Value, tool_choice: Option<ToolChoice>) {
+    match tool_choice.unwrap_or(ToolChoice::Auto) {
+        ToolChoice::Auto => {}
+        ToolChoice::Required => body["tool_choice"] = json!("required"),
+        ToolChoice::None => body["tool_choice"] = json!("none"),
+    }
+}
+
+// ─── Fireworks session affinity ─────────────────────────────────────────────────
+
 fn is_fireworks_base_url(base_url: &str) -> bool {
     base_url.contains("fireworks.ai")
 }
 
-// ─── Tool conversion ─────────────────────────────────────────────────────────
+// ─── Schema helper ────────────────────────────────────────────────────────────
 
 /// OpenAI requires `"properties"` on object schemas. Ensure it exists.
 pub(super) fn ensure_object_properties(mut schema: Value) -> Value {
