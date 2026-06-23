@@ -1,0 +1,189 @@
+name: Stale branch cleanup
+
+# Astray branches accumulate: coding-agent worktrees, abandoned spikes, and
+# (historically) merged PRs whose head branch was never deleted. This sweeper
+# deletes any branch with no COMMIT activity in the last `days` days.
+#
+# Hard exclusions (never deleted, regardless of age):
+#   - the default branch (main)
+#   - cla-signatures            (the CLA bot's signature ledger)
+#   - gh-readonly-queue/*       (GitHub-managed merge-queue refs)
+#   - dependabot/*              (managed by Dependabot)
+#   - any branch with an OPEN pull request
+#   - any branch GitHub reports as `protected` (ruleset/branch protection)
+#
+# `main` and `cla-signatures` are ALSO protected by a "deletion" ruleset, so
+# even if this exclude list regressed, the GITHUB_TOKEN delete would 422. This
+# workflow is the belt; the ruleset is the suspenders.
+#
+# Manual runs (workflow_dispatch) default to dry-run so you can preview the
+# hit list. The scheduled run actually deletes. Every deleted branch is logged
+# with its tip SHA in the job summary, so a mistaken delete is recoverable via
+# `git push origin <sha>:refs/heads/<name>` for as long as the object survives.
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily, 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Delete branches with no commit activity in this many days"
+        required: false
+        default: "7"
+      dry_run:
+        description: "Preview only — list what would be deleted, delete nothing"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write # delete refs
+  pull-requests: read # enumerate open-PR head branches
+
+concurrency:
+  group: stale-branch-cleanup
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+
+            // Scheduled runs delete; manual runs preview unless dry_run=false.
+            const isManual = context.eventName === "workflow_dispatch";
+            const inputs = context.payload.inputs || {};
+            const days = parseInt(inputs.days || "7", 10);
+            const dryRun = isManual
+              ? String(inputs.dry_run) !== "false" // default true on manual
+              : false; // scheduled = real sweep
+
+            const repoInfo = await github.rest.repos.get({ owner, repo });
+            const defaultBranch = repoInfo.data.default_branch;
+
+            const NEVER_DELETE = new Set([defaultBranch, "cla-signatures"]);
+            const isManagedPrefix = (name) =>
+              name.startsWith("gh-readonly-queue/") ||
+              name.startsWith("dependabot/");
+
+            const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+
+            // Head branches of every open PR — never delete work under review.
+            const openPrHeads = new Set();
+            for await (const page of github.paginate.iterator(
+              github.rest.pulls.list,
+              { owner, repo, state: "open", per_page: 100 },
+            )) {
+              for (const pr of page.data) openPrHeads.add(pr.head.ref);
+            }
+
+            const branches = await github.paginate(
+              github.rest.repos.listBranches,
+              { owner, repo, per_page: 100 },
+            );
+
+            const deleted = [];
+            const kept = [];
+            const failed = [];
+
+            for (const b of branches) {
+              const name = b.name;
+              const reasonSkip =
+                NEVER_DELETE.has(name) ? "protected-name"
+                : b.protected ? "protected-flag"
+                : isManagedPrefix(name) ? "managed-namespace"
+                : openPrHeads.has(name) ? "open-pr"
+                : null;
+              if (reasonSkip) {
+                kept.push({ name, reason: reasonSkip });
+                continue;
+              }
+
+              // The branch list omits commit dates; fetch the tip commit.
+              let committed;
+              try {
+                const commit = await github.rest.repos.getCommit({
+                  owner,
+                  repo,
+                  ref: b.commit.sha,
+                });
+                committed = Date.parse(
+                  commit.data.commit.committer?.date ||
+                    commit.data.commit.author?.date,
+                );
+              } catch (e) {
+                failed.push({ name, error: `tip lookup: ${e.message}` });
+                continue;
+              }
+
+              if (!(committed < cutoff)) {
+                kept.push({ name, reason: "recent" });
+                continue;
+              }
+
+              const ageDays = Math.floor((Date.now() - committed) / 86400000);
+              if (dryRun) {
+                deleted.push({ name, sha: b.commit.sha, ageDays, dryRun: true });
+                continue;
+              }
+              try {
+                await github.rest.git.deleteRef({
+                  owner,
+                  repo,
+                  ref: `heads/${name}`,
+                });
+                deleted.push({ name, sha: b.commit.sha, ageDays });
+              } catch (e) {
+                // A ruleset/branch-protection deletion rule lands here (422).
+                failed.push({ name, error: `delete: ${e.message}` });
+              }
+            }
+
+            deleted.sort((a, b) => b.ageDays - a.ageDays);
+
+            const s = core.summary
+              .addHeading(
+                `Stale branch cleanup${dryRun ? " (dry run)" : ""}`,
+                2,
+              )
+              .addRaw(
+                `Threshold: **${days} days** · scanned **${branches.length}** branches · ` +
+                  `${dryRun ? "would delete" : "deleted"} **${deleted.length}** · ` +
+                  `failed **${failed.length}**`,
+              )
+              .addBreak();
+
+            if (deleted.length) {
+              s.addHeading(dryRun ? "Would delete" : "Deleted", 3).addTable([
+                [
+                  { data: "Branch", header: true },
+                  { data: "Age (days)", header: true },
+                  { data: "Tip SHA (restore from this)", header: true },
+                ],
+                ...deleted.map((d) => [d.name, String(d.ageDays), d.sha]),
+              ]);
+            }
+            if (failed.length) {
+              s.addHeading("Failed (left in place)", 3).addTable([
+                [
+                  { data: "Branch", header: true },
+                  { data: "Error", header: true },
+                ],
+                ...failed.map((f) => [f.name, f.error]),
+              ]);
+            }
+            await s.write();
+
+            core.info(
+              `${dryRun ? "[dry-run] would delete" : "deleted"} ${deleted.length}; ` +
+                `kept ${kept.length}; failed ${failed.length}`,
+            );
+            for (const d of deleted) {
+              core.info(
+                `${dryRun ? "would-delete" : "deleted"} ${d.name} (${d.ageDays}d) @ ${d.sha}`,
+              );
+            }
+            for (const f of failed) core.warning(`${f.name}: ${f.error}`);
