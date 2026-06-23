@@ -154,7 +154,7 @@ pub(crate) async fn apply_transition_and_dispatch(
         let is_conflict_rejection = action == TransitionAction::TaskReviewRejectConflict;
         let is_orphaned_tool_call = reason
             .as_deref()
-            .map(super::super::reply_loop::error_handling::is_orphaned_tool_call_error_str)
+            .map(djinn_provider::error_classify::is_orphaned_tool_call_error_str)
             .unwrap_or(false);
         if is_orphaned_tool_call {
             tracing::warn!(

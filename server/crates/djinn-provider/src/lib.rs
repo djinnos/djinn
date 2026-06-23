@@ -2,6 +2,7 @@ pub mod bootstrap;
 pub mod catalog;
 pub mod completion;
 pub mod embeddings;
+pub mod error_classify;
 pub mod github_api;
 pub mod github_app;
 pub mod message;
@@ -17,4 +18,7 @@ pub use completion::{
     resolve_memory_provider_for_user,
 };
 
+pub use error_classify::{
+    is_context_length_error, is_orphaned_tool_call_error, is_orphaned_tool_call_error_str,
+};
 pub use prompts::{MEMORY_L0_ABSTRACT, MEMORY_L1_OVERVIEW};

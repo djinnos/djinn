@@ -1,0 +1,18 @@
+[package]
+name = "djinn-compaction"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+djinn-provider = { path = "../djinn-provider" }
+anyhow = "1"
+futures = "0.3"
+serde_json = "1"
+tracing = "0.1"
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
