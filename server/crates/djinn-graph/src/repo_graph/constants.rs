@@ -206,6 +206,20 @@ pub const REASON_TRAIT_DISPATCH_FANOUT: &str = "trait-dispatch-fanout";
 /// reached, ambiguous impl, etc.).
 pub const REASON_TRAIT_DISPATCH_SUPPRESSED: &str = "trait-dispatch-suppressed";
 
+/// Maximum number of concrete implementation methods to which a caller →
+/// trait-method dispatch edge will fan out. When a trait method has more
+/// known implementations than this cap, the builder suppresses the
+/// synthesized fan-out edges entirely to prevent unbounded edge
+/// multiplication (e.g. `RuntimeOps` with 10+ impls). The direct caller
+/// → trait-method `TraitDispatchCall` edge is still emitted regardless of
+/// the cap; only the impl-fanout edges are suppressed.
+///
+/// The cap is deliberately conservative: most traits in real Rust codebases
+/// have fewer than 5 implementations, so a cap of 5 covers the common case
+/// while preventing pathological multiplication for widely-implemented
+/// framework traits.
+pub const TRAIT_DISPATCH_FANOUT_CAP: usize = 5;
+
 pub(crate) const SYMBOL_KIND_TYPE_MULTIPLIER: f64 = 1.15;
 pub(crate) const SYMBOL_KIND_METHOD_MULTIPLIER: f64 = 1.05;
 pub(crate) const SYMBOL_KIND_FUNCTION_MULTIPLIER: f64 = 1.0;
