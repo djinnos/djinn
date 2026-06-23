@@ -556,3 +556,62 @@ fn parse_block_with_bare_json_children_no_error() {
         "bare-brace JSON children must be preserved byte-for-byte"
     );
 }
+
+// ── get_block_catalog lean surface tests ──────────────────────────────
+
+#[test]
+fn proposal_block_catalog_returns_14_entries() {
+    let catalog = proposal_block_catalog();
+    assert_eq!(
+        catalog.len(),
+        14,
+        "catalog must cover all 14 v1 block types"
+    );
+}
+
+#[test]
+fn proposal_block_catalog_entries_match_canonical_types() {
+    let catalog = proposal_block_catalog();
+    // The catalog is the lean (type, tag) projection of CANONICAL_BLOCK_TYPES.
+    let expected: std::collections::HashSet<(&str, &str)> = CANONICAL_BLOCK_TYPES
+        .iter()
+        .map(|(ty, tag)| (*ty, *tag))
+        .collect();
+    let actual: std::collections::HashSet<(&str, &str)> = catalog
+        .iter()
+        .map(|entry| (entry.block_type.as_str(), entry.tag.as_str()))
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "proposal_block_catalog() entries must match CANONICAL_BLOCK_TYPES"
+    );
+}
+
+#[test]
+fn proposal_block_catalog_sourced_from_json_file() {
+    // Verify the catalog function deserializes from the committed JSON artifact
+    // by round-tripping: read the file, parse it, and compare.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/tools/proposal_blocks/proposal_block_catalog.json");
+    let raw = std::fs::read_to_string(&path).expect("proposal_block_catalog.json must exist");
+    let from_disk: Vec<super::types::BlockCatalogEntry> =
+        serde_json::from_str(&raw).expect("proposal_block_catalog.json must be valid JSON");
+    let from_fn = proposal_block_catalog();
+    assert_eq!(
+        from_fn, from_disk,
+        "proposal_block_catalog() must return the same entries as the committed JSON file"
+    );
+}
+
+#[test]
+fn proposal_block_catalog_covers_all_registry_tags() {
+    let catalog = proposal_block_catalog();
+    let catalog_tags: std::collections::HashSet<&str> =
+        catalog.iter().map(|e| e.tag.as_str()).collect();
+    let registry_tags: std::collections::HashSet<&str> =
+        proposal_block_tags().into_iter().collect();
+    assert_eq!(
+        catalog_tags, registry_tags,
+        "catalog tags must be identical to registry tags"
+    );
+}

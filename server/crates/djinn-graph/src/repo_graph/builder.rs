@@ -27,6 +27,8 @@ use crate::scip_parser::{
     ScipSymbolRole, ScipVisibility,
 };
 
+use super::constants::TRAIT_DISPATCH_FANOUT_CAP;
+
 use super::{
     RepoDependencyGraph, RepoGraphEdge, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind,
     RepoNodeKey, RouteExclusionConfig, SymbolRange, build_name_index, derive_edge_confidence,
@@ -91,6 +93,15 @@ pub(crate) struct RepoDependencyGraphBuilder {
     /// crate-aware community seeding. `None` keeps the legacy unseeded
     /// community-detection behaviour.
     pub(super) community_seed_by_crate: Option<CommunitySeedCrateMap>,
+    /// In-memory trait-method → implementation-method index built from
+    /// SCIP `Implementation` relationships. Each key is a trait-method
+    /// symbol identifier, and the value is the list of concrete
+    /// implementation method symbols that implement it. Populated
+    /// during `add_relationship` when an `Implementation` relationship
+    /// is observed from an impl method to its trait method. Consumed
+    /// during `maybe_add_trait_dispatch_call` to emit bounded fan-out
+    /// edges from a caller to known concrete implementations.
+    pub(super) trait_impl_index: BTreeMap<String, Vec<String>>,
 }
 
 impl RepoDependencyGraphBuilder {
@@ -394,6 +405,45 @@ impl RepoDependencyGraphBuilder {
         // kinds; the bump itself doesn't need to stamp a reason
         // field since the kind is the load-bearing provenance
         // signal.
+
+        // PR 1h6c: Bounded fan-out to known concrete implementations.
+        // When the trait method has known implementations indexed from
+        // SCIP `Implementation` relationships AND the count is within
+        // `TRAIT_DISPATCH_FANOUT_CAP`, emit a `TraitDispatchCall` edge
+        // from the caller to each concrete implementation method. This
+        // gives downstream consumers (e.g. `code_graph neighbors`) a
+        // direct path to the concrete call targets without requiring
+        // dynamic type resolution.
+        //
+        // When the cap is exceeded, no impl fan-out edges are emitted —
+        // the direct caller → trait-method edge remains as the only
+        // dispatch signal. This prevents unbounded edge multiplication
+        // for widely-implemented traits (e.g. `RuntimeOps` with 10+ impls).
+        if let Some(impls) = self.trait_impl_index.get(&occurrence.symbol)
+            && impls.len() <= TRAIT_DISPATCH_FANOUT_CAP
+        {
+            // Clone the impl list to release the immutable borrow
+            // on `self.trait_impl_index` before calling
+            // `self.bump_edge` (which requires &mut self).
+            let impls_clone = impls.clone();
+            for impl_sym in &impls_clone {
+                if let Some(&impl_index) =
+                    self.node_lookup.get(&RepoNodeKey::Symbol(impl_sym.clone()))
+                {
+                    // Avoid self-loops and duplicates with the
+                    // direct caller → trait-method edge.
+                    if impl_index == caller_index || impl_index == target_symbol_index {
+                        continue;
+                    }
+                    self.bump_edge(
+                        caller_index,
+                        impl_index,
+                        RepoGraphEdgeKind::TraitDispatchCall,
+                        1,
+                    );
+                }
+            }
+        }
     }
 
     /// Find the innermost definition whose range contains
@@ -496,6 +546,32 @@ impl RepoDependencyGraphBuilder {
                 ScipRelationshipKind::Definition => RepoGraphEdgeKind::Defines,
             };
             self.bump_edge(source_symbol_index, target_symbol_index, edge_kind, 1);
+
+            // PR 1h6c: Build the trait-method → implementation-method
+            // index from `Implementation` relationships. When a concrete
+            // impl method has an `Implementation` relationship to a trait
+            // method, record the mapping so `maybe_add_trait_dispatch_call`
+            // can fan out to known implementations. The source symbol is
+            // the concrete impl method; the target symbol is the trait
+            // method it implements.
+            if matches!(kind, ScipRelationshipKind::Implementation) {
+                let source_sym = self
+                    .graph
+                    .node_weight(source_symbol_index)
+                    .and_then(|n| n.symbol.as_deref());
+                let target_sym = self
+                    .graph
+                    .node_weight(target_symbol_index)
+                    .and_then(|n| n.symbol.as_deref());
+                if let (Some(source), Some(target)) = (source_sym, target_sym)
+                    && symbol_looks_like_impl_method(source, &self.declared_symbols)
+                {
+                    self.trait_impl_index
+                        .entry(target.to_string())
+                        .or_default()
+                        .push(source.to_string());
+                }
+            }
         }
     }
 
@@ -717,8 +793,37 @@ impl RepoDependencyGraphBuilder {
     }
 
     pub(super) fn finish(mut self) -> RepoDependencyGraph {
+        // PR 1h6c: Build a set of node indices that are *sources* of
+        // `Implements` edges (i.e., concrete implementation methods).
+        // An implementation method has an `Implements` edge FROM itself
+        // TO the trait method it implements. The trait method is the
+        // *target* of that edge, so by collecting sources we get exactly
+        // the impl method nodes — not the trait method itself. This lets
+        // us stamp the fan-out reason on caller → impl-method
+        // `TraitDispatchCall` edges while leaving the direct caller →
+        // trait-method edge without the fan-out reason.
+        let impl_method_nodes: BTreeSet<NodeIndex> = self
+            .edge_accumulator
+            .keys()
+            .filter(|(_, _, kind)| *kind == RepoGraphEdgeKind::Implements)
+            .map(|(source, _, _)| *source)
+            .collect();
+
         for ((source, target, kind), evidence_count) in self.edge_accumulator {
-            let (confidence, reason) = derive_edge_confidence(&self.graph, source, target, kind);
+            let (confidence, mut reason) =
+                derive_edge_confidence(&self.graph, source, target, kind);
+            // PR 1h6c: stamp the fan-out reason on TraitDispatchCall
+            // edges whose target is an implementation method (is a
+            // source of an Implements edge). This distinguishes caller
+            // → impl-method fan-out edges from direct caller →
+            // trait-method edges, which carry no explicit reason
+            // (or "local-prefix" when a local symbol is involved).
+            if kind == RepoGraphEdgeKind::TraitDispatchCall
+                && impl_method_nodes.contains(&target)
+                && reason.as_deref() != Some("local-prefix")
+            {
+                reason = Some(super::constants::REASON_TRAIT_DISPATCH_FANOUT.to_string());
+            }
             self.graph.add_edge(
                 source,
                 target,
@@ -851,6 +956,49 @@ fn symbol_looks_like_trait_method(symbol: &str, declared_symbols: &BTreeSet<Stri
         &descriptors[..parent_descriptor_count],
     );
     declared_symbols.contains(&parent_identifier)
+}
+
+/// Best-effort check for "is this SCIP symbol identifier a concrete
+/// implementation method that implements a trait method?" Used during
+/// trait-impl index construction to filter `Implementation`
+/// relationships to only those from concrete impl methods (not from
+/// free functions, variables, or other non-method symbols).
+///
+/// The check mirrors [`symbol_looks_like_trait_method`] but does NOT
+/// require the parent type to be declared in-repo — an impl method's
+/// parent type (e.g. `StructA`) is always declared (it's the struct
+/// being implemented), but we don't need to gate on that since the
+/// `Implementation` relationship itself is the authoritative signal.
+fn symbol_looks_like_impl_method(symbol: &str, declared_symbols: &BTreeSet<String>) -> bool {
+    if crate::scip_parser::is_local_symbol(symbol) {
+        return false;
+    }
+    let parsed = match scip::symbol::parse_symbol(symbol) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+    let descriptors = parsed.descriptors;
+    if descriptors.len() < 2 {
+        return false;
+    }
+    use scip::types::descriptor::Suffix;
+    let last = match descriptors.last() {
+        Some(d) => d,
+        None => return false,
+    };
+    if last.suffix.enum_value().ok() != Some(Suffix::Method) {
+        return false;
+    }
+    let parent = &descriptors[descriptors.len() - 2];
+    let parent_suffix = parent.suffix.enum_value().ok();
+    if !matches!(
+        parent_suffix,
+        Some(Suffix::Type) | Some(Suffix::UnspecifiedSuffix)
+    ) {
+        return false;
+    }
+    // The impl method itself must be a declared in-repo symbol.
+    declared_symbols.contains(symbol)
 }
 
 /// Format a SCIP `Symbol` carrying only the parent descriptors (no

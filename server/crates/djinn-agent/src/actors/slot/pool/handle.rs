@@ -1,8 +1,8 @@
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use djinn_orchestration_types::coordinator::DebugSlot;
 use crate::context::AgentContext;
+use djinn_orchestration_types::coordinator::DebugSlot;
 
 use super::super::SlotPoolConfig;
 use super::actor::SlotPool;
