@@ -86,6 +86,7 @@ use crate::actors::slot::lifecycle::role_overrides::{
     ResolvedRoleOverrides, resolve_role_overrides,
 };
 use crate::actors::slot::lifecycle::setup::{SetupContext, SetupError, resolve_setup_context};
+use crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger;
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
 use crate::actors::slot::reply_loop::error_handling::BudgetWindDownIgnored;
 use crate::actors::slot::reply_loop::loop_guard::{
@@ -481,6 +482,13 @@ pub(crate) async fn execute_stage(
     // `runtime_role` drives resolution so specialists can override the base
     // role's MCP/skill defaults.  `role_mcp_servers` carries the DB row's
     // parsed array (or `None` when no DB row exists).
+    //
+    // The authoring trigger gates native-skill loading: only proposal-authoring
+    // planner sessions (epic_breakdown) receive platform-owned skills like
+    // `visual-spec`.  Non-authoring planner sessions (wave planning, dispatch)
+    // skip native skills to avoid paying the context cost.
+    let authoring_trigger = classify_native_skill_trigger(runtime_role.config().name, task);
+
     let McpAndSkills {
         effective_mcp_servers,
         effective_skills,
@@ -493,6 +501,7 @@ pub(crate) async fn execute_stage(
         &task.short_id,
         role_mcp_servers.as_deref(),
         &role_skills,
+        authoring_trigger,
         #[cfg(test)]
         None,
         agent_context,
