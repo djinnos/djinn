@@ -1,7 +1,7 @@
 use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 
-use super::shared_schemas::{self, ToolSafetyAnnotations};
+use crate::shared_schemas::{self, ToolSafetyAnnotations};
 
 fn serialize_tool(tool: RmcpTool, annotations: ToolSafetyAnnotations) -> serde_json::Value {
     shared_schemas::serialize_tool_schema(tool, annotations)
@@ -31,7 +31,7 @@ fn idempotent_destructive() -> ToolSafetyAnnotations {
     ToolSafetyAnnotations::idempotent_destructive()
 }
 
-pub(super) fn tool_request_lead() -> RmcpTool {
+pub fn tool_request_lead() -> RmcpTool {
     RmcpTool::new(
         "request_lead".to_string(),
         "Request Lead intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the Lead queue. Your session will effectively end after this call."
@@ -48,7 +48,7 @@ pub(super) fn tool_request_lead() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_request_planner() -> RmcpTool {
+pub fn tool_request_planner() -> RmcpTool {
     RmcpTool::new(
         "request_planner".to_string(),
         "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs to be split or merged, or has failed multiple Lead interventions. The Planner owns the board and decides whether to reshape the work, dedupe it, or — if the issue requires deeper code-structural reasoning — dispatch an Architect spike. Adds a comment and dispatches the Planner. Your session should end after this call."
@@ -64,7 +64,7 @@ pub(super) fn tool_request_planner() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_role_amend_prompt() -> RmcpTool {
+pub fn tool_role_amend_prompt() -> RmcpTool {
     RmcpTool::new(
         "agent_amend_prompt".to_string(),
         "Planner-owned, evidence-based amendment path for machine-managed learned_prompt updates; not a general prompt editor. Use only after agent-effectiveness evidence (agent_metrics, repeated reviewer/lead feedback, or repeated task failures) shows a stable specialist-agent pattern; this is audited in learned_prompt_history and is not a substitute for human/project system_prompt_extensions. Only specialist worker/reviewer agents are eligible; default roles and non-worker/reviewer roles must not be amended. Append concise observed-pattern + behavioral-correction text; provide metrics_snapshot when available so the evaluator can compare before/after outcomes."
@@ -82,7 +82,7 @@ pub(super) fn tool_role_amend_prompt() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_shell() -> RmcpTool {
+pub fn tool_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
         "Execute shell commands in the task worktree. Commands always run from the worktree root."
@@ -98,7 +98,7 @@ pub(crate) fn tool_shell() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_read() -> RmcpTool {
+pub fn tool_read() -> RmcpTool {
     RmcpTool::new(
         "read".to_string(),
         "Read a file with line numbers and pagination. Rejects binary files. Pass `project` (UUID or owner/repo slug) to read a file from ANOTHER registered repo — served read-only from its default branch (no checkout); omit it to read your task worktree.".to_string(),
@@ -115,7 +115,7 @@ pub(crate) fn tool_read() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_code_search() -> RmcpTool {
+pub fn tool_code_search() -> RmcpTool {
     RmcpTool::new(
         "code_search".to_string(),
         "Search code across registered repos with `git grep` (basic regex). Pass `project` (UUID or owner/repo slug) to search one repo, or omit it (or pass \"*\") to search ALL registered projects at once — e.g. find every caller of a gRPC service org-wide. Served from each repo's default branch (no checkout). For your own task repo's working tree (your uncommitted changes), use shell grep instead.".to_string(),
@@ -133,7 +133,7 @@ pub(crate) fn tool_code_search() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_skill_read() -> RmcpTool {
+pub fn tool_skill_read() -> RmcpTool {
     RmcpTool::new(
         "skill_read".to_string(),
         "Load the full content of an assigned skill by name. Under progressive \
@@ -151,7 +151,7 @@ pub(crate) fn tool_skill_read() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_write() -> RmcpTool {
+pub fn tool_write() -> RmcpTool {
     RmcpTool::new(
         "write".to_string(),
         "Write content to a file, creating it or overwriting if it exists. Path must be within the task worktree.".to_string(),
@@ -166,7 +166,7 @@ pub(super) fn tool_write() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_edit() -> RmcpTool {
+pub fn tool_edit() -> RmcpTool {
     RmcpTool::new(
         "edit".to_string(),
         "Edit a file by replacing exact text. Finds old_text and replaces with new_text. Fails if old_text is not found or is ambiguous (appears multiple times).".to_string(),
@@ -182,7 +182,7 @@ pub(super) fn tool_edit() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_task_delete_branch() -> RmcpTool {
+pub fn tool_task_delete_branch() -> RmcpTool {
     RmcpTool::new(
         "task_delete_branch".to_string(),
         "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.".to_string(),
@@ -196,7 +196,7 @@ pub(super) fn tool_task_delete_branch() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_task_archive_activity() -> RmcpTool {
+pub fn tool_task_archive_activity() -> RmcpTool {
     RmcpTool::new(
         "task_archive_activity".to_string(),
         "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.".to_string(),
@@ -210,7 +210,7 @@ pub(super) fn tool_task_archive_activity() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_task_reset_counters() -> RmcpTool {
+pub fn tool_task_reset_counters() -> RmcpTool {
     RmcpTool::new(
         "task_reset_counters".to_string(),
         "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.".to_string(),
@@ -224,7 +224,7 @@ pub(super) fn tool_task_reset_counters() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_task_kill_session() -> RmcpTool {
+pub fn tool_task_kill_session() -> RmcpTool {
     RmcpTool::new(
         "task_kill_session".to_string(),
         "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.".to_string(),
@@ -238,7 +238,7 @@ pub(super) fn tool_task_kill_session() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_ci_job_log() -> RmcpTool {
+pub fn tool_ci_job_log() -> RmcpTool {
     RmcpTool::new(
         "ci_job_log".to_string(),
         "Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log \
@@ -257,7 +257,7 @@ pub(super) fn tool_ci_job_log() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_output_view() -> RmcpTool {
+pub fn tool_output_view() -> RmcpTool {
     RmcpTool::new(
         "output_view".to_string(),
         "Paginated view of a truncated tool output. When a tool result was truncated, \
@@ -275,7 +275,7 @@ pub(crate) fn tool_output_view() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_output_grep() -> RmcpTool {
+pub fn tool_output_grep() -> RmcpTool {
     RmcpTool::new(
         "output_grep".to_string(),
         "Regex search within a truncated tool output. Returns matching lines with \
@@ -293,7 +293,7 @@ pub(crate) fn tool_output_grep() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_apply_patch() -> RmcpTool {
+pub fn tool_apply_patch() -> RmcpTool {
     RmcpTool::new(
         "apply_patch".to_string(),
         concat!(
@@ -327,7 +327,7 @@ pub(super) fn tool_apply_patch() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_lsp() -> RmcpTool {
+pub fn tool_lsp() -> RmcpTool {
     RmcpTool::new(
         "lsp".to_string(),
         "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.".to_string(),
@@ -376,9 +376,9 @@ pub(crate) fn tool_lsp() -> RmcpTool {
     )
 }
 
-pub(crate) use super::tool_defs_code_graph::{tool_code_graph, tool_pr_review_context};
+pub use crate::tool_defs_code_graph::{tool_code_graph, tool_pr_review_context};
 
-pub(crate) fn tool_github_search() -> RmcpTool {
+pub fn tool_github_search() -> RmcpTool {
     RmcpTool::new(
         "github_search".to_string(),
         "Search GitHub code across public repositories using the GitHub Code Search API. \
@@ -436,7 +436,7 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
 }
 
 /// Tool schemas for Worker: base + file-editing tools.
-pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
+pub fn tool_schemas_worker() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     tool_values.push(serialize_tool(tool_write(), destructive()));
     tool_values.push(serialize_tool(tool_edit(), destructive()));
@@ -458,7 +458,7 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     ));
     tool_values.push(serialize_tool(tool_request_lead(), mutation()));
     tool_values.push(serialize_tool(
-        crate::roles::finalize::tool_submit_work(),
+        crate::finalize_tools::tool_submit_work(),
         mutation(),
     ));
     tool_values
@@ -466,14 +466,14 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
 
 /// Tool schemas for Reviewer: base + submit_review finalize tool.
 /// task_update_ac is excluded — submit_review sets AC atomically.
-pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
+pub fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_build_context(),
         read_only(),
     ));
     tool_values.push(serialize_tool(
-        crate::roles::finalize::tool_submit_review(),
+        crate::finalize_tools::tool_submit_review(),
         mutation(),
     ));
     tool_values
@@ -481,7 +481,7 @@ pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
 
 /// Tool schemas for Lead: base + task/epic management tools + submit_decision finalize tool.
 /// task_comment_add and task_transition are excluded — submit_decision drives transitions.
-pub(crate) fn tool_schemas_lead() -> Vec<serde_json::Value> {
+pub fn tool_schemas_lead() -> Vec<serde_json::Value> {
     tool_schemas_lead_inner()
 }
 
@@ -498,7 +498,7 @@ fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
         serialize_tool(tool_task_reset_counters(), idempotent_destructive()),
         serialize_tool(tool_task_kill_session(), destructive()),
         serialize_tool(tool_request_planner(), mutation()),
-        serialize_tool(crate::roles::finalize::tool_submit_decision(), mutation()),
+        serialize_tool(crate::finalize_tools::tool_submit_decision(), mutation()),
     ] {
         tool_values.push(value);
     }
@@ -514,7 +514,7 @@ fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
 /// surface is the union of both needs. `code_graph` remains Architect-only
 /// (per ADR-050) because deep structural analysis is an Architect spike, not
 /// a Planner responsibility.
-pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
+pub fn tool_schemas_planner() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     tool_values.push(serialize_tool(tool_write(), destructive()));
     tool_values.push(serialize_tool(tool_edit(), destructive()));
@@ -620,7 +620,7 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
         serialize_tool(tool_task_reset_counters(), idempotent_destructive()),
         serialize_tool(tool_task_kill_session(), destructive()),
         serialize_tool(tool_role_amend_prompt(), destructive()),
-        serialize_tool(crate::roles::finalize::tool_submit_grooming(), mutation()),
+        serialize_tool(crate::finalize_tools::tool_submit_grooming(), mutation()),
     ] {
         tool_values.push(value);
     }
@@ -630,7 +630,7 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
 /// Tool schemas for Architect: read-only tools, task/epic management, submit_work,
 /// and agent effectiveness tools (role_metrics, memory_build_context, role_amend_prompt).
 /// Does not include write/edit/apply_patch. The Architect diagnoses and directs but does not write code.
-pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
+pub fn tool_schemas_architect() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     // Per ADR-050, the Architect (and only the Architect among agent roles) gets the
     // `code_graph` tool. Inserted at the position the base set used to occupy so the
@@ -716,7 +716,7 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
         // agent-effectiveness amendment is a Planner action, not a consultant
         // action. Architect keeps `role_metrics` (read) and `role_create`
         // (structural proposal) but cannot mutate existing learned_prompts.
-        serialize_tool(crate::roles::finalize::tool_submit_work(), mutation()),
+        serialize_tool(crate::finalize_tools::tool_submit_work(), mutation()),
     ] {
         tool_values.push(value);
     }

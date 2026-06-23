@@ -2,15 +2,24 @@ mod fuzzy;
 pub(crate) mod github_search;
 pub(crate) mod handlers;
 mod helpers;
-pub(crate) mod shared_schemas;
-pub(crate) mod tool_defs;
-mod tool_defs_code_graph;
 mod types;
+
+// Façade: re-export schema surfaces from `djinn-mcp-extension` so that
+// existing callers see the same paths as before the extraction.
+// The schema-only modules now live in `djinn-mcp-extension`; handler
+// dispatch and parameter types remain in this crate.
+pub(crate) use djinn_mcp_extension::shared_schemas;
+pub(crate) use djinn_mcp_extension::tool_defs;
+// `tool_defs_code_graph` items are re-exported through `tool_defs`.
+
+// Re-export the public API so external callers see the same paths as before.
+pub(crate) use djinn_mcp_extension::tool_defs::{
+    tool_schemas_architect, tool_schemas_lead, tool_schemas_planner, tool_schemas_reviewer,
+    tool_schemas_worker,
+};
 
 // Façade: re-export the public surface of `djinn-mcp-extension` so that
 // existing callers see the same paths once code is migrated there.
-// At this stage the re-export is a compatibility seam; modules above
-// remain the live code locations until later extraction waves move them.
 #[allow(unused_imports)]
 pub use djinn_mcp_extension as mcp_ext;
 
@@ -18,12 +27,6 @@ use std::path::Path;
 
 use crate::context::AgentContext;
 use crate::mcp_client::McpToolRegistry;
-
-// Re-export the public API so external callers see the same paths as before.
-pub(crate) use tool_defs::{
-    tool_schemas_architect, tool_schemas_lead, tool_schemas_planner, tool_schemas_reviewer,
-    tool_schemas_worker,
-};
 
 /// Public entry point for the Djinn-native reply loop to call a tool by name.
 ///
