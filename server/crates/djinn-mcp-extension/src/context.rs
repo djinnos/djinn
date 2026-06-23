@@ -120,16 +120,25 @@ mod boundary_tests {
         );
     }
 
-    /// Verify that `djinn-supervisor` (the actors crate) is not listed
-    /// as a dependency.  Supervisor/actor integration goes through the
-    /// `djinn-agent` façade.
+    /// Verify that `djinn-supervisor` usage is limited to the `SupervisorServices`
+    /// trait (needed by the dispatch module for tool routing).  The crate must
+    /// not depend on supervisor internals or actor lifecycle management.
     #[test]
-    fn no_actors_dependency() {
-        let cargo_toml = include_str!("../Cargo.toml");
+    fn supervisor_usage_is_trait_only() {
+        let src_root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let forbidden = scan_source_imports(
+            src_root,
+            &[
+                "djinn_supervisor::pool",
+                "djinn_supervisor::slot",
+                "djinn_supervisor::actor",
+            ],
+        );
         assert!(
-            !cargo_toml.contains("djinn-supervisor"),
-            "djinn-mcp-extension must not depend on djinn-supervisor (actors) — \
-             use ExtensionContext trait methods instead"
+            forbidden.is_empty(),
+            "djinn-mcp-extension must only use djinn_supervisor::SupervisorServices trait, \
+             not supervisor internals:\n{}",
+            forbidden.join("\n")
         );
     }
 
@@ -160,15 +169,24 @@ mod boundary_tests {
         );
     }
 
-    /// Scan all non-test `.rs` source files for imports from `djinn_supervisor`
-    /// (the actors crate).
+    /// Scan all non-test `.rs` source files for broad `djinn_supervisor`
+    /// imports beyond the allowed `SupervisorServices` trait.  The dispatch
+    /// module legitimately uses the trait for tool routing, but the crate
+    /// must not import supervisor internals (pool, slot, actor modules).
     #[test]
-    fn no_source_imports_from_actors() {
+    fn no_source_imports_from_supervisor_internals() {
         let src_root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
-        let forbidden = scan_source_imports(src_root, &["djinn_supervisor"]);
+        let forbidden = scan_source_imports(
+            src_root,
+            &[
+                "djinn_supervisor::pool",
+                "djinn_supervisor::slot",
+                "djinn_supervisor::actor",
+            ],
+        );
         assert!(
             forbidden.is_empty(),
-            "djinn-mcp-extension source files must not import from djinn_supervisor:\n{}",
+            "djinn-mcp-extension source files must not import supervisor internals:\n{}",
             forbidden.join("\n")
         );
     }

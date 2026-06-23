@@ -13,14 +13,21 @@ djinn-control-plane = { path = "../djinn-control-plane" }
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
 djinn-lsp = { path = "../djinn-lsp" }
+djinn-memory = { path = "../djinn-memory" }
+djinn-provider = { path = "../djinn-provider" }
+djinn-supervisor = { path = "../djinn-supervisor" }
+djinn-telemetry = { path = "../djinn-telemetry" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
 rmcp = { version = "0.16", features = ["server"] }
 thiserror = "2"
 tracing = "0.1"
+uuid = { version = "1", features = ["v7"] }
 workspace-hack.workspace = true
 
 [dev-dependencies]
 insta = { version = "1", features = ["json"] }
+regex = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }

@@ -16,7 +16,6 @@ use tokio_util::sync::CancellationToken;
 
 mod code_graph_tests;
 mod epic_extension_tests;
-pub(crate) mod fuzzy_replace_tests;
 mod lsp_dispatch_tests;
 mod lsp_tool_boundary_tests;
 mod memory_dispatch_tests;
