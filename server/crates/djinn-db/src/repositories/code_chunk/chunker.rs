@@ -365,81 +365,144 @@ fn chunk_statements(
 /// the architect-blessed trade-off ("degrades to character chunking,
 /// doesn't break"). The character-window fallback is one call away.
 fn find_statement_boundaries(body: &str, target_depth: i32) -> Vec<usize> {
-    let bytes = body.as_bytes();
-    let mut depth: i32 = 0;
-    let mut in_string: Option<u8> = None;
-    let mut in_line_comment = false;
-    let mut in_block_comment = false;
-    let mut boundaries: Vec<usize> = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_line_comment {
-            if c == b'\n' {
-                in_line_comment = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_block_comment {
-            if c == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-                in_block_comment = false;
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if let Some(q) = in_string {
-            if c == b'\\' {
-                i += 2; // skip escaped char (incl. escaped quote)
-                continue;
-            }
-            if c == q {
-                in_string = None;
-            }
-            i += 1;
-            continue;
-        }
-        match c {
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
-                in_line_comment = true;
-                i += 2;
-            }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
-                in_block_comment = true;
-                i += 2;
-            }
-            b'"' | b'\'' | b'`' => {
-                in_string = Some(c);
-                i += 1;
-            }
-            b'{' => {
-                depth += 1;
-                i += 1;
-            }
-            b'}' => {
-                depth -= 1;
-                // Boundary fires when a `}` closes a block at the
-                // target depth (i.e. depth was target_depth + 1 going
-                // in, now target_depth) and a newline (or EOF) follows.
-                if depth == target_depth {
-                    let after = i + 1;
-                    if after >= bytes.len() || bytes[after] == b'\n' {
-                        let cut = if after < bytes.len() {
-                            after + 1
-                        } else {
-                            after
-                        };
-                        boundaries.push(cut);
-                    }
-                }
-                i += 1;
-            }
-            _ => i += 1,
+    StatementBoundaryScanner::new(body.as_bytes(), target_depth).run()
+}
+
+/// Small byte-level scanner that locates statement boundaries in a body.
+///
+/// The previous monolithic loop mixed comment/string skipping with brace
+/// depth tracking in one deeply nested match. Splitting the state into a
+/// tiny private type lets each concern (line comment, block comment,
+/// quoted string, brace depth) live in its own helper, and reduces the
+/// main loop to a flat dispatch. Byte-offset semantics are preserved
+/// exactly, including escaped-char `+2` skip, depth decrement before
+/// boundary checks, and the "cut after following newline" rule.
+struct StatementBoundaryScanner<'a> {
+    bytes: &'a [u8],
+    target_depth: i32,
+    depth: i32,
+    in_string: Option<u8>,
+    in_line_comment: bool,
+    in_block_comment: bool,
+    boundaries: Vec<usize>,
+}
+
+impl<'a> StatementBoundaryScanner<'a> {
+    fn new(bytes: &'a [u8], target_depth: i32) -> Self {
+        Self {
+            bytes,
+            target_depth,
+            depth: 0,
+            in_string: None,
+            in_line_comment: false,
+            in_block_comment: false,
+            boundaries: Vec::new(),
         }
     }
-    boundaries
+
+    fn run(mut self) -> Vec<usize> {
+        let mut i = 0;
+        while i < self.bytes.len() {
+            let c = self.bytes[i];
+            if self.in_line_comment {
+                i = self.step_line_comment(c, i);
+                continue;
+            }
+            if self.in_block_comment {
+                i = self.step_block_comment(i);
+                continue;
+            }
+            if self.in_string.is_some() {
+                i = self.step_string(c, i);
+                continue;
+            }
+            i = self.step_normal(c, i);
+        }
+        self.boundaries
+    }
+
+    fn step_line_comment(&mut self, c: u8, i: usize) -> usize {
+        if c == b'\n' {
+            self.in_line_comment = false;
+        }
+        i + 1
+    }
+
+    fn step_block_comment(&mut self, i: usize) -> usize {
+        if self.bytes[i] == b'*' && i + 1 < self.bytes.len() && self.bytes[i + 1] == b'/' {
+            self.in_block_comment = false;
+            i + 2
+        } else {
+            i + 1
+        }
+    }
+
+    fn step_string(&mut self, c: u8, i: usize) -> usize {
+        if c == b'\\' {
+            // Skip escaped char (incl. escaped quote) — preserves the
+            // original `i += 2` behavior byte-for-byte.
+            return i + 2;
+        }
+        if let Some(q) = self.in_string
+            && c == q
+        {
+            self.in_string = None;
+        }
+        i + 1
+    }
+
+    fn step_normal(&mut self, c: u8, i: usize) -> usize {
+        match c {
+            b'/' if self.peek(i) == Some(b'/') => {
+                self.in_line_comment = true;
+                i + 2
+            }
+            b'/' if self.peek(i) == Some(b'*') => {
+                self.in_block_comment = true;
+                i + 2
+            }
+            b'"' | b'\'' | b'`' => {
+                self.in_string = Some(c);
+                i + 1
+            }
+            b'{' => {
+                self.depth += 1;
+                i + 1
+            }
+            b'}' => {
+                self.depth -= 1;
+                self.try_record_boundary(i);
+                i + 1
+            }
+            _ => i + 1,
+        }
+    }
+
+    /// `Some(next)` when `i + 1` is in bounds, else `None`.
+    fn peek(&self, i: usize) -> Option<u8> {
+        self.bytes.get(i + 1).copied()
+    }
+
+    /// Record a boundary iff `bytes[i]` is a `}` that just brought depth
+    /// down to `target_depth` AND the next byte is a newline (or EOF).
+    /// Cut offset sits *after* the following newline, matching the
+    /// pre-refactor behavior exactly.
+    fn try_record_boundary(&mut self, i: usize) {
+        if self.depth != self.target_depth {
+            return;
+        }
+        let after = i + 1;
+        let follows_newline = after >= self.bytes.len() || self.bytes[after] == b'\n';
+        if !follows_newline {
+            return;
+        }
+        let cut = if after < self.bytes.len() {
+            after + 1
+        } else {
+            after
+        };
+        self.boundaries.push(cut);
+    }
 }
 
 /// Translate two byte offsets within `body` into 0-indexed line offsets
@@ -1023,6 +1086,30 @@ mod tests {
             3,
             "expected 3 inner-block boundaries, got: {bs:?}"
         );
+    }
+
+    #[test]
+    fn brace_counter_handles_escaped_quotes_and_backslashes_in_strings() {
+        // Escaped quote/backslash inside a string must NOT close the
+        // string (i += 2 skip). A real closing `"` (after the escapes)
+        // re-arms normal scanning, so a `}` inside that real string
+        // content also doesn't fire. The single real boundary is the
+        // top-level `}` followed by newline.
+        let body = "{ let s = \"a\\\"}\\\"\"; }\n";
+        let bs = find_statement_boundaries(body, 0);
+        assert_eq!(
+            bs.len(),
+            1,
+            "expected only the outer brace boundary, got: {bs:?}"
+        );
+
+        // The same logic applies to `'…'` and `` `…` `` strings.
+        let body_chr = "{ let s = '\\\"}'; }\n";
+        let bs_chr = find_statement_boundaries(body_chr, 0);
+        assert_eq!(bs_chr.len(), 1, "single-quote body: {bs_chr:?}");
+        let body_bt = "{ let s = `}`; }\n";
+        let bs_bt = find_statement_boundaries(body_bt, 0);
+        assert_eq!(bs_bt.len(), 1, "backtick body: {bs_bt:?}");
     }
 
     #[test]

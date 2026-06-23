@@ -261,8 +261,8 @@ fn has_event_handler_attribute(lower: &str) -> bool {
         i = start + 2;
         // Require a boundary before `on` (start of string or non-alnum), so
         // words like `button` / `iron` don't match.
-        let boundary = start == 0
-            || !bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_';
+        let boundary =
+            start == 0 || !bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_';
         if !boundary {
             continue;
         }
@@ -726,7 +726,10 @@ Should we use Redis or Memcached?
 </Wireframe>
 "#;
         let err = validate_mdx_body(body, Some("mdx")).unwrap_err();
-        assert!(err.contains("on*= event handler"), "unexpected error: {err}");
+        assert!(
+            err.contains("on*= event handler"),
+            "unexpected error: {err}"
+        );
         assert!(
             err.contains("Wireframe block 'bad'"),
             "unexpected error: {err}"
@@ -755,7 +758,9 @@ Bind it with `el.onclick = fn` in the handler.
     #[test]
     fn event_handler_detection_avoids_false_positives() {
         // `iron` / `button=` style substrings must not trip the on*= matcher.
-        assert!(!has_event_handler_attribute("<button class=\"iron\">on the wall</button>"));
+        assert!(!has_event_handler_attribute(
+            "<button class=\"iron\">on the wall</button>"
+        ));
         assert!(has_event_handler_attribute("<div onmouseover=\"x\">"));
     }
 

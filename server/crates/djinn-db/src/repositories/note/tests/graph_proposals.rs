@@ -9,9 +9,7 @@
 use tokio::sync::broadcast;
 
 use super::*;
-use crate::repositories::note::{
-    MemoryEntityKind, MemoryEntityRef, NoteRepository,
-};
+use crate::repositories::note::{MemoryEntityKind, MemoryEntityRef, NoteRepository};
 use crate::repositories::proposal::{ProposalCreateInput, ProposalRepository};
 use crate::repositories::test_support::{event_bus_for, make_project};
 
@@ -67,11 +65,8 @@ async fn graph_includes_proposal_nodes_and_heterogeneous_typed_edges() {
     let graph = note_repo.graph(&project.id).await.unwrap();
 
     // 5. Assert both nodes present.
-    let node_map: std::collections::HashMap<String, GraphNode> = graph
-        .nodes
-        .into_iter()
-        .map(|n| (n.id.clone(), n))
-        .collect();
+    let node_map: std::collections::HashMap<String, GraphNode> =
+        graph.nodes.into_iter().map(|n| (n.id.clone(), n)).collect();
 
     assert!(
         node_map.contains_key(&note.id),
@@ -96,7 +91,9 @@ async fn graph_includes_proposal_nodes_and_heterogeneous_typed_edges() {
     let derived_edges: Vec<&TypedEdge> = graph
         .typed_edges
         .iter()
-        .filter(|e| e.kind == "derived_from" && e.source_id == proposal.id && e.target_id == note.id)
+        .filter(|e| {
+            e.kind == "derived_from" && e.source_id == proposal.id && e.target_id == note.id
+        })
         .collect();
     assert_eq!(
         derived_edges.len(),
