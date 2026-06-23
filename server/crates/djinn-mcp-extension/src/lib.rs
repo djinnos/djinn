@@ -34,3 +34,6 @@ pub use context::ExtensionContext;
 // Skeleton modules for future extraction waves.
 pub mod dispatch;
 pub mod types;
+
+#[cfg(test)]
+mod tests;

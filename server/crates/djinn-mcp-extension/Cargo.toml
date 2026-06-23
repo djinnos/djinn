@@ -22,4 +22,5 @@ tracing = "0.1"
 workspace-hack.workspace = true
 
 [dev-dependencies]
+insta = { version = "1", features = ["json"] }
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }

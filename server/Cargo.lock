@@ -1387,6 +1387,7 @@ dependencies = [
  "djinn-core",
  "djinn-db",
  "djinn-lsp",
+ "insta",
  "rmcp",
  "schemars 1.2.1",
  "serde",

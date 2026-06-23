@@ -38,10 +38,3 @@ fn tool_names(schemas: &[serde_json::Value]) -> Vec<&str> {
         .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
         .collect()
 }
-
-fn tool_schema<'a>(schemas: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
-    schemas
-        .iter()
-        .find(|schema| schema.get("name").and_then(|n| n.as_str()) == Some(name))
-        .expect("tool schema present")
-}
