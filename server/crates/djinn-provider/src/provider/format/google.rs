@@ -84,94 +84,119 @@ impl GoogleProvider {
 /// Parse a single Google AI Studio SSE data line.
 /// Returns zero or more `StreamEvent`s produced by this chunk.
 pub fn parse_google_line(line: &str) -> Vec<StreamEvent> {
-    let v: Value = match serde_json::from_str(line) {
-        Ok(v) => v,
-        Err(_) => return vec![],
+    let v = match parse_google_json(line) {
+        Some(v) => v,
+        None => return vec![],
     };
 
     let mut events = vec![];
 
-    // Check for usage metadata
-    if let Some(usage) = v.get("usageMetadata") {
-        let input = usage
-            .get("promptTokenCount")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0) as u32;
-        let output = usage
-            .get("candidatesTokenCount")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0) as u32;
-        // Gemini reports cache hits via `cachedContentTokenCount`.
-        let cache_read = usage
-            .get("cachedContentTokenCount")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0) as u32;
-        if input > 0 || output > 0 {
-            events.push(StreamEvent::Usage(TokenUsage {
-                input,
-                output,
-                cache_read,
-                // Gemini `promptTokenCount` already includes cached content.
-                context_total: input,
-                ..Default::default()
-            }));
-        }
-    }
+    // Usage metadata
+    append_google_usage(&v, &mut events);
 
-    // Parse candidates
-    if let Some(candidates) = v.get("candidates").and_then(|c| c.as_array()) {
+    // Candidates: parts, function calls, and finish detection
+    if let Some(candidates) = google_candidates(&v) {
         for candidate in candidates {
-            if let Some(parts) = candidate
-                .pointer("/content/parts")
-                .and_then(|p| p.as_array())
-            {
-                for part in parts {
-                    if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                        if !text.is_empty() {
-                            events.push(StreamEvent::Delta(ContentBlock::Text {
-                                text: text.to_string(),
-                            }));
-                        }
-                    } else if let Some(fc) = part.get("functionCall") {
-                        let name = fc
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let input = fc.get("args").cloned().unwrap_or(Value::Null);
-                        // Google doesn't provide a tool use id in streaming; generate a placeholder
-                        let id = format!("google_fc_{}", name);
-                        events.push(StreamEvent::Delta(ContentBlock::ToolUse {
-                            id,
-                            name,
-                            input,
-                        }));
-                    }
-                }
-            }
-
-            // Check finish reason for end of stream signal
-            if let Some(reason) = candidate.get("finishReason").and_then(|r| r.as_str())
-                && !reason.is_empty()
-                && reason != "FINISH_REASON_UNSPECIFIED"
-            {
-                // Will emit Done after the loop
-            }
+            append_candidate_parts(candidate, &mut events);
         }
-
-        // If there are candidates with a finishReason, signal done
-        let has_finish = candidates.iter().any(|c| {
-            c.get("finishReason")
-                .and_then(|r| r.as_str())
-                .map(|r| !r.is_empty() && r != "FINISH_REASON_UNSPECIFIED")
-                .unwrap_or(false)
-        });
-        if has_finish {
+        if candidates.iter().any(candidate_has_finish) {
             events.push(StreamEvent::Done);
         }
     }
 
     events
+}
+
+/// Parse an SSE data line into a JSON value, returning `None` on malformed input
+/// (preserving the previous empty-vec behavior of `parse_google_line`).
+fn parse_google_json(line: &str) -> Option<Value> {
+    serde_json::from_str(line).ok()
+}
+
+/// Append a usage event when `usageMetadata` carries non-zero input/output counts.
+fn append_google_usage(v: &Value, events: &mut Vec<StreamEvent>) {
+    let Some(usage) = v.get("usageMetadata") else {
+        return;
+    };
+    let input = usage
+        .get("promptTokenCount")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as u32;
+    let output = usage
+        .get("candidatesTokenCount")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as u32;
+    // Gemini reports cache hits via `cachedContentTokenCount`.
+    let cache_read = usage
+        .get("cachedContentTokenCount")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as u32;
+    // Suppress usage when both input and output are zero.
+    if input > 0 || output > 0 {
+        events.push(StreamEvent::Usage(TokenUsage {
+            input,
+            output,
+            cache_read,
+            // Gemini `promptTokenCount` already includes cached content.
+            context_total: input,
+            ..Default::default()
+        }));
+    }
+}
+
+/// Return the `candidates` array of a Google stream chunk, if present.
+fn google_candidates(v: &Value) -> Option<&[Value]> {
+    v.get("candidates")
+        .and_then(|c| c.as_array())
+        .map(Vec::as_slice)
+}
+
+/// Emit delta events for the text and function-call parts of a candidate.
+fn append_candidate_parts(candidate: &Value, events: &mut Vec<StreamEvent>) {
+    let Some(parts) = candidate
+        .pointer("/content/parts")
+        .and_then(|p| p.as_array())
+    else {
+        return;
+    };
+    for part in parts {
+        append_part_event(part, events);
+    }
+}
+
+/// Append the stream event for a single content part (text or function call).
+fn append_part_event(part: &Value, events: &mut Vec<StreamEvent>) {
+    if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+        // Suppress empty text deltas.
+        if !text.is_empty() {
+            events.push(StreamEvent::Delta(ContentBlock::Text {
+                text: text.to_string(),
+            }));
+        }
+    } else if let Some(fc) = part.get("functionCall") {
+        let name = fc
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string();
+        let input = fc.get("args").cloned().unwrap_or(Value::Null);
+        // Google doesn't provide a tool use id in streaming; generate a placeholder
+        let id = format!("google_fc_{}", name);
+        events.push(StreamEvent::Delta(ContentBlock::ToolUse {
+            id,
+            name,
+            input,
+        }));
+    }
+}
+
+/// True when the candidate carries a non-trivial `finishReason`.
+fn candidate_has_finish(candidate: &Value) -> bool {
+    candidate
+        .get("finishReason")
+        .and_then(|r| r.as_str())
+        .map(|r| !r.is_empty() && r != "FINISH_REASON_UNSPECIFIED")
+        .unwrap_or(false)
 }
 
 impl LlmProvider for GoogleProvider {
