@@ -1,4 +1,4 @@
-use crate::lsp::LspManager;
+use crate::LspManager;
 
 use super::spawn_fake_client;
 

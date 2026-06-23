@@ -29,6 +29,7 @@ djinn-supervisor = { path = "../djinn-supervisor" }
 djinn-k8s = { path = "../djinn-k8s" }
 djinn-workspace = { path = "../djinn-workspace" }
 djinn-sandbox = { path = "../djinn-sandbox" }
+djinn-lsp = { path = "../djinn-lsp" }
 kube = { version = "0.95", features = ["runtime", "derive"] }
 anyhow = "1"
 thiserror = "2"
@@ -45,7 +46,6 @@ rmcp = { version = "0.16", features = ["server", "client", "transport-io", "tran
 schemars = "1"
 regex = "1.12.3"
 git2 = "0.20"
-dirs = "6"
 libc = "0.2"
 wait-timeout = "0.2"
 base64 = "0.22"

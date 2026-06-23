@@ -1063,12 +1063,12 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64 0.22.1",
- "dirs 6.0.0",
  "djinn-control-plane",
  "djinn-core",
  "djinn-db",
  "djinn-git",
  "djinn-k8s",
+ "djinn-lsp",
  "djinn-memory",
  "djinn-provider",
  "djinn-runtime",
@@ -1347,6 +1347,18 @@ dependencies = [
  "tracing",
  "uuid",
  "workspace-hack",
+]
+
+[[package]]
+name = "djinn-lsp"
+version = "0.1.0"
+dependencies = [
+ "dirs 6.0.0",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

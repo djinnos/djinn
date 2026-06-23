@@ -625,10 +625,13 @@ impl bridge::GitOps for AgentGitOps {
     }
 }
 
+struct LspOpsAdapter(pub LspManager);
+
 #[async_trait]
-impl bridge::LspOps for LspManager {
+impl bridge::LspOps for LspOpsAdapter {
     async fn warnings(&self) -> Vec<bridge::LspWarning> {
-        self.warnings()
+        self.0
+            .warnings()
             .await
             .into_iter()
             .map(|warning| bridge::LspWarning {
@@ -662,7 +665,7 @@ impl AgentContext {
             None,
             None,
             None,
-            Arc::new(self.lsp.clone()),
+            Arc::new(LspOpsAdapter(self.lsp.clone())),
             runtime_ops,
             Arc::new(AgentGitOps {
                 git_actors: self.git_actors.clone(),

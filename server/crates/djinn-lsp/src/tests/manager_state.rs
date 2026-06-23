@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::lsp::LspManager;
-use crate::lsp::client::OpenedFiles;
-use crate::lsp::diagnostics::DiagnosticsMap;
+use crate::LspManager;
+use crate::client::OpenedFiles;
+use crate::diagnostics::DiagnosticsMap;
 use tokio::sync::Mutex;
 
 use super::make_diag;
@@ -79,6 +79,6 @@ async fn diagnostics_cleared_before_retouch() {
         .insert(uri.clone(), vec![make_diag(&uri, 1, 1, 1, "old error")]);
     assert_eq!(diagnostics.lock().await.get(&uri).unwrap().len(), 1);
 
-    crate::lsp::diagnostics::clear_uri(&diagnostics, &uri).await;
+    crate::diagnostics::clear_uri(&diagnostics, &uri).await;
     assert!(diagnostics.lock().await.get(&uri).is_none());
 }

@@ -1,0 +1,18 @@
+[package]
+name = "djinn-lsp"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+dirs = "6"
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+tempfile = "3"
