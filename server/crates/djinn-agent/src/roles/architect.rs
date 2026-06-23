@@ -1,4 +1,3 @@
-use crate::extension;
 use crate::prompts::TaskContext;
 use djinn_core::models::Task;
 
@@ -16,12 +15,11 @@ impl AgentRole for ArchitectRole {
     }
 }
 
-pub(crate) const ARCHITECT_CONFIG: RoleConfig = RoleConfig {
-    name: "architect",
-    display_name: "Architect",
-    dispatch_role: "architect",
-    tool_schemas: extension::tool_schemas_architect,
-    initial_message: crate::prompts::ARCHITECT_TEMPLATE,
-    finalize_tool_names: &["submit_work"],
-    mode_section: None,
+pub(crate) static ARCHITECT_CONFIG: RoleConfig = RoleConfig {
+    name: djinn_roles::config::ARCHITECT_CONFIG.name,
+    display_name: djinn_roles::config::ARCHITECT_CONFIG.display_name,
+    dispatch_role: djinn_roles::config::ARCHITECT_CONFIG.dispatch_role,
+    initial_message: djinn_roles::config::ARCHITECT_CONFIG.initial_message,
+    finalize_tool_names: djinn_roles::config::ARCHITECT_CONFIG.finalize_tool_names,
+    mode_section: djinn_roles::config::ARCHITECT_CONFIG.mode_section,
 };

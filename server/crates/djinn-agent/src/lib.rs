@@ -63,83 +63,32 @@ pub use actors::coordinator::{
 /// path behind an env flag — see `run_extraction_backfill` for the policy.
 pub use actors::slot::session_extraction::run_extraction_backfill;
 
-// ─── AgentType ────────────────────────────────────────────────────────────────
+// ─── AgentType (re-exported from djinn-roles) ──────────────────────────────
 
-/// Role an agent is playing within Djinn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentType {
-    Worker,
-    Reviewer,
-    Lead,
-    Planner,
-    /// Architect: handles spike, review tasks and proactive health monitoring (ADR-034).
-    Architect,
-}
+pub use djinn_roles::AgentType;
 
-impl AgentType {
-    pub(crate) fn role_config(&self) -> &'static roles::RoleConfig {
-        roles::config_for(*self)
-    }
+/// Initialize the djinn-roles tool schema registry with the extension-provided
+/// schema functions.
+///
+/// Idempotent: safe to call multiple times — the registry is only populated
+/// on the first call.  Called automatically from [`roles::RoleRegistry::new()`]
+/// so production boot paths get tool schemas without a separate init step.
+pub fn init_tool_schema_registry() {
+    use std::sync::Once;
 
-    pub fn as_str(&self) -> &'static str {
-        self.role_config().name
-    }
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        use std::collections::HashMap;
 
-    pub fn for_task_status(status: &str, _has_conflict_context: bool) -> Self {
-        match status {
-            "needs_task_review" | "in_task_review" => Self::Reviewer,
-            "needs_lead_intervention" | "in_lead_intervention" => Self::Lead,
-            _ => Self::Worker,
-        }
-    }
+        let mut schemas: HashMap<&'static str, fn() -> Vec<serde_json::Value>> = HashMap::new();
+        schemas.insert("worker", extension::tool_schemas_worker);
+        schemas.insert("reviewer", extension::tool_schemas_reviewer);
+        schemas.insert("lead", extension::tool_schemas_lead);
+        schemas.insert("planner", extension::tool_schemas_planner);
+        schemas.insert("architect", extension::tool_schemas_architect);
 
-    pub fn dispatch_role(&self) -> &'static str {
-        self.role_config().dispatch_role
-    }
-
-    #[cfg(test)]
-    pub(crate) fn tool_schemas(&self) -> Vec<serde_json::Value> {
-        (self.role_config().tool_schemas)()
-    }
-
-    /// Parse from a DB/wire string, including the `architect` variant.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "worker" => Some(Self::Worker),
-            "reviewer" => Some(Self::Reviewer),
-            "lead" => Some(Self::Lead),
-            "planner" => Some(Self::Planner),
-            "architect" => Some(Self::Architect),
-            _ => None,
-        }
-    }
-}
-
-impl std::str::FromStr for AgentType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::parse(s).ok_or_else(|| format!("unknown agent type: {s}"))
-    }
-}
-
-impl serde::Serialize for AgentType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for AgentType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = <String as serde::Deserialize>::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
+        djinn_roles::register_tool_schemas(schemas);
+    });
 }
 
 #[cfg(test)]
@@ -154,7 +103,6 @@ mod tests {
         let cfg = roles::config_for(agent_type);
         assert_eq!(agent_type.as_str(), cfg.name);
         assert_eq!(agent_type.dispatch_role(), cfg.dispatch_role);
-        assert_eq!(agent_type.tool_schemas(), (cfg.tool_schemas)());
     }
 
     #[test]

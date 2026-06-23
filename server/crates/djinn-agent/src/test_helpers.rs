@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, Once};
 
 use futures::stream;
 use serde_json::Value;
@@ -22,6 +22,16 @@ use crate::context::AgentContext;
 use crate::file_time::FileTime;
 use crate::lsp::LspManager;
 use crate::roles::RoleRegistry;
+
+/// Ensure the djinn-roles tool schema registry is initialized for tests.
+///
+/// Safe to call multiple times — uses `Once` internally.
+pub fn ensure_tool_schemas_registered() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        crate::init_tool_schema_registry();
+    });
+}
 
 pub fn test_tempdir(prefix: &str) -> tempfile::TempDir {
     let base = test_tmp_base();
