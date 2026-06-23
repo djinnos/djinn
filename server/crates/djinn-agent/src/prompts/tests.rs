@@ -109,6 +109,41 @@ fn make_ctx() -> TaskContext {
     }
 }
 
+// ── Facade parity test ──────────────────────────────────────────────────
+
+/// Verify that `djinn_agent` facade paths still provide access to `AgentType`,
+/// role config APIs, and prompt APIs — ensuring downstream callers that import
+/// through the old paths keep compiling.
+#[test]
+fn facade_parity_agent_type_and_role_config() {
+    // AgentType re-exported from djinn-roles
+    let agent_type = AgentType::Worker;
+    assert_eq!(agent_type.as_str(), "worker");
+    assert_eq!(agent_type.dispatch_role(), "worker");
+
+    // RoleConfig re-exported from djinn-roles through the roles facade
+    let config = crate::roles::config_for(agent_type);
+    assert_eq!(config.name, "worker");
+    assert_eq!(config.display_name, "Developer");
+
+    // Prompt templates re-exported from djinn-roles through the prompts facade
+    assert!(!super::BASE_TEMPLATE.is_empty());
+    assert!(!super::DEV_TEMPLATE.is_empty());
+    assert!(!super::REVIEWER_TEMPLATE.is_empty());
+    assert!(!super::LEAD_TEMPLATE.is_empty());
+    assert!(!super::PLANNER_TEMPLATE.is_empty());
+    assert!(!super::ARCHITECT_TEMPLATE.is_empty());
+
+    // format_acceptance_criteria / format_labels re-exported
+    assert_eq!(super::format_labels("[]"), "");
+    assert_eq!(super::format_acceptance_criteria("not json"), "not json");
+
+    // MAX_SYSTEM_PROMPT_CHARS re-exported
+    assert!(super::MAX_SYSTEM_PROMPT_CHARS > 0);
+}
+
+// ── Tests that require extension tool-schema registry ────────────────────
+
 #[test]
 fn worker_prompt_contains_task_fields() {
     ensure_registry();
@@ -134,58 +169,8 @@ fn worker_prompt_contains_task_fields() {
 }
 
 #[test]
-fn worker_prompt_describes_private_cargo_target_lifecycle() {
-    let task = make_task();
-    let ctx = make_ctx();
-    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
-
-    assert!(prompt.contains("CARGO_HOME=/cache/cargo"));
-    assert!(prompt.contains("/cache/cargo-target-runs/<task_run_id>"));
-    assert!(prompt.contains("/cache/cargo-target/<project_id>"));
-    assert!(prompt.contains("seeded from `/cache/cargo-target/<project_id>`"));
-    assert!(prompt.contains("removed after the run"));
-    assert!(prompt.contains("Do **not** redirect Cargo to `/cache/cargo-target/<project_id>`"));
-    let old_shared_target_claim =
-        ["CARGO_TARGET_DIR=", "/cache/", "cargo-target/", "<project>"].concat();
-    assert!(!prompt.contains(&old_shared_target_claim));
-}
-
-/// The dispatcher injects the research workflow ONLY for research tasks —
-/// the model never has to detect its mode.
-#[test]
-fn worker_research_mode_injects_research_section() {
-    let mut task = make_task();
-    task.issue_type = "research".into();
-    let ctx = make_ctx();
-    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
-
-    assert!(
-        prompt.contains("Research Deliverable"),
-        "research task should inject the research workflow section"
-    );
-    assert!(prompt.contains("Originated from task task-123"));
-    assert!(!prompt.contains("{{"));
-}
-
-/// Conflict context selects the merge-resolution workflow regardless of
-/// issue_type, and a plain task without conflict context never sees it.
-#[test]
-fn worker_conflict_mode_injects_conflict_section() {
-    let task = make_task();
-    let with_conflict = TaskContext {
-        conflict_files: Some("- src/main.rs".into()),
-        ..make_ctx()
-    };
-    let prompt = render_prompt(AgentType::Worker, &task, &with_conflict);
-    assert!(prompt.contains("Merge Conflict — Resolve This First"));
-    assert!(prompt.contains("src/main.rs"));
-
-    let no_conflict = render_prompt(AgentType::Worker, &task, &make_ctx());
-    assert!(!no_conflict.contains("Merge Conflict — Resolve This First"));
-}
-
-#[test]
 fn task_reviewer_prompt_contains_task_fields() {
+    ensure_registry();
     let task = make_task();
     let ctx = make_ctx();
     let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
@@ -199,254 +184,180 @@ fn task_reviewer_prompt_contains_task_fields() {
     assert!(!prompt.contains("{{"));
 }
 
+/// Architect spike notes must still carry task traceability (per ADR-051
+/// Contract 2 / §9 "Spike and Research Findings — Memory Writes").
 #[test]
-fn reviewer_prompt_describes_private_cargo_target_lifecycle() {
+fn architect_prompt_requires_spike_note_traceability() {
+    ensure_registry();
     let task = make_task();
     let ctx = make_ctx();
-    let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
-
-    assert!(prompt.contains("CARGO_HOME=/cache/cargo"));
-    assert!(prompt.contains("/cache/cargo-target-runs/<task_run_id>"));
-    assert!(prompt.contains("/cache/cargo-target/<project_id>"));
-    assert!(prompt.contains("seeded from the warm base"));
-    assert!(prompt.contains("removed after the run"));
-    assert!(prompt.contains("workers must not override it or point Cargo at the shared warm base"));
-    let old_shared_target_claim =
-        ["CARGO_TARGET_DIR=", "/cache/", "cargo-target/", "<project>"].concat();
-    assert!(!prompt.contains(&old_shared_target_claim));
-}
-
-#[test]
-fn reviewer_prompt_renders_diff_context_section_when_present() {
-    let task = make_task();
-    let ctx = TaskContext {
-            reviewer_diff_context: Some(
-                "## Changed symbols (HIGH risk first)\n\n- `foo::bar` (HIGH risk, 12 direct callers, 3 modules)\n  - file: src/foo.rs"
-                    .into(),
-            ),
-            ..make_ctx()
-        };
-    let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
+    let prompt = render_prompt(AgentType::Architect, &task, &ctx);
 
     assert!(
-        prompt.contains("## Changed Symbols"),
-        "reviewer prompt should include the Changed Symbols section heading"
+        prompt.contains("Originated from task task-123"),
+        "architect prompt should require task traceability in persisted spike notes"
     );
     assert!(
-        prompt.contains("`foo::bar` (HIGH risk, 12 direct callers, 3 modules)"),
-        "reviewer prompt should include the diff bullet body"
+        prompt.contains("task objective"),
+        "architect prompt should ask for enough context to explain why a memory note exists"
     );
     assert!(
-        !prompt.contains("{{reviewer_diff_context_section}}"),
-        "slot should be substituted"
-    );
-    assert!(!prompt.contains("{{"));
-}
-
-#[test]
-fn reviewer_prompt_omits_diff_context_section_when_absent() {
-    let task = make_task();
-    let ctx = make_ctx(); // reviewer_diff_context: None
-    let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
-
-    assert!(
-        !prompt.contains("## Changed Symbols"),
-        "reviewer prompt should not include the Changed Symbols section when absent"
-    );
-    assert!(!prompt.contains("{{reviewer_diff_context_section}}"));
-}
-
-#[test]
-fn format_acceptance_criteria_invalid_json_passthrough() {
-    let result = format_acceptance_criteria("not json");
-    assert_eq!(result, "not json");
-}
-
-#[test]
-fn format_labels_empty_array() {
-    assert_eq!(format_labels("[]"), "");
-}
-
-#[test]
-fn worker_prompt_includes_setup_commands_when_present() {
-    let task = make_task();
-    let ctx = TaskContext {
-        setup_commands: Some("- `npm install`\n- `npm run build`".into()),
-        ..make_ctx()
-    };
-    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
-
-    assert!(prompt.contains("Automated Commands"));
-    assert!(prompt.contains("Do not run them yourself"));
-    assert!(prompt.contains("npm install"));
-    assert!(!prompt.contains("{{setup_commands_section}}"));
-}
-
-#[test]
-fn worker_prompt_omits_setup_section_when_no_commands() {
-    let task = make_task();
-    let ctx = make_ctx(); // setup_commands: None
-    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
-
-    assert!(!prompt.contains("Automated Commands"));
-    assert!(!prompt.contains("{{setup_commands_section}}"));
-}
-
-#[test]
-fn system_prompt_truncated_when_exceeding_hard_cap() {
-    let task = make_task();
-    // Inject a massive activity log that blows past the 30k char cap.
-    let huge_activity = "x".repeat(40_000);
-    let ctx = TaskContext {
-        activity: Some(huge_activity),
-        ..make_ctx()
-    };
-    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
-
-    assert!(
-        prompt.len() <= super::MAX_SYSTEM_PROMPT_CHARS + 200, // +200 for the truncation notice
-        "prompt should be truncated to ~30k chars, got {}",
-        prompt.len()
-    );
-    // smart_truncate uses "bytes omitted" or "truncated" markers
-    assert!(prompt.contains("omitted") || prompt.contains("truncated"));
-}
-
-#[test]
-fn system_prompt_not_truncated_when_under_cap() {
-    let task = make_task();
-    let ctx = make_ctx();
-    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
-
-    assert!(!prompt.contains("bytes omitted"));
-    assert!(!prompt.contains("[truncated"));
-}
-
-#[test]
-fn worker_prompt_includes_merge_failure_context() {
-    let task = make_task();
-    let ctx = TaskContext {
-        merge_failure_context: Some(
-            "**Merge Conflict Detected**\n\nFile `src/main.rs` has conflicts.".into(),
-        ),
-        ..make_ctx()
-    };
-    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
-
-    assert!(
-        prompt.contains("Merge Conflict Detected"),
-        "worker prompt should include merge failure context"
+        prompt.contains("memory_graph")
+            && prompt.contains("memory_associations")
+            && prompt.contains("memory_confirm"),
+        "architect prompt should document the retained analytical memory tools"
     );
     assert!(
-        !prompt.contains("{{merge_failure_context}}"),
-        "template placeholder should be replaced"
+        prompt.contains("memory_write") && prompt.contains("memory_edit"),
+        "architect prompt should route note CRUD through memory_* MCP tools"
     );
 }
 
 #[test]
-fn worker_prompt_includes_conflict_files_for_conflict_context() {
-    let task = make_task();
-    let ctx = TaskContext {
-        conflict_files: Some("- src/main.rs\n- src/lib.rs".into()),
-        merge_base_branch: Some("task/abc123".into()),
-        merge_target_branch: Some("main".into()),
-        ..make_ctx()
-    };
-    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
-
-    assert!(
-        prompt.contains("src/main.rs"),
-        "worker prompt should include conflict files"
-    );
-    assert!(
-        prompt.contains("task/abc123"),
-        "worker prompt should include merge base branch"
-    );
-    assert!(
-        prompt.contains("main"),
-        "worker prompt should include merge target branch"
-    );
-}
-
-#[test]
-fn worker_prompt_contains_scoped_build_guidance() {
+fn worker_prompt_routes_memory_crud_through_mcp() {
+    ensure_registry();
     let task = make_task();
     let ctx = make_ctx();
     let prompt = render_prompt(AgentType::Worker, &task, &ctx);
 
     assert!(
-        prompt.contains("scoped"),
-        "worker prompt should mention scoped build/check commands"
+        prompt.contains("memory_*") && prompt.contains("Memory notes live in Dolt"),
+        "worker prompt should direct note CRUD through the memory_* MCP tools"
+    );
+    assert!(
+        prompt.contains("memory_write")
+            && prompt.contains("memory_read")
+            && prompt.contains("memory_edit"),
+        "worker prompt should call out the memory CRUD MCP tools by name"
+    );
+    assert!(
+        prompt.contains("memory_build_context"),
+        "worker prompt should retain registered analytical memory retrieval"
     );
 }
 
+/// The Planner prompt must carry explicit guidance for evidence-based
+/// `learned_prompt` amendments.
 #[test]
-fn planner_prompt_prunes_unverifiable_acceptance_criteria() {
-    let mut decomposition_task = make_task();
-    decomposition_task.issue_type = "planning".into();
+fn planner_prompt_contains_learned_prompt_amendment_guidance() {
+    ensure_registry();
+    let task = make_task();
     let ctx = make_ctx();
-    let decomposition_prompt = render_prompt(AgentType::Planner, &decomposition_task, &ctx);
+    let prompt = render_prompt(AgentType::Planner, &task, &ctx);
 
+    // The section heading must be present.
     assert!(
-        decomposition_prompt.contains("unavailable external tools, external infrastructure"),
-        "decomposition planner should recognize unavailable external proof as invalid spec"
-    );
-    assert!(
-        decomposition_prompt
-            .contains("Lack of Djinn tool/environment access is NOT a reason to `escalate`"),
-        "decomposition planner should prune unverifiable AC instead of escalating for missing tools"
-    );
-    assert!(
-        decomposition_prompt
-            .contains("Rewrite or drop invalid task acceptance criteria with `task_update`"),
-        "decomposition planner should rewrite or drop invalid task AC"
-    );
-    assert!(
-        decomposition_prompt.contains("submit_grooming(decision=\"close\")"),
-        "decomposition planner should close planning when pruning leaves no implementable work"
-    );
-    assert!(
-        decomposition_prompt
-            .contains("objectively checkable by the executing role's actual tool surface"),
-        "task AC authoring should require criteria checkable by the executing role"
-    );
-    assert!(
-        decomposition_prompt.contains("Do not create retry worker tasks")
-            && decomposition_prompt
-                .contains("Docker/Postgres/Kubernetes/operator/Djinn-authenticated proof"),
-        "decomposition planner should not create retry worker tasks for external proof"
+        prompt.contains("Learned-prompt amendments"),
+        "planner prompt should have an explicit learned-prompt amendment section"
     );
 
-    let mut intervention_task = make_task();
-    intervention_task.issue_type = "review".into();
-    let intervention_prompt = render_prompt(AgentType::Planner, &intervention_task, &ctx);
-
+    // learned_prompt is machine-managed; human customization is system_prompt_extensions.
     assert!(
-        intervention_prompt
-            .contains("requires tools/environment outside Djinn's available tool surface"),
-        "intervention planner should detect unverifiable AC loops"
+        prompt.contains("machine-managed"),
+        "planner prompt must label learned_prompt as machine-managed"
     );
     assert!(
-        intervention_prompt
-            .contains("Prune or repair the criterion with `task_update` instead of escalating"),
-        "intervention planner should prune or repair unverifiable AC instead of escalating"
+        prompt.contains("system_prompt_extensions"),
+        "planner prompt must route human customization to system_prompt_extensions"
     );
 
-    let mut proposal_task = make_task();
-    proposal_task.issue_type = "epic_breakdown".into();
-    let proposal_prompt = render_prompt(AgentType::Planner, &proposal_task, &ctx);
-
+    // Triggers: rare, evidence-based, agent-effectiveness grooming.
     assert!(
-        proposal_prompt.contains(
-            "Only translate proposal AC into epic descriptions/AC when they are checkable"
-        ),
-        "proposal decomposition should only translate verifiable AC into epics"
+        prompt.contains("agent-effectiveness grooming"),
+        "planner prompt must scope amendments to agent-effectiveness grooming"
     );
     assert!(
-            proposal_prompt.contains("Do not convert external-infra/operator-only proof requirements into acceptance criteria"),
-            "proposal decomposition should redirect external proof requirements out of AC"
-        );
+        prompt.contains("repeated, stable"),
+        "planner prompt must require a repeated, stable failure pattern"
+    );
+
+    // Evidence requirements — at least one of the named evidence sources.
+    assert!(
+        prompt.contains("agent_metrics"),
+        "planner prompt must list agent_metrics as valid evidence"
+    );
+    assert!(
+        prompt.contains("reviewer or Lead feedback"),
+        "planner prompt must list repeated reviewer/lead feedback as valid evidence"
+    );
+    assert!(
+        prompt.contains("verification/reopen patterns"),
+        "planner prompt must list verification/reopen patterns as valid evidence"
+    );
+    assert!(
+        prompt.contains("Session reflections"),
+        "planner prompt must list session reflections as valid evidence"
+    );
+
+    // Eligible roles: specialist worker/reviewer only.
+    assert!(
+        prompt.contains("specialist agents"),
+        "planner prompt must restrict amendments to specialist agents"
+    );
+    assert!(
+        prompt.contains("NOT eligible"),
+        "planner prompt must call out ineligible roles explicitly"
+    );
+    assert!(
+        prompt.contains("lead") && prompt.contains("planner") && prompt.contains("architect"),
+        "planner prompt must list lead, planner, and architect as ineligible amendment targets"
+    );
+
+    // Amendment shape: concise, behavioral, metrics snapshot.
+    assert!(
+        prompt.contains("concise, behavioral"),
+        "planner prompt must require concise, behavioral amendment text"
+    );
+    assert!(
+        prompt.contains("metrics_snapshot"),
+        "planner prompt must mention the metrics_snapshot parameter for audit"
+    );
+    assert!(
+        prompt.contains("JSON metrics snapshot"),
+        "planner prompt must require JSON metrics snapshots when available"
+    );
+
+    // Evaluator follow-up semantics: confirm / probation / discard.
+    assert!(
+        prompt.contains("confirms"),
+        "planner prompt must explain that the evaluator confirms successful amendments"
+    );
+    assert!(
+        prompt.contains("probation"),
+        "planner prompt must explain that ambiguous amendments stay on probation"
+    );
+    assert!(
+        prompt.contains("discarded and reverted"),
+        "planner prompt must explain that regressions are discarded and reverted"
+    );
+
+    // The Planner must not self-confirm/discard — the coordinator evaluator does.
+    assert!(
+        prompt.contains("You do not confirm or discard amendments yourself"),
+        "planner prompt must make clear the Planner proposes, the evaluator disposes"
+    );
 }
+
+/// Architect must NOT carry the learned-prompt amendment guidance or the
+/// `agent_amend_prompt` tool — that ownership moved to the Planner per ADR-051.
+#[test]
+fn architect_prompt_omits_learned_prompt_amendment_guidance_and_tool() {
+    ensure_registry();
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Architect, &task, &ctx);
+
+    assert!(
+        !prompt.contains("Learned-prompt amendments"),
+        "architect prompt must NOT contain the learned-prompt amendment section — it is Planner-owned per ADR-051"
+    );
+    assert!(
+        !prompt.contains("`agent_amend_prompt("),
+        "architect prompt must NOT contain agent_amend_prompt tool — it is Planner-owned per ADR-051"
+    );
+}
+
+// ── Planner 4lzx replay (needs tool schemas for tool-name assertions) ───
 
 #[derive(Debug)]
 struct ExternallyBlockedCriterion {
@@ -591,144 +502,6 @@ fn planner_4lzx_externally_blocked_replay_prunes_and_closes_in_one_session() {
     );
 }
 
-#[test]
-fn externally_blocked_replay_prunes_and_closes_without_loop_outcomes() {
-    let externally_blocked_criteria = [
-        "Prove the migration in Docker Compose against Postgres",
-        "Validate rollout in Kubernetes with operator-only cluster access",
-        "Confirm Djinn-authenticated production API access from the task pod",
-    ];
-    let invalid_spec_summary = externally_blocked_criteria.join("; ");
-    assert!(invalid_spec_summary.contains("Docker"));
-    assert!(invalid_spec_summary.contains("Postgres"));
-    assert!(invalid_spec_summary.contains("Kubernetes"));
-    assert!(invalid_spec_summary.contains("operator-only"));
-    assert!(invalid_spec_summary.contains("Djinn-authenticated"));
-
-    let converged_replay = [
-        "task_update(id=\"4lzx-worker\", acceptance_criteria=[\"external proof pruned; no implementable work remains\"])",
-        "task_comment_add(id=\"4lzx-worker\", body=\"Docker/Postgres/Kubernetes/operator/Djinn-authenticated access is unavailable to task pods; invalid spec pruned, not escalated\")",
-        "memory_edit(identifier=\"01r3-roadmap\", operation=\"append\", content=\"External proof moved to runbook/checklist rationale\")",
-        "epic_update(id=\"01r3\", description=\"External proof requirements repaired out of worker AC\")",
-        "task_transition(id=\"4lzx-worker\", status=\"close\", reason=\"no implementable work remains after pruning invalid external proof AC\")",
-        "epic_close(id=\"01r3\")",
-        "submit_grooming(summary=\"Pruned externally-blocked criteria and closed epic\", decision=\"close\")",
-    ];
-
-    assert!(
-        converged_replay
-            .iter()
-            .any(|action| action.starts_with("epic_close")),
-        "converged replay must close the epic after pruning invalid external-proof criteria"
-    );
-    assert!(
-        converged_replay
-            .iter()
-            .any(|action| action.contains("submit_grooming")
-                && action.contains("decision=\"close\"")),
-        "converged replay must close this planning task with submit_grooming(decision=\"close\")"
-    );
-
-    assert!(
-        !converged_replay
-            .iter()
-            .any(|action| action.contains("submit_grooming")
-                && action.contains("decision=\"escalate\"")),
-        "missing Docker/Postgres/Kubernetes/operator/Djinn access is invalid spec, not escalation"
-    );
-    assert!(
-        !converged_replay.iter().any(|action| {
-            action.starts_with("task_create")
-                && (action.contains("external proof")
-                    || action.contains("Docker")
-                    || action.contains("Postgres")
-                    || action.contains("Kubernetes")
-                    || action.contains("operator")
-                    || action.contains("Djinn-authenticated"))
-        }),
-        "external proof requirements must be pruned/rewritten or documented, not converted into retry worker tasks"
-    );
-
-    let final_action = converged_replay
-        .last()
-        .expect("synthetic replay should include final planner action");
-    assert!(
-        final_action.contains("submit_grooming") && final_action.contains("decision=\"close\""),
-        "final planner action must not omit decision=\"close\" or the planning task remains redispatchable"
-    );
-    assert!(
-        !final_action.contains("decision=\"approve\"")
-            && !final_action.contains("decision=\"reopen\"")
-            && !final_action.contains("decision=\"escalate\""),
-        "final planner action must not leave an open-ended redispatch path"
-    );
-}
-
-#[test]
-fn worker_prompt_routes_memory_crud_through_mcp() {
-    let task = make_task();
-    let ctx = make_ctx();
-    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
-
-    assert!(
-        prompt.contains("memory_*") && prompt.contains("Memory notes live in Dolt"),
-        "worker prompt should direct note CRUD through the memory_* MCP tools"
-    );
-    assert!(
-        prompt.contains("memory_write")
-            && prompt.contains("memory_read")
-            && prompt.contains("memory_edit"),
-        "worker prompt should call out the memory CRUD MCP tools by name"
-    );
-    assert!(
-        prompt.contains("memory_build_context"),
-        "worker prompt should retain registered analytical memory retrieval"
-    );
-}
-/// Architect spike notes must still carry task traceability (per ADR-051
-/// Contract 2 / §9 "Spike and Research Findings — Memory Writes").
-#[test]
-fn architect_prompt_requires_spike_note_traceability() {
-    let task = make_task();
-    let ctx = make_ctx();
-    let prompt = render_prompt(AgentType::Architect, &task, &ctx);
-
-    assert!(
-        prompt.contains("Originated from task task-123"),
-        "architect prompt should require task traceability in persisted spike notes"
-    );
-    assert!(
-        prompt.contains("task objective"),
-        "architect prompt should ask for enough context to explain why a memory note exists"
-    );
-    assert!(
-        prompt.contains("memory_graph")
-            && prompt.contains("memory_associations")
-            && prompt.contains("memory_confirm"),
-        "architect prompt should document the retained analytical memory tools"
-    );
-    assert!(
-        prompt.contains("memory_write") && prompt.contains("memory_edit"),
-        "architect prompt should route note CRUD through memory_* MCP tools"
-    );
-}
-
-#[test]
-fn architect_prompt_requires_read_back_verification_before_file_comments() {
-    let task = make_task();
-    let ctx = make_ctx();
-    let prompt = render_prompt(AgentType::Architect, &task, &ctx);
-
-    assert!(
-            prompt.contains("Never use it to claim a file exists, was copied, or was moved until you have read that exact path back successfully in the current session"),
-            "architect prompt should forbid file-existence comments before read-back verification"
-        );
-    assert!(
-            prompt.contains("Never add a task comment claiming a file exists, was copied, or was moved unless you have just verified that exact path by reading it back successfully"),
-            "architect prompt should require read-back verification immediately before file-placement comments"
-        );
-}
-
 // ── Tools section snapshot tests ─────────────────────────────────────────
 
 #[test]
@@ -865,9 +638,6 @@ fn tools_section_injected_into_rendered_prompt() {
     });
 
     // Per ADR-051 §1 `role_amend_prompt` moved from Architect to Planner
-    // (agent-effectiveness review is a Planner action, not a consultant
-    // action). Architect keeps `role_metrics` (read) and `role_create`
-    // (structural proposal) but cannot mutate existing learned_prompts.
     assert!(
         !architect_prompt.contains("`agent_amend_prompt("),
         "architect prompt should NOT contain agent_amend_prompt — it moved to Planner per ADR-051"
@@ -883,147 +653,5 @@ fn tools_section_injected_into_rendered_prompt() {
     assert!(
         planner_has_amend_tool,
         "planner tool schemas should expose agent_amend_prompt for evidence-based learned-prompt amendments"
-    );
-}
-
-// ── Learned-prompt amendment guidance (zr1e) ─────────────────────────────
-
-/// The Planner prompt must carry explicit guidance for evidence-based
-/// `learned_prompt` amendments, covering triggers, evidence requirements,
-/// eligible roles, amendment shape, and evaluator follow-up semantics.
-/// See decision `design/zr1e-roadmap`.
-#[test]
-fn planner_prompt_contains_learned_prompt_amendment_guidance() {
-    let task = make_task();
-    let ctx = make_ctx();
-    let prompt = render_prompt(AgentType::Planner, &task, &ctx);
-
-    // The section heading must be present.
-    assert!(
-        prompt.contains("Learned-prompt amendments"),
-        "planner prompt should have an explicit learned-prompt amendment section"
-    );
-
-    // learned_prompt is machine-managed; human customization is system_prompt_extensions.
-    assert!(
-        prompt.contains("machine-managed"),
-        "planner prompt must label learned_prompt as machine-managed"
-    );
-    assert!(
-        prompt.contains("system_prompt_extensions"),
-        "planner prompt must route human customization to system_prompt_extensions"
-    );
-
-    // Triggers: rare, evidence-based, agent-effectiveness grooming.
-    assert!(
-        prompt.contains("agent-effectiveness grooming"),
-        "planner prompt must scope amendments to agent-effectiveness grooming"
-    );
-    assert!(
-        prompt.contains("repeated, stable"),
-        "planner prompt must require a repeated, stable failure pattern"
-    );
-
-    // Evidence requirements — at least one of the named evidence sources.
-    assert!(
-        prompt.contains("agent_metrics"),
-        "planner prompt must list agent_metrics as valid evidence"
-    );
-    assert!(
-        prompt.contains("reviewer or Lead feedback"),
-        "planner prompt must list repeated reviewer/lead feedback as valid evidence"
-    );
-    assert!(
-        prompt.contains("verification/reopen patterns"),
-        "planner prompt must list verification/reopen patterns as valid evidence"
-    );
-    assert!(
-        prompt.contains("Session reflections"),
-        "planner prompt must list session reflections as valid evidence"
-    );
-
-    // Eligible roles: specialist worker/reviewer only.
-    assert!(
-        prompt.contains("specialist agents"),
-        "planner prompt must restrict amendments to specialist agents"
-    );
-    assert!(
-        prompt.contains("NOT eligible"),
-        "planner prompt must call out ineligible roles explicitly"
-    );
-    assert!(
-        prompt.contains("lead") && prompt.contains("planner") && prompt.contains("architect"),
-        "planner prompt must list lead, planner, and architect as ineligible amendment targets"
-    );
-
-    // Amendment shape: concise, behavioral, metrics snapshot.
-    assert!(
-        prompt.contains("concise, behavioral"),
-        "planner prompt must require concise, behavioral amendment text"
-    );
-    assert!(
-        prompt.contains("metrics_snapshot"),
-        "planner prompt must mention the metrics_snapshot parameter for audit"
-    );
-    assert!(
-        prompt.contains("JSON metrics snapshot"),
-        "planner prompt must require JSON metrics snapshots when available"
-    );
-
-    // Evaluator follow-up semantics: confirm / probation / discard.
-    assert!(
-        prompt.contains("confirms"),
-        "planner prompt must explain that the evaluator confirms successful amendments"
-    );
-    assert!(
-        prompt.contains("probation"),
-        "planner prompt must explain that ambiguous amendments stay on probation"
-    );
-    assert!(
-        prompt.contains("discarded and reverted"),
-        "planner prompt must explain that regressions are discarded and reverted"
-    );
-
-    // The Planner must not self-confirm/discard — the coordinator evaluator does.
-    assert!(
-        prompt.contains("You do not confirm or discard amendments yourself"),
-        "planner prompt must make clear the Planner proposes, the evaluator disposes"
-    );
-}
-
-/// The amendment guidance must appear in every Planner mode (the section is in
-/// the top-level planner.md template, injected for all issue types), not just
-/// one workflow. Spot-check decomposition, intervention, and proposal modes.
-#[test]
-fn planner_learned_prompt_guidance_present_across_modes() {
-    let ctx = make_ctx();
-
-    for issue_type in ["planning", "review", "epic_breakdown", "task"] {
-        let mut task = make_task();
-        task.issue_type = issue_type.into();
-        let prompt = render_prompt(AgentType::Planner, &task, &ctx);
-        assert!(
-            prompt.contains("Learned-prompt amendments"),
-            "planner prompt for issue_type={issue_type} should include the learned-prompt amendment section"
-        );
-    }
-}
-
-/// Architect must NOT carry the learned-prompt amendment guidance or the
-/// `agent_amend_prompt` tool — that ownership moved to the Planner per ADR-051.
-/// This guards the "preserving Architect non-ownership" criterion.
-#[test]
-fn architect_prompt_omits_learned_prompt_amendment_guidance_and_tool() {
-    let task = make_task();
-    let ctx = make_ctx();
-    let prompt = render_prompt(AgentType::Architect, &task, &ctx);
-
-    assert!(
-        !prompt.contains("Learned-prompt amendments"),
-        "architect prompt must NOT contain the learned-prompt amendment section — it is Planner-owned per ADR-051"
-    );
-    assert!(
-        !prompt.contains("`agent_amend_prompt("),
-        "architect prompt must NOT contain agent_amend_prompt tool — it is Planner-owned per ADR-051"
     );
 }

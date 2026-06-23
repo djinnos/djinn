@@ -1438,6 +1438,7 @@ version = "0.1.0"
 dependencies = [
  "djinn-core",
  "futures",
+ "insta",
  "serde",
  "serde_json",
  "toml",

@@ -452,3 +452,6 @@ mod truncate {
         )
     }
 }
+
+#[cfg(test)]
+mod tests;
