@@ -62,6 +62,19 @@ enum TurnResult {
     Empty,
 }
 
+/// Outcome of `init_provider_stream` — distinguishes the two error paths
+/// that the caller must handle with different control flow (`continue` vs
+/// `break`).
+enum StreamInitOutcome {
+    /// A recoverable compaction succeeded; the caller should retry stream
+    /// creation (i.e. `continue` the chat loop).
+    CompactedAndContinue,
+    /// An unrecoverable failure: either a non-compaction error or compaction
+    /// exhaustion. An SSE error event has already been sent; the caller
+    /// should `break` the chat loop.
+    UnrecoverableBreak,
+}
+
 /// Proactively compact the conversation if it exceeds the compaction threshold.
 async fn maybe_compact_proactively(
     provider: &dyn LlmProvider,
@@ -87,8 +100,10 @@ async fn maybe_compact_proactively(
 
 /// Attempt to initialize a provider stream, with bounded recoverable compaction retry.
 ///
-/// Returns `Ok(stream)` on success. On an unrecoverable failure, sends an SSE error
-/// event and returns `Err(())` so the caller should break the loop.
+/// Returns `Ok(stream)` on success. On recoverable compaction success, returns
+/// `Err(StreamInitOutcome::CompactedAndContinue)` so the caller retries. On
+/// unrecoverable failure, sends an SSE error event and returns
+/// `Err(StreamInitOutcome::UnrecoverableBreak)` so the caller breaks the loop.
 async fn init_provider_stream(
     provider: &dyn LlmProvider,
     conversation: &mut Conversation,
@@ -99,7 +114,7 @@ async fn init_provider_stream(
     compaction_attempts: &mut u32,
 ) -> Result<
     std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent, anyhow::Error>> + Send>>,
-    (),
+    StreamInitOutcome,
 > {
     match provider
         .stream(
@@ -133,7 +148,7 @@ async fn init_provider_stream(
                 )
                 .await
                 {
-                    return Err(()); // signal `continue` to the caller
+                    return Err(StreamInitOutcome::CompactedAndContinue);
                 }
             }
             tracing::warn!(error=%e, "provider stream init failed");
@@ -145,7 +160,7 @@ async fn init_provider_stream(
                     },
                 ))
                 .await;
-            Err(()) // signal `break` to the caller
+            Err(StreamInitOutcome::UnrecoverableBreak)
         }
     }
 }
@@ -831,16 +846,8 @@ async fn run_chat_loop(ctx: ChatLoopContext) {
         .await
         {
             Ok(s) => s,
-            Err(()) => {
-                // `init_provider_stream` already sent the appropriate SSE error
-                // event. `Err(())` means either break (unrecoverable) or continue
-                // (recoverable retry already handled inside). We distinguish by
-                // checking whether compaction_attempts was incremented.
-                if compaction_attempts > 0 && compaction_attempts <= MAX_CHAT_COMPACTION_RETRIES {
-                    continue;
-                }
-                break;
-            }
+            Err(StreamInitOutcome::CompactedAndContinue) => continue,
+            Err(StreamInitOutcome::UnrecoverableBreak) => break,
         };
 
         tokio::pin!(stream);
