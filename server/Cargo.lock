@@ -1069,6 +1069,7 @@ dependencies = [
  "djinn-db",
  "djinn-git",
  "djinn-k8s",
+ "djinn-lsp",
  "djinn-memory",
  "djinn-provider",
  "djinn-runtime",
@@ -1347,6 +1348,18 @@ dependencies = [
  "tracing",
  "uuid",
  "workspace-hack",
+]
+
+[[package]]
+name = "djinn-lsp"
+version = "0.1.0"
+dependencies = [
+ "dirs 6.0.0",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

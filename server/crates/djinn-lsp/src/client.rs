@@ -10,9 +10,9 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 
-use super::INIT_TIMEOUT;
-use super::diagnostics::{Diagnostic, DiagnosticsMap, new_diagnostics_map, publish};
-use super::server_config::{
+use crate::INIT_TIMEOUT;
+use crate::diagnostics::{Diagnostic, DiagnosticsMap, new_diagnostics_map, publish};
+use crate::server_config::{
     ServerDef, djinn_bin_dir, initialization_options, language_id_for_path, resolve_binary,
 };
 

@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::lsp::LspManager;
-use crate::lsp::client::OpenedFiles;
-use crate::lsp::diagnostics::DiagnosticsMap;
+use crate::LspManager;
+use crate::client::OpenedFiles;
+use crate::diagnostics::DiagnosticsMap;
 use tokio::sync::Mutex;
 
 use super::make_diag;
@@ -11,14 +11,14 @@ use super::make_diag;
 #[tokio::test]
 async fn lsp_manager_diagnostics_empty_by_default() {
     let mgr = LspManager::new();
-    let temp = crate::test_helpers::test_tempdir("djinn-lsp-worktree-");
+    let temp = super::test_tempdir("djinn-lsp-worktree-");
     assert!(mgr.diagnostics(temp.path()).await.is_empty());
 }
 
 #[tokio::test]
 async fn lsp_manager_touch_file_no_server_for_txt() {
     let mgr = LspManager::new();
-    let tmp = crate::test_helpers::test_tempdir("djinn-lsp-manager-");
+    let tmp = super::test_tempdir("djinn-lsp-manager-");
     let file = tmp.path().join("test.txt");
     std::fs::write(&file, "hello").unwrap();
     mgr.touch_file(tmp.path(), &file, false).await;
@@ -30,7 +30,7 @@ async fn diagnostics_xml_notes_indexing_client() {
     use std::sync::atomic::Ordering;
 
     let mgr = LspManager::new();
-    let tmp = crate::test_helpers::test_tempdir("djinn-lsp-indexing-");
+    let tmp = super::test_tempdir("djinn-lsp-indexing-");
     let (key, client) = super::spawn_fake_client(&tmp.path().display().to_string()).await;
     client.ready.store(false, Ordering::SeqCst);
     mgr.inner.lock().await.clients.insert(key, client);
@@ -79,6 +79,6 @@ async fn diagnostics_cleared_before_retouch() {
         .insert(uri.clone(), vec![make_diag(&uri, 1, 1, 1, "old error")]);
     assert_eq!(diagnostics.lock().await.get(&uri).unwrap().len(), 1);
 
-    crate::lsp::diagnostics::clear_uri(&diagnostics, &uri).await;
+    crate::diagnostics::clear_uri(&diagnostics, &uri).await;
     assert!(diagnostics.lock().await.get(&uri).is_none());
 }
