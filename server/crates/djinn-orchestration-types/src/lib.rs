@@ -6,19 +6,19 @@
 //! internals.  Its purpose is to break the slot → coordinator edge by owning
 //! the types that both sides need.
 
-pub mod slot;
 pub mod coordinator;
+pub mod slot;
 pub mod trigger;
 
 // ─── Re-exports for flat access ────────────────────────────────────────────
 
 pub use coordinator::{
-    BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
-    DebugCooldown, DebugDispatchState, DebugFailureStreak, DebugInflightEntry,
-    DebugSlot, DebugTotals, DispatchPauseView, PR_REVIEW_FEEDBACK_EVENT,
+    BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot, DebugCooldown,
+    DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
+    DispatchPauseView, PR_REVIEW_FEEDBACK_EVENT,
 };
 pub use slot::{
-    MergeConflictMetadata, MERGE_CONFLICT_PREFIX, ModelSlotConfig, SlotInfo,
-    SlotPoolConfig, SlotState,
+    MERGE_CONFLICT_PREFIX, MergeConflictMetadata, ModelSlotConfig, SlotInfo, SlotPoolConfig,
+    SlotState,
 };
 pub use trigger::CoordinatorTrigger;
