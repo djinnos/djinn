@@ -56,6 +56,12 @@ pub trait RepoGraphOps: Send + Sync {
     /// edges of a specific kind: `Some("reads")` keeps only `Reads` edges,
     /// `Some("writes")` only `Writes`. `None` keeps every kind (the
     /// pre-PR-A3 behaviour).
+    ///
+    /// Synthesized `TraitDispatchCall` edges (epic ggrm/5wyo) appear as
+    /// `Calls`-category neighbors alongside directly extracted call
+    /// references. The raw `edge_kind` on each [`GraphNeighbor`] distinguishes
+    /// `TraitDispatchCall` from `SymbolReference` when callers need to audit
+    /// provenance.
     async fn neighbors(
         &self,
         ctx: &ProjectCtx,
@@ -93,6 +99,14 @@ pub trait RepoGraphOps: Send + Sync {
     /// threshold are skipped, so weak SCIP signals (e.g. `local`-prefixed
     /// references that took the visibility-heuristic penalty) drop out of the
     /// blast radius. `None` keeps every edge — the pre-PR-A2 behaviour.
+    ///
+    /// Synthesized `TraitDispatchCall` edges (epic ggrm/5wyo) carry a
+    /// confidence floor (typically 0.70) that is below the default
+    /// `min_confidence` (0.85). Callers who want trait-dispatch callers in
+    /// the blast radius must explicitly lower `min_confidence` to that floor
+    /// or below. Directly extracted SCIP edges (`Implements`, `Defines`,
+    /// etc.) retain their original higher confidence values and are
+    /// unaffected by this filter.
     ///
     /// `workspace` scopes only seed resolution for this traversal operation:
     /// the initial `key` should be resolved inside the workspace when present,
@@ -295,6 +309,13 @@ pub trait RepoGraphOps: Send + Sync {
     /// body text (best-effort: requires the file to be readable from the
     /// project clone). The `processes` list is empty until F2 backfills
     /// process membership.
+    ///
+    /// Synthesized `TraitDispatchCall` edges (epic ggrm/5wyo) appear in
+    /// the `Calls` category alongside directly extracted call references.
+    /// The `confidence` and `confidence_tier` on each [`RelatedSymbol`]
+    /// distinguish lower-confidence trait-dispatch callers from
+    /// high-confidence extracted calls; `edge_kind` on the underlying
+    /// graph edge provides the raw provenance when needed.
     async fn context(
         &self,
         ctx: &ProjectCtx,
