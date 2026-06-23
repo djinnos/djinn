@@ -107,3 +107,24 @@ name = "leaf-telemetry-imports-no-djinn-crate"
 from_glob = "**/djinn-telemetry/**"
 to_glob = "**/djinn-*/**"
 description = "Leaf isolation: djinn-telemetry must not import any other djinn crate. Self-references (intra-crate edges) are excluded by the checker."
+
+# ------------------------------------------------------------------ #
+# djinn-roles isolation (Phase 3 extraction boundary)
+# ------------------------------------------------------------------ #
+# djinn-roles owns role configuration, prompt rendering, and AgentType.
+# It must be a focused leaf-like crate: it depends only on djinn-core
+# and its own non-djinn dependencies.  It must NOT depend on djinn-agent
+# (which would invert the intended layering) or on djinn-mcp-extension
+# (Phase 4 owns that extraction).
+
+[[rules]]
+name = "no-roles-imports-agent"
+from_glob = "**/djinn-roles/**"
+to_glob = "**/djinn-agent/**"
+description = "djinn-roles must not depend on djinn-agent. The roles crate is a lower layer; djinn-agent is the facade that re-exports from djinn-roles. An inversion here defeats the extraction."
+
+[[rules]]
+name = "no-roles-imports-extension"
+from_glob = "**/djinn-roles/**"
+to_glob = "**/djinn-mcp-extension/**"
+description = "djinn-roles must not depend on djinn-mcp-extension. Phase 4 owns extension extraction; the roles crate must remain extension-agnostic."
