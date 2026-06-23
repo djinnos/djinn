@@ -20,7 +20,6 @@ pub(super) fn string_field() -> ProposalBlockFieldSchema {
     }
 }
 
-
 pub(super) fn enum_string_field(values: Vec<&'static str>) -> ProposalBlockFieldSchema {
     ProposalBlockFieldSchema {
         field_type: "string",

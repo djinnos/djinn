@@ -204,8 +204,7 @@ pub(super) async fn completions_handler_impl(
         ));
     }
     let proposal_system = match proposal_ref {
-        Some(p) => match build_proposal_address_prompt(&state, p, req.feedback_id.as_deref())
-            .await
+        Some(p) => match build_proposal_address_prompt(&state, p, req.feedback_id.as_deref()).await
         {
             Some(prompt) => Some(prompt),
             None => {

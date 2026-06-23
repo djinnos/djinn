@@ -405,6 +405,83 @@ pub(super) fn route_node_path(node: &djinn_graph::repo_graph::RepoGraphNode) -> 
     (!path.is_empty()).then(|| path.to_string())
 }
 
+/// Predicate: does this edge kind carry "if this changes, that breaks"
+/// semantics and therefore propagate the BFS frontier?
+///
+/// Behavioral-edge whitelist shared by [`impact_bfs`] and
+/// [`impact_bfs_with_policy`]. Pure structural anchors
+/// (`ContainsDefinition`, `DeclaredInFile`) and synthetic
+/// side-channel edges (`MemberOf`, `StepInProcess`,
+/// `EntryPointOf`) are skipped.
+fn edge_propagates(kind: RepoGraphEdgeKind) -> bool {
+    match kind {
+        RepoGraphEdgeKind::Reads
+        | RepoGraphEdgeKind::Writes
+        | RepoGraphEdgeKind::SymbolReference
+        | RepoGraphEdgeKind::FileReference
+        | RepoGraphEdgeKind::Route
+        | RepoGraphEdgeKind::Implements
+        | RepoGraphEdgeKind::Extends
+        | RepoGraphEdgeKind::TypeDefines
+        | RepoGraphEdgeKind::Defines
+        | RepoGraphEdgeKind::HandlesRoute
+        | RepoGraphEdgeKind::Fetches => true,
+        RepoGraphEdgeKind::ContainsDefinition
+        | RepoGraphEdgeKind::DeclaredInFile
+        | RepoGraphEdgeKind::MemberOf
+        | RepoGraphEdgeKind::StepInProcess
+        | RepoGraphEdgeKind::EntryPointOf => false,
+    }
+}
+
+/// Build an [`ImpactEntry`] for a BFS-reached node.
+///
+/// `exclusion_reason` is `Some(...)` when the policy stamped the
+/// first-reached `Fetches` edge as a soft dependency; `None`
+/// means the entry is a hard blast-radius link.
+fn build_impact_entry(
+    node: &djinn_graph::repo_graph::RepoGraphNode,
+    depth: usize,
+    exclusion_reason: Option<String>,
+) -> ImpactEntry {
+    let tier = format!("{:?}", node.kind).to_ascii_lowercase();
+    ImpactEntry {
+        uid: node.stable_uid(),
+        key: format_node_key(&node.id),
+        depth,
+        file_path: node.file_path.as_ref().map(|p| p.display().to_string()),
+        confidence_tier: Some(tier),
+        exclusion_reason,
+    }
+}
+
+/// PR s6ch / 92z7: when a newly-reached `Fetches` edge points at a
+/// `Route` node, return the first policy exclusion reason (if any).
+///
+/// Returns `Some(reason)` when the edge is classified as a noisy
+/// inferred consumer; `None` when it's a hard dependency or not
+/// applicable. Callers should only invoke this when
+/// `newly_inserted == true` — stamping happens once on first reach
+/// so that a node also reachable via a hard edge keeps its hard
+/// classification.
+fn stamp_fetches_route_exclusion(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+    edge: &RepoGraphEdge,
+    target: petgraph::graph::NodeIndex,
+    policy: &RouteExclusionConfig,
+) -> Option<&'static str> {
+    use djinn_graph::repo_graph::RepoGraphNodeKind;
+    if edge.kind != RepoGraphEdgeKind::Fetches {
+        return None;
+    }
+    let target_node = graph.node(target);
+    if target_node.kind != RepoGraphNodeKind::Route {
+        return None;
+    }
+    let route_path = route_node_path(target_node);
+    first_exclusion_reason(edge, route_path.as_deref(), policy)
+}
+
 /// PR F4: pick the [`djinn_graph::processes::Process`] id whose member
 /// list places `node` at the lowest step ordinal (most upstream). When
 /// the node sits in two flows — say it's `step=0` in process A and
@@ -438,25 +515,6 @@ pub(super) fn impact_bfs(
     max_depth: usize,
     min_confidence: Option<f64>,
 ) -> Vec<(petgraph::graph::NodeIndex, ImpactEntry)> {
-    use djinn_graph::repo_graph::RepoGraphEdgeKind;
-    let propagates = |kind: RepoGraphEdgeKind| match kind {
-        RepoGraphEdgeKind::Reads
-        | RepoGraphEdgeKind::Writes
-        | RepoGraphEdgeKind::SymbolReference
-        | RepoGraphEdgeKind::FileReference
-        | RepoGraphEdgeKind::Route
-        | RepoGraphEdgeKind::Implements
-        | RepoGraphEdgeKind::Extends
-        | RepoGraphEdgeKind::TypeDefines
-        | RepoGraphEdgeKind::Defines
-        | RepoGraphEdgeKind::HandlesRoute
-        | RepoGraphEdgeKind::Fetches => true,
-        RepoGraphEdgeKind::ContainsDefinition
-        | RepoGraphEdgeKind::DeclaredInFile
-        | RepoGraphEdgeKind::MemberOf
-        | RepoGraphEdgeKind::StepInProcess
-        | RepoGraphEdgeKind::EntryPointOf => false,
-    };
     let confidence_threshold = min_confidence.unwrap_or(0.85);
 
     let mut visited = std::collections::HashSet::new();
@@ -468,31 +526,14 @@ pub(super) fn impact_bfs(
     while let Some((current, depth)) = queue.pop_front() {
         if depth > 0 {
             let node = graph.node(current);
-            let tier = format!("{:?}", node.kind).to_ascii_lowercase();
-            result.push((
-                current,
-                ImpactEntry {
-                    uid: node.stable_uid(),
-                    key: format_node_key(&node.id),
-                    depth,
-                    file_path: node.file_path.as_ref().map(|p| p.display().to_string()),
-                    // `impact_bfs` (legacy, parity-disabled callers)
-                    // surfaces a generic per-node tier label rather
-                    // than a per-edge one. The parity-aware
-                    // `impact_bfs_with_policy` variant below stamps
-                    // the per-edge tier / exclusion reason that
-                    // shapes "is this a suggestion" UI.
-                    confidence_tier: Some(tier),
-                    exclusion_reason: None,
-                },
-            ));
+            result.push((current, build_impact_entry(node, depth, None)));
         }
         if depth < max_depth {
             for edge in graph
                 .graph()
                 .edges_directed(current, petgraph::Direction::Incoming)
             {
-                if !propagates(edge.weight().kind) {
+                if !edge_propagates(edge.weight().kind) {
                     continue;
                 }
                 if edge.weight().confidence < confidence_threshold {
@@ -530,25 +571,6 @@ pub(super) fn impact_bfs_with_policy(
     min_confidence: Option<f64>,
     policy: Option<&RouteExclusionConfig>,
 ) -> Vec<(petgraph::graph::NodeIndex, ImpactEntry)> {
-    use djinn_graph::repo_graph::{RepoGraphEdgeKind, RepoGraphNodeKind};
-    let propagates = |kind: RepoGraphEdgeKind| match kind {
-        RepoGraphEdgeKind::Reads
-        | RepoGraphEdgeKind::Writes
-        | RepoGraphEdgeKind::SymbolReference
-        | RepoGraphEdgeKind::FileReference
-        | RepoGraphEdgeKind::Route
-        | RepoGraphEdgeKind::Implements
-        | RepoGraphEdgeKind::Extends
-        | RepoGraphEdgeKind::TypeDefines
-        | RepoGraphEdgeKind::Defines
-        | RepoGraphEdgeKind::HandlesRoute
-        | RepoGraphEdgeKind::Fetches => true,
-        RepoGraphEdgeKind::ContainsDefinition
-        | RepoGraphEdgeKind::DeclaredInFile
-        | RepoGraphEdgeKind::MemberOf
-        | RepoGraphEdgeKind::StepInProcess
-        | RepoGraphEdgeKind::EntryPointOf => false,
-    };
     let confidence_threshold = min_confidence.unwrap_or(0.85);
 
     let mut visited = std::collections::HashSet::new();
@@ -570,27 +592,16 @@ pub(super) fn impact_bfs_with_policy(
     while let Some((current, depth)) = queue.pop_front() {
         if depth > 0 {
             let node = graph.node(current);
-            let tier = format!("{:?}", node.kind).to_ascii_lowercase();
             let exclusion_reason: Option<String> =
                 suggestion_reasons.get(&current).map(|s| (*s).to_string());
-            result.push((
-                current,
-                ImpactEntry {
-                    uid: node.stable_uid(),
-                    key: format_node_key(&node.id),
-                    depth,
-                    file_path: node.file_path.as_ref().map(|p| p.display().to_string()),
-                    confidence_tier: Some(tier),
-                    exclusion_reason,
-                },
-            ));
+            result.push((current, build_impact_entry(node, depth, exclusion_reason)));
         }
         if depth < max_depth {
             for edge in graph
                 .graph()
                 .edges_directed(current, petgraph::Direction::Incoming)
             {
-                if !propagates(edge.weight().kind) {
+                if !edge_propagates(edge.weight().kind) {
                     continue;
                 }
                 if edge.weight().confidence < confidence_threshold {
@@ -601,33 +612,17 @@ pub(super) fn impact_bfs_with_policy(
                 if newly_inserted {
                     queue.push_back((source, depth + 1));
                 }
-                // PR s6ch / 92z7: a `Fetches` edge pointing at a
-                // `Route` node is downgraded to a suggestion when
-                // the project policy classifies it as a noisy
-                // inferred consumer. The upstream node still joins
-                // the BFS (so transitive impact is visible) but the
-                // entry's `exclusion_reason` field is stamped when
-                // it was first reached, so the UI can render it
-                // as a soft dependency. We only record the reason
-                // when this edge was the *first* one to reach the
-                // upstream node, so a node reachable via a hard
-                // edge and a soft edge keeps the hard-edge
-                // classification.
-                if let (Some(cfg), true, true) = (
-                    policy,
-                    edge.weight().kind == RepoGraphEdgeKind::Fetches,
-                    newly_inserted,
-                ) {
-                    let target = edge.target();
-                    let target_node = graph.node(target);
-                    if target_node.kind == RepoGraphNodeKind::Route {
-                        let route_path = route_node_path(target_node);
-                        if let Some(reason) =
-                            first_exclusion_reason(edge.weight(), route_path.as_deref(), cfg)
-                        {
-                            suggestion_reasons.entry(source).or_insert(reason);
-                        }
-                    }
+                // PR s6ch / 92z7: stamp the first exclusion reason
+                // for a newly-reached `Fetches`→`Route` edge via
+                // the shared policy helper. Only records when this
+                // edge was the *first* to reach the upstream node,
+                // so a node reachable via a hard edge and a soft
+                // edge keeps the hard-edge classification.
+                if let (Some(cfg), true) = (policy, newly_inserted)
+                    && let Some(reason) =
+                        stamp_fetches_route_exclusion(graph, edge.weight(), edge.target(), cfg)
+                {
+                    suggestion_reasons.entry(source).or_insert(reason);
                 }
             }
         }
