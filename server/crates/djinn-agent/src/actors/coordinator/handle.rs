@@ -13,6 +13,7 @@ use super::consolidation::DbConsolidationRunner;
 use super::messages::CoordinatorMessage;
 use super::types::*;
 use crate::supervisor_impl::LiveMoverSummary;
+use djinn_orchestration_types::trigger::CoordinatorTrigger;
 
 const TRY_TRIGGER_DISPATCH_LOG_INTERVAL_SECS: u64 = 30;
 
@@ -275,6 +276,14 @@ impl CoordinatorHandle {
             .await
             .map_err(|_| CoordinatorError::ActorDead)?;
         rx.await.map_err(|_| CoordinatorError::NoResponse)
+    }
+}
+
+// ─── CoordinatorTrigger impl ───────────────────────────────────────────────
+
+impl CoordinatorTrigger for CoordinatorHandle {
+    fn try_trigger_dispatch(&self) {
+        self.try_trigger_dispatch();
     }
 }
 
