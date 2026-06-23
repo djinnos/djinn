@@ -37,9 +37,10 @@ const MAX_AGGREGATED_CI_RUNS: usize = 5;
 
 /// Activity log event type for stored PR review feedback payloads.
 ///
-/// Re-exported so the worker lifecycle layer can query for PR review feedback
-/// without a module dependency on the coordinator's internal pr_poller.
-pub const PR_REVIEW_FEEDBACK_EVENT: &str = "pr_review_feedback";
+/// Re-exported from `djinn-orchestration-types` so the worker lifecycle layer
+/// can query for PR review feedback without a module dependency on the
+/// coordinator's internal pr_poller.
+pub use djinn_orchestration_types::coordinator::PR_REVIEW_FEEDBACK_EVENT;
 
 /// Activity log event type for per-cycle markers (used to count rounds).
 const PR_REVIEW_CYCLE_EVENT: &str = "pr_review_cycle";
