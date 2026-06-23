@@ -838,7 +838,7 @@ mod tests {
             vec![
                 mk("zai-coding-plan", "glm-5", zero.clone()), // canonical match → borrowed
                 mk("zai-coding-plan", "glm-only-plan", zero.clone()), // no base match → stays unpriced
-                mk("zai-coding-plan", "glm-paid", base.clone()), // already priced → untouched
+                mk("zai-coding-plan", "glm-paid", base.clone()),      // already priced → untouched
             ],
         );
 
@@ -904,10 +904,7 @@ mod tests {
         enrich_plan_pricing(&mut idx);
 
         for id in ["k2p7", "k2p5"] {
-            let m = idx["kimi-for-coding"]
-                .iter()
-                .find(|m| m.id == id)
-                .unwrap();
+            let m = idx["kimi-for-coding"].iter().find(|m| m.id == id).unwrap();
             assert!(
                 has_nonzero_pricing(&m.pricing),
                 "{id} should be priced via the explicit kimi alias"
@@ -927,9 +924,9 @@ mod tests {
             return; // snapshot may not carry the plan provider; nothing to assert.
         }
         let pricing_map = catalog.pricing_for_all_models();
-        let any_priced = plan_models.iter().any(|m| {
-            pricing_map.contains_key(&format!("zai-coding-plan/{}", m.id))
-        });
+        let any_priced = plan_models
+            .iter()
+            .any(|m| pricing_map.contains_key(&format!("zai-coding-plan/{}", m.id)));
         assert!(
             any_priced,
             "at least one zai-coding-plan model should be priced via the zai reference map"
