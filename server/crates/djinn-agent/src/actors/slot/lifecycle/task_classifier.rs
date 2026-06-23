@@ -28,7 +28,6 @@ use djinn_core::models::Task;
 /// Downstream consumers (e.g. `resolve_mcp_and_skills`) use this to decide
 /// which native skills to prepend before project skills in the prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum NativeSkillTrigger {
     /// The session is a planner proposal-authoring / grooming / refinement /
     /// reconcile task.  Native skills recommended for the planner (such as
@@ -51,7 +50,6 @@ pub(crate) enum NativeSkillTrigger {
 ///
 /// The classifier is purely synchronous, needs no DB or filesystem access,
 /// and is safe to call from unit tests with minimal `Task` stubs.
-#[allow(dead_code)]
 pub(crate) fn classify_native_skill_trigger(
     role_name: &str,
     task: &Task,
