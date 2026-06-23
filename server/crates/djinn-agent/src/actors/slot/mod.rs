@@ -1,6 +1,11 @@
-use std::collections::{HashMap, HashSet};
+// ─── Re-exports from djinn-orchestration-types ─────────────────────────────
+// Shared slot DTOs and config types are now owned by the orchestration-types
+// crate so the slot side can use them without importing coordinator internals.
 
-use serde::{Deserialize, Serialize};
+pub use djinn_orchestration_types::slot::{
+    MergeConflictMetadata, MERGE_CONFLICT_PREFIX, ModelSlotConfig, SlotInfo,
+    SlotPoolConfig, SlotState,
+};
 
 // ─── Slot types ──────────────────────────────────────────────────────────────
 
@@ -18,51 +23,6 @@ pub enum SlotEvent {
         model_id: String,
         task_id: String,
     },
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SlotInfo {
-    pub slot_id: usize,
-    pub model_id: String,
-    pub state: SlotState,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum SlotState {
-    Free,
-    Busy {
-        task_id: String,
-        started_at: String,
-        agent_type: String,
-    },
-    Draining,
-}
-
-#[derive(Debug, Clone)]
-pub struct ModelSlotConfig {
-    pub model_id: String,
-    pub max_slots: u32,
-    pub roles: HashSet<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SlotPoolConfig {
-    pub models: Vec<ModelSlotConfig>,
-    pub role_priorities: HashMap<String, Vec<String>>,
-}
-
-// ─── Constants ───────────────────────────────────────────────────────────────
-
-pub(crate) const MERGE_CONFLICT_PREFIX: &str = "merge_conflict:";
-
-// ─── Shared metadata structs ─────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MergeConflictMetadata {
-    pub(crate) conflicting_files: Vec<String>,
-    pub(crate) base_branch: String,
-    pub(crate) merge_target: String,
 }
 
 // ─── Submodules ───────────────────────────────────────────────────────────────

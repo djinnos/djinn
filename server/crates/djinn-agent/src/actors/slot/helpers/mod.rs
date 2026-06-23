@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::actors::coordinator::pr_poller::PR_REVIEW_FEEDBACK_EVENT;
+use djinn_orchestration_types::coordinator::PR_REVIEW_FEEDBACK_EVENT;
 use crate::context::AgentContext;
 use djinn_core::models::Task;
 use djinn_db::ActivityQuery;

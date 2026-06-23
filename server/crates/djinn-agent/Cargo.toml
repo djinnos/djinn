@@ -34,6 +34,7 @@ djinn-sandbox = { path = "../djinn-sandbox" }
 djinn-lsp = { path = "../djinn-lsp" }
 djinn-compaction = { path = "../djinn-compaction" }
 djinn-mcp-extension = { path = "../djinn-mcp-extension" }
+djinn-orchestration-types = { path = "../djinn-orchestration-types" }
 kube = { version = "0.95", features = ["runtime", "derive"] }
 anyhow = "1"
 thiserror = "2"
