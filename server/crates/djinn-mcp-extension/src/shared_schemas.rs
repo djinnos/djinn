@@ -2,7 +2,7 @@ use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ToolSafetyAnnotations {
+pub struct ToolSafetyAnnotations {
     pub read_only: bool,
     pub destructive: bool,
     pub idempotent: bool,
@@ -11,7 +11,7 @@ pub(crate) struct ToolSafetyAnnotations {
 }
 
 impl ToolSafetyAnnotations {
-    pub(crate) const fn new(
+    pub const fn new(
         read_only: bool,
         destructive: bool,
         idempotent: bool,
@@ -27,32 +27,32 @@ impl ToolSafetyAnnotations {
         }
     }
 
-    pub(crate) const fn read_only() -> Self {
+    pub const fn read_only() -> Self {
         Self::new(true, false, true, false, true)
     }
 
-    pub(crate) const fn open_world_read_only() -> Self {
+    pub const fn open_world_read_only() -> Self {
         Self::new(true, false, true, true, true)
     }
 
-    pub(crate) const fn mutation() -> Self {
+    pub const fn mutation() -> Self {
         Self::new(false, false, false, false, false)
     }
 
-    pub(crate) const fn idempotent_mutation() -> Self {
+    pub const fn idempotent_mutation() -> Self {
         Self::new(false, false, true, false, false)
     }
 
-    pub(crate) const fn destructive() -> Self {
+    pub const fn destructive() -> Self {
         Self::new(false, true, false, false, false)
     }
 
-    pub(crate) const fn idempotent_destructive() -> Self {
+    pub const fn idempotent_destructive() -> Self {
         Self::new(false, true, true, false, false)
     }
 }
 
-pub(crate) fn serialize_tool_schema(
+pub fn serialize_tool_schema(
     tool: RmcpTool,
     annotations: ToolSafetyAnnotations,
 ) -> serde_json::Value {
@@ -61,10 +61,7 @@ pub(crate) fn serialize_tool_schema(
     value
 }
 
-pub(crate) fn annotate_tool_safety(
-    value: &mut serde_json::Value,
-    annotations: ToolSafetyAnnotations,
-) {
+pub fn annotate_tool_safety(value: &mut serde_json::Value, annotations: ToolSafetyAnnotations) {
     if let Some(obj) = value.as_object_mut() {
         obj.insert(
             "readOnly".to_string(),
@@ -89,7 +86,7 @@ pub(crate) fn annotate_tool_safety(
     }
 }
 
-pub(crate) fn tool_memory_move() -> RmcpTool {
+pub fn tool_memory_move() -> RmcpTool {
     RmcpTool::new(
         "memory_move".to_string(),
         "Move a memory note to a different type. Memory notes live in Dolt — this is the canonical way to relocate them; do not attempt filesystem rename. Updates the permalink and resolves inbound links automatically. Use type=\"proposed_adr\" to recover a mis-routed ADR draft.".to_string(),
@@ -105,7 +102,7 @@ pub(crate) fn tool_memory_move() -> RmcpTool {
     )
 }
 
-pub(crate) fn shared_base_tool_schemas() -> Vec<serde_json::Value> {
+pub fn shared_base_tool_schemas() -> Vec<serde_json::Value> {
     vec![
         serialize_tool_schema(tool_task_show(), ToolSafetyAnnotations::read_only()),
         serialize_tool_schema(tool_task_list(), ToolSafetyAnnotations::read_only()),
@@ -119,7 +116,7 @@ pub(crate) fn shared_base_tool_schemas() -> Vec<serde_json::Value> {
     ]
 }
 
-pub(crate) fn shared_lead_tool_schemas() -> Vec<serde_json::Value> {
+pub fn shared_lead_tool_schemas() -> Vec<serde_json::Value> {
     vec![
         serialize_tool_schema(tool_task_create(), ToolSafetyAnnotations::mutation()),
         serialize_tool_schema(
@@ -140,7 +137,7 @@ pub(crate) fn shared_lead_tool_schemas() -> Vec<serde_json::Value> {
     ]
 }
 
-pub(crate) fn tool_epic_create() -> RmcpTool {
+pub fn tool_epic_create() -> RmcpTool {
     RmcpTool::new(
         "epic_create".to_string(),
         "Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — e.g. when decomposing a graduated proposal (Planner Mode D) or when a health sweep identifies a gap that needs its own delivery container. Returns the created epic.".to_string(),
@@ -161,7 +158,7 @@ pub(crate) fn tool_epic_create() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_epic_close() -> RmcpTool {
+pub fn tool_epic_close() -> RmcpTool {
     RmcpTool::new(
         "epic_close".to_string(),
         "Close an epic. Use when all work is complete and no further waves are needed.".to_string(),
@@ -175,7 +172,7 @@ pub(crate) fn tool_epic_close() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_epic_show() -> RmcpTool {
+pub fn tool_epic_show() -> RmcpTool {
     RmcpTool::new(
         "epic_show".to_string(),
         "Show details for an epic by UUID or short ID.".to_string(),
@@ -189,7 +186,7 @@ pub(crate) fn tool_epic_show() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_epic_update() -> RmcpTool {
+pub fn tool_epic_update() -> RmcpTool {
     RmcpTool::new(
         "epic_update".to_string(),
         "Update epic fields (title/description/status), memory ref deltas, and epic dependencies (blocked_by) for planner workflows.".to_string(),
@@ -210,7 +207,7 @@ pub(crate) fn tool_epic_update() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_epic_tasks() -> RmcpTool {
+pub fn tool_epic_tasks() -> RmcpTool {
     RmcpTool::new(
         "epic_tasks".to_string(),
         "List tasks for an epic with pagination.".to_string(),
@@ -226,7 +223,7 @@ pub(crate) fn tool_epic_tasks() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_epic_blockers_list() -> RmcpTool {
+pub fn tool_epic_blockers_list() -> RmcpTool {
     RmcpTool::new(
         "epic_blockers_list".to_string(),
         "List the epics that BLOCK a given epic (its dependencies — they must close before this epic's breakdown auto-dispatches).".to_string(),
@@ -240,7 +237,7 @@ pub(crate) fn tool_epic_blockers_list() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_epic_blocked_list() -> RmcpTool {
+pub fn tool_epic_blocked_list() -> RmcpTool {
     RmcpTool::new(
         "epic_blocked_list".to_string(),
         "List the epics blocked BY a given epic (its dependents — epics whose breakdown waits on this one).".to_string(),
@@ -254,7 +251,7 @@ pub(crate) fn tool_epic_blocked_list() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_proposal_show() -> RmcpTool {
+pub fn tool_proposal_show() -> RmcpTool {
     RmcpTool::new(
         "proposal_show".to_string(),
         "Show a graduated proposal's spec for decomposition (Planner Mode D): title, body, status, acceptance_criteria, and targets (each with project slug + role of `primary`/`reference`). Use this first when dispatched on an `epic_breakdown` task.".to_string(),
@@ -268,7 +265,7 @@ pub(crate) fn tool_proposal_show() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_proposal_complete() -> RmcpTool {
+pub fn tool_proposal_complete() -> RmcpTool {
     RmcpTool::new(
         "proposal_complete".to_string(),
         "Mark a `building` proposal as `done` (Planner Workflow E). Call this only after reviewing a proposal whose every graduated epic has closed and confirming the delivered work meets the acceptance criteria. If work remains instead, create more epics with epic_create(proposal_id=...) rather than completing.".to_string(),
@@ -283,7 +280,7 @@ pub(crate) fn tool_proposal_complete() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_proposal_ac_set() -> RmcpTool {
+pub fn tool_proposal_ac_set() -> RmcpTool {
     RmcpTool::new(
         "proposal_ac_set".to_string(),
         "Reconcile a proposal's acceptance-criteria `met` flags (Planner Workflow E) as graduated epics land. Send the FULL list in order — one entry per criterion, each `{\"met\": true|false}` (criterion text is preserved automatically). A status annotation only: it does not edit the spec, bump a revision, or clear sign-offs. Returns {met, total}.".to_string(),
@@ -308,7 +305,7 @@ pub(crate) fn tool_proposal_ac_set() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_proposal_ac_amend() -> RmcpTool {
+pub fn tool_proposal_ac_amend() -> RmcpTool {
     RmcpTool::new(
         "proposal_ac_amend".to_string(),
         "Amend a proposal's acceptance-criteria spec with audited revision semantics. Each amendment targets a zero-based criterion index and uses operation `rewrite`, `drop`, or `waive`: rewrite replaces criterion text and requires `criterion`; drop removes the criterion; waive keeps the criterion visible with `waived: true`. Requires a non-empty top-level reason. This is a real spec edit: it bumps the proposal revision, retains sign-offs, and records feedback/audit. Use proposal_ac_set instead when only reconciling met flags.".to_string(),
@@ -343,7 +340,7 @@ pub(crate) fn tool_proposal_ac_amend() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_proposal_reconcile_obsolete_epic() -> RmcpTool {
+pub fn tool_proposal_reconcile_obsolete_epic() -> RmcpTool {
     RmcpTool::new(
         "proposal_reconcile_obsolete_epic".to_string(),
         "Scoped proposal-reconcile teardown for one obsolete graduated epic. Lists/validates only the requested proposal+epic link, blocks terminally if any task in that subtree has merged work (recording AI proposal feedback), otherwise force-closes only that epic's tasks, closes the epic, unlinks only that epic from the proposal, and leaves unrelated graduated epics untouched. Use this instead of whole-build proposal_stop_build during Reconcile proposal tasks.".to_string(),
@@ -359,7 +356,7 @@ pub(crate) fn tool_proposal_reconcile_obsolete_epic() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_task_list() -> RmcpTool {
+pub fn tool_task_list() -> RmcpTool {
     RmcpTool::new(
         "task_list".to_string(),
         "List tasks with optional filters and pagination.".to_string(),
@@ -380,7 +377,7 @@ pub(crate) fn tool_task_list() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_task_blocked_list() -> RmcpTool {
+pub fn tool_task_blocked_list() -> RmcpTool {
     RmcpTool::new(
         "task_blocked_list".to_string(),
         "List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.".to_string(),
@@ -394,7 +391,7 @@ pub(crate) fn tool_task_blocked_list() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_task_activity_list() -> RmcpTool {
+pub fn tool_task_activity_list() -> RmcpTool {
     RmcpTool::new(
         "task_activity_list".to_string(),
         "Query a task's activity log with optional filters. Returns comments, status transitions, and other events. Use to inspect Lead guidance, reviewer feedback, or history.".to_string(),
@@ -411,7 +408,7 @@ pub(crate) fn tool_task_activity_list() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_task_show() -> RmcpTool {
+pub fn tool_task_show() -> RmcpTool {
     RmcpTool::new(
         "task_show".to_string(),
         "Show details of a work item including recent activity and blockers.".to_string(),
@@ -425,7 +422,7 @@ pub(crate) fn tool_task_show() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_memory_read() -> RmcpTool {
+pub fn tool_memory_read() -> RmcpTool {
     RmcpTool::new(
         "memory_read".to_string(),
         "Read a note by permalink or title.".to_string(),
@@ -439,7 +436,7 @@ pub(crate) fn tool_memory_read() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_memory_search() -> RmcpTool {
+pub fn tool_memory_search() -> RmcpTool {
     RmcpTool::new(
         "memory_search".to_string(),
         "Search notes and proposals in project memory. Returns a unified result set interleaved by relevance.".to_string(),
@@ -459,7 +456,7 @@ pub(crate) fn tool_memory_search() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_memory_list() -> RmcpTool {
+pub fn tool_memory_list() -> RmcpTool {
     RmcpTool::new(
         "memory_list".to_string(),
         "List notes in project memory. Returns compact summaries without full content.".to_string(),
@@ -475,7 +472,7 @@ pub(crate) fn tool_memory_list() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_memory_write() -> RmcpTool {
+pub fn tool_memory_write() -> RmcpTool {
     RmcpTool::new(
         "memory_write".to_string(),
         "Create a new memory note. Memory notes live in Dolt — this is the canonical way to author them; do not attempt filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief [singleton], roadmap [singleton]). Use [[wikilinks]] in content to connect notes.".to_string(),
@@ -493,7 +490,7 @@ pub(crate) fn tool_memory_write() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_memory_edit() -> RmcpTool {
+pub fn tool_memory_edit() -> RmcpTool {
     RmcpTool::new(
         "memory_edit".to_string(),
         "Edit an existing memory note in-place. Memory notes live in Dolt — this is the canonical way to amend them; do not attempt filesystem writes. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).".to_string(),
@@ -512,7 +509,7 @@ pub(crate) fn tool_memory_edit() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_memory_build_context() -> RmcpTool {
+pub fn tool_memory_build_context() -> RmcpTool {
     RmcpTool::new(
         "memory_build_context".to_string(),
         "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Relevant proposals are surfaced alongside notes so a planner/worker sees the motivating proposal.".to_string(),
@@ -529,7 +526,7 @@ pub(crate) fn tool_memory_build_context() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_memory_health() -> RmcpTool {
+pub fn tool_memory_health() -> RmcpTool {
     RmcpTool::new(
         "memory_health".to_string(),
         "Returns aggregate health report: total notes, broken link count, orphan note count, low-confidence note count, stale note count, stale notes by folder, lifecycle counts, and recent lifecycle sweep metrics.".to_string(),
@@ -540,7 +537,7 @@ pub(crate) fn tool_memory_health() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_memory_extracted_audit() -> RmcpTool {
+pub fn tool_memory_extracted_audit() -> RmcpTool {
     RmcpTool::new(
         "memory_extracted_audit".to_string(),
         "Audit existing extracted case/pattern/pitfall notes against ADR-054 taxonomy and required structure. Returns grouped cleanup backlogs for merge candidates, underspecified notes, demotion-to-working-spec candidates, and archive candidates, plus rerun guidance.".to_string(),
@@ -551,7 +548,7 @@ pub(crate) fn tool_memory_extracted_audit() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_memory_broken_links() -> RmcpTool {
+pub fn tool_memory_broken_links() -> RmcpTool {
     RmcpTool::new(
         "memory_broken_links".to_string(),
         "Lists all broken wikilinks with source context (permalink, title, raw text, target permalink).".to_string(),
@@ -564,7 +561,7 @@ pub(crate) fn tool_memory_broken_links() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_memory_orphans() -> RmcpTool {
+pub fn tool_memory_orphans() -> RmcpTool {
     RmcpTool::new(
         "memory_orphans".to_string(),
         "Lists notes with zero inbound links. Excludes catalogs and singletons (brief, roadmap)."
@@ -578,7 +575,7 @@ pub(crate) fn tool_memory_orphans() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_role_metrics() -> RmcpTool {
+pub fn tool_role_metrics() -> RmcpTool {
     RmcpTool::new(
         "agent_metrics".to_string(),
         "Show execution quality metrics for a role to support prompt tuning and intervention decisions.".to_string(),
@@ -592,7 +589,7 @@ pub(crate) fn tool_role_metrics() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_role_create() -> RmcpTool {
+pub fn tool_role_create() -> RmcpTool {
     RmcpTool::new(
         "agent_create".to_string(),
         "Create a new specialist agent extending a base role (worker or reviewer). Use when existing agents lack capabilities for a specific domain."
@@ -611,7 +608,7 @@ pub(crate) fn tool_role_create() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_task_create() -> RmcpTool {
+pub fn tool_task_create() -> RmcpTool {
     RmcpTool::new(
         "task_create".to_string(),
         "Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.".to_string(),
@@ -636,7 +633,7 @@ pub(crate) fn tool_task_create() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_task_update() -> RmcpTool {
+pub fn tool_task_update() -> RmcpTool {
     RmcpTool::new(
         "task_update".to_string(),
         "Update task fields and manage blocker relationships. Use blocked_by_add/blocked_by_remove to enforce task sequencing — a task with unresolved blockers will not be dispatched."
@@ -663,7 +660,7 @@ pub(crate) fn tool_task_update() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_task_transition() -> RmcpTool {
+pub fn tool_task_transition() -> RmcpTool {
     RmcpTool::new(
         "task_transition".to_string(),
         "Transition a task using a named workflow action.".to_string(),
@@ -680,7 +677,7 @@ pub(crate) fn tool_task_transition() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_task_comment_add() -> RmcpTool {
+pub fn tool_task_comment_add() -> RmcpTool {
     RmcpTool::new(
         "task_comment_add".to_string(),
         "Add a comment or strategic observation to a task's activity log.".to_string(),

@@ -1,7 +1,7 @@
 use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 
-pub(crate) fn tool_code_graph() -> RmcpTool {
+pub fn tool_code_graph() -> RmcpTool {
     RmcpTool::new(
         "code_graph".to_string(),
         "Query the SCIP-built repository dependency graph. Prefer `uid` as the stable \
@@ -274,7 +274,7 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_pr_review_context() -> RmcpTool {
+pub fn tool_pr_review_context() -> RmcpTool {
     RmcpTool::new(
         "pr_review_context".to_string(),
         "Given a PR's changed line ranges (parsed from `git diff --unified=0 base..head`), assemble the base-graph signals that matter for review in one call: touched symbols with fan-in/out, blast radius, hotspot overlap, touched cycles, deprecated-caller hits, hot-path overlap, and architecture-boundary violations. Base-graph-only — does NOT build a head graph, detect newly-introduced cycles, or parse the diff text for removed-API detection. Every list is capped (defaults: touched_symbols=100, blast_radius=50, hotspot_overlap=20, touched_cycles=20, touched_boundary_violations=50, touched_deprecated=20, hot_path_overlap=20)."

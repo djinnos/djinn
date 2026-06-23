@@ -1,9 +1,10 @@
 // Agent-domain code extracted from djinn-server.
 // Covers: commands, agent context/roles/lifecycle, actors.
 //
-// The `tool_code_graph()` schema uses `serde_json::json!` via the local
-// `object!` macro. After Phase 2 added seven new ops, the macro
-// expansion outgrew the default 128 recursion budget.
+// The `tool_code_graph()` schema (now in `djinn-mcp-extension`) uses
+// `serde_json::json!` via the `object!` macro. After Phase 2 added seven
+// new ops, the macro expansion outgrew the default 128 recursion budget.
+// Kept here for safety since `djinn-agent` still re-exports the schema.
 #![recursion_limit = "256"]
 
 pub(crate) mod commands;
