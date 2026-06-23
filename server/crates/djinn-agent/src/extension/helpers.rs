@@ -151,8 +151,7 @@ pub(super) fn is_tool_allowed_for_schemas(schemas: &[serde_json::Value], name: &
 pub(super) fn tool_names_for_agent(
     agent_type: crate::AgentType,
 ) -> std::collections::BTreeSet<String> {
-    agent_type
-        .tool_schemas()
+    crate::roles::tool_schemas_for(agent_type)
         .into_iter()
         .filter_map(|schema| {
             schema

@@ -1071,6 +1071,7 @@ dependencies = [
  "djinn-lsp",
  "djinn-memory",
  "djinn-provider",
+ "djinn-roles",
  "djinn-runtime",
  "djinn-sandbox",
  "djinn-stack",
@@ -1414,6 +1415,18 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wiremock",
+ "workspace-hack",
+]
+
+[[package]]
+name = "djinn-roles"
+version = "0.1.0"
+dependencies = [
+ "djinn-core",
+ "futures",
+ "serde",
+ "serde_json",
+ "tracing",
  "workspace-hack",
 ]
 

@@ -638,7 +638,9 @@ pub(crate) async fn execute_stage(
     };
 
     // ── Build the initial conversation ───────────────────────────────────────
-    let mut tools = (role.config().tool_schemas)();
+    let agent_type =
+        crate::AgentType::parse(role.config().name).unwrap_or(crate::AgentType::Worker);
+    let mut tools = crate::roles::tool_schemas_for(agent_type);
     if let Some(ref registry) = mcp_registry {
         tools.extend_from_slice(registry.tool_schemas());
     }

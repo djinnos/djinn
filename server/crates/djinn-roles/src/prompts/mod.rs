@@ -1,0 +1,454 @@
+//! Prompt templates, rendering, and context types for Djinn agent roles.
+//!
+//! Templates are compiled into the binary via `include_str!()` and rendered
+//! with simple `{{variable}}` string substitution.  A shared base template
+//! provides system identity, task context, workspace config, and common tools.
+//! Each role template appends role-specific mission, instructions, and rules.
+
+use serde::Deserialize;
+
+use crate::config::RoleConfig;
+use djinn_core::models::Task;
+
+/// Hard cap on rendered system prompt size (chars). Individual sections have
+/// their own soft limits, but this catches cases where multiple sections
+/// combine to blow past a reasonable size.
+///
+/// Sized to fit the largest legitimate prompt — the Planner decomposition mode
+/// (`base.md` + `planner.md` + `planner/decomposition.md` + tool schemas + task
+/// fields), which is ~35K after the planner prompt-contract guidance landed. The
+/// old 31K cap silently truncated the tail of `decomposition.md` (the
+/// "prune unverifiable AC instead of escalating" contract), so the planner never
+/// saw guidance it was explicitly given. All in-use models have >=128K context,
+/// so a ~48K system prompt is comfortably within budget.
+pub const MAX_SYSTEM_PROMPT_CHARS: usize = 48_000;
+
+// ─── Embedded templates ────────────────────────────────────────────────────────
+
+pub const BASE_TEMPLATE: &str = include_str!("base.md");
+pub const DEV_TEMPLATE: &str = include_str!("dev.md");
+pub const REVIEWER_TEMPLATE: &str = include_str!("task-reviewer.md");
+pub const LEAD_TEMPLATE: &str = include_str!("lead.md");
+pub const PLANNER_TEMPLATE: &str = include_str!("planner.md");
+pub const ARCHITECT_TEMPLATE: &str = include_str!("architect.md");
+/// PR F4: cluster-doc synthesis template.
+pub const CLUSTER_DOC_TEMPLATE: &str = include_str!("cluster-doc.md");
+
+// ─── Mode section constants ────────────────────────────────────────────────────
+
+pub(crate) const WORKER_RESEARCH: &str = include_str!("worker/research.md");
+pub(crate) const WORKER_CONFLICT: &str = include_str!("worker/conflict.md");
+
+pub(crate) const PLANNER_DECOMPOSITION: &str = include_str!("planner/decomposition.md");
+pub(crate) const PLANNER_INTERVENTION: &str = include_str!("planner/intervention.md");
+pub(crate) const PLANNER_PROPOSAL: &str = include_str!("planner/proposal.md");
+pub(crate) const PLANNER_PROPOSAL_REVIEW: &str = include_str!("planner/proposal_review.md");
+
+// ─── Context ───────────────────────────────────────────────────────────────────
+
+/// Runtime context injected alongside the task's stored fields at render time.
+///
+/// Worker agents need `project_path` and `workspace_path`. Reviewer agents
+/// additionally use the workspace to inspect code. Workers with conflict
+/// context receive merge details.
+pub struct TaskContext {
+    /// Absolute path to the project root (passed to Djinn tools as `project`).
+    pub project_path: String,
+    /// Absolute path to the active execution workspace (task worktree).
+    pub workspace_path: String,
+
+    // ── Task reviewer fields ──────────────────────────────────────────────────
+    /// Formatted git diff for the task branch (start_commit..end_commit).
+    pub diff: Option<String>,
+    /// Formatted `git log --oneline` output for the task branch.
+    pub commits: Option<String>,
+    /// Merge-base of the task branch with the target branch (task reviewer).
+    pub start_commit: Option<String>,
+    /// HEAD of the task branch (task reviewer).
+    pub end_commit: Option<String>,
+
+    // -- Merge conflict context (handled by Worker) ----------------------------
+    pub conflict_files: Option<String>,
+    pub merge_base_branch: Option<String>,
+    pub merge_target_branch: Option<String>,
+    pub merge_failure_context: Option<String>,
+
+    // ── Project command fields ────────────────────────────────────────────
+    /// Newline-separated list of setup command names, or None if none configured.
+    pub setup_commands: Option<String>,
+
+    // ── Activity log ─────────────────────────────────────────────────────
+    /// Pre-formatted activity log (comments, transitions) for the task.
+    pub activity: Option<String>,
+
+    // ── Worker submission context (for reviewer) ─────────────────────────
+    /// Summary from the last `work_submitted` activity entry.
+    pub worker_summary: Option<String>,
+    /// Remaining concerns from the last `work_submitted` activity entry.
+    pub worker_concerns: Option<String>,
+
+    // ── Epic context ─────────────────────────────────────────────────────
+    /// Epic context section for lead agents (title, description, memory_refs, sibling tasks).
+    pub epic_context: Option<String>,
+
+    // ── Knowledge context ────────────────────────────────────────────────
+    /// Path-scoped knowledge notes relevant to this task's code areas.
+    pub knowledge_context: Option<String>,
+
+    // ── Code graph context (PR E2) ───────────────────────────────────────
+    /// Auto-injected `code_graph context` summary for worker / reviewer roles
+    /// whose tasks touch known files in the canonical graph. `None` when the
+    /// role is not in the `DJINN_AUTO_CODE_CONTEXT_ROLES` allowlist or when
+    /// the task has no resolvable scope-path symbols. Capped at 2000 chars
+    /// via `smart_truncate`.
+    pub code_graph_context: Option<String>,
+
+    // ── Reviewer diff context (PR E3) ────────────────────────────────────
+    /// Auto-injected `code_graph detect_changes` summary for reviewer roles.
+    /// One bullet per touched symbol with `impact`-derived risk + direct
+    /// caller / module counts; sorted CRITICAL → HIGH → MEDIUM → LOW. `None`
+    /// when the reviewer role is not in the `DJINN_AUTO_CODE_CONTEXT_ROLES`
+    /// allowlist, when no base/head SHAs could be resolved, or when the
+    /// detected change set is empty. Capped at 2000 chars via `smart_truncate`.
+    pub reviewer_diff_context: Option<String>,
+}
+
+// ─── Renderer ─────────────────────────────────────────────────────────────────
+
+/// Render a system prompt using the given `RoleConfig` and tool schemas.
+///
+/// The `tool_schemas` function provides the dynamic tools section.  It is
+/// passed separately (rather than stored in `RoleConfig`) so that the
+/// concrete schema providers can live in `djinn-agent` without creating
+/// a `djinn-roles → djinn-agent` dependency.
+pub fn render_prompt_for_role(
+    config: &RoleConfig,
+    tool_schemas: fn() -> Vec<serde_json::Value>,
+    task: &Task,
+    ctx: &TaskContext,
+) -> String {
+    let (role_name, role_template) = (config.display_name, config.initial_message);
+
+    let ac = format_acceptance_criteria(&task.acceptance_criteria);
+    let labels = format_labels(&task.labels);
+
+    // Compose: base template + role-specific template
+    let mut out = format!("{BASE_TEMPLATE}\n{role_template}");
+    out = out.replace("{{role_name}}", role_name);
+
+    // Mode-specific section: the dispatcher (code, not the LLM) selects which
+    // workflow this stage runs and we inject ONLY that section. Single-mode
+    // roles leave `mode_section` None and have no `{{role_mode_section}}`
+    // placeholder, so this is a harmless no-op for them.
+    let mode_section = config
+        .mode_section
+        .map(|select| select(task, ctx))
+        .unwrap_or("");
+    out = out.replace("{{role_mode_section}}", mode_section);
+
+    // Dynamic tools section from role schemas
+    let tools_md = format_tools_section(&(tool_schemas)());
+    out = out.replace("{{tools_section}}", &tools_md);
+
+    // Task fields
+    out = out.replace("{{task_id}}", &task.id);
+    out = out.replace("{{task_title}}", &task.title);
+    out = out.replace("{{issue_type}}", &task.issue_type);
+    out = out.replace("{{priority}}", &task.priority.to_string());
+    out = out.replace("{{labels}}", &labels);
+    out = out.replace("{{description}}", &task.description);
+    out = out.replace("{{design}}", &task.design);
+    out = out.replace("{{acceptance_criteria}}", &ac);
+
+    // Context fields
+    out = out.replace("{{project_path}}", &ctx.project_path);
+    out = out.replace("{{workspace_path}}", &ctx.workspace_path);
+    out = out.replace("{{diff}}", ctx.diff.as_deref().unwrap_or(""));
+    out = out.replace("{{commits}}", ctx.commits.as_deref().unwrap_or(""));
+    out = out.replace(
+        "{{start_commit}}",
+        ctx.start_commit.as_deref().unwrap_or(""),
+    );
+    out = out.replace("{{end_commit}}", ctx.end_commit.as_deref().unwrap_or(""));
+    out = out.replace(
+        "{{conflict_files}}",
+        ctx.conflict_files.as_deref().unwrap_or(""),
+    );
+    out = out.replace(
+        "{{merge_base_branch}}",
+        ctx.merge_base_branch.as_deref().unwrap_or(""),
+    );
+    out = out.replace(
+        "{{merge_target_branch}}",
+        ctx.merge_target_branch.as_deref().unwrap_or(""),
+    );
+    out = out.replace(
+        "{{merge_failure_context}}",
+        ctx.merge_failure_context.as_deref().unwrap_or(""),
+    );
+
+    // Project command sections
+    let setup_section = match &ctx.setup_commands {
+        Some(cmds) if !cmds.trim().is_empty() => format!(
+            "## Automated Commands\n\nThese commands run automatically before your session starts. **Do not run them yourself.**\n\n{cmds}\n"
+        ),
+        _ => String::new(),
+    };
+    out = out.replace("{{setup_commands_section}}", &setup_section);
+
+    let epic_context_section = match &ctx.epic_context {
+        Some(text) if !text.trim().is_empty() => format!("## Epic Context\n\n{text}\n"),
+        _ => String::new(),
+    };
+    out = out.replace("{{epic_context_section}}", &epic_context_section);
+
+    let knowledge_context_section = match &ctx.knowledge_context {
+        Some(text) if !text.trim().is_empty() => format!(
+            "## Relevant Knowledge\n\n\
+             The following patterns, pitfalls, and cases were learned from previous work \
+             in the code areas this task touches.\n\n{text}\n"
+        ),
+        _ => String::new(),
+    };
+    out = out.replace("{{knowledge_context_section}}", &knowledge_context_section);
+
+    // PR E2: auto-injected `code_graph context` summary for worker/reviewer roles.
+    let code_graph_context_section = match &ctx.code_graph_context {
+        Some(text) if !text.trim().is_empty() => format!("## Code Graph Context\n\n{text}\n"),
+        _ => String::new(),
+    };
+    out = out.replace(
+        "{{code_graph_context_section}}",
+        &code_graph_context_section,
+    );
+
+    // PR E3: auto-injected `code_graph detect_changes` summary for reviewer roles.
+    let reviewer_diff_context_section = match &ctx.reviewer_diff_context {
+        Some(text) if !text.trim().is_empty() => format!("## Changed Symbols\n\n{text}\n"),
+        _ => String::new(),
+    };
+    out = out.replace(
+        "{{reviewer_diff_context_section}}",
+        &reviewer_diff_context_section,
+    );
+
+    let activity_section = match &ctx.activity {
+        Some(log) if !log.trim().is_empty() => format!(
+            "### Activity Log\n\nKey feedback and recent history from previous sessions. Use `task_activity_list` with filters for full details.\n\n{log}\n"
+        ),
+        _ => String::new(),
+    };
+    out = out.replace("{{activity_section}}", &activity_section);
+
+    // Worker submission context (reviewer-facing)
+    let worker_context_section = {
+        let mut parts = Vec::new();
+        if let Some(summary) = &ctx.worker_summary
+            && !summary.trim().is_empty()
+        {
+            parts.push(format!("### Worker's submission notes\n\n{summary}"));
+        }
+        if let Some(concerns) = &ctx.worker_concerns
+            && !concerns.trim().is_empty()
+        {
+            parts.push(format!("### Worker's remaining concerns\n\n{concerns}"));
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("## Worker Context\n\n{}\n", parts.join("\n\n"))
+        }
+    };
+    out = out.replace("{{worker_context_section}}", &worker_context_section);
+
+    // Hard cap: truncate the rendered system prompt to prevent context window
+    // blowout when individual sections escape their soft limits.
+    if out.len() > MAX_SYSTEM_PROMPT_CHARS {
+        let original_len = out.len();
+        out = truncate::smart_truncate(&out, MAX_SYSTEM_PROMPT_CHARS);
+        tracing::warn!(
+            agent_type = %config.name,
+            original_len,
+            truncated_to = out.len(),
+            "system prompt exceeded hard cap and was truncated"
+        );
+    }
+
+    out
+}
+
+// ─── Tool section generator ───────────────────────────────────────────────
+
+/// Generate a markdown tools reference from serialized tool schemas.
+///
+/// Each schema is expected to have `name`, `description`, and `inputSchema`
+/// (with `properties` and optionally `required`). Output is a bullet list:
+///
+/// ```text
+/// - `tool_name(required_param, optional_param?)` — Description text.
+/// ```
+pub fn format_tools_section(schemas: &[serde_json::Value]) -> String {
+    let mut lines = Vec::with_capacity(schemas.len());
+    for schema in schemas {
+        let name = schema["name"].as_str().unwrap_or("unknown");
+        let desc = schema["description"].as_str().unwrap_or("");
+        let input = &schema["inputSchema"];
+        let required: Vec<&str> = input["required"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+
+        // Collect parameter names in a stable order: required first, then optional.
+        let mut req_params = Vec::new();
+        let mut opt_params = Vec::new();
+        if let Some(props) = input["properties"].as_object() {
+            // Sort keys for deterministic output.
+            let mut keys: Vec<&String> = props.keys().collect();
+            keys.sort();
+            for key in keys {
+                if required.contains(&key.as_str()) {
+                    req_params.push(key.as_str());
+                } else {
+                    opt_params.push(format!("{key}?"));
+                }
+            }
+        }
+
+        let mut params: Vec<String> = req_params.iter().map(|s| s.to_string()).collect();
+        params.extend(opt_params);
+        let sig = params.join(", ");
+
+        lines.push(format!("- `{name}({sig})` — {desc}"));
+    }
+    lines.join("\n")
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Format a JSON acceptance-criteria array as a markdown checklist.
+///
+/// Input: `[{"criterion": "...", "met": false}, ...]`
+/// Output: `- [ ] ...\n- [x] ...\n`
+pub fn format_acceptance_criteria(json: &str) -> String {
+    #[derive(Deserialize)]
+    struct Criterion {
+        criterion: String,
+        #[serde(default)]
+        met: bool,
+    }
+
+    let Ok(criteria) = serde_json::from_str::<Vec<Criterion>>(json) else {
+        return json.to_string();
+    };
+
+    criteria
+        .into_iter()
+        .map(|c| {
+            let box_char = if c.met { "x" } else { " " };
+            format!("- [{box_char}] {}", c.criterion)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Format a JSON label array as a comma-separated string.
+///
+/// Input: `["wave:1", "tech-debt"]`
+/// Output: `wave:1, tech-debt`
+pub fn format_labels(json: &str) -> String {
+    djinn_core::models::parse_json_array(json).join(", ")
+}
+
+// ─── Truncation (moved from djinn-agent::truncate) ────────────────────────────
+
+mod truncate {
+    /// Find the largest byte index <= `idx` that is a valid UTF-8 char boundary.
+    fn floor_char_boundary(s: &str, idx: usize) -> usize {
+        if idx >= s.len() {
+            return s.len();
+        }
+        let mut i = idx;
+        while i > 0 && !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    }
+
+    /// Smart-truncate text to `max_bytes` using a 60% head + 40% tail split.
+    ///
+    /// Preserves both the beginning (context, setup) and end (errors, results)
+    /// of output.  Line-aware: splits happen at line boundaries when possible.
+    /// Returns the original string unchanged if it fits within the budget.
+    pub fn smart_truncate(text: &str, max_bytes: usize) -> String {
+        if text.len() <= max_bytes {
+            return text.to_string();
+        }
+
+        let total_bytes = text.len();
+
+        // Reserve some bytes for the separator line
+        let separator_reserve = 80;
+        let usable = max_bytes.saturating_sub(separator_reserve);
+        if usable == 0 {
+            return format!("[truncated — {total_bytes} bytes total]");
+        }
+
+        let head_budget = (usable * 60) / 100;
+        let tail_budget = usable - head_budget;
+
+        // Collect head lines within budget
+        let mut head_end = 0;
+        for line in text.split_inclusive('\n') {
+            if head_end + line.len() > head_budget && head_end > 0 {
+                break;
+            }
+            head_end += line.len();
+        }
+        head_end = floor_char_boundary(text, head_end);
+
+        // Collect tail lines within budget (scan backwards).
+        let mut tail_start = text.len();
+        let mut tail_used = 0usize;
+        let bytes = text.as_bytes();
+        let mut pos = text.len();
+        loop {
+            let line_start = if pos == 0 {
+                0
+            } else {
+                match bytes[..pos].iter().rposition(|&b| b == b'\n') {
+                    Some(nl) => nl + 1,
+                    None => 0,
+                }
+            };
+            let line_len = pos - line_start;
+            if tail_used + line_len > tail_budget && tail_used > 0 {
+                break;
+            }
+            tail_used += line_len;
+            tail_start = line_start;
+            if line_start == 0 {
+                break;
+            }
+            pos = line_start - 1;
+        }
+        while tail_start < text.len() && !text.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+
+        // Ensure no overlap
+        if head_end >= tail_start {
+            let end = floor_char_boundary(text, max_bytes.saturating_sub(separator_reserve));
+            return format!(
+                "{}\n\n[truncated — {total_bytes} bytes total]",
+                &text[..end]
+            );
+        }
+
+        let omitted = tail_start - head_end;
+        format!(
+            "{}\n\n... [{omitted} bytes omitted — {total_bytes} bytes total] ...\n\n{}",
+            text[..head_end].trim_end(),
+            text[tail_start..].trim_start()
+        )
+    }
+}

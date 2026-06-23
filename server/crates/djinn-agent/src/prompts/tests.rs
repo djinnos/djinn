@@ -1,4 +1,11 @@
 use super::*;
+use crate::AgentType;
+use djinn_core::models::Task;
+
+/// Ensure the tool schema registry is initialized for tests that need it.
+fn ensure_registry() {
+    crate::test_helpers::ensure_tool_schemas_registered();
+}
 
 /// G5: with progressive disclosure OFF (the default), `apply_skills`
 /// inlines every skill's full body — byte-identical to the pre-G5 form.
@@ -104,6 +111,7 @@ fn make_ctx() -> TaskContext {
 
 #[test]
 fn worker_prompt_contains_task_fields() {
+    ensure_registry();
     let task = make_task();
     let ctx = make_ctx();
     let prompt = render_prompt(AgentType::Worker, &task, &ctx);
@@ -530,6 +538,7 @@ impl Planner4lzxExternallyBlockedReplay {
 
 #[test]
 fn planner_4lzx_externally_blocked_replay_prunes_and_closes_in_one_session() {
+    ensure_registry();
     let replay = Planner4lzxExternallyBlockedReplay::synthetic_4lzx_externally_blocked_fixture();
     let mut planning_task = make_task();
     planning_task.id = replay.open_planning_task_id.into();
@@ -724,7 +733,8 @@ fn architect_prompt_requires_read_back_verification_before_file_comments() {
 
 #[test]
 fn worker_tools_section_snapshot() {
-    let schemas = (AgentType::Worker.role_config().tool_schemas)();
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Worker);
     let section = format_tools_section(&schemas);
     insta::with_settings!({ snapshot_path => "../snapshots" }, {
         insta::assert_snapshot!(section);
@@ -733,7 +743,8 @@ fn worker_tools_section_snapshot() {
 
 #[test]
 fn reviewer_tools_section_snapshot() {
-    let schemas = (AgentType::Reviewer.role_config().tool_schemas)();
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Reviewer);
     let section = format_tools_section(&schemas);
     insta::with_settings!({ snapshot_path => "../snapshots" }, {
         insta::assert_snapshot!(section);
@@ -742,7 +753,8 @@ fn reviewer_tools_section_snapshot() {
 
 #[test]
 fn lead_tools_section_snapshot() {
-    let schemas = (AgentType::Lead.role_config().tool_schemas)();
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Lead);
     let section = format_tools_section(&schemas);
     insta::with_settings!({ snapshot_path => "../snapshots" }, {
         insta::assert_snapshot!(section);
@@ -751,7 +763,8 @@ fn lead_tools_section_snapshot() {
 
 #[test]
 fn planner_tools_section_snapshot() {
-    let schemas = (AgentType::Planner.role_config().tool_schemas)();
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Planner);
     let section = format_tools_section(&schemas);
     insta::with_settings!({ snapshot_path => "../snapshots" }, {
         insta::assert_snapshot!(section);
@@ -760,7 +773,8 @@ fn planner_tools_section_snapshot() {
 
 #[test]
 fn architect_tools_section_snapshot() {
-    let schemas = (AgentType::Architect.role_config().tool_schemas)();
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Architect);
     let section = format_tools_section(&schemas);
     insta::with_settings!({ snapshot_path => "../snapshots" }, {
         insta::assert_snapshot!(section);
@@ -769,6 +783,7 @@ fn architect_tools_section_snapshot() {
 
 #[test]
 fn tools_section_injected_into_rendered_prompt() {
+    ensure_registry();
     let task = make_task();
     let ctx = make_ctx();
 
@@ -839,12 +854,12 @@ fn tools_section_injected_into_rendered_prompt() {
         "architect prompt should contain memory_health"
     );
 
-    let planner_tools = (AgentType::Planner.role_config().tool_schemas)();
+    let planner_tools = crate::roles::tool_schemas_for(AgentType::Planner);
     let planner_has_amend_tool = planner_tools.iter().any(|schema| {
         schema.get("name").and_then(|name| name.as_str()) == Some("agent_amend_prompt")
     });
 
-    let architect_tools = (AgentType::Architect.role_config().tool_schemas)();
+    let architect_tools = crate::roles::tool_schemas_for(AgentType::Architect);
     let architect_has_amend_tool = architect_tools.iter().any(|schema| {
         schema.get("name").and_then(|name| name.as_str()) == Some("agent_amend_prompt")
     });

@@ -1,4 +1,3 @@
-use crate::extension;
 use crate::prompts::TaskContext;
 use djinn_core::models::Task;
 
@@ -16,12 +15,11 @@ impl AgentRole for LeadRole {
     }
 }
 
-pub(crate) const LEAD_CONFIG: RoleConfig = RoleConfig {
-    name: "lead",
-    display_name: "Lead Intervention",
-    dispatch_role: "lead",
-    tool_schemas: extension::tool_schemas_lead,
-    initial_message: crate::prompts::LEAD_TEMPLATE,
-    finalize_tool_names: &["submit_decision"],
-    mode_section: None,
+pub(crate) static LEAD_CONFIG: RoleConfig = RoleConfig {
+    name: djinn_roles::config::LEAD_CONFIG.name,
+    display_name: djinn_roles::config::LEAD_CONFIG.display_name,
+    dispatch_role: djinn_roles::config::LEAD_CONFIG.dispatch_role,
+    initial_message: djinn_roles::config::LEAD_CONFIG.initial_message,
+    finalize_tool_names: djinn_roles::config::LEAD_CONFIG.finalize_tool_names,
+    mode_section: djinn_roles::config::LEAD_CONFIG.mode_section,
 };

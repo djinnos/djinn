@@ -1,4 +1,3 @@
-use crate::extension;
 use crate::prompts::TaskContext;
 use djinn_core::models::Task;
 
@@ -16,12 +15,11 @@ impl AgentRole for ReviewerRole {
     }
 }
 
-pub(crate) const REVIEWER_CONFIG: RoleConfig = RoleConfig {
-    name: "reviewer",
-    display_name: "Reviewer",
-    dispatch_role: "reviewer",
-    tool_schemas: extension::tool_schemas_reviewer,
-    initial_message: crate::prompts::REVIEWER_TEMPLATE,
-    finalize_tool_names: &["submit_review", "request_lead"],
-    mode_section: None,
+pub(crate) static REVIEWER_CONFIG: RoleConfig = RoleConfig {
+    name: djinn_roles::config::REVIEWER_CONFIG.name,
+    display_name: djinn_roles::config::REVIEWER_CONFIG.display_name,
+    dispatch_role: djinn_roles::config::REVIEWER_CONFIG.dispatch_role,
+    initial_message: djinn_roles::config::REVIEWER_CONFIG.initial_message,
+    finalize_tool_names: djinn_roles::config::REVIEWER_CONFIG.finalize_tool_names,
+    mode_section: djinn_roles::config::REVIEWER_CONFIG.mode_section,
 };

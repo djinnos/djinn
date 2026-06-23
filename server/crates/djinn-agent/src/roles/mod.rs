@@ -1,10 +1,25 @@
-use super::AgentType;
+//! Agent roles facade.
+//!
+//! After Phase 3, core role data (`AgentType`, `RoleConfig`, prompt templates
+//! and rendering) lives in [`djinn_roles`].  This module re-exports those
+//! public symbols under the old `djinn_agent::roles::*` paths so existing
+//! consumers keep compiling unchanged, and adds the agent-specific pieces
+//! that depend on `djinn-agent` internals (the `AgentRole` trait, concrete
+//! role implementations, dispatch logic, and the `RoleRegistry`).
+
 use crate::context::AgentContext;
 use crate::prompts::TaskContext;
 use djinn_core::models::Task;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+// ─── Re-exports from djinn-roles (facade paths) ─────────────────────────────
+
+pub use djinn_roles::config::RoleConfig;
+pub use djinn_roles::config::config_for;
+
+// ─── Agent-specific role implementations ─────────────────────────────────────
 
 mod architect;
 pub mod finalize;
@@ -13,43 +28,16 @@ mod planner;
 mod reviewer;
 mod worker;
 
-pub(crate) use architect::{ARCHITECT_CONFIG, ArchitectRole};
-pub(crate) use lead::{LEAD_CONFIG, LeadRole};
-pub(crate) use planner::{PLANNER_CONFIG, PlannerRole};
-pub(crate) use reviewer::{REVIEWER_CONFIG, ReviewerRole};
-pub(crate) use worker::{WORKER_CONFIG, WorkerRole};
+pub(crate) use architect::ArchitectRole;
+pub(crate) use lead::LeadRole;
+pub(crate) use planner::PlannerRole;
+pub(crate) use reviewer::ReviewerRole;
+pub(crate) use worker::WorkerRole;
 
-#[derive(Clone, Copy)]
-pub(crate) struct RoleConfig {
-    pub(crate) name: &'static str,
-    pub(crate) display_name: &'static str,
-    pub(crate) dispatch_role: &'static str,
-    pub(crate) tool_schemas: fn() -> Vec<serde_json::Value>,
-    pub(crate) initial_message: &'static str,
-    /// Tool names the agent can call to signal completion for this role.
-    /// The first entry is the primary finalize tool; additional entries are
-    /// alternate exit paths (e.g. `request_lead` for workers).
-    pub(crate) finalize_tool_names: &'static [&'static str],
-    /// Mode selector: given the task + render context, return the single
-    /// mode-specific prompt section to inject at `{{role_mode_section}}`.
-    /// `None` for single-mode roles (their template has no placeholder).
-    ///
-    /// This is how the *dispatcher* (code, not the LLM) picks the workflow:
-    /// instead of the prompt asking the model to "detect your mode", the
-    /// builder injects only the relevant mode's instructions. Keep each
-    /// selector in lockstep with [`flow_for_task_dispatch`] /
-    /// [`role_for_task_dispatch`].
-    pub(crate) mode_section: Option<fn(&Task, &TaskContext) -> &'static str>,
-}
-
-pub(crate) fn config_for(agent_type: AgentType) -> &'static RoleConfig {
-    match agent_type {
-        AgentType::Worker => &WORKER_CONFIG,
-        AgentType::Reviewer => &REVIEWER_CONFIG,
-        AgentType::Lead => &LEAD_CONFIG,
-        AgentType::Planner => &PLANNER_CONFIG,
-        AgentType::Architect => &ARCHITECT_CONFIG,
-    }
+/// Resolve the concrete tool schemas for an `AgentType` using the
+/// djinn-roles registry.
+pub(crate) fn tool_schemas_for(agent_type: crate::AgentType) -> Vec<serde_json::Value> {
+    djinn_roles::tool_schemas_for(agent_type)
 }
 
 /// Thin role trait that every agent role must implement.
@@ -88,18 +76,18 @@ pub(crate) trait AgentRole: Send + Sync + 'static {
 ///
 /// This is the tool name the agent must call to signal session completion.
 /// Convenience wrapper over `role_impl_for(agent_type).finalize_tool_name()`.
-pub fn finalize_tool_name_for(agent_type: AgentType) -> &'static str {
+pub fn finalize_tool_name_for(agent_type: crate::AgentType) -> &'static str {
     role_impl_for(agent_type).finalize_tool_name()
 }
 
 /// Resolve the concrete `AgentRole` implementation for an `AgentType`.
-pub(crate) fn role_impl_for(agent_type: AgentType) -> Arc<dyn AgentRole> {
+pub(crate) fn role_impl_for(agent_type: crate::AgentType) -> Arc<dyn AgentRole> {
     match agent_type {
-        AgentType::Worker => Arc::new(WorkerRole),
-        AgentType::Reviewer => Arc::new(ReviewerRole),
-        AgentType::Lead => Arc::new(LeadRole),
-        AgentType::Planner => Arc::new(PlannerRole),
-        AgentType::Architect => Arc::new(ArchitectRole),
+        crate::AgentType::Worker => Arc::new(WorkerRole),
+        crate::AgentType::Reviewer => Arc::new(ReviewerRole),
+        crate::AgentType::Lead => Arc::new(LeadRole),
+        crate::AgentType::Planner => Arc::new(PlannerRole),
+        crate::AgentType::Architect => Arc::new(ArchitectRole),
     }
 }
 
@@ -139,11 +127,11 @@ pub(crate) fn role_for_task_dispatch(
     if let Some(ref specialist) = task.agent_type
         && !specialist.is_empty()
         && let Some(base) = match specialist.as_str() {
-            "worker" => Some(AgentType::Worker),
-            "reviewer" => Some(AgentType::Reviewer),
-            "lead" | "pm" => Some(AgentType::Lead),
-            "planner" => Some(AgentType::Planner),
-            "architect" => Some(AgentType::Architect),
+            "worker" => Some(crate::AgentType::Worker),
+            "reviewer" => Some(crate::AgentType::Reviewer),
+            "lead" | "pm" => Some(crate::AgentType::Lead),
+            "planner" => Some(crate::AgentType::Planner),
+            "architect" => Some(crate::AgentType::Architect),
             _ => None,
         }
     {
@@ -154,18 +142,21 @@ pub(crate) fn role_for_task_dispatch(
     match task.issue_type.as_str() {
         // `epic_breakdown` is proposal decomposition — Planner Mode D.
         "planning" | "decomposition" | "epic_breakdown" => {
-            return role_impl_for(AgentType::Planner);
+            return role_impl_for(crate::AgentType::Planner);
         }
         // ADR-051 §1 + §8: review tasks are Planner-owned (escalation +
         // lead escalation ceiling).  Previously this routed to Architect
         // per ADR-034 before the split.
-        "review" => return role_impl_for(AgentType::Planner),
+        "review" => return role_impl_for(crate::AgentType::Planner),
         // Spikes remain the Architect's territory — they are how the
         // Planner asks for deep code-structural reasoning (ADR-051 §2).
-        "spike" => return role_impl_for(AgentType::Architect),
+        "spike" => return role_impl_for(crate::AgentType::Architect),
         _ => {}
     }
-    role_impl_for(AgentType::for_task_status(task.status.as_str(), false))
+    role_impl_for(crate::AgentType::for_task_status(
+        task.status.as_str(),
+        false,
+    ))
 }
 
 /// Coordinator-side flow selector mirroring [`role_for_task_dispatch`] for the
@@ -256,7 +247,7 @@ pub(crate) struct DispatchRule {
 }
 
 pub struct RoleRegistry {
-    pub(crate) roles: HashMap<&'static str, AgentType>,
+    pub(crate) roles: HashMap<&'static str, crate::AgentType>,
     pub(crate) dispatch_rules: Vec<DispatchRule>,
 }
 
@@ -269,11 +260,11 @@ impl Default for RoleRegistry {
 impl RoleRegistry {
     pub fn new() -> Self {
         let roles = HashMap::from([
-            ("worker", AgentType::Worker),
-            ("reviewer", AgentType::Reviewer),
-            ("lead", AgentType::Lead),
-            ("planner", AgentType::Planner),
-            ("architect", AgentType::Architect),
+            ("worker", crate::AgentType::Worker),
+            ("reviewer", crate::AgentType::Reviewer),
+            ("lead", crate::AgentType::Lead),
+            ("planner", crate::AgentType::Planner),
+            ("architect", crate::AgentType::Architect),
         ]);
 
         let dispatch_rules = vec![
@@ -367,11 +358,10 @@ fn planner_review_dispatch_rule() -> DispatchRule {
 /// dispatched to the Planner role). Also matches legacy `decomposition` for
 /// backward compatibility with existing DB rows.
 fn planning_claims(task: &Task, _ctx: &DispatchContext) -> bool {
-    matches!(task.status.as_str(), "open" | "in_progress")
-        && matches!(
-            task.issue_type.as_str(),
-            "planning" | "decomposition" | "epic_breakdown"
-        )
+    matches!(
+        task.issue_type.as_str(),
+        "planning" | "decomposition" | "epic_breakdown"
+    )
 }
 
 fn planning_dispatch_rule() -> DispatchRule {
