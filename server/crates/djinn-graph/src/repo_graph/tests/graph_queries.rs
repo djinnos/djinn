@@ -331,6 +331,7 @@ fn impact_edge_propagates(kind: RepoGraphEdgeKind) -> bool {
             | RepoGraphEdgeKind::Defines
             | RepoGraphEdgeKind::HandlesRoute
             | RepoGraphEdgeKind::Fetches
+            | RepoGraphEdgeKind::TraitDispatchCall
     )
 }
 // F6: query-planner search path. The OFF path must be identical to the
