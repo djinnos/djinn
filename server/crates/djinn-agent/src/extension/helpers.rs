@@ -151,6 +151,9 @@ pub(super) fn is_tool_allowed_for_schemas(schemas: &[serde_json::Value], name: &
 pub(super) fn tool_names_for_agent(
     agent_type: crate::AgentType,
 ) -> std::collections::BTreeSet<String> {
+    // Ensure the djinn-roles tool schema registry is populated before
+    // resolving tool names.  Idempotent (guarded by `Once` inside).
+    crate::init_tool_schema_registry();
     crate::roles::tool_schemas_for(agent_type)
         .into_iter()
         .filter_map(|schema| {
