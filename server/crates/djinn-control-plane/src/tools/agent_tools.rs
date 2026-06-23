@@ -17,7 +17,8 @@ mod ops;
 
 pub use self::ops::{
     AgentCreateParams, AgentMetricEntry, AgentMetricsParams, AgentMetricsResponse, AgentModel,
-    AgentSingleResponse, create_agent, metrics_for_agents,
+    AgentSingleResponse, create_agent, filter_native_skill_entries, is_native_skill_name,
+    metrics_for_agents, reject_native_skill_entries,
 };
 
 use self::ops::{agent_not_found_error, resolve_agent, validate_agent_name, validate_base_role};
@@ -341,6 +342,15 @@ impl DjinnMcpServer {
             .as_ref()
             .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()))
             .unwrap_or_else(|| role.skills.clone());
+        // Reject native skill names before persisting.
+        if let Some(ref skills) = p.skills
+            && let Err(e) = reject_native_skill_entries(skills)
+        {
+            return Json(AgentSingleResponse {
+                agent: None,
+                error: Some(e),
+            });
+        }
         // Reject direct learned_prompt setting before any clear/update side
         // effect — it bypasses history/evaluator semantics, and mixed
         // learned_prompt + clear_learned_prompt requests must be atomic errors.
@@ -538,5 +548,259 @@ mod tests {
                 .and_then(|value| value.as_i64()),
             Some(0)
         );
+    }
+
+    #[tokio::test]
+    async fn agent_create_rejects_native_skill_names() {
+        let (server, _dir, project_path) = test_server().await;
+
+        let result = server
+            .dispatch_tool(
+                "agent_create",
+                serde_json::json!({
+                    "project": project_path,
+                    "name": "Native Skill Creator",
+                    "base_role": "worker",
+                    "skills": ["visual-spec"]
+                }),
+            )
+            .await
+            .expect("dispatch agent_create");
+
+        let error = result
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("should have error");
+        assert!(
+            error.contains("native/immutable"),
+            "error should mention native/immutable: {error}"
+        );
+        assert!(
+            error.contains("'visual-spec'"),
+            "error should list the offending name: {error}"
+        );
+        assert!(
+            error.contains("platform-owned"),
+            "error should explain platform ownership: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_create_rejects_native_skill_in_object_form() {
+        let (server, _dir, project_path) = test_server().await;
+
+        let result = server
+            .dispatch_tool(
+                "agent_create",
+                serde_json::json!({
+                    "project": project_path,
+                    "name": "Native Obj Creator",
+                    "base_role": "worker",
+                    "skills": [{"name": "visual-spec"}]
+                }),
+            )
+            .await
+            .expect("dispatch agent_create");
+
+        let error = result
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("should have error");
+        assert!(error.contains("'visual-spec'"));
+    }
+
+    #[tokio::test]
+    async fn agent_create_allows_non_native_skills() {
+        let (server, _dir, project_path) = test_server().await;
+
+        let result = server
+            .dispatch_tool(
+                "agent_create",
+                serde_json::json!({
+                    "project": project_path,
+                    "name": "Good Creator",
+                    "base_role": "worker",
+                    "skills": ["my-skill", "another-skill"]
+                }),
+            )
+            .await
+            .expect("dispatch agent_create");
+
+        assert_eq!(result.get("error"), None, "should succeed without error");
+        assert_eq!(
+            result.get("name").and_then(|v| v.as_str()),
+            Some("Good Creator")
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_update_rejects_native_skill_names() {
+        let (server, _dir, project_path) = test_server().await;
+
+        // First create an agent without native skills.
+        let create = server
+            .dispatch_tool(
+                "agent_create",
+                serde_json::json!({
+                    "project": project_path,
+                    "name": "Update Target",
+                    "base_role": "worker"
+                }),
+            )
+            .await
+            .expect("dispatch agent_create");
+        assert_eq!(create.get("error"), None);
+
+        // Attempt to update with a native skill name.
+        let result = server
+            .dispatch_tool(
+                "agent_update",
+                serde_json::json!({
+                    "project": project_path,
+                    "id": "Update Target",
+                    "skills": ["visual-spec"]
+                }),
+            )
+            .await
+            .expect("dispatch agent_update");
+
+        let error = result
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("should have error");
+        assert!(
+            error.contains("native/immutable"),
+            "error should mention native/immutable: {error}"
+        );
+        assert!(error.contains("'visual-spec'"));
+    }
+
+    #[tokio::test]
+    async fn agent_update_allows_non_native_skills() {
+        let (server, _dir, project_path) = test_server().await;
+
+        // Create an agent.
+        let create = server
+            .dispatch_tool(
+                "agent_create",
+                serde_json::json!({
+                    "project": project_path,
+                    "name": "Update Good Target",
+                    "base_role": "worker"
+                }),
+            )
+            .await
+            .expect("dispatch agent_create");
+        assert_eq!(create.get("error"), None);
+
+        // Update with non-native skills — should succeed.
+        let result = server
+            .dispatch_tool(
+                "agent_update",
+                serde_json::json!({
+                    "project": project_path,
+                    "id": "Update Good Target",
+                    "skills": ["my-skill"]
+                }),
+            )
+            .await
+            .expect("dispatch agent_update");
+
+        assert_eq!(result.get("error"), None, "should succeed without error");
+    }
+
+    #[tokio::test]
+    async fn agent_show_filters_stale_native_skills() {
+        let (server, _dir, project_path) = test_server().await;
+
+        // Create a clean agent.
+        let create = server
+            .dispatch_tool(
+                "agent_create",
+                serde_json::json!({
+                    "project": project_path,
+                    "name": "Stale Show Agent",
+                    "base_role": "worker",
+                    "skills": ["good-skill"]
+                }),
+            )
+            .await
+            .expect("dispatch agent_create");
+        assert_eq!(create.get("error"), None);
+
+        // Show the agent — skills should only contain non-native entries.
+        let show = server
+            .dispatch_tool(
+                "agent_show",
+                serde_json::json!({
+                    "project": project_path,
+                    "id": "Stale Show Agent"
+                }),
+            )
+            .await
+            .expect("dispatch agent_show");
+
+        let skills = show
+            .get("skills")
+            .and_then(|v| v.as_array())
+            .expect("skills array");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].as_str(), Some("good-skill"));
+        // Verify no native names leaked.
+        for skill in skills {
+            if let Some(name) = skill.as_str() {
+                assert!(
+                    !name.starts_with("visual-spec"),
+                    "agent_show should not expose native skill '{name}'"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_list_filters_stale_native_skills() {
+        let (server, _dir, project_path) = test_server().await;
+
+        // Create an agent.
+        let create = server
+            .dispatch_tool(
+                "agent_create",
+                serde_json::json!({
+                    "project": project_path,
+                    "name": "Stale List Agent",
+                    "base_role": "worker",
+                    "skills": ["good-skill"]
+                }),
+            )
+            .await
+            .expect("dispatch agent_create");
+        assert_eq!(create.get("error"), None);
+
+        // List agents — skills should only contain non-native entries.
+        let list = server
+            .dispatch_tool(
+                "agent_list",
+                serde_json::json!({
+                    "project": project_path
+                }),
+            )
+            .await
+            .expect("dispatch agent_list");
+
+        let agents = list
+            .get("agents")
+            .and_then(|v| v.as_array())
+            .expect("agents array");
+        let agent = agents
+            .iter()
+            .find(|a| a.get("name").and_then(|v| v.as_str()) == Some("Stale List Agent"))
+            .expect("found agent");
+
+        let skills = agent
+            .get("skills")
+            .and_then(|v| v.as_array())
+            .expect("skills array");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].as_str(), Some("good-skill"));
     }
 }
