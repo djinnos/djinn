@@ -51,3 +51,6 @@ pub use context::ExtensionContext;
 
 // Re-export dispatch result for façade consumers.
 pub use dispatch::DispatchResult;
+
+#[cfg(test)]
+mod tests;

@@ -62,12 +62,6 @@ pub(super) fn error_or_to_value<T>(
     })
 }
 
-/// Find the largest byte index <= `idx` that is a valid UTF-8 char boundary.
-#[cfg(test)]
-pub(super) fn floor_char_boundary(s: &str, idx: usize) -> usize {
-    crate::truncate::floor_char_boundary(s, idx)
-}
-
 /// Normalize `Some("")` → `None`. OpenAI models often send empty strings
 /// for optional parameters instead of omitting them, which breaks SQL filters.
 pub(super) fn non_empty(opt: Option<String>) -> Option<String> {
