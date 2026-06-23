@@ -7,6 +7,13 @@ pub(crate) mod tool_defs;
 mod tool_defs_code_graph;
 mod types;
 
+// Façade: re-export the public surface of `djinn-mcp-extension` so that
+// existing callers see the same paths once code is migrated there.
+// At this stage the re-export is a compatibility seam; modules above
+// remain the live code locations until later extraction waves move them.
+#[allow(unused_imports)]
+pub use djinn_mcp_extension as mcp_ext;
+
 use std::path::Path;
 
 use crate::context::AgentContext;
