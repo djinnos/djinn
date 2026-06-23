@@ -43,12 +43,7 @@ impl TaskRepository {
         target_override: Option<TaskStatus>,
         conflict_metadata: Option<&str>,
     ) -> Result<Task> {
-        // Check reason requirement before touching the DB.
-        if action.requires_reason() && reason.map(str::is_empty).unwrap_or(true) {
-            return Err(Error::InvalidTransition(format!(
-                "{action:?} requires a non-empty reason"
-            )));
-        }
+        Self::validate_reason_requirement(&action, reason)?;
 
         self.db.ensure_initialized().await?;
         let reason_str = reason.unwrap_or("").to_owned();
@@ -74,7 +69,6 @@ impl TaskRepository {
                 async move {
                     let mut tx = self.db.pool().begin().await?;
 
-                    // Load current task.
                     let current: Task =
                         task_select_where_id!(&id).fetch_one(&mut *tx).await?;
                     let from = TaskStatus::parse(&current.status)?;
@@ -86,7 +80,6 @@ impl TaskRepository {
                         None
                     };
 
-                    // Validate and compute side effects.
                     let apply = compute_transition_for_issue_type(
                         &action,
                         &from,
@@ -94,97 +87,23 @@ impl TaskRepository {
                         &current.issue_type,
                     )?;
 
-                    // For pre-completion closes: reject if this task still blocks other non-closed
-                    // tasks. The lead/architect must reassign blockers to replacement tasks before
-                    // closing incomplete work. Closures from post-approval states (Approved, PrDraft,
-                    // PrReview) and PrMerge are exempt because the work actually landed.
-                    // Simple-lifecycle tasks (spikes, research, planning, review) are also exempt
-                    // when closed via Close — closing IS their completion, they never go through
-                    // approval/merge states.
-                    let simple_lifecycle_close = IssueType::parse(&current.issue_type)
-                        .map(|it| it.uses_simple_lifecycle())
-                        .unwrap_or(false)
-                        && action == TransitionAction::Close;
-                    let work_landed = matches!(
-                        from,
-                        TaskStatus::Approved | TaskStatus::PrDraft | TaskStatus::PrReview
-                    ) || action == TransitionAction::PrMerge
-                        || simple_lifecycle_close
-                        || action == TransitionAction::ForceClose;
-                    if apply.set_closed_at && !work_landed {
-                        let downstream = sqlx::query_as!(
-                            BlockerRef,
-                            r#"SELECT t.id AS task_id, t.short_id, t.title, t.status AS "status!"
-                             FROM blockers b
-                             JOIN tasks t ON t.id = b.task_id
-                             WHERE b.blocking_task_id = $1
-                               AND t.status != 'closed'"#,
-                            id
-                        )
-                        .fetch_all(&mut *tx)
-                        .await?;
-                        if !downstream.is_empty() {
-                            let names: Vec<String> = downstream
-                                .iter()
-                                .map(|b| format!("{} ({})", b.short_id, b.title))
-                                .collect();
-                            return Err(Error::InvalidTransition(format!(
-                                "task blocks {} other task(s): {}. Remove or reassign these blockers before closing.",
-                                downstream.len(),
-                                names.join(", ")
-                            )));
-                        }
-                    }
+                    Self::validate_close_blockers_guard(
+                        &current, &apply, &action, &from, &id, &mut tx,
+                    )
+                    .await?;
 
-                    // For Start: block if any unresolved blockers exist.
-                    // A blocker is unresolved if its blocking task has not reached post-merge states.
-                    if action == TransitionAction::Start {
-                        let uses_simple = IssueType::parse(&current.issue_type)
-                            .map(|it| it.uses_simple_lifecycle())
-                            .unwrap_or(false);
-                        if !uses_simple {
-                            let ac = current.acceptance_criteria.trim();
-                            if ac.is_empty() || ac == "[]" {
-                                return Err(Error::InvalidTransition(
-                                    "task has no acceptance criteria".into(),
-                                ));
-                            }
-                        }
-                        let count: i64 = sqlx::query_scalar!(
-                            r#"SELECT COUNT(*) AS "count!: i64" FROM blockers b
-                             JOIN tasks bt ON b.blocking_task_id = bt.id
-                             WHERE b.task_id = $1
-                               AND bt.status != 'closed'"#,
-                            id
-                        )
-                        .fetch_one(&mut *tx)
-                        .await?;
-                        if count > 0 {
-                            return Err(Error::InvalidTransition(
-                                "task has unresolved blockers".into(),
-                            ));
-                        }
-                    }
+                    Self::validate_start_guard(&current, &action, &id, &mut tx).await?;
 
                     let to_status = apply
                         .to_status
+                        .as_ref()
                         .expect("all transitions must have a target status");
                     let to_str = to_status.as_str();
                     let from_str = from.as_str();
 
-                    // Auto-extract conflict metadata from reason when the transition sets the flag
-                    // but no explicit metadata was provided. The reason has the format:
-                    // "merge_conflict:{JSON}" — extract the JSON portion.
-                    let effective_conflict_metadata: Option<String> =
-                        if apply.set_merge_conflict_metadata {
-                            conflict_metadata.clone().or_else(|| {
-                                reason_str
-                                    .strip_prefix("merge_conflict:")
-                                    .map(|s| s.to_owned())
-                            })
-                        } else {
-                            None
-                        };
+                    let effective_conflict_metadata = Self::resolve_conflict_metadata(
+                        &apply, &conflict_metadata, &reason_str,
+                    );
                     let conflict_meta_ref = effective_conflict_metadata.as_deref();
 
                     // Apply all side effects atomically.
@@ -234,20 +153,10 @@ impl TaskRepository {
                     .execute(&mut *tx)
                     .await?;
 
-                    // Append activity log entry.
-                    let activity_id = uuid::Uuid::now_v7().to_string();
-                    let mut payload_obj = serde_json::json!({
-                        "from_status": from_str,
-                        "to_status": to_str,
-                        "reason": if reason_str.is_empty() { None } else { Some(reason_str.as_str()) },
-                    });
-                    if let Some(ref ac) = ac_snapshot {
-                        let ac_value: serde_json::Value =
-                            serde_json::from_str(ac).unwrap_or(serde_json::json!([]));
-                        payload_obj["ac_snapshot"] = ac_value;
-                    }
-                    let payload = payload_obj;
+                    let payload =
+                        Self::build_activity_payload(from_str, to_str, &reason_str, &ac_snapshot);
 
+                    let activity_id = uuid::Uuid::now_v7().to_string();
                     sqlx::query!(
                         "INSERT INTO activity_log
                             (id, task_id, actor_id, actor_role, event_type, payload)
@@ -477,5 +386,154 @@ impl TaskRepository {
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
         Ok(task)
+    }
+
+    // ── Private helpers for transition_with_conflict_metadata ─────────────────
+
+    /// Pre-DB validation: reject transitions whose action requires a reason when none is provided.
+    fn validate_reason_requirement(action: &TransitionAction, reason: Option<&str>) -> Result<()> {
+        if action.requires_reason() && reason.map(str::is_empty).unwrap_or(true) {
+            return Err(Error::InvalidTransition(format!(
+                "{action:?} requires a non-empty reason"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Guard for pre-completion closes: reject if this task still blocks other
+    /// non-closed tasks. Exemptions:
+    /// - Closures from post-approval states (Approved, PrDraft, PrReview)
+    /// - PrMerge and ForceClose actions
+    /// - Simple-lifecycle tasks closed via Close (closing IS their completion)
+    async fn validate_close_blockers_guard(
+        current: &Task,
+        apply: &djinn_core::models::TransitionApply,
+        action: &TransitionAction,
+        from: &TaskStatus,
+        id: &str,
+        tx: &mut sqlx::PgConnection,
+    ) -> Result<()> {
+        if !apply.set_closed_at {
+            return Ok(());
+        }
+
+        let simple_lifecycle_close = IssueType::parse(&current.issue_type)
+            .map(|it| it.uses_simple_lifecycle())
+            .unwrap_or(false)
+            && *action == TransitionAction::Close;
+        let work_landed = matches!(
+            from,
+            TaskStatus::Approved | TaskStatus::PrDraft | TaskStatus::PrReview
+        ) || *action == TransitionAction::PrMerge
+            || simple_lifecycle_close
+            || *action == TransitionAction::ForceClose;
+        if work_landed {
+            return Ok(());
+        }
+
+        let downstream = sqlx::query_as::<_, BlockerRef>(
+            r#"SELECT t.id AS task_id, t.short_id, t.title, t.status
+             FROM blockers b
+             JOIN tasks t ON t.id = b.task_id
+             WHERE b.blocking_task_id = $1
+               AND t.status != 'closed'"#,
+        )
+        .bind(id)
+        .fetch_all(tx)
+        .await?;
+        if downstream.is_empty() {
+            return Ok(());
+        }
+
+        let names: Vec<String> = downstream
+            .iter()
+            .map(|b| format!("{} ({})", b.short_id, b.title))
+            .collect();
+        Err(Error::InvalidTransition(format!(
+            "task blocks {} other task(s): {}. Remove or reassign these blockers before closing.",
+            downstream.len(),
+            names.join(", ")
+        )))
+    }
+
+    /// Guard for Start: require acceptance criteria (for full-lifecycle types)
+    /// and reject if any unresolved blockers exist.
+    async fn validate_start_guard(
+        current: &Task,
+        action: &TransitionAction,
+        id: &str,
+        tx: &mut sqlx::PgConnection,
+    ) -> Result<()> {
+        if *action != TransitionAction::Start {
+            return Ok(());
+        }
+
+        let uses_simple = IssueType::parse(&current.issue_type)
+            .map(|it| it.uses_simple_lifecycle())
+            .unwrap_or(false);
+        if !uses_simple {
+            let ac = current.acceptance_criteria.trim();
+            if ac.is_empty() || ac == "[]" {
+                return Err(Error::InvalidTransition(
+                    "task has no acceptance criteria".into(),
+                ));
+            }
+        }
+
+        let count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM blockers b
+             JOIN tasks bt ON b.blocking_task_id = bt.id
+             WHERE b.task_id = $1
+               AND bt.status != 'closed'"#,
+        )
+        .bind(id)
+        .fetch_one(tx)
+        .await?;
+        if count > 0 {
+            return Err(Error::InvalidTransition(
+                "task has unresolved blockers".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Derive the effective conflict metadata JSON for the transition.
+    ///
+    /// Auto-extracts from reason (`"merge_conflict:{JSON}"`) when the transition
+    /// sets the merge-conflict-metadata flag but no explicit metadata was provided.
+    fn resolve_conflict_metadata(
+        apply: &djinn_core::models::TransitionApply,
+        conflict_metadata: &Option<String>,
+        reason_str: &str,
+    ) -> Option<String> {
+        if !apply.set_merge_conflict_metadata {
+            return None;
+        }
+        conflict_metadata.clone().or_else(|| {
+            reason_str
+                .strip_prefix("merge_conflict:")
+                .map(|s| s.to_owned())
+        })
+    }
+
+    /// Build the activity log payload JSON from transition state.
+    fn build_activity_payload(
+        from_str: &str,
+        to_str: &str,
+        reason_str: &str,
+        ac_snapshot: &Option<String>,
+    ) -> serde_json::Value {
+        let mut payload_obj = serde_json::json!({
+            "from_status": from_str,
+            "to_status": to_str,
+            "reason": if reason_str.is_empty() { None } else { Some(reason_str) },
+        });
+        if let Some(ac) = ac_snapshot {
+            let ac_value: serde_json::Value =
+                serde_json::from_str(ac).unwrap_or(serde_json::json!([]));
+            payload_obj["ac_snapshot"] = ac_value;
+        }
+        payload_obj
     }
 }

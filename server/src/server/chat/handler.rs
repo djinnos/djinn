@@ -520,21 +520,21 @@ pub(super) async fn completions_handler_impl(
                 user_token,
                 SESSION_USER_ID.scope(
                     user_id,
-                    run_chat_loop(
-                        spawn_state,
+                    run_chat_loop(ChatLoopContext {
+                        state: spawn_state,
                         provider,
                         conversation,
                         tool_schemas,
                         resolver,
                         mcp,
                         tx,
-                        session_id_for_loop,
+                        session_id: session_id_for_loop,
                         needs_title,
                         user_turn_for_title,
-                        model_for_title,
+                        model_id: model_for_title,
                         context_window,
                         extra_allowed_mcp,
-                    ),
+                    }),
                 ),
             )
             .await;
@@ -543,11 +543,12 @@ pub(super) async fn completions_handler_impl(
     Ok(Sse::new(ReceiverStream::new(rx).map(Ok)).keep_alive(KeepAlive::default()))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_chat_loop(
+/// Internal context bundle passed into `run_chat_loop` so the spawn
+/// call and the loop body don't carry a 15-parameter positional list.
+struct ChatLoopContext {
     state: AppState,
     provider: Box<dyn LlmProvider>,
-    mut conversation: Conversation,
+    conversation: Conversation,
     tool_schemas: Vec<serde_json::Value>,
     resolver: Arc<ProjectResolver>,
     mcp: DjinnMcpServer,
@@ -557,10 +558,27 @@ async fn run_chat_loop(
     user_turn_for_title: Option<Vec<ContentBlock>>,
     model_id: String,
     context_window: i64,
-    // Extra MCP tools allowed for this loop on top of the global chat allowlist
-    // (the proposal-editing subset for a proposal-scoped chat; empty otherwise).
+    /// Extra MCP tools allowed for this loop on top of the global chat allowlist
+    /// (the proposal-editing subset for a proposal-scoped chat; empty otherwise).
     extra_allowed_mcp: Vec<String>,
-) {
+}
+
+async fn run_chat_loop(ctx: ChatLoopContext) {
+    let ChatLoopContext {
+        state,
+        provider,
+        mut conversation,
+        tool_schemas,
+        resolver,
+        mcp,
+        tx,
+        session_id,
+        needs_title,
+        user_turn_for_title,
+        model_id,
+        context_window,
+        extra_allowed_mcp,
+    } = ctx;
     let agent_ctx = state.agent_context();
     let mut loop_count = 0usize;
     // C3: bound the reactive compact-and-retry on a context-overflow stream
