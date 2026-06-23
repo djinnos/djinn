@@ -221,7 +221,19 @@ export function ZoomPanSurface({
         interactive && zoomed
           ? "cursor-grab active:cursor-grabbing"
           : "cursor-default",
-        inFullscreen ? "h-full" : "max-h-[70vh]",
+        // Height policy:
+        //   - fullscreen fills its dialog (`h-full`),
+        //   - an INTERACTIVE inline surface caps at 70vh and CLIPS
+        //     (`overflow-hidden` above), so the cap is safe — content stays
+        //     inside the box and pan/zoom navigates it,
+        //   - a STATIC inline surface uses `overflow-visible`, so a `max-h`
+        //     cap would let a taller-than-70vh diagram bleed past its own box:
+        //     the next block lays out at the (capped) box bottom while the SVG
+        //     overflows on top of it (visible overlap) AND that escaped
+        //     overflow inflates the document height into a second scrollbar.
+        //     So a static surface takes its NATURAL height (no cap) — it "sits
+        //     at its natural fit" as intended; fullscreen handles inspection.
+        inFullscreen ? "h-full" : interactive ? "max-h-[70vh]" : "",
       )}
       // Static inline mode attaches NO wheel/drag handlers — no zoom capture,
       // no pan; the page scrolls right over it.
