@@ -1618,6 +1618,7 @@ mod tests {
                     status: "building",
                     superseded_by: None,
                     body_format: Some("markdown"),
+                    event_metadata: None,
                 },
             )
             .await
@@ -1678,6 +1679,7 @@ mod tests {
                     status: "building",
                     superseded_by: None,
                     body_format: Some("markdown"),
+                    event_metadata: None,
                 },
             )
             .await
@@ -1692,6 +1694,7 @@ mod tests {
                     status: "building",
                     superseded_by: None,
                     body_format: Some("markdown"),
+                    event_metadata: None,
                 },
             )
             .await
@@ -1759,6 +1762,7 @@ mod tests {
                     status: "building",
                     superseded_by: None,
                     body_format: Some("markdown"),
+                    event_metadata: None,
                 },
             )
             .await
@@ -1823,6 +1827,7 @@ mod tests {
                     status: "draft",
                     superseded_by: None,
                     body_format: Some("markdown"),
+                    event_metadata: None,
                 },
             )
             .await
@@ -1955,6 +1960,7 @@ mod tests {
                     status: "building",
                     superseded_by: None,
                     body_format: Some("markdown"),
+                    event_metadata: None,
                 },
             )
             .await
@@ -2090,6 +2096,7 @@ mod tests {
                     status: "building",
                     superseded_by: None,
                     body_format: Some("markdown"),
+                    event_metadata: None,
                 },
             )
             .await
