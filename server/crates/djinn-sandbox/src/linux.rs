@@ -13,7 +13,7 @@ use landlock::{
     ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
 };
 
-use super::{Sandbox, djinn_cache_dir, git_dir, git_metadata_dir};
+use crate::{Sandbox, djinn_cache_dir, git_dir, git_metadata_dir};
 
 /// Landlock-based filesystem sandbox for Linux ≥ 5.13.
 ///
