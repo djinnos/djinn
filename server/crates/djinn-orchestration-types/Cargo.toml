@@ -1,0 +1,13 @@
+[package]
+name = "djinn-orchestration-types"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+djinn-provider = { path = "../djinn-provider" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+workspace-hack.workspace = true

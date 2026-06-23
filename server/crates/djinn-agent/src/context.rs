@@ -20,7 +20,8 @@ use djinn_runtime::GraphWarmerService;
 use djinn_workspace::MirrorManager;
 use tokio::sync::Mutex;
 
-use crate::actors::coordinator::{BackgroundWorkTracker, CoordinatorHandle};
+use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
+use crate::actors::coordinator::CoordinatorHandle;
 use crate::file_time::FileTime;
 use crate::lsp::LspManager;
 use crate::roles::RoleRegistry;
