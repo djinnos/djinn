@@ -72,12 +72,16 @@ pub(crate) const PAGE_RANK_ITERATIONS: usize = 25;
 ///   carry the under-populated flag; the bump forces a re-warm so the
 ///   `/code-graph` "hide tests" toggle and the `code_graph tests=`
 ///   filter see a complete classification.
+/// - v11: adds `TraitDispatchCall` edge kind for synthesized
+///   trait-dispatch caller edges (proposal t16t). Old v10 blobs
+///   bincode-fail on the new enum variant and force a re-warm so
+///   the graph reflects persisted trait-dispatch semantics.
 ///
 /// Route/Tool nodes plus `HandlesRoute` / `Fetches` route edges are
 /// intentionally additive under v10: the new enum variants are appended,
 /// new struct fields are `#[serde(default)]`, and existing v10 artifacts that
 /// do not contain the new surface keep round-tripping without a forced re-warm.
-pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 10;
+pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 11;
 
 /// Canonical "is this path a test file" classification — re-exported
 /// from [`djinn_core::test_paths`] (the single source of truth) so the
@@ -143,6 +147,11 @@ pub(crate) const EDGE_CONFIDENCE_STEP_IN_PROCESS: f64 = 0.95;
 // confidence than `HandlesRoute`.
 pub(crate) const EDGE_CONFIDENCE_HANDLES_ROUTE: f64 = 0.90;
 pub(crate) const EDGE_CONFIDENCE_FETCHES: f64 = 0.75;
+// Trait-dispatch edges are synthesized from SCIP implementation/occurrence
+// analysis rather than directly extracted. They sit in the inferred tier
+// (below 0.9) so `confidence_tier()` classifies them as `Inferred` unless
+// the confidence is dropped below the floor (→ `Ambiguous`).
+pub(crate) const EDGE_CONFIDENCE_TRAIT_DISPATCH_CALL: f64 = 0.70;
 pub(crate) const EDGE_CONFIDENCE_LOCAL_PENALTY: f64 = 0.15;
 pub(crate) const EDGE_WEIGHT_DEFINITION_TO_FILE: f64 = 4.0;
 pub(crate) const EDGE_WEIGHT_FILE_TO_DEFINITION: f64 = 1.5;
@@ -173,6 +182,30 @@ pub(crate) const EDGE_WEIGHT_STEP_IN_PROCESS: f64 = 0.5;
 // hang off the graph without dominating PageRank or shortest-path scoring.
 pub(crate) const EDGE_WEIGHT_HANDLES_ROUTE: f64 = 0.75;
 pub(crate) const EDGE_WEIGHT_FETCHES: f64 = 1.0;
+// Trait-dispatch call edges are synthesized call-graph links (caller →
+// trait-method). They carry moderate weight — stronger than metadata-only
+// edges (`EntryPointOf`, `MemberOf`) but below primary SCIP evidence
+// (`Implements`, `SymbolReference`) so they don't dominate PageRank.
+pub(crate) const EDGE_WEIGHT_TRAIT_DISPATCH_CALL: f64 = 1.5;
+// ── Trait-dispatch reason constants (proposal t16t) ───────────────────────
+//
+// Stable reason strings stamped on synthesized trait-dispatch edges so
+// downstream consumers can distinguish provenance without string-matching
+// fragile prose.
+
+/// Reason stamped on the direct caller → trait-method edge when a SCIP
+/// occurrence resolves to a trait method symbol via dispatch analysis.
+pub const REASON_TRAIT_DISPATCH_CALL: &str = "trait-dispatch-call";
+
+/// Reason stamped on trait-method → implementation edges during bounded
+/// fan-out (future work; the reason constant is defined here so builder
+/// code can use it immediately).
+pub const REASON_TRAIT_DISPATCH_FANOUT: &str = "trait-dispatch-fanout";
+
+/// Reason stamped when a potential fan-out edge is suppressed (fan-out cap
+/// reached, ambiguous impl, etc.).
+pub const REASON_TRAIT_DISPATCH_SUPPRESSED: &str = "trait-dispatch-suppressed";
+
 pub(crate) const SYMBOL_KIND_TYPE_MULTIPLIER: f64 = 1.15;
 pub(crate) const SYMBOL_KIND_METHOD_MULTIPLIER: f64 = 1.05;
 pub(crate) const SYMBOL_KIND_FUNCTION_MULTIPLIER: f64 = 1.0;

@@ -43,6 +43,9 @@ pub use self::artifact::{
     RepoGraphArtifactSymbolRange, RouteExclusionConfig, RouteRef,
     deserialize_repo_graph_artifact_bincode,
 };
+pub use self::constants::{
+    REASON_TRAIT_DISPATCH_CALL, REASON_TRAIT_DISPATCH_FANOUT, REASON_TRAIT_DISPATCH_SUPPRESSED,
+};
 pub use self::constants::{REPO_GRAPH_ARTIFACT_VERSION, is_test_path};
 pub use self::edge::{
     EdgeConfidenceTier, RepoGraphEdge, RepoGraphEdgeKind, edge_confidence_floor,
