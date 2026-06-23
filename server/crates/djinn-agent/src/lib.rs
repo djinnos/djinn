@@ -28,6 +28,7 @@ pub(crate) mod knowledge_promotion;
 pub mod lsp;
 pub mod mcp_client;
 pub mod mcp_settings;
+pub mod native_skills;
 pub(crate) mod oauth;
 pub(crate) mod output_parser;
 pub mod output_stash;
