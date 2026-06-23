@@ -854,3 +854,38 @@ impl AgentContext {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// ExtensionContext implementation
+// ---------------------------------------------------------------------------
+//
+// Bridges the narrow `djinn_mcp_extension::ExtensionContext` capability seam
+// to the concrete `AgentContext` fields.  Extension handlers operate through
+// the trait; this impl is the only place that names both sides.
+
+#[async_trait::async_trait]
+impl djinn_mcp_extension::ExtensionContext for AgentContext {
+    fn db(&self) -> Database {
+        self.db.clone()
+    }
+
+    fn event_bus(&self) -> djinn_core::events::EventBus {
+        self.event_bus.clone()
+    }
+
+    fn mcp_state(&self) -> djinn_control_plane::McpState {
+        self.to_mcp_state()
+    }
+
+    fn lsp(&self) -> crate::lsp::LspManager {
+        self.lsp.clone()
+    }
+
+    fn working_root_for(&self, fallback: &std::path::Path) -> std::path::PathBuf {
+        AgentContext::working_root_for(self, fallback)
+    }
+
+    fn default_project_id(&self) -> Option<&str> {
+        self.default_project_id.as_deref()
+    }
+}
