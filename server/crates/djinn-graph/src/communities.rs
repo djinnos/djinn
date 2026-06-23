@@ -330,24 +330,11 @@ fn local_moving_phase(
     partition: &mut [usize],
 ) -> bool {
     // Σ_in / Σ_tot tracking per community for the modularity gain
-    // formula (see e.g. Blondel et al. 2008 §2).
-    //
-    // sigma_tot[c] = Σ k_v for v in c (sum of degrees)
-    // sigma_in[c]  = Σ A_uv for u, v in c (intra-community weight,
-    //                directed sum — equals 2 × undirected count + self-loops)
-    let mut sigma_tot: HashMap<usize, f64> = HashMap::new();
-    let mut sigma_in: HashMap<usize, f64> = HashMap::new();
-    for (v, &c) in partition.iter().enumerate().take(node_count) {
-        *sigma_tot.entry(c).or_default() += k.get(&v).copied().unwrap_or(0.0);
-    }
-    for (&u, neighbors) in adjacency.iter() {
-        let cu = partition[u];
-        for (&w, &weight) in neighbors.iter() {
-            if partition[w] == cu {
-                *sigma_in.entry(cu).or_default() += weight;
-            }
-        }
-    }
+    // formula (see e.g. Blondel et al. 2008 §2). Initial values are
+    // computed once per pass by `initial_modularity_bookkeeping` and
+    // then kept in lock-step with `partition` by `apply_node_move`.
+    let (mut sigma_tot, mut sigma_in) =
+        initial_modularity_bookkeeping(node_count, adjacency, k, partition);
 
     let mut any_moved = false;
     for outer_pass in 0..MAX_LOCAL_MOVE_ITERATIONS {
@@ -360,65 +347,18 @@ fn local_moving_phase(
             }
             let cur_comm = partition[v];
 
-            // Σ A_vw over w in current community (excluding v itself).
-            let edges_to: HashMap<usize, f64> =
-                aggregate_edges_to_communities(v, adjacency, partition);
-            let weight_to_self = edges_to.get(&cur_comm).copied().unwrap_or(0.0);
-
-            // Tentatively remove v from cur_comm so the gain math
-            // for "stay put" comes out to 0. We only need
-            // `cur_sigma_tot` for the candidate-loop math; `sigma_in`
-            // bookkeeping happens at apply-move time, so we don't need
-            // a removed-from-current `sigma_in` value here. The
-            // `weight_to_self` factor is consumed below when we do
-            // the actual move.
-            let cur_sigma_tot = sigma_tot.get(&cur_comm).copied().unwrap_or(0.0) - kv;
-
-            // Find best target community by modularity gain.
-            let mut best_comm = cur_comm;
-            let mut best_gain = 0.0_f64;
-            // Iterate sorted by community id for deterministic tie-break.
-            let mut candidates: Vec<usize> = edges_to.keys().copied().collect();
-            candidates.sort_unstable();
-            // Always include "stay" by treating cur_comm gain as 0
-            // implicitly via best_gain initial value.
-            for cand_comm in candidates {
-                let weight_to_cand = edges_to.get(&cand_comm).copied().unwrap_or(0.0);
-                let cand_sigma_tot = if cand_comm == cur_comm {
-                    cur_sigma_tot
-                } else {
-                    sigma_tot.get(&cand_comm).copied().unwrap_or(0.0)
-                };
-                // Modularity gain of inserting v into cand_comm
-                // (Blondel eq. 2):
-                //   ΔQ = [ (Σ_in + 2 k_v_in) / 2m
-                //          - ((Σ_tot + k_v) / 2m)^2 ]
-                //        - [ Σ_in/2m - (Σ_tot/2m)^2 - (k_v/2m)^2 ]
-                // which simplifies to:
-                //   ΔQ = (k_v_in / m)
-                //        - (Σ_tot * k_v) / (2 m^2)
-                // when v has been removed from its current community
-                // (so the "leave" term cancels). We compute that
-                // simpler form.
-                let gain = weight_to_cand / m - (cand_sigma_tot * kv) / (2.0 * m * m);
-                if gain > best_gain + 1e-12 {
-                    best_gain = gain;
-                    best_comm = cand_comm;
-                }
-            }
-
-            if best_comm != cur_comm {
-                // Apply move.
-                let weight_to_target = edges_to.get(&best_comm).copied().unwrap_or(0.0);
-                // Withdraw from cur_comm.
-                let entry_tot = sigma_tot.entry(cur_comm).or_default();
-                *entry_tot -= kv;
-                let entry_in = sigma_in.entry(cur_comm).or_default();
-                *entry_in -= 2.0 * weight_to_self;
-                // Deposit into best_comm.
-                *sigma_tot.entry(best_comm).or_default() += kv;
-                *sigma_in.entry(best_comm).or_default() += 2.0 * weight_to_target;
-                partition[v] = best_comm;
+            if let Some(decision) =
+                best_move_for_node(v, cur_comm, kv, m, adjacency, partition, &sigma_tot)
+            {
+                apply_node_move(
+                    v,
+                    cur_comm,
+                    kv,
+                    &decision,
+                    partition,
+                    &mut sigma_tot,
+                    &mut sigma_in,
+                );
                 moved_this_pass = true;
                 any_moved = true;
             }
@@ -435,8 +375,149 @@ fn local_moving_phase(
     any_moved
 }
 
+/// Build the per-community Σ_tot / Σ_in bookkeeping required by the
+/// modularity-gain formula (Blondel et al. 2008 §2) at the start of a
+/// [`local_moving_phase`] pass.
+///
+/// * `sigma_tot[c]` = Σ `k_v` for `v` in `c` (sum of degrees)
+/// * `sigma_in[c]`  = Σ `A_uv` for `u`, `v` in `c` (intra-community
+///   weight; the directed sum — equals 2 × undirected count + self-loops)
+fn initial_modularity_bookkeeping(
+    node_count: usize,
+    adjacency: &HashMap<usize, HashMap<usize, f64>>,
+    k: &HashMap<usize, f64>,
+    partition: &[usize],
+) -> (HashMap<usize, f64>, HashMap<usize, f64>) {
+    let mut sigma_tot: HashMap<usize, f64> = HashMap::new();
+    let mut sigma_in: HashMap<usize, f64> = HashMap::new();
+    for (v, &c) in partition.iter().enumerate().take(node_count) {
+        *sigma_tot.entry(c).or_default() += k.get(&v).copied().unwrap_or(0.0);
+    }
+    for (&u, neighbors) in adjacency.iter() {
+        let cu = partition[u];
+        for (&w, &weight) in neighbors.iter() {
+            if partition[w] == cu {
+                *sigma_in.entry(cu).or_default() += weight;
+            }
+        }
+    }
+    (sigma_tot, sigma_in)
+}
+
+/// Decision returned by [`best_move_for_node`] when moving `v` from
+/// `cur_comm` to a different community would strictly improve
+/// modularity. Carries the bookkeeping weights needed to apply the move
+/// in lock-step with `sigma_tot` / `sigma_in`.
+struct NodeMoveDecision {
+    /// Community the node is moving to.
+    target_comm: usize,
+    /// Σ A_vw for `w` already in `cur_comm` (used to shrink `sigma_in`
+    /// for the source community during apply).
+    weight_to_source: f64,
+    /// Σ A_vw for `w` already in `target_comm` (used to grow `sigma_in`
+    /// for the destination community during apply).
+    weight_to_target: f64,
+}
+
+/// Decide whether moving node `v` (currently in `cur_comm`, degree
+/// `kv`) to a different community would strictly improve modularity,
+/// and if so describe the move with the bookkeeping weights needed to
+/// apply it.
+///
+/// Determinism: candidate communities are visited in ascending id order
+/// (via [`aggregate_edges_to_communities`] + `sort_unstable`); the gain
+/// comparison is strictly `>` against the running best plus a `1e-12`
+/// slack, so ties resolve to the lowest-id candidate — matching the
+/// legacy in-line behaviour exactly.
+fn best_move_for_node(
+    v: usize,
+    cur_comm: usize,
+    kv: f64,
+    m: f64,
+    adjacency: &HashMap<usize, HashMap<usize, f64>>,
+    partition: &[usize],
+    sigma_tot: &HashMap<usize, f64>,
+) -> Option<NodeMoveDecision> {
+    // Σ A_vw over w in current community (excluding v itself).
+    let edges_to: HashMap<usize, f64> = aggregate_edges_to_communities(v, adjacency, partition);
+    let weight_to_self = edges_to.get(&cur_comm).copied().unwrap_or(0.0);
+
+    // Tentatively remove v from cur_comm so the gain math for "stay put"
+    // comes out to 0. We only need `cur_sigma_tot` for the candidate-loop
+    // math; `sigma_in` bookkeeping happens at apply-move time, so we don't
+    // need a removed-from-current `sigma_in` value here. The
+    // `weight_to_self` factor is consumed below when we do the actual
+    // move.
+    let cur_sigma_tot = sigma_tot.get(&cur_comm).copied().unwrap_or(0.0) - kv;
+
+    // Find best target community by modularity gain.
+    let mut best_comm = cur_comm;
+    let mut best_gain = 0.0_f64;
+    // Iterate sorted by community id for deterministic tie-break.
+    let mut candidates: Vec<usize> = edges_to.keys().copied().collect();
+    candidates.sort_unstable();
+    // Always include "stay" by treating cur_comm gain as 0 implicitly
+    // via best_gain initial value.
+    for cand_comm in candidates {
+        let weight_to_cand = edges_to.get(&cand_comm).copied().unwrap_or(0.0);
+        let cand_sigma_tot = if cand_comm == cur_comm {
+            cur_sigma_tot
+        } else {
+            sigma_tot.get(&cand_comm).copied().unwrap_or(0.0)
+        };
+        // Modularity gain of inserting v into cand_comm (Blondel eq. 2):
+        //   ΔQ = [ (Σ_in + 2 k_v_in) / 2m
+        //          - ((Σ_tot + k_v) / 2m)^2 ]
+        //        - [ Σ_in/2m - (Σ_tot/2m)^2 - (k_v/2m)^2 ]
+        // which simplifies to:
+        //   ΔQ = (k_v_in / m)
+        //        - (Σ_tot * k_v) / (2 m^2)
+        // when v has been removed from its current community (so the
+        // "leave" term cancels). We compute that simpler form.
+        let gain = weight_to_cand / m - (cand_sigma_tot * kv) / (2.0 * m * m);
+        if gain > best_gain + 1e-12 {
+            best_gain = gain;
+            best_comm = cand_comm;
+        }
+    }
+
+    if best_comm == cur_comm {
+        return None;
+    }
+    let weight_to_target = edges_to.get(&best_comm).copied().unwrap_or(0.0);
+    Some(NodeMoveDecision {
+        target_comm: best_comm,
+        weight_to_source: weight_to_self,
+        weight_to_target,
+    })
+}
+
+/// Apply a [`NodeMoveDecision`] to `partition`, `sigma_tot`, and
+/// `sigma_in` in lock-step — exact same arithmetic as the legacy
+/// in-line move block.
+fn apply_node_move(
+    v: usize,
+    cur_comm: usize,
+    kv: f64,
+    decision: &NodeMoveDecision,
+    partition: &mut [usize],
+    sigma_tot: &mut HashMap<usize, f64>,
+    sigma_in: &mut HashMap<usize, f64>,
+) {
+    let best_comm = decision.target_comm;
+    // Withdraw from cur_comm.
+    let entry_tot = sigma_tot.entry(cur_comm).or_default();
+    *entry_tot -= kv;
+    let entry_in = sigma_in.entry(cur_comm).or_default();
+    *entry_in -= 2.0 * decision.weight_to_source;
+    // Deposit into best_comm.
+    *sigma_tot.entry(best_comm).or_default() += kv;
+    *sigma_in.entry(best_comm).or_default() += 2.0 * decision.weight_to_target;
+    partition[v] = best_comm;
+}
+
 /// Sum the edge weights from `v` into each community in the current
-/// partition. Used inside [`local_moving_phase`] to compute the
+/// partition. Used inside [`best_move_for_node`] to compute the
 /// modularity gain for every candidate community in one pass.
 fn aggregate_edges_to_communities(
     v: usize,
