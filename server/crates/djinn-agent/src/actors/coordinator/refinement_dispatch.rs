@@ -30,8 +30,8 @@ use djinn_db::{ProposalRepository, TaskRepository, UserSettingsRepository};
 
 use super::refinement::{
     AdversaryPassOutcome, AdversaryPassResult, JudgeVerdictResult, ObjectionRecord,
-    RefinementLoopState, RefinementPhase, StopReason, build_revision_event_metadata,
-    select_refinement_model,
+    RefinementLoopState, RefinementPhase, StopReason, UpdateAuthority,
+    build_revision_event_metadata, select_refinement_model,
 };
 
 use super::actor::CoordinatorActor;
@@ -276,6 +276,11 @@ impl CoordinatorActor {
     /// advanced), the revision's `event_metadata` is patched with
     /// refinement-loop attribution (role, round, authority mode, model)
     /// via `ProposalRepository::set_latest_revision_event_metadata`.
+    ///
+    /// In checkpoint mode, the revision is additionally marked as
+    /// `checkpoint_pending` and the live proposal body is reverted to
+    /// the previous revision so the pending revision is inspectable
+    /// without mutating the live proposal.
     async fn process_advocate_outcome(&mut self, proposal_id: &str, state: &RefinementLoopState) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
@@ -310,6 +315,7 @@ impl CoordinatorActor {
 
         let new_revision_seq = proposal.latest_revision_seq;
         let advanced = new_revision_seq > state.current_revision_seq;
+        let is_checkpoint = state.update_authority() == UpdateAuthority::Checkpoint;
 
         // Persist revision attribution when the advocate advanced the spec.
         // The agent's `proposal_update` tool call doesn't carry refinement
@@ -319,11 +325,19 @@ impl CoordinatorActor {
                 .refinement_sessions
                 .get(proposal_id)
                 .map(|s| s.model_id.clone());
-            let event_meta = build_revision_event_metadata(
+            let mut event_meta = build_revision_event_metadata(
                 state.current_round,
                 state.update_authority(),
                 model_id.as_deref(),
             );
+
+            // In checkpoint mode, mark the revision as pending and revert
+            // the live body so the proposal is unchanged until approval.
+            if is_checkpoint {
+                event_meta["checkpoint_status"] = serde_json::json!("pending");
+                event_meta["previous_revision_seq"] = serde_json::json!(state.current_revision_seq);
+            }
+
             let event_bus2 = crate::events::event_bus_for(&self.events_tx);
             let proposal_repo2 = ProposalRepository::new(self.db.clone(), event_bus2);
             if let Err(e) = proposal_repo2
@@ -337,6 +351,29 @@ impl CoordinatorActor {
                     "Failed to patch advocate revision event_metadata"
                 );
             }
+
+            // In checkpoint mode, revert the live proposal body to the
+            // pre-revision state. The revision row retains the advocate's
+            // full output for later approval.
+            if is_checkpoint {
+                if let Err(e) = self
+                    .revert_checkpoint_body(proposal_id, state.current_revision_seq)
+                    .await
+                {
+                    tracing::warn!(
+                        proposal_id = %proposal_id,
+                        error = %e,
+                        "Failed to revert proposal body for checkpoint pending"
+                    );
+                } else {
+                    tracing::info!(
+                        proposal_id = %proposal_id,
+                        pending_seq = new_revision_seq,
+                        reverted_to_seq = state.current_revision_seq,
+                        "Checkpoint: advocate revision marked pending, live body reverted"
+                    );
+                }
+            }
         }
 
         if let Some(state) = self.active_refinements.get_mut(proposal_id) {
@@ -346,6 +383,7 @@ impl CoordinatorActor {
                     proposal_id = %proposal_id,
                     new_seq = new_revision_seq,
                     round = state.current_round,
+                    is_checkpoint,
                     "Advocate produced revision"
                 );
             } else {
@@ -501,6 +539,80 @@ impl CoordinatorActor {
         }
         self.persist_refinement_stop(proposal_id, &reason).await;
         self.refinement_sessions.remove(proposal_id);
+    }
+
+    /// Revert the live proposal body to the state at `target_revision_seq`
+    /// after a checkpoint-mode advocate revision. Reads the spec_snapshot
+    /// from the proposal_revisions row at `target_revision_seq` and writes
+    /// it back to the live proposals table.
+    ///
+    /// This is a best-effort operation: if the target revision doesn't exist
+    /// or the revert fails, the caller logs a warning and continues.
+    async fn revert_checkpoint_body(
+        &self,
+        proposal_id: &str,
+        target_revision_seq: i32,
+    ) -> Result<(), String> {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+
+        let revisions = proposal_repo
+            .revisions(proposal_id)
+            .await
+            .map_err(|e| format!("failed to read revisions: {e}"))?;
+
+        // Find the spec_revision at or before the target seq.
+        let target_rev = revisions
+            .iter()
+            .rev()
+            .find(|r| r.event_kind == "spec_revision" && r.seq <= target_revision_seq);
+
+        let Some(rev) = target_rev else {
+            return Err(format!(
+                "no spec_revision found at or before seq {target_revision_seq}"
+            ));
+        };
+
+        // Only revert if there's something to revert to.
+        if rev.body.is_empty() && rev.title.is_empty() {
+            return Ok(());
+        }
+
+        // We need direct DB access for the revert. Re-use the proposal repo's
+        // update helper by reading the previous revision and writing it back.
+        // This uses the standard update path which will create a new revision
+        // row — but that's acceptable: the row records the revert event.
+        let event_bus2 = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo2 = ProposalRepository::new(self.db.clone(), event_bus2);
+        let current = proposal_repo2
+            .get(proposal_id)
+            .await
+            .map_err(|e| format!("failed to read proposal: {e}"))?
+            .ok_or_else(|| format!("proposal not found: {proposal_id}"))?;
+
+        let event_bus3 = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo3 = ProposalRepository::new(self.db.clone(), event_bus3);
+        proposal_repo3
+            .update(
+                proposal_id,
+                djinn_db::ProposalUpdateInput {
+                    title: &rev.title,
+                    body: &rev.body,
+                    acceptance_criteria: &rev.acceptance_criteria,
+                    status: &current.status,
+                    superseded_by: current.superseded_by.as_deref(),
+                    body_format: Some(&rev.body_format),
+                    event_metadata: Some(&serde_json::json!({
+                        "source": "checkpoint_revert",
+                        "reverted_from_seq": current.latest_revision_seq,
+                        "reverted_to_seq": target_revision_seq,
+                    })),
+                },
+            )
+            .await
+            .map_err(|e| format!("failed to revert proposal body: {e}"))?;
+
+        Ok(())
     }
 
     /// Persist refinement-stop lifecycle metadata.

@@ -1057,4 +1057,35 @@ mod tests {
         assert_eq!(state.current_round, 2);
         assert_eq!(state.current_revision_seq, 1);
     }
+
+    // ── Checkpoint pending metadata ─────────────────────────────────────
+
+    #[test]
+    fn build_revision_event_metadata_checkpoint_includes_pending() {
+        let meta = build_revision_event_metadata(2, UpdateAuthority::Checkpoint, Some("model-x"));
+        assert_eq!(meta["authority"], "checkpoint");
+        assert_eq!(meta["role"], "advocate");
+        assert_eq!(meta["round"], 2);
+        assert_eq!(meta["author_model"], "model-x");
+        // The coordinator adds checkpoint_status: "pending" after calling this.
+        // Verify the base metadata doesn't include it (that's the coordinator's job).
+        assert!(meta.get("checkpoint_status").is_none());
+    }
+
+    #[test]
+    fn build_revision_event_metadata_auto_accept_no_checkpoint() {
+        let meta = build_revision_event_metadata(1, UpdateAuthority::AutoAccept, None);
+        assert_eq!(meta["authority"], "auto_accept");
+        assert!(meta.get("checkpoint_status").is_none());
+        assert!(meta.get("author_model").is_none());
+    }
+
+    #[test]
+    fn checkpoint_pending_status_field_can_be_added() {
+        let mut meta = build_revision_event_metadata(3, UpdateAuthority::Checkpoint, None);
+        meta["checkpoint_status"] = serde_json::json!("pending");
+        meta["previous_revision_seq"] = serde_json::json!(2);
+        assert_eq!(meta["checkpoint_status"], "pending");
+        assert_eq!(meta["previous_revision_seq"], 2);
+    }
 }

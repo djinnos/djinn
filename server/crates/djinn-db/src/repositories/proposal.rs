@@ -912,6 +912,197 @@ impl ProposalRepository {
         Ok(())
     }
 
+    /// Return all `spec_revision` rows whose `event_metadata` marks them as
+    /// `checkpoint_pending` — i.e. advocate revisions produced in checkpoint
+    /// mode that have not yet been approved or rejected.
+    ///
+    /// Rows are ordered newest-first so the UI can surface the most recent
+    /// pending revision at the top.
+    pub async fn pending_checkpoint_revisions(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Vec<ProposalRevision>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, ProposalRevision>(
+            r#"SELECT id, proposal_id, seq, title, body, body_format,
+                    acceptance_criteria::text AS acceptance_criteria,
+                    edited_by_user_id, event_kind, status_from, status_to,
+                    event_metadata::text AS event_metadata, created_at
+             FROM proposal_revisions
+             WHERE proposal_id = $1
+               AND event_kind = 'spec_revision'
+               AND event_metadata->>'checkpoint_status' = 'pending'
+             ORDER BY created_at DESC, id DESC"#,
+        )
+        .bind(proposal_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Approve a pending checkpoint revision: apply its body/title/AC to the
+    /// live proposal, advance the head revision, and mark the revision row as
+    /// `checkpoint_approved`.
+    ///
+    /// Idempotent: if the revision is already approved or rejected, this is a
+    /// no-op that returns the current proposal unchanged.
+    ///
+    /// `approved_by_user_id` is recorded in the event_metadata for audit.
+    pub async fn approve_checkpoint_revision(
+        &self,
+        proposal_id: &str,
+        revision_seq: i32,
+        approved_by_user_id: Option<&str>,
+    ) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+
+        // 1. Load the pending revision row.
+        let revision = sqlx::query_as::<_, ProposalRevision>(
+            r#"SELECT id, proposal_id, seq, title, body, body_format,
+                    acceptance_criteria::text AS acceptance_criteria,
+                    edited_by_user_id, event_kind, status_from, status_to,
+                    event_metadata::text AS event_metadata, created_at
+             FROM proposal_revisions
+             WHERE proposal_id = $1 AND seq = $2
+               AND event_kind = 'spec_revision'
+               AND event_metadata->>'checkpoint_status' = 'pending'"#,
+        )
+        .bind(proposal_id)
+        .bind(revision_seq)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        let Some(revision) = revision else {
+            // No pending revision at this seq — idempotent no-op.
+            return self.get_required(proposal_id).await;
+        };
+
+        // 2. Apply the revision's body/title/AC to the live proposal.
+        let ac: serde_json::Value =
+            serde_json::from_str(&revision.acceptance_criteria).unwrap_or(serde_json::json!([]));
+        let new_seq = {
+            let current = self.get_required(proposal_id).await?;
+            current.latest_revision_seq + 1
+        };
+        sqlx::query(
+            r#"UPDATE proposals SET title = $1, body = $2, body_format = $3,
+                    acceptance_criteria = $4, latest_revision_seq = $5,
+                    pending_reconcile = true,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $6"#,
+        )
+        .bind(&revision.title)
+        .bind(&revision.body)
+        .bind(&revision.body_format)
+        .bind(&ac)
+        .bind(new_seq)
+        .bind(proposal_id)
+        .execute(self.db.pool())
+        .await?;
+
+        // 3. Insert a new spec_revision row for the approval event so history
+        //    records the apply.
+        self.insert_revision(ProposalRevisionSnapshot {
+            proposal_id,
+            seq: new_seq,
+            title: &revision.title,
+            body: &revision.body,
+            body_format: &revision.body_format,
+            acceptance_criteria: &ac,
+            edited_by: approved_by_user_id,
+            event_metadata: Some(&serde_json::json!({
+                "source": "checkpoint_approval",
+                "approved_from_seq": revision_seq,
+                "approved_by": approved_by_user_id,
+            })),
+        })
+        .await?;
+
+        // 4. Mark the original pending row as `checkpoint_approved`.
+        let approved_meta = {
+            let mut meta: serde_json::Value = revision
+                .event_metadata
+                .as_ref()
+                .and_then(|m| serde_json::from_str(m).ok())
+                .unwrap_or(serde_json::json!({}));
+            meta["checkpoint_status"] = serde_json::json!("approved");
+            if let Some(uid) = approved_by_user_id {
+                meta["approved_by_user_id"] = serde_json::json!(uid);
+            }
+            meta
+        };
+        sqlx::query(
+            r#"UPDATE proposal_revisions
+               SET event_metadata = $3
+             WHERE proposal_id = $1 AND seq = $2 AND event_kind = 'spec_revision'"#,
+        )
+        .bind(proposal_id)
+        .bind(revision_seq)
+        .bind(&approved_meta)
+        .execute(self.db.pool())
+        .await?;
+
+        let proposal = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&proposal));
+        Ok(proposal)
+    }
+
+    /// Reject a pending checkpoint revision: mark it as `checkpoint_rejected`
+    /// without modifying the live proposal body.
+    ///
+    /// Idempotent: if the revision is already approved or rejected, this is a
+    /// no-op that returns the current proposal unchanged.
+    ///
+    /// `rejected_by_user_id` is recorded in the event_metadata for audit.
+    pub async fn reject_checkpoint_revision(
+        &self,
+        proposal_id: &str,
+        revision_seq: i32,
+        rejected_by_user_id: Option<&str>,
+    ) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+
+        // Mark the pending row as `checkpoint_rejected` (no body mutation).
+        let rejected_meta = {
+            let existing = sqlx::query_scalar::<_, Option<String>>(
+                r#"SELECT event_metadata::text FROM proposal_revisions
+                   WHERE proposal_id = $1 AND seq = $2
+                     AND event_kind = 'spec_revision'
+                     AND event_metadata->>'checkpoint_status' = 'pending'"#,
+            )
+            .bind(proposal_id)
+            .bind(revision_seq)
+            .fetch_optional(self.db.pool())
+            .await?;
+
+            let Some(existing_str) = existing.flatten() else {
+                // No pending revision — idempotent no-op.
+                return self.get_required(proposal_id).await;
+            };
+
+            let mut meta: serde_json::Value =
+                serde_json::from_str(&existing_str).unwrap_or(serde_json::json!({}));
+            meta["checkpoint_status"] = serde_json::json!("rejected");
+            if let Some(uid) = rejected_by_user_id {
+                meta["rejected_by_user_id"] = serde_json::json!(uid);
+            }
+            meta
+        };
+
+        sqlx::query(
+            r#"UPDATE proposal_revisions
+               SET event_metadata = $3
+             WHERE proposal_id = $1 AND seq = $2 AND event_kind = 'spec_revision'"#,
+        )
+        .bind(proposal_id)
+        .bind(revision_seq)
+        .bind(&rejected_meta)
+        .execute(self.db.pool())
+        .await?;
+
+        self.get_required(proposal_id).await
+    }
+
     pub async fn signoffs(&self, proposal_id: &str) -> Result<Vec<ProposalSignoff>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(

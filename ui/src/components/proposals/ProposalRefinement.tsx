@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { callMcpTool } from "@/api/mcpClient";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { showToast } from "@/lib/toast";
-import type { ProposalRefinementStatus } from "@/api/types";
+import type { CheckpointRevision, ProposalRefinementStatus } from "@/api/types";
 
 /**
  * Human-readable label for the stop reason.
@@ -43,16 +43,22 @@ function authorityBadgeVariant(
 }
 
 /**
+ * Status badge for a checkpoint revision.
+ */
+function checkpointStatusBadge(
+  rev: CheckpointRevision,
+): { label: string; variant: "default" | "secondary" | "outline" } {
+  return { label: `Round ${rev.round ?? "?"}`, variant: "outline" };
+}
+
+/**
  * Proposal refinement kickoff and status component.
  *
  * Shows a "Start refinement" button when refinement hasn't been started,
  * and a status panel when refinement is active or has stopped.
  *
- * Copy explains:
- * - Checkpoint mode: advocate revisions require explicit approval.
- * - Auto-accept mode: revisions are applied automatically.
- * - Same-model fallback: when diverse models are unavailable, the tribunal
- *   falls back to the same model — this is not an error.
+ * In checkpoint mode, shows pending advocate revisions with approve/reject
+ * actions. In auto-accept mode, revisions are applied automatically.
  */
 export function ProposalRefinement({
   proposalId,
@@ -67,6 +73,78 @@ export function ProposalRefinement({
 }) {
   const [busy, setBusy] = useState(false);
   const [authority, setAuthority] = useState<string>("checkpoint");
+  const [pendingRevisions, setPendingRevisions] = useState<
+    CheckpointRevision[]
+  >([]);
+  const [actionBusy, setActionBusy] = useState<number | null>(null);
+
+  // Fetch pending checkpoint revisions when in checkpoint mode.
+  const fetchPending = useCallback(async () => {
+    if (!proposalId) return;
+    try {
+      const res = await callMcpTool(
+        "proposal_refinement_checkpoint_list" as any,
+        { proposal_id: proposalId },
+      );
+      if (!res.error) {
+        setPendingRevisions(res.pending ?? []);
+      }
+    } catch {
+      // Silently ignore — the list endpoint may not exist on older servers.
+    }
+  }, [proposalId]);
+
+  useEffect(() => {
+    if (status?.update_authority === "checkpoint" && status?.active) {
+      fetchPending();
+    }
+  }, [status?.update_authority, status?.active, status?.pending_checkpoint_count, fetchPending]);
+
+  const handleApprove = useCallback(
+    async (seq: number) => {
+      setActionBusy(seq);
+      try {
+        const res = await callMcpTool(
+          "proposal_refinement_checkpoint_approve" as any,
+          { proposal_id: proposalId, revision_seq: seq },
+        );
+        if (res.error) throw new Error(res.error);
+        showToast.success("Checkpoint revision approved");
+        await fetchPending();
+        onChanged();
+      } catch (e) {
+        showToast.error("Failed to approve revision", {
+          description: (e as Error).message,
+        });
+      } finally {
+        setActionBusy(null);
+      }
+    },
+    [proposalId, fetchPending, onChanged],
+  );
+
+  const handleReject = useCallback(
+    async (seq: number) => {
+      setActionBusy(seq);
+      try {
+        const res = await callMcpTool(
+          "proposal_refinement_checkpoint_reject" as any,
+          { proposal_id: proposalId, revision_seq: seq },
+        );
+        if (res.error) throw new Error(res.error);
+        showToast.success("Checkpoint revision rejected");
+        await fetchPending();
+        onChanged();
+      } catch (e) {
+        showToast.error("Failed to reject revision", {
+          description: (e as Error).message,
+        });
+      } finally {
+        setActionBusy(null);
+      }
+    },
+    [proposalId, fetchPending, onChanged],
+  );
 
   const handleStart = useCallback(async () => {
     setBusy(true);
@@ -147,9 +225,88 @@ export function ProposalRefinement({
           </p>
         )}
 
+        {/* Pending checkpoint revisions */}
+        {status.update_authority === "checkpoint" &&
+          (status.pending_checkpoint_count ?? 0) > 0 && (
+            <div className="space-y-2 border-t pt-2">
+              <Label className="text-xs uppercase text-muted-foreground">
+                Pending revisions ({status.pending_checkpoint_count})
+              </Label>
+              {pendingRevisions.map((rev) => {
+                const badge = checkpointStatusBadge(rev);
+                return (
+                  <div
+                    key={rev.seq}
+                    className="space-y-1 rounded-md border border-amber-200 bg-amber-50 p-2"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Badge
+                          variant={badge.variant}
+                          className="text-xs"
+                        >
+                          {badge.label}
+                        </Badge>
+                        {rev.author_model && (
+                          <span className="text-xs text-muted-foreground">
+                            {rev.author_model}
+                          </span>
+                        )}
+                        <span className="text-xs text-muted-foreground">
+                          #{rev.seq}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          size="sm"
+                          variant="default"
+                          className="h-6 text-xs"
+                          disabled={actionBusy === rev.seq}
+                          onClick={() => handleApprove(rev.seq)}
+                        >
+                          {actionBusy === rev.seq
+                            ? "…"
+                            : "Approve"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-6 text-xs"
+                          disabled={actionBusy === rev.seq}
+                          onClick={() => handleReject(rev.seq)}
+                        >
+                          {actionBusy === rev.seq
+                            ? "…"
+                            : "Reject"}
+                        </Button>
+                      </div>
+                    </div>
+                    {rev.title && (
+                      <p className="text-xs font-medium">{rev.title}</p>
+                    )}
+                    {rev.body_preview && (
+                      <p className="line-clamp-2 text-xs text-muted-foreground">
+                        {rev.body_preview}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+              {pendingRevisions.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {status.pending_checkpoint_count} pending revision(s) — refresh
+                  to see details.
+                </p>
+              )}
+            </div>
+          )}
+
         {status.update_authority === "checkpoint" && status.active && (
           <p className="text-xs text-muted-foreground">
-            Advocate revisions require explicit approval before they are applied.
+            {(status.pending_checkpoint_count ?? 0) > 0
+              ? `${status.pending_checkpoint_count} advocate revision(s) awaiting approval.`
+              : "Advocate revisions require explicit approval before they are applied."}
+            {" "}
             In auto-accept mode, revisions are applied automatically.
           </p>
         )}
