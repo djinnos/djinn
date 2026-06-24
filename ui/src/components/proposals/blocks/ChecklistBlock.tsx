@@ -4,7 +4,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 
 import { cn } from "@/lib/utils";
 
-import { BlockMarkdown, BlockSection } from "./BlockShell";
+import { BlockMarkdown, BlockSection, InlineMarkdown } from "./BlockShell";
 import { parseChecklist } from "./checklist";
 import type { BlockProps } from "./types";
 
@@ -54,7 +54,7 @@ export function ChecklistBlock({ children }: BlockProps) {
               aria-hidden
             />
             <span className="min-w-0 flex-1">
-              <span
+              <InlineMarkdown
                 className={cn(
                   "block break-words text-sm",
                   item.checked
@@ -63,11 +63,11 @@ export function ChecklistBlock({ children }: BlockProps) {
                 )}
               >
                 {item.label}
-              </span>
+              </InlineMarkdown>
               {item.note && (
-                <span className="block break-words text-xs text-muted-foreground">
+                <InlineMarkdown className="block break-words text-xs text-muted-foreground">
                   {item.note}
-                </span>
+                </InlineMarkdown>
               )}
             </span>
           </li>
