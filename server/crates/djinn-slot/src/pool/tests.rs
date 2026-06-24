@@ -21,7 +21,7 @@ enum RunnerSignal {
 }
 
 fn test_app_state() -> (
-    crate::host::AgentContext,
+    crate::host::SlotContext,
     tokio_util::sync::CancellationToken,
     TempDir,
 ) {
@@ -109,7 +109,7 @@ impl djinn_control_plane::bridge::RuntimeOps for RecordingRuntimeOps {
 }
 
 async fn seed_running_session_with_task_run(
-    app_state: &crate::host::AgentContext,
+    app_state: &crate::host::SlotContext,
     _task_title: &str,
     task_run_id: &str,
 ) -> String {
@@ -145,7 +145,7 @@ async fn seed_running_session_with_task_run(
 }
 
 async fn seed_running_session_with_task_run_in_project(
-    app_state: &crate::host::AgentContext,
+    app_state: &crate::host::SlotContext,
     project_id: &str,
     task_run_id: &str,
 ) -> String {

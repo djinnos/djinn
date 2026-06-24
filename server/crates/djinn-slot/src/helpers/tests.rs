@@ -328,7 +328,12 @@ impl RepoGraphOps for FakeRepoGraphOps {
     }
 }
 
-async fn setup_project() -> (Database, AgentContext, Project, tempfile::TempDir) {
+async fn setup_project() -> (
+    Database,
+    crate::host::SlotContext,
+    Project,
+    tempfile::TempDir,
+) {
     let db = Database::open_in_memory().expect("db");
     db.ensure_initialized().await.expect("init db");
     let tmp = crate::test_helpers::test_tempdir("slot-helpers-");

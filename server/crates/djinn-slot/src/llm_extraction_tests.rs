@@ -21,11 +21,11 @@ use djinn_db::{
     NoteDedupCandidate, NoteRepository, ProjectRepository, SessionRepository, TaskRepository,
 };
 
-use crate::actors::slot::llm_extraction::{
+use crate::llm_extraction::{
     run_llm_extraction, run_llm_extraction_with_provider,
     run_llm_extraction_with_provider_and_candidate_lookup,
 };
-use crate::actors::slot::session_extraction::{SessionTaxonomy, extract_session_signals};
+use crate::session_extraction::{SessionTaxonomy, extract_session_signals};
 use crate::test_helpers::{FailingProvider, FakeProvider, agent_context_from_db, create_test_db};
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -326,7 +326,7 @@ async fn structural_extraction_flushes_co_access_associations() {
         },
     ];
 
-    let taxonomy = crate::actors::slot::session_extraction::run_structural_extraction(
+    let taxonomy = crate::session_extraction::run_structural_extraction(
         fixture.session_id.clone(),
         messages,
         ctx,
@@ -996,7 +996,7 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
         },
     ];
 
-    let taxonomy = crate::actors::slot::session_extraction::run_structural_extraction(
+    let taxonomy = crate::session_extraction::run_structural_extraction(
         fixture.session_id.clone(),
         messages,
         ctx_structural,

@@ -341,7 +341,7 @@ impl SlotPool {
         }
     }
 
-    fn snapshot(&self) -> Vec<DebugSlot> {
+    pub(super) fn snapshot(&self) -> Vec<DebugSlot> {
         self.slot_states
             .iter()
             .map(|(&id, state)| DebugSlot {
@@ -386,5 +386,180 @@ impl SlotPool {
                 self.free_slots.entry(model_id).or_default().push(slot_id);
             }
         }
+    }
+
+    // ── Production helpers (extraction gap from djinn-agent) ────────────────
+
+    fn remove_from_free_list(&mut self, model_id: &str, slot_id: usize) {
+        if let Some(free) = self.free_slots.get_mut(model_id)
+            && let Some(pos) = free.iter().position(|id| *id == slot_id)
+        {
+            free.swap_remove(pos);
+        }
+    }
+
+    /// Return a slot to the free list if it's not retired and not already present.
+    fn mark_slot_free(&mut self, slot_id: usize, model_id: String) {
+        if self.retired_slots.contains(&slot_id) {
+            return;
+        }
+        self.slot_states.insert(slot_id, SlotState::Free);
+        let free = self.free_slots.entry(model_id).or_default();
+        if !free.contains(&slot_id) {
+            free.push(slot_id);
+        }
+    }
+
+    /// Publish scrape-visible slot-pool gauges aggregated only by `(state, model)`.
+    fn record_slot_pool_metrics(&self) {
+        let mut free_by_model: HashMap<String, usize> = HashMap::new();
+        let mut busy_by_model: HashMap<String, usize> = HashMap::new();
+
+        for (model_id, slots) in &self.free_slots {
+            let count = slots
+                .iter()
+                .filter(|slot_id| !self.retired_slots.contains(slot_id))
+                .count();
+            free_by_model.insert(model_id.clone(), count);
+        }
+
+        for slot_id in self.task_to_slot.values() {
+            if self.retired_slots.contains(slot_id) {
+                continue;
+            }
+            if let Some(model_id) = self.slot_models.get(slot_id) {
+                *busy_by_model.entry(model_id.clone()).or_insert(0) += 1;
+            }
+        }
+
+        let mut model_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        model_ids.extend(free_by_model.keys().map(String::as_str));
+        model_ids.extend(busy_by_model.keys().map(String::as_str));
+
+        for model_id in model_ids {
+            djinn_telemetry::slot_pool::set_slots(
+                djinn_telemetry::slot_pool::STATE_FREE,
+                model_id,
+                free_by_model.get(model_id).copied().unwrap_or(0),
+            );
+            djinn_telemetry::slot_pool::set_slots(
+                djinn_telemetry::slot_pool::STATE_BUSY,
+                model_id,
+                busy_by_model.get(model_id).copied().unwrap_or(0),
+            );
+        }
+    }
+
+    fn slot(&self, slot_id: usize) -> Result<&SlotHandle, PoolError> {
+        self.slots
+            .get(slot_id)
+            .ok_or(PoolError::SlotNotFound { slot_id })
+    }
+
+    // ── Test helpers (behind #[cfg(test)]) ─────────────────────────────────
+
+    #[cfg(test)]
+    pub(super) async fn test_dispatch(
+        &mut self,
+        task_id: &str,
+        project_path: &str,
+        model_id: &str,
+    ) -> Result<(), PoolError> {
+        self.dispatch(task_id, project_path, model_id).await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn test_terminate_session(&mut self, task_id: &str) -> Result<(), PoolError> {
+        self.terminate_session(task_id).await
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_slot_of(&self, task_id: &str) -> Option<usize> {
+        self.task_to_slot.get(task_id).copied()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_free_slots(&self, model_id: &str) -> Vec<usize> {
+        self.free_slots.get(model_id).cloned().unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_free_slots_by_model(&self) -> HashMap<String, Vec<usize>> {
+        self.free_slots.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_retired_slots(&self) -> HashSet<usize> {
+        self.retired_slots.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_slot_states(&self) -> HashMap<usize, SlotState> {
+        self.slot_states.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_task_slots(&self) -> HashMap<String, usize> {
+        self.task_to_slot.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_set_slot_model(&mut self, slot_id: usize, model_id: &str) {
+        self.slot_models.insert(slot_id, model_id.to_owned());
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_set_slot_state(&mut self, slot_id: usize, state: SlotState) {
+        self.slot_states.insert(slot_id, state);
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_set_task_slot(&mut self, task_id: &str, slot_id: usize) {
+        self.task_to_slot.insert(task_id.to_owned(), slot_id);
+    }
+
+    /// Raw push onto the free list, bypassing `mark_slot_free`.
+    #[cfg(test)]
+    pub(super) fn test_inject_free(&mut self, slot_id: usize, model_id: &str) {
+        self.free_slots
+            .entry(model_id.to_string())
+            .or_default()
+            .push(slot_id);
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_mark_slot_free(&mut self, slot_id: usize, model_id: &str) {
+        self.mark_slot_free(slot_id, model_id.to_string());
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_assign_busy(&mut self, task_id: &str, slot_id: usize) {
+        self.task_to_slot.insert(task_id.to_owned(), slot_id);
+        if let Some(model_id) = self.slot_models.get(&slot_id).cloned() {
+            self.remove_from_free_list(&model_id, slot_id);
+        }
+        self.slot_states.insert(
+            slot_id,
+            SlotState::Busy {
+                task_id: task_id.to_owned(),
+                started_at: super::types::now_unix_string(),
+                agent_type: "worker".to_owned(),
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_record_slot_pool_metrics(&self) {
+        self.record_slot_pool_metrics();
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_retire(&mut self, slot_id: usize) {
+        self.retired_slots.insert(slot_id);
+    }
+
+    #[cfg(test)]
+    pub(super) async fn test_handle_slot_event(&mut self, event: SlotEvent) {
+        self.handle_event(event).await;
     }
 }
