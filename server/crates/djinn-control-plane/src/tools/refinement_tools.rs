@@ -18,8 +18,9 @@ use crate::bridge::ProposalRefinementStartRequest;
 use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
     CheckpointApproveResponse, CheckpointListResponse, CheckpointRejectResponse,
-    CheckpointRevisionModel, NeedsEvidenceStatus, ProposalRefinementStartResponse,
-    ProposalRefinementStatusModel, ProposalRefinementStatusResponse,
+    CheckpointRevisionModel, DemandRoundResponse, NeedsEvidenceStatus,
+    ProposalRefinementStartResponse, ProposalRefinementStatusModel,
+    ProposalRefinementStatusResponse, VerdictOverrideResponse,
 };
 use djinn_db::ProposalRepository;
 use djinn_db::TaskRepository;
@@ -83,6 +84,33 @@ pub struct CheckpointRejectParams {
     pub proposal_id: String,
     /// Revision sequence number to reject.
     pub revision_seq: i32,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalRefinementDemandRoundParams {
+    /// Proposal UUID or short_id.
+    pub proposal_id: String,
+    /// Why another round is being demanded. Recorded in proposal history.
+    pub reason: Option<String>,
+    /// Update authority mode: `checkpoint` (default) or `auto_accept`.
+    #[serde(default = "default_demand_authority")]
+    pub update_authority: Option<String>,
+}
+
+fn default_demand_authority() -> Option<String> {
+    Some("checkpoint".to_string())
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalVerdictOverrideParams {
+    /// Proposal UUID or short_id.
+    pub proposal_id: String,
+    /// Why the verdict is being overridden. Required — recorded in proposal
+    /// history for audit.
+    pub reason: String,
+    /// Optional debate-trail entry id of the verdict being overridden.
+    #[serde(default)]
+    pub overridden_verdict_entry_id: Option<String>,
 }
 
 // ── Tool router ──────────────────────────────────────────────────────────────
@@ -377,9 +405,205 @@ impl DjinnMcpServer {
             }),
         }
     }
-}
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+    /// Demand another tribunal round for a proposal whose refinement has
+    /// stopped (e.g. after a judge verdict, round cap, or spawn cap).
+    /// Reuses the existing coordinator refinement loop — clears the stop
+    /// state and re-enqueues an Advocate→Adversary→Judge cycle.
+    /// Records the demand action in proposal history.
+    #[tool(
+        description = "Demand another tribunal round for a proposal whose refinement has stopped (e.g. after a judge verdict or round cap). Reuses the existing coordinator refinement loop. Records the action in proposal history. Returns an error if refinement is still active."
+    )]
+    pub async fn proposal_refinement_demand_round(
+        &self,
+        Parameters(p): Parameters<ProposalRefinementDemandRoundParams>,
+    ) -> Json<DemandRoundResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        let Some(proposal) = repo.resolve(&p.proposal_id).await.ok().flatten() else {
+            return Json(DemandRoundResponse {
+                proposal_id: None,
+                accepted: false,
+                refinement: None,
+                error: Some(format!("proposal not found: {}", p.proposal_id)),
+            });
+        };
+
+        // Only allow demanding a round for proposals in draft or in_review.
+        if !matches!(proposal.status.as_str(), "draft" | "in_review") {
+            return Json(DemandRoundResponse {
+                proposal_id: Some(proposal.id),
+                accepted: false,
+                refinement: None,
+                error: Some(format!(
+                    "proposal status '{}' does not support demanding a refinement round (must be draft or in_review)",
+                    proposal.status
+                )),
+            });
+        }
+
+        let authority = p.update_authority.as_deref().unwrap_or("checkpoint");
+        if !matches!(authority, "checkpoint" | "auto_accept") {
+            return Json(DemandRoundResponse {
+                proposal_id: Some(proposal.id),
+                accepted: false,
+                refinement: None,
+                error: Some(format!(
+                    "invalid update_authority: {authority:?} (expected checkpoint or auto_accept)"
+                )),
+            });
+        }
+
+        // Record the demand-round action as a lifecycle event.
+        let demand_metadata = serde_json::json!({
+            "source": "human_demand_round",
+            "reason": p.reason,
+            "update_authority": authority,
+        });
+        if let Err(e) = repo
+            .record_refinement_lifecycle(&proposal.id, "refinement_start", Some(&demand_metadata))
+            .await
+        {
+            return Json(DemandRoundResponse {
+                proposal_id: Some(proposal.id),
+                accepted: false,
+                refinement: None,
+                error: Some(format!("failed to record demand-round event: {e}")),
+            });
+        }
+
+        // Delegate to the coordinator.
+        let coordinator = self.state.coordinator().await;
+        match coordinator {
+            Some(coordinator_handle) => {
+                let request = ProposalRefinementStartRequest {
+                    proposal_id: proposal.id.clone(),
+                    current_revision_seq: proposal.latest_revision_seq,
+                    update_authority: authority.to_string(),
+                };
+                if let Err(e) = coordinator_handle
+                    .demand_proposal_refinement_round(request)
+                    .await
+                {
+                    let _ = repo
+                        .record_refinement_lifecycle(
+                            &proposal.id,
+                            "refinement_stop",
+                            Some(&serde_json::json!({
+                                "stop_reason": e,
+                                "source": "demand_round_failure",
+                            })),
+                        )
+                        .await;
+                    return Json(DemandRoundResponse {
+                        proposal_id: Some(proposal.id),
+                        accepted: false,
+                        refinement: None,
+                        error: Some(format!("coordinator rejected demand: {e}")),
+                    });
+                }
+            }
+            None => {
+                let _ = repo
+                    .record_refinement_lifecycle(
+                        &proposal.id,
+                        "refinement_stop",
+                        Some(&serde_json::json!({
+                            "stop_reason": "coordinator not available",
+                            "source": "demand_round_failure",
+                        })),
+                    )
+                    .await;
+                return Json(DemandRoundResponse {
+                    proposal_id: Some(proposal.id),
+                    accepted: false,
+                    refinement: None,
+                    error: Some("coordinator not available".to_string()),
+                });
+            }
+        }
+
+        let refinement = ProposalRefinementStatusModel {
+            active: true,
+            current_round: Some(1),
+            dry_rounds: 0,
+            total_entries: 0,
+            update_authority: authority.to_string(),
+            stop_reason: None,
+            pending_checkpoint_count: 0,
+            needs_evidence: None,
+        };
+
+        Json(DemandRoundResponse {
+            proposal_id: Some(proposal.id),
+            accepted: true,
+            refinement: Some(refinement),
+            error: None,
+        })
+    }
+
+    /// Override a latest `needs-work` verdict with auditable sign-off/approval
+    /// metadata. The override is scoped to the current revision — later edits
+    /// that advance the proposal revision make the override stale, preventing
+    /// silent inheritance by future revisions.
+    #[tool(
+        description = "Override a judge needs-work verdict with auditable approval metadata. The override is scoped to the current proposal revision — later spec edits that advance the revision make it stale. Records who overrode, when, and why in proposal history."
+    )]
+    pub async fn proposal_verdict_override(
+        &self,
+        Parameters(p): Parameters<ProposalVerdictOverrideParams>,
+    ) -> Json<VerdictOverrideResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        let Some(proposal) = repo.resolve(&p.proposal_id).await.ok().flatten() else {
+            return Json(VerdictOverrideResponse {
+                proposal_id: None,
+                overridden: false,
+                override_on_revision_seq: None,
+                error: Some(format!("proposal not found: {}", p.proposal_id)),
+            });
+        };
+
+        if p.reason.trim().is_empty() {
+            return Json(VerdictOverrideResponse {
+                proposal_id: Some(proposal.id),
+                overridden: false,
+                override_on_revision_seq: None,
+                error: Some("override reason must not be empty".to_string()),
+            });
+        }
+
+        // Record the override as a lifecycle event scoped to current revision.
+        let override_seq = proposal.latest_revision_seq;
+        let user_id = djinn_core::auth_context::current_user_id();
+        let override_metadata = serde_json::json!({
+            "source": "human_verdict_override",
+            "override_by": user_id,
+            "override_reason": p.reason,
+            "override_on_revision_seq": override_seq,
+            "overridden_verdict_entry_id": p.overridden_verdict_entry_id,
+        });
+
+        if let Err(e) = repo
+            .record_refinement_lifecycle(&proposal.id, "verdict_override", Some(&override_metadata))
+            .await
+        {
+            return Json(VerdictOverrideResponse {
+                proposal_id: Some(proposal.id),
+                overridden: false,
+                override_on_revision_seq: None,
+                error: Some(format!("failed to record verdict override: {e}")),
+            });
+        }
+
+        Json(VerdictOverrideResponse {
+            proposal_id: Some(proposal.id),
+            overridden: true,
+            override_on_revision_seq: Some(override_seq),
+            error: None,
+        })
+    }
+}
 
 /// Derive the current refinement status from lifecycle events and debate trail.
 pub async fn build_refinement_status(

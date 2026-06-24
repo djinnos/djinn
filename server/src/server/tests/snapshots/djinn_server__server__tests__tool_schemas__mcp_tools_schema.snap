@@ -14016,6 +14016,163 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_refinement_demand_round",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why another round is being demanded. Recorded in proposal history.",
+          "nullable": true,
+          "type": "string"
+        },
+        "update_authority": {
+          "default": "checkpoint",
+          "description": "Update authority mode: `checkpoint` (default) or `auto_accept`.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id"
+      ],
+      "title": "ProposalRefinementDemandRoundParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "NeedsEvidenceStatus": {
+          "description": "Needs-evidence parking state for a proposal.",
+          "properties": {
+            "claim": {
+              "description": "The named feasibility claim that the Judge identified.",
+              "type": "string"
+            },
+            "spike_short_id": {
+              "description": "The spike task short id (human-readable).",
+              "type": "string"
+            },
+            "spike_status": {
+              "description": "Current status of the spike task.",
+              "type": "string"
+            },
+            "spike_task_id": {
+              "description": "The spike task id (UUID).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "claim",
+            "spike_task_id",
+            "spike_short_id",
+            "spike_status"
+          ],
+          "type": "object"
+        },
+        "ProposalRefinementStatusModel": {
+          "description": "Refinement session state tracked on the proposal's event_metadata.\nThe coordinator refinement workflow populates these fields; the\ncontrol-plane surfaces them read-only to the UI.",
+          "properties": {
+            "active": {
+              "description": "Whether refinement has been started for this proposal.",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Current debate round (1-based). `None` when refinement has not started.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "dry_rounds": {
+              "description": "How many consecutive adversary dry rounds have been observed.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "needs_evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NeedsEvidenceStatus"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
+            },
+            "pending_checkpoint_count": {
+              "default": 0,
+              "description": "Count of pending checkpoint revisions awaiting approval.\nAlways 0 in auto-accept mode.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "stop_reason": {
+              "description": "When set, refinement has stopped for this reason.\nValues: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,\n`agent_failure`, or `null` (still running / not started).",
+              "nullable": true,
+              "type": "string"
+            },
+            "total_entries": {
+              "description": "Total debate-trail entries produced so far.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "update_authority": {
+              "description": "Update authority mode: `checkpoint` (advocate revisions are proposed\nbut not auto-applied) or `auto_accept` (revisions are applied as\nproposal updates).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "active",
+            "dry_rounds",
+            "total_entries",
+            "update_authority"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for `proposal_refinement_demand_round`.",
+      "properties": {
+        "accepted": {
+          "description": "True when the demand was accepted and a new round started.",
+          "type": "boolean"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "refinement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalRefinementStatusModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "Refinement status after the demand."
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "title": "DemandRoundResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_refinement_start",
     "read_only": false,
     "destructive": true,
@@ -15635,6 +15792,68 @@ expression: signatures
         }
       },
       "title": "ProposalSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_verdict_override",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "overridden_verdict_entry_id": {
+          "default": null,
+          "description": "Optional debate-trail entry id of the verdict being overridden.",
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why the verdict is being overridden. Required — recorded in proposal\nhistory for audit.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "reason"
+      ],
+      "title": "ProposalVerdictOverrideParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for `proposal_verdict_override`.",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "overridden": {
+          "description": "True when the override was recorded.",
+          "type": "boolean"
+        },
+        "override_on_revision_seq": {
+          "description": "The revision seq the override is scoped to. Later revisions make\nthis override stale.",
+          "format": "int32",
+          "nullable": true,
+          "type": "integer"
+        },
+        "proposal_id": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "overridden"
+      ],
+      "title": "VerdictOverrideResponse",
       "type": "object"
     }
   },

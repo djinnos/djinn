@@ -892,6 +892,42 @@ impl ProposalRepository {
         Ok(())
     }
 
+    /// Find the latest verdict override for a proposal. Returns
+    /// `Some((override_on_revision_seq, override_metadata_json))` when an
+    /// active override exists, or `None` when no override has been recorded.
+    ///
+    /// Gate composition (task cuzf) uses this to check whether a human
+    /// override supersedes a judge `needs-work` verdict: the override is
+    /// active when its `override_on_revision_seq` equals the proposal's
+    /// current `latest_revision_seq`.
+    pub async fn latest_verdict_override(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<(i32, String)>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query_scalar::<_, Option<String>>(
+            r#"SELECT event_metadata::text FROM proposal_revisions
+               WHERE proposal_id = $1
+                 AND event_kind = 'verdict_override'
+               ORDER BY created_at DESC, id DESC
+               LIMIT 1"#,
+        )
+        .bind(proposal_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        if let Some(Some(meta_str)) = row {
+            // Extract override_on_revision_seq from the JSON.
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str)
+                && let Some(seq) = meta
+                    .get("override_on_revision_seq")
+                    .and_then(|v| v.as_i64())
+            {
+                return Ok(Some((seq as i32, meta_str)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Patch the `event_metadata` column on the latest `spec_revision` row for
     /// `proposal_id`.  Used by the refinement coordinator to retroactively
     /// attribute an advocate-authored revision after the agent session completes

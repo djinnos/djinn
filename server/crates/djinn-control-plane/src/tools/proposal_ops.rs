@@ -697,3 +697,34 @@ fn parse_acceptance_criteria(raw: &str) -> Vec<AcceptanceCriterionItem> {
         })
         .collect()
 }
+
+// ── Human authority control responses ──────────────────────────────────────
+
+/// Response for `proposal_refinement_demand_round`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct DemandRoundResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    /// True when the demand was accepted and a new round started.
+    pub accepted: bool,
+    /// Refinement status after the demand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<ProposalRefinementStatusModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response for `proposal_verdict_override`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct VerdictOverrideResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    /// True when the override was recorded.
+    pub overridden: bool,
+    /// The revision seq the override is scoped to. Later revisions make
+    /// this override stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_on_revision_seq: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
