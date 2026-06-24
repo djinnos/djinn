@@ -722,3 +722,97 @@ pub fn tool_schemas_architect() -> Vec<serde_json::Value> {
     }
     tool_values
 }
+
+/// Tool schemas for Advocate: base + write/edit + memory + proposal tools +
+/// submit_work finalize tool.
+///
+/// The Advocate authors/revises proposal specifications in the tribunal
+/// refinement workflow (k9zw). It has write access for proposal enrichment
+/// and memory tools for design rationale.
+pub fn tool_schemas_advocate() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    tool_values.push(serialize_tool(tool_write(), destructive()));
+    tool_values.push(serialize_tool(tool_edit(), destructive()));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_build_context(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_write(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_edit(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_show(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_ac_set(),
+        idempotent_mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_ac_amend(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        crate::finalize_tools::tool_submit_work(),
+        mutation(),
+    ));
+    tool_values
+}
+
+/// Tool schemas for Adversary: base + memory + proposal read tools +
+/// task_comment_add + submit_review finalize tool.
+///
+/// The Adversary produces falsifiable blocking/non-blocking objections to
+/// proposal specifications (k9zw). Read-only by design — it challenges but
+/// does not modify proposals.
+pub fn tool_schemas_adversary() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_build_context(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_show(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_task_comment_add(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        crate::finalize_tools::tool_submit_review(),
+        mutation(),
+    ));
+    tool_values
+}
+
+/// Tool schemas for Judge: base + memory + proposal read tools +
+/// task_comment_add + submit_decision finalize tool.
+///
+/// The Judge adjudicates proposal readiness after the Adversary is dry (k9zw).
+/// Read-only by design — it evaluates but does not modify proposals.
+pub fn tool_schemas_judge() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_build_context(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_show(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_task_comment_add(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        crate::finalize_tools::tool_submit_decision(),
+        mutation(),
+    ));
+    tool_values
+}

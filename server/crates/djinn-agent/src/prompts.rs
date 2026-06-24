@@ -12,8 +12,8 @@ pub use djinn_roles::prompts::MAX_SYSTEM_PROMPT_CHARS;
 pub use djinn_roles::prompts::TaskContext;
 pub use djinn_roles::prompts::format_tools_section;
 pub use djinn_roles::prompts::{
-    ARCHITECT_TEMPLATE, BASE_TEMPLATE, CLUSTER_DOC_TEMPLATE, DEV_TEMPLATE, LEAD_TEMPLATE,
-    PLANNER_TEMPLATE, REVIEWER_TEMPLATE,
+    ADVERSARY_TEMPLATE, ADVOCATE_TEMPLATE, ARCHITECT_TEMPLATE, BASE_TEMPLATE, CLUSTER_DOC_TEMPLATE,
+    DEV_TEMPLATE, JUDGE_TEMPLATE, LEAD_TEMPLATE, PLANNER_TEMPLATE, REVIEWER_TEMPLATE,
 };
 pub use djinn_roles::prompts::{format_acceptance_criteria, format_labels};
 
