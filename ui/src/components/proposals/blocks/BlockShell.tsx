@@ -149,3 +149,39 @@ export function BlockMarkdown({ children }: { children?: ReactNode }) {
     </div>
   );
 }
+
+/**
+ * Render inline markdown (bold, italic, code, links) without the block-level
+ * `<p>` wrapper that `ReactMarkdown` normally produces. Designed for labels,
+ * checklist items, and other short strings that live inside flex rows where a
+ * `<p>` would break layout.
+ *
+ * The outer `<span>` suppresses the default paragraph margin while preserving
+ * inline formatting like `<strong>`, `<code>`, `<em>`, and `<a>`.
+ */
+export function InlineMarkdown({
+  children,
+  className,
+}: {
+  children?: string;
+  className?: string;
+}) {
+  if (!children) return null;
+  return (
+    <span className={className}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        allowedElements={["p", "strong", "em", "code", "a", "del", "br"]}
+        components={{
+          // Render the auto-generated <p> wrapper as a <span> so it stays inline.
+          // Filter out the `node` AST object that react-markdown passes through.
+          p: ({ children: c, node: _node, ...props }) => (
+            <span {...props}>{c}</span>
+          ),
+        }}
+      >
+        {children}
+      </ReactMarkdown>
+    </span>
+  );
+}
