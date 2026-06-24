@@ -9,6 +9,10 @@
 //! `djinn_agent::context::AgentContext`.
 
 #![recursion_limit = "256"]
+// Temporary: many internal modules are extracted but not yet fully wired into
+// the public facade. Allow dead_code so the crate compiles while the extraction
+// is in progress. Remove once all modules are connected.
+#![allow(dead_code)]
 
 // ─── Public host seam ───────────────────────────────────────────────────────
 

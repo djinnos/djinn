@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 //! Structural session extraction: co-access flush + event taxonomy capture.
 //!
 //! After a session completes, this module parses the session's conversation to:
