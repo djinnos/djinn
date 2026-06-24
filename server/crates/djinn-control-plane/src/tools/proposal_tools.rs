@@ -1518,6 +1518,24 @@ impl DjinnMcpServer {
         let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
             return Json(err_single(proposal_not_found_error(&p.id)));
         };
+
+        // Deterministic DoR gate: block sign-off on draft/in_review proposals
+        // whose body/AC/targets are not ready.  This prevents sign-off-driven
+        // auto-advance (draft→in_review, draft→approved, in_review→approved)
+        // from bypassing readiness checks.
+        if matches!(proposal.status.as_str(), "draft" | "in_review") {
+            let ac_items = parse_ac_items(&proposal.acceptance_criteria);
+            let target_count = repo
+                .targets(&proposal.id)
+                .await
+                .map(|t| t.len())
+                .unwrap_or(0);
+            let readiness = evaluate_proposal_readiness(&proposal.body, &ac_items, target_count);
+            if let Some(err) = format_readiness_error(&readiness) {
+                return Json(err_single(err));
+            }
+        }
+
         match repo.add_signoff(&proposal.id, &p.kind, &user_id).await {
             Ok(updated) => Json(ProposalSingleResponse {
                 proposal: Some(ProposalModel::from(&updated)),
@@ -4226,5 +4244,256 @@ Summary paragraph.
             skill_body.contains("backtick"),
             "visual-spec SKILL.md must mention the backtick mechanism"
         );
+    }
+}
+
+#[cfg(test)]
+mod signoff_readiness_tests {
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{
+        Database, ProjectRepository, ProposalCreateInput, ProposalRepository, UserRepository,
+    };
+
+    /// A well-formed body that passes all deterministic readiness checks.
+    fn ready_body() -> &'static str {
+        r#"
+# Problem
+Users cannot do X.
+
+# Scope
+In scope: Y. Out of scope: Z.
+
+# Objectives
+- Deliver A
+- Deliver B
+
+## File map
+```file-map
+    src/main.rs
+    src/lib.rs
+```
+
+# Dependencies
+Blocked by service C.
+
+# Open Questions
+What happens if D fails?
+"#
+    }
+
+    /// A minimal body that fails most readiness checks (missing problem,
+    /// scope, objectives, grounding, dependencies, open questions).
+    fn incomplete_body() -> &'static str {
+        "Just some random text without any required sections."
+    }
+
+    async fn setup_test_server_and_user() -> (DjinnMcpServer, Database, String) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(999_700, "signoff-test-user", None, None)
+            .await
+            .unwrap();
+        UserRepository::new(db.clone())
+            .set_role(&user.id, "engineer")
+            .await
+            .unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db, user.id)
+    }
+
+    /// A draft proposal with incomplete readiness fails on first sign-off
+    /// and remains `draft` with no new sign-off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn draft_incomplete_proposal_fails_signoff_and_remains_draft() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("svc-draft-inc", "test", "svc-draft-inc")
+            .await
+            .unwrap();
+
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Incomplete Draft",
+                body: incomplete_body(),
+                acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        // Add a target so target_count > 0 (one fewer failure to worry about).
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(
+            error.is_some(),
+            "expected readiness error, got: {response:?}"
+        );
+        let error = error.unwrap();
+        assert!(
+            error.contains("proposal not ready for review"),
+            "error should mention readiness: {error}"
+        );
+
+        // Proposal must still be `draft` — sign-off was never persisted.
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "draft", "status must remain draft");
+
+        // No sign-offs recorded.
+        let signoffs = repo.signoffs(&proposal.id).await.unwrap();
+        assert!(signoffs.is_empty(), "no sign-offs should be recorded");
+    }
+
+    /// A complete draft proposal can receive a sign-off and advance to
+    /// `in_review` (one of two required sign-off kinds).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn draft_complete_proposal_accepts_signoff_and_advances() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("svc-draft-ok", "test", "svc-draft-ok")
+            .await
+            .unwrap();
+
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Complete Draft",
+                body: ready_body(),
+                acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            response.get("error").is_none(),
+            "sign-off should succeed: {:?}",
+            response.get("error")
+        );
+
+        // Proposal must have advanced to `in_review` (one of two kinds given).
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.status, "in_review",
+            "status must advance to in_review"
+        );
+
+        // One sign-off recorded.
+        let signoffs = repo.signoffs(&proposal.id).await.unwrap();
+        assert_eq!(signoffs.len(), 1, "one sign-off should be recorded");
+    }
+
+    /// An `in_review` proposal with a vague AC fails technical sign-off with
+    /// the offending AC index/text in the error message.
+    ///
+    /// Uses a direct status update to simulate legacy data that was advanced
+    /// before the readiness gate was in place.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn in_review_proposal_with_vague_ac_fails_signoff() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+        // Create a proposal with a clean body but vague AC.
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Vague AC Review",
+                body: ready_body(),
+                acceptance_criteria: Some(
+                    r#"[{"criterion":"API returns 200","met":false},{"criterion":"The UI should be user-friendly","met":false}]"#,
+                ),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("svc-review-vague", "test", "svc-review-vague")
+            .await
+            .unwrap();
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+
+        // Directly advance the status to `in_review` to simulate legacy
+        // data that pre-dates the readiness gate.
+        sqlx::query("UPDATE proposals SET status = 'in_review' WHERE id = $1")
+            .bind(&proposal.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        // Attempt the technical sign-off — it should fail because the
+        // vague AC makes the proposal not ready.
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(
+            error.is_some(),
+            "expected readiness error, got: {response:?}"
+        );
+        let error = error.unwrap();
+        assert!(
+            error.contains("proposal not ready for review"),
+            "error should mention readiness: {error}"
+        );
+        assert!(
+            error.contains("Vague/unverifiable acceptance criterion"),
+            "error should mention vague AC: {error}"
+        );
+        assert!(
+            error.contains("user-friendly"),
+            "error should include the offending AC text: {error}"
+        );
+
+        // Proposal must still be `in_review` — no new sign-off was recorded.
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "in_review");
+
+        // No sign-offs should exist.
+        let signoffs = repo.signoffs(&proposal.id).await.unwrap();
+        assert!(signoffs.is_empty(), "no sign-offs should be recorded");
     }
 }
