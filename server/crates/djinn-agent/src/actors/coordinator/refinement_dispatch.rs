@@ -24,11 +24,14 @@
 
 use std::time::{Duration, Instant as StdInstant};
 
+use djinn_control_plane::tools::epic_ops::AcceptanceCriterionItem;
+use djinn_control_plane::tools::proposal_readiness::evaluate_proposal_readiness;
 use djinn_db::{ProposalRepository, TaskRepository, UserSettingsRepository};
 
 use super::refinement::{
     AdversaryPassOutcome, AdversaryPassResult, JudgeVerdictResult, ObjectionRecord,
-    RefinementLoopState, RefinementPhase, StopReason, select_refinement_model,
+    RefinementLoopState, RefinementPhase, StopReason, build_revision_event_metadata,
+    select_refinement_model,
 };
 
 use super::actor::CoordinatorActor;
@@ -115,6 +118,10 @@ impl CoordinatorActor {
     }
 
     /// Dispatch the next refinement phase for a proposal.
+    ///
+    /// At each round boundary the deterministic P1 DoR evaluator is consulted
+    /// so that readiness findings are available to the dispatched agent and
+    /// included in stop metadata.
     async fn dispatch_next_refinement_phase(&mut self, proposal_id: &str) {
         let Some(state) = self.active_refinements.get(proposal_id).cloned() else {
             return;
@@ -127,13 +134,41 @@ impl CoordinatorActor {
         // Read diverse_refinement setting at the round boundary.
         let diverse_refinement = self.read_diverse_refinement_setting(proposal_id).await;
 
+        // Consult the deterministic P1 DoR evaluator.
+        let readiness = self.evaluate_proposal_readiness(proposal_id).await;
+
+        // Log readiness findings for observability.
+        if let Some(ref readiness) = readiness
+            && !readiness.ready
+        {
+            tracing::info!(
+                proposal_id = %proposal_id,
+                round,
+                failure_count = readiness.failures.len(),
+                "DoR evaluator found readiness failures at round boundary"
+            );
+        }
+
         // Determine the agent_type and model for this phase.
         let (agent_type, model_id) =
             self.resolve_refinement_dispatch_params(phase, diverse_refinement);
 
+        // Build a readiness-enriched task description so the agent sees
+        // current DoR findings.
+        let readiness_context = readiness
+            .as_ref()
+            .and_then(|r| r.to_error_string())
+            .unwrap_or_else(|| "Proposal currently meets all DoR checks.".to_string());
+
         // Create a refinement task in the DB.
         let task_id = match self
-            .create_refinement_task(proposal_id, &agent_type, round, revision_seq)
+            .create_refinement_task_with_context(
+                proposal_id,
+                &agent_type,
+                round,
+                revision_seq,
+                &readiness_context,
+            )
             .await
         {
             Some(id) => id,
@@ -236,6 +271,11 @@ impl CoordinatorActor {
 
     /// Process an advocate session outcome by reading the proposal's
     /// latest revision and advancing the state machine.
+    ///
+    /// When the advocate produced a material revision (latest_revision_seq
+    /// advanced), the revision's `event_metadata` is patched with
+    /// refinement-loop attribution (role, round, authority mode, model)
+    /// via `ProposalRepository::set_latest_revision_event_metadata`.
     async fn process_advocate_outcome(&mut self, proposal_id: &str, state: &RefinementLoopState) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
@@ -270,6 +310,34 @@ impl CoordinatorActor {
 
         let new_revision_seq = proposal.latest_revision_seq;
         let advanced = new_revision_seq > state.current_revision_seq;
+
+        // Persist revision attribution when the advocate advanced the spec.
+        // The agent's `proposal_update` tool call doesn't carry refinement
+        // context, so we patch the event_metadata post-hoc.
+        if advanced {
+            let model_id = self
+                .refinement_sessions
+                .get(proposal_id)
+                .map(|s| s.model_id.clone());
+            let event_meta = build_revision_event_metadata(
+                state.current_round,
+                state.update_authority(),
+                model_id.as_deref(),
+            );
+            let event_bus2 = crate::events::event_bus_for(&self.events_tx);
+            let proposal_repo2 = ProposalRepository::new(self.db.clone(), event_bus2);
+            if let Err(e) = proposal_repo2
+                .set_latest_revision_event_metadata(proposal_id, new_revision_seq, &event_meta)
+                .await
+            {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    seq = new_revision_seq,
+                    error = %e,
+                    "Failed to patch advocate revision event_metadata"
+                );
+            }
+        }
 
         if let Some(state) = self.active_refinements.get_mut(proposal_id) {
             if advanced {
@@ -530,13 +598,15 @@ impl CoordinatorActor {
         }
     }
 
-    /// Create a refinement task in the DB for the given tribunal role.
-    async fn create_refinement_task(
+    /// Create a refinement task in the DB for the given tribunal role,
+    /// enriched with readiness context from the P1 DoR evaluator.
+    async fn create_refinement_task_with_context(
         &self,
         proposal_id: &str,
         agent_type: &str,
         round: i32,
         against_revision_seq: i32,
+        readiness_context: &str,
     ) -> Option<String> {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let task_repo = TaskRepository::new(self.db.clone(), event_bus.clone());
@@ -544,7 +614,8 @@ impl CoordinatorActor {
         let title = format!("Refinement {agent_type} — proposal {proposal_id} (round {round})");
         let description = format!(
             "Proposal refinement session: {agent_type} role for proposal {proposal_id}, \
-             round {round}, against revision {against_revision_seq}."
+             round {round}, against revision {against_revision_seq}.\n\n\
+             Current DoR status: {readiness_context}"
         );
 
         // Find a project_id from the proposal's targets.
@@ -599,5 +670,41 @@ impl CoordinatorActor {
                 None
             }
         }
+    }
+
+    /// Evaluate proposal readiness using the deterministic P1 DoR evaluator.
+    ///
+    /// Reads the current proposal body, acceptance criteria, and target count
+    /// and calls `evaluate_proposal_readiness`. Returns `None` when the
+    /// proposal cannot be loaded (the caller should treat this as
+    /// "no readiness data available" rather than a fatal error).
+    async fn evaluate_proposal_readiness(
+        &self,
+        proposal_id: &str,
+    ) -> Option<djinn_control_plane::tools::proposal_readiness::ProposalReadinessResult> {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+
+        let proposal = match proposal_repo.get(proposal_id).await {
+            Ok(Some(p)) => p,
+            _ => return None,
+        };
+
+        let target_count = match proposal_repo.targets(proposal_id).await {
+            Ok(targets) => targets.len(),
+            _ => 0,
+        };
+
+        let ac_items: Vec<AcceptanceCriterionItem> =
+            djinn_core::models::parse_json_array(&proposal.acceptance_criteria)
+                .into_iter()
+                .map(AcceptanceCriterionItem::Text)
+                .collect();
+
+        Some(evaluate_proposal_readiness(
+            &proposal.body,
+            &ac_items,
+            target_count,
+        ))
     }
 }
