@@ -555,6 +555,36 @@ fn architect_tools_section_snapshot() {
 }
 
 #[test]
+fn advocate_tools_section_snapshot() {
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Advocate);
+    let section = format_tools_section(&schemas);
+    insta::with_settings!({ snapshot_path => "../snapshots" }, {
+        insta::assert_snapshot!(section);
+    });
+}
+
+#[test]
+fn adversary_tools_section_snapshot() {
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Adversary);
+    let section = format_tools_section(&schemas);
+    insta::with_settings!({ snapshot_path => "../snapshots" }, {
+        insta::assert_snapshot!(section);
+    });
+}
+
+#[test]
+fn judge_tools_section_snapshot() {
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Judge);
+    let section = format_tools_section(&schemas);
+    insta::with_settings!({ snapshot_path => "../snapshots" }, {
+        insta::assert_snapshot!(section);
+    });
+}
+
+#[test]
 fn tools_section_injected_into_rendered_prompt() {
     ensure_registry();
     let task = make_task();
@@ -653,6 +683,37 @@ fn tools_section_injected_into_rendered_prompt() {
     assert!(
         planner_has_amend_tool,
         "planner tool schemas should expose agent_amend_prompt for evidence-based learned-prompt amendments"
+    );
+
+    // Tribunal roles (k9zw): verify each role renders its finalize tool.
+    let advocate_prompt = render_prompt(AgentType::Advocate, &task, &ctx);
+    assert!(
+        advocate_prompt.contains("`submit_work("),
+        "advocate prompt should contain submit_work"
+    );
+    assert!(
+        !advocate_prompt.contains("{{"),
+        "advocate prompt should have no unresolved placeholders"
+    );
+
+    let adversary_prompt = render_prompt(AgentType::Adversary, &task, &ctx);
+    assert!(
+        adversary_prompt.contains("`submit_review("),
+        "adversary prompt should contain submit_review"
+    );
+    assert!(
+        !adversary_prompt.contains("{{"),
+        "adversary prompt should have no unresolved placeholders"
+    );
+
+    let judge_prompt = render_prompt(AgentType::Judge, &task, &ctx);
+    assert!(
+        judge_prompt.contains("`submit_decision("),
+        "judge prompt should contain submit_decision"
+    );
+    assert!(
+        !judge_prompt.contains("{{"),
+        "judge prompt should have no unresolved placeholders"
     );
 }
 
@@ -1282,9 +1343,20 @@ fn proposal_address_prompt_contains_block_patch_workflow_guidance() {
     // Lazy semantics: must NOT inline the full block vocabulary (no concrete
     // block tag names from the catalog).
     let forbidden_block_tags = [
-        "AnnotatedCode", "ApiEndpoint", "Callout", "Checklist", "Columns",
-        "Decisions", "Diagram", "Diff", "FileTree", "JsonExplorer",
-        "QuestionForm", "RichText", "Tabs", "Wireframe",
+        "AnnotatedCode",
+        "ApiEndpoint",
+        "Callout",
+        "Checklist",
+        "Columns",
+        "Decisions",
+        "Diagram",
+        "Diff",
+        "FileTree",
+        "JsonExplorer",
+        "QuestionForm",
+        "RichText",
+        "Tabs",
+        "Wireframe",
     ];
     for tag in &forbidden_block_tags {
         assert!(

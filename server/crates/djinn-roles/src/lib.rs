@@ -20,8 +20,8 @@ use std::sync::OnceLock;
 // Re-export the prompt templates so callers can access them through
 // `djinn_roles::DEV_TEMPLATE` etc.
 pub use prompts::{
-    ARCHITECT_TEMPLATE, BASE_TEMPLATE, CLUSTER_DOC_TEMPLATE, DEV_TEMPLATE, LEAD_TEMPLATE,
-    PLANNER_TEMPLATE, REVIEWER_TEMPLATE,
+    ADVERSARY_TEMPLATE, ADVOCATE_TEMPLATE, ARCHITECT_TEMPLATE, BASE_TEMPLATE, CLUSTER_DOC_TEMPLATE,
+    DEV_TEMPLATE, JUDGE_TEMPLATE, LEAD_TEMPLATE, PLANNER_TEMPLATE, REVIEWER_TEMPLATE,
 };
 
 /// Role an agent is playing within Djinn.
@@ -33,6 +33,12 @@ pub enum AgentType {
     Planner,
     /// Architect: handles spike, review tasks and proactive health monitoring (ADR-034).
     Architect,
+    /// Advocate: proposal author/reviser in the tribunal refinement workflow (k9zw).
+    Advocate,
+    /// Adversary: red-team objection producer in the tribunal refinement workflow (k9zw).
+    Adversary,
+    /// Judge: independent adjudicator in the tribunal refinement workflow (k9zw).
+    Judge,
 }
 
 impl AgentType {
@@ -61,7 +67,8 @@ impl AgentType {
         tool_schemas_for(*self)
     }
 
-    /// Parse from a DB/wire string, including the `architect` variant.
+    /// Parse from a DB/wire string, including the `architect` variant
+    /// and tribunal refinement roles (k9zw).
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "worker" => Some(Self::Worker),
@@ -69,6 +76,9 @@ impl AgentType {
             "lead" => Some(Self::Lead),
             "planner" => Some(Self::Planner),
             "architect" => Some(Self::Architect),
+            "advocate" => Some(Self::Advocate),
+            "adversary" => Some(Self::Adversary),
+            "judge" => Some(Self::Judge),
             _ => None,
         }
     }
@@ -169,6 +179,9 @@ mod tests {
             AgentType::Lead,
             AgentType::Planner,
             AgentType::Architect,
+            AgentType::Advocate,
+            AgentType::Adversary,
+            AgentType::Judge,
         ] {
             assert_equivalent_to_role_config(agent_type);
         }
@@ -203,6 +216,16 @@ mod tests {
         assert_eq!(AgentType::Lead.dispatch_role(), "lead");
         assert_eq!(AgentType::Planner.dispatch_role(), "planner");
         assert_eq!(AgentType::Architect.dispatch_role(), "architect");
+        assert_eq!(AgentType::Advocate.dispatch_role(), "advocate");
+        assert_eq!(AgentType::Adversary.dispatch_role(), "adversary");
+        assert_eq!(AgentType::Judge.dispatch_role(), "judge");
+    }
+
+    #[test]
+    fn tribunal_roles_parse_from_string() {
+        assert_eq!(AgentType::parse("advocate"), Some(AgentType::Advocate));
+        assert_eq!(AgentType::parse("adversary"), Some(AgentType::Adversary));
+        assert_eq!(AgentType::parse("judge"), Some(AgentType::Judge));
     }
 }
 

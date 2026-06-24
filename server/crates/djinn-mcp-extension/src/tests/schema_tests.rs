@@ -111,6 +111,9 @@ fn tool_names_for_role(role: &str) -> BTreeSet<String> {
         "lead" => tool_schemas_lead(),
         "planner" => tool_schemas_planner(),
         "architect" => tool_schemas_architect(),
+        "advocate" => tool_schemas_advocate(),
+        "adversary" => tool_schemas_adversary(),
+        "judge" => tool_schemas_judge(),
         _ => panic!("unknown role: {role}"),
     };
     schemas
@@ -199,6 +202,79 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(!architect.iter().any(|n| n == "edit"));
     assert!(!architect.iter().any(|n| n == "apply_patch"));
     assert!(!architect.iter().any(|n| n == "agent_amend_prompt"));
+
+    // Tribunal roles (k9zw): verify role-specific tools.
+    let advocate = schema_names(tool_schemas_advocate());
+    assert!(
+        advocate.iter().any(|n| n == "write"),
+        "advocate should have write"
+    );
+    assert!(
+        advocate.iter().any(|n| n == "edit"),
+        "advocate should have edit"
+    );
+    assert!(
+        advocate.iter().any(|n| n == "submit_work"),
+        "advocate should have submit_work"
+    );
+    assert!(
+        advocate.iter().any(|n| n == "proposal_show"),
+        "advocate should have proposal_show"
+    );
+    assert!(
+        advocate.iter().any(|n| n == "proposal_ac_amend"),
+        "advocate should have proposal_ac_amend"
+    );
+    assert!(
+        advocate.iter().any(|n| n == "memory_write"),
+        "advocate should have memory_write"
+    );
+
+    let adversary = schema_names(tool_schemas_adversary());
+    assert!(
+        adversary.iter().any(|n| n == "submit_review"),
+        "adversary should have submit_review"
+    );
+    assert!(
+        adversary.iter().any(|n| n == "proposal_show"),
+        "adversary should have proposal_show"
+    );
+    assert!(
+        adversary.iter().any(|n| n == "task_comment_add"),
+        "adversary should have task_comment_add"
+    );
+    // Adversary must NOT have write/edit tools.
+    assert!(
+        !adversary.iter().any(|n| n == "write"),
+        "adversary must not have write"
+    );
+    assert!(
+        !adversary.iter().any(|n| n == "edit"),
+        "adversary must not have edit"
+    );
+
+    let judge = schema_names(tool_schemas_judge());
+    assert!(
+        judge.iter().any(|n| n == "submit_decision"),
+        "judge should have submit_decision"
+    );
+    assert!(
+        judge.iter().any(|n| n == "proposal_show"),
+        "judge should have proposal_show"
+    );
+    assert!(
+        judge.iter().any(|n| n == "task_comment_add"),
+        "judge should have task_comment_add"
+    );
+    // Judge must NOT have write/edit tools.
+    assert!(
+        !judge.iter().any(|n| n == "write"),
+        "judge must not have write"
+    );
+    assert!(
+        !judge.iter().any(|n| n == "edit"),
+        "judge must not have edit"
+    );
 }
 
 #[test]
@@ -475,6 +551,9 @@ fn all_role_tool_schemas_have_pinned_safety_annotations() {
         ("lead", tool_schemas_lead()),
         ("planner", tool_schemas_planner()),
         ("architect", tool_schemas_architect()),
+        ("advocate", tool_schemas_advocate()),
+        ("adversary", tool_schemas_adversary()),
+        ("judge", tool_schemas_judge()),
     ] {
         for schema in schemas {
             let name = schema
@@ -504,6 +583,9 @@ fn role_tool_schemas_pin_destructive_and_open_world_sets() {
         tool_schemas_lead(),
         tool_schemas_planner(),
         tool_schemas_architect(),
+        tool_schemas_advocate(),
+        tool_schemas_adversary(),
+        tool_schemas_judge(),
     ] {
         for schema in schemas {
             let name = schema
@@ -617,4 +699,40 @@ fn snapshot_code_graph_tool_schema() {
         "code_graph_tool_schema",
         serde_json::to_value(tool_code_graph()).unwrap()
     );
+}
+
+#[test]
+fn snapshot_advocate_tool_names() {
+    let schemas = tool_schemas_advocate();
+    let names = tool_names(&schemas);
+    insta::assert_json_snapshot!("advocate_tool_names", names);
+}
+
+#[test]
+fn snapshot_advocate_tool_schemas() {
+    insta::assert_json_snapshot!("advocate_tool_schemas", tool_schemas_advocate());
+}
+
+#[test]
+fn snapshot_adversary_tool_names() {
+    let schemas = tool_schemas_adversary();
+    let names = tool_names(&schemas);
+    insta::assert_json_snapshot!("adversary_tool_names", names);
+}
+
+#[test]
+fn snapshot_adversary_tool_schemas() {
+    insta::assert_json_snapshot!("adversary_tool_schemas", tool_schemas_adversary());
+}
+
+#[test]
+fn snapshot_judge_tool_names() {
+    let schemas = tool_schemas_judge();
+    let names = tool_names(&schemas);
+    insta::assert_json_snapshot!("judge_tool_names", names);
+}
+
+#[test]
+fn snapshot_judge_tool_schemas() {
+    insta::assert_json_snapshot!("judge_tool_schemas", tool_schemas_judge());
 }

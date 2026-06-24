@@ -21,14 +21,20 @@ pub use djinn_roles::config::config_for;
 
 // ─── Agent-specific role implementations ─────────────────────────────────────
 
+mod adversary;
+mod advocate;
 mod architect;
 pub mod finalize;
+mod judge;
 mod lead;
 mod planner;
 mod reviewer;
 mod worker;
 
+pub(crate) use adversary::AdversaryRole;
+pub(crate) use advocate::AdvocateRole;
 pub(crate) use architect::ArchitectRole;
+pub(crate) use judge::JudgeRole;
 pub(crate) use lead::LeadRole;
 pub(crate) use planner::PlannerRole;
 pub(crate) use reviewer::ReviewerRole;
@@ -88,6 +94,9 @@ pub(crate) fn role_impl_for(agent_type: crate::AgentType) -> Arc<dyn AgentRole> 
         crate::AgentType::Lead => Arc::new(LeadRole),
         crate::AgentType::Planner => Arc::new(PlannerRole),
         crate::AgentType::Architect => Arc::new(ArchitectRole),
+        crate::AgentType::Advocate => Arc::new(AdvocateRole),
+        crate::AgentType::Adversary => Arc::new(AdversaryRole),
+        crate::AgentType::Judge => Arc::new(JudgeRole),
     }
 }
 
@@ -132,6 +141,9 @@ pub(crate) fn role_for_task_dispatch(
             "lead" | "pm" => Some(crate::AgentType::Lead),
             "planner" => Some(crate::AgentType::Planner),
             "architect" => Some(crate::AgentType::Architect),
+            "advocate" => Some(crate::AgentType::Advocate),
+            "adversary" => Some(crate::AgentType::Adversary),
+            "judge" => Some(crate::AgentType::Judge),
             _ => None,
         }
     {
@@ -270,6 +282,10 @@ impl RoleRegistry {
             ("lead", crate::AgentType::Lead),
             ("planner", crate::AgentType::Planner),
             ("architect", crate::AgentType::Architect),
+            // Tribunal refinement roles (k9zw).
+            ("advocate", crate::AgentType::Advocate),
+            ("adversary", crate::AgentType::Adversary),
+            ("judge", crate::AgentType::Judge),
         ]);
 
         let dispatch_rules = vec![
@@ -639,6 +655,24 @@ mod tests {
             model_pool_roles.contains(&"architect"),
             "model_pool_roles should include 'architect'"
         );
+    }
+
+    #[test]
+    fn registry_includes_tribunal_roles() {
+        let registry = RoleRegistry::new();
+        for role_name in ["advocate", "adversary", "judge"] {
+            assert!(
+                registry.roles.contains_key(role_name),
+                "RoleRegistry should contain '{role_name}'"
+            );
+        }
+        let model_pool_roles = registry.model_pool_roles();
+        for role_name in ["advocate", "adversary", "judge"] {
+            assert!(
+                model_pool_roles.contains(&role_name),
+                "model_pool_roles should include '{role_name}'"
+            );
+        }
     }
 
     // ── flow_for_task_dispatch ────────────────────────────────────────────────

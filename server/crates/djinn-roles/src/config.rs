@@ -135,6 +135,36 @@ pub const ARCHITECT_CONFIG: RoleConfig = RoleConfig {
     mode_section: None,
 };
 
+/// Advocate role: proposal author/reviser in the tribunal refinement workflow (k9zw).
+pub const ADVOCATE_CONFIG: RoleConfig = RoleConfig {
+    name: "advocate",
+    display_name: "Proposal Advocate",
+    dispatch_role: "advocate",
+    initial_message: prompts::ADVOCATE_TEMPLATE,
+    finalize_tool_names: &["submit_work"],
+    mode_section: None,
+};
+
+/// Adversary role: red-team objection producer in the tribunal refinement workflow (k9zw).
+pub const ADVERSARY_CONFIG: RoleConfig = RoleConfig {
+    name: "adversary",
+    display_name: "Proposal Adversary",
+    dispatch_role: "adversary",
+    initial_message: prompts::ADVERSARY_TEMPLATE,
+    finalize_tool_names: &["submit_review"],
+    mode_section: None,
+};
+
+/// Judge role: independent adjudicator in the tribunal refinement workflow (k9zw).
+pub const JUDGE_CONFIG: RoleConfig = RoleConfig {
+    name: "judge",
+    display_name: "Proposal Judge",
+    dispatch_role: "judge",
+    initial_message: prompts::JUDGE_TEMPLATE,
+    finalize_tool_names: &["submit_decision"],
+    mode_section: None,
+};
+
 /// Resolve the base `RoleConfig` for an `AgentType`.
 pub fn config_for(agent_type: AgentType) -> &'static RoleConfig {
     match agent_type {
@@ -143,6 +173,9 @@ pub fn config_for(agent_type: AgentType) -> &'static RoleConfig {
         AgentType::Lead => &LEAD_CONFIG,
         AgentType::Planner => &PLANNER_CONFIG,
         AgentType::Architect => &ARCHITECT_CONFIG,
+        AgentType::Advocate => &ADVOCATE_CONFIG,
+        AgentType::Adversary => &ADVERSARY_CONFIG,
+        AgentType::Judge => &JUDGE_CONFIG,
     }
 }
 

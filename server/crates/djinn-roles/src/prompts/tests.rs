@@ -479,3 +479,115 @@ fn planner_learned_prompt_guidance_present_across_modes() {
         );
     }
 }
+
+// ── Tribunal roles (k9zw) ────────────────────────────────────────────────
+
+#[test]
+fn advocate_prompt_contains_role_responsibilities() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Advocate, &task, &ctx);
+
+    assert!(
+        prompt.contains("Advocate"),
+        "advocate prompt should identify the Advocate role"
+    );
+    assert!(
+        prompt.contains("proposal"),
+        "advocate prompt should mention proposals"
+    );
+    assert!(
+        prompt.contains("Adversary") || prompt.contains("adversary"),
+        "advocate prompt should reference the Adversary role"
+    );
+    assert!(
+        prompt.contains("proposal_blocks") || prompt.contains("block catalog"),
+        "advocate prompt should reference proposal_blocks / block catalog"
+    );
+    // MDX enrichment must not be mandatory for DoR.
+    assert!(
+        prompt.contains("optional") || prompt.contains("not required") || prompt.contains("not a"),
+        "advocate prompt should frame MDX enrichment as optional"
+    );
+    assert!(
+        !prompt.contains("{{"),
+        "advocate prompt should have no unresolved placeholders"
+    );
+}
+
+#[test]
+fn adversary_prompt_contains_objection_contract() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Adversary, &task, &ctx);
+
+    assert!(
+        prompt.contains("Adversary") || prompt.contains("adversary"),
+        "adversary prompt should identify the Adversary role"
+    );
+    assert!(
+        prompt.contains("blocking") || prompt.contains("non-blocking"),
+        "adversary prompt should mention blocking/non-blocking objections"
+    );
+    assert!(
+        prompt.contains("falsifiable"),
+        "adversary prompt should require falsifiable objections"
+    );
+    assert!(
+        prompt.contains("dry") || prompt.contains("no new"),
+        "adversary prompt should mention the dry signal"
+    );
+    assert!(
+        !prompt.contains("{{"),
+        "adversary prompt should have no unresolved placeholders"
+    );
+}
+
+#[test]
+fn judge_prompt_contains_adjudication_contract() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Judge, &task, &ctx);
+
+    assert!(
+        prompt.contains("Judge") || prompt.contains("judge"),
+        "judge prompt should identify the Judge role"
+    );
+    assert!(
+        prompt.contains("adjudicate") || prompt.contains("verdict") || prompt.contains("approve"),
+        "judge prompt should mention adjudication or verdict"
+    );
+    assert!(
+        prompt.contains("dry") || prompt.contains("no new blocking"),
+        "judge prompt should reference the Adversary dry condition"
+    );
+    assert!(
+        prompt.contains("independent"),
+        "judge prompt should emphasize independence"
+    );
+    assert!(
+        !prompt.contains("{{"),
+        "judge prompt should have no unresolved placeholders"
+    );
+}
+
+#[test]
+fn tribunal_roles_are_not_routed_through_reviewer() {
+    // Verify tribunal roles have distinct config names, not aliases for "reviewer".
+    let advocate_cfg = AgentType::Advocate.role_config();
+    let adversary_cfg = AgentType::Adversary.role_config();
+    let judge_cfg = AgentType::Judge.role_config();
+
+    assert_eq!(advocate_cfg.name, "advocate");
+    assert_eq!(adversary_cfg.name, "adversary");
+    assert_eq!(judge_cfg.name, "judge");
+
+    assert_ne!(advocate_cfg.name, "reviewer");
+    assert_ne!(adversary_cfg.name, "reviewer");
+    assert_ne!(judge_cfg.name, "reviewer");
+
+    // Dispatch roles must also be distinct.
+    assert_eq!(advocate_cfg.dispatch_role, "advocate");
+    assert_eq!(adversary_cfg.dispatch_role, "adversary");
+    assert_eq!(judge_cfg.dispatch_role, "judge");
+}
