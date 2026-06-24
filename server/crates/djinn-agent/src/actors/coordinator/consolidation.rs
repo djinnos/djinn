@@ -483,6 +483,7 @@ mod tests {
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,
             pr_cleanup_config: PrCleanupConfig::default(),
+            active_refinements: std::collections::HashMap::new(),
             dispatched: 0,
             recovered: 0,
         }

@@ -277,6 +277,30 @@ impl CoordinatorHandle {
             .map_err(|_| CoordinatorError::ActorDead)?;
         rx.await.map_err(|_| CoordinatorError::NoResponse)
     }
+
+    /// Start a proposal refinement run.  The coordinator is authoritative for
+    /// duplicate-start rejection — if the proposal already has an active
+    /// refinement loop the call returns an error.
+    pub async fn start_proposal_refinement(
+        &self,
+        proposal_id: String,
+        current_revision_seq: i32,
+        update_authority: String,
+    ) -> Result<(), CoordinatorError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(CoordinatorMessage::StartProposalRefinement {
+                proposal_id,
+                current_revision_seq,
+                update_authority,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| CoordinatorError::ActorDead)?;
+        rx.await
+            .map_err(|_| CoordinatorError::NoResponse)?
+            .map_err(CoordinatorError::Other)
+    }
 }
 
 // ─── CoordinatorTrigger impl ───────────────────────────────────────────────

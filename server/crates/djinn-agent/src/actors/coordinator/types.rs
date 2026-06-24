@@ -647,6 +647,8 @@ pub enum CoordinatorError {
     TaskNotFound(String),
     #[error("live-mover evidence query failed: {0}")]
     LiveMoverEvidence(String),
+    #[error("{0}")]
+    Other(String),
 }
 
 // ─── Public types ────────────────────────────────────────────────────────────

@@ -374,6 +374,32 @@ pub mod stubs {
         async fn trigger_dispatch_for_project(&self, _: &str) -> Result<(), String> {
             Err("coordinator not initialized".into())
         }
+        async fn start_proposal_refinement(
+            &self,
+            _: crate::bridge::ProposalRefinementStartRequest,
+        ) -> Result<(), String> {
+            Err("coordinator not initialized".into())
+        }
+    }
+
+    /// Test-only coordinator stub that accepts refinement starts (returns Ok)
+    /// while still rejecting other operations.  Used by `test_mcp_state` so
+    /// existing refinement tool tests can run without a real coordinator.
+    pub struct StubRefinementAcceptingCoordinator;
+    #[async_trait]
+    impl CoordinatorOps for StubRefinementAcceptingCoordinator {
+        fn get_status(&self) -> Result<crate::bridge::CoordinatorStatus, String> {
+            Err("coordinator not initialized".into())
+        }
+        async fn trigger_dispatch_for_project(&self, _: &str) -> Result<(), String> {
+            Err("coordinator not initialized".into())
+        }
+        async fn start_proposal_refinement(
+            &self,
+            _: crate::bridge::ProposalRefinementStartRequest,
+        ) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     pub struct StubSlotPoolOps;
@@ -776,7 +802,7 @@ pub mod stubs {
             EventBus::noop(),
             CatalogService::new(),
             HealthTracker::new(),
-            None,
+            Some(Arc::new(StubRefinementAcceptingCoordinator)),
             None,
             None,
             None,

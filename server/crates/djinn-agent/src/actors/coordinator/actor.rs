@@ -216,6 +216,11 @@ pub(super) struct CoordinatorActor {
     /// hook in the terminal-close dispatch paths (sibling task hrv6).
     #[allow(dead_code)]
     pub(super) pr_cleanup_config: PrCleanupConfig,
+    /// Active refinement loops by proposal_id.  The coordinator is the
+    /// authoritative source for duplicate-start rejection — a proposal that
+    /// already has an entry here cannot be started again until the loop
+    /// completes or is terminated.
+    pub(super) active_refinements: HashMap<String, super::refinement::RefinementLoopState>,
     // Metrics
     pub(super) dispatched: u64,
     pub(super) recovered: u64,
@@ -410,6 +415,7 @@ impl CoordinatorActor {
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,
             pr_cleanup_config,
+            active_refinements: HashMap::new(),
             dispatched: 0,
             recovered: 0,
         }
@@ -917,7 +923,64 @@ impl CoordinatorActor {
             CoordinatorMessage::DebugSnapshot { reply } => {
                 let _ = reply.send(self.dispatch_state_snapshot());
             }
+            CoordinatorMessage::StartProposalRefinement {
+                proposal_id,
+                current_revision_seq,
+                update_authority,
+                reply,
+            } => {
+                let result = self
+                    .handle_start_proposal_refinement(
+                        &proposal_id,
+                        current_revision_seq,
+                        &update_authority,
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
         }
+    }
+
+    /// Handle a proposal-refinement start request.  Rejects duplicate starts
+    /// (coordinator is authoritative) and initialises `RefinementLoopState`.
+    async fn handle_start_proposal_refinement(
+        &mut self,
+        proposal_id: &str,
+        current_revision_seq: i32,
+        update_authority: &str,
+    ) -> Result<(), String> {
+        use super::refinement::{RefinementLoopState, UpdateAuthority};
+
+        // Coordinator-level duplicate rejection — this is authoritative over
+        // the lifecycle-level check in the control-plane tool.
+        if self.active_refinements.contains_key(proposal_id) {
+            return Err(format!(
+                "refinement is already active for proposal {proposal_id}"
+            ));
+        }
+
+        let authority = match update_authority {
+            "checkpoint" => UpdateAuthority::Checkpoint,
+            "auto_accept" => UpdateAuthority::AutoAccept,
+            other => {
+                return Err(format!(
+                    "invalid update_authority: {other:?} (expected checkpoint or auto_accept)"
+                ));
+            }
+        };
+
+        let state = RefinementLoopState::new(proposal_id, current_revision_seq, authority);
+        self.active_refinements
+            .insert(proposal_id.to_string(), state);
+
+        tracing::info!(
+            proposal_id = %proposal_id,
+            current_revision_seq,
+            update_authority,
+            "CoordinatorActor: started proposal refinement"
+        );
+
+        Ok(())
     }
 
     async fn handle_event_result(
@@ -1652,6 +1715,7 @@ impl CoordinatorActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actors::coordinator::refinement::UpdateAuthority;
     use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig};
     use std::collections::HashSet;
 
@@ -1745,5 +1809,152 @@ mod tests {
             rendered_metric_sample(&rendered, "djinn_pr_poller_tracked"),
             "djinn_pr_poller_tracked 2"
         );
+    }
+
+    /// Create a minimal actor for message-handling tests without spawning the
+    /// full run-loop.  Returns the actor and a oneshot-capable sender.
+    fn minimal_test_actor() -> CoordinatorActor {
+        use crate::test_helpers;
+        let db = test_helpers::create_test_db();
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let cancel = CancellationToken::new();
+        let pool = SlotPoolHandle::spawn(
+            test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+            cancel.clone(),
+            SlotPoolConfig {
+                models: vec![ModelSlotConfig {
+                    model_id: DEFAULT_MODEL_ID.to_owned(),
+                    max_slots: 1,
+                    roles: HashSet::from(["worker".to_owned()]),
+                }],
+                role_priorities: HashMap::new(),
+            },
+        );
+        let (sender, receiver) = mpsc::channel(64);
+        let (status_tx, _status_rx) = watch::channel(SharedCoordinatorState {
+            dispatched: 0,
+            recovered: 0,
+            epic_throughput: HashMap::new(),
+            pr_errors: HashMap::new(),
+            rate_limited_until: None,
+        });
+        CoordinatorActor::new(
+            CoordinatorDeps::new(
+                events_tx,
+                cancel,
+                db,
+                pool,
+                CatalogService::new(),
+                HealthTracker::new(),
+                Arc::new(RoleRegistry::new()),
+                BackgroundWorkTracker::default(),
+                crate::lsp::LspManager::new(),
+            ),
+            receiver,
+            sender,
+            status_tx,
+        )
+    }
+
+    #[tokio::test]
+    async fn start_proposal_refinement_initializes_loop_state() {
+        let mut actor = minimal_test_actor();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        actor
+            .handle_message(CoordinatorMessage::StartProposalRefinement {
+                proposal_id: "p-1".to_string(),
+                current_revision_seq: 0,
+                update_authority: "checkpoint".to_string(),
+                reply: reply_tx,
+            })
+            .await;
+        assert!(reply_rx.await.unwrap().is_ok());
+        assert!(actor.active_refinements.contains_key("p-1"));
+        let state = &actor.active_refinements["p-1"];
+        assert_eq!(state.proposal_id, "p-1");
+        assert_eq!(state.current_revision_seq, 0);
+        assert_eq!(state.update_authority, UpdateAuthority::Checkpoint);
+    }
+
+    #[tokio::test]
+    async fn duplicate_refinement_start_is_rejected() {
+        let mut actor = minimal_test_actor();
+        // First start succeeds.
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        actor
+            .handle_message(CoordinatorMessage::StartProposalRefinement {
+                proposal_id: "p-dup".to_string(),
+                current_revision_seq: 1,
+                update_authority: "auto_accept".to_string(),
+                reply: tx1,
+            })
+            .await;
+        assert!(rx1.await.unwrap().is_ok());
+
+        // Second start for the same proposal is rejected.
+        let (tx2, rx2) = tokio::sync::oneshot::channel();
+        actor
+            .handle_message(CoordinatorMessage::StartProposalRefinement {
+                proposal_id: "p-dup".to_string(),
+                current_revision_seq: 1,
+                update_authority: "auto_accept".to_string(),
+                reply: tx2,
+            })
+            .await;
+        let result = rx2.await.unwrap();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("already active"),
+            "expected duplicate rejection, got: {err}"
+        );
+        // Original entry is still present.
+        assert!(actor.active_refinements.contains_key("p-dup"));
+    }
+
+    #[tokio::test]
+    async fn invalid_update_authority_is_rejected() {
+        let mut actor = minimal_test_actor();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        actor
+            .handle_message(CoordinatorMessage::StartProposalRefinement {
+                proposal_id: "p-bad".to_string(),
+                current_revision_seq: 0,
+                update_authority: "invalid".to_string(),
+                reply: tx,
+            })
+            .await;
+        let result = rx.await.unwrap();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid update_authority"));
+        assert!(!actor.active_refinements.contains_key("p-bad"));
+    }
+
+    #[tokio::test]
+    async fn separate_proposals_can_refine_independently() {
+        let mut actor = minimal_test_actor();
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        actor
+            .handle_message(CoordinatorMessage::StartProposalRefinement {
+                proposal_id: "p-a".to_string(),
+                current_revision_seq: 0,
+                update_authority: "checkpoint".to_string(),
+                reply: tx1,
+            })
+            .await;
+        assert!(rx1.await.unwrap().is_ok());
+
+        let (tx2, rx2) = tokio::sync::oneshot::channel();
+        actor
+            .handle_message(CoordinatorMessage::StartProposalRefinement {
+                proposal_id: "p-b".to_string(),
+                current_revision_seq: 2,
+                update_authority: "auto_accept".to_string(),
+                reply: tx2,
+            })
+            .await;
+        assert!(rx2.await.unwrap().is_ok());
+        assert_eq!(actor.active_refinements.len(), 2);
+        assert_eq!(actor.active_refinements["p-b"].current_revision_seq, 2);
     }
 }

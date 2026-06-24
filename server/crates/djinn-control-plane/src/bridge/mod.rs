@@ -13,7 +13,9 @@ mod memory_enrichment_bridge;
 mod runtime_bridge;
 mod slot_pool_bridge;
 
-pub use self::coordinator_bridge::{CoordinatorOps, CoordinatorStatus};
+pub use self::coordinator_bridge::{
+    CoordinatorOps, CoordinatorStatus, ProposalRefinementStartRequest,
+};
 pub use self::git_bridge::GitOps;
 pub use self::graph_bridge::RepoGraphOps;
 pub use self::graph_data::{
