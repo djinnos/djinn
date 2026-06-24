@@ -356,7 +356,7 @@ fn build_corpus_fixture(spec: &CorpusFixtureSpec) -> RepoDependencyGraph {
         });
     }
 
-    let graph = RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
+    RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
         version: REPO_GRAPH_ARTIFACT_VERSION,
         nodes: vec![caller, trait_method, impl_method],
         edges,
@@ -365,9 +365,7 @@ fn build_corpus_fixture(spec: &CorpusFixtureSpec) -> RepoDependencyGraph {
         processes: vec![],
         route_exclusion_config: Default::default(),
         layout_positions: std::collections::BTreeMap::new(),
-    });
-
-    graph
+    })
 }
 
 /// Return the NodeIndex for the node whose role matches `role`.
