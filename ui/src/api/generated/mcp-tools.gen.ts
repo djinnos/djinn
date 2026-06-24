@@ -8585,6 +8585,13 @@ export namespace UserSettingsGetOutputSchema {
    * same-model review.
    */
   diverse_review: boolean
+  /**
+   * Cross-model ("Diverse") refinement. When true (the default), the
+   * proposal-refinement roles (advocate, adversary, judge) prefer a model id
+   * different from the primary task model. Falls back to same-model when
+   * alternatives are unavailable.
+   */
+  diverse_refinement: boolean
   error?: string
   /**
    * True when the org AI policy locks lane assignment: the member may not
@@ -8644,6 +8651,13 @@ export namespace UserSettingsSetInputSchema {
    */
   diverse_review?: boolean
   /**
+   * Enable or disable cross-model ("Diverse") refinement for THIS user. When
+   * on (the default), proposal-refinement roles prefer a different model from
+   * the primary task model. Falls back to same-model when alternatives are
+   * unavailable. Omit to keep the current value.
+   */
+  diverse_refinement?: boolean
+  /**
    * Per-ROLE ordered model lanes for THIS user (each highest priority first),
    * as full `provider/model` ids: `plan` (planner/architect/chat),
    * `implement` (worker), `review` (reviewer). Each id must be a model on a
@@ -8699,6 +8713,10 @@ export namespace UserSettingsSetOutputSchema {
    * The resulting cross-model review toggle after the patch.
    */
   diverse_review?: boolean
+  /**
+   * The resulting cross-model refinement toggle after the patch.
+   */
+  diverse_refinement?: boolean
   error?: string
   /**
    * The resulting per-role model lanes after the patch.

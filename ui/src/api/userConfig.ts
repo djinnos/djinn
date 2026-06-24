@@ -82,6 +82,12 @@ export interface UserModelSelection {
    * reviewer prefers a model id different from the implementer's.
    */
   diverseReview: boolean;
+  /**
+   * Cross-model ("Diverse") refinement toggle. When true (the default),
+   * proposal-refinement roles prefer a different model from the primary
+   * task model. Falls back to same-model when alternatives are unavailable.
+   */
+  diverseRefinement: boolean;
 }
 
 function parseMaxSessions(raw: unknown): Record<string, number> {
@@ -100,25 +106,29 @@ export async function fetchUserModelSelection(
     lanes: parseLanes(response.lanes),
     maxSessions: parseMaxSessions(response.max_sessions),
     diverseReview: response.diverse_review !== false,
+    diverseRefinement: response.diverse_refinement !== false,
   };
 }
 
 /**
  * Persist the target user's per-role model lanes, per-model caps, and the
- * cross-model review toggle. `diverseReview` is optional — omit it to leave the
- * server value untouched (e.g. a lanes-only save).
+ * cross-model review/refinement toggles. `diverseReview` and
+ * `diverseRefinement` are optional — omit to leave the server value untouched
+ * (e.g. a lanes-only save).
  */
 export async function saveUserModelSelection(
   targetUserId: string,
   lanes: ModelLanes,
   maxSessions: Record<string, number>,
   diverseReview?: boolean,
+  diverseRefinement?: boolean,
 ): Promise<UserModelSelection> {
   const response = await callMcpTool("user_settings_set", {
     ...targetArgs(targetUserId),
     lanes,
     max_sessions: maxSessions,
     ...(diverseReview === undefined ? {} : { diverse_review: diverseReview }),
+    ...(diverseRefinement === undefined ? {} : { diverse_refinement: diverseRefinement }),
   });
   if (!response.ok) {
     throw new Error(response.error ?? "Failed to save user models");
@@ -127,6 +137,7 @@ export async function saveUserModelSelection(
     lanes: parseLanes(response.lanes),
     maxSessions: parseMaxSessions(response.max_sessions),
     diverseReview: response.diverse_review !== false,
+    diverseRefinement: response.diverse_refinement !== false,
   };
 }
 

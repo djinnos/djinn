@@ -118,6 +118,13 @@ pub struct UserSettings {
     /// Persisted as a NOT-NULL boolean column (`user_settings.diverse_review`,
     /// migration 78, default TRUE).
     pub diverse_review: bool,
+    /// Cross-model ("Diverse") refinement. When `true` (the default), the
+    /// proposal-refinement roles (advocate, adversary, judge) prefer a model id
+    /// different from the primary task model — using best-effort cross-model
+    /// diversity. When alternatives are unavailable, dispatch collapses to
+    /// same-model rather than blocking. Persisted as a NOT-NULL boolean column
+    /// (`user_settings.diverse_refinement`, migration 81, default TRUE).
+    pub diverse_refinement: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -135,6 +142,9 @@ impl UserSettings {
             // Cross-model review is on by default (DB column default TRUE), so a
             // never-written user gets the same behavior as a migrated row.
             diverse_review: true,
+            // Cross-model refinement is on by default (DB column default TRUE),
+            // so a never-written user gets the same behavior as a migrated row.
+            diverse_refinement: true,
             created_at: String::new(),
             updated_at: String::new(),
         }

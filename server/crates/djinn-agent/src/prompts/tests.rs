@@ -1282,9 +1282,20 @@ fn proposal_address_prompt_contains_block_patch_workflow_guidance() {
     // Lazy semantics: must NOT inline the full block vocabulary (no concrete
     // block tag names from the catalog).
     let forbidden_block_tags = [
-        "AnnotatedCode", "ApiEndpoint", "Callout", "Checklist", "Columns",
-        "Decisions", "Diagram", "Diff", "FileTree", "JsonExplorer",
-        "QuestionForm", "RichText", "Tabs", "Wireframe",
+        "AnnotatedCode",
+        "ApiEndpoint",
+        "Callout",
+        "Checklist",
+        "Columns",
+        "Decisions",
+        "Diagram",
+        "Diff",
+        "FileTree",
+        "JsonExplorer",
+        "QuestionForm",
+        "RichText",
+        "Tabs",
+        "Wireframe",
     ];
     for tag in &forbidden_block_tags {
         assert!(
