@@ -42,6 +42,7 @@ mod messages;
 pub(crate) mod pr_poller;
 mod prompt_eval;
 mod reentrance;
+pub(crate) mod refinement;
 pub(crate) mod rules;
 mod types;
 mod wave;
