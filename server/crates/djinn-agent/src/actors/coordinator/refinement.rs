@@ -815,6 +815,62 @@ mod tests {
         assert!(!same_fallback);
     }
 
+    /// Constrained model-candidate setup: when diverse_refinement is enabled
+    /// but the only candidate is the primary model itself, the function
+    /// falls back to the same model and flags the fallback. This verifies
+    /// the same-model fallback path without requiring live external models.
+    #[test]
+    fn diverse_refinement_constrained_single_model_candidate_falls_back() {
+        // Simulate a deployment where the model pool has only one model
+        // registered (e.g. a self-hosted setup or a fresh installation).
+        let constrained_candidates = vec!["anthropic/claude-sonnet-4-20250514".to_string()];
+
+        // Primary is the same as the only candidate → same-model fallback.
+        let (model, same_fallback) = select_refinement_model(
+            true,
+            "anthropic/claude-sonnet-4-20250514",
+            &constrained_candidates,
+        );
+        assert_eq!(model, "anthropic/claude-sonnet-4-20250514");
+        assert!(
+            same_fallback,
+            "must flag same-model fallback for single-candidate pool"
+        );
+
+        // With two identical entries in the pool (duplicate registration),
+        // the result is the same: no real alternative exists.
+        let dup_candidates = vec![
+            "anthropic/claude-sonnet-4-20250514".to_string(),
+            "anthropic/claude-sonnet-4-20250514".to_string(),
+        ];
+        let (model2, same_fallback2) =
+            select_refinement_model(true, "anthropic/claude-sonnet-4-20250514", &dup_candidates);
+        assert_eq!(model2, "anthropic/claude-sonnet-4-20250514");
+        assert!(
+            same_fallback2,
+            "duplicate candidates must still flag same-model fallback"
+        );
+
+        // With a real alternative available, it should be selected instead.
+        let mixed_candidates = vec![
+            "anthropic/claude-sonnet-4-20250514".to_string(),
+            "openai/gpt-4o".to_string(),
+        ];
+        let (model3, same_fallback3) = select_refinement_model(
+            true,
+            "anthropic/claude-sonnet-4-20250514",
+            &mixed_candidates,
+        );
+        assert_eq!(
+            model3, "openai/gpt-4o",
+            "should prefer the alternative model"
+        );
+        assert!(
+            !same_fallback3,
+            "real alternative means no same-model fallback"
+        );
+    }
+
     // ── Objection signature normalization ─────────────────────────────────
 
     #[test]
