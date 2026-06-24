@@ -1,3 +1,4 @@
+// djinn:allow-oversize — note context queries accumulated over many features; split when touched substantively.
 use std::collections::{HashMap, HashSet};
 
 use djinn_memory::{
