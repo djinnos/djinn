@@ -21,7 +21,10 @@ pub use epic::Epic;
 pub use git_settings::GitSettings;
 pub use org_ai_policy::{LockLevel, OrgAiPolicy, OrgDefaultLanes};
 pub use project::Project;
-pub use proposal::{Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff, ProposalTarget};
+pub use proposal::{
+    Proposal, ProposalDebateTrail, ProposalFeedback, ProposalRevision, ProposalSignoff,
+    ProposalTarget,
+};
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
 pub use session::{SessionRecord, SessionStatus};
 pub use session_message::SessionMessage;
