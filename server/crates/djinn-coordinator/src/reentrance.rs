@@ -139,7 +139,6 @@ mod tests {
     use super::*;
     use crate::test_helpers;
     use djinn_db::{CreateSessionParams, EpicRepository, SessionRepository, TaskRepository};
-    use sqlx;
 
     async fn make_epic(db: &djinn_db::Database, project_id: &str) -> djinn_core::models::Epic {
         EpicRepository::new(db.clone(), EventBus::noop())

@@ -82,6 +82,7 @@ fn split_owner_repo(path: &str) -> Option<(String, String)> {
     Some((owner, repo))
 }
 
+#[allow(dead_code)]
 pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &CoordinatorContext) {
     let repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let Ok(Some(paused)) = repo.paused_for_task(task_id).await else {
@@ -220,6 +221,7 @@ pub async fn cleanup_task_branches_post_close(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) async fn resolve_project_path_for_id(
     project_id: &str,
     app_state: &CoordinatorContext,

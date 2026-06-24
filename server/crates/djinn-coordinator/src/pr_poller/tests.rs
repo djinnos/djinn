@@ -1464,22 +1464,21 @@ fn review_stuck_is_failing_conclusion_recognizes_terminal_red() {
 fn review_stuck_window_minutes_is_positive() {
     // The trigger requires elapsed >= REVIEW_STUCK_WINDOW_MINUTES before firing.
     // Verify the constant is a sane positive value so the window is meaningful.
-    assert!(
-        super::REVIEW_STUCK_WINDOW_MINUTES > 0,
-        "review-stuck window must be positive"
-    );
+    const {
+        assert!(
+            super::REVIEW_STUCK_WINDOW_MINUTES > 0,
+            "review-stuck window must be positive"
+        );
+    }
 }
 
 #[test]
 fn review_stuck_same_ci_signature_threshold_is_lower_than_cycle_cap() {
     // Content-aware escalation (same-signature) must fire before the blind
     // cycle-count force-close, so the Planner gets a chance to intervene.
-    assert!(
-        super::SAME_CI_SIGNATURE_THRESHOLD < super::PR_CI_FAILURE_THRESHOLD,
-        "same-CI-signature threshold ({}) must be lower than cycle cap ({})",
-        super::SAME_CI_SIGNATURE_THRESHOLD,
-        super::PR_CI_FAILURE_THRESHOLD
-    );
+    const {
+        assert!(super::SAME_CI_SIGNATURE_THRESHOLD < super::PR_CI_FAILURE_THRESHOLD,);
+    }
 }
 
 // ── Integration-level: ordering invariants for the three triggers ────────

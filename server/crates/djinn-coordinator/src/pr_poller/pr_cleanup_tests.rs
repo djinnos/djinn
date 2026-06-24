@@ -26,15 +26,9 @@ struct MockState {
     deleted_refs: Vec<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct PrMergeQueueStateFixture {
     queued: bool,
-}
-
-impl Default for PrMergeQueueStateFixture {
-    fn default() -> Self {
-        Self { queued: false }
-    }
 }
 
 #[async_trait]

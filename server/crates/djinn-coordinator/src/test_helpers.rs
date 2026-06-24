@@ -33,10 +33,8 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotCo
     let event_bus = EventBus::noop();
     let catalog = CatalogService::new();
     let health_tracker = HealthTracker::default();
-    let background_work =
-        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-    let active_tasks =
-        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let background_work = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let active_tasks = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
     // No-op host callbacks for tests
     struct NoopCallbacks;
@@ -55,9 +53,8 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotCo
             _ctx: &'a SlotContext,
         ) -> std::pin::Pin<
             Box<
-                dyn std::future::Future<
-                        Output = Result<djinn_slot::host::ResolvedMcpTools, String>,
-                    > + Send
+                dyn std::future::Future<Output = Result<djinn_slot::host::ResolvedMcpTools, String>>
+                    + Send
                     + 'a,
             >,
         > {

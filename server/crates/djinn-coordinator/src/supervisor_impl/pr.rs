@@ -432,6 +432,7 @@ fn pr_open_failure_outcome(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn pr_open_untyped_failure_outcome(
     method: &'static str,
     path: String,

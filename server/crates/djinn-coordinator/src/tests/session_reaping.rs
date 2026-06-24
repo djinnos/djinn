@@ -113,7 +113,8 @@ async fn taskrun_job_backstop_skips_empty_task_run_id_inventory_entry() {
             task_run_id: "   ".to_string(),
         },
     ]);
-    let mut app_state = test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
+    let mut app_state =
+        test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
     app_state.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
 
     health::reap_orphaned_taskrun_jobs(&db, &app_state, "test").await;
@@ -945,7 +946,8 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
         taskrun_job_ref(interrupted_run_id),
         taskrun_job_ref(live_run_id),
     ]);
-    let mut app_state = test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
+    let mut app_state =
+        test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
 
     health::reap_orphaned_taskrun_jobs(&db, &app_state, "test").await;
@@ -988,7 +990,8 @@ async fn stale_resource_sweep_runs_taskrun_job_backstop() {
     .unwrap();
     let runtime =
         RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![taskrun_job_ref(periodic_run_id)]);
-    let mut app_state = test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
+    let mut app_state =
+        test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
 
     let before_metric = rendered_counter_value("djinn_zombie_reaps_total", "periodic");
@@ -1020,7 +1023,8 @@ async fn startup_reconcile_runs_taskrun_job_backstop() {
     .unwrap();
     let runtime =
         RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![taskrun_job_ref(startup_run_id)]);
-    let mut app_state = test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
+    let mut app_state =
+        test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
 
     let before_metric = rendered_counter_value("djinn_zombie_reaps_total", "startup");
@@ -1041,7 +1045,8 @@ async fn taskrun_job_backstop_continues_after_delete_failure() {
         taskrun_job_ref("missing-one"),
         taskrun_job_ref("missing-two"),
     ]);
-    let mut app_state = test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
+    let mut app_state =
+        test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
 
     health::reap_orphaned_taskrun_jobs(&db, &app_state, "test").await;
