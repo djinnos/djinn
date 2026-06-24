@@ -19,6 +19,7 @@ pub mod pr_review_tools;
 pub mod project_tools;
 pub mod proposal_blocks;
 pub mod proposal_ops;
+pub mod proposal_readiness;
 pub mod proposal_tools;
 pub mod provider_tools;
 pub mod service_tools;
