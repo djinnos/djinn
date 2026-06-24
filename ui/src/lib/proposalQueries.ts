@@ -13,6 +13,7 @@ import type {
   ProposalDebateTrailRow,
   ProposalEpic,
   ProposalFeedback,
+  ProposalRefinementStatus,
   ProposalRevision,
   ProposalSignoff,
   ProposalTarget,
@@ -65,6 +66,8 @@ export interface ProposalDetail {
   epics: ProposalEpic[];
   /** Structured debate-trail rows (objections, rebuttals, verdicts). */
   debate_trail: ProposalDebateTrailRow[];
+  /** Refinement session status. null when refinement has not been started. */
+  refinement: ProposalRefinementStatus | null;
 }
 
 export function proposalDetailQueryOptions(id: string | null) {
@@ -81,6 +84,7 @@ export function proposalDetailQueryOptions(id: string | null) {
         signoffs: (res.signoffs ?? []) as ProposalSignoff[],
         epics: (res.epics ?? []) as ProposalEpic[],
         debate_trail: (res.debate_trail ?? []) as ProposalDebateTrailRow[],
+        refinement: (res.refinement ?? null) as ProposalRefinementStatus | null,
       };
     },
     staleTime: 15_000,

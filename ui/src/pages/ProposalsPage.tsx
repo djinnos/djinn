@@ -29,6 +29,7 @@ import {
 } from "@/components/proposals/ProposalDiff";
 import { ProposalSignoffs } from "@/components/proposals/ProposalSignoffs";
 import { ProposalKickoff } from "@/components/proposals/ProposalKickoff";
+import { ProposalRefinement } from "@/components/proposals/ProposalRefinement";
 import { ProposalHistory } from "@/components/proposals/ProposalHistory";
 import { DebateTrail } from "@/components/proposals/DebateTrail";
 import { Badge } from "@/components/ui/badge";
@@ -598,16 +599,29 @@ function ProposalDetailView({
 
         <ProposalSignoffs detail={detail} onChanged={onChanged} />
 
+        <ProposalRefinement
+          proposalId={proposal.id}
+          status={detail.refinement}
+          canStart={
+            (proposal.status === "draft" || proposal.status === "in_review") &&
+            !detail.refinement?.active
+          }
+          onChanged={onChanged}
+        />
+
         <ProposalKickoff detail={detail} onChanged={onChanged} />
 
         <Separator />
 
+        {/* Tribunal debate trail (objections/rebuttals/verdicts) — kept
+            separate from human feedback below. */}
         <DebateTrail
           debateTrail={detail.debate_trail}
           canEdit={canDirectEdit}
           onChanged={onChanged}
         />
 
+        {/* Human feedback thread — separate from tribunal debate trail. */}
         <FeedbackThread
           proposal={proposal}
           feedback={feedback}

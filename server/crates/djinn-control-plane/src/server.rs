@@ -204,6 +204,7 @@ impl DjinnMcpServer {
                 + Self::proposal_blocks_tool_router()
                 + Self::proposal_tool_router()
                 + Self::debate_tool_router()
+                + Self::refinement_tool_router()
                 + Self::agent_tool_router()
                 + Self::graph_tool_router()
                 + Self::pr_review_tool_router()

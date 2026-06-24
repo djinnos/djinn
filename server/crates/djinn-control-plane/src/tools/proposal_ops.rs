@@ -342,6 +342,10 @@ pub struct ProposalShowResponse {
     /// Kept separate from `feedback` (plain human discussion).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub debate_trail: Option<Vec<ProposalDebateTrailModel>>,
+    /// Refinement session status (active round, stop reason, update authority).
+    /// `None` when refinement has not been started for this proposal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<ProposalRefinementStatusModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -504,6 +508,56 @@ pub struct ProposalDebateTrailListResponse {
     pub proposal_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entries: Option<Vec<ProposalDebateTrailModel>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ── Refinement status models ────────────────────────────────────────────────
+
+/// Refinement session state tracked on the proposal's event_metadata.
+/// The coordinator refinement workflow populates these fields; the
+/// control-plane surfaces them read-only to the UI.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalRefinementStatusModel {
+    /// Whether refinement has been started for this proposal.
+    pub active: bool,
+    /// Current debate round (1-based). `None` when refinement has not started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_round: Option<i32>,
+    /// How many consecutive adversary dry rounds have been observed.
+    pub dry_rounds: i32,
+    /// Total debate-trail entries produced so far.
+    pub total_entries: i32,
+    /// Update authority mode: `checkpoint` (advocate revisions are proposed
+    /// but not auto-applied) or `auto_accept` (revisions are applied as
+    /// proposal updates).
+    pub update_authority: String,
+    /// When set, refinement has stopped for this reason.
+    /// Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,
+    /// `agent_failure`, or `null` (still running / not started).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+}
+
+/// Response for `proposal_refinement_start`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalRefinementStartResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    /// The initial refinement status after starting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<ProposalRefinementStatusModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response for `proposal_refinement_status`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalRefinementStatusResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<ProposalRefinementStatusModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

@@ -848,6 +848,40 @@ impl ProposalRepository {
         .await?)
     }
 
+    /// Record a refinement lifecycle event (`refinement_start` or
+    /// `refinement_stop`) as a lightweight `proposal_revisions` row. These
+    /// events carry `event_metadata` with structured JSON (e.g.
+    /// `{ "update_authority": "checkpoint" }` or
+    /// `{ "stop_reason": "adversary_dry" }`) but no spec snapshot — `title`,
+    /// `body`, etc. are empty. The row's `seq` is set to the proposal's current
+    /// head revision so ordering stays correct.
+    pub async fn record_refinement_lifecycle(
+        &self,
+        proposal_id: &str,
+        event_kind: &str,
+        event_metadata: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let proposal = self
+            .get(proposal_id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("proposal not found: {proposal_id}")))?;
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            r#"INSERT INTO proposal_revisions
+                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata)
+               VALUES ($1, $2, $3, '', '', 'markdown', '[]', NULL, $4, $5)"#,
+        )
+        .bind(id)
+        .bind(proposal_id)
+        .bind(proposal.latest_revision_seq)
+        .bind(event_kind)
+        .bind(event_metadata)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
     pub async fn signoffs(&self, proposal_id: &str) -> Result<Vec<ProposalSignoff>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
