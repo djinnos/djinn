@@ -98,6 +98,10 @@ pub fn init_tool_schema_registry() {
         schemas.insert("lead", extension::tool_schemas_lead);
         schemas.insert("planner", extension::tool_schemas_planner);
         schemas.insert("architect", extension::tool_schemas_architect);
+        // Tribunal refinement roles (k9zw).
+        schemas.insert("advocate", extension::tool_schemas_advocate);
+        schemas.insert("adversary", extension::tool_schemas_adversary);
+        schemas.insert("judge", extension::tool_schemas_judge);
 
         djinn_roles::register_tool_schemas(schemas);
     });
@@ -125,6 +129,9 @@ mod tests {
             AgentType::Lead,
             AgentType::Planner,
             AgentType::Architect,
+            AgentType::Advocate,
+            AgentType::Adversary,
+            AgentType::Judge,
         ] {
             assert_equivalent_to_role_config(agent_type);
         }
@@ -160,6 +167,9 @@ mod tests {
         assert_eq!(AgentType::Lead.dispatch_role(), "lead");
         assert_eq!(AgentType::Planner.dispatch_role(), "planner");
         assert_eq!(AgentType::Architect.dispatch_role(), "architect");
+        assert_eq!(AgentType::Advocate.dispatch_role(), "advocate");
+        assert_eq!(AgentType::Adversary.dispatch_role(), "adversary");
+        assert_eq!(AgentType::Judge.dispatch_role(), "judge");
     }
 }
 
@@ -213,5 +223,8 @@ mod djinn_roles_facade_regression {
         assert!(!crate::prompts::PLANNER_TEMPLATE.is_empty());
         assert!(!crate::prompts::ARCHITECT_TEMPLATE.is_empty());
         assert!(!crate::prompts::CLUSTER_DOC_TEMPLATE.is_empty());
+        assert!(!crate::prompts::ADVOCATE_TEMPLATE.is_empty());
+        assert!(!crate::prompts::ADVERSARY_TEMPLATE.is_empty());
+        assert!(!crate::prompts::JUDGE_TEMPLATE.is_empty());
     }
 }

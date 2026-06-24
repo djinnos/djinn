@@ -33,6 +33,10 @@ pub const PLANNER_TEMPLATE: &str = include_str!("planner.md");
 pub const ARCHITECT_TEMPLATE: &str = include_str!("architect.md");
 /// PR F4: cluster-doc synthesis template.
 pub const CLUSTER_DOC_TEMPLATE: &str = include_str!("cluster-doc.md");
+/// Proposal refinement tribunal roles (k9zw).
+pub const ADVOCATE_TEMPLATE: &str = include_str!("advocate.md");
+pub const ADVERSARY_TEMPLATE: &str = include_str!("adversary.md");
+pub const JUDGE_TEMPLATE: &str = include_str!("judge.md");
 
 // ─── Mode section constants ────────────────────────────────────────────────────
 

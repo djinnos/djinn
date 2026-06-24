@@ -135,6 +135,24 @@ fn prompt_references_for_agent(agent_type: AgentType) -> Vec<ToolReference> {
                 include_str!("../../prompts/architect.md"),
             ),
         ],
+        AgentType::Advocate => &[
+            ("prompts/base.md", include_str!("../../prompts/base.md")),
+            (
+                "prompts/advocate.md",
+                include_str!("../../prompts/advocate.md"),
+            ),
+        ],
+        AgentType::Adversary => &[
+            ("prompts/base.md", include_str!("../../prompts/base.md")),
+            (
+                "prompts/adversary.md",
+                include_str!("../../prompts/adversary.md"),
+            ),
+        ],
+        AgentType::Judge => &[
+            ("prompts/base.md", include_str!("../../prompts/base.md")),
+            ("prompts/judge.md", include_str!("../../prompts/judge.md")),
+        ],
     };
 
     prompt_sources
