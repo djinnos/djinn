@@ -27,9 +27,9 @@ use crate::tools::proposal_blocks::{
     validate_question_form_placement,
 };
 use crate::tools::proposal_ops::{
-    ProposalDeleteResponse, ProposalEpicModel, ProposalFeedbackResponse, ProposalModel,
-    ProposalReconcileObsoleteEpicResponse, ProposalShowResponse, ProposalSignoffModel,
-    ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
+    ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalFeedbackResponse,
+    ProposalModel, ProposalReconcileObsoleteEpicResponse, ProposalShowResponse,
+    ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
 };
 use crate::tools::validation::{
     validate_ac_count, validate_body, validate_design, validate_limit, validate_mdx_body,
@@ -861,9 +861,9 @@ impl DjinnMcpServer {
         })
     }
 
-    /// Show a proposal with targets, feedback, revisions, and sign-offs.
+    /// Show a proposal with targets, feedback, debate trail, revisions, and sign-offs.
     #[tool(
-        description = "Show a proposal (by UUID or short_id) including target projects, the feedback/discussion thread, its revision history, and review sign-offs (each flagged `stale` when given against an older revision)."
+        description = "Show a proposal (by UUID or short_id) including target projects, the feedback/discussion thread, the debate-trail (objections/rebuttals/verdicts kept separate from feedback), its revision history, and review sign-offs (each flagged `stale` when given against an older revision)."
     )]
     pub async fn proposal_show(
         &self,
@@ -911,6 +911,10 @@ impl DjinnMcpServer {
             Ok(refs) => refs.into_iter().map(Into::into).collect(),
             Err(e) => return Json(err_show(e.to_string())),
         };
+        let debate_trail = match repo.debate_trail(&proposal.id).await {
+            Ok(d) => Some(d.iter().map(ProposalDebateTrailModel::from).collect()),
+            Err(e) => return Json(err_show(e.to_string())),
+        };
         Json(ProposalShowResponse {
             proposal: Some(ProposalModel::from(&proposal)),
             targets: Some(targets),
@@ -919,6 +923,7 @@ impl DjinnMcpServer {
             signoffs: Some(signoffs),
             epics: Some(epics),
             memory_refs,
+            debate_trail,
             error: None,
         })
     }
@@ -2101,7 +2106,10 @@ impl DjinnMcpServer {
 impl DjinnMcpServer {
     /// Gate a direct spec edit: allowed for the author, a PM, an engineer, or
     /// an admin. `Ok(())` when unauthenticated (trusted/system path).
-    async fn gate_proposal_edit(&self, author_user_id: Option<&str>) -> Result<(), String> {
+    pub(crate) async fn gate_proposal_edit(
+        &self,
+        author_user_id: Option<&str>,
+    ) -> Result<(), String> {
         if let Some(caps) = acting_caps(self.state.db()).await? {
             let is_author = author_user_id == Some(caps.user_id.as_str());
             if !caps.can_edit(is_author) {
@@ -2126,6 +2134,7 @@ fn err_show(error: impl Into<String>) -> ProposalShowResponse {
         signoffs: None,
         epics: None,
         memory_refs: vec![],
+        debate_trail: None,
         error: Some(error.into()),
     }
 }
