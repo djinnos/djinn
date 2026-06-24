@@ -1,6 +1,10 @@
 //! Corpus-driven end-to-end regression tests for trait-dispatch
 //! `code_graph context` and `code_graph impact`.
 //!
+//! **Developer documentation:** see `docs/TRAIT_DISPATCH_VALIDATION.md`
+//! for the full validation matrix, warm-artifact expectations, and
+//! fan-out/confidence/provenance semantics.
+//!
 //! Complements the synthetic-fixture coverage in
 //! [`super::trait_dispatch_query`] and [`super::trait_dispatch_impact`]
 //! by tying those fixtures to the hand-verified reproduction corpus in

@@ -8,6 +8,11 @@
 //! trait object (dynamic dispatch via `dyn Trait` or generic `impl
 //! Trait`).
 //!
+//! **Developer documentation:** see `docs/TRAIT_DISPATCH_VALIDATION.md`
+//! for the full validation matrix (commands + expected outcomes),
+//! warm-artifact expectations, and the finalized fan-out default/cap
+//! and confidence/provenance semantics.
+//!
 //! The corpus is **not** a graph fixture — it documents the source
 //! truth that graph tests can assert against.  The companion test
 //! fixtures in [`super::trait_dispatch_query`] and
