@@ -42,6 +42,11 @@ mod messages;
 pub(crate) mod pr_poller;
 mod prompt_eval;
 mod reentrance;
+// Refinement workflow skeleton — types are `pub` for future integration by
+// coordinator dispatch/actor modules, but nothing in the crate consumes them
+// yet.  Allow dead_code until the full loop is wired into the coordinator.
+#[allow(dead_code)]
+pub(crate) mod refinement;
 pub(crate) mod rules;
 mod types;
 mod wave;
