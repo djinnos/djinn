@@ -338,8 +338,78 @@ pub struct ProposalShowResponse {
     /// Memory notes linked to this proposal's graduated epics/tasks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memory_refs: Vec<ProposalMemoryRefModel>,
+    /// Structured debate-trail rows (objections, rebuttals, verdicts).
+    /// Kept separate from `feedback` (plain human discussion).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debate_trail: Option<Vec<ProposalDebateTrailModel>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// A structured debate-trail row for the proposal tribunal. Separate from
+/// [`ProposalFeedbackModel`] (human discussion): debate rows are typed
+/// (objection, rebuttal, verdict), track blocking state, and carry
+/// resolution/reopen lifecycle.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalDebateTrailModel {
+    pub id: String,
+    pub proposal_id: String,
+    /// `objection` | `rebuttal` | `verdict`.
+    pub kind: String,
+    pub body: String,
+    /// When true, this entry blocks proposal readiness.
+    pub blocking: bool,
+    /// Agent role (e.g. "advocate", "adversary", "judge").
+    pub agent_role: String,
+    /// `agent` or `user`.
+    pub author_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_task_id: Option<String>,
+    /// The proposal revision this entry was written against.
+    pub against_revision_seq: i32,
+    /// Debate round (1-based).
+    pub round: i32,
+    /// When set, the entry has been resolved. `None` while open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_by_user_id: Option<String>,
+    /// When set alongside `resolved_at`, the entry was reopened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reopened_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reopened_by_user_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<&djinn_core::models::ProposalDebateTrail> for ProposalDebateTrailModel {
+    fn from(d: &djinn_core::models::ProposalDebateTrail) -> Self {
+        Self {
+            id: d.id.clone(),
+            proposal_id: d.proposal_id.clone(),
+            kind: d.kind.clone(),
+            body: d.body.clone(),
+            blocking: d.blocking,
+            agent_role: d.agent_role.clone(),
+            author_kind: d.author_kind.clone(),
+            author_user_id: d.author_user_id.clone(),
+            author_model: d.author_model.clone(),
+            source_task_id: d.source_task_id.clone(),
+            against_revision_seq: d.against_revision_seq,
+            round: d.round,
+            resolved_at: d.resolved_at.clone(),
+            resolved_by_user_id: d.resolved_by_user_id.clone(),
+            reopened_at: d.reopened_at.clone(),
+            reopened_by_user_id: d.reopened_by_user_id.clone(),
+            created_at: d.created_at.clone(),
+            updated_at: d.updated_at.clone(),
+        }
+    }
 }
 
 /// A memory note linked to a proposal via its graduated epics/tasks.
@@ -414,6 +484,26 @@ pub struct ProposalReconcileObsoleteEpicResponse {
 pub struct ProposalDeleteResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ── Debate-trail responses ───────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalDebateTrailResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry: Option<ProposalDebateTrailModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalDebateTrailListResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entries: Option<Vec<ProposalDebateTrailModel>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
