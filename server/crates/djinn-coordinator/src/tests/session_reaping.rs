@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use super::*;
 
 fn rendered_counter_value(metric: &str, kind: &str) -> f64 {

@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use super::{
     AutoMergeFastPathState, AutoMergeTickDecision, Task, advisory_checks_section,
     blocking_failed_checks, build_ci_failure_sections, compute_ci_failure_fingerprint,

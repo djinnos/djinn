@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 //! Session-scoped stash for full tool outputs that exceed the truncation limit.
 //!
 //! Before `smart_truncate` discards the middle of a large tool result, the full

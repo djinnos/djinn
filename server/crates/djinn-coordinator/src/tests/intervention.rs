@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use super::*;
 use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
 use djinn_core::run_progress::RunProgress;
