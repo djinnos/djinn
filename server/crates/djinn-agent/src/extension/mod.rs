@@ -14,8 +14,8 @@ pub(crate) use djinn_mcp_extension::tool_defs;
 
 // Re-export the public API so external callers see the same paths as before.
 pub(crate) use djinn_mcp_extension::tool_defs::{
-    tool_schemas_architect, tool_schemas_lead, tool_schemas_planner, tool_schemas_reviewer,
-    tool_schemas_worker,
+    tool_schemas_adversary, tool_schemas_advocate, tool_schemas_architect, tool_schemas_judge,
+    tool_schemas_lead, tool_schemas_planner, tool_schemas_reviewer, tool_schemas_worker,
 };
 
 // Façade: re-export the public surface of `djinn-mcp-extension` so that
