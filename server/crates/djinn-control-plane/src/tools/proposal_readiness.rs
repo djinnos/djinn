@@ -1,12 +1,12 @@
 use crate::tools::epic_ops::AcceptanceCriterionItem;
 use serde::{Deserialize, Serialize};
 
-/// Deterministic Definition-of-Ready evaluator for proposals.
-///
-/// No LLM involvement — pure heuristic checks over body text, acceptance
-/// criteria, and target count.  Structured results are easy to turn into
-/// human-readable error strings by callers such as `proposal_update`,
-/// `proposal_signoff`, and `proposal_graduate`.
+// Deterministic Definition-of-Ready evaluator for proposals.
+//
+// No LLM involvement — pure heuristic checks over body text, acceptance
+// criteria, and target count.  Structured results are easy to turn into
+// human-readable error strings by callers such as `proposal_update`,
+// `proposal_signoff`, and `proposal_graduate`.
 
 // ── Public result types ────────────────────────────────────────────────────
 
@@ -185,28 +185,89 @@ fn normalize_body(body: &str) -> String {
 // ── Section coverage heuristics ────────────────────────────────────────────
 
 fn has_problem_coverage(normalized: &str) -> bool {
-    has_heading_family(normalized, &["problem", "problem statement", "motivation", "why", "background"])
-        || has_inline_keyword_family(normalized, &["problem:", "problem statement", "the problem is"])
+    has_heading_family(
+        normalized,
+        &[
+            "problem",
+            "problem statement",
+            "motivation",
+            "why",
+            "background",
+        ],
+    ) || has_inline_keyword_family(
+        normalized,
+        &["problem:", "problem statement", "the problem is"],
+    )
 }
 
 fn has_scope_coverage(normalized: &str) -> bool {
-    has_heading_family(normalized, &["scope", "in scope", "out of scope", "boundaries"])
-        || has_inline_keyword_family(normalized, &["scope:", "in scope", "out of scope"])
+    has_heading_family(
+        normalized,
+        &["scope", "in scope", "out of scope", "boundaries"],
+    ) || has_inline_keyword_family(normalized, &["scope:", "in scope", "out of scope"])
 }
 
 fn has_objective_coverage(normalized: &str) -> bool {
-    has_heading_family(normalized, &["objective", "objectives", "outcomes", "goals", "success criteria", "deliverables"])
-        || has_inline_keyword_family(normalized, &["objective:", "objectives:", "outcomes:", "goals:", "success criteria:"])
+    has_heading_family(
+        normalized,
+        &[
+            "objective",
+            "objectives",
+            "outcomes",
+            "goals",
+            "success criteria",
+            "deliverables",
+        ],
+    ) || has_inline_keyword_family(
+        normalized,
+        &[
+            "objective:",
+            "objectives:",
+            "outcomes:",
+            "goals:",
+            "success criteria:",
+        ],
+    )
 }
 
 fn has_dependencies_coverage(normalized: &str) -> bool {
-    has_heading_family(normalized, &["dependencies", "coordination", "blocked by", "prerequisites", "requires", "related work"])
-        || has_inline_keyword_family(normalized, &["dependencies:", "coordination:", "prerequisites:", "blocked by:", "related work:"])
+    has_heading_family(
+        normalized,
+        &[
+            "dependencies",
+            "coordination",
+            "blocked by",
+            "prerequisites",
+            "requires",
+            "related work",
+        ],
+    ) || has_inline_keyword_family(
+        normalized,
+        &[
+            "dependencies:",
+            "coordination:",
+            "prerequisites:",
+            "blocked by:",
+            "related work:",
+        ],
+    )
 }
 
 fn has_open_questions_coverage(normalized: &str) -> bool {
-    has_heading_family(normalized, &["open questions", "risks", "risk", "assumptions", "unknowns", "mitigations"])
-        || has_inline_keyword_family(normalized, &["open questions:", "risks:", "assumptions:", "unknowns:"])
+    has_heading_family(
+        normalized,
+        &[
+            "open questions",
+            "risks",
+            "risk",
+            "assumptions",
+            "unknowns",
+            "mitigations",
+        ],
+    ) || has_inline_keyword_family(
+        normalized,
+        &["open questions:", "risks:", "assumptions:", "unknowns:"],
+    )
 }
 
 // ── Heading / keyword helpers ──────────────────────────────────────────────
@@ -393,10 +454,12 @@ src/main.rs
         let acs = vec![ac_text("API returns 200")];
         let result = evaluate_proposal_readiness(body, &acs, 0);
         assert!(!result.ready);
-        assert!(result
-            .failures
-            .iter()
-            .any(|f| f.check == ReadinessCheck::TargetCount));
+        assert!(
+            result
+                .failures
+                .iter()
+                .any(|f| f.check == ReadinessCheck::TargetCount)
+        );
     }
 
     #[test]
@@ -419,10 +482,12 @@ src/main.rs
 "#;
         let result = evaluate_proposal_readiness(body, &[], 1);
         assert!(!result.ready);
-        assert!(result
-            .failures
-            .iter()
-            .any(|f| f.check == ReadinessCheck::AcceptanceCriteriaCount));
+        assert!(
+            result
+                .failures
+                .iter()
+                .any(|f| f.check == ReadinessCheck::AcceptanceCriteriaCount)
+        );
     }
 
     #[test]
