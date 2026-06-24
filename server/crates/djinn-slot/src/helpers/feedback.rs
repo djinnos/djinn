@@ -295,7 +295,7 @@ pub(crate) async fn load_task(task_id: &str, app_state: &SlotContext) -> anyhow:
     task.ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))
 }
 
-pub(crate) async fn default_target_branch(project_id: &str, app_state: &SlotContext) -> String {
+pub async fn default_target_branch(project_id: &str, app_state: &SlotContext) -> String {
     let repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if let Ok(Some(config)) = repo.get_config(project_id).await {
         return config.target_branch;
