@@ -18113,8 +18113,8 @@ expression: signatures
         "lanes",
         "lane_locked",
         "max_sessions",
-        "diverse_refinement",
-        "diverse_review"
+        "diverse_review",
+        "diverse_refinement"
       ],
       "title": "UserSettingsGetResponse",
       "type": "object"
@@ -18168,7 +18168,7 @@ expression: signatures
           "type": "boolean"
         },
         "diverse_refinement": {
-          "description": "Enable or disable cross-model (\"Diverse\") refinement for THIS user. When\non (the default), proposal-refinement roles prefer a different model from\nthe primary task model. Falls back to same-model when alternatives are\navailable. Omit to keep the current value.",
+          "description": "Enable or disable cross-model (\"Diverse\") refinement for THIS user. When\non (the default), proposal-refinement roles prefer a different model from\nthe primary task model. Falls back to same-model when alternatives are\nunavailable. Omit to keep the current value.",
           "nullable": true,
           "type": "boolean"
         },
@@ -18250,12 +18250,12 @@ expression: signatures
           "nullable": true,
           "type": "boolean"
         },
-        "diverse_review": {
         "diverse_refinement": {
           "description": "The resulting cross-model refinement toggle after the patch.",
           "nullable": true,
           "type": "boolean"
         },
+        "diverse_review": {
           "description": "The resulting cross-model review toggle after the patch.",
           "nullable": true,
           "type": "boolean"
