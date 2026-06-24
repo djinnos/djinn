@@ -150,13 +150,70 @@ pub async fn create_test_project(db: &Database) -> djinn_core::models::Project {
     let event_bus = EventBus::noop();
     let repo = djinn_db::ProjectRepository::new(db.clone(), event_bus);
     let uuid = uuid::Uuid::now_v7().simple();
-    repo.create(
-        &format!("test-project-{uuid}"),
-        &format!("owner-{uuid}"),
-        &format!("repo-{uuid}"),
-    )
-    .await
-    .expect("create project")
+    let project = repo
+        .create(
+            &format!("test-project-{uuid}"),
+            &format!("owner-{uuid}"),
+            &format!("repo-{uuid}"),
+        )
+        .await
+        .expect("create project");
+    // Satisfy the coordinator's readiness gate so existing tests can dispatch
+    // without threading a full devcontainer pipeline.
+    let image = djinn_db::ProjectImage {
+        tag: Some(format!(
+            "test-registry/djinn-project-{}:testhash",
+            &project.id
+        )),
+        hash: Some("testhash".into()),
+        status: djinn_db::ProjectImageStatus::READY.into(),
+        last_error: None,
+    };
+    let _ = repo.set_project_image(&project.id, &image).await;
+    let image_repo = djinn_db::ImageRepository::new(db.clone());
+    let image_id = format!(
+        "ci-ready-{}",
+        &uuid::Uuid::now_v7().simple().to_string()[..16]
+    );
+    let image_name = format!("ci-ready-{}", &image_id[..8]);
+    let _ = image_repo
+        .create(
+            &image_id,
+            &image_name,
+            Some("ready test image"),
+            r#"{"schema_version":1}"#,
+        )
+        .await;
+    let _ = image_repo
+        .mark_ready(
+            &image_id,
+            image
+                .tag
+                .as_deref()
+                .unwrap_or("test-registry/djinn-test:testhash"),
+            Some("sha256:testhash"),
+        )
+        .await;
+    let _ = image_repo
+        .set_project_image(&project.id, Some(&image_id))
+        .await;
+    let cache_repo = djinn_db::RepoGraphCacheRepository::new(db.clone());
+    let _ = cache_repo
+        .upsert(djinn_db::RepoGraphCacheInsert {
+            project_id: &project.id,
+            commit_sha: "test-commit",
+            graph_blob: b"test-graph",
+        })
+        .await;
+    let _ = djinn_db::ProjectWorkspaceGraphRepository::new(db.clone())
+        .upsert(djinn_db::ProjectWorkspaceGraphUpsert {
+            project_id: &project.id,
+            workspace_slug: "root",
+            commit_sha: "test-commit",
+            status: "ready",
+        })
+        .await;
+    project
 }
 
 /// Build a [`CoordinatorContext`] for tests that exercise coordinator-owned

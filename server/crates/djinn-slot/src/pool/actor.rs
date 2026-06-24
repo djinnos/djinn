@@ -30,6 +30,8 @@ pub(super) struct SlotPool {
     ctx: SlotContext,
     cancel: CancellationToken,
     slot_factory: SlotFactory,
+    #[cfg(any(test, feature = "test-support"))]
+    test_token_overrides: HashMap<String, (u64, u64)>,
 }
 
 impl SlotPool {
@@ -69,6 +71,8 @@ impl SlotPool {
             ctx,
             cancel,
             slot_factory,
+            #[cfg(any(test, feature = "test-support"))]
+            test_token_overrides: HashMap::new(),
         };
         pool.spawn_slots_for_config(&config);
         pool
@@ -153,21 +157,7 @@ impl SlotPool {
                 task_id,
                 respond_to,
             } => {
-                let info = self.task_to_slot.get(&task_id).and_then(|&sid| {
-                    self.task_started
-                        .get(&task_id)
-                        .map(|started| super::types::RunningTaskInfo {
-                            task_id: task_id.clone(),
-                            model_id: self.slot_models.get(&sid).cloned().unwrap_or_default(),
-                            slot_id: sid,
-                            duration_seconds: started.elapsed().as_secs(),
-                            idle_seconds: self.ctx.idle_seconds(&task_id).unwrap_or(0),
-                            activity_tracked: true,
-                            project_id: self.task_projects.get(&task_id).cloned(),
-                            token_count: 0,
-                            turn_count: 0,
-                        })
-                });
+                let info = self.session_for_task(&task_id);
                 let _ = respond_to.send(Ok(info));
             }
             PoolMessage::Reconfigure { config, respond_to } => {
@@ -210,8 +200,52 @@ impl SlotPool {
                 let _ = respond_to.send(result);
             }
             #[cfg(any(test, feature = "test-support"))]
-            PoolMessage::TestSetTokenOverride { .. } => {}
+            PoolMessage::TestSetTokenOverride {
+                task_id,
+                token_count,
+                turn_count,
+            } => {
+                self.test_token_overrides
+                    .insert(task_id, (token_count, turn_count));
+            }
         }
+    }
+
+    fn session_for_task(&self, task_id: &str) -> Option<super::types::RunningTaskInfo> {
+        let slot_id = self.task_to_slot.get(task_id)?;
+        let model_id = self.slot_models.get(slot_id)?.clone();
+        let duration_seconds = self
+            .task_started
+            .get(task_id)
+            .map(|ts| ts.elapsed().as_secs())
+            .unwrap_or(0);
+        // If activity tracker has no entry (reply loop not started yet),
+        // the session has been idle since slot assignment.
+        let tracked_idle = self.ctx.idle_seconds(task_id);
+        let idle_seconds = tracked_idle.unwrap_or(duration_seconds);
+        let project_id = self.task_projects.get(task_id).cloned();
+        // Test-only token/turn overrides: in production the live counts are
+        // bridged from the worker's `touch_activity` RPC, but in tests there
+        // is no worker so the ceiling tests inject a count here.
+        #[cfg(any(test, feature = "test-support"))]
+        let (token_count, turn_count) = self
+            .test_token_overrides
+            .get(task_id)
+            .copied()
+            .unwrap_or((0, 0));
+        #[cfg(not(any(test, feature = "test-support")))]
+        let (token_count, turn_count) = (0, 0);
+        Some(super::types::RunningTaskInfo {
+            task_id: task_id.to_string(),
+            model_id,
+            slot_id: *slot_id,
+            duration_seconds,
+            idle_seconds,
+            activity_tracked: tracked_idle.is_some(),
+            project_id,
+            token_count,
+            turn_count,
+        })
     }
 
     async fn dispatch(
