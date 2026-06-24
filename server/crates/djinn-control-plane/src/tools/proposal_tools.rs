@@ -30,6 +30,7 @@ use crate::tools::proposal_ops::{
     ProposalReconcileObsoleteEpicResponse, ProposalShowResponse, ProposalSignoffModel,
     ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
 };
+use crate::tools::proposal_readiness::evaluate_proposal_readiness;
 use crate::tools::validation::{
     validate_ac_count, validate_body, validate_design, validate_limit, validate_mdx_body,
     validate_offset, validate_proposal_create_status, validate_proposal_status, validate_sort,
@@ -376,6 +377,26 @@ pub struct ProposalStopBuildResponse {
     pub error: Option<String>,
 }
 
+// ── Readiness gate helpers ──────────────────────────────────────────────────
+
+/// Parse a stored acceptance-criteria JSON string into `AcceptanceCriterionItem`
+/// values for the readiness evaluator.  Returns an empty vec when the JSON is
+/// missing, empty, or unparseable.
+fn parse_ac_items(ac_json: &str) -> Vec<AcceptanceCriterionItem> {
+    serde_json::from_str::<Vec<AcceptanceCriterionItem>>(ac_json).unwrap_or_default()
+}
+
+/// Convert a `ProposalReadinessResult` into a user-facing error string,
+/// prepending a short preamble so callers can return it directly as a tool
+/// error.
+fn format_readiness_error(
+    result: &crate::tools::proposal_readiness::ProposalReadinessResult,
+) -> Option<String> {
+    result
+        .to_error_string()
+        .map(|details| format!("proposal not ready for review: {details}"))
+}
+
 // ── Tool router ──────────────────────────────────────────────────────────────
 
 #[tool_router(router = proposal_tool_router, vis = "pub")]
@@ -423,6 +444,30 @@ impl DjinnMcpServer {
         };
         let ac_json = serde_json::to_string(&ac).unwrap_or_else(|_| "[]".to_string());
 
+        // Pre-resolve target projects: used both for the readiness gate
+        // (target count) and for seeding after proposal creation.
+        let mut resolved_target_ids: Vec<String> = Vec::new();
+        if let Some(targets) = &p.target_projects {
+            let project_repo =
+                ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+            for t in targets {
+                if let Ok(Some(pid)) = project_repo.resolve(t).await {
+                    resolved_target_ids.push(pid);
+                }
+            }
+        }
+
+        // Deterministic DoR gate: block entering `in_review` when the spec is
+        // not ready. Existing body/MDX/AC-count validation already passed.
+        let effective_status = status.unwrap_or("draft");
+        if effective_status == "in_review" {
+            let ac_items = parse_ac_items(&ac_json);
+            let readiness = evaluate_proposal_readiness(body, &ac_items, resolved_target_ids.len());
+            if let Some(err) = format_readiness_error(&readiness) {
+                return Json(err_single(err));
+            }
+        }
+
         let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
         let proposal = match repo
             .create(djinn_db::ProposalCreateInput {
@@ -439,14 +484,8 @@ impl DjinnMcpServer {
         };
 
         // Seed target projects (best-effort: unresolvable refs are skipped).
-        if let Some(targets) = &p.target_projects {
-            let project_repo =
-                ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-            for t in targets {
-                if let Ok(Some(pid)) = project_repo.resolve(t).await {
-                    let _ = repo.add_target(&proposal.id, &pid, "primary").await;
-                }
-            }
+        for pid in &resolved_target_ids {
+            let _ = repo.add_target(&proposal.id, pid, "primary").await;
         }
 
         Json(ProposalSingleResponse {
@@ -493,6 +532,20 @@ impl DjinnMcpServer {
                 .await
             {
                 return Json(err_single(e));
+            }
+            // Deterministic DoR gate: block import that would leave an
+            // `in_review` proposal in a non-ready state.
+            if existing.status == "in_review" {
+                let ac_items = parse_ac_items(&imported.acceptance_criteria_json);
+                let target_count = repo
+                    .targets(&existing.id)
+                    .await
+                    .map(|t| t.len())
+                    .unwrap_or(0);
+                let readiness = evaluate_proposal_readiness(imported.body, &ac_items, target_count);
+                if let Some(err) = format_readiness_error(&readiness) {
+                    return Json(err_single(err));
+                }
             }
             match repo
                 .update(
@@ -806,6 +859,22 @@ impl DjinnMcpServer {
         let status = p.status.as_deref().unwrap_or(&existing.status);
         if let Err(e) = validate_proposal_status(status) {
             return Json(err_single(e));
+        }
+
+        // Deterministic DoR gate: block entering `in_review` when the
+        // effective proposal body/AC/targets are not ready. Existing
+        // body/MDX/AC-count validation already passed above.
+        if status == "in_review" {
+            let ac_items = parse_ac_items(&ac_json);
+            let target_count = repo
+                .targets(&existing.id)
+                .await
+                .map(|t| t.len())
+                .unwrap_or(0);
+            let readiness = evaluate_proposal_readiness(body, &ac_items, target_count);
+            if let Some(err) = format_readiness_error(&readiness) {
+                return Json(err_single(err));
+            }
         }
 
         // Resolve superseded_by to a canonical proposal id when provided.
