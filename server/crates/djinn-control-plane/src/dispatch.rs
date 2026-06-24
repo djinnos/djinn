@@ -43,10 +43,11 @@ use crate::tools::project_tools::{
 };
 use crate::tools::proposal_blocks::{GetBlockCatalogParams, ProposalBlocksParams};
 use crate::tools::proposal_tools::{
-    ProposalCreateParams, ProposalDeleteParams, ProposalExportParams, ProposalFeedbackAddParams,
-    ProposalFeedbackResolveParams, ProposalGraduateParams, ProposalImportParams,
-    ProposalListParams, ProposalReconcileObsoleteEpicParams, ProposalShowParams,
-    ProposalSignoffParams, ProposalStopBuildParams, ProposalTargetParams, ProposalUpdateParams,
+    ProposalBlockPatchParams, ProposalCreateParams, ProposalDeleteParams, ProposalExportParams,
+    ProposalFeedbackAddParams, ProposalFeedbackResolveParams, ProposalGraduateParams,
+    ProposalImportParams, ProposalListParams, ProposalReconcileObsoleteEpicParams,
+    ProposalShowParams, ProposalSignoffParams, ProposalStopBuildParams, ProposalTargetParams,
+    ProposalUpdateParams,
 };
 use crate::tools::provider_tools::{
     ModelHealthInput, ProviderCatalogInput, ProviderConnectedInput, ProviderModelLookupInput,
@@ -429,6 +430,13 @@ impl DjinnMcpServer {
                 name,
                 self.proposal_update(Parameters(decode_args::<ProposalUpdateParams>(name, args)?))
                     .await,
+            ),
+            "proposal_block_patch" => map_json(
+                name,
+                self.proposal_block_patch(Parameters(decode_args::<ProposalBlockPatchParams>(
+                    name, args,
+                )?))
+                .await,
             ),
             "proposal_delete" => map_json(
                 name,
