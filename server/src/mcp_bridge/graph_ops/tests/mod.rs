@@ -1303,4 +1303,5 @@ mod trait_dispatch_query;
 
 mod route;
 mod trait_dispatch_corpus;
+mod trait_dispatch_corpus_e2e;
 mod trait_dispatch_impact;
