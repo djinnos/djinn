@@ -340,6 +340,9 @@ pub const PROPOSAL_SCOPED_MCP_TOOLS: &[&str] = &[
     "proposal_update",
     "proposal_feedback_resolve",
     "proposal_feedback_add",
+    "proposal_block_patch",
+    "get_block_catalog",
+    "proposal_blocks",
 ];
 
 /// `true` when `name` is one of the proposal-scoped tools (see
