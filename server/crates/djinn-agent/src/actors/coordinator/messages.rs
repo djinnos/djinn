@@ -62,4 +62,12 @@ pub(super) enum CoordinatorMessage {
     DebugSnapshot {
         reply: tokio::sync::oneshot::Sender<CoordinatorDebugSnapshot>,
     },
+    /// Start a proposal refinement run.  The coordinator is authoritative for
+    /// duplicate-start rejection (checks its own `active_refinements` map).
+    StartProposalRefinement {
+        proposal_id: String,
+        current_revision_seq: i32,
+        update_authority: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
 }

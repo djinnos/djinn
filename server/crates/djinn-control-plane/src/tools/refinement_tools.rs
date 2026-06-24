@@ -14,6 +14,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::bridge::ProposalRefinementStartRequest;
 use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
     ProposalRefinementStartResponse, ProposalRefinementStatusModel,
@@ -66,15 +67,19 @@ pub struct ProposalRefinementStatusParams {
 impl DjinnMcpServer {
     /// Start proposal refinement. Validates the proposal is in a state that
     /// supports refinement (draft or in_review), records a `refinement_start`
-    /// lifecycle entry in the proposal revision history, and returns the initial
-    /// refinement status.
+    /// lifecycle entry, delegates to the coordinator to initialize the runtime
+    /// refinement loop, and returns the initial refinement status.
+    ///
+    /// The coordinator is authoritative for duplicate-start rejection. If the
+    /// coordinator rejects the start (e.g. duplicate active run), a
+    /// `refinement_stop` lifecycle entry is recorded with the error reason.
     ///
     /// `update_authority` controls whether advocate revisions are applied
     /// automatically (`auto_accept`) or proposed for approval (`checkpoint`,
     /// the default). Same-model fallback is allowed when diverse models are
     /// unavailable — this is not presented as an error.
     #[tool(
-        description = "Start proposal refinement for the given proposal. Validates the proposal exists and is in draft or in_review state. Records a refinement_start lifecycle event. `update_authority` is `checkpoint` (default — advocate revisions require approval) or `auto_accept` (revisions are applied automatically). Returns the initial refinement status. Same-model fallback is used when diverse models are unavailable."
+        description = "Start proposal refinement for the given proposal. Validates the proposal exists and is in draft or in_review state. Records a refinement_start lifecycle event and delegates to the coordinator to initialize the runtime refinement loop. `update_authority` is `checkpoint` (default — advocate revisions require approval) or `auto_accept` (revisions are applied automatically). Returns the initial refinement status. Same-model fallback is used when diverse models are unavailable."
     )]
     pub async fn proposal_refinement_start(
         &self,
@@ -105,8 +110,8 @@ impl DjinnMcpServer {
             )));
         }
 
-        // Check if refinement is already active (latest refinement_start
-        // without a corresponding refinement_stop).
+        // Lifecycle-level duplicate check — fast-path early return before
+        // hitting the coordinator channel.
         if refinement_is_active(&repo, &proposal.id).await {
             return Json(err_refinement_start(
                 "refinement is already active for this proposal".to_string(),
@@ -126,6 +131,57 @@ impl DjinnMcpServer {
                 return Json(err_refinement_start(format!(
                     "failed to record refinement_start: {e}"
                 )));
+            }
+        }
+
+        // Delegate to the coordinator to start the runtime refinement loop.
+        // The coordinator is authoritative for duplicate-start rejection — if
+        // the coordinator has a live run for this proposal (e.g. race between
+        // two MCP tool calls), it rejects the start and we record a
+        // refinement_stop lifecycle entry to close the dangling start.
+        let coordinator = self.state.coordinator().await;
+        match coordinator {
+            Some(coordinator_handle) => {
+                let request = ProposalRefinementStartRequest {
+                    proposal_id: proposal.id.clone(),
+                    current_revision_seq: proposal.latest_revision_seq,
+                    update_authority: authority.to_string(),
+                };
+                if let Err(e) = coordinator_handle.start_proposal_refinement(request).await {
+                    let stop_metadata = json!({
+                        "stop_reason": e,
+                        "source": "coordinator_start_failure",
+                    });
+                    let _ = repo
+                        .record_refinement_lifecycle(
+                            &proposal.id,
+                            "refinement_stop",
+                            Some(&stop_metadata),
+                        )
+                        .await;
+                    return Json(err_refinement_start(format!(
+                        "coordinator rejected refinement start: {e}"
+                    )));
+                }
+            }
+            None => {
+                // No coordinator wired — record the failure and return an
+                // error.  This keeps the lifecycle entry from dangling without
+                // runtime ownership.
+                let stop_metadata = json!({
+                    "stop_reason": "coordinator not available",
+                    "source": "coordinator_start_failure",
+                });
+                let _ = repo
+                    .record_refinement_lifecycle(
+                        &proposal.id,
+                        "refinement_stop",
+                        Some(&stop_metadata),
+                    )
+                    .await;
+                return Json(err_refinement_start(
+                    "coordinator not available".to_string(),
+                ));
             }
         }
 
@@ -296,6 +352,7 @@ mod tests {
     use crate::state::stubs::test_mcp_state;
     use djinn_core::events::EventBus;
     use djinn_db::{Database, ProposalCreateInput};
+    use std::sync::Arc;
 
     async fn test_server() -> (DjinnMcpServer, Database) {
         let db = Database::open_in_memory().unwrap();
@@ -581,5 +638,166 @@ mod tests {
             error.contains("proposal not found"),
             "should mention proposal not found: {error}"
         );
+    }
+
+    /// Test that when the coordinator rejects the refinement start (e.g.
+    /// duplicate active run), the error is propagated through the response
+    /// and a `refinement_stop` lifecycle entry is recorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refinement_start_propagates_coordinator_error_and_records_stop() {
+        use crate::bridge::CoordinatorOps;
+        use async_trait::async_trait;
+
+        /// Coordinator stub that always rejects refinement starts.
+        struct RejectingCoordinator;
+        #[async_trait]
+        impl CoordinatorOps for RejectingCoordinator {
+            fn get_status(&self) -> Result<crate::bridge::CoordinatorStatus, String> {
+                Err("not initialized".into())
+            }
+            async fn trigger_dispatch_for_project(&self, _: &str) -> Result<(), String> {
+                Err("not initialized".into())
+            }
+            async fn start_proposal_refinement(
+                &self,
+                _: crate::bridge::ProposalRefinementStartRequest,
+            ) -> Result<(), String> {
+                Err("duplicate refinement active".to_string())
+            }
+        }
+
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let state = crate::state::stubs::test_mcp_state(db.clone());
+        // Override the coordinator to one that rejects.
+        let state = crate::state::McpState::with_enrichment(
+            db.clone(),
+            state.event_bus(),
+            state.catalog().clone(),
+            state.health_tracker().clone(),
+            Some(Arc::new(RejectingCoordinator) as Arc<dyn CoordinatorOps>),
+            None,
+            None,
+            None,
+            state.lsp().clone(),
+            Arc::new(crate::state::stubs::StubRuntimeOps),
+            Arc::new(crate::state::stubs::StubGitOps),
+            Arc::new(crate::state::stubs::StubRepoGraphOps),
+            None,
+        );
+        let server = DjinnMcpServer::new(state);
+
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Reject Test",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let resp = server
+            .dispatch_tool(
+                "proposal_refinement_start",
+                serde_json::json!({ "proposal_id": proposal.id }),
+            )
+            .await
+            .expect("tool should be registered");
+
+        let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(
+            error.contains("coordinator rejected refinement start"),
+            "should mention coordinator rejection: {error}"
+        );
+        assert!(
+            error.contains("duplicate refinement active"),
+            "should include the coordinator error message: {error}"
+        );
+
+        // Verify a refinement_stop lifecycle entry was recorded.
+        let revisions = repo.revisions(&proposal.id).await.unwrap();
+        let starts: Vec<_> = revisions
+            .iter()
+            .filter(|r| r.event_kind == "refinement_start")
+            .collect();
+        let stops: Vec<_> = revisions
+            .iter()
+            .filter(|r| r.event_kind == "refinement_stop")
+            .collect();
+        assert_eq!(starts.len(), 1, "expected one refinement_start");
+        assert_eq!(stops.len(), 1, "expected one refinement_stop");
+        // The stop metadata should include the error reason.
+        let stop_meta: serde_json::Value =
+            serde_json::from_str(stops[0].event_metadata.as_deref().unwrap_or("{}")).unwrap();
+        assert_eq!(
+            stop_meta.get("source").and_then(|v| v.as_str()),
+            Some("coordinator_start_failure")
+        );
+    }
+
+    /// Test that when the coordinator is not wired (None), the tool records
+    /// a refinement_stop and returns an error rather than leaving a dangling
+    /// lifecycle entry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refinement_start_records_stop_when_coordinator_unavailable() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        // Build McpState with no coordinator (None).
+        let state = crate::state::McpState::new(
+            db.clone(),
+            EventBus::noop(),
+            crate::state::stubs::test_mcp_state(db.clone())
+                .catalog()
+                .clone(),
+            crate::state::stubs::test_mcp_state(db.clone())
+                .health_tracker()
+                .clone(),
+            None, // no coordinator
+            None,
+            None,
+            None,
+            Arc::new(crate::state::stubs::StubLspOps),
+            Arc::new(crate::state::stubs::StubRuntimeOps),
+            Arc::new(crate::state::stubs::StubGitOps),
+            Arc::new(crate::state::stubs::StubRepoGraphOps),
+        );
+        let server = DjinnMcpServer::new(state);
+
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "No Coordinator Test",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let resp = server
+            .dispatch_tool(
+                "proposal_refinement_start",
+                serde_json::json!({ "proposal_id": proposal.id }),
+            )
+            .await
+            .expect("tool should be registered");
+
+        let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(
+            error.contains("coordinator not available"),
+            "should mention coordinator unavailable: {error}"
+        );
+
+        // Verify the lifecycle was cleaned up.
+        let revisions = repo.revisions(&proposal.id).await.unwrap();
+        let stops: Vec<_> = revisions
+            .iter()
+            .filter(|r| r.event_kind == "refinement_stop")
+            .collect();
+        assert_eq!(stops.len(), 1, "expected one refinement_stop");
     }
 }

@@ -4,7 +4,7 @@ use djinn_agent::actors::slot::SlotPoolHandle;
 use djinn_agent::lsp::LspManager;
 use djinn_control_plane::bridge::{
     CoordinatorOps, CoordinatorStatus, LspOps, LspWarning, ModelPoolStatus, PoolStatus,
-    RunningTaskInfo, SlotPoolOps,
+    ProposalRefinementStartRequest, RunningTaskInfo, SlotPoolOps,
 };
 
 // ── Newtype wrappers ───────────────────────────────────────────────────────────
@@ -30,6 +30,20 @@ impl CoordinatorOps for CoordinatorBridge {
     async fn trigger_dispatch_for_project(&self, project_id: &str) -> Result<(), String> {
         self.0
             .trigger_dispatch_for_project(project_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn start_proposal_refinement(
+        &self,
+        request: ProposalRefinementStartRequest,
+    ) -> Result<(), String> {
+        self.0
+            .start_proposal_refinement(
+                request.proposal_id,
+                request.current_revision_seq,
+                request.update_authority,
+            )
             .await
             .map_err(|e| e.to_string())
     }
