@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::host::SlotContext;
 use djinn_orchestration_types::coordinator::DebugSlot;
-use djinn_orchestration_types::trigger::CoordinatorTrigger;
+// use djinn_orchestration_types::trigger::CoordinatorTrigger; // unused — re-enable when trigger dispatch is wired
 
 use super::super::{ModelSlotConfig, SlotEvent, SlotHandle, SlotPoolConfig, SlotState};
 use super::types::{PoolError, PoolMessage, SlotFactory};

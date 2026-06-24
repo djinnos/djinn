@@ -11,7 +11,7 @@ use djinn_db::ActivityQuery;
 use djinn_db::ProjectRepository;
 use djinn_db::TaskRepository;
 use djinn_orchestration_types::coordinator::PR_REVIEW_FEEDBACK_EVENT;
-use djinn_provider::repos::CredentialRepository;
+// use djinn_provider::repos::CredentialRepository; // unused — re-enable when credential helpers are wired
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 

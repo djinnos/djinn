@@ -650,9 +650,7 @@ pub(crate) async fn run_memory_enrichment_with_provider(
     run_memory_enrichment_inner(project_id, db, Some(provider)).await
 }
 
-/// Inner implementation.
-///
-/// `provider_override` bypasses credential loading when `Some` (tests).
+// Inner implementation.  `provider_override` bypasses credential loading when `Some` (tests).
 // ── Extracted helpers for run_memory_enrichment_inner ────────────────────────
 
 /// Load source notes for enrichment, filtering out entity/claim notes
@@ -709,6 +707,7 @@ async fn load_proposal_summaries(
 /// Process a single enrichment batch: call the LLM, parse the response,
 /// and persist entities, claims, and edges. Returns (entities, claims,
 /// edges_dropped_wikilink, warnings) for this batch.
+#[allow(clippy::too_many_arguments)] // extracted helper — argument count mirrors the original hotspot
 async fn process_enrichment_batch(
     project_id: &str,
     batch_idx: usize,
