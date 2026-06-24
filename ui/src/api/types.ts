@@ -69,3 +69,30 @@ export interface ProposalDebateTrailRow {
   created_at: string;
   updated_at: string;
 }
+
+/**
+ * Refinement session status for a proposal. Derived from refinement lifecycle
+ * events and debate-trail entries. When `active` is false and `stop_reason`
+ * is null, refinement has never been started for this proposal.
+ */
+export interface ProposalRefinementStatus {
+  /** Whether refinement is currently active. */
+  active: boolean;
+  /** Current debate round (1-based). null when refinement has not started. */
+  current_round?: number | null;
+  /** Consecutive adversary dry rounds at the end of the trail. */
+  dry_rounds: number;
+  /** Total debate-trail entries produced so far. */
+  total_entries: number;
+  /**
+   * Update authority mode: `checkpoint` (advocate revisions require approval)
+   * or `auto_accept` (revisions applied automatically).
+   */
+  update_authority: "checkpoint" | "auto_accept" | string;
+  /**
+   * When set, refinement has stopped.
+   * Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,
+   * `agent_failure`. null while still running or not started.
+   */
+  stop_reason?: string | null;
+}

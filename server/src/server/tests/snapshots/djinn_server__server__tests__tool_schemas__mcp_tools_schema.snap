@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 510
 expression: signatures
 ---
 [
@@ -13763,6 +13762,196 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_refinement_start",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "update_authority": {
+          "default": "checkpoint",
+          "description": "Update authority mode: `checkpoint` (advocate revisions are proposed\nbut not auto-applied) or `auto_accept` (revisions are applied as\nproposal updates). Defaults to `checkpoint`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id"
+      ],
+      "title": "ProposalRefinementStartParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalRefinementStatusModel": {
+          "description": "Refinement session state tracked on the proposal's event_metadata.\nThe coordinator refinement workflow populates these fields; the\ncontrol-plane surfaces them read-only to the UI.",
+          "properties": {
+            "active": {
+              "description": "Whether refinement has been started for this proposal.",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Current debate round (1-based). `None` when refinement has not started.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "dry_rounds": {
+              "description": "How many consecutive adversary dry rounds have been observed.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "stop_reason": {
+              "description": "When set, refinement has stopped for this reason.\nValues: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,\n`agent_failure`, or `null` (still running / not started).",
+              "nullable": true,
+              "type": "string"
+            },
+            "total_entries": {
+              "description": "Total debate-trail entries produced so far.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "update_authority": {
+              "description": "Update authority mode: `checkpoint` (advocate revisions are proposed\nbut not auto-applied) or `auto_accept` (revisions are applied as\nproposal updates).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "active",
+            "dry_rounds",
+            "total_entries",
+            "update_authority"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for `proposal_refinement_start`.",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "refinement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalRefinementStatusModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "The initial refinement status after starting."
+        }
+      },
+      "title": "ProposalRefinementStartResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_refinement_status",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id"
+      ],
+      "title": "ProposalRefinementStatusParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalRefinementStatusModel": {
+          "description": "Refinement session state tracked on the proposal's event_metadata.\nThe coordinator refinement workflow populates these fields; the\ncontrol-plane surfaces them read-only to the UI.",
+          "properties": {
+            "active": {
+              "description": "Whether refinement has been started for this proposal.",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Current debate round (1-based). `None` when refinement has not started.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "dry_rounds": {
+              "description": "How many consecutive adversary dry rounds have been observed.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "stop_reason": {
+              "description": "When set, refinement has stopped for this reason.\nValues: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,\n`agent_failure`, or `null` (still running / not started).",
+              "nullable": true,
+              "type": "string"
+            },
+            "total_entries": {
+              "description": "Total debate-trail entries produced so far.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "update_authority": {
+              "description": "Update authority mode: `checkpoint` (advocate revisions are proposed\nbut not auto-applied) or `auto_accept` (revisions are applied as\nproposal updates).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "active",
+            "dry_rounds",
+            "total_entries",
+            "update_authority"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for `proposal_refinement_status`.",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "refinement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalRefinementStatusModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "title": "ProposalRefinementStatusResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_remove_target",
     "read_only": false,
     "destructive": true,
@@ -14203,6 +14392,47 @@ expression: signatures
           ],
           "type": "object"
         },
+        "ProposalRefinementStatusModel": {
+          "description": "Refinement session state tracked on the proposal's event_metadata.\nThe coordinator refinement workflow populates these fields; the\ncontrol-plane surfaces them read-only to the UI.",
+          "properties": {
+            "active": {
+              "description": "Whether refinement has been started for this proposal.",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Current debate round (1-based). `None` when refinement has not started.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "dry_rounds": {
+              "description": "How many consecutive adversary dry rounds have been observed.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "stop_reason": {
+              "description": "When set, refinement has stopped for this reason.\nValues: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,\n`agent_failure`, or `null` (still running / not started).",
+              "nullable": true,
+              "type": "string"
+            },
+            "total_entries": {
+              "description": "Total debate-trail entries produced so far.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "update_authority": {
+              "description": "Update authority mode: `checkpoint` (advocate revisions are proposed\nbut not auto-applied) or `auto_accept` (revisions are applied as\nproposal updates).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "active",
+            "dry_rounds",
+            "total_entries",
+            "update_authority"
+          ],
+          "type": "object"
+        },
         "ProposalRevisionModel": {
           "properties": {
             "acceptance_criteria": {
@@ -14371,6 +14601,18 @@ expression: signatures
               "nullable": true
             }
           ]
+        },
+        "refinement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalRefinementStatusModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "Refinement session status (active round, stop reason, update authority).\n`None` when refinement has not been started for this proposal."
         },
         "revisions": {
           "items": {
