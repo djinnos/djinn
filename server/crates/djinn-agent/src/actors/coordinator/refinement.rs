@@ -82,6 +82,10 @@ pub enum RefinementPhase {
     JudgeAdjudication,
     /// Refinement loop is complete.
     Complete,
+    /// The Judge issued a needs-evidence verdict and a spike task has been
+    /// created. The proposal is parked in `draft` while the spike is open.
+    /// Refinement resumes when the spike closes.
+    NeedsEvidenceParked,
 }
 
 /// Update authority mode for the refinement loop. Read at each round boundary
@@ -135,6 +139,14 @@ pub struct AdvocateRevisionResult {
     pub event_metadata: Option<serde_json::Value>,
 }
 
+/// A named load-bearing feasibility claim that the Judge identified as needing
+/// research evidence before the proposal can be deemed ready.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NeedsEvidenceClaim {
+    /// The claim text describing what feasibility question needs evidence.
+    pub claim: String,
+}
+
 /// Result of a judge adjudication pass.
 #[derive(Debug, Clone)]
 pub struct JudgeVerdictResult {
@@ -142,6 +154,9 @@ pub struct JudgeVerdictResult {
     pub body: String,
     /// Whether the verdict blocks proposal readiness.
     pub blocking: bool,
+    /// When non-empty, the Judge has identified claims that need research
+    /// evidence (spike tasks) before the proposal can be deemed ready.
+    pub needs_evidence: Vec<NeedsEvidenceClaim>,
 }
 
 /// Configuration for the refinement loop.
@@ -196,6 +211,9 @@ pub struct RefinementLoopState {
     pub round_blocking_objections: Vec<(i32, usize)>,
     /// Set when the loop terminates.
     pub stop_reason: Option<StopReason>,
+    /// When the Judge issues a needs-evidence verdict, the spike task id is
+    /// stored here so the coordinator can track the parked state.
+    pub linked_spike_task_id: Option<String>,
 }
 
 impl RefinementLoopState {
@@ -232,6 +250,7 @@ impl RefinementLoopState {
             objection_signatures: HashMap::new(),
             round_blocking_objections: Vec::new(),
             stop_reason: None,
+            linked_spike_task_id: None,
         }
     }
 
@@ -333,10 +352,33 @@ impl RefinementLoopState {
         AdversaryPassOutcome::Continue
     }
 
-    /// Record a judge verdict. Transitions to Complete.
-    pub fn record_judge_verdict(&mut self, _result: &JudgeVerdictResult) {
-        let reason = StopReason::AdversaryDry;
-        self.terminate(reason);
+    /// Record a judge verdict. When the verdict contains needs-evidence claims,
+    /// transitions to NeedsEvidenceParked instead of Complete.
+    pub fn record_judge_verdict(&mut self, result: &JudgeVerdictResult) {
+        if result.needs_evidence.is_empty() {
+            let reason = StopReason::AdversaryDry;
+            self.terminate(reason);
+        }
+        // When needs-evidence is non-empty, the caller is responsible for
+        // calling `record_needs_evidence_parked()` after creating the spike
+        // task. The phase stays at JudgeAdjudication until then.
+    }
+
+    /// Park the refinement loop for a needs-evidence spike. The loop stays
+    /// active but parked — `drive_one_refinement` skips it until the spike
+    /// closes and `resume_from_needs_evidence()` is called.
+    pub fn record_needs_evidence_parked(&mut self, spike_task_id: String) {
+        self.linked_spike_task_id = Some(spike_task_id);
+        self.phase = RefinementPhase::NeedsEvidenceParked;
+    }
+
+    /// Resume refinement after the needs-evidence spike has closed. Advances
+    /// the round and returns to the Advocate phase.
+    pub fn resume_from_needs_evidence(&mut self) {
+        self.linked_spike_task_id = None;
+        self.current_round += 1;
+        self.consecutive_dry_rounds = 0;
+        self.phase = RefinementPhase::AdvocateRevision;
     }
 
     /// Terminate the loop with the given stop reason.
@@ -494,6 +536,33 @@ pub fn build_verdict_debate_params<'a>(
     }
 }
 
+// ─── Needs-evidence verdict parsing ─────────────────────────────────────────
+
+/// Prefix marker in a judge verdict body that signals a needs-evidence claim.
+/// The judge agent is instructed to include lines of the form:
+///   NEEDS-EVIDENCE: <claim description>
+pub const NEEDS_EVIDENCE_PREFIX: &str = "NEEDS-EVIDENCE:";
+
+/// Parse needs-evidence claims from a judge verdict body. Scans each line for
+/// the `NEEDS-EVIDENCE:` prefix and extracts the claim text. Returns an empty
+/// vec when no claims are found.
+pub fn parse_needs_evidence_claims(body: &str) -> Vec<NeedsEvidenceClaim> {
+    body.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix(NEEDS_EVIDENCE_PREFIX) {
+                let claim = rest.trim();
+                if !claim.is_empty() {
+                    return Some(NeedsEvidenceClaim {
+                        claim: claim.to_string(),
+                    });
+                }
+            }
+            None
+        })
+        .collect()
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -561,6 +630,7 @@ mod tests {
         state.record_judge_verdict(&JudgeVerdictResult {
             body: "Proposal is ready.".into(),
             blocking: false,
+            needs_evidence: vec![],
         });
         assert!(state.is_complete());
         assert_eq!(state.stop_reason, Some(StopReason::AdversaryDry));
@@ -1087,5 +1157,142 @@ mod tests {
         meta["previous_revision_seq"] = serde_json::json!(2);
         assert_eq!(meta["checkpoint_status"], "pending");
         assert_eq!(meta["previous_revision_seq"], 2);
+    }
+
+    // ── Needs-evidence verdict parsing ──────────────────────────────────
+
+    #[test]
+    fn parse_needs_evidence_extracts_claims() {
+        let body = "The proposal looks good overall.\n\
+                     NEEDS-EVIDENCE: Can the widget handle 10k concurrent users?\n\
+                     Some other text.\n\
+                     NEEDS-EVIDENCE: Does the API rate limit work as described?";
+        let claims = parse_needs_evidence_claims(body);
+        assert_eq!(claims.len(), 2);
+        assert_eq!(
+            claims[0].claim,
+            "Can the widget handle 10k concurrent users?"
+        );
+        assert_eq!(
+            claims[1].claim,
+            "Does the API rate limit work as described?"
+        );
+    }
+
+    #[test]
+    fn parse_needs_evidence_returns_empty_for_no_markers() {
+        let body = "Proposal is ready. No further research needed.";
+        let claims = parse_needs_evidence_claims(body);
+        assert!(claims.is_empty());
+    }
+
+    #[test]
+    fn parse_needs_evidence_ignores_empty_claims() {
+        let body = "NEEDS-EVIDENCE:\nNEEDS-EVIDENCE:   \nReal claim here.";
+        let claims = parse_needs_evidence_claims(body);
+        assert!(claims.is_empty());
+    }
+
+    // ── Needs-evidence state machine transitions ───────────────────────
+
+    #[test]
+    fn needs_evidence_verdict_parks_refinement() {
+        let mut state =
+            RefinementLoopState::with_config("p1", 0, UpdateAuthority::AutoAccept, test_config());
+
+        // Drive through to judge adjudication.
+        state.record_advocate_revision(1);
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![],
+            explicit_dry: true,
+        });
+        state.record_advocate_revision(2);
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![],
+            explicit_dry: true,
+        });
+        assert_eq!(state.phase, RefinementPhase::JudgeAdjudication);
+
+        // Judge issues needs-evidence verdict.
+        let verdict = JudgeVerdictResult {
+            body: "NEEDS-EVIDENCE: Can the system handle 10k concurrent users?".into(),
+            blocking: true,
+            needs_evidence: vec![NeedsEvidenceClaim {
+                claim: "Can the system handle 10k concurrent users?".into(),
+            }],
+        };
+        state.record_judge_verdict(&verdict);
+
+        // Phase should still be JudgeAdjudication (not Complete) since needs_evidence is non-empty.
+        assert_eq!(state.phase, RefinementPhase::JudgeAdjudication);
+        assert!(!state.is_complete());
+
+        // Park the refinement with a spike task.
+        state.record_needs_evidence_parked("spike-task-1".into());
+        assert_eq!(state.phase, RefinementPhase::NeedsEvidenceParked);
+        assert_eq!(state.linked_spike_task_id.as_deref(), Some("spike-task-1"));
+        assert!(!state.is_complete());
+    }
+
+    #[test]
+    fn needs_evidence_resume_advances_round() {
+        let mut state =
+            RefinementLoopState::with_config("p1", 0, UpdateAuthority::AutoAccept, test_config());
+
+        // Drive to judge and park.
+        state.record_advocate_revision(1);
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![],
+            explicit_dry: true,
+        });
+        state.record_advocate_revision(2);
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![],
+            explicit_dry: true,
+        });
+
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: "NEEDS-EVIDENCE: claim".into(),
+            blocking: true,
+            needs_evidence: vec![NeedsEvidenceClaim {
+                claim: "claim".into(),
+            }],
+        });
+        state.record_needs_evidence_parked("spike-task-1".into());
+        assert_eq!(state.current_round, 2);
+
+        // Resume from needs-evidence.
+        state.resume_from_needs_evidence();
+        assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
+        assert!(state.linked_spike_task_id.is_none());
+        assert_eq!(state.current_round, 3); // Round advanced
+        assert_eq!(state.consecutive_dry_rounds, 0); // Dry counter reset
+        assert!(!state.is_complete());
+    }
+
+    #[test]
+    fn needs_evidence_no_claims_terminates_normally() {
+        let mut state =
+            RefinementLoopState::with_config("p1", 0, UpdateAuthority::AutoAccept, test_config());
+
+        state.record_advocate_revision(1);
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![],
+            explicit_dry: true,
+        });
+        state.record_advocate_revision(2);
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![],
+            explicit_dry: true,
+        });
+
+        // Verdict with no needs-evidence claims terminates normally.
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: "Proposal is ready.".into(),
+            blocking: false,
+            needs_evidence: vec![],
+        });
+        assert!(state.is_complete());
+        assert_eq!(state.stop_reason, Some(StopReason::AdversaryDry));
     }
 }
