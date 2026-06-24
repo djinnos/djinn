@@ -178,7 +178,7 @@ export function ProposalRefinement({
       </p>
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm">Mode</span>
-        <Select value={authority} onValueChange={setAuthority}>
+        <Select value={authority} onValueChange={(value) => setAuthority(value ?? "checkpoint")}>
           <SelectTrigger className="h-8 w-[200px] text-sm">
             <SelectValue />
           </SelectTrigger>
