@@ -968,6 +968,13 @@ impl DjinnMcpServer {
             Ok(d) => Some(d.iter().map(ProposalDebateTrailModel::from).collect()),
             Err(e) => return Json(err_show(e.to_string())),
         };
+        // Derive refinement status from lifecycle events + debate trail.
+        // Non-critical — swallow errors silently so proposal_show still works
+        // even if refinement status can't be computed.
+        let refinement =
+            crate::tools::refinement_tools::build_refinement_status(&repo, &proposal.id)
+                .await
+                .ok();
         Json(ProposalShowResponse {
             proposal: Some(ProposalModel::from(&proposal)),
             targets: Some(targets),
@@ -977,6 +984,7 @@ impl DjinnMcpServer {
             epics: Some(epics),
             memory_refs,
             debate_trail,
+            refinement,
             error: None,
         })
     }
@@ -2235,6 +2243,7 @@ fn err_show(error: impl Into<String>) -> ProposalShowResponse {
         epics: None,
         memory_refs: vec![],
         debate_trail: None,
+        refinement: None,
         error: Some(error.into()),
     }
 }

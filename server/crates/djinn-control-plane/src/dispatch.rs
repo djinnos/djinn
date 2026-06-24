@@ -58,6 +58,9 @@ use crate::tools::provider_tools::{
     ProviderModelsConnectedInput, ProviderModelsInput, ProviderOauthStartInput,
     ProviderRemoveInput, ProviderValidateInput,
 };
+use crate::tools::refinement_tools::{
+    ProposalRefinementStartParams, ProposalRefinementStatusParams,
+};
 use crate::tools::service_tools::ServicePresetListParams;
 use crate::tools::session_tools::{
     SessionActiveParams, SessionListParams, SessionMessagesParams, SessionShowParams,
@@ -537,6 +540,20 @@ impl DjinnMcpServer {
                     name, args,
                 )?))
                 .await,
+            ),
+            "proposal_refinement_start" => map_json(
+                name,
+                self.proposal_refinement_start(Parameters(decode_args::<
+                    ProposalRefinementStartParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "proposal_refinement_status" => map_json(
+                name,
+                self.proposal_refinement_status(Parameters(decode_args::<
+                    ProposalRefinementStatusParams,
+                >(name, args)?))
+                    .await,
             ),
             "model_health" => map_json(
                 name,
